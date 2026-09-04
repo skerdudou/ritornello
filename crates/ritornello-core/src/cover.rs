@@ -85,6 +85,47 @@ type RenditionInFlight =
 type EmbeddedInFlight =
     Arc<tokio::sync::OnceCell<Option<(&'static str, axum::body::Bytes, SourceStamp)>>>;
 
+/// A full-size download under way, shared between the caller performing it
+/// and those waiting for it. The fourth instance of this module's rendezvous,
+/// and the one with the most to lose: `EmbeddedInFlight` spares a parse of a
+/// container on the owner's own disk, this one spares a request to a third
+/// party's server.
+///
+/// **`axum::body::Bytes` for the same reason as `EmbeddedInFlight`**: it is
+/// what a response body is built from directly, so N browsers enlarging the
+/// same cover together share one allocation all the way to their sockets
+/// instead of each cloning out its own copy of a 2.5 MiB picture — which is
+/// half of what this rendezvous exists to avoid, the other half being the N
+/// requests themselves.
+///
+/// **No `SourceStamp` travels here**, unlike the two rendezvous above, and
+/// its absence is not an oversight: both halves of a `CoverPayload::Pair`
+/// come from a network body checked in full, frozen under a key that hashes
+/// the URL it came from. There is no stat anywhere on this path, hence no
+/// skew between a caller's stamp and the read's to express — every caller's
+/// validator is the key itself.
+type FullInFlight = Arc<tokio::sync::OnceCell<Option<(&'static str, axum::body::Bytes)>>>;
+
+/// A shared buffer in the shape `axum::body::Bytes::from_owner` asks for.
+///
+/// `Arc<Vec<u8>>` implements `AsRef<Vec<u8>>` and not `AsRef<[u8]>`, so it
+/// cannot be handed over directly; this wrapper is the whole of the
+/// adaptation, and it is what keeps a memoised full size from being copied
+/// on its way into a response body — see `CoverPayload::Pair`'s `fetched`.
+struct SharedBody(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// A response body over `bytes`, sharing its allocation rather than copying
+/// it. See `SharedBody`.
+fn shared_body(bytes: Arc<Vec<u8>>) -> axum::body::Bytes {
+    axum::body::Bytes::from_owner(SharedBody(bytes))
+}
+
 /// What proves a source has not changed under its key.
 ///
 /// **Owned by this module, and that is a correction.** The HTTP route used to
@@ -180,7 +221,33 @@ pub enum CoverPayload {
     /// the invariant then has nowhere to break. A side table can outlive the
     /// eviction of its entry and hand back an orphan reference; a variant
     /// carries both halves or neither.
-    Pair { thumb: Vec<u8>, thumb_mime: &'static str, full: CoverRef },
+    ///
+    /// `fetched` is that full-size image **once somebody has enlarged it**,
+    /// with its MIME type: the memo `CoverCache::remember_full` writes back
+    /// after a download, so that a second reader of the same cover costs
+    /// nothing. It lives in the variant for the reason the reference does,
+    /// and the reason is worth more here: being held in memory it is charged
+    /// to the budget (`payload_cost`), and being part of its entry it is
+    /// **evicted with it** — no separate lifetime to manage, and no fourth
+    /// concern in `evict_to_budget`, which the byte budget already bounds.
+    ///
+    /// **Shared behind an `Arc`, and that is not a detail of taste.**
+    /// `CoverCache::read` clones the whole payload on **every** request for
+    /// this key — the thumbnail of the player's square included, and a `304`
+    /// included, both of which reach that clone before they ever look at the
+    /// size they were asked for. With owned bytes in here, one enlargement
+    /// would make every later request on that key copy up to `source_max`
+    /// (20 MiB by default) on a route nobody has to authenticate against.
+    /// An `Arc` makes that clone a refcount bump, exactly as the retained
+    /// renditions are shared (`Rendered::bytes`), and
+    /// `axum::body::Bytes::from_owner` then builds a response body over the
+    /// very same allocation rather than a copy of it.
+    Pair {
+        thumb: Vec<u8>,
+        thumb_mime: &'static str,
+        full: CoverRef,
+        fetched: Option<(Arc<Vec<u8>>, &'static str)>,
+    },
 }
 
 /// What `p` charges against `CoverSettings::budget`.
@@ -192,14 +259,20 @@ pub enum CoverPayload {
 /// way, directly against its `bytes.len()` — there is no payload to match
 /// on there, only ever bytes.
 ///
-/// **A `Pair` is charged its thumbnail and nothing more.** Its other half is
-/// a `CoverRef` nobody has downloaded — a string, on the order of the path a
-/// `File` costs — so charging the full-size image would bill the budget for
-/// megabytes the process does not hold.
+/// **A `Pair` is charged its thumbnail, plus its full size once that has
+/// actually been downloaded.** For as long as nobody enlarges the cover, the
+/// other half is a `CoverRef` nobody has fetched — a string, on the order of
+/// the path a `File` costs — and charging the full-size image then would bill
+/// the budget for megabytes the process does not hold. After an enlargement
+/// the opposite is true: `fetched` holds those megabytes, and leaving them
+/// uncharged would stop the budget from describing what the appliance
+/// actually holds, which is the one thing it exists to do.
 fn payload_cost(p: &CoverPayload) -> usize {
     match p {
         CoverPayload::Bytes(v, _) => v.len(),
-        CoverPayload::Pair { thumb, .. } => thumb.len(),
+        CoverPayload::Pair { thumb, fetched, .. } => {
+            thumb.len() + fetched.as_ref().map_or(0, |(b, _)| b.len())
+        }
         CoverPayload::File(_) | CoverPayload::Embedded(_) => 0,
     }
 }
@@ -653,13 +726,90 @@ pub struct CoverCache {
     /// here is a test that hangs rather than one that fails.
     #[cfg(test)]
     extraction_hold: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
-    /// Test-only count of callers that reached the embedded rendezvous.
+    /// The full-size downloads in progress, one entry per cache key.
+    ///
+    /// **What no rendezvous above covers**, because until this task nothing
+    /// on this path downloaded at all: the bare URL of a
+    /// `CoverPayload::Pair` served the supplied thumbnail as a stand-in.
+    /// Now that it fetches the full size, the shape of the hazard is the one
+    /// `embedded_in_flight` documents, moved outward: the route is
+    /// unauthenticated on the LAN, so N browsers enlarging the same cover
+    /// would issue N requests for the same 2.5 MiB image — not to a disk of
+    /// ours this time, but to `coverartarchive.org`, which turns one local
+    /// request into an amplifier aimed at a third party — and hold N copies
+    /// of the answer at once.
+    full_in_flight: tokio::sync::Mutex<HashMap<String, FullInFlight>>,
+    /// How many full-size downloads were **actually** performed.
+    ///
+    /// Under `cfg(test)`, the same trade-off as the three counters above.
+    /// **Cannot be folded into any of them**: they watch a decode, a
+    /// re-encode and a container parse, none of which this path performs —
+    /// a counter watching the wrong stage would sit still however many times
+    /// this one went out on the network, which is the definition of an
+    /// assertion that cannot fail.
+    #[cfg(test)]
+    full_downloads: std::sync::atomic::AtomicUsize,
+    /// Test-only hold on the one download a flight performs, the twin of
+    /// `extraction_hold` and installed for the same reason: N callers must
+    /// be inside the flight *at the same instant* for the rendezvous to be
+    /// exercised at all, and spawning N tasks does not obtain that on its
+    /// own. A `Semaphore` and not a `Notify`, again so that a permit added
+    /// before the download reaches its `acquire` is still there to be taken:
+    /// a lost wake-up here is a test that hangs rather than one that fails.
+    #[cfg(test)]
+    full_download_hold: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// Test-only body handed back in place of a download.
+    ///
+    /// **The seam exists because the test binary cannot reach the network,
+    /// and must not.** `allowed_target` refuses every literal IP address by
+    /// design, so the local HTTP server the `download` tests use is
+    /// unreachable through a `CoverRef::Url`, and a hostname would mean a
+    /// suite that depends on somebody else's server being up. So under
+    /// `cfg(test)` this field *is* the network: absent, a download yields
+    /// nothing — which is exactly the failure case the fall-back has to
+    /// handle — and present, it yields these bytes.
+    ///
+    /// **It applies the caller's cap itself**, as `download` does chunk by
+    /// chunk. Without that, no test could tell `source_max` from
+    /// `download_max` on this path, and the one setting choice this task had
+    /// to get right would be unprovable.
+    #[cfg(test)]
+    canned_full_download: std::sync::Mutex<Option<(Vec<u8>, &'static str)>>,
+    /// Keys whose full size has already been reported as unfetchable. See
+    /// `report_unfetchable`, which is the only thing that reads or writes it,
+    /// and which documents both why a repetition is silenced and why this set
+    /// is bounded.
+    ///
+    /// A `std::sync` lock and not tokio's, like `settings`: the critical
+    /// section is a hash lookup, never an IO, and no guard crosses a
+    /// suspension point.
+    warned_full: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Test-only count of the `warn` lines `report_unfetchable` has actually
+    /// emitted.
+    ///
+    /// **A counter and not a captured log**, though the log was tried first:
+    /// `tracing::subscriber::set_default` installs a *thread-local* default,
+    /// while the sibling tests of this module reach the very same callsite on
+    /// other threads at the same instant. The capture was therefore a race —
+    /// measured, one failure in a full run — and a test that reads a global
+    /// side effect of the test binary cannot be made deterministic by trying
+    /// harder. This counter sits inside the branch the throttle guards, so
+    /// removing the throttle moves it, which is the property to prove.
+    #[cfg(test)]
+    unfetchable_reports: std::sync::atomic::AtomicUsize,
+    /// Test-only count of callers that reached a full-size rendezvous —
+    /// `extract_embedded`'s or `full_size`'s.
     ///
     /// What lets a test wait on a *state* instead of on a duration: it yields
     /// until every caller it launched has registered, then lifts
-    /// `extraction_hold`. Counted at the rendezvous rather than at the
-    /// extraction because followers never reach the extraction — that is the
-    /// very thing the flight exists to spare them.
+    /// `extraction_hold` or `full_download_hold`. Counted at the rendezvous
+    /// rather than at the work because followers never reach the work — that
+    /// is the very thing the flight exists to spare them.
+    ///
+    /// **One counter for both**, and not one per rendezvous: an entry is
+    /// either an `Embedded` or a `Pair`, so a test exercises exactly one of
+    /// the two paths, and a second counter would be a second name for one
+    /// property rather than a second property.
     #[cfg(test)]
     rendezvous_arrivals: std::sync::atomic::AtomicUsize,
 }
@@ -1035,6 +1185,287 @@ impl CoverCache {
         result
     }
 
+    /// The full-size half of a pair, fetched **once** however many readers
+    /// enlarge the cover, and memoised so that the next one is free.
+    ///
+    /// The same shape as the three rendezvous above — a `OnceCell` per key
+    /// behind an `Arc`, registered under the table's lock and awaited
+    /// outside it, removed afterwards by whichever caller still finds the
+    /// table pointing at the cell it registered. That last check is
+    /// `Arc::ptr_eq` and not mere presence, for the reason `rendition_for`
+    /// spells out: a fresher cell registered meanwhile belongs to its own
+    /// callers and must not be stolen from them.
+    ///
+    /// **The rendezvous and the memo answer two different questions**, and
+    /// only having both bounds the traffic. The rendezvous collapses callers
+    /// that are inside the flight *together*; the memo bounds callers that
+    /// come *one after another*, which is the half one forgets. Without it,
+    /// every enlargement of the same cover asks a third party for the same
+    /// 2.5 MiB again, and a loop on one valid key — the key itself is not
+    /// attacker-chosen, but the repetition is anybody's — turns this local
+    /// route into an amplifier aimed at that third party.
+    ///
+    /// **What the memo does not bound, and it must be said.** It bounds the
+    /// repetition *per key, for as long as that key's entry survives*. A
+    /// client on the LAN that rotates over enough keys for their full sizes
+    /// to exceed `CoverSettings::budget` — some twenty pairs of 2.5 MiB under
+    /// a 50 MiB budget — evicts each memo before coming back to it, and every
+    /// cycle downloads afresh. That is inherent to a memo bounded by a
+    /// budget, not a defect of this one: the alternatives are a memory that
+    /// ignores the budget, or a per-client rate limit on a route that has no
+    /// notion of a client. It is named here rather than discovered later, and
+    /// the two facts that keep it from being alarming are that the appliance
+    /// is on a home network and that the rate is bounded by the budget's
+    /// turnover, not by the client's own cadence.
+    ///
+    /// **Two failures are deliberately not memoised**, and both are residuals
+    /// rather than oversights — see `report_unfetchable` for the log side of
+    /// the first:
+    ///
+    /// * a **failed** fetch: a broken target clicked again costs one failed
+    ///   request per click, bounded by a human gesture and small (a 404 is a
+    ///   few hundred bytes against 2.5 MiB for a success);
+    /// * a **local** full size: `CoverRef::Path` is served and never
+    ///   memoised. This module holds no local file in memory — a `File`
+    ///   payload costs a path and is streamed, and a three-megabyte
+    ///   `folder.jpg` on a NAS is commonplace. The rule of this repository is
+    ///   that the network means the internet: the share is local, re-readable
+    ///   at the cost of a read, and memoising it would charge the budget for
+    ///   megabytes the appliance has no reason to hold.
+    async fn full_size(
+        &self,
+        key: &str,
+        full: &CoverRef,
+        cap: usize,
+    ) -> Option<(&'static str, axum::body::Bytes)> {
+        let cell = {
+            let mut in_flight = self.full_in_flight.lock().await;
+            in_flight.entry(key.to_string()).or_insert_with(FullInFlight::default).clone()
+        };
+        // Registered, whether this caller goes on to download or to wait. See
+        // the `rendezvous_arrivals` field.
+        #[cfg(test)]
+        self.rendezvous_arrivals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let result = cell
+            .get_or_init(|| async {
+                // **The memo, read again from inside the cell.** `cover_get`
+                // has already looked at the payload it read, but it read it
+                // before this flight existed: a caller that arrived just
+                // before another flight wrote its memo back would otherwise
+                // download a second time. Closing that window costs one read
+                // of the entries table, taken only by the caller that is
+                // about to go out on the network anyway.
+                if let Some((bytes, mime)) = self.memoised_full(key).await {
+                    return Some((mime, shared_body(bytes)));
+                }
+                let Some((mime, bytes)) = self.download_full(full, cap).await else {
+                    // The one place that knows a fetch failed, hence the one
+                    // place that reports it — and reports it at most once per
+                    // key, see `report_unfetchable`.
+                    self.report_unfetchable(key, full);
+                    return None;
+                };
+                let bytes = Arc::new(bytes);
+                // **Only a success is memoised, and only a remote one.** The
+                // two exclusions are argued on this method's doc; both are
+                // accepted residuals, and saying so is what keeps the next
+                // reader from taking either for an oversight.
+                if matches!(full, CoverRef::Url { .. }) {
+                    self.remember_full(key, bytes.clone(), mime).await;
+                    // This key answers again: a later outage deserves to be
+                    // reported afresh rather than silenced by the memory of
+                    // the last one.
+                    self.warned_full.lock().unwrap().remove(key);
+                }
+                Some((mime, shared_body(bytes)))
+            })
+            .await
+            .clone();
+
+        {
+            let mut in_flight = self.full_in_flight.lock().await;
+            if in_flight.get(key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+                in_flight.remove(key);
+            }
+        }
+        result
+    }
+
+    /// Reports a full size that could not be fetched — **at most once per
+    /// key**, and at `debug` afterwards.
+    ///
+    /// **A `warn` per click would let the LAN write the journal.** This route
+    /// needs no authentication, the failure is not memoised (deliberately, so
+    /// that a recovered target is picked up on the next click), and a client
+    /// looping on one broken key would therefore fill `journalctl` at its own
+    /// cadence. The first failure of a key is the event worth a `warn` — the
+    /// owner sees a soft image and needs the reason; the hundredth adds
+    /// nothing the first did not say.
+    ///
+    /// **The set is bounded**, and cleared wholesale rather than trimmed by
+    /// age: a client rotating over keys must not be able to grow it without
+    /// end either. The worst a clear can do is allow one further `warn` per
+    /// key — this remembers a repetition, it does not keep a history.
+    fn report_unfetchable(&self, key: &str, full: &CoverRef) {
+        let first = {
+            let mut warned = self.warned_full.lock().unwrap();
+            if warned.len() >= MAX_ENTRIES {
+                warned.clear();
+            }
+            warned.insert(key.to_string())
+        };
+        if first {
+            #[cfg(test)]
+            self.unfetchable_reports.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tracing::warn!(
+                "cover {key}: the full size at {full:?} could not be fetched, \
+                 serving the supplied thumbnail instead"
+            );
+        } else {
+            tracing::debug!("cover {key}: the full size at {full:?} is still unfetchable");
+        }
+    }
+
+    /// The full size already downloaded for `key`, if there is one. The
+    /// clone is a refcount bump — see `CoverPayload::Pair`'s `fetched`.
+    async fn memoised_full(&self, key: &str) -> Option<(Arc<Vec<u8>>, &'static str)> {
+        self.entries.read().await.iter().find(|(k, _)| k == key).and_then(|(_, p)| match p {
+            CoverPayload::Pair { fetched, .. } => fetched.clone(),
+            _ => None,
+        })
+    }
+
+    /// Writes a downloaded full size back into its entry, then reconciles the
+    /// cache against the byte budget — the same reconciliation `insert`
+    /// performs, and for the same reason: these bytes are now held, so they
+    /// are now charged (`payload_cost`).
+    ///
+    /// **Mutated in place rather than re-inserted.** `insert` moves an entry
+    /// to the back of the deque, which is the eviction order; enlarging a
+    /// cover is no reason for an older entry to outlive a newer one.
+    ///
+    /// `key` is handed to `evict_to_budget` as the entry to protect, exactly
+    /// as `insert` does: the entry that just grew must not be evicted to pay
+    /// for its own growth, when the caller is holding the very bytes it is
+    /// about to serve.
+    async fn remember_full(&self, key: &str, bytes: Arc<Vec<u8>>, mime: &'static str) {
+        {
+            let mut entries = self.entries.write().await;
+            let Some((_, CoverPayload::Pair { fetched, .. })) =
+                entries.iter_mut().find(|(k, _)| k == key)
+            else {
+                // Evicted, or replaced by another payload, while the download
+                // was in flight. There is nothing to memoise onto and nothing
+                // to reconcile: the caller still gets its bytes, and a later
+                // enlargement will download again.
+                return;
+            };
+            *fetched = Some((bytes, mime));
+        }
+        self.evict_to_budget(Some(key), None).await;
+    }
+
+    /// Obtains the full-size half of a pair. **The one place a full size is
+    /// actually fetched**, hence the one true place to count one — the same
+    /// reasoning as `read_embedded_bounded` and `embedded_extractions`: a
+    /// counter incremented by a caller would prove that a caller ran, never
+    /// that a download did.
+    ///
+    /// **`cap` is `source_max` and not `download_max`, and that distinction
+    /// is the whole reason the pair needed no new setting.** The two bound
+    /// different things: `download_max` bounds what the appliance fetches
+    /// **by itself**, on the announcement of every track it plays, where two
+    /// mebibytes is already generous; `source_max` bounds what it agrees to
+    /// read at all, whoever asked. An enlargement is neither automatic nor
+    /// per-track — it is one gesture of one reader — so it is the second
+    /// bound that applies. Under the first, a 2.5 MiB original would be
+    /// refused here for exactly the reason it was refused on announcement,
+    /// and the pair would have bought nothing at all.
+    async fn download_full(
+        &self,
+        full: &CoverRef,
+        cap: usize,
+    ) -> Option<(&'static str, Vec<u8>)> {
+        #[cfg(test)]
+        self.full_downloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Before any work, so that a test can hold this one flight open while
+        // it watches the followers arrive. See the `full_download_hold`
+        // field. The guard is a temporary of its own statement, so it is
+        // released before the `await` below — a `std::sync::MutexGuard` held
+        // across an await point would not compile here, and should not.
+        #[cfg(test)]
+        {
+            let hold = self.full_download_hold.lock().unwrap().clone();
+            if let Some(hold) = hold {
+                let _permit = hold.acquire().await;
+            }
+        }
+        self.perform_full_download(full, cap).await
+    }
+
+    /// Where the fetch is aimed: the same two doors as `fetch_ref`, spelt
+    /// here because this one wants the bytes rather than a payload.
+    ///
+    /// **A `Pair` can perfectly well name a local file as its other half.**
+    /// The pair forms around a thumbnail that materialized as bytes (see
+    /// `fetch`), which says nothing about the full size; refusing to serve
+    /// that case would be a hole nobody would think to look for.
+    ///
+    /// **This whole method runs under test as it does in service** — the
+    /// filter, the local read, its cap and its time bound. Only the body of a
+    /// remote fetch diverges, at `fetch_url` below, and that is as low as the
+    /// seam can be pushed.
+    async fn perform_full_download(
+        &self,
+        full: &CoverRef,
+        cap: usize,
+    ) -> Option<(&'static str, Vec<u8>)> {
+        match full {
+            CoverRef::Url { url } => {
+                if !allowed_target(url) {
+                    tracing::debug!("cover fetch refused: target not allowed");
+                    return None;
+                }
+                self.fetch_url(url, cap).await
+            }
+            CoverRef::Path { path } => read_file_bounded(std::path::Path::new(path), cap)
+                .await
+                .map(|(mime, bytes, _)| (mime, bytes)),
+        }
+    }
+
+    /// The remote body, in the shipped binary.
+    #[cfg(not(test))]
+    async fn fetch_url(&self, url: &str, cap: usize) -> Option<(&'static str, Vec<u8>)> {
+        match download(url, cap).await {
+            Some(CoverPayload::Bytes(bytes, mime)) => Some((mime, bytes)),
+            // `download` only ever produces `Bytes`; anything else would be a
+            // defect there, and serving nothing is the same answer as a
+            // failed fetch.
+            _ => None,
+        }
+    }
+
+    /// The remote body, under test: the canned one, or nothing.
+    ///
+    /// **These are the only two lines of this path the test binary replaces**
+    /// — `download`'s call and the match around it. Everything above them is
+    /// the real code: `allowed_target` judges the real URL, so a refused
+    /// target is proven without a socket ever being opened, and a local full
+    /// size goes through the real `read_file_bounded`. See the
+    /// `canned_full_download` field for why the network itself cannot be
+    /// reached from here.
+    #[cfg(test)]
+    async fn fetch_url(&self, _url: &str, cap: usize) -> Option<(&'static str, Vec<u8>)> {
+        let (bytes, mime) = self.canned_full_download.lock().unwrap().clone()?;
+        // The cap the caller handed down, applied as `download` applies it.
+        if bytes.len() > cap {
+            tracing::debug!("cover fetch refused: over {cap} bytes");
+            return None;
+        }
+        Some((mime, bytes))
+    }
+
     /// How many times a frame was built since the cache was created.
     #[cfg(test)]
     pub(crate) fn builds(&self) -> usize {
@@ -1062,7 +1493,36 @@ impl CoverCache {
         *self.extraction_hold.lock().unwrap() = Some(hold);
     }
 
-    /// How many callers have reached the embedded rendezvous. See the
+    /// How many full-size downloads ran since the cache was created. See the
+    /// `full_downloads` field.
+    #[cfg(test)]
+    pub(crate) fn full_downloads(&self) -> usize {
+        self.full_downloads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Installs the hold described on the `full_download_hold` field: every
+    /// download begun afterwards waits for a permit before doing any work.
+    #[cfg(test)]
+    pub(crate) fn hold_full_downloads(&self, hold: Arc<tokio::sync::Semaphore>) {
+        *self.full_download_hold.lock().unwrap() = Some(hold);
+    }
+
+    /// Installs the body a download answers with, in place of the network the
+    /// test binary cannot reach. See the `canned_full_download` field.
+    #[cfg(test)]
+    pub(crate) fn answer_full_downloads_with(&self, bytes: Vec<u8>, mime: &'static str) {
+        *self.canned_full_download.lock().unwrap() = Some((bytes, mime));
+    }
+
+    /// How many unfetchable full sizes were **reported** since the cache was
+    /// created — `warn` lines, not failures. See the `unfetchable_reports`
+    /// field.
+    #[cfg(test)]
+    pub(crate) fn unfetchable_reports(&self) -> usize {
+        self.unfetchable_reports.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How many callers have reached a full-size rendezvous. See the
     /// `rendezvous_arrivals` field.
     #[cfg(test)]
     pub(crate) fn rendezvous_arrivals(&self) -> usize {
@@ -1229,8 +1689,11 @@ impl CoverCache {
                 // **The thumbnail, never the full size.** This method is the
                 // socket side's door in, and what the displays receive is a
                 // square of a couple of hundred pixels: they have never wanted
-                // the full-size image, and the full-size half of a pair is a
-                // reference nobody has downloaded anyway. Same cap and same
+                // the full-size image. Nor does a memoised one change that —
+                // `fetched` is filled by a reader enlarging the cover in a
+                // browser, and pushing those megabytes at a twenty-column
+                // display would be the very waste the pair exists to
+                // avoid. Same cap and same
                 // `Frozen` stamp as `Bytes` above, for the same reasons — this
                 // is a network image, frozen under its key.
                 Some(CoverPayload::Pair { thumb, thumb_mime, .. }) => {
@@ -1953,8 +2416,10 @@ const FILE_TIMEOUT: std::time::Duration = crate::health::TIMEOUT;
 /// the payload as a reference. This is what lets a 2.5 MiB original be
 /// announced at all: under `download_max` it would simply be refused, which
 /// is why `musicbrainz` used to announce `front-500` as if it were the cover
-/// itself. Nothing enlarges the full size yet — a later task fetches it on
-/// demand — so until then it costs exactly a string.
+/// itself. The full size costs exactly a string until somebody enlarges the
+/// cover, at which point `cover_get` fetches it under `source_max` and
+/// memoises it in the payload (`CoverPayload::Pair`'s `fetched`) — a cost
+/// paid on a gesture, never on an announcement.
 pub async fn fetch(
     s: &CoverSource,
     thumb: Option<&CoverRef>,
@@ -1979,7 +2444,15 @@ pub async fn fetch(
     if let Some(t) = thumb {
         match fetch_ref(t, download_max).await {
             Some(CoverPayload::Bytes(thumb, thumb_mime)) => {
-                return Some(CoverPayload::Pair { thumb, thumb_mime, full: r.clone() });
+                // `fetched` starts empty, and that is the whole economy of
+                // the pair: the full size is a reference until a reader
+                // enlarges it, at which point `cover_get` fills this in.
+                return Some(CoverPayload::Pair {
+                    thumb,
+                    thumb_mime,
+                    full: r.clone(),
+                    fetched: None,
+                });
             }
             other => {
                 tracing::debug!(
@@ -2067,12 +2540,72 @@ fn file_etag(stamp: &SourceStamp) -> String {
 /// obtained from a rendezvous uses the stamp of the read that produced it (see
 /// `RenditionInFlight`). Two derivations spelt out twice each would have
 /// drifted.
-fn variant_etag(stamp: &SourceStamp, thumbnail: bool) -> String {
+fn variant_etag(stamp: &SourceStamp, thumbnail: bool, rules: Option<Rendition>) -> String {
     let base = file_etag(stamp);
     if thumbnail {
-        format!("\"v-{}\"", base.trim_matches('"'))
+        format!("\"v-{}-{}\"", rules_tag(rules), base.trim_matches('"'))
     } else {
         base
+    }
+}
+
+/// What the rendition rules contribute to a **validator**.
+///
+/// **A thumbnail's validator must follow the settings that produced it**, and
+/// that it did not was a defect this worksite could only make worse. The
+/// `ETag` encoded the source and never the rules, while the core's own memory
+/// of a thumbnail has included `Rendition::tag` all along: lower the longest
+/// edge from 640 to 320 px and the core re-renders at once, but the browser
+/// revalidates against an unchanged validator, is told `304`, and goes on
+/// displaying the 640. Now that the page predicts the weight a setting will
+/// produce, the owner has every reason to touch those settings — and nothing
+/// would have moved on screen.
+///
+/// **Re-encoding unchecked gets a representation of its own** rather than an
+/// empty one: unchecking is itself a change of what the route answers with
+/// (the source, untouched), so an absent tag would make that one change
+/// invisible to every browser holding a thumbnail. `raw` cannot collide with
+/// a `Rendition::tag`, which is digits and dashes only.
+fn rules_tag(rules: Option<Rendition>) -> String {
+    match rules {
+        Some(r) => r.tag(),
+        None => "raw".to_string(),
+    }
+}
+
+/// How a **frozen** cover — a network body checked in full, unable to change
+/// behind a key that hashes the URL it came from — is cached and labelled,
+/// for the size that was asked for.
+///
+/// **Two answers, because the two URLs do not determine their content
+/// equally.** The bare URL names the source as it arrived: nothing the owner
+/// can change alters those bytes, so a year of `immutable` is exactly right
+/// and the key alone identifies them.
+///
+/// `?size=thumbnail` names *a rendering of* that source, and what it answers
+/// with depends on settings the owner can change from the admin page. Both
+/// halves therefore differ there:
+///
+/// * the validator carries the rules (`rules_tag`), for the reason written
+///   out on that function;
+/// * and it is `no-cache`, as the `File` and `Embedded` thumbnails already
+///   were. A validator that changes is worth nothing to a browser that has
+///   been told not to ask again for a year — `immutable` on a rendering was
+///   the same defect in its severest form, the one with no recourse at all
+///   from the server side. What this costs is one conditional request
+///   answered by a bodiless `304`, and it is reversible; a year of
+///   `immutable` on content that has since moved is not. Between two
+///   imperfect headers, take the reversible one.
+///
+/// The alternative — keeping `immutable` and making the rules part of the
+/// **URL** — is the better shape in principle and out of reach here: that URL
+/// is `cover_href`, published in the protocol and appended to by the web app,
+/// so it would take a protocol change to settle a header question.
+fn frozen_headers(key: &str, thumbnail: bool, rules: Option<Rendition>) -> (String, String) {
+    if thumbnail {
+        ("no-cache".to_string(), format!("\"{key}-v-{}\"", rules_tag(rules)))
+    } else {
+        ("public, max-age=31536000, immutable".to_string(), format!("\"{key}\""))
     }
 }
 
@@ -2129,16 +2662,28 @@ pub async fn cover_get(
     };
     match p {
         CoverPayload::Bytes(bytes, mime) => {
-            // A network cover is frozen under its key: its ETag has nothing to
-            // carry beyond the key and the requested size, and its thumbnail
-            // is as immutable as it is.
+            // A network cover is frozen under its key: its validator has
+            // nothing to carry beyond the key, the requested size, and — for
+            // a thumbnail alone — the rules that produced it. See
+            // `frozen_headers`, which also holds the reason a rendering is
+            // not served `immutable`.
+            //
+            // **One read of the settings for both**, as `line` does: the
+            // rules that go into the validator and the rules the verdict
+            // below is reached under must not straddle a change.
+            let rules = state.covers.settings().rendition;
+            let (cache_control, etag) = frozen_headers(&key, thumbnail_requested, rules);
+            // **Ahead of both sizes now**, where this check used to guard the
+            // thumbnail alone: the bare URL of a frozen cover answered a full
+            // body to a browser that already held it and said so. The
+            // validator is a pure function of the key, the size and the
+            // rules, so nothing has to be read to answer.
+            if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
+                == Some(etag.as_str())
+            {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
             if thumbnail_requested {
-                let etag = format!("\"{key}-v\"");
-                if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
-                    == Some(etag.as_str())
-                {
-                    return StatusCode::NOT_MODIFIED.into_response();
-                }
                 // The stamp is dropped rather than used: a network cover
                 // is `Frozen`, so every caller's stamp is the same one and no
                 // skew is expressible here — the `ETag` is the key.
@@ -2148,10 +2693,7 @@ pub async fn cover_get(
                     return (
                         [
                             (header::CONTENT_TYPE, mime.to_string()),
-                            (
-                                header::CACHE_CONTROL,
-                                "public, max-age=31536000, immutable".to_string(),
-                            ),
+                            (header::CACHE_CONTROL, cache_control),
                             (header::ETAG, etag),
                         ],
                         small.as_slice().to_vec(),
@@ -2162,23 +2704,34 @@ pub async fn cover_get(
                 // dimensions beyond the cap): the original, which is the
                 // answer we would have given without this parameter. Better an
                 // oversized image than no image.
+                //
+                // **Still labelled as the thumbnail variant**, not as the
+                // bare URL: the answer to this URL is a function of the
+                // frozen source and the current rules, whichever branch
+                // produced it, so one validator describes it exactly — and
+                // the day the rules change, this fall-back revalidates like
+                // any other.
             }
             (
                 [
                     (header::CONTENT_TYPE, mime.to_string()),
-                    (header::CACHE_CONTROL, "public, max-age=31536000, immutable".to_string()),
-                    (header::ETAG, format!("\"{key}\"")),
+                    (header::CACHE_CONTROL, cache_control),
+                    (header::ETAG, etag),
                 ],
                 bytes,
             )
                 .into_response()
         }
-        CoverPayload::Pair { thumb, thumb_mime, full } => {
+        CoverPayload::Pair { thumb, thumb_mime, full, fetched } => {
             // Frozen under its key, exactly like `Bytes`: both halves came
             // from a network body already fully checked, and neither can
-            // change behind this key.
+            // change behind this key. **One read of the settings for the
+            // whole arm**: the rules that go into a validator, the rules the
+            // acceptance verdict is reached under and the ceiling a download
+            // obeys must not straddle a change.
+            let settings = state.covers.settings();
             if thumbnail_requested {
-                let etag = format!("\"{key}-v\"");
+                let (cache_control, etag) = frozen_headers(&key, true, settings.rendition);
                 if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
                     == Some(etag.as_str())
                 {
@@ -2201,7 +2754,7 @@ pub async fn cover_get(
                 // Re-encoding disabled (`rendition` at `None`) accepts the
                 // thumbnail too: nothing is being produced to compare it
                 // against, and the setting says push the source as it is.
-                let within_the_rule = match state.covers.settings().rendition {
+                let within_the_rule = match settings.rendition {
                     None => true,
                     Some(r) => dimensions(&thumb)
                         .is_some_and(|d| r.leaves_alone(thumb.len(), d)),
@@ -2213,10 +2766,7 @@ pub async fn cover_get(
                     return (
                         [
                             (header::CONTENT_TYPE, mime.to_string()),
-                            (
-                                header::CACHE_CONTROL,
-                                "public, max-age=31536000, immutable".to_string(),
-                            ),
+                            (header::CACHE_CONTROL, cache_control),
                             (header::ETAG, etag),
                         ],
                         small.as_slice().to_vec(),
@@ -2228,58 +2778,98 @@ pub async fn cover_get(
                 // (unreadable image, dimensions beyond the cap). In both
                 // cases the supplied thumbnail is the answer, for the same
                 // reason as the `Bytes` arm's fall-through: better an
-                // oversized image than no image.
+                // oversized image than no image. And in both cases it is the
+                // rendering of this frozen source under these rules, hence
+                // the one validator.
                 return (
                     [
                         (header::CONTENT_TYPE, thumb_mime.to_string()),
-                        (
-                            header::CACHE_CONTROL,
-                            "public, max-age=31536000, immutable".to_string(),
-                        ),
+                        (header::CACHE_CONTROL, cache_control),
                         (header::ETAG, etag),
                     ],
                     thumb,
                 )
                     .into_response();
             }
-            // **The bare URL serves the thumbnail, for now.** The full size
-            // is a reference this task deliberately leaves undownloaded, and
-            // a later one fetches it on demand here.
+            // **The bare URL means the full size, and now it fetches one.**
+            // Until this task nothing on this path ever downloaded: the route
+            // read a cache the announcement path had filled, and this branch
+            // served the supplied thumbnail as a stand-in. What made the
+            // change affordable is that it is not automatic — a 2.5 MiB
+            // original is fetched when a reader enlarges the cover, and never
+            // on the off chance that one might.
             //
-            // **A validator of its own, and this is the part that had to be
-            // settled here rather than later.** `no-cache` guarantees that
-            // the browser asks again; it says nothing about the answer. Had
-            // this stand-in gone out under `"{key}"` — the tag the `Bytes`
-            // arm gives real network bytes, hence the one the real full size
-            // will carry under this same key — then the day this branch
-            // learns to fetch it, the browser's `If-None-Match: "{key}"`
-            // would compare *equal*, earn a `304`, and the stand-in would
-            // stay on screen at every revalidation, for ever. The guarantee
-            // cannot rest on an unwritten decision of the next task: the
-            // validator is created here, so it is distinguished here.
+            // **It takes `"{key}"`, the validator the `Bytes` arm gives real
+            // network bytes**, which the previous task deliberately kept free
+            // by giving the stand-in a tag of its own. Any browser still
+            // holding a stand-in therefore mismatches on its own and is
+            // served a `200` — no decision left unwritten, no stand-in frozen
+            // on a screen.
+            let (cache_control, etag) = frozen_headers(&key, false, settings.rendition);
+            // **Answered before anything is fetched, and that is the point.**
+            // These bytes are frozen under this key: a browser holding this
+            // validator holds the right image, whether or not this process
+            // still has it. So a revalidation — after a restart, after an
+            // eviction — costs a `304` and never a second request to a third
+            // party.
+            if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
+                == Some(etag.as_str())
+            {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
+            // The memo first, the network second. See `CoverCache::full_size`
+            // for why both a memo and a rendezvous are needed: one bounds the
+            // readers who arrive together, the other those who come one after
+            // another.
+            let full_size = match fetched {
+                // A refcount bump and no copy, on both halves: the payload's
+                // clone shared this buffer (see `CoverPayload::Pair`), and
+                // `shared_body` builds the response over it rather than over
+                // a copy of it.
+                Some((bytes, mime)) => Some((mime, shared_body(bytes))),
+                None => state.covers.full_size(&key, &full, settings.source_max).await,
+            };
+            if let Some((mime, bytes)) = full_size {
+                return (
+                    [
+                        (header::CONTENT_TYPE, mime.to_string()),
+                        (header::CACHE_CONTROL, cache_control),
+                        (header::ETAG, etag),
+                    ],
+                    bytes,
+                )
+                    .into_response();
+            }
+            // **The download failed: serve the thumbnail, not a 404.** The
+            // reader asked to see the image larger; a smaller version is an
+            // honest answer where an empty square is not.
             //
-            // **And distinct from the thumbnail branch's `"{key}-v"` too**,
-            // not merely from `"{key}"`. Within the rule the two branches do
-            // serve the same bytes, which is what makes sharing tempting —
-            // but *outside* it they do not: `?size=thumbnail` then answers
-            // with the re-encoded rendition while this branch still answers
-            // with the raw supplied thumbnail. One validator over two bodies
-            // is exactly the fault the `File` arm's comment warns about, and
-            // it would make a browser serve one size for the other.
+            // **A validator of its own, and never `immutable`.** This branch
+            // answers with something other than what its URL names, so the
+            // rule is by *response* and not by route: the same URL will serve
+            // the real full size as soon as the network comes back, and a
+            // year of `immutable` would pin this browser to the stand-in for
+            // that year with no recourse from the server side. `no-cache`
+            // guarantees the browser asks again; the distinct `ETag` is what
+            // makes the answer to that question correct — under `"{key}"` the
+            // revalidation would compare equal, earn a `304`, and leave the
+            // stand-in on screen for ever.
             //
-            // Hence a third tag. Three bodies, three validators; the day the
-            // full size is fetched, it takes `"{key}"` and every cached
-            // stand-in mismatches on its own.
+            // **Distinct from the thumbnail branch's tag too**, not merely
+            // from `"{key}"`. Within the rule the two branches do serve the
+            // same bytes, which is what makes sharing tempting — but outside
+            // it they do not: `?size=thumbnail` then answers with the
+            // re-encoded rendition while this branch still answers with the
+            // raw supplied thumbnail. One validator over two bodies is
+            // exactly the fault the `File` arm's comment warns about.
             //
-            // Named in the log rather than left implicit: this branch answers
-            // with something other than what its URL promises, and a
-            // `journalctl` that does not say so would make the enlarged view's
-            // softness look like a rendition defect. The reference is right
-            // there, so the line can say which image was *not* fetched.
-            tracing::debug!(
-                "cover {key}: serving the supplied thumbnail; the full size at {full:?} \
-                 has not been downloaded"
-            );
+            // **Reported where the failure is known, not here.** A
+            // `journalctl` that stayed silent would make the enlarged view's
+            // softness look like a rendition defect, so it is said — but by
+            // `CoverCache::report_unfetchable`, which alone can say it at
+            // most once per key. Repeated here, a client looping on a broken
+            // target would write the journal at its own cadence, on a route
+            // that needs no authentication.
             let etag = format!("\"{key}-standin\"");
             if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
                 == Some(etag.as_str())
@@ -2289,11 +2879,6 @@ pub async fn cover_get(
             (
                 [
                     (header::CONTENT_TYPE, thumb_mime.to_string()),
-                    // `no-cache` and not the `immutable` year the `Bytes` arm
-                    // gives: these bytes are a stand-in for the image this URL
-                    // names, and a year of it would outlive the stand-in
-                    // itself. The distinct `ETag` above makes the revalidation
-                    // it forces actually correct.
                     (header::CACHE_CONTROL, "no-cache".to_string()),
                     (header::ETAG, etag),
                 ],
@@ -2337,9 +2922,14 @@ pub async fn cover_get(
             // The thumbnail's ETag is not the original's: it is the same
             // source content but not the same served bytes, and two different
             // responses under a single validator would make the browser serve
-            // one for the other.
+            // one for the other. **Nor is it the same across settings**: a
+            // thumbnail is a rendering, so the rules that produced it belong
+            // in its validator — see `rules_tag`. Read once for the whole
+            // arm, so that the label and the rendition below cannot straddle
+            // a change.
+            let rules = state.covers.settings().rendition;
             let stamp = SourceStamp::of_file(&meta);
-            let etag = variant_etag(&stamp, thumbnail_requested);
+            let etag = variant_etag(&stamp, thumbnail_requested, rules);
             if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str())
             {
                 return StatusCode::NOT_MODIFIED.into_response();
@@ -2369,7 +2959,7 @@ pub async fn cover_get(
                         // the bytes; the next request stats afresh,
                         // mismatches, and is served the current image. See
                         // `RenditionInFlight`.
-                        (header::ETAG, variant_etag(&served, true)),
+                        (header::ETAG, variant_etag(&served, true, rules)),
                     ],
                     small.as_slice().to_vec(),
                 )
@@ -2472,6 +3062,10 @@ pub async fn cover_get(
                     return (StatusCode::NOT_FOUND, "illisible").into_response();
                 }
             };
+            // Read once for the whole arm, as in the `File` arm above and
+            // for the same reason: a thumbnail is a rendering, and the rules
+            // that produced it belong in its validator (`rules_tag`).
+            let rules = state.covers.settings().rendition;
             let stamp = SourceStamp::of_file(&meta);
             // **The conditional answer is derived from this route's own stat,
             // and that must not change.** It is the only stamp available
@@ -2480,7 +3074,7 @@ pub async fn cover_get(
             // What follows below is the other half: a `200` is labelled from
             // the stamp of the read that produced its bytes, which is not
             // necessarily this one.
-            let etag = variant_etag(&stamp, thumbnail_requested);
+            let etag = variant_etag(&stamp, thumbnail_requested, rules);
             // **Before any parsing of the container**: this is the whole
             // point of stamping from `metadata` rather than from the picture
             // itself — a conditional request costs one `stat`, exactly like
@@ -2499,7 +3093,7 @@ pub async fn cover_get(
                         (header::CACHE_CONTROL, "no-cache".to_string()),
                         // `served`, not `stamp` — same reasoning as the
                         // `File` arm above.
-                        (header::ETAG, variant_etag(&served, true)),
+                        (header::ETAG, variant_etag(&served, true, rules)),
                     ],
                     small.as_slice().to_vec(),
                 )
@@ -2538,7 +3132,7 @@ pub async fn cover_get(
                     // still yields the newer stamp, the `304` returns the same
                     // stale bytes, and nothing ever corrects it. See
                     // `EmbeddedInFlight`.
-                    (header::ETAG, variant_etag(&served, thumbnail_requested)),
+                    (header::ETAG, variant_etag(&served, thumbnail_requested, rules)),
                 ],
                 // **No clone here, unlike `line`'s `Some(_)` branch.** `bytes`
                 // is `axum::body::Bytes`, not `Arc<Vec<u8>>`: it is what
@@ -2782,6 +3376,23 @@ mod tests {
         key: &str,
         query: &str,
     ) -> (u16, String, Vec<u8>) {
+        let (status, etag, _, body) = served_with_headers(cache, key, query).await;
+        (status, etag, body)
+    }
+
+    /// The same request, returning **both** headers a cached response is
+    /// judged by: `(status, etag, cache-control, body)`.
+    ///
+    /// The two are read together because they answer one question between
+    /// them and neither is sufficient alone: a validator that changes buys
+    /// nothing from a browser told not to ask again for a year, and a
+    /// revalidation buys nothing if the validator cannot tell two bodies
+    /// apart.
+    async fn served_with_headers(
+        cache: &Arc<CoverCache>,
+        key: &str,
+        query: &str,
+    ) -> (u16, String, String, Vec<u8>) {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
@@ -2795,13 +3406,13 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status().as_u16();
-        let etag = resp
-            .headers()
-            .get(header::ETAG)
-            .map(|v| v.to_str().unwrap().to_string())
-            .unwrap_or_default();
+        let header_of = |name: header::HeaderName| {
+            resp.headers().get(name).map(|v| v.to_str().unwrap().to_string()).unwrap_or_default()
+        };
+        let etag = header_of(header::ETAG);
+        let cache_control = header_of(header::CACHE_CONTROL);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (status, etag, bytes.to_vec())
+        (status, etag, cache_control, bytes.to_vec())
     }
 
     /// The same request, made **conditional** on `etag`. Returns the status
@@ -2914,8 +3525,17 @@ mod tests {
         let (status, etag, body) = served_with_etag(&cache, "k", "?size=thumbnail").await;
         assert_eq!(status, 200);
         assert_eq!(body, b"THUMB-A", "the rendezvous is what served this body");
-        assert_eq!(etag, variant_etag(&old, true), "the label must describe the bytes served");
-        assert_ne!(etag, variant_etag(&new, true), "labelling from the route's own stat is the defect");
+        let rules = cache.settings().rendition;
+        assert_eq!(
+            etag,
+            variant_etag(&old, true, rules),
+            "the label must describe the bytes served"
+        );
+        assert_ne!(
+            etag,
+            variant_etag(&new, true, rules),
+            "labelling from the route's own stat is the defect"
+        );
     }
 
     #[tokio::test]
@@ -3056,18 +3676,36 @@ mod tests {
     }
 
     /// A paired payload: `thumb`'s bytes in hand, and a full-size reference
-    /// nobody has downloaded.
+    /// nobody has downloaded yet.
     ///
-    /// A helper rather than one literal per test, and for a reason beyond
-    /// brevity: the variant is about to gain a fourth field (the fetched
-    /// full size), and scattered literals would each have to be revisited,
-    /// whereas this is corrected once.
+    /// A helper rather than one literal per test, and the reason has now been
+    /// collected: the variant gained a fourth field (`fetched`), and one
+    /// helper was corrected where a dozen literals would each have had to be
+    /// revisited.
     fn paired_entry(thumb: Vec<u8>) -> CoverPayload {
+        paired_with(thumb, CoverRef::Url { url: "https://example.org/front.jpg".into() })
+    }
+
+    /// The same, with the full-size half named by the caller: a refused
+    /// target, or a file on the share.
+    fn paired_with(thumb: Vec<u8>, full: CoverRef) -> CoverPayload {
         CoverPayload::Pair {
             thumb,
             thumb_mime: "image/jpeg",
-            full: CoverRef::Url { url: "https://example.org/front.jpg".into() },
+            full,
+            // Nothing downloaded yet: the state every one of these tests
+            // starts from, and the state an entry stays in until a reader
+            // enlarges the cover.
+            fetched: None,
         }
+    }
+
+    /// The body a canned download answers with — the "full size" of these
+    /// tests. Visibly different from the thumbnails they pair it with, so
+    /// that "which half did the route serve?" is answered by the bytes and
+    /// not by their length alone.
+    fn full_size_fixture() -> Vec<u8> {
+        fixtures::jpeg_decodable(1200, 1200)
     }
 
     /// **A supplied thumbnail that respects the rule is served byte for
@@ -3110,20 +3748,44 @@ mod tests {
         assert_eq!(cache.renditions_built(), 1);
     }
 
-    /// The bare URL serves the thumbnail **for now**, which is exactly what
-    /// the `Bytes` arm does for a network cover: nothing regresses, and the
-    /// full size stays a reference until a later task fetches it on demand.
-    /// The production change that would make this fail: downloading the full
-    /// size on announcement, which is precisely what the pair avoids.
+    /// **A failed download answers with the thumbnail, and never freezes
+    /// it.** The reader asked to see the image larger; a smaller version is
+    /// an honest answer where an empty square is not.
+    ///
+    /// The header is the half that needed pinning. This response says
+    /// something other than what its URL names, and the same URL will serve
+    /// the real full size the moment the target answers again — so a year of
+    /// `immutable` would pin this browser to the stand-in for that year, with
+    /// no recourse at all from the server side.
+    ///
+    /// Named production changes this guards: serving a `404` when the fetch
+    /// fails; giving this response the `immutable` the real full size gets;
+    /// or handing it `"{key}"`, under which a browser holding a stand-in
+    /// would earn a `304` for ever.
     #[tokio::test]
-    async fn the_bare_url_of_a_paired_entry_serves_its_thumbnail() {
+    async fn a_failed_full_size_download_serves_the_thumbnail_without_freezing_it() {
         let cache = Arc::new(CoverCache::new());
         let thumb = fixtures::jpeg_decodable(500, 500);
         cache.insert("k".into(), paired_entry(thumb.clone())).await;
+        // No canned body is installed, so the download yields nothing — see
+        // `CoverCache::canned_full_download`. That is the failure this test
+        // is about, obtained without a network and without a clock.
 
-        let (status, body) = served_body(&cache, "k", "").await;
+        let (status, etag, cache_control, body) = served_with_headers(&cache, "k", "").await;
+        assert_eq!(status, 200, "a failed fetch must not turn into a 404");
+        assert_eq!(body, thumb, "the thumbnail is the honest answer");
+        assert_eq!(cache_control, "no-cache", "a stand-in must never be frozen for a year");
+        assert_ne!(etag, "\"k\"", "nor may it claim the real full size's validator");
+        assert_eq!(cache.full_downloads(), 1, "it did try, once");
+
+        // **The failure is not memoised**, deliberately: the next click tries
+        // again rather than serving the stand-in for ever from memory. The
+        // cost of that choice is one failed request per click, which is what
+        // this second call measures.
+        let (status, _, _, again) = served_with_headers(&cache, "k", "").await;
         assert_eq!(status, 200);
-        assert_eq!(body, thumb);
+        assert_eq!(again, thumb);
+        assert_eq!(cache.full_downloads(), 2, "a broken target is retried, not remembered");
     }
 
     /// **Within the edge, over the threshold** — the half of the rule the two
@@ -3160,12 +3822,13 @@ mod tests {
         assert_eq!(cache.renditions_built(), 1);
     }
 
-    /// **The stand-in must not wear the validator the real full size will
-    /// wear.** `no-cache` only guarantees the browser asks again; the answer
+    /// **The stand-in must not wear the validator the real full size
+    /// wears.** `no-cache` only guarantees the browser asks again; the answer
     /// is the `ETag`'s business. Under `"{key}"` — the tag the `Bytes` arm
-    /// gives real network bytes — a later task fetching the full size would
-    /// compare equal to what the browser holds, answer `304`, and leave the
-    /// stand-in on screen at every revalidation for ever.
+    /// gives real network bytes, and the one a fetched full size now takes —
+    /// the browser's revalidation would compare equal, earn a `304`, and
+    /// leave the stand-in on screen for ever. Its counterpart from the other
+    /// side is `a_fetched_full_size_takes_the_validator_of_the_real_image`.
     ///
     /// Distinct from the thumbnail branch's tag too, and the third assertion
     /// is the one that matters there: out of the rule the two branches serve
@@ -3242,6 +3905,569 @@ mod tests {
         let cache = CoverCache::new();
         cache.insert("k".into(), paired_entry(vec![0u8; 3_333])).await;
         assert_eq!(cache.snapshot().await.used_bytes, 3_333);
+    }
+
+    /// **Proved by a counter, not by a duration.** The full size must not be
+    /// looked for until somebody enlarges the cover; an assertion on a delay
+    /// would only measure how fast the machine is.
+    #[tokio::test]
+    async fn the_full_size_is_not_fetched_until_someone_enlarges() {
+        let cache = Arc::new(CoverCache::new());
+        cache.answer_full_downloads_with(full_size_fixture(), "image/jpeg");
+        cache.insert("k".into(), paired_entry(fixtures::jpeg_decodable(500, 500))).await;
+
+        // The player's square, as many times as one likes: it asks for the
+        // thumbnail, which is already there.
+        for _ in 0..5 {
+            let (status, _) = served_body(&cache, "k", "?size=thumbnail").await;
+            assert_eq!(status, 200);
+        }
+        assert_eq!(cache.full_downloads(), 0, "nobody enlarged, nothing was downloaded");
+
+        // And the counter is not simply inert: the very same cache downloads
+        // as soon as the bare URL is asked for. Without this line the
+        // assertion above would pass just as well against a cache that can
+        // never download at all.
+        let (status, body) = served_body(&cache, "k", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, full_size_fixture(), "enlarging is what fetches the full size");
+        assert_eq!(cache.full_downloads(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_enlargements_download_the_full_size_once() {
+        // The route is unauthenticated on the LAN: ten browsers enlarging the
+        // same cover must produce one download, not ten multi-mebibyte bodies
+        // held in memory at once — and not ten requests to a third party's
+        // server, which is what turns one local request into an amplifier.
+        //
+        // Only a count of executions can prove it: the eight bodies are
+        // byte-identical whether one download ran or eight.
+        let cache = Arc::new(CoverCache::new());
+        cache.answer_full_downloads_with(full_size_fixture(), "image/jpeg");
+        cache.insert("k".into(), paired_entry(fixtures::jpeg_decodable(500, 500))).await;
+        // **The eight callers are made simultaneous, not hoped to be**, on
+        // the model of `concurrent_full_size_requests_extract_once`: a canned
+        // download returns without ever suspending, so the first caller would
+        // otherwise run register / download / remove in a single poll and
+        // every follower would arrive to an empty table — eight downloads,
+        // and a rendezvous never exercised.
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        cache.hold_full_downloads(hold.clone());
+
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let c = cache.clone();
+                tokio::spawn(async move { served_body(&c, "k", "").await })
+            })
+            .collect();
+
+        // Waiting on a state, never on a duration — no clock appears in this
+        // test. The bound exists so that a caller which never reaches the
+        // rendezvous *fails* the test instead of hanging it.
+        let mut spins = 0;
+        while cache.rendezvous_arrivals() < 8 {
+            spins += 1;
+            assert!(
+                spins < 100_000,
+                "only {} of the eight callers reached the rendezvous",
+                cache.rendezvous_arrivals()
+            );
+            tokio::task::yield_now().await;
+        }
+        // **One permit per caller, not one in total.** A rendezvous that
+        // stopped collapsing would have all eight callers waiting here; with
+        // a single permit, seven would wait for ever and the suite would hang
+        // instead of reporting a failure. Intact, the flight consumes exactly
+        // one and the spare permits are never taken.
+        hold.add_permits(8);
+
+        let mut bodies = Vec::new();
+        for t in tasks {
+            let (status, body) = t.await.expect("no task may panic");
+            assert_eq!(status, 200);
+            bodies.push(body);
+        }
+        assert!(
+            bodies.iter().all(|b| b == &full_size_fixture()),
+            "all eight must get the full size, not a stand-in"
+        );
+        assert_eq!(cache.full_downloads(), 1, "eight enlargements, one download");
+    }
+
+    /// **What validation does not protect against.** The route is
+    /// unauthenticated on the LAN and the full size lives on a third party's
+    /// server, so without memoising, every enlargement of the same cover asks
+    /// coverartarchive.org for 2.5 MiB again -- and a loop on one valid key
+    /// turns a local request into an amplifier aimed at someone else.
+    ///
+    /// The key itself is *not* attacker-chosen: `cover_get` only serves keys
+    /// already in the cache, at most `MAX_ENTRIES` of them, and an unknown key
+    /// answers 404. It is the **repetition** that had to be bounded, not the
+    /// input -- which is why the fix is a memo and not a filter.
+    #[tokio::test]
+    async fn a_second_enlargement_does_not_download_again() {
+        let cache = Arc::new(CoverCache::new());
+        cache.answer_full_downloads_with(full_size_fixture(), "image/jpeg");
+        cache.insert("k".into(), paired_entry(fixtures::jpeg_decodable(500, 500))).await;
+
+        let (first, body) = served_body(&cache, "k", "").await;
+        assert_eq!(first, 200);
+        assert!(!body.is_empty());
+        let (second, again) = served_body(&cache, "k", "").await;
+        assert_eq!(second, 200);
+        assert_eq!(again, body, "the same bytes, served from the memo");
+        assert_eq!(
+            cache.full_downloads(),
+            1,
+            "two enlargements, one download: the second must be free"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_memoised_full_size_is_charged_to_the_budget() {
+        // It is held in memory, so it must be paid for -- otherwise the budget
+        // stops describing what the appliance holds, which is the one thing it
+        // exists to do.
+        //
+        // The assertion is on the **increase**, not on an absolute value: the
+        // downloaded body is decided by the test harness, and a hard-coded
+        // figure here would be pinning the fixture rather than the rule.
+        let cache = Arc::new(CoverCache::new());
+        let full = full_size_fixture();
+        cache.answer_full_downloads_with(full.clone(), "image/jpeg");
+        cache.insert("k".into(), paired_entry(fixtures::jpeg_decodable(500, 500))).await;
+
+        let before = cache.snapshot().await.used_bytes;
+        let (status, _) = served_body(&cache, "k", "").await;
+        assert_eq!(status, 200);
+        let after = cache.snapshot().await.used_bytes;
+        assert_eq!(
+            after - before,
+            full.len(),
+            "the memoised full size must be charged, to the byte"
+        );
+    }
+
+    /// **The full size obeys the source ceiling, not the download ceiling**,
+    /// and the whole affordability of the pair rests on that distinction:
+    /// `download_max` bounds what the appliance fetches by itself for every
+    /// track it plays, `source_max` bounds what it agrees to read at all. An
+    /// enlargement is a gesture of the reader, so it is the second that
+    /// applies — under the first, a 2.5 MiB original would be refused here
+    /// for exactly the reason it was refused on announcement, and no new
+    /// setting could have been avoided.
+    ///
+    /// Named production change this guards: handing `download_max` to
+    /// `full_size`, under which the first half of this test serves a stand-in.
+    #[tokio::test]
+    async fn the_full_size_obeys_the_source_ceiling_and_not_the_download_ceiling() {
+        let settings = CoverSettings::default();
+        // Between the two ceilings, which is the whole point: the product
+        // ships 2 MiB of download and 20 MiB of source.
+        let big = {
+            let mut v = fixtures::jpeg_decodable(64, 64);
+            v.resize(3 * 1024 * 1024, 0);
+            v
+        };
+        assert!(big.len() > settings.download_max, "the fixture must be over the download cap");
+        assert!(big.len() < settings.source_max, "and under the source cap");
+
+        let cache = Arc::new(CoverCache::new());
+        cache.answer_full_downloads_with(big.clone(), "image/jpeg");
+        cache.insert("k".into(), paired_entry(fixtures::jpeg_decodable(500, 500))).await;
+        let (status, body) = served_body(&cache, "k", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, big, "the source ceiling is what applies to an enlargement");
+
+        // The other edge, so that the assertion above cannot be satisfied by
+        // a ceiling that is simply never applied: lower `source_max` under
+        // the same body and the fetch must be refused, leaving the thumbnail.
+        let thumb = fixtures::jpeg_decodable(500, 500);
+        let tight = Arc::new(CoverCache::new());
+        tight.set_cover_settings(CoverSettings { source_max: 1024 * 1024, ..settings });
+        tight.answer_full_downloads_with(big, "image/jpeg");
+        tight.insert("k".into(), paired_entry(thumb.clone())).await;
+        let (status, body) = served_body(&tight, "k", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, thumb, "over the source ceiling, the stand-in answers");
+    }
+
+    /// **The real full size takes `"{key}"`, and that is what un-freezes the
+    /// stand-ins already in browsers.** The previous task gave the stand-in a
+    /// tag of its own precisely so this one could take the tag the `Bytes`
+    /// arm gives real network bytes: a browser still holding a stand-in then
+    /// mismatches on its own and is served a `200`, with no decision left
+    /// unwritten anywhere.
+    ///
+    /// Named production changes this guards: reusing `"{key}-standin"` or
+    /// `"{key}-v"` for the fetched full size — the first would answer `304`
+    /// to every browser holding a stand-in and leave it on screen for ever,
+    /// the second would let the thumbnail URL and the bare URL be served one
+    /// for the other.
+    #[tokio::test]
+    async fn a_fetched_full_size_takes_the_validator_of_the_real_image() {
+        let cache = Arc::new(CoverCache::new());
+        cache.answer_full_downloads_with(full_size_fixture(), "image/jpeg");
+        // Out of the rule by its dimensions, so that the thumbnail branch
+        // really does answer with different bytes — the case a shared
+        // validator would corrupt.
+        cache.insert("k".into(), paired_entry(fixtures::jpeg_decodable(900, 900))).await;
+
+        let (status, etag, cache_control, body) = served_with_headers(&cache, "k", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, full_size_fixture());
+        assert_eq!(etag, "\"k\"", "the real full size wears the key itself");
+        assert!(
+            cache_control.contains("immutable"),
+            "this URL determines its content, so a year is right: {cache_control}"
+        );
+
+        // A browser that cached the stand-in — the answer this URL gave
+        // before anything was downloaded — must be served the real image, not
+        // a 304 confirming what it holds.
+        assert_eq!(
+            served_if_none_match(&cache, "k", "", "\"k-standin\"").await,
+            200,
+            "a cached stand-in must not survive the arrival of the real full size"
+        );
+        // And the thumbnail URL must not honour the full size's validator:
+        // out of the rule the two serve different bytes.
+        let (_, thumb_etag, _) = served_with_etag(&cache, "k", "?size=thumbnail").await;
+        assert_ne!(thumb_etag, etag, "two different bodies, two validators");
+        assert_eq!(served_if_none_match(&cache, "k", "?size=thumbnail", &etag).await, 200);
+    }
+
+    /// **A thumbnail's validator must follow the settings that produced
+    /// it**, at all four arms of the route.
+    ///
+    /// The symptom this closes, reported against the shipped device: the
+    /// owner takes the longest edge from 640 down to 320 px and saves. The
+    /// core re-renders at once — a rendition's identity has carried
+    /// `Rendition::tag` all along — the browser revalidates against an
+    /// unchanged `ETag`, is told `304`, and goes on displaying the 640. For a
+    /// cover from the internet it was worse: served `immutable` for a year,
+    /// the browser did not even ask.
+    ///
+    /// **The proof is entirely in the headers.** A test comparing two bodies
+    /// would prove nothing about it: the core was already producing the right
+    /// bytes, and it is the browser that was never allowed to see them.
+    ///
+    /// Named production changes this guards: dropping `rules_tag` from
+    /// `variant_etag` or from `frozen_headers`; giving `rendition: None` no
+    /// representation of its own, under which unchecking re-encoding alone
+    /// would go unnoticed; and putting `immutable` back on a network
+    /// thumbnail, which would make a changed validator unreachable.
+    #[tokio::test]
+    async fn a_thumbnail_validator_follows_the_rules_that_produced_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("folder.jpg");
+        std::fs::write(&folder, fixtures::jpeg_decodable(900, 900)).unwrap();
+
+        let cache = Arc::new(CoverCache::new());
+        cache
+            .insert(
+                "net".into(),
+                CoverPayload::Bytes(fixtures::jpeg_decodable(900, 900), "image/jpeg"),
+            )
+            .await;
+        cache.insert("pair".into(), paired_entry(fixtures::jpeg_decodable(900, 900))).await;
+        cache.insert("file".into(), CoverPayload::File(folder)).await;
+        let mut arms = vec!["net", "pair", "file"];
+        // The fourth arm needs a real container. Skipped rather than faked
+        // when ffmpeg is absent, like every other embedded test here — the
+        // three arms above still fail on the same defect.
+        match crate::player::mpv::tests::mp3_with_cover_from(dir.path(), "color=c=red:s=64x64:d=1")
+        {
+            Some(track) => {
+                cache.insert("tags".into(), CoverPayload::Embedded(track)).await;
+                arms.push("tags");
+            }
+            None => eprintln!("ffmpeg missing: leaving the Embedded arm out of this test"),
+        }
+
+        let base = CoverSettings::default();
+        cache.set_cover_settings(CoverSettings {
+            rendition: Some(test_rendition(400, 512 * 1024, 16_000_000)),
+            ..base
+        });
+        let mut wide = Vec::new();
+        for arm in &arms {
+            let (status, etag, cache_control, _) =
+                served_with_headers(&cache, arm, "?size=thumbnail").await;
+            assert_eq!(status, 200, "{arm}");
+            assert!(!etag.is_empty(), "{arm}: a thumbnail must carry a validator");
+            // Without this, a validator that changes is worth nothing: the
+            // browser has been told not to ask again for a year.
+            assert!(
+                !cache_control.contains("immutable"),
+                "{arm}: a rendering must stay revalidatable, got {cache_control}"
+            );
+            wide.push((*arm, etag));
+        }
+
+        cache.set_cover_settings(CoverSettings {
+            rendition: Some(test_rendition(100, 512 * 1024, 16_000_000)),
+            ..base
+        });
+        let mut narrow = Vec::new();
+        for (arm, before) in &wide {
+            let (_, etag, _, _) = served_with_headers(&cache, arm, "?size=thumbnail").await;
+            assert_ne!(&etag, before, "{arm}: a new longest edge must be a new validator");
+            assert_eq!(
+                served_if_none_match(&cache, arm, "?size=thumbnail", before).await,
+                200,
+                "{arm}: the validator of the previous size must not earn a 304"
+            );
+            narrow.push((*arm, etag));
+        }
+
+        // Unchecking re-encoding is a change of what the route answers with
+        // too — the source, untouched — so it must be a change of validator
+        // as well, which an absent rules tag would have hidden.
+        cache.set_cover_settings(CoverSettings { rendition: None, ..base });
+        for ((arm, wide_etag), (_, narrow_etag)) in wide.iter().zip(narrow.iter()) {
+            let (_, etag, _, _) = served_with_headers(&cache, arm, "?size=thumbnail").await;
+            assert_ne!(&etag, wide_etag, "{arm}: unchecking must not look like the 400 px rules");
+            assert_ne!(&etag, narrow_etag, "{arm}: nor like the 100 px rules");
+            assert_eq!(
+                served_if_none_match(&cache, arm, "?size=thumbnail", narrow_etag).await,
+                200,
+                "{arm}: the validator of the last rendering must not earn a 304 either"
+            );
+        }
+    }
+
+    /// **A revalidation must never reach the network.** The bare URL of a
+    /// pair answers `304` from the key alone — these bytes are frozen under
+    /// it — so a browser that already holds the full size costs a header and
+    /// nothing else, whether or not this process still has the image.
+    ///
+    /// Named production change this guards: moving the `If-None-Match` check
+    /// down beside the response it labels, which reads naturally and would
+    /// make every revalidation fetch 2.5 MiB from a third party before
+    /// discarding it.
+    #[tokio::test]
+    async fn a_conditional_enlargement_never_reaches_the_network() {
+        let cache = Arc::new(CoverCache::new());
+        cache.answer_full_downloads_with(full_size_fixture(), "image/jpeg");
+        cache.insert("k".into(), paired_entry(fixtures::jpeg_decodable(500, 500))).await;
+
+        // Nothing has been downloaded on this cache, deliberately: the answer
+        // must come from the validator, not from a memo.
+        assert_eq!(served_if_none_match(&cache, "k", "", "\"k\"").await, 304);
+        assert_eq!(
+            cache.full_downloads(),
+            0,
+            "a browser that already holds the image must cost nobody a request"
+        );
+    }
+
+    /// **A memo that is charged must also be reconciled**, and against the
+    /// right entry. `remember_full` grows an entry by megabytes, so the cache
+    /// has to be brought back under its budget then and there — and the entry
+    /// that grew is the one to protect, never the one to sacrifice.
+    ///
+    /// Named production changes this guards: dropping `evict_to_budget` from
+    /// `remember_full`, under which the budget is exceeded until the next
+    /// insertion happens to run it; and passing `None` where `Some(key)` goes,
+    /// under which the entry pays for its own growth — evicted on the spot,
+    /// so the reader's next click downloads all over again.
+    #[tokio::test]
+    async fn memoising_a_full_size_reconciles_the_budget_around_it() {
+        let thumb = fixtures::jpeg_decodable(500, 500);
+        let big = {
+            let mut v = fixtures::jpeg_decodable(64, 64);
+            v.resize(3 * 1024 * 1024, 0);
+            v
+        };
+        let cache = Arc::new(CoverCache::new());
+        // A budget the memo alone blows through, so that the reconciliation
+        // has no choice but to act.
+        cache.set_cover_settings(CoverSettings {
+            budget: 1024 * 1024,
+            ..CoverSettings::default()
+        });
+        cache.answer_full_downloads_with(big, "image/jpeg");
+        cache.insert("enlarged".into(), paired_entry(thumb.clone())).await;
+        cache.insert("neighbour".into(), paired_entry(thumb)).await;
+        assert!(cache.contains("neighbour").await, "both fit before the enlargement");
+
+        let (status, _) = served_body(&cache, "enlarged", "").await;
+        assert_eq!(status, 200);
+        assert!(
+            cache.contains("enlarged").await,
+            "the entry that grew must not be evicted to pay for its own growth"
+        );
+        assert!(
+            !cache.contains("neighbour").await,
+            "and the budget must be reconciled the moment the memo lands"
+        );
+        let (status, _) = served_body(&cache, "enlarged", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(cache.full_downloads(), 1, "the memo survived, so the second click is free");
+    }
+
+    /// **The memo must cost a refcount, not a copy.** `CoverCache::read`
+    /// clones the whole payload before the route has even looked at the size
+    /// it was asked for — the player's square and a `304` both go through
+    /// that clone — so an owned buffer here would make every later request on
+    /// an enlarged cover copy up to `source_max` on an unauthenticated route.
+    ///
+    /// Named production change this guards: `fetched` holding a `Vec<u8>`
+    /// instead of an `Arc<Vec<u8>>` — under which this test does not even
+    /// compile, there being no pointer left to compare.
+    #[tokio::test]
+    async fn a_memoised_full_size_is_shared_and_not_copied() {
+        let cache = Arc::new(CoverCache::new());
+        cache.answer_full_downloads_with(full_size_fixture(), "image/jpeg");
+        cache.insert("k".into(), paired_entry(fixtures::jpeg_decodable(500, 500))).await;
+        let (status, _) = served_body(&cache, "k", "").await;
+        assert_eq!(status, 200);
+
+        // **Both held at once**, as in `concurrent_full_size_requests_share_
+        // one_allocation`: read one at a time and dropped, the allocator
+        // could hand the second read the address the first just freed.
+        let one = cache.read("k").await.expect("the entry is still there");
+        let two = cache.read("k").await.expect("the entry is still there");
+        let (
+            CoverPayload::Pair { fetched: Some((first, _)), .. },
+            CoverPayload::Pair { fetched: Some((second, _)), .. },
+        ) = (&one, &two)
+        else {
+            panic!("both reads must carry the memo");
+        };
+        assert!(
+            Arc::ptr_eq(first, second),
+            "two reads of the payload must share one buffer, not copy it"
+        );
+        assert!(
+            Arc::strong_count(first) >= 3,
+            "the entry and both reads point at it: {}",
+            Arc::strong_count(first)
+        );
+
+        // The hot path this protects, exercised: a conditional thumbnail
+        // request goes through that very clone before answering `304`.
+        let (_, thumb_etag, _) = served_with_etag(&cache, "k", "?size=thumbnail").await;
+        assert_eq!(served_if_none_match(&cache, "k", "?size=thumbnail", &thumb_etag).await, 304);
+    }
+
+    /// **The filter runs before anything is fetched, and it is the real
+    /// one.** `allowed_target` is what stops the SSE of a third-party source
+    /// from pointing this appliance at its own network; the enlargement path
+    /// must go through it exactly as the announcement path does.
+    ///
+    /// This test opens no socket, and could not: the refusal happens before
+    /// the fetch, which is precisely what makes the property provable without
+    /// a network.
+    ///
+    /// Named production change this guards: reaching for the body before
+    /// judging the target.
+    #[tokio::test]
+    async fn a_refused_target_is_never_fetched() {
+        for url in ["http://example.org/front.jpg", "https://192.168.1.10/front.jpg"] {
+            let cache = Arc::new(CoverCache::new());
+            // A body is waiting to be served: if the filter did not run, this
+            // is what would come back.
+            cache.answer_full_downloads_with(full_size_fixture(), "image/jpeg");
+            let thumb = fixtures::jpeg_decodable(500, 500);
+            cache
+                .insert("k".into(), paired_with(thumb.clone(), CoverRef::Url { url: url.into() }))
+                .await;
+
+            let (status, body) = served_body(&cache, "k", "").await;
+            assert_eq!(status, 200, "{url}");
+            assert_eq!(body, thumb, "{url}: a refused target must leave the stand-in");
+            assert_ne!(body, full_size_fixture(), "{url}");
+        }
+    }
+
+    /// **A local full size is served and never memoised.** The rule of this
+    /// module is that the network means the internet: a file on the share is
+    /// local, re-readable at the cost of a read, and holding megabytes of it
+    /// in memory would charge the budget for something a `File` payload
+    /// costs nothing at all.
+    ///
+    /// It is also the one branch of `perform_full_download` that runs for
+    /// real under test — no canned body is installed here, so a served image
+    /// proves `read_file_bounded` itself ran, cap and time bound included.
+    ///
+    /// Named production changes this guards: memoising a local full size,
+    /// which the budget assertion catches; and handing the read a cap it does
+    /// not apply, which the second half catches.
+    #[tokio::test]
+    async fn a_local_full_size_is_read_afresh_and_never_memoised() {
+        let dir = tempfile::tempdir().unwrap();
+        let on_the_share = dir.path().join("front.jpg");
+        let original = fixtures::jpeg_decodable(1200, 1200);
+        std::fs::write(&on_the_share, &original).unwrap();
+        let full = CoverRef::Path { path: on_the_share.to_string_lossy().into_owned() };
+        let thumb = fixtures::jpeg_decodable(500, 500);
+
+        let cache = Arc::new(CoverCache::new());
+        cache.insert("k".into(), paired_with(thumb.clone(), full.clone())).await;
+        let charged = cache.snapshot().await.used_bytes;
+
+        let (status, body) = served_body(&cache, "k", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, original, "the file on the share is what the bare URL serves");
+        assert_eq!(
+            cache.snapshot().await.used_bytes,
+            charged,
+            "a local full size costs a read, never a place in the budget"
+        );
+        let (_, again) = served_body(&cache, "k", "").await;
+        assert_eq!(again, original);
+        assert_eq!(cache.full_downloads(), 2, "read afresh rather than memoised");
+
+        // The cap the real reader applies, at a value the file is over: the
+        // ceiling is not merely passed down, it bites.
+        let tight = Arc::new(CoverCache::new());
+        tight.set_cover_settings(CoverSettings {
+            source_max: 1024,
+            ..CoverSettings::default()
+        });
+        tight.insert("k".into(), paired_with(thumb.clone(), full)).await;
+        let (status, body) = served_body(&tight, "k", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, thumb, "over the source ceiling, the stand-in answers");
+    }
+
+    /// **A broken target must not let the LAN write the journal.** This route
+    /// needs no authentication and the failure is deliberately not memoised,
+    /// so a client looping on one broken key would otherwise produce one
+    /// `warn` per request, at its own cadence.
+    ///
+    /// Counted rather than read out of a captured log, and the reason is
+    /// written on the `unfetchable_reports` field: a thread-local subscriber
+    /// cannot see — and cannot avoid racing with — the sibling tests that
+    /// reach the same callsite on other threads.
+    ///
+    /// Named production changes this guards: dropping the throttle, and
+    /// warning from `cover_get`'s fall-back instead, where the line reads
+    /// naturally and where nothing can count how often it has already been
+    /// said.
+    #[tokio::test]
+    async fn a_broken_target_is_reported_once_however_often_it_is_clicked() {
+        let cache = Arc::new(CoverCache::new());
+        // No canned body: every one of these enlargements fails.
+        cache.insert("k".into(), paired_entry(fixtures::jpeg_decodable(500, 500))).await;
+
+        for _ in 0..5 {
+            let (status, _) = served_body(&cache, "k", "").await;
+            assert_eq!(status, 200);
+        }
+        assert_eq!(cache.full_downloads(), 5, "every click did try again");
+        assert_eq!(cache.unfetchable_reports(), 1, "five clicks, one report");
+
+        // **And the silence is per key, not global.** A second broken cover
+        // is a different event and must be said: a throttle that swallowed it
+        // would hide the failure this log exists to explain.
+        cache.insert("other".into(), paired_entry(fixtures::jpeg_decodable(500, 500))).await;
+        let (status, _) = served_body(&cache, "other", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(cache.unfetchable_reports(), 2, "another key, another report");
     }
 
     #[tokio::test]

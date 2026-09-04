@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
+import { ReloadIcon } from '@radix-icons/vue'
 import { Badge, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import ProgressBar from './ProgressBar.vue'
 import ProvenanceDetails from './ProvenanceDetails.vue'
@@ -98,6 +99,7 @@ watch(
     // track's image full screen, without anyone asking for it. Closing is the
     // only honest answer.
     enlarged.value = false
+    enlargedLoading.value = false
   },
 )
 // True when the device announces an image and the browser managed to load it:
@@ -120,6 +122,28 @@ const thumbnailHref = computed(() => {
 })
 /** Is the cover open full screen? */
 const enlarged = ref(false)
+/**
+ * Is the full-size image still on its way?
+ *
+ * Deliberately its own flag, not `imageBroken`: that one describes the
+ * **thumbnail**, and sharing it would let a slow or unavailable full size
+ * condemn the player's square, which did nothing wrong. The core now falls
+ * back to serving the thumbnail bytes under the same URL when the full size
+ * cannot be fetched (Task 8), so there is no failure state left to render
+ * here — only a wait that always ends in a `load` event.
+ */
+const enlargedLoading = ref(false)
+/**
+ * Opens the full-screen view and arms the loading indicator.
+ *
+ * Set unconditionally on every open, not only the first one: the full size
+ * is now fetched on demand (Task 8), so a second look at the same track can
+ * be just as slow as the first if the core's cache has since evicted it.
+ */
+function openEnlarged() {
+  enlarged.value = true
+  enlargedLoading.value = true
+}
 // Escape closes, like any modal overlay. The listener only exists while open:
 // a permanent global listener for a rarely-opened view is a debt, and it would
 // catch keys on pages that have no cover at all.
@@ -228,7 +252,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
           :aria-label="t('cover_zoom')"
           :title="t('cover_zoom')"
           data-cover-enlarge
-          @click="enlarged = true"
+          @click="openEnlarged"
         >
           <img
             :src="thumbnailHref!"
@@ -382,7 +406,23 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
           :src="state?.cover_href ?? ''"
           :alt="t('cover_alt')"
           class="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
+          @load="enlargedLoading = false"
         />
+        <!-- The full size is now fetched on demand (Task 8): it can take a
+             moment, and a plain dark veil with nothing in it reads as a bug.
+             Painted after the `<img>` so it stacks above it while the bytes
+             are still streaming in. `role="status"` announces the wording to
+             a screen reader on its own (implicit `aria-live="polite"`),
+             without a listener of its own to maintain. -->
+        <div
+          v-if="enlargedLoading"
+          class="absolute inset-0 flex flex-col items-center justify-center gap-2 text-white"
+          role="status"
+          data-cover-enlarged-loading
+        >
+          <ReloadIcon class="size-8 animate-spin" aria-hidden="true" />
+          <span>{{ t('cover_zoom_loading') }}</span>
+        </div>
         <!-- The close button doubles the click on the backdrop, it does not
              replace it: without it, there is no way to close from the
              keyboard other than Escape, which is announced nowhere. -->

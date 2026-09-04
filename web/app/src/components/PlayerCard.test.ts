@@ -360,6 +360,84 @@ describe('PlayerCard', () => {
     w.unmount()
   })
 
+  it('shows a loading indicator while the full-size cover has not loaded yet', async () => {
+    // The full size is fetched on demand (Task 8), so opening no longer
+    // guarantees the bytes are already there. Fails if a future change goes
+    // back to treating the enlarge click as instant and drops the indicator.
+    const w = mount(PlayerCard, {
+      props: { state: full({ title: 'So What', cover_href: '/api/cover/1a2b' }), seekStep: 10 },
+      attachTo: document.body,
+    })
+    await w.get('[data-cover-enlarge]').trigger('click')
+    const overlay = document.body.querySelector('[data-cover-enlarged]')
+    expect(overlay).not.toBeNull()
+    expect(overlay?.querySelector('[data-cover-enlarged-loading]')).not.toBeNull()
+    w.unmount()
+  })
+
+  it('hides the loading indicator once the full-size image has loaded, keeping the picture', async () => {
+    // Fails if `@load` is not wired to the flag, or wired to something that
+    // also tears down the overlay itself (the picture must stay).
+    const w = mount(PlayerCard, {
+      props: { state: full({ title: 'So What', cover_href: '/api/cover/1a2b' }), seekStep: 10 },
+      attachTo: document.body,
+    })
+    await w.get('[data-cover-enlarge]').trigger('click')
+    const overlay = document.body.querySelector('[data-cover-enlarged]')
+    const img = overlay?.querySelector('img')
+    expect(img).not.toBeNull()
+    img!.dispatchEvent(new Event('load'))
+    await nextTick()
+    expect(document.body.querySelector('[data-cover-enlarged-loading]')).toBeNull()
+    expect(document.body.querySelector('[data-cover-enlarged]')).not.toBeNull()
+    expect(document.body.querySelector('[data-cover-enlarged] img')).not.toBeNull()
+    w.unmount()
+  })
+
+  it('keeps the full-size wait independent from the thumbnail\'s own retry flag', async () => {
+    // Fails if the two states were folded into one shared flag: the
+    // thumbnail's `imageBroken` (with its own retry mechanics, see
+    // `onImageError`) would then also toggle or hide the enlarged view's
+    // indicator, condemning the player's square to a failure that is not its
+    // own -- exactly what the brief forbids.
+    const w = mount(PlayerCard, {
+      props: { state: full({ title: 'So What', cover_href: '/api/cover/1a2b' }), seekStep: 10 },
+      attachTo: document.body,
+    })
+    await w.get('[data-cover-enlarge]').trigger('click')
+    expect(document.body.querySelector('[data-cover-enlarged-loading]')).not.toBeNull()
+
+    // The thumbnail fails and enters its own retry cycle.
+    await w.get('[data-cover-image] img').trigger('error')
+    expect(document.body.querySelector('[data-cover-enlarged]')).not.toBeNull()
+    expect(document.body.querySelector('[data-cover-enlarged-loading]')).not.toBeNull()
+    w.unmount()
+  })
+
+  it('arms the loading indicator again on a fresh open, even after a previous open finished loading', async () => {
+    // Fails if the flag were only ever initialized once (e.g. `ref(true)`
+    // read once) instead of being reset by the click handler on every open:
+    // a second, genuinely slow fetch (the core's cache evicted the first
+    // download) would then show nothing while it works.
+    const w = mount(PlayerCard, {
+      props: { state: full({ title: 'So What', cover_href: '/api/cover/1a2b' }), seekStep: 10 },
+      attachTo: document.body,
+    })
+    await w.get('[data-cover-enlarge]').trigger('click')
+    const firstImg = document.body.querySelector('[data-cover-enlarged] img')
+    firstImg!.dispatchEvent(new Event('load'))
+    await nextTick()
+    expect(document.body.querySelector('[data-cover-enlarged-loading]')).toBeNull()
+
+    await document.body.querySelector<HTMLElement>('[data-cover-close]')!.click()
+    await nextTick()
+    expect(document.body.querySelector('[data-cover-enlarged]')).toBeNull()
+
+    await w.get('[data-cover-enlarge]').trigger('click')
+    expect(document.body.querySelector('[data-cover-enlarged-loading]')).not.toBeNull()
+    w.unmount()
+  })
+
   it('closes the enlarged cover when the track changes', async () => {
     // Otherwise the next track's image shows up full screen without anyone
     // asking for it.
