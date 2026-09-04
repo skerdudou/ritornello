@@ -1,6 +1,13 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
-import { Button, cn, Slider, Tabs, TabsContent, TabsList, TabsTrigger, UI_CONTRACT } from './index'
+import { h } from 'vue'
+import {
+  Button, cn, Dialog, DialogContent, DialogTitle, Slider, Tabs, TabsContent, TabsList,
+  TabsTrigger, UI_CONTRACT,
+} from './index'
+// Not part of the kit's public surface, and no reason to widen it just for
+// a test that lives inside the kit.
+import { buttonVariants } from './components/ui/button'
 
 // jsdom does not provide ResizeObserver; reka-ui uses it (`useSize`) to
 // measure the slider track on mount. A minimal stub is enough: the test checks
@@ -86,5 +93,39 @@ describe('public surface of the kit', () => {
     // "sent once": a single keyboard step must not produce several commits.
     expect(w.emitted('valueCommit')).toHaveLength(1)
     w.unmount()
+  })
+
+  /**
+   * Guardrails on the hand cursor.
+   *
+   * Tailwind's Preflight no longer puts `cursor: pointer` on a `<button>`, so
+   * every clickable of this kit carries the class explicitly. Nothing enforced
+   * that, and the dialog's close cross -- built from raw classes instead of
+   * going through `buttonVariants` -- had silently missed it: on a popin, the
+   * one control that closes it gave no hover feedback at all.
+   *
+   * Asserted on the class and not on a computed style: jsdom computes none.
+   * That the browser really applies it was measured through Playwright.
+   */
+  describe('the hand cursor on what is clickable', () => {
+    it('every button variant carries it', () => {
+      expect(buttonVariants()).toContain('cursor-pointer')
+      expect(buttonVariants({ variant: 'ghost', size: 'icon-xs' })).toContain('cursor-pointer')
+    })
+
+    it('the close cross of a dialog carries it', async () => {
+      const w = mount(Dialog, {
+        props: { open: true },
+        slots: { default: () => h(DialogContent, null, { default: () => h(DialogTitle, null, { default: () => 'Title' }) }) },
+        attachTo: document.body,
+      })
+      await flushPromises()
+      // The dialog renders in a portal, hence `document.body` and not `w`.
+      const close = document.body.querySelector('[data-slot="dialog-close"]')
+      expect(close).not.toBeNull()
+      expect(close!.className).toContain('cursor-pointer')
+      w.unmount()
+      document.body.innerHTML = ''
+    })
   })
 })
