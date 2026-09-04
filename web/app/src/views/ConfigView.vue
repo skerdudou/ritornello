@@ -619,21 +619,28 @@ function goTo(id: string) {
         </Card>
       </section>
 
-      <!-- Covers. Two boxes that must not be confused, one per question:
-           what the cache **keeps in memory** (a budget the user reads
-           directly, plus the live count it implies), and what the core
-           **reads to publish** (the source cap, then the switch and the four
-           settings it greys out). Mixing them in one box is what produced the
-           false "40 MiB, 2 MiB per cover" line this replaces: a label that
-           looked like a memory bound levered nothing, because the real bound
-           lived in a different setting entirely.
+      <!-- Covers. One card, one subject: everything the appliance applies to
+           an album cover, in the order a reader meets it — what the cache may
+           hold, the two ceilings on what may be read, the count the budget
+           implies, then the re-encoding switch and the four settings that
+           describe nothing but the thumbnail.
+
+           These were briefly two cards, "what is kept in memory" and "what is
+           read to publish". The distinction they drew is real and the field
+           help still carries it, but as card titles they read as two
+           unrelated rubrics, and they left the table of contents announcing a
+           heading the page no longer had.
+
+           `cover_source_max_mio` sits above the rule, among the ceilings: it
+           applies whatever happens, and is the only guard left once
+           re-encoding is unchecked.
 
            Greyed out, not emptied: the four rendition settings stay readable
            and go back in the PUT (see `saveSettings`), so re-checking the
            switch finds what had been set. -->
-      <section id="covers" class="scroll-mt-6 space-y-4">
+      <section id="covers" class="scroll-mt-6">
         <Card>
-          <CardHeader><CardTitle>{{ t('cover_kept_title') }}</CardTitle></CardHeader>
+          <CardHeader><CardTitle>{{ t('cover_card_title') }}</CardTitle></CardHeader>
           <CardContent class="space-y-4">
             <label class="grid gap-1 text-sm">
               {{ t('cover_cache_budget_label') }}
@@ -647,6 +654,12 @@ function goTo(id: string) {
                 v-model="settings.cover_download_max_mio" />
               <span class="max-w-md text-xs text-muted-foreground">{{ t('cover_download_max_help') }}</span>
             </label>
+            <label class="grid gap-1 text-sm">
+              {{ t('cover_source_max_label') }}
+              <Input type="number" min="1" max="20" class="w-28" data-cover-source-max
+                v-model="settings.cover_source_max_mio" />
+              <span class="max-w-md text-xs text-muted-foreground">{{ t('cover_source_max_help') }}</span>
+            </label>
             <!-- The live estimate: what the budget above translates to, in
                  covers, given the current download and thumbnail ceilings.
                  Reactive to every field that feeds it, so it never lags what
@@ -654,21 +667,6 @@ function goTo(id: string) {
             <p class="max-w-md text-xs text-muted-foreground" data-cover-cache-estimate>
               {{ coverCacheEstimateText }}
             </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader><CardTitle>{{ t('cover_read_title') }}</CardTitle></CardHeader>
-          <CardContent class="space-y-4">
-            <!-- Outside the greyed-out re-encoding box: this bound applies
-                 whatever happens, and is the only guard left once re-encoding
-                 is unchecked. -->
-            <label class="grid gap-1 text-sm">
-              {{ t('cover_source_max_label') }}
-              <Input type="number" min="1" max="20" class="w-28" data-cover-source-max
-                v-model="settings.cover_source_max_mio" />
-              <span class="text-xs text-muted-foreground">{{ t('cover_source_max_help') }}</span>
-            </label>
 
             <div class="border-t border-border pt-4">
               <label class="flex items-start gap-3 text-sm">

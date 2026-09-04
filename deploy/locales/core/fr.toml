@@ -53,14 +53,13 @@ remote_eject = "Éjecter"
 remote_source = "Source"
 remote_power = "Veille"
 seek_step_label = "Pas de déplacement (s)"
-# Pochettes d'album. Deux boîtes : ce que le cache garde en mémoire (un
-# budget, pas un compte), et ce que le cœur lit pour publier. Le plafond de la
-# source vient en premier dans la seconde boîte et reste actif quoi que dise
-# l'interrupteur en dessous : c'est la seule garde qui subsiste quand le
-# réencodage est décoché.
+# Pochettes d'album. Une seule carte : la mémoire que le cache peut occuper
+# (un budget, pas un compte), puis les plafonds de ce que le cœur accepte de
+# lire, puis l'interrupteur de réencodage et les quatre réglages qui décrivent
+# la vignette. Le plafond de la source reste actif quoi que dise
+# l'interrupteur : c'est la seule garde qui subsiste quand le réencodage est
+# décoché.
 cover_card_title = "Pochettes d'album"
-cover_kept_title = "Ce qui est gardé en mémoire"
-cover_read_title = "Ce qui est lu pour publier"
 cover_cache_budget_label = "Budget mémoire (Mio)"
 cover_cache_budget_help = "Borne les octets des pochettes téléchargées depuis internet et les vignettes gardées prêtes à servir. Une pochette locale — un fichier à côté du morceau, ou intégré à celui-ci — ne coûte qu'un chemin, jamais ces octets."
 cover_cache_estimate = "Au moins {floor} pochettes en mémoire dans le pire cas (toutes venues d'internet) ; environ {typical} pour une bibliothèque de pochettes locales."

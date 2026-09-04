@@ -585,16 +585,22 @@ Living in the core rather than on the key means the same reasoning as the
 5% volume step: a remote never has to be reprogrammed just because the step
 it sends should now be bigger or smaller.
 
-### Album covers cards
+### Album covers card
 
 Eight settings on the same `GET`/`PUT /api/settings` and the same
-`422`-on-write contract, split across **two cards**, and that split carries a
-distinction that matters more than any of the values: what the appliance
-*keeps*, and what it *reads and produces*.
+`422`-on-write contract, in **one card**. They answer two questions that must
+not be confused — what the appliance *keeps*, and what it *reads and
+produces* — and the field help below carries that distinction. It was briefly
+drawn as two cards, "what is kept in memory" and "what is read to publish";
+as headings the two read as unrelated rubrics, and they left the page's table
+of contents announcing a heading no card carried. One subject, one card, in
+the order a reader meets it: what the cache may hold, the ceilings on what
+may be read, the count the budget implies, then the re-encoding switch and
+the four settings that describe nothing but the thumbnail.
 
-**What is kept in memory.** **`cover_cache_budget_mio`** comes first, alone
-in its card. 50 MiB by default, bounded **8-256**. It is the memory the cover cache may occupy, and
-it replaced a count of entries: a number of covers said nothing about memory
+**`cover_cache_budget_mio`** comes first. 50 MiB by default, bounded
+**8-256**. It is the memory the cover cache may occupy, and it replaced a
+count of entries: a number of covers said nothing about memory
 — one had to multiply it by two other settings to learn what it cost, and the
 product could reach absurd figures without anything objecting. The figure the
 user reads is now the memory itself, and the number of covers becomes a
@@ -628,9 +634,9 @@ memory. It is the other half of the worst-case estimate above, and it is not
 `cover_source_max_mio`: one bounds a transfer from a third party, the other
 bounds any read at all.
 
-**What is read to publish.** **`cover_source_max_mio`** comes first in this
-card and is never greyed out: it bounds what the core agrees to *read*,
-whatever happens next, and it is the only guard left when re-encoding is off.
+**`cover_source_max_mio`** closes the ceilings and is never greyed out: it
+bounds what the core agrees to *read*, whatever happens next, and it is the
+only guard left when re-encoding is off.
 20 MiB by default, bounded **1-20** — the upper bound is `COVER_MAX_BYTES` expressed in the setting's unit, not a
 comfort choice. That constant is the promise made to display plugins about
 what they may receive, and the MPD plugin sizes its own bounds on it without

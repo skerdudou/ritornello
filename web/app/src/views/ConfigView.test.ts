@@ -42,8 +42,6 @@ const CATALOGUE = {
   seek_card_title: 'Déplacement',
   seek_step_label: 'Pas de déplacement (s)',
   cover_card_title: "Pochettes d'album",
-  cover_kept_title: 'Ce qui est gardé en mémoire',
-  cover_read_title: 'Ce qui est lu pour publier',
   cover_cache_budget_label: 'Budget mémoire (Mio)',
   cover_cache_budget_help: 'Borne les octets réseau et les vignettes gardées.',
   cover_cache_estimate: 'Au moins {floor} pochettes ; environ {typical} pour une bibliothèque locale.',

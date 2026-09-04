@@ -53,13 +53,12 @@ remote_eject = "Eject"
 remote_source = "Source"
 remote_power = "Standby"
 seek_step_label = "Seek step (s)"
-# Album covers. Two boxes: what the cache keeps in memory (a budget, not a
-# count), and what the core reads to publish. The source ceiling comes first
-# in the second box and stays live whatever the switch below says: it is the
-# only guard left when re-encoding is off.
+# Album covers. One card: the memory the cache may occupy (a budget, not a
+# count), then the ceilings on what the core agrees to read, then the
+# re-encoding switch and the four settings describing the thumbnail. The
+# source ceiling stays live whatever the switch says: it is the only guard
+# left when re-encoding is off.
 cover_card_title = "Album covers"
-cover_kept_title = "What is kept in memory"
-cover_read_title = "What is read to publish"
 cover_cache_budget_label = "Memory budget (MiB)"
 cover_cache_budget_help = "Bounds the bytes of covers downloaded from the internet and the thumbnails kept ready to serve. A local cover — a file beside the track, or one embedded in it — costs only a path, never these bytes."
 cover_cache_estimate = "At least {floor} covers held at once in the worst case (every cover from the internet); about {typical} for a library of local covers."
