@@ -47,6 +47,26 @@ pub struct Runtime {
     /// `halves`: `admin` is not a `PluginKind`, it's a flag of the
     /// announcement.
     admin: Option<Pin<Box<dyn Future<Output = Result<()>> + Send>>>,
+    /// Fingerprint of the admin page's UI assets, computed in `.admin()`
+    /// while the plugin is still in hand — see `ui_fingerprint` below.
+    ui_version: Option<String>,
+}
+
+/// Fingerprint of a plugin's UI assets.
+///
+/// `DefaultHasher` and no crypto dependency: this is a cache key, not a
+/// signature. Its instability across compiler versions costs, at worst, one
+/// extra fetch after a rebuild — and a rebuild changes the bytes anyway.
+pub fn ui_fingerprint(plugin: &impl AdminPlugin) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for path in ["ui.js", "ui.css"] {
+        // The path itself is hashed too: without it, a plugin serving the same
+        // body under both names would collide with one serving neither.
+        path.hash(&mut h);
+        plugin.asset(path).map(|(_, body)| body).hash(&mut h);
+    }
+    format!("{:x}", h.finish())
 }
 
 impl Runtime {
@@ -61,7 +81,7 @@ impl Runtime {
 
     /// Useful for tests, which don't go through `std::env::args`.
     pub fn new(name: String, register: PathBuf, prefix: PathBuf) -> Self {
-        Self { name, register, prefix, halves: Vec::new(), admin: None }
+        Self { name, register, prefix, halves: Vec::new(), admin: None, ui_version: None }
     }
 
     pub fn source(mut self, plugin: impl SourcePlugin) -> Result<Self> {
@@ -112,6 +132,9 @@ impl Runtime {
 
     pub fn admin(mut self, plugin: impl AdminPlugin) -> Result<Self> {
         let l = bind_admin(&crate::admin_socket(&self.prefix))?;
+        // Computed here and not in `run`: at that point the plugin has already
+        // been moved into the serving future and its assets are out of reach.
+        self.ui_version = Some(ui_fingerprint(&plugin));
         self.admin = Some(Box::pin(serve_admin(l, plugin)));
         Ok(self)
     }
@@ -131,6 +154,7 @@ impl Runtime {
             // register of halves, so no path can announce covers
             // for a display that doesn't want any, nor the reverse.
             covers: self.halves.iter().any(|m| m.covers),
+            ui_version: self.ui_version.clone(),
         };
         let mut stream = UnixStream::connect(&self.register)
             .await
@@ -394,5 +418,33 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("the state did not reach the display even though the input was working");
+    }
+
+    #[test]
+    fn the_fingerprint_follows_the_ui_bytes() {
+        // Derived from what the plugin actually exposes, never declared: the
+        // announcement cannot lie, exactly as for `covers`.
+        struct Ui(&'static str);
+        #[async_trait::async_trait]
+        impl AdminPlugin for Ui {
+            fn asset(&self, path: &str) -> Option<(String, String)> {
+                match path {
+                    "ui.js" => Some(("text/javascript".into(), self.0.to_string())),
+                    "ui.css" => Some(("text/css".into(), ".a{}".into())),
+                    _ => None,
+                }
+            }
+            fn catalog(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn get_data(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn set_data(&mut self, _: serde_json::Value) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        assert_ne!(ui_fingerprint(&Ui("one")), ui_fingerprint(&Ui("two")));
+        assert_eq!(ui_fingerprint(&Ui("one")), ui_fingerprint(&Ui("one")));
     }
 }

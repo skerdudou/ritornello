@@ -55,6 +55,23 @@ pub struct Announcement {
     /// registration protocol — the announcement cannot lie.
     #[serde(default)]
     pub covers: bool,
+    /// Fingerprint of this plugin's UI assets (`ui.js` **and** `ui.css`
+    /// together), so the shell can serve them from a URL that never needs
+    /// revalidating.
+    ///
+    /// Carried by the announcement rather than fetched afterwards: the plugin
+    /// already holds those bytes (`include_str!`), so this costs no round
+    /// trip — and, like `covers`, it is **derived** from what was registered,
+    /// so the announcement cannot lie.
+    ///
+    /// One fingerprint for both files: they come from the same build and move
+    /// together. If either changes, both are refetched — an over-invalidation
+    /// worth twice the simplicity.
+    ///
+    /// `None` = plugin without an admin page, or one predating this field: the
+    /// shell then builds an unstamped URL and the old revalidation applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_version: Option<String>,
 }
 
 #[cfg(test)]
@@ -68,6 +85,7 @@ mod tests {
             kinds: vec![PluginKind::Input, PluginKind::Display],
             admin: true,
             covers: true,
+            ui_version: None,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(
@@ -112,9 +130,33 @@ mod tests {
             kinds: vec![PluginKind::Source, PluginKind::Metadata],
             admin: false,
             covers: false,
+            ui_version: None,
         };
         let back: Announcement =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back, a);
+    }
+
+    #[test]
+    fn an_announcement_without_a_ui_version_reads_back() {
+        // Additive field, same idiom as `admin` and `covers`: a core predating it
+        // reads an old line without seeing anything new, and a plugin without an
+        // admin page never writes it.
+        let a: Announcement =
+            serde_json::from_str(r#"{"name":"x","kinds":["source"]}"#).unwrap();
+        assert_eq!(a.ui_version, None);
+    }
+
+    #[test]
+    fn a_ui_version_survives_a_round_trip() {
+        let a = Announcement {
+            name: "radio".into(),
+            kinds: vec![PluginKind::Source],
+            admin: true,
+            covers: false,
+            ui_version: Some("deadbeef".into()),
+        };
+        let line = serde_json::to_string(&a).unwrap();
+        assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
     }
 }

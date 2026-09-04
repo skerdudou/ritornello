@@ -56,6 +56,17 @@ pub struct PluginStatus {
     /// second. Additive like `stalled` and `disabled`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub busy: bool,
+    /// Fingerprint of the plugin's UI assets, as its announcement gave it.
+    ///
+    /// Relayed and never recomputed: the plugin is the only one holding those
+    /// bytes at announcement time. The shell turns it into
+    /// `/plugins/<name>/ui.js?v=<fingerprint>`, an URL that never needs
+    /// revalidating.
+    ///
+    /// `None` = no admin page, or a plugin predating the field: the shell then
+    /// builds the plain URL and the old revalidation applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_version: Option<String>,
 }
 
 impl PluginStatus {
@@ -74,6 +85,7 @@ impl PluginStatus {
             starting: false,
             disabled: false,
             busy: false,
+            ui_version: None,
         }
     }
 
@@ -92,6 +104,7 @@ impl PluginStatus {
             starting: false,
             disabled: false,
             busy: false,
+            ui_version: None,
         }
     }
 
@@ -110,6 +123,7 @@ impl PluginStatus {
             starting: true,
             disabled: false,
             busy: false,
+            ui_version: None,
         }
     }
 
@@ -125,6 +139,7 @@ impl PluginStatus {
             starting: false,
             disabled: true,
             busy: false,
+            ui_version: None,
         }
     }
 }

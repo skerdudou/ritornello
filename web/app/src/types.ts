@@ -16,6 +16,9 @@ export interface PluginStatus {
    * holds its lock (most often a network share). Computed at the time of
    * `/api/status`, so it can change from one refresh to the next. */
   busy?: boolean
+  /** Fingerprint of the plugin's UI assets, when it announced one. Absent for
+   * a plugin with no admin page, or one predating the field. */
+  ui_version?: string
 }
 export interface StatusPayload { plugins: PluginStatus[]; active_source: string }
 export interface AudioDevice { name: string; description: string }

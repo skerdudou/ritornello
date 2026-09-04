@@ -818,6 +818,7 @@ mod tests {
                     kinds: vec![PluginKind::Metadata],
                     admin: false,
                     covers: false,
+                    ui_version: None,
                 },
             );
         }
@@ -828,6 +829,7 @@ mod tests {
                 kinds: vec![PluginKind::Source],
                 admin: true,
                 covers: false,
+                ui_version: None,
             },
         );
         let g = Gathered { announcements, ..Default::default() };

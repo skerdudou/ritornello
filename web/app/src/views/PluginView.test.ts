@@ -398,4 +398,36 @@ describe('PluginView', () => {
       '@import url("/plugins/layered-sheet/ui.css") layer(plugin);',
     )
   })
+
+  it('stamps the stylesheet with the version the plugin announced', async () => {
+    // A stable name is the plugin UI contract and cannot carry a hash: the
+    // fingerprint travels in the query, and that is what lets the sheet be
+    // cached for good instead of revalidated on every load.
+    document.head.innerHTML = ''
+    const view = defineComponent({ render: () => h('p', 'ok') })
+    mount(PluginView, {
+      props: {
+        name: 'stamped-sheet',
+        loadModule: async () => ({ contract: 1, default: view }),
+        catalog: CATALOG,
+        uiVersion: 'cafe',
+      },
+    })
+    await flushPromises()
+    const style = document.head.querySelector('style[data-plugin-sheet="stamped-sheet"]')
+    expect(style?.textContent).toBe(
+      '@import url("/plugins/stamped-sheet/ui.css?v=cafe") layer(plugin);',
+    )
+  })
+
+  it('falls back to the plain URL when no version was announced', async () => {
+    // A plugin predating the field, or one without assets: the old behaviour
+    // (revalidation) must keep working rather than produce a broken URL.
+    document.head.innerHTML = ''
+    const view = defineComponent({ render: () => h('p', 'ok') })
+    mountView(async () => ({ contract: 1, default: view }), 'plain-sheet')
+    await flushPromises()
+    const style = document.head.querySelector('style[data-plugin-sheet="plain-sheet"]')
+    expect(style?.textContent).toBe('@import url("/plugins/plain-sheet/ui.css") layer(plugin);')
+  })
 })

@@ -613,11 +613,17 @@ async fn hotplug<P: player::Player>(
                                 tracing::debug!("list_presets for {catalog_name}: {e}");
                             }
                         });
-                        lines.push(PluginStatus::kind(&name, "source", true, announcement.admin));
+                        lines.push(PluginStatus {
+                            ui_version: announcement.ui_version.clone(),
+                            ..PluginStatus::kind(&name, "source", true, announcement.admin)
+                        });
                     }
                     Err(e) => {
                         tracing::warn!("plugin {name} source unavailable: {e}");
-                        lines.push(PluginStatus::kind(&name, "source", false, announcement.admin));
+                        lines.push(PluginStatus {
+                            ui_version: announcement.ui_version.clone(),
+                            ..PluginStatus::kind(&name, "source", false, announcement.admin)
+                        });
                     }
                 }
             }
@@ -635,11 +641,17 @@ async fn hotplug<P: player::Player>(
                         children.catalog_rx.clone(),
                         UnreachableNotice { wiring, tx: children.unreachable_tx.clone() },
                     );
-                    lines.push(PluginStatus::kind(&name, "display", true, announcement.admin));
+                    lines.push(PluginStatus {
+                        ui_version: announcement.ui_version.clone(),
+                        ..PluginStatus::kind(&name, "display", true, announcement.admin)
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("display plugin {name} unavailable: {e}");
-                    lines.push(PluginStatus::kind(&name, "display", false, announcement.admin));
+                    lines.push(PluginStatus {
+                        ui_version: announcement.ui_version.clone(),
+                        ..PluginStatus::kind(&name, "display", false, announcement.admin)
+                    });
                 }
             },
             PluginKind::Input => {
@@ -657,7 +669,10 @@ async fn hotplug<P: player::Player>(
                     // receiver with it — so it does not need to be distinguished.
                     let _ = unreachable.send((task_name, wiring)).await;
                 });
-                lines.push(PluginStatus::kind(&name, "input", true, announcement.admin));
+                lines.push(PluginStatus {
+                    ui_version: announcement.ui_version.clone(),
+                    ..PluginStatus::kind(&name, "input", true, announcement.admin)
+                });
             }
             PluginKind::Metadata => {
                 let tx = children.enrich_tx.clone();
@@ -673,7 +688,10 @@ async fn hotplug<P: player::Player>(
                     }
                     let _ = unreachable.send((task_name, wiring)).await;
                 });
-                lines.push(PluginStatus::kind(&name, "metadata", true, announcement.admin));
+                lines.push(PluginStatus {
+                    ui_version: announcement.ui_version.clone(),
+                    ..PluginStatus::kind(&name, "metadata", true, announcement.admin)
+                });
             }
         }
     }
@@ -703,6 +721,9 @@ async fn hotplug<P: player::Player>(
     // `admin: true` whose `connect` fails must not leave the UI pointing at a
     // page that answers 404. Reasserted on every line rather than fixed only
     // in the failure case: one truth, written once.
+    // `ui_version` is deliberately left untouched here: every reader gates
+    // the fingerprint on `admin` first (`usePlugins.ts`, `ConfigView.vue`),
+    // so a stale value sitting next to `admin: false` is never read.
     for line in lines.iter_mut() {
         line.admin = admin_connected;
     }
@@ -1290,22 +1311,34 @@ async fn main() -> Result<()> {
                     {
                         Ok(client) => {
                             sources.insert(name.clone(), client);
-                            plugin_statuses.push(PluginStatus::kind(name, "source", true, announcement.admin));
+                            plugin_statuses.push(PluginStatus {
+                                ui_version: announcement.ui_version.clone(),
+                                ..PluginStatus::kind(name, "source", true, announcement.admin)
+                            });
                         }
                         Err(e) => {
                             tracing::warn!("plugin {name} source unavailable: {e}");
-                            plugin_statuses.push(PluginStatus::kind(name, "source", false, announcement.admin));
+                            plugin_statuses.push(PluginStatus {
+                                ui_version: announcement.ui_version.clone(),
+                                ..PluginStatus::kind(name, "source", false, announcement.admin)
+                            });
                         }
                     }
                 }
                 PluginKind::Display => match DisplayClient::connect(&socket).await {
                     Ok(client) => {
                         display_clients.push((name.clone(), client, announcement.covers));
-                        plugin_statuses.push(PluginStatus::kind(name, "display", true, announcement.admin));
+                        plugin_statuses.push(PluginStatus {
+                            ui_version: announcement.ui_version.clone(),
+                            ..PluginStatus::kind(name, "display", true, announcement.admin)
+                        });
                     }
                     Err(e) => {
                         tracing::warn!("display plugin {name} unavailable: {e}");
-                        plugin_statuses.push(PluginStatus::kind(name, "display", false, announcement.admin));
+                        plugin_statuses.push(PluginStatus {
+                            ui_version: announcement.ui_version.clone(),
+                            ..PluginStatus::kind(name, "display", false, announcement.admin)
+                        });
                     }
                 },
                 PluginKind::Input => {
@@ -1325,7 +1358,10 @@ async fn main() -> Result<()> {
                         // name.
                         let _ = unreachable.send((task_name, 0)).await;
                     });
-                    plugin_statuses.push(PluginStatus::kind(name, "input", true, announcement.admin));
+                    plugin_statuses.push(PluginStatus {
+                        ui_version: announcement.ui_version.clone(),
+                        ..PluginStatus::kind(name, "input", true, announcement.admin)
+                    });
                 }
                 PluginKind::Metadata => {
                     // Two-way relay, in its own task: its failure concerns
@@ -1344,7 +1380,10 @@ async fn main() -> Result<()> {
                         }
                         let _ = unreachable.send((task_name, 0)).await;
                     });
-                    plugin_statuses.push(PluginStatus::kind(name, "metadata", true, announcement.admin));
+                    plugin_statuses.push(PluginStatus {
+                        ui_version: announcement.ui_version.clone(),
+                        ..PluginStatus::kind(name, "metadata", true, announcement.admin)
+                    });
                 }
             }
         }
@@ -1364,6 +1403,10 @@ async fn main() -> Result<()> {
                     // 404. Set back here to `false` on every line for this
                     // name, whatever their kind, pushed earlier in the kinds
                     // loop that precedes this connection.
+                    // `ui_version` is deliberately left untouched: every
+                    // reader gates the fingerprint on `admin` first
+                    // (`usePlugins.ts`, `ConfigView.vue`), so a stale value
+                    // sitting next to `admin: false` is never read.
                     for status in plugin_statuses.iter_mut().filter(|s| s.name == *name) {
                         status.admin = false;
                     }
@@ -2343,6 +2386,7 @@ mod toggle_tests {
                 kinds: vec![PluginKind::Display],
                 admin: true,
                 covers: false,
+                ui_version: None,
             },
         );
 

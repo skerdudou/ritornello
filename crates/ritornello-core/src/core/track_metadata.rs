@@ -558,6 +558,7 @@ mod tests {
                     kinds: vec![ritornello_proto::PluginKind::Metadata],
                     admin: false,
                     covers: false,
+                    ui_version: None,
                 },
             );
         }

@@ -1,12 +1,24 @@
 <script setup lang="ts">
 import { api, type Catalog } from '@ritornello/ui'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { usePlugins } from '../composables/usePlugins'
 import PluginView from './PluginView'
 
 const route = useRoute()
 const name = ref('')
 const catalog = ref<Catalog>({})
+
+/**
+ * Fingerprint of the current plugin's UI assets, as `/api/status` last
+ * reported it — the same state the nav and the settings table already share.
+ * Absent (`''`) for a plugin that announced none, or before the first
+ * `/api/status` answer settles.
+ */
+const { state } = usePlugins()
+const uiVersion = computed(
+  () => state.value.plugins.find((p) => p.name === name.value)?.ui_version ?? '',
+)
 /**
  * Cause of a refusal by the core, as it now carries it.
  *
@@ -90,5 +102,6 @@ watch(
     :catalog="catalog"
     :cause="cause"
     :catalog-pending="catalogPending"
+    :ui-version="uiVersion"
   />
 </template>

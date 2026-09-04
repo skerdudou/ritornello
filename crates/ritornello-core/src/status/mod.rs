@@ -725,6 +725,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_status_carries_the_ui_fingerprint_of_an_announced_plugin() {
+        // The shell needs it *before* asking for `ui.js`, to build the
+        // stamped URL. `/api/status` is the only payload it already reads at
+        // mount, hence relaying the fingerprint here rather than adding a
+        // second round trip.
+        let state = app_state();
+        state.status.write().await.plugins = vec![
+            PluginStatus {
+                ui_version: Some("cafe".into()),
+                ..PluginStatus::kind("radio", "source", true, true)
+            },
+            // A plugin that announced no fingerprint: the key must be
+            // genuinely absent, not `null` — that is the whole point of
+            // `skip_serializing_if`, and the shell's fallback to an
+            // unstamped URL depends on this exact distinction.
+            PluginStatus::kind("cd", "source", true, false),
+        ];
+        let app = router(state);
+        let resp =
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["plugins"][0]["ui_version"], "cafe");
+        assert!(v["plugins"][1].get("ui_version").is_none(), "{}", v["plugins"][1]);
+    }
+
+    #[tokio::test]
     async fn get_theme_returns_the_defaults_when_nothing_is_persisted() {
         let app = router(app_state());
         let resp = app.oneshot(Request::get("/api/theme").body(Body::empty()).unwrap()).await.unwrap();

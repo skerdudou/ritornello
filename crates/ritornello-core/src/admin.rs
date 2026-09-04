@@ -123,6 +123,7 @@ pub async fn admin_asset(
     State(st): State<AppState>,
     Path((name, file)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
 ) -> Response {
     // Cloned then lock released: what follows makes IPC round trips, and
     // holding them under a read lock would delay the insertion of a plugin
@@ -152,10 +153,20 @@ pub async fn admin_asset(
     {
         return StatusCode::NOT_MODIFIED.into_response();
     }
+    // Same rule as the shell's own bundles (`web.rs::cache_control_for`),
+    // deliberately duplicated rather than shared: two routers with no state in
+    // common, and a shared module for one boolean would cost more in
+    // indirection than it saves. A version in the query means the URL
+    // identifies this exact content, so it never needs revalidating.
+    let cache_control = if uri.query().is_some_and(|q| q.split('&').any(|p| p.starts_with("v="))) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
     (
         [
             (axum::http::header::CONTENT_TYPE, mime.as_str()),
-            (axum::http::header::CACHE_CONTROL, "no-cache"),
+            (axum::http::header::CACHE_CONTROL, cache_control),
             (axum::http::header::ETAG, etag.as_str()),
         ],
         body,
@@ -403,6 +414,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn a_plugin_asset_asked_with_a_version_is_immutable() {
+        // Same rule as the shell's own bundles: a versioned URL identifies its
+        // content, so it never needs revalidating.
+        let app = router(state_with(Fake::default()));
+        let resp = app
+            .oneshot(Request::get("/plugins/radio/ui.js?v=cafe").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let cc = resp.headers()[axum::http::header::CACHE_CONTROL].to_str().unwrap();
+        assert!(cc.contains("immutable"), "{cc}");
     }
 
     #[tokio::test]

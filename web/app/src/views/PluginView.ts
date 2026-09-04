@@ -17,11 +17,17 @@ export interface PluginModule {
   default: Component
 }
 
-// Tracking of the stylesheets already requested, by plugin name. A `Set`
-// rather than a DOM query by attribute selector: building a CSS selector from
-// an arbitrary plugin name (`link[href="..."]`) throws a `SyntaxError` outside
-// any `try` if that name contains a quote, which blanks the view instead of
-// the explicit error message this file otherwise prepares.
+// Tracking of the stylesheets already requested, by `${name}?${version}`. A
+// `Set` rather than a DOM query by attribute selector: building a CSS
+// selector from an arbitrary plugin name (`link[href="..."]`) throws a
+// `SyntaxError` outside any `try` if that name contains a quote, which blanks
+// the view instead of the explicit error message this file otherwise
+// prepares.
+//
+// Keyed by name **and** version, not by name alone: a plugin relaunched with
+// rebuilt assets announces a new fingerprint, and the old key would then
+// forever match, leaving the stale sheet injected and the new one never
+// requested.
 const injectedStylesheets = new Set<string>()
 
 /**
@@ -58,6 +64,11 @@ export function pluginBase(name: string): string {
  */
 const PLUGIN_LAYER = 'plugin'
 
+/** Query suffix carrying an asset fingerprint, empty when there is none. */
+function versionQuery(version: string): string {
+  return version ? `?v=${encodeURIComponent(version)}` : ''
+}
+
 // A plugin's CSS is its own Tailwind pass: we inject it once and leave it in
 // place (coming back to the page must not replay a download).
 //
@@ -67,15 +78,20 @@ const PLUGIN_LAYER = 'plugin'
 // build. The internal layers of the imported sheet (`theme`, `utilities`)
 // become sublayers of `plugin`, so their relative order — the one Tailwind
 // computed for that plugin — is preserved.
-function ensureStylesheet(name: string): void {
-  if (injectedStylesheets.has(name)) return
-  injectedStylesheets.add(name)
+function ensureStylesheet(name: string, version: string): void {
+  const key = `${name}?${version}`
+  if (injectedStylesheets.has(key)) return
+  injectedStylesheets.add(key)
   const style = document.createElement('style')
   // The plugin name comes from `/api/status`, hence from `plugins.toml`.
   // Quotes and parentheses are the only characters that could escape the
   // `url(...)`: strip them rather than escape them, a plugin name never
   // contains any and a malformed `@import` would be ignored silently.
-  const href = `${pluginBase(name)}ui.css`.replace(/["'()\\\s]/g, '')
+  //
+  // Filtered on the **complete** URL, version query included: it is what
+  // protects the `url(...)` regardless of which part of the string a stray
+  // character came from.
+  const href = `${pluginBase(name)}ui.css${versionQuery(version)}`.replace(/["'()\\\s]/g, '')
   style.setAttribute('data-plugin-sheet', name)
   style.textContent = `@import url("${href}") layer(${PLUGIN_LAYER});`
   document.head.appendChild(style)
@@ -112,9 +128,18 @@ export default defineComponent({
      * every test that mounts this view directly — behaves as before.
      */
     catalogPending: { type: Boolean, default: false },
+    /**
+     * Fingerprint of the plugin's UI assets, as `/api/status` relays it.
+     *
+     * Turns the two stable URLs into ones that never need revalidating. Absent
+     * for a plugin that announced none: the plain URL is then used, and the
+     * previous behaviour (an `ETag` and a 304 per load) still applies.
+     */
+    uiVersion: { type: String, default: '' },
     loadModule: {
-      type: Function as PropType<(name: string) => Promise<unknown>>,
-      default: (name: string) => import(/* @vite-ignore */ `/plugins/${name}/ui.js`),
+      type: Function as PropType<(name: string, version: string) => Promise<unknown>>,
+      default: (name: string, version: string) =>
+        import(/* @vite-ignore */ `/plugins/${name}/ui.js${versionQuery(version)}`),
     },
   },
   setup(props) {
@@ -170,8 +195,8 @@ export default defineComponent({
       component.value = null
       error.value = null
       try {
-        ensureStylesheet(props.name)
-        const mod = (await props.loadModule(props.name)) as Partial<PluginModule>
+        ensureStylesheet(props.name, props.uiVersion)
+        const mod = (await props.loadModule(props.name, props.uiVersion)) as Partial<PluginModule>
         if (gen !== generation) return
         if (mod?.contract !== UI_CONTRACT) {
           console.warn(`plugin ${props.name}: contract ${mod?.contract} expected ${UI_CONTRACT}`)
