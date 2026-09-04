@@ -175,10 +175,58 @@ const pluginName = computed(() => props.base.replace(/^\/plugins\//, '').replace
 const activeSource = ref<string | null>(null)
 const isActiveSource = computed(() => activeSource.value === pluginName.value)
 
+/**
+ * Fields of a pushed frame that move on their own and that this page does not
+ * show.
+ *
+ * `position_s` is the clock: the core republishes the player state **once a
+ * second** while something plays, for the sole purpose of advancing the
+ * shell's progress bar. `overlay` is the transient banner the displays render
+ * and the admin pages ignore.
+ *
+ * Named here rather than deduced, because the payload's shape belongs to the
+ * core and will change without notice (see `onPlayer`): an unknown field
+ * therefore counts as a real change and costs a re-read — the safe direction
+ * to be wrong in.
+ */
+const CLOCK_FIELDS = ['position_s', 'overlay'] as const
+
+/**
+ * What a frame says once the clock is set aside; `''` for a frame that carries
+ * nothing readable.
+ */
+function signature(state: unknown): string {
+  if (state === null || typeof state !== 'object') return ''
+  const rest = { ...(state as Record<string, unknown>) }
+  for (const field of CLOCK_FIELDS) delete rest[field]
+  return JSON.stringify(rest)
+}
+
+/** Signature of the last frame acted upon; `null` before the first one. */
+let lastSignature: string | null = null
+
 onMounted(() => {
   closePlayer = onPlayer((state) => {
     const s = (state as { source?: unknown } | null)?.source
+    // Read on **every** frame, including the ones skipped below: this is what
+    // tells the playlist whether it is the source being played, and freezing
+    // it would silently break the stop-on-clear.
     activeSource.value = typeof s === 'string' ? s : null
+
+    // The measured waste: this page used to re-read `api/data` — a full round
+    // trip to the plugin process — on every one of those per-second frames,
+    // for an answer identical but for a counter it does not display. Only what
+    // is not the clock is worth a re-read; the track changing at the end of
+    // each one, which is why this subscription exists, always is.
+    //
+    // An unreadable frame has no signature and is never skipped: the signal
+    // still counts, and the caller re-reads its own source of truth — that is
+    // `onPlayer`'s contract.
+    const sig = signature(state)
+    const clockOnly = sig !== '' && sig === lastSignature
+    lastSignature = sig
+    if (clockOnly) return
+
     // Not during a send: the SDK serves requests serially, and a re-read added
     // on top would exceed the core's 5 s cap.
     if (!inProgress.value && !loadFailed.value) void reload()

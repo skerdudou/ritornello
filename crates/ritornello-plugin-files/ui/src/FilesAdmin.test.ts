@@ -77,6 +77,103 @@ describe('FilesAdmin, the page', () => {
     expect(s.urls().length).toBe(before + 1)
   })
 
+  // --- What the pushed player stream is allowed to cost -------------------
+
+  describe('reacting to the player stream', () => {
+    /**
+     * Stubs `EventSource` and hands back a way to push a frame, with a body
+     * this time: the older test above pushes an *unreadable* frame, which is a
+     * different branch of the contract.
+     */
+    function fakeStream(): { push: (frame: unknown) => void } {
+      let onmessage: ((e: { data: string }) => void) | null = null
+      vi.stubGlobal(
+        'EventSource',
+        class {
+          set onmessage(v: (e: { data: string }) => void) {
+            onmessage = v
+          }
+          close(): void {}
+        },
+      )
+      return { push: (frame) => onmessage?.({ data: JSON.stringify(frame) }) }
+    }
+
+    /** A plausible frame, in the shape `PlayerState` serializes. */
+    function frame(over: Record<string, unknown> = {}) {
+      return { source: 'files', volume: 30, muted: false, standby: false, ...over }
+    }
+
+    it('does not re-read anything when only the clock moved', async () => {
+      // **The waste, measured on the device.** The core publishes the player
+      // state once per second while something plays, purely to advance the
+      // progress bar. This page re-read `api/data` on every one of those —
+      // a full round trip to the plugin process, once a second, for an answer
+      // identical but for a counter it does not even display.
+      const stream = fakeStream()
+      const s = server({ playlist: [{ path: '/m/1.mp3', name: '01' }], index: 0 })
+      mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
+      await flushPromises()
+
+      stream.push(frame({ position_s: 10 }))
+      await flushPromises()
+      const settled = s.urls().length
+
+      for (const t of [11, 12, 13, 14, 15]) {
+        stream.push(frame({ position_s: t }))
+        await flushPromises()
+      }
+
+      expect(s.urls().length).toBe(settled)
+    })
+
+    it('re-reads as soon as anything else changes', async () => {
+      // The reason the subscription exists: the track changes by itself at the
+      // end of each one, and the highlighted row must follow. Only `api/data`
+      // carries the index, so a real change still costs a read — that is the
+      // half of the behaviour worth keeping.
+      const stream = fakeStream()
+      const s = server({ playlist: [{ path: '/m/1.mp3', name: '01' }], index: 0 })
+      mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
+      await flushPromises()
+
+      stream.push(frame({ position_s: 10, preset: 1 }))
+      await flushPromises()
+      const settled = s.urls().length
+
+      stream.push(frame({ position_s: 11, preset: 2 }))
+      await flushPromises()
+
+      expect(s.urls().length).toBe(settled + 1)
+    })
+
+    it('still tracks the active source across a clock-only frame', async () => {
+      // Skipping the re-read must not mean skipping the frame: `activeSource`
+      // is read straight off it, and it is what tells the playlist whether it
+      // is the one being played. Ignoring the whole frame would freeze that —
+      // and the observable consequence is precise: clearing the list of the
+      // source that **is** playing must ask the core to stop, even when the
+      // plugin's own `playing` says false.
+      const stream = fakeStream()
+      const s = server({ playlist: [{ path: '/m/1.mp3', name: '01' }], playing: false, index: 0 })
+      const w = mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
+      await flushPromises()
+
+      // `base` is `/plugins/mediatheque/`, so this frame names *this* plugin.
+      stream.push(frame({ source: 'mediatheque', position_s: 10 }))
+      await flushPromises()
+      const settled = s.urls().length
+
+      stream.push(frame({ source: 'mediatheque', position_s: 11 }))
+      await flushPromises()
+      expect(s.urls().length).toBe(settled)
+
+      await w.find('[data-clear]').trigger('click')
+      await flushPromises()
+      expect(s.spy.mock.calls.some(([u]) => String(u) === '/api/command')).toBe(true)
+    })
+  })
+
   it('addresses all its requests under the absolute prefix received through `base`', async () => {
     // Encoded regression: a relative `./api/data` resolves against the browser
     // URL, not against the plugin prefix. On `/plugins/files` (without trailing
