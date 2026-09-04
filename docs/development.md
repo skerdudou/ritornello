@@ -259,6 +259,27 @@ France live answers), and
 **discriminating** tests — several encode a regression that actually
 happened, and say which one in a comment.
 
+### Measurement benches
+
+Two tests in `cover.rs` are `#[ignore]`d and driven by `COVER_CORPUS`, a directory of
+real album covers:
+
+    COVER_CORPUS=/path/to/covers cargo test --offline --release -p ritornello-core \
+        -- --ignored --nocapture cover::tests
+
+`the_weight_rule_of_a_thumbnail` measures what the encoder produces at several
+(edge, quality) pairs. `where_the_passthrough_threshold_belongs` measures the other
+population — images already smaller than the edge — and compares what they weigh against
+what re-encoding them would produce.
+
+They are not assertions, and they are not dead code: the configuration page shows the
+user a predicted thumbnail weight, and `cover_passthrough_max_ko`'s default is derived
+from these figures. A number put in front of the user whose measurement can no longer be
+reproduced is an invention. Run them in `--release`: sizes are identical in debug, but
+the image decoder is an order of magnitude slower.
+
+The corpus is deliberately not shipped — it is someone's music library.
+
 ## E2e journeys (Playwright)
 
 `npm run e2e -w app` needs a compiled core, built in the order

@@ -3978,4 +3978,171 @@ mod tests {
             "the source cap survives the switch: that is its reason for being"
         );
     }
+    /// **A measurement bench, not an assertion.** Ignored by default: it needs
+    /// a corpus of real album covers, which this repository does not ship.
+    ///
+    /// It is what the weight rule shown on the configuration page is derived
+    /// from -- "at these settings a thumbnail weighs about N KiB". Guessing
+    /// that figure would put a made-up number in front of the owner, and the
+    /// whole point of the setting it feeds is that nobody can guess it.
+    ///
+    ///     COVER_CORPUS=/path/to/covers cargo test -p ritornello-core \
+    ///         the_weight_rule_of_a_thumbnail -- --ignored --nocapture
+    ///
+    /// It calls `rendition` -- the real pipeline, not a replica -- so the
+    /// figures it prints are the ones the appliance would actually produce.
+    #[tokio::test]
+    #[ignore = "needs a corpus of real covers, see COVER_CORPUS"]
+    async fn the_weight_rule_of_a_thumbnail() {
+        let Ok(dir) = std::env::var("COVER_CORPUS") else {
+            println!("COVER_CORPUS unset, nothing measured");
+            return;
+        };
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("the corpus directory must be readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("jpg")))
+            .collect();
+        files.sort();
+        println!("corpus: {} files from {dir}\n", files.len());
+
+        // Read once, not once per pair: the corpus lives on a share and the
+        // measurement is about encoding, not about I/O.
+        let sources: Vec<(std::path::PathBuf, Vec<u8>, u32)> = files
+            .iter()
+            .filter_map(|p| {
+                let bytes = std::fs::read(p).ok()?;
+                let (w, h) = dimensions(&bytes)?;
+                Some((p.clone(), bytes, w.max(h)))
+            })
+            .collect();
+        let mut edges: Vec<u32> = sources.iter().map(|(_, _, e)| *e).collect();
+        edges.sort_unstable();
+        println!(
+            "long edge of the corpus: min {} / p50 {} / max {}",
+            edges.first().copied().unwrap_or(0),
+            edges.get(edges.len() / 2).copied().unwrap_or(0),
+            edges.last().copied().unwrap_or(0),
+        );
+        println!("({} of {} decoded a header)\n", sources.len(), files.len());
+
+        for (edge, quality) in
+            [(320u32, 85u8), (512, 85), (640, 75), (640, 85), (640, 90), (1024, 85)]
+        {
+            // `output_cap` and `pixel_cap` are opened wide on purpose: the
+            // question here is what the encoder *produces*, so a net that
+            // refused an answer would remove that answer from the sample.
+            let r = Rendition {
+                max_edge_px: edge,
+                jpeg_quality: quality,
+                output_cap: usize::MAX,
+                pixel_cap: 1_000_000_000,
+            };
+            let mut produced: Vec<usize> = Vec::new();
+            let mut passed_through = 0usize;
+            for (_, bytes, source_edge) in &sources {
+                // Only an image actually re-encoded says anything about the
+                // rule; one already smaller than `edge` would report its own
+                // weight and flatten the figures towards zero.
+                if *source_edge <= edge {
+                    passed_through += 1;
+                    continue;
+                }
+                if let Some((_, out)) = rendition("image/jpeg", bytes.clone(), r).await {
+                    produced.push(out.len());
+                }
+            }
+            produced.sort_unstable();
+            if produced.is_empty() {
+                println!("edge {edge:4} q{quality:<3}: nothing re-encoded");
+                continue;
+            }
+            let k = |n: usize| n / 1024;
+            println!(
+                "edge {edge:4} q{quality:<3}: n={:3} (+{passed_through:3} already small)  \
+                 min {:4}  p50 {:4}  p90 {:4}  max {:4}  KiB",
+                produced.len(),
+                k(produced[0]),
+                k(produced[produced.len() / 2]),
+                k(produced[produced.len() * 9 / 10]),
+                k(produced[produced.len() - 1]),
+            );
+        }
+    }
+    /// **The other half of the bench above, and the one that chooses the
+    /// pass-through threshold.** Same corpus, same invocation, but it looks at
+    /// the population the first table *skips*: images already no wider than
+    /// `max_edge`, which is exactly the population the threshold governs.
+    ///
+    /// For each of them it compares what the image already weighs against what
+    /// re-compressing it would produce. That comparison is the whole question:
+    /// above the threshold an image is re-encoded, and the honest threshold is
+    /// the weight past which re-encoding actually buys something.
+    ///
+    /// `encode` is called directly rather than `rendition`, on purpose:
+    /// `rendition` would hand these images straight back untouched -- that is
+    /// the very short-circuit being measured around.
+    #[tokio::test]
+    #[ignore = "needs a corpus of real covers, see COVER_CORPUS"]
+    async fn where_the_passthrough_threshold_belongs() {
+        let Ok(dir) = std::env::var("COVER_CORPUS") else {
+            println!("COVER_CORPUS unset, nothing measured");
+            return;
+        };
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("the corpus directory must be readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("jpg")))
+            .collect();
+        files.sort();
+
+        let pct = |v: &[usize], p: usize| v.get(v.len() * p / 100).copied().unwrap_or(0) / 1024;
+        for (edge, quality) in [(512u32, 85u8), (640, 85), (1024, 85)] {
+            let r = Rendition {
+                max_edge_px: edge,
+                jpeg_quality: quality,
+                output_cap: usize::MAX,
+                pixel_cap: 1_000_000_000,
+            };
+            let mut before: Vec<usize> = Vec::new();
+            let mut after: Vec<usize> = Vec::new();
+            let mut worth_it = 0usize;
+            for p in &files {
+                let Ok(bytes) = std::fs::read(p) else { continue };
+                let Some((w, h)) = dimensions(&bytes) else { continue };
+                if w.max(h) > edge {
+                    continue; // measured by the other bench
+                }
+                let was = bytes.len();
+                let Some((_, out)) = encode(bytes, r, (r.pixel_cap as usize) * 4) else { continue };
+                // "Worth it" at a factor of two: re-encoding costs a decode
+                // plus an encode on a Pi, so shaving a few percent off is not
+                // a reason to spend that.
+                if out.len() * 2 <= was {
+                    worth_it += 1;
+                }
+                before.push(was);
+                after.push(out.len());
+            }
+            before.sort_unstable();
+            after.sort_unstable();
+            if before.is_empty() {
+                println!("edge {edge:4} q{quality:<3}: no image already small enough");
+                continue;
+            }
+            println!(
+                "edge {edge:4} q{quality:<3}: n={:3}  already weigh p50 {:4} p90 {:4} max {:4}  \
+                 -> re-encoded p50 {:4} p90 {:4} max {:4}  KiB  \
+                 ({worth_it} of {} at least halved)",
+                before.len(),
+                pct(&before, 50),
+                pct(&before, 90),
+                before[before.len() - 1] / 1024,
+                pct(&after, 50),
+                pct(&after, 90),
+                after[after.len() - 1] / 1024,
+                before.len(),
+            );
+        }
+    }
 }
