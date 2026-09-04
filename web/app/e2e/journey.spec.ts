@@ -269,3 +269,30 @@ test('the usable width does not move when content starts or stops scrolling', as
   await page.goto('/config')
   await expect(page.locator('html')).toHaveCSS('scrollbar-gutter', 'stable')
 })
+
+test('the stable bundles are served immutable, under a single URL each', async ({ page, request }) => {
+  // Two invariants in one journey, because they are two faces of the same
+  // decision. The fingerprint is what lets a **stable** name be cached for
+  // good — that name is the plugin UI contract and cannot carry a hash. And
+  // it must appear in the import map ONLY: a module is identified by its
+  // resolved URL, so a second reachable URL for `vue.js` would evaluate Vue
+  // twice and split the reactivity graph between shell and plugins.
+  const requests: string[] = []
+  page.on('request', (r) => requests.push(new URL(r.url()).pathname))
+  await page.goto('/plugins/radio/')
+  await expect(page.locator('[data-save]')).toBeVisible()
+
+  // One request for the Vue bundle, hence one instance.
+  expect(requests.filter((p) => p === '/assets/vue.js')).toHaveLength(1)
+
+  // The import map carries a fingerprint for both stable names.
+  const html = await (await request.get('/')).text()
+  const map = html.match(/<script type="importmap">([\s\S]*?)<\/script>/)?.[1] ?? ''
+  expect(map).toMatch(/"vue":"\/assets\/vue\.js\?v=[0-9a-f]+"/)
+  expect(map).toMatch(/"@ritornello\/ui":"\/assets\/ui-kit\.js\?v=[0-9a-f]+"/)
+
+  // And that URL is served without any need to revalidate it.
+  const stamped = map.match(/"vue":"([^"]+)"/)![1]!
+  const head = await request.get(stamped)
+  expect(head.headers()['cache-control']).toContain('immutable')
+})

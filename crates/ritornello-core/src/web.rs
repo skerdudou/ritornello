@@ -117,12 +117,63 @@ async fn asset(headers: HeaderMap, uri: Uri) -> Response {
     (
         [
             (header::CONTENT_TYPE, mime_for(path)),
-            (header::CACHE_CONTROL, cache_control(path)),
+            (header::CACHE_CONTROL, cache_control_for(path, uri.query())),
             (header::ETAG, etag.as_str()),
         ],
         f.data.to_vec(),
     )
         .into_response()
+}
+
+/// Cache policy for an asset request, query included.
+///
+/// A version in the query means the URL identifies this exact content, so it
+/// never needs revalidating. The value is not compared against anything: a
+/// client asking under an old stamp gets the current bytes, and its next
+/// `index.html` — served `no-cache` — sends it to the new URL anyway.
+pub fn cache_control_for(path: &str, query: Option<&str>) -> &'static str {
+    if query.is_some_and(|q| q.split('&').any(|p| p.starts_with("v="))) {
+        return "public, max-age=31536000, immutable";
+    }
+    cache_control(path)
+}
+
+/// Fingerprint of an embedded asset, short enough to keep the URL readable.
+///
+/// Derived from the bytes actually served, never declared by hand: an
+/// `immutable` response under a fingerprint that does not follow its content
+/// would freeze a client on a stale bundle until they clear their cache.
+fn asset_version(name: &str) -> Option<String> {
+    let f = Dist::get(&format!("assets/{name}"))?;
+    Some(f.metadata.sha256_hash().iter().take(8).map(|b| format!("{b:02x}")).collect())
+}
+
+/// The two stable names of the plugin UI contract, resolved through the import
+/// map. They cannot carry a hash in their filename — that name **is** the
+/// contract — so the fingerprint travels in the query instead.
+const STABLE_ASSETS: [&str; 2] = ["vue.js", "ui-kit.js"];
+
+/// Rewrites the import map's URLs with the fingerprint of what will be served.
+///
+/// Done at serve time and not at build time, for a measured reason: `vue.js`
+/// is produced by a **second** vite pass that runs *after* the import map has
+/// been injected into `index.html`, so its bytes do not exist yet when the
+/// build would need to hash them. The core, on the other hand, holds exactly
+/// the bytes it is about to serve.
+///
+/// **The stamp must appear here and nowhere else.** A module is identified by
+/// its resolved URL: were `/assets/vue.js` and `/assets/vue.js?v=…` both
+/// reachable, the browser would evaluate Vue twice and the shell and the
+/// plugins would stop sharing a reactivity graph.
+pub fn stamp_import_map(html: &str, version: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = html.to_string();
+    for name in STABLE_ASSETS {
+        // No fingerprint (placeholder build): leave the plain URL. It still
+        // resolves; a URL stamped with nothing would not.
+        let Some(v) = version(name) else { continue };
+        out = out.replace(&format!("\"/assets/{name}\""), &format!("\"/assets/{name}?v={v}\""));
+    }
+    out
 }
 
 /// Router fallback: serves the shell for SPA paths, 404 otherwise.
@@ -133,7 +184,7 @@ pub async fn shell(State(state): State<AppState>, uri: Uri) -> Response {
     let t = state.theme_current.read().await.clone();
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")],
-        inject_theme(&shell_html(), &t.theme, &t.mode),
+        inject_theme(&stamp_import_map(&shell_html(), asset_version), &t.theme, &t.mode),
     )
         .into_response()
 }
@@ -288,5 +339,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn the_import_map_gets_the_fingerprint_of_each_stable_url() {
+        // The two stable names are the plugin UI contract: they cannot carry a
+        // hash the way `app-*.js` does, so the fingerprint goes in the query.
+        let html = r#"<script type="importmap">
+      {"imports":{"vue":"/assets/vue.js","@ritornello/ui":"/assets/ui-kit.js"}}
+    </script>"#;
+        let out = stamp_import_map(html, |name| match name {
+            "vue.js" => Some("aaaa".into()),
+            "ui-kit.js" => Some("bbbb".into()),
+            _ => None,
+        });
+        assert!(out.contains(r#""vue":"/assets/vue.js?v=aaaa""#), "{out}");
+        assert!(out.contains(r#""@ritornello/ui":"/assets/ui-kit.js?v=bbbb""#), "{out}");
+    }
+
+    #[test]
+    fn an_absent_asset_leaves_its_url_untouched() {
+        // A placeholder build (no `dist/`) must still serve a usable import map:
+        // a URL stamped with nothing would 404 where the plain one merely misses.
+        let html = r#"{"imports":{"vue":"/assets/vue.js"}}"#;
+        assert_eq!(stamp_import_map(html, |_| None), html);
+    }
+
+    #[test]
+    fn a_version_in_the_query_makes_any_asset_immutable() {
+        // The stable names are the plugin UI contract and cannot carry a hash in
+        // the filename; the fingerprint travels in the query instead, and that is
+        // what lets them be cached without revalidation.
+        assert!(cache_control_for("vue.js", Some("v=abcd")).contains("immutable"));
+        assert!(cache_control_for("ui-kit.js", Some("v=abcd")).contains("immutable"));
+    }
+
+    #[test]
+    fn the_same_asset_without_a_version_is_still_revalidated() {
+        // The switch must not silently freeze a client on a stale bundle: an
+        // unstamped URL keeps the old behaviour.
+        assert_eq!(cache_control_for("vue.js", None), "no-cache");
+        assert_eq!(cache_control_for("vue.js", Some("theme=dark")), "no-cache");
+    }
+
+    #[test]
+    fn a_hashed_chunk_stays_immutable_without_a_version() {
+        // `app-*.js` already carries its hash in its name — the query changes
+        // nothing for it, and that existing policy must survive this change.
+        assert!(cache_control_for("app-abc123.js", None).contains("immutable"));
     }
 }
