@@ -20,6 +20,23 @@ const catalog = ref<Catalog>({})
  */
 const cause = ref('')
 
+/**
+ * Whether the catalog request is still in flight, for `PluginView` to hold the
+ * reveal.
+ *
+ * Mounting the plugin's component as soon as its module arrives shows the
+ * translation **keys** — `col_num`, `btn_save` — which the real labels replace
+ * a moment later; they do not have the same length, so every label of the page
+ * shifts once it is already on screen. This flag is what lets the view wait for
+ * both answers before drawing anything. The two requests are unchanged and
+ * still leave together: nothing is serialised, only the curtain is held.
+ *
+ * Starts raised: at the very first render the request has not been sent yet,
+ * and a flag that started down would reveal an empty catalog before raising
+ * itself.
+ */
+const catalogPending = ref(true)
+
 // Generation counter: the `watch` is asynchronous, and a fast navigation
 // radio → generic-input with a slow GET let the catalog of the first plugin
 // settle **after** that of the second — the displayed admin then ran with the
@@ -32,6 +49,11 @@ watch(
   async (value) => {
     name.value = String(value ?? '')
     if (!name.value) return
+    // Raised **before** the request leaves, and synchronously: a navigation to
+    // another plugin must close the curtain on the spot, otherwise the
+    // incoming page is revealed for one frame carrying the previous plugin's
+    // catalog.
+    catalogPending.value = true
     const localGeneration = ++generation
     // An unreachable catalog must not prevent the UI from showing: `t()` then
     // falls back on the keys, which stays readable. The log keeps the trace,
@@ -49,6 +71,11 @@ watch(
     if (localGeneration === generation) {
       catalog.value = loaded
       cause.value = reason
+      // A refusal settles the catalog just as much as a success does: the flag
+      // says "the answer is in", not "the answer is good". Leaving it raised
+      // on a 502 would hold the curtain shut for good — on the very page whose
+      // job is then to display the cause of that refusal.
+      catalogPending.value = false
     }
   },
   { immediate: true },
@@ -56,5 +83,12 @@ watch(
 </script>
 
 <template>
-  <PluginView v-if="name" :key="name" :name="name" :catalog="catalog" :cause="cause" />
+  <PluginView
+    v-if="name"
+    :key="name"
+    :name="name"
+    :catalog="catalog"
+    :cause="cause"
+    :catalog-pending="catalogPending"
+  />
 </template>

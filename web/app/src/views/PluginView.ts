@@ -1,5 +1,6 @@
-import { createT, UI_CONTRACT, type Catalog } from '@ritornello/ui'
+import { createT, Skeleton, UI_CONTRACT, useSkeleton, type Catalog } from '@ritornello/ui'
 import {
+  computed,
   defineComponent,
   h,
   ref,
@@ -7,6 +8,7 @@ import {
   watchEffect,
   type Component,
   type PropType,
+  type VNode,
 } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 
@@ -95,6 +97,21 @@ export default defineComponent({
      * and the cause of a catalog refusal has nothing to do with it.
      */
     cause: { type: String, default: '' },
+    /**
+     * Whether the plugin's catalog is still in flight, as `PluginRoute` knows
+     * it.
+     *
+     * Mounting the plugin's component before its catalog has arrived shows the
+     * translation **keys** — `col_num`, `btn_save` — which the real labels then
+     * replace. Those do not have the same length, so every label of the page
+     * shifts a fraction of a second after it appeared. Holding the curtain
+     * until both the module and the catalog have settled costs nothing: the
+     * two requests still leave together, only the reveal waits.
+     *
+     * Defaults to `false` so that a caller that knows nothing of the catalog —
+     * every test that mounts this view directly — behaves as before.
+     */
+    catalogPending: { type: Boolean, default: false },
     loadModule: {
       type: Function as PropType<(name: string) => Promise<unknown>>,
       default: (name: string) => import(/* @vite-ignore */ `/plugins/${name}/ui.js`),
@@ -121,6 +138,21 @@ export default defineComponent({
     // the plugin is unreachable — the very case that produces
     // `plugin_unavailable`.
     const { t: tShell } = useCatalog()
+
+    /**
+     * Nothing showable yet: neither the module nor its catalog has settled.
+     *
+     * An `error` counts as settled — a refusal is a final answer, and holding
+     * it back would only delay the one message that tells the user what to do.
+     */
+    const pending = computed(
+      () => props.catalogPending || (!component.value && !error.value),
+    )
+
+    // Nothing for the first fraction of a second, a placeholder only if the
+    // wait outlasts it. The rhythm lives in the kit so that a plugin UI keeps
+    // exactly the same one.
+    const skeleton = useSkeleton(pending)
 
     // Generation counter: the `watchEffect` is asynchronous and re-runs on
     // every change of `props.name`. Without it, the late resolution of a load
@@ -166,7 +198,49 @@ export default defineComponent({
       // shell's catalog is loaded asynchronously by `App.vue`, hence often
       // after the first render of this view.
       const t = Object.keys(props.catalog).length > 0 ? createT(props.catalog) : tShell.value
-      if (error.value) {
+
+      /**
+       * The placeholder the shell can honestly draw: a generic one.
+       *
+       * At this point it has not loaded the plugin's module, so it does not
+       * know the shape of the page it is about to reveal. A plugin composes a
+       * placeholder of its own once mounted and knowing better.
+       *
+       * `role="status"` carries the only text: the blocks themselves are
+       * `aria-hidden`, so a screen reader hears the wait announced once
+       * instead of a run of empty boxes. The text is visually hidden — it says
+       * nothing the moving blocks do not already say to someone who sees them.
+       */
+      const placeholder = skeleton.value
+        ? h('div', { role: 'status', class: 'space-y-3' }, [
+            h('span', { class: 'sr-only' }, t('loading')),
+            h(Skeleton, { class: 'h-7 w-48' }),
+            h(Skeleton, { class: 'h-4 w-full' }),
+            h(Skeleton, { class: 'h-4 w-5/6' }),
+            h(Skeleton, { class: 'h-4 w-2/3' }),
+          ])
+        : null
+
+      let content: VNode | null = null
+      if (component.value) {
+        // `catalog` must be passed explicitly: `h()` does not forward
+        // PluginView's props to the component it mounts (this is not
+        // "attribute fallthrough", which only concerns undeclared attributes).
+        // Without this relay, every real plugin module — RadioAdmin,
+        // InputAdmin — receives `catalog: undefined` and `createT` throws at
+        // the first `t(...)` of its template.
+        //
+        // `base` is part of the **contract** of plugin UIs, just like
+        // `catalog`: it is the absolute prefix under which the core serves the
+        // plugin's routes. The modules previously built their URLs relatively
+        // (`./api/data`), hence resolved against the browser's URL and not
+        // against anything the contract guarantees — a silent coupling to the
+        // form of the shell's route (see `pluginBase`).
+        content = h(component.value, {
+          catalog: props.catalog,
+          base: pluginBase(props.name),
+        })
+      } else if (error.value) {
         // The cause is not composed by concatenation but by a `{cause}` of
         // the catalog: word order and punctuation belong to the translator,
         // as everywhere else in this repository.
@@ -174,23 +248,40 @@ export default defineComponent({
           error.value === 'plugin_unavailable' && props.cause
             ? t('plugin_unavailable_cause', { cause: props.cause })
             : t(error.value)
-        return h('p', { class: 'text-muted-foreground' }, message)
+        content = h('p', { class: 'text-muted-foreground' }, message)
       }
-      if (!component.value) return h('p', { class: 'text-muted-foreground' }, t('loading'))
-      // `catalog` must be passed explicitly: `h()` does not forward
-      // PluginView's props to the component it mounts (this is not "attribute
-      // fallthrough", which only concerns undeclared attributes). Without this
-      // relay, every real plugin module — RadioAdmin, InputAdmin — receives
-      // `catalog: undefined` and `createT` throws at the first `t(...)` of its
-      // template.
+
+      // Mounted as soon as it exists, **shown** only once the wait is over.
       //
-      // `base` is part of the **contract** of plugin UIs, just like `catalog`:
-      // it is the absolute prefix under which the core serves the plugin's
-      // routes. The modules previously built their URLs relatively
-      // (`./api/data`), hence resolved against the browser's URL and not
-      // against anything the contract guarantees — a silent coupling to the
-      // form of the shell's route (see `pluginBase`).
-      return h(component.value, { catalog: props.catalog, base: pluginBase(props.name) })
+      // Hiding rather than withholding is what keeps the slow path honest: the
+      // floor keeps the placeholder up for a moment after the module lands,
+      // and a component only mounted at the end of it would start its own data
+      // request that much later — up to 300 ms of pure latency added exactly
+      // where it hurts — then paint its own placeholder after a blank gap.
+      // Mounted underneath, it loads during the wait and is usually ready by
+      // the time the placeholder gives way.
+      //
+      // `display: none` and not a `v-if`: hidden from sight and from assistive
+      // technology alike, while the component keeps living. Moving it between
+      // two shapes would unmount and remount it — hence fetch twice.
+      const revealed = !skeleton.value && !pending.value
+
+      // Always the same two children, in the same order: Vue patches an
+      // unkeyed list by position, so a stable shape is what guarantees the
+      // component below is never torn down and rebuilt.
+      return h('div', [
+        placeholder,
+        content
+          ? h(
+              'div',
+              {
+                'data-plugin-content': '',
+                style: revealed ? undefined : { display: 'none' },
+              },
+              [content],
+            )
+          : null,
+      ])
     }
   },
 })

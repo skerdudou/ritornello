@@ -1,6 +1,6 @@
-import type { Catalog } from '@ritornello/ui'
+import { SKELETON_DELAY_MS, SKELETON_MIN_VISIBLE_MS, type Catalog } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, type PropType } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import PluginView from './PluginView'
@@ -20,6 +20,17 @@ function mountView(loader: () => Promise<unknown>, name = 'demo', cause = '') {
   return mount(PluginView, { props: { name, loadModule: loader, catalog: CATALOG, cause } })
 }
 
+/**
+ * Whether the plugin's component is mounted but kept off screen.
+ *
+ * The view mounts it as soon as it exists and hides it until the wait is over,
+ * so "not on screen" and "not mounted" are two different states — and only the
+ * `display: none` rule tells them apart.
+ */
+function hiddenContent(w: ReturnType<typeof mountView>): boolean {
+  return w.get('[data-plugin-content]').attributes('style') === 'display: none;'
+}
+
 describe('PluginView', () => {
   // The shell's catalog lives in a module-level `ref` of `useCatalog`: it
   // persists between `it()`s. We reset it to empty before each test so that
@@ -28,6 +39,13 @@ describe('PluginView', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
     await useCatalog().reload()
     vi.unstubAllGlobals()
+  })
+
+  // Several tests below fake the clock to walk through the loading rhythm. A
+  // fake clock left installed would leak into the next file's timers, so it is
+  // handed back unconditionally — a no-op when it was never taken.
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('mounts the module component when the contract matches', async () => {
@@ -173,6 +191,9 @@ describe('PluginView', () => {
   it('none of the three messages is shown as a raw key', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const keys = ['loading', 'plugin_unavailable', 'plugin_contract_mismatch'] as const
+    // The clock is faked **before** mounting: the wait timer is armed during
+    // mount, and a fake clock installed afterwards would never own it.
+    vi.useFakeTimers()
     // The three states that each produce one of the three messages.
     const view = defineComponent({ render: () => h('p', 'ui') })
     const neverResolved = mountView(() => new Promise<never>(() => {})) // stays loading
@@ -181,6 +202,12 @@ describe('PluginView', () => {
       throw new Error('404')
     }, 'unreachable')
     await flushPromises()
+    // `loading` is no longer shown on sight: the page stays blank for the
+    // first fraction of a second, then announces the wait. The clock has to be
+    // pushed past that threshold for the first of the three texts to exist at
+    // all — the behaviour the tests further down pin down in its own right.
+    vi.advanceTimersByTime(SKELETON_DELAY_MS)
+    await flushPromises()
 
     const texts = [neverResolved.text(), contractKo.text(), unreachable.text()]
     expect(texts).toEqual(['Loading…', 'Plugin to rebuild', 'UI unavailable'])
@@ -188,6 +215,130 @@ describe('PluginView', () => {
     for (const text of texts) {
       expect(keys).not.toContain(text)
     }
+  })
+
+  // --- The loading rhythm: nothing, then a placeholder, and never a page
+  // that assembles itself under the reader's eyes ---
+
+  describe('loading rhythm', () => {
+    beforeEach(() => {
+      // Armed before every mount of this block, for the reason above.
+      vi.useFakeTimers()
+    })
+
+    it('shows strictly nothing while the wait is short', async () => {
+      // The whole point of the delay: on this installation the module and its
+      // catalog arrive in a few dozen milliseconds, so the normal experience
+      // must be an empty frame followed by a complete page — never a grey
+      // flash, and never a half-built one.
+      const w = mountView(() => new Promise<never>(() => {}))
+      await flushPromises()
+      vi.advanceTimersByTime(SKELETON_DELAY_MS - 1)
+      await flushPromises()
+
+      expect(w.text()).toBe('')
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(false)
+    })
+
+    it('paints a placeholder once the wait outlasts the delay', async () => {
+      const w = mountView(() => new Promise<never>(() => {}))
+      await flushPromises()
+      vi.advanceTimersByTime(SKELETON_DELAY_MS)
+      await flushPromises()
+
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(true)
+      // The wait is announced once, on the container: the placeholder blocks
+      // themselves are `aria-hidden`, so a screen reader hears one message
+      // rather than a run of empty boxes.
+      const status = w.get('[role="status"]')
+      expect(status.text()).toBe('Loading…')
+    })
+
+    it('holds the page back until the catalog has settled', async () => {
+      // **This is the i18n jump.** The module can be ready while the plugin's
+      // catalog is still in flight; mounting then shows raw keys (`col_num`,
+      // `btn_save`) which the real labels later replace — and those do not
+      // have the same length, so every label shifts. Both requests still leave
+      // together: only the curtain is held.
+      const view = defineComponent({ render: () => h('p', 'plugin UI') })
+      const w = mount(PluginView, {
+        props: {
+          name: 'demo',
+          loadModule: async () => ({ contract: 1, default: view }),
+          catalog: CATALOG,
+          catalogPending: true,
+        },
+      })
+      await flushPromises()
+      // Mounted underneath — see the test above — but nothing of it reaches
+      // the reader, nor a screen reader: `display: none` hides it from both.
+      //
+      // The style attribute rather than `isVisible()`: that helper disagrees
+      // with the DOM here, reporting a hidden element after the very patch
+      // that removes the rule (the rendered HTML carries no `style` at all).
+      // The attribute is the mechanism itself and cannot drift from it.
+      expect(hiddenContent(w)).toBe(true)
+
+      await w.setProps({ catalogPending: false })
+      await flushPromises()
+      expect(hiddenContent(w)).toBe(false)
+      expect(w.text()).toContain('plugin UI')
+    })
+
+    it('mounts the plugin behind the placeholder, so its own loading starts at once', async () => {
+      // The floor keeps the placeholder on screen for a moment after the
+      // module has arrived. Were the component only mounted once that floor
+      // expired, its `onMounted` fetch would start up to 300 ms late — pure
+      // latency added to the slow path, the one case where it hurts — and the
+      // reader would get placeholder, blank, then the plugin's own
+      // placeholder. It is mounted underneath instead: hidden, but working.
+      const mounted: number[] = []
+      let resolve: (m: unknown) => void = () => {}
+      const view = defineComponent({
+        setup: () => {
+          mounted.push(Date.now())
+          return () => h('p', 'plugin UI')
+        },
+      })
+      const w = mountView(() => new Promise((r) => (resolve = r)))
+      await flushPromises()
+      vi.advanceTimersByTime(SKELETON_DELAY_MS)
+      await flushPromises()
+
+      // The module lands while the placeholder is still serving its minimum.
+      resolve({ contract: 1, default: view })
+      await flushPromises()
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(true)
+      expect(mounted).toHaveLength(1)
+
+      // And it is the same instance that surfaces: a component mounted twice
+      // would fire its data request twice.
+      vi.advanceTimersByTime(SKELETON_MIN_VISIBLE_MS)
+      await flushPromises()
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(false)
+      expect(w.text()).toContain('plugin UI')
+      expect(mounted).toHaveLength(1)
+    })
+
+    it('once shown, the placeholder is not wiped by data landing just after', async () => {
+      // Without the floor, a module that resolves 10 ms after the delay
+      // elapsed paints a grey flash and erases it — strictly worse than the
+      // jump the placeholder replaced.
+      let resolve: (m: unknown) => void = () => {}
+      const view = defineComponent({ render: () => h('p', 'plugin UI') })
+      const w = mountView(() => new Promise((r) => (resolve = r)))
+      await flushPromises()
+      vi.advanceTimersByTime(SKELETON_DELAY_MS)
+      await flushPromises()
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(true)
+
+      vi.advanceTimersByTime(10)
+      resolve({ contract: 1, default: view })
+      await flushPromises()
+
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(true)
+      expect(hiddenContent(w)).toBe(true)
+    })
   })
 
   it('unreachable plugin (empty catalog): the message comes from the shell catalog', async () => {
