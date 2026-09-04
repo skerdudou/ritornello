@@ -245,3 +245,27 @@ test('the top menu survives a visit to generic-input', async ({ page }) => {
   await page.locator('[data-top-nav] a', { hasText: 'Configuration' }).click()
   await expect(page.locator('[data-top-nav]')).toBeVisible()
 })
+
+test('the usable width does not move when content starts or stops scrolling', async ({ page }) => {
+  // Reported in use: moving from page to page, the layout jumps sideways. A
+  // page short enough to need no scrollbar gives the document the classic
+  // scrollbar's width back, and the next page takes it away again — every
+  // element shifts horizontally, twice per navigation. The deferred
+  // placeholders made it systematic, since a page now starts out empty.
+  //
+  // The remedy must not be a permanently visible scrollbar: the gutter is
+  // reserved, the bar itself is drawn only when it can be used.
+  //
+  // **Measured, not assumed**: the browser these journeys run in draws overlay
+  // scrollbars — `window.innerWidth` equals `documentElement.clientWidth`, so
+  // its scrollbar takes zero width. Emptying and refilling the page therefore
+  // moves nothing here, and a width comparison would pass with or without the
+  // fix. It would be a test that proves nothing.
+  //
+  // What is checked instead is the rule reaching the served stylesheet and
+  // being understood by a real engine — the thing that can silently break in
+  // this project (a rule that never reaches the sheet has bitten before) and
+  // that jsdom, computing no style at all, can never see.
+  await page.goto('/config')
+  await expect(page.locator('html')).toHaveCSS('scrollbar-gutter', 'stable')
+})

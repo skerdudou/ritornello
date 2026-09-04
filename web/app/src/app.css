@@ -34,6 +34,22 @@
    them). */
 @source "../../kit/src";
 
+/* The gutter the scrollbar would take, reserved once and for all.
+ *
+ * Without it the usable width follows the presence of the scrollbar: a page
+ * short enough not to scroll hands its width back, the next page takes it
+ * away, and every element shifts sideways — twice per navigation. Deferring
+ * the placeholders made it systematic, since a page now starts out empty.
+ *
+ * `stable` and not `overflow-y: scroll`: the gutter is reserved, but the bar
+ * itself is still drawn only when it can be used — no permanently visible
+ * track. On the platforms that overlay their scrollbars (phones, and the
+ * browser these journeys run in) nothing is reserved and nothing changes,
+ * which is exactly right: there was no jump to fix there. */
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   @apply bg-background text-foreground;
   font-family: var(--font-sans);
