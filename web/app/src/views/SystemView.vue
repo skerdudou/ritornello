@@ -2,12 +2,16 @@
 import {
   api, Button, Card, CardContent, CardHeader, CardTitle, Dialog, DialogContent,
   DialogDescription, DialogHeader, DialogTitle, Input, Select, SelectContent, SelectItem,
-  SelectTrigger, SelectValue, toast,
+  SelectTrigger, SelectValue, Table, TableBody, TableCell, TableHead, TableHeader,
+  TableRow, toast,
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import { PERIODS_S, useMetrics } from '../composables/useMetrics'
-import type { DateFormat, LogsPayload, SettingsPayload, SystemPayload, SystemUsage } from '../types'
+import type {
+  DateFormat, LogsPayload, ProcessEntry, ProcessesPayload, SettingsPayload, SystemPayload,
+  SystemUsage,
+} from '../types'
 import { lineDate, filterLines } from './log'
 import { xValues, sparklinePath, minuteTicks } from './sparkline'
 
@@ -88,6 +92,60 @@ function openErrors(): void {
   errorsQuery.value = ''
   errorsOpen.value = true
   void fetchLog()
+}
+
+/**
+ * The Ritornello process tree, behind the `(?)` of the Memory card.
+ *
+ * Fetched on opening the popin and never on a timer, for the reason spelled
+ * out on `logs` and `fetchLog`: the metrics polling holds an "in flight" lock
+ * and computes a CPU delta between two responses, so a second request must
+ * not ride along with it. Here the argument is even stronger -- the route
+ * walks every entry of `/proc`, far too much work to repeat every second for
+ * a panel nobody has open.
+ *
+ * A snapshot, then: the list describes the instant the popin opened. That is
+ * enough for what it is for -- seeing where the memory went, and spotting a
+ * short-lived helper still alive -- and the button reopens for a fresh one.
+ */
+const processes = ref<ProcessEntry[]>([])
+const processesOpen = ref(false)
+/** Set once a fetch has answered, so an empty tree reads as "none found"
+ *  rather than flashing that message over a list still on its way. */
+const processesLoaded = ref(false)
+
+/** Its own `.catch`, like `fetchLog`: a failure here must not cost the
+ *  metrics, and leaves the previous list in place rather than clearing it. */
+async function fetchProcesses(): Promise<void> {
+  const j = await api.get<ProcessesPayload>('/api/system/processes').catch(() => null)
+  if (j) {
+    processes.value = j.processes ?? []
+    processesLoaded.value = true
+  }
+}
+
+function openProcesses(): void {
+  processesOpen.value = true
+  void fetchProcesses()
+}
+
+/**
+ * Age of a process: seconds below the minute, then `duration`'s two units.
+ *
+ * `duration` alone floors to the minute, and that is exactly the case this
+ * column exists for: an `smbclient` forty seconds old and one forty minutes
+ * old are one healthy and one stuck, and both read "0 min" there.
+ */
+function age(seconds: number | null): string {
+  if (seconds == null) return NOTHING
+  if (seconds < 60) return `${seconds} ${t.value('system_unit_second')}`
+  return duration(seconds)
+}
+
+/** "12.3 MB": one decimal, because a plugin at rest sits in the low
+ *  megabytes and whole numbers would round several lines to the same "2". */
+function megabytes(kb: number): string {
+  return `${(kb / 1024).toFixed(1)} ${t.value('system_unit_mb')}`
 }
 
 /** Chart frame, in `viewBox` units. */
@@ -662,7 +720,25 @@ async function waitForReturn(before: number | null, maxMs: number, successKey: s
     </Card>
 
     <Card>
-      <CardHeader><CardTitle>{{ t('system_memory') }}</CardTitle></CardHeader>
+      <CardHeader>
+        <!-- Same shape as the History card: a title holding a second,
+             lighter element on the same baseline. The `(?)` follows the
+             under-voltage one below (`data-system-voltage-help`) rather than
+             inventing a second help affordance for this tab. -->
+        <CardTitle class="flex items-baseline gap-2">
+          {{ t('system_memory') }}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            data-system-processes-help
+            :aria-label="t('system_processes_help')"
+            @click="openProcesses"
+          >
+            ?
+          </Button>
+        </CardTitle>
+      </CardHeader>
       <CardContent class="space-y-2 text-sm">
         <div data-system-memory>
           {{ usage(state?.memory, 'mb') }}
@@ -1014,6 +1090,70 @@ async function waitForReturn(before: number | null, maxMs: number, successKey: s
     <!-- Under-voltage help popin, independent of the power dialog below:
          same kit components (`Dialog` already handles focus and escape), no
          shared state or content. -->
+    <!-- Process popin, opened by the `(?)` of the Memory card. Its own
+         dialog rather than a section of another: it is the only one needing
+         a table, and it caps its own height.
+
+         `sm:max-w-2xl`: the kit's default (512 px) leaves the four columns
+         fighting over the width, and a process name is as long as
+         `ritornello-plugin-generic-input`. Not as wide as the log popin
+         either -- a table of four short cells is not a wall of log lines. -->
+    <Dialog v-model:open="processesOpen">
+      <DialogContent class="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{{ t('system_processes_title') }}</DialogTitle>
+          <DialogDescription>{{ t('system_processes_body') }}</DialogDescription>
+        </DialogHeader>
+        <!-- `max-h-[60vh]` with the scroll on the wrapper and not on the
+             table: a scrolling `<table>` loses its header row, and the
+             header is what names the two numeric columns. -->
+        <div class="max-h-[60vh] overflow-y-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{{ t('system_processes_process') }}</TableHead>
+                <!-- Numbers right-aligned: the point of the table is
+                     comparing them down the column, which ragged-right
+                     digits defeat. -->
+                <TableHead class="text-right">{{ t('system_memory') }}</TableHead>
+                <TableHead class="text-right">%</TableHead>
+                <TableHead class="text-right">{{ t('system_processes_age') }}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow v-for="p in processes" :key="p.pid" data-system-process-row>
+                <TableCell class="font-mono text-xs">
+                  {{ p.name }}
+                  <span class="text-muted-foreground">({{ p.pid }})</span>
+                </TableCell>
+                <TableCell class="text-right tabular-nums" data-system-process-memory>
+                  {{ megabytes(p.rss_kb) }}
+                </TableCell>
+                <TableCell class="text-right tabular-nums">
+                  {{ p.percent == null ? NOTHING : p.percent.toFixed(1) }}
+                </TableCell>
+                <TableCell class="text-right tabular-nums" data-system-process-age>
+                  {{ age(p.age_s) }}
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </div>
+        <p
+          v-if="processesLoaded && !processes.length"
+          data-system-processes-none
+          class="text-sm text-muted-foreground"
+        >
+          {{ t('system_processes_none') }}
+        </p>
+        <!-- The caveat written down rather than left to be discovered: the
+             lines add up to more than the memory bar above them, and someone
+             checking that sum deserves to know why before doubting the
+             figures. -->
+        <p class="text-xs text-muted-foreground">{{ t('system_processes_note') }}</p>
+      </DialogContent>
+    </Dialog>
+
     <Dialog v-model:open="voltageHelpOpen">
       <DialogContent>
         <DialogHeader>

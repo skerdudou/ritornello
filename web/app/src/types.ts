@@ -225,6 +225,25 @@ export interface SourcePresets { name: string; presets?: NamedPreset[] }
 export interface PresetsPayload { sources: SourcePresets[] }
 export interface SystemUsage { total_kb: number; available_kb: number }
 /**
+ * One process of the Ritornello tree, as served by
+ * `GET /api/system/processes` behind the `(?)` of the Memory card.
+ *
+ * `percent` and `age_s` are nullable for the same reason as the fields of
+ * `SystemPayload`: a machine whose `MemTotal` or uptime is unreadable still
+ * has a list to show, it just cannot say what share of the whole a line is.
+ */
+export interface ProcessEntry {
+  pid: number
+  name: string
+  rss_kb: number
+  percent: number | null
+  age_s: number | null
+}
+
+/** `GET /api/system/processes`. Never `null`: an empty list is an answer. */
+export interface ProcessesPayload { processes: ProcessEntry[] }
+
+/**
  * OS metrics, as served by `GET /api/system`.
  *
  * Any field the machine does not expose is `null` — no thermal sensor, no

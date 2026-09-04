@@ -7,6 +7,7 @@ mod metadata;
 mod placeholder;
 mod player;
 mod plugins;
+mod processes;
 mod register;
 mod health;
 mod state;

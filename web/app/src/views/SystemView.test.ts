@@ -59,6 +59,8 @@ const CATALOGUE = {
   system_unit_minute: 'min',
   system_history_span: '{minutes} min',
   system_errors_all: 'All errors ({count})',
+  system_unit_second: 's',
+  system_processes_none: 'Aucun processus',
 }
 
 /**
@@ -73,13 +75,14 @@ const CATALOGUE = {
 function stub(
   body: unknown | (() => unknown),
   catalog: Record<string, string> = CATALOGUE,
-  // `log` takes `null` — not `undefined` — to mean "this route fails".
-  // Passing `undefined` to a parameter that has a default is what *selects*
-  // the default, so the failure never happened: measured, the "unreachable
-  // log" test below was quietly being served an empty list and passing for
-  // the wrong reason.
+  // `log` and `processes` take `null` — not `undefined` — to mean "this
+  // route fails". Passing `undefined` to a parameter that has a default is
+  // what *selects* the default, so the failure never happened: measured, the
+  // "unreachable log" test below was quietly being served an empty list and
+  // passing for the wrong reason.
   log: unknown = { lines: [] },
   postRefusal?: string,
+  processes: unknown = { processes: [] },
 ) {
   const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
@@ -105,6 +108,17 @@ function stub(
         return Promise.resolve({ ok: false, status: 503, json: async () => ({}) } as Response)
       }
       return Promise.resolve({ ok: true, json: async () => log } as Response)
+    }
+    // `/api/system/processes` told apart from `/api/system`, and for exactly
+    // the reason spelled out for `/api/settings` below: left to the fallback
+    // it would **consume a metrics sample** and shift every CPU delta
+    // computed afterwards. `null` makes the route fail, for the test
+    // that checks a failure there costs nothing elsewhere.
+    if (u.includes('/api/system/processes')) {
+      if (processes === null) {
+        return Promise.resolve({ ok: false, status: 503, json: async () => ({}) } as Response)
+      }
+      return Promise.resolve({ ok: true, json: async () => processes } as Response)
     }
     // `/api/settings` told apart too: the page fetches it once at mount, to
     // date the log in the configured format. Without this branch, it fell
@@ -856,7 +870,9 @@ describe('SystemView', () => {
     const w = await mountView()
     const titles = w.findAllComponents(CardTitle).map((c) => c.text())
     expect(titles[0]).toBe('system_cpu')
-    expect(titles[1]).toBe('system_memory')
+    // `toContain` and no longer `toBe`: the title now holds the `(?)` that
+    // opens the process popin, like the History one holds its window span.
+    expect(titles[1]).toContain('system_memory')
     expect(titles[2]).toContain('system_history')
     expect(titles[3]).toBe('system_storage')
     expect(titles[4]).toBe('system_device')
@@ -1455,6 +1471,109 @@ describe('SystemView', () => {
       await w.get('[data-logs-all]').trigger('click')
       await flushPromises()
       expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(12)
+      w.unmount()
+    })
+  })
+
+  describe('process popin', () => {
+    /** The core, a plugin and mpv, deliberately out of order in the payload:
+     *  the ordering is the server's job, and the page must render what it is
+     *  given rather than re-sort it. */
+    const TREE = {
+      processes: [
+        { pid: 1200, name: 'mpv', rss_kb: 20_480, percent: 20.5, age_s: 500 },
+        { pid: 1000, name: 'ritornello-core', rss_kb: 12_288, percent: 12.3, age_s: 90_061 },
+        {
+          pid: 1300,
+          name: 'smbclient',
+          rss_kb: 2_048,
+          percent: 2.05,
+          age_s: 42,
+        },
+      ],
+    }
+
+    it('the (?) of the memory card opens the popin and lists the tree', async () => {
+      stub(payload(), CATALOGUE, { lines: [] }, undefined, TREE)
+      const w = await mountView()
+      // Closed until asked for: the popin costs a `/proc` walk, so it must
+      // not open on its own.
+      expect(document.body.querySelector('[data-system-process-row]')).toBeNull()
+      await w.get('[data-system-processes-help]').trigger('click')
+      await flushPromises()
+      const rows = document.body.querySelectorAll('[data-system-process-row]')
+      expect(rows).toHaveLength(3)
+      // Order preserved from the payload, names and pids both rendered: the
+      // pid is what tells two incarnations of one plugin apart.
+      expect(rows[0]!.textContent).toContain('mpv')
+      expect(rows[0]!.textContent).toContain('1200')
+      expect(rows[1]!.textContent).toContain('ritornello-core')
+      const memory = document.body.querySelectorAll('[data-system-process-memory]')
+      // 20 480 KiB = 20.0 MB, one decimal so two plugins in the low
+      // megabytes do not both round to the same figure.
+      expect(memory[0]!.textContent!.trim()).toBe('20.0 Mo')
+      expect(memory[2]!.textContent!.trim()).toBe('2.0 Mo')
+      w.unmount()
+    })
+
+    it('an age below the minute is shown in seconds', async () => {
+      // The whole reason `age()` exists rather than reusing `duration()`:
+      // that one floors to the minute, so a 42 s helper and a stuck one both
+      // read "0 min" and the column stops answering the question it is for.
+      stub(payload(), CATALOGUE, { lines: [] }, undefined, TREE)
+      const w = await mountView()
+      await w.get('[data-system-processes-help]').trigger('click')
+      await flushPromises()
+      const ages = document.body.querySelectorAll('[data-system-process-age]')
+      expect(ages[2]!.textContent!.trim()).toBe('42 s')
+      // Above the minute, `duration`'s two units, like the uptime line.
+      expect(ages[1]!.textContent!.trim()).toBe('1 j 1 h')
+      // 500 s: under the hour, `duration` keeps only minutes.
+      expect(ages[0]!.textContent!.trim()).toBe('8 min')
+      w.unmount()
+    })
+
+    it('a dash where the machine cannot say the share', async () => {
+      // `MemTotal` unreadable: the list still renders, the percentage does
+      // not lie. Same convention as every metric of this page.
+      stub(payload(), CATALOGUE, { lines: [] }, undefined, {
+        processes: [{ pid: 1000, name: 'ritornello-core', rss_kb: 1024, percent: null, age_s: null }],
+      })
+      const w = await mountView()
+      await w.get('[data-system-processes-help]').trigger('click')
+      await flushPromises()
+      const row = document.body.querySelector('[data-system-process-row]')!
+      expect(row.textContent).toContain('—')
+      expect(document.body.querySelector('[data-system-process-age]')!.textContent!.trim())
+        .toBe('—')
+      w.unmount()
+    })
+
+    it('an empty tree says so, and only once the answer is in', async () => {
+      stub(payload(), CATALOGUE, { lines: [] }, undefined, { processes: [] })
+      const w = await mountView()
+      // Before the click there is no answer, so no message either: it would
+      // otherwise be asserting "none found" about a list never asked for.
+      expect(document.body.querySelector('[data-system-processes-none]')).toBeNull()
+      await w.get('[data-system-processes-help]').trigger('click')
+      await flushPromises()
+      expect(document.body.querySelector('[data-system-processes-none]')!.textContent)
+        .toContain('Aucun processus')
+      w.unmount()
+    })
+
+    it('a failing route costs the metrics nothing', async () => {
+      // The popin has its own `.catch` for this: the memory bar above it is
+      // read far more often than the list, and must survive it.
+      stub(payload(), CATALOGUE, { lines: [] }, undefined, null)
+      const w = await mountView()
+      await w.get('[data-system-processes-help]').trigger('click')
+      await flushPromises()
+      expect(document.body.querySelector('[data-system-process-row]')).toBeNull()
+      // No answer ever came, so not even the "none found" message: an empty
+      // list and a broken route are not the same thing.
+      expect(document.body.querySelector('[data-system-processes-none]')).toBeNull()
+      expect(w.get('[data-system-memory]').text()).toBe('586 / 977 Mo (60 %)')
       w.unmount()
     })
   })
