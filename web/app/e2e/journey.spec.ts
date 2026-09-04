@@ -246,6 +246,26 @@ test('the top menu survives a visit to generic-input', async ({ page }) => {
   await expect(page.locator('[data-top-nav]')).toBeVisible()
 })
 
+test('a file the app does not have gets a 404, not the whole page', async ({ page, request }) => {
+  // Reported in use: an icon request that never settled, on a project that
+  // had no icon. No `rel="icon"` was declared, so every browser asked for
+  // `/favicon.ico` by itself — and the SPA fallback answered with the entire
+  // HTML shell and a 200. A browser cannot decode that as an image and has
+  // nothing worth keeping from it, so it asked again on every load, for ever.
+  //
+  // Two halves, and both are needed. The 404 stops the shell from pretending
+  // to be a file; the declared icon is what stops the request being made at
+  // all.
+  const missing = await request.get('/favicon.ico')
+  expect(missing.status()).toBe(404)
+
+  await page.goto('/')
+  const icon = page.locator('link[rel="icon"]')
+  await expect(icon).toHaveCount(1)
+  // Inlined, so the icon costs no request of its own.
+  expect(await icon.getAttribute('href')).toMatch(/^data:image\/svg\+xml,/)
+})
+
 test('the usable width does not move when content starts or stops scrolling', async ({ page }) => {
   // Reported in use: moving from page to page, the layout jumps sideways. A
   // page short enough to need no scrollbar gives the document the classic

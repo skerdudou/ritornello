@@ -4,6 +4,43 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ritornello</title>
+    <!--
+      Tab icon: the musical repeat sign, which is what a ritornello is — a
+      thick barline, a thin one, and the two dots that send you back.
+
+      Inlined as a data URI rather than served as a file, and that is the
+      point: a declared icon is the only thing that stops a browser asking
+      for `/favicon.ico` on its own, and inlining it means the icon costs no
+      request at all. It travels with the document, which is served
+      `no-cache` anyway.
+
+      Readable source of the same mark, since the encoded form below is not:
+
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+          <rect width="32" height="32" rx="7" fill="#34a85a"/>
+          <g fill="#fff">
+            <rect x="6" y="6" width="6" height="20" rx="1"/>
+            <rect x="14.5" y="6" width="3.5" height="20" rx="1"/>
+            <circle cx="23" cy="12" r="3.2"/>
+            <circle cx="23" cy="20" r="3.2"/>
+          </g>
+        </svg>
+
+      The green is `--primary` of the default preset (Northern Lights); a
+      filled tile rather than a bare glyph, so the mark stays legible on a
+      light tab strip and on a dark one without depending on either.
+
+      The weights are chosen for **16 px**, the size a tab actually uses, not
+      for how the mark looks enlarged. A first draft used a 2.5-unit thin bar,
+      which is 1.25 px at tab size — below one pixel, so it blurred into its
+      neighbour and the sign stopped reading as a repeat. Rendered side by side
+      at real size, the heavier weights below keep the three elements apart.
+    -->
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='7'%20fill='%2334a85a'/%3E%3Cg%20fill='%23fff'%3E%3Crect%20x='6'%20y='6'%20width='6'%20height='20'%20rx='1'/%3E%3Crect%20x='14.5'%20y='6'%20width='3.5'%20height='20'%20rx='1'/%3E%3Ccircle%20cx='23'%20cy='12'%20r='3.2'/%3E%3Ccircle%20cx='23'%20cy='20'%20r='3.2'/%3E%3C/g%3E%3C/svg%3E"
+    />
     <!--IMPORTMAP-->
   </head>
   <body>

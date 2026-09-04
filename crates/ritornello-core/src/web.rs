@@ -81,6 +81,24 @@ pub fn serves_shell(path: &str) -> bool {
             return false;
         }
     }
+    // A last segment carrying an extension names a **file**, never an app
+    // route: every route of the Vue router is a bare word (`/config`,
+    // `/system`, `/plugins/<name>/`).
+    //
+    // The case that made this necessary is `/favicon.ico`. No icon was
+    // declared, so every browser asked for that path on its own initiative --
+    // and got the entire HTML shell with a 200. It cannot be decoded as an
+    // image, there is nothing worth caching in a reply like that, so the
+    // browser asked again on the next load, for ever. Reported in use as an
+    // icon request that never settles, on a project that has no icon.
+    //
+    // The same reasoning already applied to a plugin's deep asset paths just
+    // above; this extends it to the shell's own namespace. `/robots.txt` and
+    // `/apple-touch-icon.png` now get an honest 404 too, instead of a page.
+    let last = path.rsplit('/').next().unwrap_or(path);
+    if last.contains('.') {
+        return false;
+    }
     true
 }
 
@@ -264,6 +282,18 @@ mod tests {
         assert!(!serves_shell("/plugins/radio/api/data"));
         assert!(!serves_shell("/plugins/radio/ui.js"));
         assert!(!serves_shell("/plugins/radio/ui.css"));
+        // A path that names a file is never an app route. `/favicon.ico` is
+        // the one every browser asks for on its own, and it used to be
+        // answered with the whole HTML shell and a 200: the browser cannot
+        // decode that as an image, has nothing worth keeping, and asks again
+        // on the next load — for ever. Same failure mode as the deep asset
+        // path below, reported in use as an icon request that never settles.
+        assert!(!serves_shell("/favicon.ico"));
+        assert!(!serves_shell("/apple-touch-icon.png"));
+        assert!(!serves_shell("/robots.txt"));
+        // The rule keys on the **last** segment: a dot earlier in the path
+        // says nothing about what the last one names.
+        assert!(serves_shell("/plugins/a.b/"));
         // Deep asset path: a plugin's assets are only served on a single
         // segment, so `/plugins/radio/assets/chunk.js` matches no route. It
         // fell onto the fallback, which answered 200 with the HTML shell — a
