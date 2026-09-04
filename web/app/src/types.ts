@@ -117,8 +117,8 @@ export interface SettingsPayload {
   cover_max_edge_px: number
   /** JPEG quality of the thumbnail. Rendition only, and ignored if the image has an alpha channel. */
   cover_jpeg_quality: number
-  /** Cap of the produced thumbnail, in kibibytes. Rendition only. */
-  cover_max_bytes_ko: number
+  /** Weight under which a cover is pushed without being re-encoded, in kibibytes. */
+  cover_passthrough_max_ko: number
   /** Cap of pixels to decode, in megapixels. Rendition only. */
   cover_max_pixels_mpx: number
   /** Step of the "forward" / "rewind" keys, in seconds. */

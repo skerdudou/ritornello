@@ -55,8 +55,8 @@ const CATALOGUE = {
   cover_max_edge_label: 'Côté le plus long (px)',
   cover_jpeg_quality_label: 'Qualité JPEG',
   cover_jpeg_quality_help: 'JPEG seulement.',
-  cover_max_bytes_label: 'Plafond de la vignette (Kio)',
-  cover_max_bytes_help: 'Un filet.',
+  cover_passthrough_max_label: 'Ne pas réencoder en dessous de (Kio)',
+  cover_passthrough_max_help: 'Un seuil.',
   cover_max_pixels_label: 'Plafond de décodage (Mpx)',
   cover_max_pixels_help: 'Lu dans l’en-tête.',
   toc_label: 'sections',
@@ -86,7 +86,7 @@ function payloads() {
       overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
       cover_cache_budget_mio: 50, cover_download_max_mio: 2,
       cover_source_max_mio: 20, cover_rendition: true, cover_max_edge_px: 640,
-      cover_jpeg_quality: 85, cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16,
+      cover_jpeg_quality: 85, cover_passthrough_max_ko: 512, cover_max_pixels_mpx: 16,
     } as unknown,
     '/api/i18n': CATALOGUE as unknown,
   }
@@ -560,7 +560,7 @@ describe('ConfigView — settings', () => {
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
-          cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
+          cover_passthrough_max_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -580,7 +580,7 @@ describe('ConfigView — settings', () => {
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
-          cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
+          cover_passthrough_max_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -601,7 +601,7 @@ describe('ConfigView — settings', () => {
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
-          cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
+          cover_passthrough_max_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -651,7 +651,7 @@ describe('ConfigView — overlays', () => {
           overlay_ms: 2000, tens_window_ms: 7000, seek_step_s: 10,
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
-          cover_max_bytes_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
+          cover_passthrough_max_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -727,7 +727,7 @@ describe('ConfigView — covers', () => {
     const fields = [
       '[data-cover-max-edge]',
       '[data-cover-jpeg-quality]',
-      '[data-cover-max-bytes]',
+      '[data-cover-passthrough-max]',
       '[data-cover-max-pixels]',
     ]
     for (const c of fields) expect(w.find(c).attributes('disabled')).toBeUndefined()
@@ -768,7 +768,7 @@ describe('ConfigView — covers', () => {
     await w.find('[data-cover-source-max]').setValue('12')
     await w.find('[data-cover-max-edge]').setValue('800')
     await w.find('[data-cover-jpeg-quality]').setValue('70')
-    await w.find('[data-cover-max-bytes]').setValue('256')
+    await w.find('[data-cover-passthrough-max]').setValue('256')
     await w.find('[data-cover-max-pixels]').setValue('24')
     await w.find('[data-cover-change]').trigger('click')
     await flushPromises()
@@ -776,7 +776,7 @@ describe('ConfigView — covers', () => {
       cover_source_max_mio: 12,
       cover_max_edge_px: 800,
       cover_jpeg_quality: 70,
-      cover_max_bytes_ko: 256,
+      cover_passthrough_max_ko: 256,
       cover_max_pixels_mpx: 24,
     })
   })
@@ -837,7 +837,7 @@ describe('ConfigView — covers', () => {
     // Named production change this guards: testing `coverThumbnailBytes <= 0`
     // instead of `settings.cover_rendition` to choose the sentence.
     const { w } = await mountView()
-    await w.find('[data-cover-max-bytes]').setValue('')
+    await w.find('[data-cover-passthrough-max]').setValue('')
     await flushPromises()
     const text = w.find('[data-cover-cache-estimate]').text()
     expect(text).toContain('pour une bibliothèque locale')
@@ -845,18 +845,19 @@ describe('ConfigView — covers', () => {
   })
 
   it('never announces a floor of zero covers', async () => {
-    // 8 MiB of budget, a 20 MiB download cap and an 8192 KiB rendered
-    // ceiling floor to `Math.floor(8 / 28)` = 0, and the page read "at least
-    // 0 covers" — alarming and false. `evict_to_budget` protects the entry
-    // its caller just inserted, so one cover is what the core actually
-    // guarantees however badly the boxes are set.
+    // 8 MiB of budget, a 20 MiB download cap and a 2048 KiB pass-through
+    // threshold (the field's own ceiling) floor to `Math.floor(8 / 22)` = 0,
+    // and the page read "at least 0 covers" — alarming and false.
+    // `evict_to_budget` protects the entry its caller just inserted, so one
+    // cover is what the core actually guarantees however badly the boxes are
+    // set.
     //
     // Named production change this guards: dropping the `Math.max(1, …)` in
     // `coverFloorEstimate`.
     const { w } = await mountView()
     await w.find('[data-cover-cache-budget]').setValue('8')
     await w.find('[data-cover-download-max]').setValue('20')
-    await w.find('[data-cover-max-bytes]').setValue('8192')
+    await w.find('[data-cover-passthrough-max]').setValue('2048')
     await flushPromises()
     expect(w.find('[data-cover-cache-estimate]').text()).toContain('Au moins 1 pochettes')
   })

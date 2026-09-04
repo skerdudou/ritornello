@@ -35,7 +35,7 @@ const settings = ref<SettingsPayload>({
   cover_rendition: true,
   cover_max_edge_px: 640,
   cover_jpeg_quality: 85,
-  cover_max_bytes_ko: 512,
+  cover_passthrough_max_ko: 150,
   cover_max_pixels_mpx: 16,
 })
 
@@ -49,7 +49,7 @@ const settings = ref<SettingsPayload>({
  * **The figure does reach the page**, and a comment here used to deny it. Both
  * estimates take `min` with it so neither overstates what the cache would
  * actually hold, and that `min` bites at ordinary settings: budget 256 MiB
- * with a 32 KiB rendered ceiling clamps the typical count to 256, and
+ * with a 16 KiB pass-through threshold clamps the typical count to 256, and
  * re-encoding off with a 1 MiB download cap clamps the floor to it too. What
  * must not happen is the page *explaining* the number — hence the wording of
  * `cover_cache_estimate_unlimited`, which states a few-hundred ceiling in
@@ -74,7 +74,7 @@ const coverDownloadBytes = computed(
  * estimate below divide by zero.
  */
 const coverThumbnailBytes = computed(() =>
-  settings.value.cover_rendition ? (Number(settings.value.cover_max_bytes_ko) || 0) * 1024 : 0,
+  settings.value.cover_rendition ? (Number(settings.value.cover_passthrough_max_ko) || 0) * 1024 : 0,
 )
 
 /**
@@ -84,12 +84,13 @@ const coverThumbnailBytes = computed(() =>
  * one never needs the "unlimited" escape hatch below.
  *
  * **Never below one**, and that is not cosmetic rounding. The combination
- * exists: an 8 MiB budget with a 20 MiB download cap and an 8192 KiB rendered
- * ceiling floors to zero, and the page then read "at least 0 covers" — which
- * is both alarming and false. `cover.rs::evict_to_budget` protects the entry
- * its caller just inserted (`keep_entry`), so a budget too small for even one
- * cover still serves that one rather than discarding it on arrival. One is
- * therefore what the core actually guarantees.
+ * exists: an 8 MiB budget with a 20 MiB download cap and a 2048 KiB
+ * pass-through threshold (`Math.floor(8 / 22)`) floors to zero, and the page
+ * then read "at least 0 covers" — which is both alarming and false.
+ * `cover.rs::evict_to_budget` protects the entry its caller just inserted
+ * (`keep_entry`), so a budget too small for even one cover still serves that
+ * one rather than discarding it on arrival. One is therefore what the core
+ * actually guarantees.
  */
 const coverFloorEstimate = computed(() => {
   const perEntry = coverDownloadBytes.value + coverThumbnailBytes.value
@@ -312,7 +313,7 @@ async function saveSettings() {
     cover_source_max_mio: Number(settings.value.cover_source_max_mio),
     cover_max_edge_px: Number(settings.value.cover_max_edge_px),
     cover_jpeg_quality: Number(settings.value.cover_jpeg_quality),
-    cover_max_bytes_ko: Number(settings.value.cover_max_bytes_ko),
+    cover_passthrough_max_ko: Number(settings.value.cover_passthrough_max_ko),
     cover_max_pixels_mpx: Number(settings.value.cover_max_pixels_mpx),
   })
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
@@ -704,11 +705,11 @@ function goTo(id: string) {
                 <span class="text-xs text-muted-foreground">{{ t('cover_jpeg_quality_help') }}</span>
               </label>
               <label class="grid gap-1 text-sm">
-                {{ t('cover_max_bytes_label') }}
-                <Input type="number" min="32" max="8192" class="w-28" data-cover-max-bytes
+                {{ t('cover_passthrough_max_label') }}
+                <Input type="number" min="16" max="2048" class="w-28" data-cover-passthrough-max
                   :disabled="!settings.cover_rendition"
-                  v-model="settings.cover_max_bytes_ko" />
-                <span class="text-xs text-muted-foreground">{{ t('cover_max_bytes_help') }}</span>
+                  v-model="settings.cover_passthrough_max_ko" />
+                <span class="text-xs text-muted-foreground">{{ t('cover_passthrough_max_help') }}</span>
               </label>
               <label class="grid gap-1 text-sm">
                 {{ t('cover_max_pixels_label') }}

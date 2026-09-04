@@ -182,14 +182,25 @@ pub struct Settings {
     /// background would be a visual choice the device has no business making.
     pub cover_jpeg_quality: u8,
 
-    /// Cap of the **produced** thumbnail, in kibibytes.
+    /// Weight under which a cover is pushed **without being re-encoded**, in
+    /// kibibytes.
     ///
-    /// A safety net, not a target: the maximum side already bounds the number
-    /// of pixels, so a thumbnail exceeds this cap only on a pathologically
-    /// noisy image. Exceeding it = nothing is pushed, and the log names this
-    /// setting — rather than a loop of decreasing re-encodings whose cost would
-    /// be invisible.
-    pub cover_max_bytes_ko: u32,
+    /// The low threshold, and only that: an image already lighter than this —
+    /// and no wider than `cover_max_edge_px` — is served as it is, because
+    /// re-encoding it would not meaningfully lighten it. It is also the rule a
+    /// **supplied** thumbnail is accepted on (`cover_thumb` in the protocol).
+    ///
+    /// It replaced a single number that was compared to *two* different things:
+    /// the weight of the original as this threshold, and the weight of the
+    /// produced thumbnail as a net that dropped the cover. Two opposite
+    /// intentions on one knob, which is why no value ever felt right. The net
+    /// now lives in `Rendition::net`, is derived from the edge, and is not a
+    /// setting at all.
+    ///
+    /// Getting it wrong is cheap: at worst an image is re-encoded that needed
+    /// not be, or one slightly heavier is pushed. That is what distinguishes
+    /// it from the net it used to share a number with.
+    pub cover_passthrough_max_ko: u32,
 
     /// Cap of **pixels** to decode, in megapixels.
     ///
@@ -243,10 +254,14 @@ impl Default for Settings {
             // 85: the threshold beyond which a JPEG grows without the eye
             // gaining anything, on an image of this size.
             cover_jpeg_quality: 85,
-            // 512 KiB, i.e. well above a typical 640 px thumbnail (60 to
-            // 120 KiB): the safety net must not trigger in normal use,
-            // otherwise it is no longer a net but a limit.
-            cover_max_bytes_ko: 512,
+            // 150 KiB, twice a measured 72-73 KiB. Two figures that landed on
+            // the same value: what our own encoder produces at 640 px q85
+            // (p50 over 78 covers of a real library), and what Cover Art
+            // Archive's `front-500` weighs. A supplied thumbnail therefore
+            // passes untouched with a factor of two to spare, and the heavy
+            // tail — p90 at 316 KiB, which re-encoding divides by 2.4 — is
+            // still caught. See `cover.rs`'s measurement benches.
+            cover_passthrough_max_ko: 150,
             // 16 Mpx = 64 MiB of decoded buffer. Covers a cover scanned at
             // 4000 × 4000 with margin, and refuses the bomb.
             cover_max_pixels_mpx: 16,
@@ -460,7 +475,7 @@ mod tests {
                 cover_rendition: false,
                 cover_max_edge_px: 800,
                 cover_jpeg_quality: 70,
-                cover_max_bytes_ko: 256,
+                cover_passthrough_max_ko: 256,
                 cover_max_pixels_mpx: 24,
             },
             ..Default::default()

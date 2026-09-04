@@ -275,9 +275,14 @@ pub struct Rendition {
     /// JPEG quality, 1 to 100. Ignored for an image with an alpha channel,
     /// re-encoded as lossless PNG.
     pub jpeg_quality: u8,
-    /// Cap on the produced thumbnail, in bytes. A safety net: beyond it,
-    /// nothing is pushed.
-    pub output_cap: usize,
+    /// Weight under which the original is pushed untouched, in bytes.
+    ///
+    /// Compared to the **incoming** image only. What the encoder produces is
+    /// judged by `net` instead, and the two must never be the same number
+    /// again: as one number it was raised to avoid dropping covers, which let
+    /// heavy originals through, and lowered to tighten thumbnails, which made
+    /// drops likelier.
+    pub passthrough_max: usize,
     /// Cap on the pixels to decode. Compared against the dimensions read from
     /// the header **before any allocation**, and carried into `image::Limits`
     /// for the case of a header that would lie about its own dimensions.
@@ -294,8 +299,25 @@ impl Rendition {
     /// without a line of invalidation logic — other rules, other identity, and
     /// the stale entry falls out on its own.
     fn tag(&self) -> String {
-        let Self { max_edge_px, jpeg_quality, output_cap, pixel_cap } = self;
-        format!("{max_edge_px}-{jpeg_quality}-{output_cap}-{pixel_cap}")
+        let Self { max_edge_px, jpeg_quality, passthrough_max, pixel_cap } = self;
+        format!("{max_edge_px}-{jpeg_quality}-{passthrough_max}-{pixel_cap}")
+    }
+
+    /// The safety net on what the encoder **produced**, in bytes.
+    ///
+    /// Derived, not configured: one byte per pixel of the thumbnail, floored
+    /// at 256 KiB. Measured against a real library, the encoder's densest
+    /// output was 0.30 byte per pixel (640 px, q90), so this leaves a factor
+    /// of three — it cannot fire at any sane setting, which is the point. It
+    /// exists only to stop the absurd.
+    ///
+    /// **Deliberately computed from the edge alone**, and not from the page's
+    /// weight model: that model lives in `web/app` because it exists to
+    /// explain, and a net depending on it would force a second copy here, with
+    /// two versions to drift apart.
+    pub fn net(&self) -> usize {
+        let square = (self.max_edge_px as usize).saturating_mul(self.max_edge_px as usize);
+        square.max(256 * 1024)
     }
 }
 
@@ -376,7 +398,7 @@ impl From<&crate::state::Settings> for CoverSettings {
             rendition: s.cover_rendition.then(|| Rendition {
                 max_edge_px: s.cover_max_edge_px,
                 jpeg_quality: s.cover_jpeg_quality,
-                output_cap: (s.cover_max_bytes_ko as usize) * 1024,
+                passthrough_max: (s.cover_passthrough_max_ko as usize) * 1024,
                 pixel_cap: (s.cover_max_pixels_mpx as u64) * 1_000_000,
             }),
         }
@@ -1315,7 +1337,7 @@ async fn rendition(
         );
         return None;
     }
-    if width.max(height) <= r.max_edge_px && bytes.len() <= r.output_cap {
+    if width.max(height) <= r.max_edge_px && bytes.len() <= r.passthrough_max {
         tracing::debug!("cover already small ({width}x{height}, {} bytes), pushed as it is", bytes.len());
         return Some((mime, bytes));
     }
@@ -1343,11 +1365,14 @@ async fn rendition(
             return None;
         }
     };
-    if output.len() > r.output_cap {
+    if output.len() > r.net() {
         tracing::warn!(
-            "cover not pushed: rendered to {} bytes, over the {}-byte net",
+            "cover not pushed: rendered to {} bytes, over the {}-byte net derived from a \
+             {} px edge. This is not a setting to adjust -- at any sane edge and quality the \
+             net cannot be reached, so reaching it is a defect worth reporting.",
             output.len(),
-            r.output_cap
+            r.net(),
+            r.max_edge_px
         );
         return None;
     }
@@ -3717,10 +3742,10 @@ mod tests {
     // -- The rendition: what the core builds before pushing -----------------
 
     /// A `Rendition` whose every field is named by the test using it: the
-    /// product defaults (640 px, 512 KiB, 16 Mpx) would make most cases
+    /// product defaults (640 px, 150 KiB, 16 Mpx) would make most cases
     /// unreachable without fabricating huge images.
-    fn test_rendition(max_edge_px: u32, output_cap: usize, pixel_cap: u64) -> Rendition {
-        Rendition { max_edge_px, jpeg_quality: 85, output_cap, pixel_cap }
+    fn test_rendition(max_edge_px: u32, passthrough_max: usize, pixel_cap: u64) -> Rendition {
+        Rendition { max_edge_px, jpeg_quality: 85, passthrough_max, pixel_cap }
     }
 
     #[tokio::test]
@@ -3819,6 +3844,61 @@ mod tests {
         assert_eq!(output, ("image/jpeg", source));
     }
 
+    /// **The whole point of the split, in one test.** A single number used to
+    /// answer both questions, so raising it to stop covers being dropped also
+    /// let heavy originals through untouched, and lowering it did the reverse.
+    /// Here the two are set in opposition: a threshold small enough that the
+    /// image must be re-encoded, and a net large enough that the result is
+    /// kept. Under the old shared number this combination could not be
+    /// expressed at all.
+    #[tokio::test]
+    async fn the_threshold_and_the_net_are_no_longer_the_same_number() {
+        // 700 x 700, so wider than the 640 edge: it will be resized whatever
+        // the threshold says.
+        let source = fixtures::jpeg_decodable(700, 700);
+        let r = Rendition {
+            max_edge_px: 640,
+            jpeg_quality: 85,
+            // Tighter than anything the encoder could produce, so the
+            // pass-through cannot be what returns a result here.
+            passthrough_max: 16 * 1024,
+            pixel_cap: 16_000_000,
+        };
+        let (mime, output) = rendition("image/jpeg", source.clone(), r)
+            .await
+            .expect("the net is derived from the edge and must not refuse a normal thumbnail");
+        assert_eq!(mime, "image/jpeg");
+        assert_ne!(output, source, "a 700 px image must have been re-encoded to 640");
+        assert!(
+            output.len() > r.passthrough_max,
+            "the produced thumbnail is allowed to exceed the *threshold*: {} bytes against a \
+             threshold of {} — that is exactly what the old shared number forbade",
+            output.len(),
+            r.passthrough_max,
+        );
+        assert!(output.len() <= r.net(), "and it must stay under the derived net");
+    }
+
+    #[test]
+    fn the_net_is_derived_from_the_edge_with_a_floor() {
+        let at = |edge: u32| Rendition {
+            max_edge_px: edge,
+            jpeg_quality: 85,
+            passthrough_max: 150 * 1024,
+            pixel_cap: 16_000_000,
+        }
+        .net();
+        // 640^2 = 409_600 bytes, twice the 193 KiB maximum the bench observed
+        // at these settings. The floor is deliberately below this: at 512 KiB it
+        // would have won here, and the stated rule -- one byte per pixel -- would
+        // have described nothing at the product's own edge.
+        assert_eq!(at(640), 409_600);
+        // The floor covers the small edges, where the square would fall under
+        // what even a tiny thumbnail can weigh.
+        assert_eq!(at(64), 256 * 1024, "the floor must win on a small edge");
+        assert_eq!(at(2048), 2048 * 2048, "and lose on a large one");
+    }
+
     #[tokio::test]
     async fn an_oversized_image_is_shrunk_keeping_its_aspect_ratio() {
         // 300 × 150, reduced to an edge of 100: the 2:1 ratio must survive.
@@ -3856,16 +3936,17 @@ mod tests {
     ///
     /// The image of this test would clear the pass-through without
     /// difficulty: 100 px per edge under the 640 allowed, two kilobytes under
-    /// the output cap. Only the pixel guard refuses it. The test therefore
-    /// fails if the guard disappears **and** if it is moved after the
-    /// pass-through — it is this second case that matters, because a bomb is
-    /// precisely an image tiny in bytes and outsized in pixels.
+    /// the pass-through threshold. Only the pixel guard refuses it. The test
+    /// therefore fails if the guard disappears **and** if it is moved after
+    /// the pass-through — it is this second case that matters, because a bomb
+    /// is precisely an image tiny in bytes and outsized in pixels.
     #[tokio::test]
     async fn the_pixel_cap_refuses_before_any_decoding_and_before_the_pass_through() {
         let source = fixtures::jpeg_decodable(100, 100);
         assert!(
             source.len() < 512 * 1024,
-            "the fixture must fit under the output cap, otherwise the test does not prove the order"
+            "the fixture must fit under the pass-through threshold, otherwise the test does not \
+             prove the order"
         );
         assert_eq!(
             rendition("image/jpeg", source, test_rendition(640, 512 * 1024, 1_000)).await,
@@ -3875,14 +3956,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_thumbnail_over_the_output_net_is_not_pushed() {
-        // The safety net, exercised on a deliberately tiny cap: a 200 × 200
-        // thumbnail of a gradient does not fit in 200 bytes.
-        let source = fixtures::jpeg_decodable(400, 400);
+    async fn a_thumbnail_over_the_net_is_not_pushed() {
+        // The net is derived (`Rendition::net`) and floored at 256 KiB: it is
+        // no longer a field a test can dial down to an arbitrary tiny cap, so
+        // triggering it for real takes an image the encoder cannot compress.
+        // A gradient (the usual fixture) will not do -- that is the whole
+        // point of the floor. Uniform random noise, PNG-encoded on the
+        // lossless path (an alpha channel forces it), defeats DEFLATE and
+        // lands close to its raw RGBA weight: at 600 px that is roughly
+        // 1.4 MB against a derived net of 600 x 600 = 360 000 bytes.
+        let width = 600u32;
+        let height = 600u32;
+        let mut img = image::RgbaImage::new(width, height);
+        let mut state: u32 = 0xC0FF_EE11;
+        for px in img.pixels_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let r = (state >> 24) as u8;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let g = (state >> 24) as u8;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let b = (state >> 24) as u8;
+            *px = image::Rgba([r, g, b, 255]);
+        }
+        let mut source = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut source), image::ImageFormat::Png)
+            .expect("fixture encoding");
+        let r = Rendition { max_edge_px: width, jpeg_quality: 85, passthrough_max: 1, pixel_cap: 16_000_000 };
         assert_eq!(
-            rendition("image/jpeg", source, test_rendition(200, 200, 16_000_000)).await,
+            rendition("image/png", source, r).await,
             None,
-            "a thumbnail beyond the net must not be pushed"
+            "random noise, losslessly re-encoded, must exceed the derived net and be refused"
         );
     }
 
@@ -4029,13 +4133,13 @@ mod tests {
         for (edge, quality) in
             [(320u32, 85u8), (512, 85), (640, 75), (640, 85), (640, 90), (1024, 85)]
         {
-            // `output_cap` and `pixel_cap` are opened wide on purpose: the
+            // `passthrough_max` and `pixel_cap` are opened wide on purpose: the
             // question here is what the encoder *produces*, so a net that
             // refused an answer would remove that answer from the sample.
             let r = Rendition {
                 max_edge_px: edge,
                 jpeg_quality: quality,
-                output_cap: usize::MAX,
+                passthrough_max: usize::MAX,
                 pixel_cap: 1_000_000_000,
             };
             let mut produced: Vec<usize> = Vec::new();
@@ -4101,7 +4205,7 @@ mod tests {
             let r = Rendition {
                 max_edge_px: edge,
                 jpeg_quality: quality,
-                output_cap: usize::MAX,
+                passthrough_max: usize::MAX,
                 pixel_cap: 1_000_000_000,
             };
             let mut before: Vec<usize> = Vec::new();

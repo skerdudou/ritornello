@@ -49,7 +49,7 @@ const settings = ref<SettingsPayload>({
   cover_rendition: true,
   cover_max_edge_px: 640,
   cover_jpeg_quality: 85,
-  cover_max_bytes_ko: 512,
+  cover_passthrough_max_ko: 150,
   cover_max_pixels_mpx: 16,
   seek_step_s: 10,
 })

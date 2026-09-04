@@ -44,11 +44,12 @@ pub(super) const COVER_MAX_EDGE_PX: std::ops::RangeInclusive<u32> = 64..=2048;
 /// gradients of a cover. 100 at the top, the bound of the format.
 pub(super) const COVER_JPEG_QUALITY: std::ops::RangeInclusive<u32> = 40..=100;
 
-/// Cap of the produced thumbnail, in kibibytes. 32 KiB at the bottom, under
-/// which a 640 px thumbnail does not fit and the safety net would always
-/// trigger; 8 MiB at the top, which makes it inoperative for whoever wants to
-/// neutralize it without unticking re-encoding.
-pub(super) const COVER_MAX_BYTES_KO: std::ops::RangeInclusive<u32> = 32..=8192;
+/// Weight under which a cover is pushed without re-encoding, in kibibytes.
+/// 16 KiB at the bottom: below that nothing real passes untouched and the
+/// threshold would be inert. 2 MiB at the top, past which one is no longer
+/// setting a threshold but disabling re-encoding by the back door — the switch
+/// is there for that, and says so.
+pub(super) const COVER_PASSTHROUGH_MAX_KO: std::ops::RangeInclusive<u32> = 16..=2048;
 
 /// Memory budget for covers, in mebibytes. 8 at the bottom, under which
 /// even one worst-case entry would not fit and the cache would thrash;
@@ -91,7 +92,7 @@ pub enum SettingsError {
     CoverSourceMax { min: u32, max: u32 },
     CoverMaxEdge { min: u32, max: u32 },
     CoverJpegQuality { min: u32, max: u32 },
-    CoverMaxBytes { min: u32, max: u32 },
+    CoverPassthroughMax { min: u32, max: u32 },
     CoverMaxPixels { min: u32, max: u32 },
     CoverCacheBudget { min: u32, max: u32 },
     CoverDownloadMax { min: u32, max: u32 },
@@ -132,8 +133,8 @@ impl SettingsError {
                 .get("settings_cover_jpeg_quality_out_of_range")
                 .replace("{min}", &min.to_string())
                 .replace("{max}", &max.to_string()),
-            SettingsError::CoverMaxBytes { min, max } => catalog
-                .get("settings_cover_max_bytes_out_of_range")
+            SettingsError::CoverPassthroughMax { min, max } => catalog
+                .get("settings_cover_passthrough_max_out_of_range")
                 .replace("{min}", &min.to_string())
                 .replace("{max}", &max.to_string()),
             SettingsError::CoverCacheBudget { min, max } => catalog
@@ -179,8 +180,8 @@ impl std::fmt::Display for SettingsError {
             SettingsError::CoverJpegQuality { min, max } => {
                 write!(f, "cover JPEG quality out of range ({min}-{max})")
             }
-            SettingsError::CoverMaxBytes { min, max } => {
-                write!(f, "rendered cover ceiling out of range ({min}-{max} KiB)")
+            SettingsError::CoverPassthroughMax { min, max } => {
+                write!(f, "cover pass-through threshold out of range ({min}-{max} KiB)")
             }
             SettingsError::CoverMaxPixels { min, max } => {
                 write!(f, "cover decode ceiling out of range ({min}-{max} Mpx)")
@@ -264,10 +265,10 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError
             max: *COVER_JPEG_QUALITY.end(),
         });
     }
-    if !COVER_MAX_BYTES_KO.contains(&s.cover_max_bytes_ko) {
-        return Err(SettingsError::CoverMaxBytes {
-            min: *COVER_MAX_BYTES_KO.start(),
-            max: *COVER_MAX_BYTES_KO.end(),
+    if !COVER_PASSTHROUGH_MAX_KO.contains(&s.cover_passthrough_max_ko) {
+        return Err(SettingsError::CoverPassthroughMax {
+            min: *COVER_PASSTHROUGH_MAX_KO.start(),
+            max: *COVER_PASSTHROUGH_MAX_KO.end(),
         });
     }
     if !COVER_MAX_PIXELS_MPX.contains(&s.cover_max_pixels_mpx) {
@@ -340,6 +341,17 @@ mod tests {
         assert!(validate_settings(&s).is_err(), "257 MiB is above the 256 MiB ceiling");
         s.cover_cache_budget_mio = 50;
         assert!(validate_settings(&s).is_ok());
+    }
+
+    #[test]
+    fn a_passthrough_threshold_outside_its_bounds_is_refused() {
+        use crate::state::Settings;
+        let mut s = Settings { cover_passthrough_max_ko: 15, ..Default::default() };
+        assert!(validate_settings(&s).is_err(), "15 KiB is below the 16 KiB floor");
+        s.cover_passthrough_max_ko = 2049;
+        assert!(validate_settings(&s).is_err(), "2049 KiB is above the 2048 KiB ceiling");
+        s.cover_passthrough_max_ko = 150;
+        assert!(validate_settings(&s).is_ok(), "the product default must validate");
     }
 
     #[test]
