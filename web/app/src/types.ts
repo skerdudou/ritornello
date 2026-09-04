@@ -71,6 +71,23 @@ export interface Provenance {
   derived?: Record<string, string>
 }
 
+/**
+ * Snapshot of the cover cache, `GET /api/cover-cache`. Mirror of
+ * `cover::CacheSnapshot` — the field names are the contract, and TypeScript
+ * sees nothing of a JSON, so a rename on either side breaks the panel in
+ * silence.
+ */
+export interface CachePayload {
+  used_bytes: number
+  budget_bytes: number
+  entries: number
+  entries_free: number
+  renditions: number
+  renditions_bytes: number
+  renditions_stale: number
+  max_entries: number
+}
+
 export interface SettingsPayload {
   volume_repeat_initial_ms: number
   volume_repeat_interval_ms: number

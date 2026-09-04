@@ -5,6 +5,7 @@ import {
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
+import CoverCacheDetails from '../components/CoverCacheDetails.vue'
 import { predictedThumbnailBytes } from '../composables/coverWeight'
 import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
@@ -771,10 +772,11 @@ function goTo(id: string) {
                  download ceiling, edge, quality, threshold, and the switch
                  itself), and it must read whether re-encoding is on or off —
                  hence not greyed. -->
-            <div class="border-t border-border pt-4">
+            <div class="flex items-start gap-1 border-t border-border pt-4">
               <p class="max-w-md text-xs text-muted-foreground" data-cover-cache-estimate>
                 {{ coverCacheEstimateText }}
               </p>
+              <CoverCacheDetails />
             </div>
 
             <Button data-cover-change @click="saveSettings">{{ t('change') }}</Button>

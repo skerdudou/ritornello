@@ -124,6 +124,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/system/processes", get(crate::processes::processes_json))
         .route("/api/command", axum::routing::post(command_post))
         .route("/api/cover/{key}", get(crate::cover::cover_get))
+        .route("/api/cover-cache", get(crate::cover::cache_json))
         .route(
             "/plugins/{name}/api/data",
             get(crate::admin::admin_get_data).put(crate::admin::admin_put_data),

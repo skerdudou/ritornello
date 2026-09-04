@@ -405,6 +405,70 @@ impl From<&crate::state::Settings> for CoverSettings {
     }
 }
 
+/// What the cache holds **right now**, for the configuration page's detail
+/// panel.
+///
+/// The counterpart of the estimate shown on that page, and not a replacement
+/// for it: the estimate answers "what would this setting do", this answers
+/// "what is happening". Keeping them apart is deliberate — an estimate that
+/// moved because the cache warmed up would blur the very effect the user is
+/// trying to see.
+///
+/// Bytes and counts only, no keys and no paths: the panel is a diagnostic, not
+/// a listing, and the keys name what someone is listening to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct CacheSnapshot {
+    /// Bytes charged against the budget: costly sources plus every retained
+    /// rendition. The same arithmetic `evict_to_budget` uses.
+    pub used_bytes: usize,
+    /// The budget those bytes are measured against.
+    pub budget_bytes: usize,
+    /// Entries held, whatever they cost.
+    pub entries: usize,
+    /// Of those, how many cost nothing but a path — a local file or a picture
+    /// embedded in the audio file (see `payload_cost`). This is the line that
+    /// makes `MAX_ENTRIES` legible: it exists because these cost zero.
+    pub entries_free: usize,
+    /// Retained thumbnails, and what they weigh together. The page divides one
+    /// by the other to show the real average, which is the ground truth behind
+    /// the weight it predicts.
+    pub renditions: usize,
+    pub renditions_bytes: usize,
+    /// Of those, how many were produced under rules the cache no longer uses
+    /// (see `rendition_is_current`). They are pure waste, and the first thing
+    /// eviction reclaims.
+    pub renditions_stale: usize,
+    /// The belt on the entry count, `MAX_ENTRIES`. Shown **here** and nowhere
+    /// else: this is the one place it can be presented as what it is, a bound
+    /// on a count, without being mistaken for a memory bound.
+    pub max_entries: usize,
+}
+
+impl CoverCache {
+    /// Reads both tables once and counts. No allocation, no clone of a
+    /// payload: a walk of a few hundred entries at worst.
+    pub async fn snapshot(&self) -> CacheSnapshot {
+        let settings = self.settings();
+        let entries = self.entries.read().await;
+        let renditions = self.renditions.read().await;
+        let costly: usize = entries.iter().map(|(_, p)| payload_cost(p)).sum();
+        let renditions_bytes: usize = renditions.iter().map(|r| r.bytes.len()).sum();
+        CacheSnapshot {
+            used_bytes: costly + renditions_bytes,
+            budget_bytes: settings.budget,
+            entries: entries.len(),
+            entries_free: entries.iter().filter(|(_, p)| payload_cost(p) == 0).count(),
+            renditions: renditions.len(),
+            renditions_bytes,
+            renditions_stale: renditions
+                .iter()
+                .filter(|r| !rendition_is_current(&r.identity, settings.rendition))
+                .count(),
+            max_entries: MAX_ENTRIES,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CoverCache {
     entries: RwLock<VecDeque<(String, CoverPayload)>>,
@@ -2255,6 +2319,16 @@ pub async fn cover_get(
     }
 }
 
+/// `GET /api/cover-cache`. Read-only, and read **on demand**: the page fetches
+/// it when its panel opens and when the reader asks again, never on a timer.
+/// A periodic refresh would repeat the fault measured on the MPD side, where
+/// the server woke its clients once a second for nothing.
+pub async fn cache_json(
+    State(state): State<crate::status::AppState>,
+) -> axum::Json<CacheSnapshot> {
+    axum::Json(state.covers.snapshot().await)
+}
+
 /// Image fixtures shared by this module's tests and those of `main`.
 ///
 /// Here and not in each `mod tests`: two copies of an image generator would
@@ -2351,6 +2425,112 @@ mod tests {
         let status = resp.status().as_u16();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         (status, bytes.to_vec())
+    }
+
+    /// **Un instantané qui compte des octets doit être vérifié contre des
+    /// octets connus**, pas contre lui-même. Les charges utiles sont donc
+    /// posées à la main, avec des tailles distinctes et non rondes pour
+    /// qu'une somme fausse ne puisse pas tomber juste par hasard.
+    #[tokio::test]
+    async fn the_snapshot_counts_the_bytes_it_actually_holds() {
+        let cache = CoverCache::new();
+        cache.insert("net".into(), CoverPayload::Bytes(vec![0u8; 7_777], "image/jpeg")).await;
+        cache.insert("file".into(), CoverPayload::File("/music/a/cover.jpg".into())).await;
+        cache.insert("tags".into(), CoverPayload::Embedded("/music/a/01.flac".into())).await;
+
+        let s = cache.snapshot().await;
+        assert_eq!(s.entries, 3);
+        assert_eq!(s.entries_free, 2, "a File and an Embedded cost a path, not bytes");
+        assert_eq!(s.used_bytes, 7_777, "only the network payload weighs anything");
+        assert_eq!(s.renditions, 0);
+        assert_eq!(s.renditions_bytes, 0);
+        assert_eq!(s.max_entries, MAX_ENTRIES);
+        assert_eq!(s.budget_bytes, cache.settings().budget);
+    }
+
+    /// La ligne qui compte le plus du panneau : le poids moyen réel d'une
+    /// vignette, à confronter au poids prédit que la page annonce. La
+    /// division est faite par la page — le cœur rend le total et le compte —
+    /// donc c'est leur exactitude qui est vérifiée ici.
+    #[tokio::test]
+    async fn the_snapshot_reports_the_real_weight_of_retained_thumbnails() {
+        let cache = CoverCache::new();
+        let rules = cache.settings().rendition.expect("the product default re-encodes");
+        let stamp = SourceStamp::Frozen;
+        for (i, size) in [40_000usize, 60_000, 110_000].iter().enumerate() {
+            let identity = rendition_identity(&format!("k{i}"), &stamp, &rules);
+            cache
+                .remember_rendition(identity, "image/jpeg", Arc::new(vec![0u8; *size]))
+                .await;
+        }
+
+        let s = cache.snapshot().await;
+        assert_eq!(s.renditions, 3);
+        assert_eq!(s.renditions_bytes, 210_000);
+        assert_eq!(s.renditions_stale, 0, "all three were produced under the live rules");
+        assert_eq!(s.used_bytes, 210_000, "renditions are charged to the budget too");
+    }
+
+    /// Périmées, pas seulement anciennes. Le changement de production qui
+    /// ferait échouer ceci : compter les vignettes sans les confronter aux
+    /// règles vivantes, ce qui ferait passer pour utile ce que
+    /// `evict_to_budget` jettera en premier.
+    #[tokio::test]
+    async fn the_snapshot_tells_stale_thumbnails_apart() {
+        let cache = CoverCache::new();
+        let stamp = SourceStamp::Frozen;
+        let old = Rendition {
+            max_edge_px: 320,
+            jpeg_quality: 85,
+            passthrough_max: 150 * 1024,
+            pixel_cap: 16_000_000,
+        };
+        cache
+            .remember_rendition(
+                rendition_identity("k", &stamp, &old),
+                "image/jpeg",
+                Arc::new(vec![0u8; 1_000]),
+            )
+            .await;
+        // Les règles vivantes sont celles du défaut produit (640 px), donc
+        // l'identité ci-dessus ne les décrit plus.
+        let s = cache.snapshot().await;
+        assert_eq!(s.renditions, 1);
+        assert_eq!(s.renditions_stale, 1, "produced under 320 px, the cache now asks 640");
+    }
+
+    async fn served_cache_json(cache: &Arc<CoverCache>) -> (u16, Vec<u8>) {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = crate::status::router(crate::status::AppState {
+            covers: cache.clone(),
+            ..crate::status::tests_support::app_state()
+        });
+        let resp = app
+            .oneshot(Request::get("/api/cover-cache").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn the_cache_route_serves_the_snapshot_as_json() {
+        let cache = Arc::new(CoverCache::new());
+        cache.insert("net".into(), CoverPayload::Bytes(vec![0u8; 4_096], "image/jpeg")).await;
+        let (status, body) = served_cache_json(&cache).await;
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["entries"], 1);
+        assert_eq!(v["used_bytes"], 4_096);
+        // Le nom des champs est un contrat avec la page : le renommer sans
+        // toucher `CachePayload` côté web casserait le panneau en silence,
+        // TypeScript ne voyant rien d'un JSON.
+        assert!(v["budget_bytes"].is_number());
+        assert!(v["max_entries"].is_number());
     }
 
     /// The same request as `served_body`, plus the validator the route puts on
