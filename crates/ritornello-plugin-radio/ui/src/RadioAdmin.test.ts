@@ -1,10 +1,13 @@
-import { Dialog } from '@ritornello/ui'
+import { Dialog, SKELETON_DELAY_MS } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CountryPicker from './CountryPicker.vue'
 import RadioAdmin from './RadioAdmin.vue'
 
 const CATALOG = {
+  // Inherited from the common vocabulary (`common_en.toml`) by every plugin
+  // catalog, exactly as the real merged catalog delivers it.
+  loading: 'Chargement…',
   btn_add: 'Ajouter', btn_save: 'Enregistrer', btn_search: 'Chercher',
   btn_add_result: '+', saved: 'Enregistré', save_error: 'Échec : ',
   limit_reached: '99 maximum', empty_query: 'Saisir un terme',
@@ -424,5 +427,72 @@ describe('RadioAdmin', () => {
     await w.find('[data-add-result]').trigger('click')
     expect(w.findAll('[data-station-num]')).toHaveLength(1)
     expect((w.find('[data-station-name]').element as HTMLInputElement).value).toBe('FIP')
+  })
+
+  // --- The first render, before any answer -------------------------------
+
+  describe('while the first answer is still in flight', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    /** Mounts with a `fetch` that never answers. */
+    function mountUnanswered() {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => new Promise<Response>(() => {})),
+      )
+      return mount(RadioAdmin, { props: { catalog: CATALOG, base: BASE } })
+    }
+
+    it('shows nothing at all while the wait is short', async () => {
+      vi.useFakeTimers()
+      const w = mountUnanswered()
+      await flushPromises()
+      vi.advanceTimersByTime(SKELETON_DELAY_MS - 1)
+      await flushPromises()
+
+      expect(w.text()).toBe('')
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(false)
+    })
+
+    it('reveals the page in one piece rather than a table then the rest', async () => {
+      // The shift this fixes: the table used to render with its headers alone,
+      // then the rows dropped in and pushed the action bar and the whole
+      // search section down the page. Since the number of stations is unknown
+      // until the answer lands, **anything** shown above them moves — so
+      // nothing is shown until everything can be.
+      vi.useFakeTimers()
+      const w = mountUnanswered()
+      await flushPromises()
+      vi.advanceTimersByTime(SKELETON_DELAY_MS)
+      await flushPromises()
+
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(true)
+      expect(w.get('[role="status"]').text()).toBe('Chargement…')
+      // None of the real furniture is on screen yet — neither the column
+      // headers, nor the buttons, nor the directory search below them.
+      expect(w.text()).not.toContain('N°')
+      expect(w.find('[data-save]').exists()).toBe(false)
+      expect(w.find('[data-query]').exists()).toBe(false)
+    })
+
+    it('still shows the page, and its error, when the load fails', async () => {
+      // A refusal settles the wait too. Were the placeholder tied to success
+      // alone, a plugin that answers 500 would leave the page grey for good —
+      // and swallow the message that says the save is now unsafe.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response('nope', { status: 500 })),
+      )
+      const w = mount(RadioAdmin, { props: { catalog: CATALOG, base: BASE } })
+      await flushPromises()
+
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(false)
+      expect(w.text()).toContain('Erreur : ')
+      // Inert, as it was: an empty `stations` next to a table the plugin does
+      // have is exactly the state in which a "Save" wipes the presets.
+      expect(w.get('[data-save]').attributes('disabled')).toBeDefined()
+    })
   })
 })

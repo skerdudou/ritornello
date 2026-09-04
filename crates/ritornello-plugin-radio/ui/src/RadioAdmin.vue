@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
   api, Button, createT, Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
-  Input, type Catalog,
+  Input, Skeleton, useSkeleton, type Catalog,
 } from '@ritornello/ui'
 import { computed, onMounted, ref } from 'vue'
 import { move } from './order'
@@ -82,6 +82,22 @@ const searching = ref(false)
 const loadFailed = ref(false)
 
 /**
+ * Whether the first answer has come back — successful or not.
+ *
+ * Nothing is drawn before it. The number of stations is unknown until then, so
+ * **everything** placed above them moves once they land: the table used to
+ * render with its headers alone, then the rows dropped in and pushed the
+ * action bar and the whole search section down the page. Revealing the page in
+ * one piece costs a fraction of a second and removes every one of those jumps.
+ */
+const loaded = ref(false)
+
+// Nothing for the first fraction of a second, a placeholder only if the wait
+// outlasts it. The rhythm comes from the kit so that it cannot drift from the
+// shell's or the other plugins'.
+const skeleton = useSkeleton(() => !loaded.value)
+
+/**
  * Country button label, rendered from **our own** state.
  *
  * This is the fix for an observed bug: the previous version entrusted this
@@ -115,6 +131,11 @@ async function reload(): Promise<void> {
   } catch (e) {
     message.value = t.value('load_error_1') + (e as Error).message + t.value('load_error_2')
     loadFailed.value = true
+  } finally {
+    // A refusal settles the wait as much as a success does: the page must
+    // appear — inert, and carrying the message that says why — rather than
+    // stay behind a placeholder that would never end.
+    loaded.value = true
   }
 }
 
@@ -244,6 +265,23 @@ function label(s: FoundStation): string {
 
 <template>
   <div class="space-y-6">
+    <!-- The wait. `role="status"` carries the only text; the blocks are
+         `aria-hidden`, so a screen reader hears it announced once instead of a
+         run of empty boxes. The shape is an approximation of the page — a few
+         station rows, the action bar, the search field — and it is honest
+         about being one: the real number of stations is exactly what is not
+         known yet. -->
+    <div v-if="skeleton" role="status" class="space-y-6">
+      <span class="sr-only">{{ t('loading') }}</span>
+      <div class="space-y-2">
+        <Skeleton v-for="i in 4" :key="i" class="h-10 w-full" />
+      </div>
+      <Skeleton class="h-9 w-56" />
+      <Skeleton class="h-9 w-full" />
+    </div>
+
+    <!-- Everything below appears at once, or not at all: see `loaded`. -->
+    <template v-else-if="loaded">
     <table class="w-full text-sm">
       <thead class="text-muted-foreground">
         <tr>
@@ -375,5 +413,6 @@ function label(s: FoundStation): string {
         </li>
       </ul>
     </section>
+    </template>
   </div>
 </template>

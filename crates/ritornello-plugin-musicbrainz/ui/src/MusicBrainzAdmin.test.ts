@@ -1,6 +1,6 @@
-import { toast } from '@ritornello/ui'
+import { SKELETON_DELAY_MS, toast } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import MusicBrainzAdmin from './MusicBrainzAdmin.vue'
 
 // Same approach as `MpdAdmin.test.ts`: keep the real module (components,
@@ -44,6 +44,9 @@ const CATALOG = {
   separator_no_space: 'the separator must contain a space on each side, otherwise a hyphenated name gets cut in two',
   unknown_station: 'no entry for that stream',
   save_failed: 'could not write the pattern file',
+  // Inherited from the common vocabulary (`common_en.toml`) by every plugin
+  // catalog, exactly as the real merged catalog delivers it.
+  loading: 'Loading…',
 }
 
 // Absolute prefix the shell passes through the (required) `base` prop: that is
@@ -299,5 +302,67 @@ describe('MusicBrainzAdmin', () => {
     expect(puts).toHaveLength(1)
     expect(puts[0]!.body).toEqual({ action: 'clear' })
     expect(gets.length).toBeGreaterThan(getsBefore)
+  })
+
+  // --- The first render, before any answer -------------------------------
+
+  describe('while the first answer is still in flight', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    /** Mounts with a `fetch` that never answers, so the page stays in its
+     *  very first state for as long as the test wants. */
+    function mountUnanswered() {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => new Promise<Response>(() => {})),
+      )
+      return mount(MusicBrainzAdmin, { props: { catalog: CATALOG, base: BASE } })
+    }
+
+    it('does not claim that nothing was ever probed', async () => {
+      // **A defect, not a cosmetic detail.** `data` starts at `{ stations: [] }`,
+      // so `nothingProbed` is true before the server has said anything: the
+      // page asserted "No station probed yet." — a statement it had no grounds
+      // for — and replaced it with a full table a moment later.
+      const w = mountUnanswered()
+      await flushPromises()
+
+      expect(w.find('[data-empty]').exists()).toBe(false)
+      expect(w.text()).not.toContain('No station probed yet.')
+    })
+
+    it('shows nothing at all while the wait is short', async () => {
+      vi.useFakeTimers()
+      const w = mountUnanswered()
+      await flushPromises()
+      vi.advanceTimersByTime(SKELETON_DELAY_MS - 1)
+      await flushPromises()
+
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(false)
+    })
+
+    it('announces the wait once it outlasts the delay', async () => {
+      vi.useFakeTimers()
+      const w = mountUnanswered()
+      await flushPromises()
+      vi.advanceTimersByTime(SKELETON_DELAY_MS)
+      await flushPromises()
+
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(true)
+      expect(w.get('[role="status"]').text()).toBe('Loading…')
+    })
+  })
+
+  it('still says so when the server really has nothing to show', async () => {
+    // The counterpart of the test above: silencing the empty state before the
+    // answer must not silence it after. The two empty states of this page —
+    // "nothing probed" and "the filter hides everything" — are deliberately
+    // distinct, and both must survive.
+    const { w } = await mountView({ stations: [] })
+
+    expect(w.get('[data-empty]').text()).toBe('No station probed yet.')
+    expect(w.find('[data-slot="skeleton"]').exists()).toBe(false)
   })
 })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { api, Button, Card, CardContent, CardHeader, CardTitle, createT, Input, Label, toast, type Catalog } from '@ritornello/ui'
+import { api, Button, Card, CardContent, CardHeader, CardTitle, createT, Input, Label, Skeleton, toast, useSkeleton, type Catalog } from '@ritornello/ui'
 import { computed, onMounted, ref } from 'vue'
 
 // `base` is part of the plugin UI contract, just like `catalog`: the
@@ -85,6 +85,25 @@ const shownStations = computed(() =>
     : data.value.stations,
 )
 
+/**
+ * Whether the server has answered at least once.
+ *
+ * `data` starts at `{ stations: [] }` — a coherent shape, but not an
+ * observation. Without this flag `nothingProbed` below is true before anything
+ * has been asked, and the page states "no station probed yet" on the strength
+ * of a value it invented, then replaces it with a full table. The empty state
+ * is a **finding**, and a finding needs an answer to rest on.
+ *
+ * Stays true afterwards: a reload triggered by an action on the page must
+ * refresh the table, not blank it.
+ */
+const loaded = ref(false)
+
+// Nothing for the first fraction of a second, a placeholder only if the wait
+// outlasts it. Same rhythm as the shell and the other plugins — it comes from
+// the kit precisely so it cannot drift.
+const skeleton = useSkeleton(() => !loaded.value)
+
 // Two distinct empty states, never merged: an empty screen would otherwise be
 // ambiguous between "all is well" and "nothing has ever worked".
 const nothingProbed = computed(() => data.value.stations.length === 0)
@@ -97,6 +116,11 @@ async function reload(): Promise<void> {
     // Like `MpdAdmin.vue`: no catalog key covers this load failure, the raw
     // request message is the only text available.
     toast.error((e as Error).message)
+  } finally {
+    // A refusal settles the question as much as a success: the page then shows
+    // its (genuinely empty) table next to the error notification, rather than
+    // staying blank for good behind a placeholder that would never end.
+    loaded.value = true
   }
 }
 
@@ -289,14 +313,28 @@ async function clear(): Promise<void> {
         <Button variant="secondary" data-clear @click="clear">{{ t('clear_all') }}</Button>
       </div>
 
-      <p v-if="nothingProbed" data-empty class="text-sm text-muted-foreground">{{ t('empty') }}</p>
-      <p v-else-if="filterHidesAll" data-empty-filtered class="text-sm text-muted-foreground">
+      <!-- The wait, before any of the three states below can be told apart.
+           `role="status"` carries the only text; the blocks are `aria-hidden`,
+           so a screen reader hears the wait once instead of a run of empty
+           boxes. -->
+      <div v-if="skeleton" role="status" class="space-y-2">
+        <span class="sr-only">{{ t('loading') }}</span>
+        <Skeleton v-for="i in 3" :key="i" class="h-8 w-full" />
+      </div>
+
+      <!-- `loaded &&` on both empty states, and it is a fix rather than a
+           precaution: `data` starts at `{ stations: [] }`, so `nothingProbed`
+           was true before the server had said anything and this page claimed
+           "no station probed yet" a moment before showing a full table. An
+           empty state is a finding; it needs an answer to rest on. -->
+      <p v-if="loaded && nothingProbed" data-empty class="text-sm text-muted-foreground">{{ t('empty') }}</p>
+      <p v-else-if="loaded && filterHidesAll" data-empty-filtered class="text-sm text-muted-foreground">
         {{ t('empty_filtered') }}
       </p>
 
       <!-- Scroll container specific to the table: a stream URL is long, and
            this page must not scroll the whole page to accommodate it. -->
-      <div v-if="!nothingProbed && !filterHidesAll" class="overflow-x-auto">
+      <div v-if="loaded && !nothingProbed && !filterHidesAll" class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead class="text-muted-foreground">
             <tr>

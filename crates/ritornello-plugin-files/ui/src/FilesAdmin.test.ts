@@ -1,3 +1,4 @@
+import { SKELETON_DELAY_MS } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import FilesAdmin from './FilesAdmin.vue'
@@ -307,5 +308,59 @@ describe('FilesAdmin, the page', () => {
     expect(w.find('[data-playlist-pane]').exists()).toBe(true)
     // And no further browse was requested on tab change.
     expect(s.putsOf('browse').length).toBe(browseBefore)
+  })
+
+  // --- The first render, before any answer -------------------------------
+
+  describe('while the first answer is still in flight', () => {
+    /** Mounts with a `fetch` that never answers. */
+    function mountUnanswered() {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => new Promise<Response>(() => {})),
+      )
+      return mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
+    }
+
+    it('shows nothing at all while the wait is short', async () => {
+      // This page showed a strictly empty screen until the answer landed, then
+      // the three tabs and their content appeared at once. The empty frame is
+      // kept — it is the right thing for a fast load — and only the long wait
+      // now gets an explanation.
+      vi.useFakeTimers()
+      const w = mountUnanswered()
+      await flushPromises()
+      vi.advanceTimersByTime(SKELETON_DELAY_MS - 1)
+      await flushPromises()
+
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(false)
+      expect(w.find('[data-tab="playlist"]').exists()).toBe(false)
+    })
+
+    it('announces the wait once it outlasts the delay', async () => {
+      vi.useFakeTimers()
+      const w = mountUnanswered()
+      await flushPromises()
+      vi.advanceTimersByTime(SKELETON_DELAY_MS)
+      await flushPromises()
+
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(true)
+      expect(w.get('[role="status"]').text()).toBe('Loading…')
+    })
+
+    it('gives up the placeholder when the load fails', async () => {
+      // `data` stays null on a refusal, so a placeholder tied to it alone
+      // would pulse for ever — on top of the very message explaining why the
+      // page is inert.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response('nope', { status: 500 })),
+      )
+      const w = mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
+      await flushPromises()
+
+      expect(w.find('[data-slot="skeleton"]').exists()).toBe(false)
+      expect(w.get('[data-message]').text()).toContain('Error: ')
+    })
   })
 })

@@ -3,10 +3,12 @@ import {
   api,
   createT,
   onPlayer,
+  Skeleton,
   Tabs,
   TabsContent,
   TabsList,
   TabsTrigger,
+  useSkeleton,
   type Catalog,
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
@@ -56,6 +58,20 @@ const message = ref('')
 // there, it does not lie, and making the page inert because a one-second
 // refresh failed would be a comfort regression for no safety gain.
 const loadFailed = ref(false)
+
+/**
+ * Whether the first answer has come back — successful or not.
+ *
+ * Not `data !== null`, which is what the template used to key off: on a
+ * refusal `data` stays null for good, so a placeholder tied to it would pulse
+ * for ever, on top of the very message explaining why the page is inert.
+ */
+const loaded = ref(false)
+
+// Nothing for the first fraction of a second, a placeholder only if the wait
+// outlasts it. Same rhythm as the shell and the other plugins, held in the kit
+// so it cannot drift.
+const skeleton = useSkeleton(() => !loaded.value)
 
 let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -114,6 +130,8 @@ async function reload(): Promise<void> {
     message.value = t.value('load_error_1') + (e as Error).message + t.value('load_error_2')
     if (data.value === null) loadFailed.value = true
     stopProbe()
+  } finally {
+    loaded.value = true
   }
 }
 
@@ -291,7 +309,19 @@ const scan = computed(
          after a detour would reopen the root of the source instead of the
          folder we were in — and would relaunch a `browse` at every back and
          forth. The panes therefore stay alive, only the display changes. -->
-    <Tabs v-if="data" default-value="playlist">
+    <!-- The wait. `role="status"` carries the only text; the blocks are
+         `aria-hidden`, so a screen reader hears it announced once rather than
+         a run of empty boxes. The shape stands in for the tab strip and the
+         list under it. -->
+    <div v-if="skeleton" role="status" class="space-y-4">
+      <span class="sr-only">{{ t('loading') }}</span>
+      <Skeleton class="h-9 w-72" />
+      <div class="space-y-2">
+        <Skeleton v-for="i in 6" :key="i" class="h-8 w-full" />
+      </div>
+    </div>
+
+    <Tabs v-else-if="data" default-value="playlist">
       <TabsList>
         <!-- `data-tab` carries the value and not only the marker: the
              end-to-end journey must designate a tab without depending on its

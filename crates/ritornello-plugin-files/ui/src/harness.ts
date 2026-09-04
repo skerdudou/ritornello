@@ -22,6 +22,9 @@ export const BASE = '/plugins/mediatheque/'
  * thanks to another label.
  */
 export const CATALOG: Record<string, string> = {
+  // Inherited from the common vocabulary (`common_en.toml`) by every plugin
+  // catalog, exactly as the real merged catalog delivers it.
+  loading: 'Loading…',
   load_error_1: 'Error: ',
   load_error_2: '',
   scan_progress: 'Scanning {dir} — {found} tracks found so far',
