@@ -281,15 +281,33 @@ pub struct SourceMessage {
     /// playback must not wait.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<crate::CoverRef>,
+    /// A ready-made thumbnail for the cover above. See
+    /// [`crate::Enrichment::cover_thumb`] for what it is, why it is optional
+    /// and under which rule it is accepted — one description, not two to
+    /// drift apart.
+    ///
+    /// It travels **beside** `cover`, on the same frame and from the same
+    /// declaration: a thumbnail on its own describes a cover nobody
+    /// announced, and the core keeps the pair together for that reason.
+    /// The same serde attributes as `cover`, so that absence stays absence on
+    /// the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_thumb: Option<crate::CoverRef>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Frame declaring nothing. The full literals of the older tests are left
-    /// as is deliberately: that is what forces every case to be revisited when
-    /// a field appears.
+    /// Frame declaring nothing.
+    ///
+    /// **The one exhaustive literal of this module, and it stays exhaustive
+    /// deliberately**: a field added to `SourceMessage` no longer compiles
+    /// until someone has named it here. Every other test used to repeat the
+    /// same eleven `None`s, which multiplied the cost of an addition without
+    /// asking any new question — the field had to be typed out six times to
+    /// answer it once. They now declare only what they assert and fall back
+    /// on `Default` for the rest.
     fn empty_message() -> SourceMessage {
         SourceMessage {
             id: None,
@@ -303,6 +321,7 @@ mod tests {
             can_eject: None,
             presets: None,
             cover: None,
+            cover_thumb: None,
         }
     }
 
@@ -470,14 +489,7 @@ mod tests {
             id: Some(1),
             action: Some(SourceAction::play("http://fip")),
             identity: Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream"}))),
-            transient: false,
-            preset: None,
-            preset_count: None,
-            preset_name: None,
-            status: None,
-            can_eject: None,
-            presets: None,
-            cover: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
@@ -488,7 +500,7 @@ mod tests {
 
     #[test]
     fn notification_message_without_id() {
-        let m = SourceMessage { id: None, action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None, presets: None, cover: None };
+        let m = SourceMessage::default();
         let json = serde_json::to_string(&m).unwrap();
         let back: SourceMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, None);
@@ -517,15 +529,8 @@ mod tests {
         let m = SourceMessage {
             id: Some(3),
             action: Some(SourceAction::Noop),
-            identity: None,
-            transient: false,
             preset: Some(4),
-            preset_count: None,
-            preset_name: None,
-            status: None,
-            can_eject: None,
-            presets: None,
-            cover: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset\":4"));
@@ -540,7 +545,7 @@ mod tests {
         // Most frames say nothing about the identity (SetLocale, Deactivate…):
         // weighing them down with an `"identity":null` would be noise on a
         // link deliberately readable by eye.
-        let m = SourceMessage { id: Some(2), action: None, identity: None, transient: false, preset: None, preset_count: None, preset_name: None, status: None, can_eject: None, presets: None, cover: None };
+        let m = SourceMessage { id: Some(2), ..Default::default() };
         assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"id":2,"action":null}"#);
     }
 
@@ -549,15 +554,8 @@ mod tests {
         let m = SourceMessage {
             id: Some(4),
             action: Some(SourceAction::Noop),
-            identity: None,
-            transient: false,
-            preset: None,
-            preset_count: None,
-            preset_name: None,
-            status: None,
             can_eject: Some(true),
-            presets: None,
-            cover: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"can_eject\":true"), "{json}");
@@ -578,15 +576,8 @@ mod tests {
         let m = SourceMessage {
             id: Some(3),
             action: Some(SourceAction::Noop),
-            identity: None,
-            transient: false,
-            preset: None,
             preset_count: Some(23),
-            preset_name: None,
-            status: None,
-            can_eject: None,
-            presets: None,
-            cover: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_count\":23"));
@@ -608,15 +599,9 @@ mod tests {
         let m = SourceMessage {
             id: Some(3),
             action: Some(SourceAction::Noop),
-            identity: None,
-            transient: false,
             preset: Some(4),
-            preset_count: None,
             preset_name: Some("FIP".into()),
-            status: None,
-            can_eject: None,
-            presets: None,
-            cover: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"preset_name\":\"FIP\""));
@@ -653,6 +638,35 @@ mod tests {
         assert!(!serde_json::to_string(&silent).unwrap().contains("cover"));
     }
 
+    #[test]
+    fn the_source_message_carries_a_thumb_beside_its_cover() {
+        // The pair on the Source's channel, and the same two properties as on
+        // the enrichment side: it travels when present, and absence stays
+        // absence. The production change that would make the last assertion
+        // fail: dropping `skip_serializing_if`, which would make every frame
+        // a source has ever emitted grow by a `"cover_thumb":null`.
+        let msg = SourceMessage {
+            cover: Some(crate::CoverRef::Url { url: "https://example.org/front.jpg".into() }),
+            cover_thumb: Some(crate::CoverRef::Url {
+                url: "https://example.org/front-500.jpg".into(),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("front-500.jpg"), "{json}");
+        let back: SourceMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.cover_thumb, msg.cover_thumb);
+
+        // A frame from a plugin that knows nothing of the field reads back,
+        // the thumbnail simply absent.
+        let old: SourceMessage =
+            serde_json::from_str(r#"{"cover":{"kind":"path","path":"/nas/a/folder.jpg"}}"#)
+                .unwrap();
+        assert!(old.cover.is_some());
+        assert!(old.cover_thumb.is_none());
+        assert!(!serde_json::to_string(&SourceMessage::default()).unwrap().contains("cover_thumb"));
+    }
+
     /// Local factory: avoids repeating the path in several tests.
     fn ritornello_proto_test_cover() -> crate::CoverRef {
         crate::CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() }
@@ -667,15 +681,8 @@ mod tests {
         let m = SourceMessage {
             id: Some(3),
             action: Some(SourceAction::Noop),
-            identity: None,
-            transient: false,
-            preset: None,
-            preset_count: None,
-            preset_name: None,
             status: Some("NO DISC".into()),
-            can_eject: None,
-            presets: None,
-            cover: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"status\":\"NO DISC\""));

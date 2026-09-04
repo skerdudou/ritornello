@@ -140,14 +140,7 @@ pub(super) fn bare_update() -> SourceUpdate {
 pub(super) fn plays(identity: serde_json::Value) -> SourceUpdate {
     SourceUpdate {
         identity: Some(IdentityUpdate::Playing(identity)),
-        transient: false,
-        preset: None,
-        preset_count: None,
-        preset_name: None,
-        status: None,
-        can_eject: None,
-        presets: None,
-        cover: None,
+        ..Default::default()
     }
 }
 
@@ -383,45 +376,24 @@ pub(super) fn enrichment(identity: serde_json::Value, artist: &str, title: &str)
 /// Update carrying only a preset count declared by the Source.
 pub(super) fn update_with_count(count: Option<u8>) -> SourceUpdate {
     SourceUpdate {
-        identity: None,
-        transient: false,
-        preset: None,
         preset_count: count,
-        preset_name: None,
-        status: None,
-        can_eject: None,
-        presets: None,
-        cover: None,
+        ..Default::default()
     }
 }
 
 /// Update carrying only a preset name declared by the Source.
 pub(super) fn update_with_name(name: Option<&str>) -> SourceUpdate {
     SourceUpdate {
-        identity: None,
-        transient: false,
-        preset: None,
-        preset_count: None,
         preset_name: name.map(str::to_string),
-        status: None,
-        can_eject: None,
-        presets: None,
-        cover: None,
+        ..Default::default()
     }
 }
 
 /// Update carrying only the eject capability declared by the Source.
 pub(super) fn update_with_eject(can: Option<bool>) -> SourceUpdate {
     SourceUpdate {
-        identity: None,
-        transient: false,
-        preset: None,
-        preset_count: None,
-        preset_name: None,
-        status: None,
         can_eject: can,
-        presets: None,
-        cover: None,
+        ..Default::default()
     }
 }
 

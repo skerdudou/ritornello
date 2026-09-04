@@ -136,6 +136,9 @@ pub struct Notification {
     pub presets: Option<Vec<Preset>>,
     /// See `SourceMessage::cover`.
     pub cover: Option<ritornello_proto::CoverRef>,
+    /// See `SourceMessage::cover_thumb`. Set through
+    /// [`Notification::cover_with_thumb`], which takes both halves at once.
+    pub cover_thumb: Option<ritornello_proto::CoverRef>,
 }
 
 impl Notification {
@@ -193,6 +196,25 @@ impl Notification {
     /// See `SourceMessage::cover`.
     pub fn cover(mut self, c: ritornello_proto::CoverRef) -> Self {
         self.cover = Some(c);
+        self
+    }
+
+    /// The cover **and** the ready-made thumbnail this source has for it (see
+    /// `SourceMessage::cover_thumb`).
+    ///
+    /// Both halves in one call, deliberately: there is no builder for a
+    /// thumbnail on its own, because a thumbnail without the cover it
+    /// describes is not a declaration the core can act on — it drops it (see
+    /// `Core::apply_source_cover`). The field itself stays `pub`, like every
+    /// other one on this struct, so this steers rather than forbids: a
+    /// plugin author reaching for a builder finds only the pair.
+    pub fn cover_with_thumb(
+        mut self,
+        full: ritornello_proto::CoverRef,
+        thumb: ritornello_proto::CoverRef,
+    ) -> Self {
+        self.cover = Some(full);
+        self.cover_thumb = Some(thumb);
         self
     }
 }
@@ -376,8 +398,11 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     presets: outcome.presets,
                     // A response to a request (Activate, Select…) never
                     // carries a cover: `SourceOutcome` does not declare it,
-                    // only the spontaneous notification does (see below).
+                    // only the spontaneous notification does (see below). Its
+                    // thumbnail follows it, for the same reason and by the
+                    // same route — the pair is never split.
                     cover: None,
+                    cover_thumb: None,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -396,6 +421,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             can_eject: Some(plugin.can_eject()),
                             presets: n.presets,
                             cover: n.cover,
+                            cover_thumb: n.cover_thumb,
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }

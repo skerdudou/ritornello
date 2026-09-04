@@ -330,8 +330,10 @@ impl CdSource {
             // and a spontaneous frame has nothing to republish here.
             presets: None,
             // The cd is not in the scope of that project: it does not declare a
-            // cover yet (see `SourceMessage::cover`).
+            // cover yet (see `SourceMessage::cover`), hence no thumbnail
+            // either — the pair is never split.
             cover: None,
+            cover_thumb: None,
         }
     }
 }

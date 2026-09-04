@@ -146,10 +146,14 @@ impl SourceStamp {
 
 /// What the core keeps of a cover.
 ///
-/// Two natures, and it is deliberate: a **local** cover does not enter memory.
-/// A three-megabyte `folder.jpg` is commonplace on a NAS, and loading it into
-/// RAM on a Pi for an image the browser will cache on its side would be a
-/// waste.
+/// Bytes or a path, and it is deliberate: a **local** cover does not enter
+/// memory. A three-megabyte `folder.jpg` is commonplace on a NAS, and loading
+/// it into RAM on a Pi for an image the browser will cache on its side would
+/// be a waste.
+///
+/// `Pair` is the one variant that is both at once — bytes for the thumbnail,
+/// a reference for the full size — and that is exactly what it exists to
+/// express.
 #[derive(Debug, Clone)]
 pub enum CoverPayload {
     /// From the network: the bytes are in memory.
@@ -166,19 +170,36 @@ pub enum CoverPayload {
     /// deposited through `Core::set_source_cover` and `fetch` — a probe, never
     /// a copy: nothing is written to disk to produce this variant.
     Embedded(PathBuf),
+    /// A cover whose contributor supplied a ready-made thumbnail alongside it.
+    ///
+    /// The thumbnail's bytes are held — they are what the player's square
+    /// shows — and the full-size image is kept as a **reference only**, not
+    /// downloaded, until someone enlarges the cover. Most covers never are.
+    ///
+    /// Why the reference lives in the payload and not in a table beside it:
+    /// the invariant then has nowhere to break. A side table can outlive the
+    /// eviction of its entry and hand back an orphan reference; a variant
+    /// carries both halves or neither.
+    Pair { thumb: Vec<u8>, thumb_mime: &'static str, full: CoverRef },
 }
 
 /// What `p` charges against `CoverSettings::budget`.
 ///
-/// Only `Bytes` costs anything real, and that mirrors `CoverPayload`'s own
-/// doc: `File` and `Embedded` both keep a path and nothing else, the same
+/// Only bytes actually held cost anything, and that mirrors `CoverPayload`'s
+/// own doc: `File` and `Embedded` both keep a path and nothing else, the same
 /// path a `folder.jpg` on a NAS would cost whether it sat beside the track
 /// or inside it. `evict_to_budget` charges a retained `Rendered` the same
 /// way, directly against its `bytes.len()` — there is no payload to match
 /// on there, only ever bytes.
+///
+/// **A `Pair` is charged its thumbnail and nothing more.** Its other half is
+/// a `CoverRef` nobody has downloaded — a string, on the order of the path a
+/// `File` costs — so charging the full-size image would bill the budget for
+/// megabytes the process does not hold.
 fn payload_cost(p: &CoverPayload) -> usize {
     match p {
         CoverPayload::Bytes(v, _) => v.len(),
+        CoverPayload::Pair { thumb, .. } => thumb.len(),
         CoverPayload::File(_) | CoverPayload::Embedded(_) => 0,
     }
 }
@@ -301,6 +322,27 @@ impl Rendition {
     fn tag(&self) -> String {
         let Self { max_edge_px, jpeg_quality, passthrough_max, pixel_cap } = self;
         format!("{max_edge_px}-{jpeg_quality}-{passthrough_max}-{pixel_cap}")
+    }
+
+    /// **The rule: is this image already small enough to be left alone?**
+    /// Within the longest edge *and* under the pass-through threshold.
+    ///
+    /// One method and not two spellings of one predicate, and that is the
+    /// whole reason it exists. It has two callers with nothing else in
+    /// common — `rendition`, deciding whether to run the encoder at all, and
+    /// `cover_get`'s `Pair` arm, deciding whether a **supplied** thumbnail is
+    /// acceptable as it stands. Written out on both sides, the day someone
+    /// turned a `<=` into a `<`, or measured the long edge differently, a
+    /// contributor's thumbnail would be judged by a rule no other cover is
+    /// judged by. The convergence of those two questions onto one answer is
+    /// the finding this worksite rests on; a shared method is what makes it
+    /// true rather than merely intended.
+    ///
+    /// `len` and the dimensions are passed in rather than read from the
+    /// bytes: `rendition` has already decoded the header for its pixel cap,
+    /// and asking for them again would be a second read of the same header.
+    pub fn leaves_alone(&self, len: usize, (width, height): (u32, u32)) -> bool {
+        width.max(height) <= self.max_edge_px && len <= self.passthrough_max
     }
 
     /// The safety net on what the encoder **produced**, in bytes.
@@ -1184,6 +1226,23 @@ impl CoverCache {
                     }
                     return Some((*mime, v.clone(), SourceStamp::Frozen));
                 }
+                // **The thumbnail, never the full size.** This method is the
+                // socket side's door in, and what the displays receive is a
+                // square of a couple of hundred pixels: they have never wanted
+                // the full-size image, and the full-size half of a pair is a
+                // reference nobody has downloaded anyway. Same cap and same
+                // `Frozen` stamp as `Bytes` above, for the same reasons — this
+                // is a network image, frozen under its key.
+                Some(CoverPayload::Pair { thumb, thumb_mime, .. }) => {
+                    if thumb.len() > cap {
+                        tracing::warn!(
+                            "supplied thumbnail not pushed: {} bytes over the {cap}-byte limit",
+                            thumb.len()
+                        );
+                        return None;
+                    }
+                    return Some((*thumb_mime, thumb.clone(), SourceStamp::Frozen));
+                }
                 Some(CoverPayload::File(c)) => OnDisk::File(c.clone()),
                 Some(CoverPayload::Embedded(c)) => OnDisk::Embedded(c.clone()),
             }
@@ -1401,7 +1460,10 @@ async fn rendition(
         );
         return None;
     }
-    if width.max(height) <= r.max_edge_px && bytes.len() <= r.passthrough_max {
+    // The rule, shared with `cover_get`'s `Pair` arm — see
+    // `Rendition::leaves_alone` for why it is a method and not a condition
+    // written out twice.
+    if r.leaves_alone(bytes.len(), (width, height)) {
         tracing::debug!("cover already small ({width}x{height}, {} bytes), pushed as it is", bytes.len());
         return Some((mime, bytes));
     }
@@ -1884,11 +1946,58 @@ const FILE_TIMEOUT: std::time::Duration = crate::health::TIMEOUT;
 /// job, not this function's, to read the current setting — `fetch` runs
 /// detached (`Core::start_cover_fetch`), well away from any lock on the
 /// settings.
-pub async fn fetch(s: &CoverSource, download_max: usize) -> Option<CoverPayload> {
+///
+/// **`thumb` inverts what gets downloaded, and that is the whole point of the
+/// pair.** When the contributor supplied a ready-made thumbnail, it is *that*
+/// one that crosses the network here, and the full size is merely copied into
+/// the payload as a reference. This is what lets a 2.5 MiB original be
+/// announced at all: under `download_max` it would simply be refused, which
+/// is why `musicbrainz` used to announce `front-500` as if it were the cover
+/// itself. Nothing enlarges the full size yet — a later task fetches it on
+/// demand — so until then it costs exactly a string.
+pub async fn fetch(
+    s: &CoverSource,
+    thumb: Option<&CoverRef>,
+    download_max: usize,
+) -> Option<CoverPayload> {
     let r = match s {
         CoverSource::Embedded { audio, .. } => return Some(CoverPayload::Embedded(audio.clone())),
         CoverSource::Ref(r) => r,
     };
+    // A supplied thumbnail short-circuits the full size entirely: the full
+    // size is not touched, not even to read a header.
+    //
+    // **The pair only forms around bytes.** A thumbnail that materializes as
+    // a path (`CoverRef::Path`) is not paired: a local file already costs a
+    // path and nothing else, so there would be nothing to gain and a half of
+    // the pair would have to hold something other than bytes. Anything that
+    // is not bytes — a local thumbnail, or one that could not be obtained —
+    // falls through to the full size, which is the answer this function would
+    // have given without the pair. Failing over rather than failing is
+    // deliberate: a thumbnail is an optimization, and losing the cover
+    // because the optimization was unavailable would be a regression.
+    if let Some(t) = thumb {
+        match fetch_ref(t, download_max).await {
+            Some(CoverPayload::Bytes(thumb, thumb_mime)) => {
+                return Some(CoverPayload::Pair { thumb, thumb_mime, full: r.clone() });
+            }
+            other => {
+                tracing::debug!(
+                    "supplied thumbnail yielded no bytes ({}), falling back to the full size",
+                    if other.is_some() { "not a network image" } else { "unavailable" }
+                );
+            }
+        }
+    }
+    fetch_ref(r, download_max).await
+}
+
+/// One reference, fetched. Split out of [`fetch`] so that a supplied
+/// thumbnail goes through exactly the same door as a full size — the same
+/// timeout on a share, the same `allowed_target`, the same download cap.
+/// Written twice, the two halves of a pair would eventually be fetched under
+/// different rules.
+async fn fetch_ref(r: &CoverRef, download_max: usize) -> Option<CoverPayload> {
     match r {
         CoverRef::Path { path } => {
             let path = PathBuf::from(path);
@@ -2061,6 +2170,134 @@ pub async fn cover_get(
                     (header::ETAG, format!("\"{key}\"")),
                 ],
                 bytes,
+            )
+                .into_response()
+        }
+        CoverPayload::Pair { thumb, thumb_mime, full } => {
+            // Frozen under its key, exactly like `Bytes`: both halves came
+            // from a network body already fully checked, and neither can
+            // change behind this key.
+            if thumbnail_requested {
+                let etag = format!("\"{key}-v\"");
+                if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
+                    == Some(etag.as_str())
+                {
+                    return StatusCode::NOT_MODIFIED.into_response();
+                }
+                // **The acceptance rule is the threshold rule, and that
+                // convergence is the point of the pair.** Not a second
+                // spelling of it either: `Rendition::leaves_alone` is the
+                // one place the rule lives, and `rendition` asks it the same
+                // question about any cover at all. A supplied thumbnail that
+                // satisfies it would come out of the encoder byte-identical
+                // at best — and re-encoded, measurably not identical at all.
+                //
+                // Judged **before** `rendition_for` rather than inside it,
+                // and that is what the test's `renditions_built() == 0`
+                // pins: `rendition` reaches the same verdict, but only after
+                // a rendezvous, a lookup and a counted build. Here it costs
+                // one header read.
+                //
+                // Re-encoding disabled (`rendition` at `None`) accepts the
+                // thumbnail too: nothing is being produced to compare it
+                // against, and the setting says push the source as it is.
+                let within_the_rule = match state.covers.settings().rendition {
+                    None => true,
+                    Some(r) => dimensions(&thumb)
+                        .is_some_and(|d| r.leaves_alone(thumb.len(), d)),
+                };
+                if !within_the_rule
+                    && let Some((mime, small, _)) =
+                        state.covers.rendition_for(&key, Some(SourceStamp::Frozen)).await
+                {
+                    return (
+                        [
+                            (header::CONTENT_TYPE, mime.to_string()),
+                            (
+                                header::CACHE_CONTROL,
+                                "public, max-age=31536000, immutable".to_string(),
+                            ),
+                            (header::ETAG, etag),
+                        ],
+                        small.as_slice().to_vec(),
+                    )
+                        .into_response();
+                }
+                // Either within the rule — served untouched, which is what
+                // the pair exists for — or out of it with nothing produced
+                // (unreadable image, dimensions beyond the cap). In both
+                // cases the supplied thumbnail is the answer, for the same
+                // reason as the `Bytes` arm's fall-through: better an
+                // oversized image than no image.
+                return (
+                    [
+                        (header::CONTENT_TYPE, thumb_mime.to_string()),
+                        (
+                            header::CACHE_CONTROL,
+                            "public, max-age=31536000, immutable".to_string(),
+                        ),
+                        (header::ETAG, etag),
+                    ],
+                    thumb,
+                )
+                    .into_response();
+            }
+            // **The bare URL serves the thumbnail, for now.** The full size
+            // is a reference this task deliberately leaves undownloaded, and
+            // a later one fetches it on demand here.
+            //
+            // **A validator of its own, and this is the part that had to be
+            // settled here rather than later.** `no-cache` guarantees that
+            // the browser asks again; it says nothing about the answer. Had
+            // this stand-in gone out under `"{key}"` — the tag the `Bytes`
+            // arm gives real network bytes, hence the one the real full size
+            // will carry under this same key — then the day this branch
+            // learns to fetch it, the browser's `If-None-Match: "{key}"`
+            // would compare *equal*, earn a `304`, and the stand-in would
+            // stay on screen at every revalidation, for ever. The guarantee
+            // cannot rest on an unwritten decision of the next task: the
+            // validator is created here, so it is distinguished here.
+            //
+            // **And distinct from the thumbnail branch's `"{key}-v"` too**,
+            // not merely from `"{key}"`. Within the rule the two branches do
+            // serve the same bytes, which is what makes sharing tempting —
+            // but *outside* it they do not: `?size=thumbnail` then answers
+            // with the re-encoded rendition while this branch still answers
+            // with the raw supplied thumbnail. One validator over two bodies
+            // is exactly the fault the `File` arm's comment warns about, and
+            // it would make a browser serve one size for the other.
+            //
+            // Hence a third tag. Three bodies, three validators; the day the
+            // full size is fetched, it takes `"{key}"` and every cached
+            // stand-in mismatches on its own.
+            //
+            // Named in the log rather than left implicit: this branch answers
+            // with something other than what its URL promises, and a
+            // `journalctl` that does not say so would make the enlarged view's
+            // softness look like a rendition defect. The reference is right
+            // there, so the line can say which image was *not* fetched.
+            tracing::debug!(
+                "cover {key}: serving the supplied thumbnail; the full size at {full:?} \
+                 has not been downloaded"
+            );
+            let etag = format!("\"{key}-standin\"");
+            if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok())
+                == Some(etag.as_str())
+            {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
+            (
+                [
+                    (header::CONTENT_TYPE, thumb_mime.to_string()),
+                    // `no-cache` and not the `immutable` year the `Bytes` arm
+                    // gives: these bytes are a stand-in for the image this URL
+                    // names, and a year of it would outlive the stand-in
+                    // itself. The distinct `ETag` above makes the revalidation
+                    // it forces actually correct.
+                    (header::CACHE_CONTROL, "no-cache".to_string()),
+                    (header::ETAG, etag),
+                ],
+                thumb,
             )
                 .into_response()
         }
@@ -2567,6 +2804,34 @@ mod tests {
         (status, etag, bytes.to_vec())
     }
 
+    /// The same request, made **conditional** on `etag`. Returns the status
+    /// alone: `304` or `200` is the entire question a validator answers.
+    async fn served_if_none_match(
+        cache: &Arc<CoverCache>,
+        key: &str,
+        query: &str,
+        etag: &str,
+    ) -> u16 {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = crate::status::router(crate::status::AppState {
+            covers: cache.clone(),
+            ..crate::status::tests_support::app_state()
+        });
+        app.oneshot(
+            Request::get(format!("/api/cover/{key}{query}"))
+                .header(header::IF_NONE_MATCH, etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+    }
+
     // -- The stamp a response is labelled with ------------------------------
 
     #[tokio::test]
@@ -2788,6 +3053,195 @@ mod tests {
         let (status, body) = served_body(&cache, "k", "?size=nawak").await;
         assert_eq!(status, 200);
         assert_eq!(body, bytes);
+    }
+
+    /// A paired payload: `thumb`'s bytes in hand, and a full-size reference
+    /// nobody has downloaded.
+    ///
+    /// A helper rather than one literal per test, and for a reason beyond
+    /// brevity: the variant is about to gain a fourth field (the fetched
+    /// full size), and scattered literals would each have to be revisited,
+    /// whereas this is corrected once.
+    fn paired_entry(thumb: Vec<u8>) -> CoverPayload {
+        CoverPayload::Pair {
+            thumb,
+            thumb_mime: "image/jpeg",
+            full: CoverRef::Url { url: "https://example.org/front.jpg".into() },
+        }
+    }
+
+    /// **A supplied thumbnail that respects the rule is served byte for
+    /// byte.** Binary identity is the assertion that counts: a
+    /// decode/encode round trip would produce different bytes even at equal
+    /// dimensions, so equality proves there was none.
+    #[tokio::test]
+    async fn a_supplied_thumbnail_within_the_rule_is_served_untouched() {
+        let cache = Arc::new(CoverCache::new());
+        // 500 px, like Cover Art Archive's `front-500`, under the 640 px of
+        // the shipped default.
+        let thumb = fixtures::jpeg_decodable(500, 500);
+        assert!(
+            thumb.len() <= 150 * 1024,
+            "the fixture must sit under the default threshold for this test to mean anything"
+        );
+        cache.insert("k".into(), paired_entry(thumb.clone())).await;
+
+        let (status, body) = served_body(&cache, "k", "?size=thumbnail").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, thumb, "a supplied thumbnail within the rule must not be re-encoded");
+        assert_eq!(cache.renditions_built(), 0, "and nothing must have been produced");
+    }
+
+    /// The other edge. A supplied thumbnail that is too heavy **is**
+    /// re-encoded, and from itself — not from the full size, which has not
+    /// even been downloaded.
+    #[tokio::test]
+    async fn a_supplied_thumbnail_outside_the_rule_is_re_encoded_from_itself() {
+        let cache = Arc::new(CoverCache::new());
+        // 900 px: beyond the 640 px edge, hence out of the rule by its
+        // dimensions.
+        let thumb = fixtures::jpeg_decodable(900, 900);
+        cache.insert("k".into(), paired_entry(thumb.clone())).await;
+
+        let (status, body) = served_body(&cache, "k", "?size=thumbnail").await;
+        assert_eq!(status, 200);
+        assert_ne!(body, thumb, "out of the rule, it must be re-encoded");
+        assert_eq!(dimensions(&body), Some((640, 640)), "down to the configured edge");
+        assert_eq!(cache.renditions_built(), 1);
+    }
+
+    /// The bare URL serves the thumbnail **for now**, which is exactly what
+    /// the `Bytes` arm does for a network cover: nothing regresses, and the
+    /// full size stays a reference until a later task fetches it on demand.
+    /// The production change that would make this fail: downloading the full
+    /// size on announcement, which is precisely what the pair avoids.
+    #[tokio::test]
+    async fn the_bare_url_of_a_paired_entry_serves_its_thumbnail() {
+        let cache = Arc::new(CoverCache::new());
+        let thumb = fixtures::jpeg_decodable(500, 500);
+        cache.insert("k".into(), paired_entry(thumb.clone())).await;
+
+        let (status, body) = served_body(&cache, "k", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, thumb);
+    }
+
+    /// **Within the edge, over the threshold** — the half of the rule the two
+    /// tests above cannot reach. One sits under both bounds, the other is out
+    /// by its dimensions alone, so dropping `len <= passthrough_max` from
+    /// `Rendition::leaves_alone` would survive both of them.
+    ///
+    /// The threshold is lowered rather than the fixture inflated: a fixture
+    /// heavy enough to cross 150 KiB while staying under 640 px would rest on
+    /// how well a gradient happens to compress, which is not a property to
+    /// pin a rule on.
+    #[tokio::test]
+    async fn a_supplied_thumbnail_within_the_edge_but_over_the_threshold_is_re_encoded() {
+        let cache = Arc::new(CoverCache::new());
+        let rules = cache.settings().rendition.expect("the product default re-encodes");
+        cache.set_cover_settings(CoverSettings {
+            // 500 px stays well within the 640 px edge; 1 KiB is a threshold
+            // no real cover clears.
+            rendition: Some(Rendition { passthrough_max: 1024, ..rules }),
+            ..cache.settings()
+        });
+        let thumb = fixtures::jpeg_decodable(500, 500);
+        // The two halves of this case, stated on the **input**: comfortably
+        // within the edge, and over the threshold. It is the second alone
+        // that must send it through the encoder.
+        assert_eq!(dimensions(&thumb), Some((500, 500)));
+        assert!(500 <= rules.max_edge_px, "the fixture must be within the edge");
+        assert!(thumb.len() > 1024, "and over the lowered threshold");
+        cache.insert("k".into(), paired_entry(thumb.clone())).await;
+
+        let (status, body) = served_body(&cache, "k", "?size=thumbnail").await;
+        assert_eq!(status, 200);
+        assert_ne!(body, thumb, "over the threshold, it must be re-encoded");
+        assert_eq!(cache.renditions_built(), 1);
+    }
+
+    /// **The stand-in must not wear the validator the real full size will
+    /// wear.** `no-cache` only guarantees the browser asks again; the answer
+    /// is the `ETag`'s business. Under `"{key}"` — the tag the `Bytes` arm
+    /// gives real network bytes — a later task fetching the full size would
+    /// compare equal to what the browser holds, answer `304`, and leave the
+    /// stand-in on screen at every revalidation for ever.
+    ///
+    /// Distinct from the thumbnail branch's tag too, and the third assertion
+    /// is the one that matters there: out of the rule the two branches serve
+    /// **different** bodies, so a shared validator would let a browser be
+    /// served one size for the other.
+    #[tokio::test]
+    async fn the_stand_in_carries_a_validator_of_its_own() {
+        let cache = Arc::new(CoverCache::new());
+        // Out of the rule by its dimensions, so that the two branches really
+        // do answer with different bytes — the case a shared validator would
+        // corrupt.
+        cache.insert("k".into(), paired_entry(fixtures::jpeg_decodable(900, 900))).await;
+
+        let (status, bare_etag, _) = served_with_etag(&cache, "k", "").await;
+        assert_eq!(status, 200);
+        assert_ne!(
+            bare_etag, "\"k\"",
+            "the stand-in must not claim the validator the real full size will carry"
+        );
+        let (_, thumb_etag, _) = served_with_etag(&cache, "k", "?size=thumbnail").await;
+        assert_ne!(bare_etag, thumb_etag, "two different bodies, two validators");
+
+        // Its own validator does earn a 304: `no-cache` costs a round trip,
+        // never a body.
+        assert_eq!(served_if_none_match(&cache, "k", "", &bare_etag).await, 304);
+        // And it earns one **only on its own branch**. This is the assertion
+        // that would fail if the stand-in borrowed `"{key}-v"`: the thumbnail
+        // branch would hand back a `304` for bytes it never served.
+        assert_eq!(
+            served_if_none_match(&cache, "k", "?size=thumbnail", &bare_etag).await,
+            200,
+            "the thumbnail branch must not honour the stand-in's validator"
+        );
+    }
+
+    /// **The documented fall-back, which had no test.** A thumbnail that is a
+    /// local path forms no pair — half a pair would then have to hold
+    /// something other than bytes, and a local file costs a path anyway — so
+    /// `fetch` answers with the full size, exactly as it would have without
+    /// any thumbnail at all.
+    ///
+    /// The production change that would make this fail: pairing on anything
+    /// `fetch_ref` returns rather than on bytes, which would put a `File`
+    /// payload's path where the thumbnail's bytes belong; or treating an
+    /// unusable thumbnail as a failure of the whole fetch, which would trade
+    /// the cover for the optimization.
+    #[tokio::test]
+    async fn a_local_thumbnail_forms_no_pair_and_the_full_size_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let full = dir.path().join("front.jpg");
+        let thumb = dir.path().join("front-500.jpg");
+        std::fs::write(&full, fixtures::jpeg_decodable(1200, 1200)).unwrap();
+        std::fs::write(&thumb, fixtures::jpeg_decodable(500, 500)).unwrap();
+
+        let source = CoverSource::Ref(CoverRef::Path {
+            path: full.to_string_lossy().into_owned(),
+        });
+        let thumb_ref = CoverRef::Path { path: thumb.to_string_lossy().into_owned() };
+        let p = fetch(&source, Some(&thumb_ref), download_cap())
+            .await
+            .expect("the full size must still be obtained");
+        match p {
+            CoverPayload::File(got) => assert_eq!(got, full, "the full size, not the thumbnail"),
+            other => panic!("a local thumbnail must form no pair, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paired_entry_is_charged_its_thumbnail_and_not_its_full_size() {
+        // The full-size half is only a reference as long as nobody enlarges
+        // it: it must cost the budget nothing. The production change that
+        // would make this fail: downloading the full size on announcement,
+        // which is exactly what this task avoids.
+        let cache = CoverCache::new();
+        cache.insert("k".into(), paired_entry(vec![0u8; 3_333])).await;
+        assert_eq!(cache.snapshot().await.used_bytes, 3_333);
     }
 
     #[tokio::test]
@@ -3145,7 +3599,7 @@ mod tests {
         std::fs::write(&fake, b"this is not an image").unwrap();
         let r = CoverSource::Ref(CoverRef::Path { path: fake.to_string_lossy().into_owned() });
         assert!(
-            fetch(&r, download_cap()).await.is_none(),
+            fetch(&r, None, download_cap()).await.is_none(),
             "the header bytes must be checked: without this, a badly written contributor \
              would get any file of the system served on a public HTTP route"
         );
@@ -3154,7 +3608,7 @@ mod tests {
         // Minimal JPEG header: SOI + APP0 marker.
         std::fs::write(&real, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let r = CoverSource::Ref(CoverRef::Path { path: real.to_string_lossy().into_owned() });
-        match fetch(&r, download_cap()).await {
+        match fetch(&r, None, download_cap()).await {
             Some(CoverPayload::File(p)) => assert_eq!(p, real),
             other => panic!("a local image must stay a path, not bytes: {other:?}"),
         }
@@ -3170,7 +3624,7 @@ mod tests {
         // ever hands `fetch` a path it just probed successfully.
         let audio = PathBuf::from("/does/not/exist.mp3");
         let s = CoverSource::Embedded { audio: audio.clone(), content: "abcd".into() };
-        match fetch(&s, download_cap()).await {
+        match fetch(&s, None, download_cap()).await {
             Some(CoverPayload::Embedded(p)) => assert_eq!(p, audio),
             other => panic!("an embedded source must yield CoverPayload::Embedded: {other:?}"),
         }
@@ -3254,7 +3708,7 @@ mod tests {
         let path = dir.path().join("folder.jpg");
         std::fs::write(&path, jpeg(10)).unwrap();
         let r = CoverSource::Ref(CoverRef::Path { path: path.to_string_lossy().into_owned() });
-        let Some(p) = fetch(&r, download_cap()).await else { panic!("a local image must be accepted") };
+        let Some(p) = fetch(&r, None, download_cap()).await else { panic!("a local image must be accepted") };
         let cache = CoverCache::new();
         cache.insert("k".into(), p).await;
 

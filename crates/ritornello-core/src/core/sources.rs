@@ -717,14 +717,12 @@ mod tests {
             "radio",
             SourceUpdate {
                 identity: Some(IdentityUpdate::Playing(serde_json::json!({"kind": "stream"}))),
-                transient: false,
                 preset: Some(3),
                 preset_count: Some(23),
                 preset_name: Some("France Inter".into()),
                 status: Some("EN DIRECT".into()),
                 can_eject: Some(true),
-                presets: None,
-                cover: None,
+                ..Default::default()
             },
         );
         assert_eq!(state_rx.borrow().source, "radio");

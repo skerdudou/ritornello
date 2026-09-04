@@ -469,6 +469,7 @@ impl<P: Player> Core<P> {
             can_eject,
             presets,
             cover,
+            cover_thumb,
         } = update;
         // Read **before** the guard below, and this is intentional: the
         // sources_catalog describes every source, not the one that is
@@ -540,16 +541,25 @@ impl<P: Player> Core<P> {
         // and `transient` joins them because a transient word is a
         // statement about what is playing (it must keep its overlay and
         // disarm a `+NN` in flight). `preset`, `preset_name`,
-        // `preset_count`, `can_eject`, `presets` and `cover` attest
-        // nothing: all of them follow the "absent = keep" convention, so
-        // none can prove the frame describes the whole view.
+        // `preset_count`, `can_eject`, `presets`, `cover` and `cover_thumb`
+        // attest nothing: all of them follow the "absent = keep" convention,
+        // so none can prove the frame describes the whole view.
         let recomposes_the_view = transient || identity.is_some() || status.is_some();
+        // **`cover_thumb` is in this disjunction, and leaving it out would
+        // repeat the defect recorded above word for word.** A frame carrying
+        // only a thumbnail would reach neither exit: not guarded, it would be
+        // dropped in silence — which is exactly what happened to `cover`
+        // itself ("Every Source cover was lost silently"). It is guarded even
+        // though a lone thumbnail is applied to nothing (see
+        // `apply_source_cover`): the guard's job is to let the frame *reach*
+        // the decision, not to make it.
         let carries_a_fact = carries_presets
             || preset_count.is_some()
             || can_eject.is_some()
             || preset.is_some()
             || preset_name.is_some()
-            || cover.is_some();
+            || cover.is_some()
+            || cover_thumb.is_some();
         if carries_a_fact && !recomposes_the_view {
             // A **single** call, and that is the point: the "absent =
             // keep" fields that must be applied after identity all live in
@@ -559,7 +569,7 @@ impl<P: Player> Core<P> {
             // depending on someone remembering to copy it — that is
             // exactly the oversight that made every Source cover get lost
             // silently.
-            self.apply_declared_facts(preset, preset_name, cover, name);
+            self.apply_declared_facts(preset, preset_name, cover, cover_thumb, name);
             // Publish anyway: count, drawer and selection are part of the
             // broadcast state, and the channel dedupes if nothing changed.
             self.publish_state();
@@ -615,7 +625,7 @@ impl<P: Player> Core<P> {
         // alongside `preset_count`; the early-return path, meanwhile,
         // cannot carry an identity by construction, so calling it there is
         // safe.
-        self.apply_declared_facts(preset, preset_name, cover, name);
+        self.apply_declared_facts(preset, preset_name, cover, cover_thumb, name);
         // `preset_count` and `can_eject` are applied **at the top** of this
         // function, before the early return, for the same reason.
         //
@@ -656,10 +666,15 @@ impl<P: Player> Core<P> {
         preset: Option<u8>,
         preset_name: Option<String>,
         cover: Option<ritornello_proto::CoverRef>,
+        cover_thumb: Option<ritornello_proto::CoverRef>,
         name: &str,
     ) {
         self.apply_selection(preset, preset_name);
-        self.apply_source_cover(cover, name);
+        // Both halves of the pair through **one** call, so that neither exit
+        // can carry one without the other — the same reason `cover` itself is
+        // routed through here rather than written at the bottom of
+        // `handle_source_update`.
+        self.apply_source_cover(cover, cover_thumb, name);
     }
 
 }
@@ -896,6 +911,44 @@ mod tests {
 
         core.handle_source_update("radio", bare_update());
         assert_eq!(core.player_state().status, None, "absent means cleared, not kept");
+    }
+
+    #[tokio::test]
+    async fn a_frame_carrying_only_a_thumbnail_does_not_erase_the_status() {
+        // **What `carries_a_fact` actually protects, and it is not the
+        // thumbnail.** A frame declaring neither identity nor status is
+        // *permanent*, and a permanent frame without a status **clears** the
+        // remembered one (see the convention just above). The early return
+        // exists so such a frame never reaches that line.
+        //
+        // So the production change that would make this fail is taking
+        // `cover_thumb` out of `carries_a_fact`: the frame would fall through
+        // the guard, reach `self.source_status = status.clone()` with
+        // `status` at `None`, and blank "NO DISC" off the console and the
+        // SPA until the next command. That is the historical defect the early
+        // return was installed to fix, for `preset_count` then for `presets`,
+        // and it is observable here without a network or a cover in sight.
+        //
+        // A lone thumbnail is applied to nothing (`apply_source_cover` needs
+        // the cover it describes), which is exactly why this test is written
+        // against the *status* and not against the cover: the guard's job is
+        // to keep the frame from doing damage on its way to being ignored.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        let mut permanent = bare_update();
+        permanent.status = Some("NO DISC".into());
+        core.handle_source_update("radio", permanent);
+        assert_eq!(core.player_state().status.as_deref(), Some("NO DISC"));
+
+        let mut thumb_only = bare_update();
+        thumb_only.cover_thumb = Some(ritornello_proto::CoverRef::Url {
+            url: "https://example.org/front-500.jpg".into(),
+        });
+        core.handle_source_update("radio", thumb_only);
+        assert_eq!(
+            core.player_state().status.as_deref(),
+            Some("NO DISC"),
+            "a frame that only announces a fact must take the early return, not clear the status"
+        );
     }
 
     #[tokio::test]

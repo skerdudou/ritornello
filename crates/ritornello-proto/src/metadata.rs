@@ -362,6 +362,26 @@ pub struct Enrichment {
     /// The cover this contributor found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<CoverRef>,
+    /// A ready-made thumbnail for the cover above, if this contributor has
+    /// one.
+    ///
+    /// **Optional, and the pair is not two covers.** `cover` stays the
+    /// subject — the full-size image, the one an enlarged view wants. This is
+    /// the same image, already reduced, offered so the appliance does not
+    /// re-encode what is already the right size: Cover Art Archive's
+    /// `front-500` weighs 73 KiB against 2.5 MiB for the original, and 73 KiB
+    /// is almost exactly what our own encoder would produce anyway.
+    ///
+    /// It is accepted **only if it respects the rule** — no wider than
+    /// `cover_max_edge_px`, no heavier than `cover_passthrough_max_ko` — the
+    /// same rule that decides whether any cover is left alone. One mechanism,
+    /// two uses.
+    ///
+    /// The same serde attributes as `cover` just above, deliberately: a
+    /// plugin that ignores the field emits exactly the frame it emitted
+    /// before, and absence stays absence on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_thumb: Option<CoverRef>,
     /// This contributor only **fills in**: it replaces no field already set.
     ///
     /// Default `false` = it overwrites, which is the project's current rule ("a
@@ -429,6 +449,11 @@ impl Enrichment {
         clear(&mut self.title);
         clear(&mut self.album);
         self.cover = self.cover.take().and_then(CoverRef::validated);
+        // The twin line, and it goes through the **same** `validated`: the two
+        // halves of a pair are the same kind of value, arriving from the same
+        // process, and a second grammar written here would eventually judge
+        // them differently.
+        self.cover_thumb = self.cover_thumb.take().and_then(CoverRef::validated);
         // Re-bounded here even though the contributor is supposed to have done
         // it: this value crosses a socket, and this layer is the one documented
         // as owner of the shape validation.
@@ -825,6 +850,7 @@ mod tests {
             ],
             position_s: None,
             cover: None,
+            cover_thumb: None,
             fill_only: false,
             searched: false,
             derived_from: None,
@@ -967,6 +993,7 @@ mod tests {
             links: Vec::new(),
             position_s: None,
             cover: None,
+            cover_thumb: None,
             fill_only: false,
             searched: false,
             derived_from: None,
@@ -1364,6 +1391,73 @@ mod tests {
             ..Default::default()
         };
         assert!(e.is_empty());
+    }
+
+    #[test]
+    fn an_enrichment_without_a_thumb_deserializes_as_before() {
+        // **Backward compatibility, proved on the old shape**: a frame from a
+        // plugin that has not been recompiled must still read.
+        //
+        // The production change that would make this fail is the new field
+        // ceasing to be an `Option` — a bare `CoverRef`, or a wrapper serde
+        // cannot supply — at which point every such frame is refused.
+        // **Not** the loss of `#[serde(default)]`: serde fills an absent
+        // `Option<T>` with `None` with or without the attribute, so naming
+        // that mutation here would be naming one this assertion cannot
+        // catch. The attribute earns its place next to
+        // `skip_serializing_if` — as documentation of intent and as what
+        // keeps the pair of them symmetrical with `cover` — not as this
+        // test's subject.
+        let old = r#"{"identity":1,"cover":{"kind":"url","url":"https://example.org/a.jpg"}}"#;
+        let e: Enrichment = serde_json::from_str(old).expect("the old shape must still parse");
+        assert!(e.cover.is_some());
+        assert!(e.cover_thumb.is_none());
+    }
+
+    #[test]
+    fn an_absent_thumb_does_not_grow_the_frame() {
+        // The same contract as `year` and `links`: absence stays absence on
+        // the wire. The production change that would make this fail: dropping
+        // `skip_serializing_if` on the new field, which would stamp a
+        // `"cover_thumb":null` onto every enrichment ever emitted.
+        let e = Enrichment { identity: json!(1), ..Default::default() };
+        assert!(!serde_json::to_string(&e).unwrap().contains("cover_thumb"));
+    }
+
+    #[test]
+    fn a_thumb_is_validated_like_a_cover() {
+        // The same door in, the same distrust: these values come from another
+        // process. A literal IP address and a plain `http://` are refused on
+        // the thumbnail side just as on the full-size side.
+        let mut e = Enrichment {
+            identity: json!(1),
+            cover: Some(CoverRef::Url { url: "https://example.org/full.jpg".into() }),
+            cover_thumb: Some(CoverRef::Url { url: "http://192.168.1.15/thumb.jpg".into() }),
+            ..Default::default()
+        };
+        e = e.cleaned();
+        assert!(e.cover.is_some(), "the full cover was well formed");
+        assert!(e.cover_thumb.is_none(), "a plain-http literal IP must be dropped");
+    }
+
+    #[test]
+    fn a_thumb_survives_cleaning_when_it_is_well_formed() {
+        let e = Enrichment {
+            identity: json!(1),
+            cover: Some(CoverRef::Url {
+                url: "https://coverartarchive.org/release/x/front".into(),
+            }),
+            cover_thumb: Some(CoverRef::Url {
+                url: " https://coverartarchive.org/release/x/front-500 ".into(),
+            }),
+            ..Default::default()
+        }
+        .cleaned();
+        assert_eq!(
+            e.cover_thumb,
+            Some(CoverRef::Url { url: "https://coverartarchive.org/release/x/front-500".into() }),
+            "trimmed, like the full one"
+        );
     }
 
     #[test]

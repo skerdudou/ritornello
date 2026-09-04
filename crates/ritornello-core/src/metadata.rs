@@ -90,7 +90,14 @@ pub struct Metadata {
     /// there is nothing here for `CoverSource::Embedded` to widen: only the
     /// core itself produces that variant, by probing the file it is playing
     /// (see `cover_tags` below).
-    cover_source: Option<(CoverRef, String)>,
+    ///
+    /// The middle member is the ready-made thumbnail this same frame declared
+    /// (`SourceMessage::cover_thumb`), and it lives **inside** the tuple
+    /// rather than in a field of its own on purpose: a thumbnail is an
+    /// attribute of one particular cover, so it must be replaced and cleared
+    /// with it. Kept apart, a thumbnail could outlive the cover it describes
+    /// and end up pinned to the next one — which would be another album.
+    cover_source: Option<(CoverRef, Option<CoverRef>, String)>,
     /// Cover embedded in the file, read by the core (`player::mpv::
     /// embedded_cover`, via `Core::extraction_arrived`).
     ///
@@ -276,7 +283,19 @@ impl Metadata {
         // enters no arbitration: without text it cannot win (`text_block`
         // discards it), without a field it fills nothing (`composed_text`
         // only reads `Some`s). It only adds a line to `Provenance::misses`.
-        if e.is_empty() && e.cover.is_none() && e.year.is_none() && e.links.is_empty() && !e.searched
+        //
+        // **`cover_thumb` is exempted just as `cover` is**, and forgetting it
+        // would be the same defect one field over: a frame carrying only a
+        // thumbnail would be counted as no response and thrown away at the
+        // door, with nothing but a `debug!` to show for it. No plugin of ours
+        // sends a thumbnail without its cover today — which is exactly why
+        // the omission would have been invisible.
+        if e.is_empty()
+            && e.cover.is_none()
+            && e.cover_thumb.is_none()
+            && e.year.is_none()
+            && e.links.is_empty()
+            && !e.searched
         {
             // **An enrichment that says nothing at all is a withdrawal**, no
             // longer only a refusal: it removes what this plugin had retained.
@@ -354,9 +373,22 @@ impl Metadata {
             .map(String::as_str)
     }
 
-    /// Retains the cover declared by the Source. `true` if it is news.
-    pub fn set_cover_source(&mut self, c: Option<CoverRef>, origin: &str) -> bool {
-        let fresh = c.map(|r| (r, origin.to_string()));
+    /// Retains the cover declared by the Source, and the ready-made thumbnail
+    /// that came with it. `true` if it is news.
+    ///
+    /// `thumb` is taken **on the same call** as the cover, never set on its
+    /// own: the two halves come from one frame and describe one image, and a
+    /// separate setter would allow a thumbnail from one declaration to be
+    /// paired with a cover from another. A thumbnail without a cover is
+    /// therefore not expressible here — which is what the `Option<CoverRef>`
+    /// living inside the tuple says.
+    pub fn set_cover_source(
+        &mut self,
+        c: Option<CoverRef>,
+        thumb: Option<CoverRef>,
+        origin: &str,
+    ) -> bool {
+        let fresh = c.map(|r| (r, thumb, origin.to_string()));
         if self.cover_source == fresh {
             return false;
         }
@@ -396,20 +428,30 @@ impl Metadata {
     /// only ever carry the wire form, wrapped here in `CoverSource::Ref`;
     /// `cover_tags` already carries whichever `CoverSource` the core's own
     /// probe produced, `Embedded` included, and is handed back as-is.
-    pub fn selected_cover(&self) -> Option<(crate::cover::CoverSource, String)> {
+    ///
+    /// The middle member is the ready-made thumbnail of the **same**
+    /// contributor as the retained cover, and never of another. A thumbnail
+    /// borrowed from a plugin that lost the arbitration would describe a
+    /// different album: the two halves are picked up together or not at all.
+    /// `cover_tags` has no thumbnail to offer by construction — it is the
+    /// core's own probe of the played file, and nothing on that path declares
+    /// one.
+    pub fn selected_cover(
+        &self,
+    ) -> Option<(crate::cover::CoverSource, Option<CoverRef>, String)> {
         // Not a `let` chain like its neighbour below: the wire form has to be
         // wrapped before `has_failed` can be asked about it, and an
         // intermediate binding is what a chain cannot express.
-        if let Some((r, o)) = &self.cover_source {
+        if let Some((r, thumb, o)) = &self.cover_source {
             let s = crate::cover::CoverSource::Ref(r.clone());
             if !self.has_failed(&s) {
-                return Some((s, o.clone()));
+                return Some((s, thumb.clone(), o.clone()));
             }
         }
         if let Some(s) = &self.cover_tags
             && !self.has_failed(s)
         {
-            return Some((s.clone(), ORIGIN_TAGS.to_string()));
+            return Some((s.clone(), None, ORIGIN_TAGS.to_string()));
         }
         // An overriding plugin first, then a `fill_only`. Two passes rather
         // than one: otherwise a `fill_only` declared high in `plugins.toml`
@@ -426,7 +468,11 @@ impl Metadata {
                     // judge it.
                     let s = crate::cover::CoverSource::Ref(r.clone());
                     if !self.has_failed(&s) {
-                        return Some((s, plugin.clone()));
+                        // `e.cover_thumb` and not some other contributor's:
+                        // the thumbnail comes from the very enrichment that
+                        // just won, which is what keeps a pair describing one
+                        // album.
+                        return Some((s, e.cover_thumb.clone(), plugin.clone()));
                     }
                 }
             }
@@ -519,7 +565,7 @@ impl Metadata {
         // `set_cover_href`), and this method is called at least once per
         // second as long as a track is playing.
         if let Some(key) = &self.cover_cle
-            && let Some((_, origin)) = self.selected_cover()
+            && let Some((_, _, origin)) = self.selected_cover()
         {
             m.cover_href = Some(format!("{}{key}", crate::cover::HREF_PREFIX));
             m.provenance.fields.insert("cover".into(), origin.clone());
@@ -849,7 +895,7 @@ mod tests {
                 ..Default::default()
             }
         ));
-        let (_, origin) = m.selected_cover().expect("the plugin provides a cover");
+        let (_, _, origin) = m.selected_cover().expect("the plugin provides a cover");
         assert_eq!(origin, "musicbrainz");
 
         // The embedded cover, probed by the core, goes ahead of the plugin.
@@ -857,15 +903,16 @@ mod tests {
             audio: "/mnt/nas/a.flac".into(),
             content: "abcd".into(),
         })));
-        assert_eq!(m.selected_cover().unwrap().1, ORIGIN_TAGS);
+        assert_eq!(m.selected_cover().unwrap().2, ORIGIN_TAGS);
 
         // The file placed alongside, declared by the Source, goes ahead of
         // everything.
         assert!(m.set_cover_source(
             Some(CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() }),
+            None,
             "files"
         ));
-        let (r, origin) = m.selected_cover().unwrap();
+        let (r, _, origin) = m.selected_cover().unwrap();
         assert_eq!(origin, "files");
         assert_eq!(
             r,
@@ -898,7 +945,7 @@ mod tests {
                 ..Default::default()
             }
         ));
-        let (r, origin) = m.selected_cover().expect("a cover alone must be retained");
+        let (r, _, origin) = m.selected_cover().expect("a cover alone must be retained");
         assert_eq!(origin, "musicbrainz");
         assert_eq!(
             r,
@@ -909,6 +956,123 @@ mod tests {
         assert!(m.known().cover);
         // And nothing of the text: the `is_empty` convention has not moved.
         assert!(m.state().is_empty(), "a cover alone brings no text");
+    }
+
+    #[test]
+    fn a_thumbnail_alone_is_not_refused_at_the_door() {
+        // **The emptiness gate of `add`, one field over.** The production
+        // change that would make this fail: leaving `cover_thumb` out of the
+        // exemption list, at which point a frame carrying only a thumbnail is
+        // counted as no response and thrown away with nothing but a `debug!`
+        // — the very defect this method's own documentation records for
+        // `cover` ("refused at the door, with no trace other than a
+        // `debug!`").
+        //
+        // Retained, and yet it designates no cover: that is the other half of
+        // the contract, and it is deliberate. A thumbnail describes a cover
+        // this contributor did not announce, so `selected_cover` has nothing
+        // to hand back — but the frame's *withdrawal* semantics must not
+        // treat it as silence either.
+        let id = json!({"kind": "file", "path": "/mnt/nas/a.flac"});
+        let mut m = Metadata::new(vec!["musicbrainz".into()]);
+        m.set_identity(Some(id.clone()));
+        assert!(m.add(
+            "musicbrainz",
+            Enrichment {
+                identity: id,
+                cover_thumb: Some(CoverRef::Url {
+                    url: "https://coverartarchive.org/release/x/front-500".into()
+                }),
+                ..Default::default()
+            }
+        ));
+        assert!(m.selected_cover().is_none(), "a thumbnail alone designates no cover");
+    }
+
+    #[test]
+    fn the_retained_thumbnail_is_the_winning_contributor_s_own() {
+        // **A thumbnail is never borrowed across contributors.** Two plugins
+        // each announce a cover of their own, and only one wins; the pair
+        // handed to the fetch must be that one's two halves. The production
+        // change that would make this fail: reading `cover_thumb` from any
+        // enrichment that has one rather than from the enrichment that won —
+        // which would pair one album's thumbnail with another album's cover,
+        // and the screen would show a square that does not belong to the
+        // image behind it.
+        let id = json!({"kind": "stream", "url": "https://fip"});
+        let mut m = Metadata::new(vec!["first".into(), "second".into()]);
+        m.set_identity(Some(id.clone()));
+        assert!(m.add(
+            "second",
+            Enrichment {
+                identity: id.clone(),
+                cover: Some(CoverRef::Url { url: "https://example.org/loser.jpg".into() }),
+                cover_thumb: Some(CoverRef::Url {
+                    url: "https://example.org/loser-500.jpg".into()
+                }),
+                ..Default::default()
+            }
+        ));
+        assert!(m.add(
+            "first",
+            Enrichment {
+                identity: id,
+                cover: Some(CoverRef::Url { url: "https://example.org/winner.jpg".into() }),
+                cover_thumb: Some(CoverRef::Url {
+                    url: "https://example.org/winner-500.jpg".into()
+                }),
+                ..Default::default()
+            }
+        ));
+        let (r, thumb, origin) = m.selected_cover().expect("a cover must be retained");
+        assert_eq!(origin, "first");
+        assert_eq!(
+            r,
+            CoverSource::Ref(CoverRef::Url { url: "https://example.org/winner.jpg".into() })
+        );
+        assert_eq!(
+            thumb,
+            Some(CoverRef::Url { url: "https://example.org/winner-500.jpg".into() }),
+            "the thumbnail must come from the enrichment that won, not from the other one"
+        );
+    }
+
+    #[test]
+    fn a_source_declares_its_cover_and_its_thumbnail_together() {
+        // The pair on the Source's tier, which outranks every other. The
+        // production change that would make this fail: dropping the
+        // thumbnail anywhere between `set_cover_source` and
+        // `selected_cover` — the two halves are stored in one tuple
+        // precisely so that neither can be lost without the other.
+        let mut m = Metadata::new(Vec::new());
+        m.set_identity(Some(json!({"kind": "file", "path": "/nas/a.flac"})));
+        assert!(m.set_cover_source(
+            Some(CoverRef::Url { url: "https://example.org/front.jpg".into() }),
+            Some(CoverRef::Url { url: "https://example.org/front-500.jpg".into() }),
+            "files"
+        ));
+        let (r, thumb, origin) = m.selected_cover().expect("a cover must be retained");
+        assert_eq!(origin, "files");
+        assert_eq!(
+            r,
+            CoverSource::Ref(CoverRef::Url { url: "https://example.org/front.jpg".into() })
+        );
+        assert_eq!(
+            thumb,
+            Some(CoverRef::Url { url: "https://example.org/front-500.jpg".into() })
+        );
+
+        // **The thumbnail dies with the cover it describes.** Re-declaring
+        // the same cover without a thumbnail clears it, rather than leaving
+        // the previous one pinned to it: they live in one tuple for this
+        // reason. The published key is invalidated too, since the retained
+        // declaration changed.
+        assert!(m.set_cover_source(
+            Some(CoverRef::Url { url: "https://example.org/front.jpg".into() }),
+            None,
+            "files"
+        ));
+        assert_eq!(m.selected_cover().unwrap().1, None);
     }
 
     #[test]
@@ -934,7 +1098,7 @@ mod tests {
         let state = m.state();
         assert_eq!(state.title.as_deref(), Some("Miles Davis - So What"), "the ICY must stay displayed");
         assert_eq!(state.origin.as_deref(), Some("icy"));
-        assert_eq!(m.selected_cover().unwrap().1, "radiofrance", "and the cover is indeed its own");
+        assert_eq!(m.selected_cover().unwrap().2, "radiofrance", "and the cover is indeed its own");
 
         // Same guarantee against the file's tags, the other layer this empty
         // block would have covered up.
@@ -986,7 +1150,7 @@ mod tests {
                 ..Default::default()
             }
         ));
-        let (r, origin) = m.selected_cover().expect("the specialized plugin provides a cover");
+        let (r, _, origin) = m.selected_cover().expect("the specialized plugin provides a cover");
         assert_eq!(origin, "specialized", "declared lower, it must nevertheless not yield to the fill_only");
         assert_eq!(
             r,
@@ -1201,7 +1365,7 @@ mod tests {
                 ..Default::default()
             }
         ));
-        assert_eq!(m.selected_cover().unwrap().1, "musicbrainz");
+        assert_eq!(m.selected_cover().unwrap().2, "musicbrainz");
         m.set_cover_href(Some("keya".into()));
         assert_eq!(m.state().cover_href.as_deref(), Some("/api/cover/keya"));
 
@@ -1214,7 +1378,7 @@ mod tests {
                 ..Default::default()
             }
         ));
-        let (r, origin) = m.selected_cover().unwrap();
+        let (r, _, origin) = m.selected_cover().unwrap();
         assert_eq!(origin, "specialized");
         assert_eq!(
             r,
@@ -1231,7 +1395,7 @@ mod tests {
         let id = json!({"kind": "file", "path": "/a.flac"});
         let mut m = Metadata::new(vec![]);
         m.set_identity(Some(id));
-        m.set_cover_source(Some(CoverRef::Path { path: "/a/folder.jpg".into() }), "files");
+        m.set_cover_source(Some(CoverRef::Path { path: "/a/folder.jpg".into() }), None, "files");
         m.set_cover_tags(Some(CoverSource::Embedded {
             audio: "/b.flac".into(),
             content: "abcd".into(),
@@ -1288,7 +1452,7 @@ mod tests {
                 ..Default::default()
             }
         ));
-        let (r, origin) = m.selected_cover().expect("the compensator must get through");
+        let (r, _, origin) = m.selected_cover().expect("the compensator must get through");
         assert_eq!((r, origin.as_str()), (CoverSource::Ref(caa), "musicbrainz"));
     }
 
@@ -1300,14 +1464,14 @@ mod tests {
         let mut m = Metadata::new(vec!["radiofrance".into()]);
         m.set_identity(Some(json!({"url": "one"})));
         let r = CoverRef::Url { url: "https://www.radiofrance.fr/x.jpg".into() };
-        m.set_cover_source(Some(r.clone()), "radio");
+        m.set_cover_source(Some(r.clone()), None, "radio");
         assert!(m.mark_cover_failed(crate::cover::key(&CoverSource::Ref(r.clone()))));
         assert!(m.selected_cover().is_none());
 
         assert!(m.set_identity(Some(json!({"url": "two"}))));
-        m.set_cover_source(Some(r.clone()), "radio");
+        m.set_cover_source(Some(r.clone()), None, "radio");
         assert_eq!(
-            m.selected_cover().map(|(r, _)| r),
+            m.selected_cover().map(|(r, _, _)| r),
             Some(CoverSource::Ref(r)),
             "the failure slate must be wiped clean with the rest"
         );
@@ -1333,7 +1497,7 @@ mod tests {
         let id = json!({"kind": "file", "path": "/a.flac"});
         let mut m = Metadata::new(vec![]);
         m.set_identity(Some(id));
-        m.set_cover_source(Some(CoverRef::Path { path: "/a/folder.jpg".into() }), "files");
+        m.set_cover_source(Some(CoverRef::Path { path: "/a/folder.jpg".into() }), None, "files");
         // As long as the bytes are not in hand, nothing is published: the UI
         // must never receive the URL of a broken image.
         assert!(m.state().cover_href.is_none());

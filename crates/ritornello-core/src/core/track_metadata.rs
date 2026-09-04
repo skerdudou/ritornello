@@ -65,13 +65,27 @@ impl<P: Player> Core<P> {
     /// never "no more cover": that is the field's convention (see
     /// `SourceUpdate::cover`), and erasing on a malformed frame would remove
     /// the valid image a previous frame had declared.
+    ///
+    /// **The thumbnail goes through the same `validated`**, and it is
+    /// deliberately not a second rule: the two halves of a pair are the same
+    /// kind of value from the same process, and two grammars would eventually
+    /// judge them differently. A thumbnail refused for its shape simply
+    /// leaves the cover unpaired — the appliance then re-encodes, which is
+    /// what it did before any pair existed.
+    ///
+    /// A thumbnail arriving **without** a cover is dropped along with it: the
+    /// guard below is on `cover`, and a thumbnail alone describes a cover
+    /// nobody announced. Applying it would either strand it or pin it to
+    /// whatever cover a previous frame had declared, which is another image.
     pub(super) fn apply_source_cover(
         &mut self,
         cover: Option<ritornello_proto::CoverRef>,
+        cover_thumb: Option<ritornello_proto::CoverRef>,
         name: &str,
     ) {
         if let Some(cover) = cover.and_then(ritornello_proto::CoverRef::validated) {
-            self.set_source_cover(Some(cover), name);
+            let thumb = cover_thumb.and_then(ritornello_proto::CoverRef::validated);
+            self.set_source_cover(Some(cover), thumb, name);
         }
     }
 
@@ -325,9 +339,18 @@ impl<P: Player> Core<P> {
     }
 
     /// Retains the cover a Source just declared on its own channel (see
-    /// `SourceMessage::cover`, Task 2).
-    pub fn set_source_cover(&mut self, c: Option<ritornello_proto::CoverRef>, origin: &str) {
-        if self.metadata.set_cover_source(c, origin) {
+    /// `SourceMessage::cover`), together with the ready-made thumbnail of the
+    /// same declaration (`SourceMessage::cover_thumb`).
+    ///
+    /// One call for both halves, never two: they come from one frame and
+    /// describe one image (see `Metadata::set_cover_source`).
+    pub fn set_source_cover(
+        &mut self,
+        c: Option<ritornello_proto::CoverRef>,
+        thumb: Option<ritornello_proto::CoverRef>,
+        origin: &str,
+    ) {
+        if self.metadata.set_cover_source(c, thumb, origin) {
             self.start_cover_fetch();
             self.publish_state();
         }
@@ -343,13 +366,19 @@ impl<P: Player> Core<P> {
     /// the text (`Metadata::add`), for the same reason: a late reply for
     /// the previous track must never settle on the next one.
     pub fn start_cover_fetch(&mut self) {
-        let Some((r, _)) = self.metadata.selected_cover() else {
+        let Some((r, thumb, _)) = self.metadata.selected_cover() else {
             // Nothing left to show (identity changed, cover removed): clear
             // the published URL rather than leaving it pointing at an image
             // that no longer matches what is playing.
             self.metadata.set_cover_href(None);
             return;
         };
+        // **The key is computed on the full-size reference, thumbnail or
+        // not.** That reference is what identifies the cover; the thumbnail
+        // is an attribute of it. Keying on the thumbnail instead — or on both
+        // — would make one image into two entries, two downloads and two
+        // lines of eviction, and would break the deduplication a shared
+        // `contains` already gives.
         let key = crate::cover::key(&r);
         if self.metadata.published_cover() == Some(key.as_str()) {
             // Already published under this same key: nothing to redo.
@@ -410,7 +439,7 @@ impl<P: Player> Core<P> {
             // and not the one read here — `cover::fetch` bounds one transfer,
             // it does not decide what the cache retains.
             let download_max = covers.settings().download_max;
-            match crate::cover::fetch(&r, download_max).await {
+            match crate::cover::fetch(&r, thumb.as_ref(), download_max).await {
                 Some(p) => {
                     tracing::info!("cover {key} fetched in {:?}", started.elapsed());
                     covers.insert(key.clone(), p).await;
@@ -464,7 +493,7 @@ impl<P: Player> Core<P> {
         // here, it would be discarded without having been attempted a
         // single time. The failure holds for the track where it happened,
         // like all the rest of this state (see `Metadata::failed_covers`).
-        let Some((r, _)) = self.metadata.selected_cover() else {
+        let Some((r, _, _)) = self.metadata.selected_cover() else {
             // Nothing is playing anymore, or no cover retained anymore: the
             // reply arrives too late to be meaningful.
             return;
@@ -858,7 +887,7 @@ mod tests {
         update.cover = Some(ritornello_proto::CoverRef::Path { path: "relative/folder.jpg".into() });
         core.handle_source_update("radio", update.clone());
         assert_eq!(
-            core.metadata.selected_cover().map(|(r, _)| r),
+            core.metadata.selected_cover().map(|(r, _, _)| r),
             Some(CoverSource::Ref(good)),
             "a malformed reference must neither settle nor erase the one that holds"
         );
@@ -868,7 +897,7 @@ mod tests {
         update.cover =
             Some(ritornello_proto::CoverRef::Url { url: "http://192.168.1.1/a.jpg".into() });
         core.handle_source_update("radio", update);
-        assert_eq!(core.metadata.selected_cover().map(|(_, o)| o), Some("radio".to_string()));
+        assert_eq!(core.metadata.selected_cover().map(|(_, _, o)| o), Some("radio".to_string()));
     }
 
     /// A contributor that just got hot-wired, or that answers slowly, must
@@ -900,11 +929,11 @@ mod tests {
         let s = CoverSource::Ref(r.clone());
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
-        core.set_source_cover(Some(r), "files");
+        core.set_source_cover(Some(r), None, "files");
         // The fetch is detached: the test waits for it explicitly rather
         // than sleeping, so as not to manufacture a flake.
         let key = crate::cover::key(&s);
-        let p = crate::cover::fetch(&s, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
+        let p = crate::cover::fetch(&s, None, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1012,8 +1041,8 @@ mod tests {
         let key = crate::cover::key(&s);
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
-        core.set_source_cover(Some(r), "files");
-        let p = crate::cover::fetch(&s, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
+        core.set_source_cover(Some(r), None, "files");
+        let p = crate::cover::fetch(&s, None, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1048,7 +1077,7 @@ mod tests {
         let key_old = crate::cover::key(&s_old);
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
-        core.set_source_cover(Some(r_old), "files");
+        core.set_source_cover(Some(r_old), None, "files");
 
         // The track changes before the old cover's retrieval has had time
         // to arrive, and the new one declares its **own** cover (a
@@ -1060,11 +1089,11 @@ mod tests {
         std::fs::write(&new, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let r_new = ritornello_proto::CoverRef::Path { path: new.to_string_lossy().into_owned() };
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/b.flac"})));
-        core.set_source_cover(Some(r_new), "files");
+        core.set_source_cover(Some(r_new), None, "files");
         state_rx.borrow_and_update();
 
         // The OLD cover's late reply arrives anyway.
-        let p = crate::cover::fetch(&s_old, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
+        let p = crate::cover::fetch(&s_old, None, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
         core.app_covers().insert(key_old.clone(), p).await;
         core.cover_arrived(key_old, true).await;
 
@@ -1100,7 +1129,7 @@ mod tests {
         // this module, this one simulates the arrival itself rather than
         // sleeping.
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
-        core.set_source_cover(Some(r.clone()), "files");
+        core.set_source_cover(Some(r.clone()), None, "files");
         assert_eq!(core.cover_in_flight.as_deref(), Some(key.as_str()));
 
         // 2. The track changes before the response arrives: nothing is
@@ -1129,13 +1158,13 @@ mod tests {
         // on this key and this album never showed a cover again before a
         // restart.
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
-        core.set_source_cover(Some(r.clone()), "files");
+        core.set_source_cover(Some(r.clone()), None, "files");
         assert_eq!(
             core.cover_in_flight.as_deref(),
             Some(key.as_str()),
             "a new retrieval must be able to restart for the same key"
         );
-        let p = crate::cover::fetch(&s, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
+        let p = crate::cover::fetch(&s, None, crate::cover::CoverSettings::default().download_max).await.expect("the test image must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1164,19 +1193,64 @@ mod tests {
         core.handle_source_update(
             "cd",
             SourceUpdate {
-                identity: None,
-                transient: false,
-                preset: None,
-                preset_count: None,
-                preset_name: None,
-                status: None,
-                can_eject: None,
-                presets: None,
                 cover: Some(r),
+                ..Default::default()
             },
         );
         assert_eq!(core.cover_in_flight, None, "an inactive source must trigger no retrieval");
         assert!(!state_rx.has_changed().unwrap_or(false));
+    }
+
+    /// **The whole entry path of a pair, in one frame.** A Source frame
+    /// carrying a cover and its ready-made thumbnail must reach
+    /// `selected_cover` with both halves — through the early-return exit,
+    /// which is the one such a frame always takes (no identity, no status).
+    ///
+    /// The production changes that would make this fail, in order along the
+    /// path: `cover_thumb` missing from `handle_source_update`'s
+    /// `carries_a_fact`, so the frame never reaches an exit; missing from
+    /// `apply_declared_facts`, so the early-return exit drops it — the exact
+    /// shape of the defect the code records for `cover` itself ("Every
+    /// Source cover was lost silently"); or dropped anywhere between
+    /// `apply_source_cover` and `Metadata::selected_cover`.
+    #[tokio::test]
+    async fn a_source_frame_carrying_a_pair_keeps_both_halves() {
+        let (mut core, _np_rx, _state_rx, _tmp) = test_core();
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                cover: Some(ritornello_proto::CoverRef::Url {
+                    url: "https://example.org/front.jpg".into(),
+                }),
+                cover_thumb: Some(ritornello_proto::CoverRef::Url {
+                    url: "https://example.org/front-500.jpg".into(),
+                }),
+                ..Default::default()
+            },
+        );
+        let (r, thumb, origin) =
+            core.metadata.selected_cover().expect("the declared cover must be retained");
+        assert_eq!(origin, "radio");
+        assert_eq!(
+            r,
+            crate::cover::CoverSource::Ref(ritornello_proto::CoverRef::Url {
+                url: "https://example.org/front.jpg".into()
+            })
+        );
+        assert_eq!(
+            thumb,
+            Some(ritornello_proto::CoverRef::Url {
+                url: "https://example.org/front-500.jpg".into()
+            }),
+            "the thumbnail must have survived both exits of handle_source_update"
+        );
+        // And the key is the **full size**'s, not the thumbnail's: one image
+        // is one cache entry, not two.
+        assert_eq!(
+            core.cover_in_flight.as_deref(),
+            Some(crate::cover::key(&r).as_str()),
+            "the fetch must be keyed on the full-size reference"
+        );
     }
 
     /// The path announced by mpv (`Event::Path`) arms a **detached**
@@ -1241,7 +1315,7 @@ mod tests {
         core.extraction_arrived(received_path, Some(r.clone())).await;
 
         assert!(core.metadata.known().cover);
-        let (retained, origin) = core.metadata.selected_cover().expect("a cover must be retained");
+        let (retained, _, origin) = core.metadata.selected_cover().expect("a cover must be retained");
         assert_eq!(origin, crate::metadata::ORIGIN_TAGS);
         assert_eq!(retained, r);
         assert!(state_rx.has_changed().unwrap(), "set_cover_tags returned true: a frame must come out");
@@ -1251,7 +1325,7 @@ mod tests {
         // must be the one for the temp file the extraction wrote.
         let key = crate::cover::key(&r);
         assert_eq!(core.cover_in_flight.as_deref(), Some(key.as_str()));
-        let p = crate::cover::fetch(&r, crate::cover::CoverSettings::default().download_max).await.expect("the temp file must be readable");
+        let p = crate::cover::fetch(&r, None, crate::cover::CoverSettings::default().download_max).await.expect("the temp file must be readable");
         core.app_covers().insert(key.clone(), p).await;
         core.cover_arrived(key.clone(), true).await;
 
@@ -1277,7 +1351,7 @@ mod tests {
 
         core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
         core.playback = true;
-        core.set_source_cover(Some(r.clone()), "files");
+        core.set_source_cover(Some(r.clone()), None, "files");
         state_rx.borrow_and_update();
 
         core.handle_event(Event::Path(f.to_string_lossy().into_owned())).await;
@@ -1286,7 +1360,7 @@ mod tests {
             !state_rx.has_changed().unwrap(),
             "no extraction attempted, hence no extra frame"
         );
-        let (retained, origin) = core.metadata.selected_cover().unwrap();
+        let (retained, _, origin) = core.metadata.selected_cover().unwrap();
         assert_eq!(origin, "files", "the Source's folder.jpg keeps precedence");
         assert_eq!(retained, CoverSource::Ref(r));
     }

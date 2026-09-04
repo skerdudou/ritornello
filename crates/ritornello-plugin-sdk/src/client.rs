@@ -80,6 +80,16 @@ pub struct SourceUpdate {
     /// by hand to a disjunction once, and until then every Source cover was
     /// silently dropped.
     pub cover: Option<CoverRef>,
+    /// See `SourceMessage::cover_thumb`. Same convention as `cover`, and it
+    /// travels beside it: the core applies the pair through a single call
+    /// (`Core::apply_source_cover`), so a thumbnail can never be attached to
+    /// a cover from another frame.
+    ///
+    /// Arms the relayable-frame predicate by derivation, like every field
+    /// here but `can_eject` — nothing to add to a disjunction, which is
+    /// precisely what kept `cover` from being dropped in silence a second
+    /// time.
+    pub cover_thumb: Option<CoverRef>,
 }
 
 pub struct SourceClient {
@@ -157,6 +167,7 @@ impl SourceClient {
                     can_eject: msg.can_eject,
                     presets: msg.presets,
                     cover: msg.cover,
+                    cover_thumb: msg.cover_thumb,
                 };
                 // And here is the "the answer is forced too" half. The
                 // predicate deciding whether this frame is worth relaying is
@@ -647,14 +658,9 @@ mod tests {
                 identity: Some(ritornello_proto::IdentityUpdate::Playing(
                     serde_json::json!({"kind": "stream", "url": "http://fip"}),
                 )),
-                transient: false,
                 preset: Some(1),
-                preset_count: None,
                 preset_name: Some("FIP".into()),
-                status: None,
-                can_eject: None,
-                presets: None,
-                cover: None,
+                ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             let _ = socket_for_server; // keeps the path alive for debugging
@@ -696,15 +702,8 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                identity: None,
-                transient: false,
-                preset: None,
                 preset_count: Some(5),
-                preset_name: None,
-                status: None,
-                can_eject: None,
-                presets: None,
-                cover: None,
+                ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -744,15 +743,8 @@ mod tests {
             let bare = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                identity: None,
-                transient: false,
-                preset: None,
-                preset_count: None,
-                preset_name: None,
-                status: None,
                 can_eject: Some(true),
-                presets: None,
-                cover: None,
+                ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&bare).unwrap()).as_bytes()).await.unwrap();
             // Second request: the same capability, this time accompanied by a
@@ -762,15 +754,9 @@ mod tests {
             let dressed = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                identity: None,
-                transient: false,
-                preset: None,
-                preset_count: None,
-                preset_name: None,
                 status: Some("AUDIO CD".into()),
                 can_eject: Some(true),
-                presets: None,
-                cover: None,
+                ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&dressed).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -807,15 +793,8 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                identity: None,
-                transient: false,
-                preset: None,
-                preset_count: None,
                 preset_name: Some("FIP".into()),
-                status: None,
-                can_eject: None,
-                presets: None,
-                cover: None,
+                ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -847,15 +826,8 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                identity: None,
-                transient: false,
-                preset: None,
-                preset_count: None,
-                preset_name: None,
                 status: Some("PAS DE DISQUE".into()),
-                can_eject: None,
-                presets: None,
-                cover: None,
+                ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -895,15 +867,8 @@ mod tests {
             let list_msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                identity: None,
-                transient: false,
-                preset: None,
-                preset_count: None,
-                preset_name: None,
-                status: None,
-                can_eject: None,
                 presets: Some(vec![Preset { index: 5, name: "FIP".into() }]),
-                cover: None,
+                ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&list_msg).unwrap()).as_bytes()).await.unwrap();
             let line = lines.next_line().await.unwrap().unwrap();
@@ -911,15 +876,8 @@ mod tests {
             let status_msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                identity: None,
-                transient: false,
-                preset: None,
-                preset_count: None,
-                preset_name: None,
                 status: Some("RADIO".into()),
-                can_eject: None,
-                presets: None,
-                cover: None,
+                ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&status_msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -1030,15 +988,17 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                identity: None,
-                transient: false,
-                preset: None,
-                preset_count: None,
-                preset_name: None,
-                status: None,
-                can_eject: None,
-                presets: None,
                 cover: Some(CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() }),
+                // The thumbnail rides the very same frame, which is the only
+                // shape in which it can arrive (see
+                // `SourceMessage::cover_thumb`). Asserted below alongside the
+                // cover: the literal that builds `SourceUpdate` forces the
+                // field to be *named*, not to be given the right value — a
+                // second `msg.cover` copied there would compile.
+                cover_thumb: Some(CoverRef::Url {
+                    url: "https://example.org/front-500.jpg".into(),
+                }),
+                ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
@@ -1050,6 +1010,51 @@ mod tests {
         let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "files");
         assert_eq!(update.cover, Some(CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() }));
+        assert_eq!(
+            update.cover_thumb,
+            Some(CoverRef::Url { url: "https://example.org/front-500.jpg".into() })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frame_carrying_only_a_thumbnail_is_relayed() {
+        // **The derived predicate, and what it buys.** A frame carrying
+        // nothing but the new field must still be relayed — the core alone
+        // decides what to do with it. Nothing had to be added to a
+        // disjunction for this to hold: the predicate compares the frame
+        // against an inert one, so a field added to `SourceUpdate` enters it
+        // without anyone thinking about it. That is precisely what a
+        // hand-written condition failed at twice, dropping `presets` then
+        // `cover` in silence.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                cover_thumb: Some(CoverRef::Url {
+                    url: "https://example.org/front-500.jpg".into(),
+                }),
+                ..Default::default()
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "files".into(), update_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        let (_, update) = update_rx.recv().await.unwrap();
+        assert_eq!(
+            update.cover_thumb,
+            Some(CoverRef::Url { url: "https://example.org/front-500.jpg".into() })
+        );
     }
 
     #[tokio::test]
@@ -1068,15 +1073,7 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                identity: None,
-                transient: false,
-                preset: None,
-                preset_count: None,
-                preset_name: None,
-                status: None,
-                can_eject: None,
-                presets: None,
-                cover: None,
+                ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
             std::future::pending::<()>().await;
