@@ -1,6 +1,25 @@
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
+/// A cover resolved as a pair: the full-size image and a ready-made
+/// thumbnail. Same MBID, same level (release or release-group) — decided
+/// once, here, where the response is visible (see [`DiscInfo::cover_url`] and
+/// [`Recording::cover_url`]), and never rebuilt by a caller.
+///
+/// The two members always come from the same [`url_caa`]/[`url_caa_thumb`] (or
+/// [`caa_group_url`]/[`caa_group_thumb_url`]) pair, hence one struct rather
+/// than two independent `Option`s: nothing can end up with a full image from
+/// one level and a thumbnail from another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverUrls {
+    /// The bare `front`: the full-size image an enlarged view fetches on
+    /// demand. See [`url_caa`].
+    pub full: String,
+    /// The `front-500` reduction: what the core downloads automatically, at
+    /// announcement. See [`url_caa_thumb`].
+    pub thumb: String,
+}
+
 /// What a recognized disc tells us: the artist, the album, and the titles in
 /// track order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,19 +38,20 @@ pub struct DiscInfo {
     /// Measured: this field is sometimes `"1987"`, sometimes `"2017-06-23"`,
     /// hence the pass through `valid_year`, which only keeps the numeric head.
     pub year: Option<u16>,
-    /// Cover URL, **already resolved**: that of the recognized pressing when
-    /// it announces a front cover, that of the album (`release-group`)
+    /// Cover, **already resolved as a pair**: that of the recognized pressing
+    /// when it announces a front cover, that of the album (`release-group`)
     /// otherwise.
     ///
-    /// A URL and not an MBID, because the response carries what is needed to
-    /// choose between two levels, and that choice is made here, once, at the
-    /// place that sees the `cover-art-archive`. An MBID would force the caller
-    /// to decide again — and it would no longer have the information to do so.
+    /// A pair of URLs and not an MBID, because the response carries what is
+    /// needed to choose between two levels, and that choice is made here,
+    /// once, at the place that sees the `cover-art-archive`. An MBID would
+    /// force the caller to decide again — and it would no longer have the
+    /// information to do so.
     ///
     /// `None` means **"do not ask for an image"**, not "unknown disc": that
     /// case only remains if the response denies the front cover *and* carries
     /// no release-group.
-    pub cover_url: Option<String>,
+    pub cover_url: Option<CoverUrls>,
 }
 
 /// Puts the raw TOC (`NTRACKS OFF1 … OFFN LEADOUT`, as the cd plugin places
@@ -137,12 +157,13 @@ fn extract(release: &Value, ntracks: usize) -> Option<DiscInfo> {
         // `cover-art-archive`: this very pressing if it has a front cover,
         // the album otherwise.
         let cover_url = match front_cover(release) {
-            FrontCover::Present | FrontCover::Unknown => {
-                release.get("id").and_then(Value::as_str).map(url_caa)
-            }
-            FrontCover::Absent => {
-                release.pointer("/release-group/id").and_then(Value::as_str).map(caa_group_url)
-            }
+            FrontCover::Present | FrontCover::Unknown => release
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|mbid| CoverUrls { full: url_caa(mbid), thumb: url_caa_thumb(mbid) }),
+            FrontCover::Absent => release.pointer("/release-group/id").and_then(Value::as_str).map(|rgid| {
+                CoverUrls { full: caa_group_url(rgid), thumb: caa_group_thumb_url(rgid) }
+            }),
         };
         return Some(DiscInfo {
             artist: release
@@ -420,18 +441,32 @@ fn url_lookup(toc: &str) -> String {
     )
 }
 
-/// URL of a release's front cover.
+/// URL of a release's full-size front cover.
+///
+/// The bare `front`, and that is only announceable now: measured on
+/// 2026-08-24, it weighs 2,670,705 bytes, well past the core's 2 MiB
+/// automatic-download cap — asking for it at announcement would have been
+/// refused in silence. It is announced here because the core no longer
+/// downloads it automatically: an enlarged view fetches it itself, on demand,
+/// under the source's own ceiling (20 MiB) rather than the download cap. See
+/// [`url_caa_thumb`] for the one still fetched at announcement.
+pub fn url_caa(mbid: &str) -> String {
+    format!("https://coverartarchive.org/release/{mbid}/front")
+}
+
+/// URL of a release's front cover, reduced to a ready-made thumbnail.
 ///
 /// `front-500` and not `front`: measured on 2026-08-24, 75,249 bytes versus
-/// 2,670,705 for the original — the core caps its download at 2 MiB, so a
-/// bare `front` would be refused silently. A 404 is the common case — many
-/// releases have no image — and the core handles it silently.
-pub fn url_caa(mbid: &str) -> String {
+/// 2,670,705 for the bare original — this is the half of the pair the core
+/// downloads automatically, at announcement, and it must fit the download cap
+/// (2 MiB). A 404 is the common case — many releases have no image — and the
+/// core handles it silently.
+pub fn url_caa_thumb(mbid: &str) -> String {
     format!("https://coverartarchive.org/release/{mbid}/front-500")
 }
 
-/// URL of the front cover of a **release-group**: the album's cover, taken
-/// from one of its pressings.
+/// URL of the full-size front cover of a **release-group**: the album's
+/// cover, taken from one of its pressings.
 ///
 /// This is the fallback when the recognized pressing has no typed front
 /// cover. Two reference projects do exactly this, and it is no coincidence:
@@ -439,14 +474,23 @@ pub fn url_caa(mbid: &str) -> String {
 /// its 1.3, and `beets` queries both levels, marking the second as a fallback.
 /// Neither of them guesses from an untyped image.
 ///
-/// Measured on 2026-08-26: on the 1997 pressing of *Kind of Blue*, whose
-/// response announces `front: false`, this URL returns 200 and a JPEG of
-/// 50,220 bytes — a real front cover, where the release URL returns 404.
-///
 /// The image may come from **another pressing** than the recognized one. This
 /// is accepted: for a listening device, it is the album's cover, and the right
 /// cover from another edition beats no cover at all.
+///
+/// See [`url_caa`] for why this is the bare `front`, fetched on demand, and
+/// [`caa_group_thumb_url`] for the reduction fetched at announcement.
 pub fn caa_group_url(rgid: &str) -> String {
+    format!("https://coverartarchive.org/release-group/{rgid}/front")
+}
+
+/// URL of a release-group's front cover, reduced to a ready-made thumbnail.
+///
+/// Measured on 2026-08-26: on the 1997 pressing of *Kind of Blue*, whose
+/// response announces `front: false`, this URL returns 200 and a JPEG of
+/// 50,220 bytes — a real front cover, where the release URL returns 404. This
+/// is the half of the pair the core downloads automatically, at announcement.
+pub fn caa_group_thumb_url(rgid: &str) -> String {
     format!("https://coverartarchive.org/release-group/{rgid}/front-500")
 }
 
@@ -528,17 +572,22 @@ pub const RELEASE_THRESHOLD: u64 = 85;
 /// The fallback on the pressing only serves a response without a
 /// release-group. Measured, those do not exist (5/5 and 2/2), but counting on
 /// that would be assuming a schema rather than reading it.
-fn release_cover(release: &Value) -> Option<String> {
+fn release_cover(release: &Value) -> Option<CoverUrls> {
     release
         .pointer("/release-group/id")
         .and_then(Value::as_str)
-        .map(caa_group_url)
-        .or_else(|| release.get("id").and_then(Value::as_str).map(url_caa))
+        .map(|rgid| CoverUrls { full: caa_group_url(rgid), thumb: caa_group_thumb_url(rgid) })
+        .or_else(|| {
+            release
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|mbid| CoverUrls { full: url_caa(mbid), thumb: url_caa_thumb(mbid) })
+        })
 }
 
 /// Cover of the first result, **if it is confident enough**. `None` = nothing
 /// found, unreadable response, or best result too uncertain.
-pub fn first_cover(json: &str) -> Option<String> {
+pub fn first_cover(json: &str) -> Option<CoverUrls> {
     let v: Value = serde_json::from_str(json).ok()?;
     let first = v.get("releases")?.as_array()?.first()?;
     // Absent score = refusal, and a `warn` rather than a `debug`: this is a
@@ -564,7 +613,7 @@ pub fn first_cover(json: &str) -> Option<String> {
 /// the release from text. `Ok(None)` = nothing found or offline, exactly like
 /// [`lookup`]: the plugin stays silent, it knows nothing more than what it was
 /// given.
-pub async fn search_release(artist: &str, album: &str) -> Result<Option<String>> {
+pub async fn search_release(artist: &str, album: &str) -> Result<Option<CoverUrls>> {
     let url = request_release(artist, album);
     let body = request_text(&url).await?;
     Ok(first_cover(&body))
@@ -600,12 +649,12 @@ pub struct Recording {
     /// listed only appears on two compilations — the first being German. That
     /// is the cover the device displayed. `The Joshua Tree` came seventh.
     ///
-    /// A URL and not an MBID, for the same reason as `DiscInfo::cover_url`:
-    /// the level to aim at (album or pressing) is decided here, where the
-    /// response is visible, and never at the caller. This is what prevents a
-    /// third path from rebuilding a URL blindly — the defect this module
-    /// carried on all three of its paths at once.
-    pub cover_url: Option<String>,
+    /// A pair of URLs and not an MBID, for the same reason as
+    /// `DiscInfo::cover_url`: the level to aim at (album or pressing) is
+    /// decided here, where the response is visible, and never at the caller.
+    /// This is what prevents a third path from rebuilding a URL blindly — the
+    /// defect this module carried on all three of its paths at once.
+    pub cover_url: Option<CoverUrls>,
 }
 
 /// Search request for a recording by artist and title.
@@ -927,11 +976,31 @@ mod tests {
 
     #[test]
     fn the_cover_art_archive_url_asks_for_a_bounded_size() {
-        // A bare `front` returns a PNG of 2,670,705 bytes; `front-500`, 75,249.
+        // The invariant survives the split into a pair: nothing must ask
+        // *automatically* for the 2.5 MiB `front` — that download would be
+        // refused in silence by the core's 2 MiB cap. It now rides on
+        // `url_caa_thumb`, which is what the core actually downloads at
+        // announcement; `url_caa` itself is free to return the bare `front`,
+        // because an enlarged view fetches it separately, on demand, under
+        // the source ceiling. The defect this test guards against — a full
+        // image refused in silence — would come back if `url_caa` were wired
+        // into `Enrichment::cover_thumb` instead of `url_caa_thumb`.
         assert_eq!(
-            url_caa("e32a3f0b-1c19-3170-bb1c-650893774744"),
+            url_caa_thumb("e32a3f0b-1c19-3170-bb1c-650893774744"),
             "https://coverartarchive.org/release/e32a3f0b-1c19-3170-bb1c-650893774744/front-500"
         );
+    }
+
+    #[test]
+    fn the_archive_is_announced_as_a_pair() {
+        // The visible payoff of the whole project. Measured on 2026-08-24:
+        // the bare `front` renders 2,670,705 bytes, `front-500` renders
+        // 75,249. The full size was not announceable while automatic
+        // download was the only channel and it was capped at 2 MiB; it
+        // became announceable once enlarging a cover fetches it itself,
+        // under the source's own ceiling.
+        assert_eq!(url_caa("x"), "https://coverartarchive.org/release/x/front");
+        assert_eq!(url_caa_thumb("x"), "https://coverartarchive.org/release/x/front-500");
     }
 
     /// Reduction of a real capture of the lookup this module builds
@@ -951,10 +1020,13 @@ mod tests {
         // an acceptable candidate carried one.
         assert_eq!(info.album, "Kiss You Off");
         assert_eq!(info.artist, "Scissor Sisters");
-        // Front cover announced: the URL aims at the pressing, not the album.
+        // Front cover announced: the pair aims at the pressing, not the
+        // album, and both halves are announced (not just the thumbnail).
+        let cover = info.cover_url.expect("a cover pair");
+        assert_eq!(cover.full, "https://coverartarchive.org/release/2de62a1b-0401-4569-bfe4-7bac2a61dea2/front");
         assert_eq!(
-            info.cover_url.as_deref(),
-            Some("https://coverartarchive.org/release/2de62a1b-0401-4569-bfe4-7bac2a61dea2/front-500")
+            cover.thumb,
+            "https://coverartarchive.org/release/2de62a1b-0401-4569-bfe4-7bac2a61dea2/front-500"
         );
         // The text follows the image: both come from the same release, without
         // which the displayed cover would not match the titles.
@@ -986,10 +1058,16 @@ mod tests {
              "media":[{"tracks":[{"title":"un"}]}]}]}"#;
         let info = parse_lookup(without, 1).unwrap();
         assert_eq!(info.album, "No image", "the text always comes from the pressing");
+        // The image, on the other hand, comes from the album — as a pair,
+        // like the release level above.
+        let cover = info.cover_url.expect("a cover pair");
         assert_eq!(
-            info.cover_url.as_deref(),
-            Some("https://coverartarchive.org/release-group/33333333-3333-3333-3333-333333333333/front-500"),
-            "the image, on the other hand, comes from the album"
+            cover.full,
+            "https://coverartarchive.org/release-group/33333333-3333-3333-3333-333333333333/front"
+        );
+        assert_eq!(
+            cover.thumb,
+            "https://coverartarchive.org/release-group/33333333-3333-3333-3333-333333333333/front-500"
         );
     }
 
@@ -1016,9 +1094,10 @@ mod tests {
              "cover-art-archive":{"front":true,"count":4,"darkened":true},
              "release-group":{"id":"44444444-4444-4444-4444-444444444444"},
              "media":[{"tracks":[{"title":"un"}]}]}]}"#;
+        let cover = parse_lookup(dark, 1).unwrap().cover_url.expect("a cover pair");
         assert_eq!(
-            parse_lookup(dark, 1).unwrap().cover_url.as_deref(),
-            Some("https://coverartarchive.org/release-group/44444444-4444-4444-4444-444444444444/front-500")
+            cover.thumb,
+            "https://coverartarchive.org/release-group/44444444-4444-4444-4444-444444444444/front-500"
         );
     }
 
@@ -1030,8 +1109,9 @@ mod tests {
         // and its URL must keep aiming at the pressing — the behavior from
         // before this work.
         assert!(!FIXTURE.contains("cover-art-archive"), "test precondition");
-        let url = parse_lookup(FIXTURE, 3).unwrap().cover_url.unwrap();
-        assert!(url.starts_with("https://coverartarchive.org/release/"), "{url}");
+        let cover = parse_lookup(FIXTURE, 3).unwrap().cover_url.unwrap();
+        assert!(cover.full.starts_with("https://coverartarchive.org/release/"), "{}", cover.full);
+        assert!(cover.thumb.starts_with("https://coverartarchive.org/release/"), "{}", cover.thumb);
     }
 
     #[test]
@@ -1050,21 +1130,29 @@ mod tests {
              "media":[{"tracks":[{"title":"un"}]}]}]}"#;
         let info = parse_lookup(two, 1).unwrap();
         assert_eq!(info.album, "Avec");
+        let cover = info.cover_url.expect("a cover pair");
+        assert_eq!(cover.thumb, "https://coverartarchive.org/release/22222222-2222-2222-2222-222222222222/front-500");
+    }
+
+    #[test]
+    fn the_album_thumb_follows_the_measured_pattern() {
+        // Measured on 2026-08-26: 200 and a JPEG of 50,220 bytes on the
+        // release-group of "Kind of Blue"'s `/front-500`, where the URL of the
+        // 1997 pressing returns 404.
         assert_eq!(
-            info.cover_url.as_deref(),
-            Some("https://coverartarchive.org/release/22222222-2222-2222-2222-222222222222/front-500")
+            caa_group_thumb_url("8e8a594f-2175-38c7-a871-abb68ec363e7"),
+            "https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500"
         );
     }
 
     #[test]
-    fn the_album_url_follows_the_measured_pattern() {
-        // Measured on 2026-08-26: 200 and a JPEG of 50,220 bytes on the
-        // release-group of "Kind of Blue", where the URL of the 1997 pressing
-        // returns 404.
-        assert_eq!(
-            caa_group_url("8e8a594f-2175-38c7-a871-abb68ec363e7"),
-            "https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500"
-        );
+    fn the_release_group_is_announced_as_a_pair_too() {
+        // The release-group is the other family of cover URLs -- the
+        // album-level fallback used when the recognized pressing has no
+        // typed front cover. It must announce the same pair as the release,
+        // not just the thumbnail it alone served before.
+        assert_eq!(caa_group_url("x"), "https://coverartarchive.org/release-group/x/front");
+        assert_eq!(caa_group_thumb_url("x"), "https://coverartarchive.org/release-group/x/front-500");
     }
 
     #[test]
@@ -1072,12 +1160,13 @@ mod tests {
         // The MBID is the key to the image, and it was being thrown away. The
         // real fixture in the tests/fixtures directory is `mb_discid.json`
         // (3 tracks).
-        let url = parse_lookup(FIXTURE, 3).unwrap().cover_url.expect("a cover URL");
-        let mbid = url
+        let cover = parse_lookup(FIXTURE, 3).unwrap().cover_url.expect("a cover pair");
+        let mbid = cover
+            .thumb
             .strip_prefix("https://coverartarchive.org/release/")
             .and_then(|r| r.strip_suffix("/front-500"))
             .unwrap_or("");
-        assert_eq!(mbid.len(), 36, "an MBID is 36 characters long, got {url:?}");
+        assert_eq!(mbid.len(), 36, "an MBID is 36 characters long, got {:?}", cover.thumb);
     }
 
     #[test]
@@ -1136,9 +1225,11 @@ mod tests {
             {"id":"e32a3f0b-1c19-3170-bb1c-650893774744","score":100,
              "release-group":{"id":"8e8a594f-2175-38c7-a871-abb68ec363e7"}},
             {"id":"other"}]}"#;
+        let cover = first_cover(json).expect("a cover pair");
+        assert_eq!(cover.full, "https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front");
         assert_eq!(
-            first_cover(json).as_deref(),
-            Some("https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500")
+            cover.thumb,
+            "https://coverartarchive.org/release-group/8e8a594f-2175-38c7-a871-abb68ec363e7/front-500"
         );
         assert_eq!(first_cover(r#"{"releases":[]}"#), None);
         assert_eq!(first_cover("not json"), None);
@@ -1154,9 +1245,13 @@ mod tests {
         // pressings has a front cover.
         let json = r#"{"releases":[{"id":"11111111-1111-1111-1111-111111111111","score":100,
             "release-group":{"id":"22222222-2222-2222-2222-222222222222"}}]}"#;
-        let url = first_cover(json).unwrap();
-        assert!(url.contains("/release-group/22222222"), "{url}");
-        assert!(!url.contains("/release/11111111"), "the pressing must not be aimed at — {url}");
+        let cover = first_cover(json).unwrap();
+        assert!(cover.thumb.contains("/release-group/22222222"), "{}", cover.thumb);
+        assert!(
+            !cover.thumb.contains("/release/11111111"),
+            "the pressing must not be aimed at — {}",
+            cover.thumb
+        );
     }
 
     #[test]
@@ -1164,10 +1259,8 @@ mod tests {
         // Measured: 5/5 and 2/2 of the responses carry one. But relying on
         // that would be assuming a schema rather than reading it.
         let json = r#"{"releases":[{"id":"11111111-1111-1111-1111-111111111111","score":100}]}"#;
-        assert_eq!(
-            first_cover(json).as_deref(),
-            Some("https://coverartarchive.org/release/11111111-1111-1111-1111-111111111111/front-500")
-        );
+        let cover = first_cover(json).expect("a cover pair");
+        assert_eq!(cover.thumb, "https://coverartarchive.org/release/11111111-1111-1111-1111-111111111111/front-500");
     }
 
     /// Release search response **as MusicBrainz emits it**: the `score` field
@@ -1185,10 +1278,10 @@ mod tests {
 
     #[test]
     fn a_confident_enough_release_is_kept() {
+        let cover = first_cover(&release_response(RELEASE_THRESHOLD)).expect("exactly the threshold must pass");
         assert_eq!(
-            first_cover(&release_response(RELEASE_THRESHOLD)).as_deref(),
-            Some("https://coverartarchive.org/release-group/ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb/front-500"),
-            "exactly the threshold must pass"
+            cover.thumb,
+            "https://coverartarchive.org/release-group/ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb/front-500"
         );
     }
 
@@ -1278,10 +1371,12 @@ mod tests {
         assert_eq!(e.title, "So What");
         // The album, not the pressing: a search carries no `cover-art-archive`
         // block, and the group level is strictly more available (see
-        // `release_cover`).
+        // `release_cover`). Both halves of the pair, not just the thumbnail.
+        let cover = e.cover_url.expect("a cover pair");
+        assert_eq!(cover.full, "https://coverartarchive.org/release-group/66666666-7777-8888-9999-aaaaaaaaaaaa/front");
         assert_eq!(
-            e.cover_url.as_deref(),
-            Some("https://coverartarchive.org/release-group/66666666-7777-8888-9999-aaaaaaaaaaaa/front-500")
+            cover.thumb,
+            "https://coverartarchive.org/release-group/66666666-7777-8888-9999-aaaaaaaaaaaa/front-500"
         );
     }
 
@@ -1316,9 +1411,9 @@ mod tests {
         // **The defect itself, verbatim.** The owner saw a German cover under
         // a U2 track; this fixture is the response that produced it.
         let e = first_recording(U2_FIXTURE).expect("a readable response");
-        let url = e.cover_url.expect("a cover URL");
-        assert!(url.contains(JOSHUA_TREE_GROUP), "the album's cover was expected, got {url}");
-        assert!(!url.contains(GERMAN_COMPILATION_GROUP), "the compilation won again: {url}");
+        let cover = e.cover_url.expect("a cover pair");
+        assert!(cover.thumb.contains(JOSHUA_TREE_GROUP), "the album's cover was expected, got {}", cover.thumb);
+        assert!(!cover.thumb.contains(GERMAN_COMPILATION_GROUP), "the compilation won again: {}", cover.thumb);
     }
 
     #[test]
@@ -1348,10 +1443,11 @@ mod tests {
               {"id":"aaaaaaaa-0000-0000-0000-000000000002","status":"Official",
                "release-group":{"id":"22222222-0000-0000-0000-000000000002",
                                 "primary-type":"Album"}}]}]}"#;
-        let url = first_recording(json).unwrap().cover_url.expect("a cover URL");
+        let cover = first_recording(json).unwrap().cover_url.expect("a cover pair");
         assert!(
-            url.contains("11111111-0000-0000-0000-000000000001"),
-            "the top score must keep its cover: {url}"
+            cover.thumb.contains("11111111-0000-0000-0000-000000000001"),
+            "the top score must keep its cover: {}",
+            cover.thumb
         );
     }
 

@@ -131,11 +131,11 @@ type DiscOutcome = (String, Answer<DiscInfo>);
 /// also the memorization key (see `MusicBrainzPlugin`).
 type GenericKey = (String, String);
 
-/// Result of a generic search: the pair concerned, and the MBID found.
-type FoundCover = (GenericKey, Option<String>);
+/// Result of a generic search: the pair concerned, and the cover pair found.
+type FoundCover = (GenericKey, Option<musicbrainz::CoverUrls>);
 
 /// What the cover search task sends through the channel.
-type CoverOutcome = (GenericKey, Answer<String>);
+type CoverOutcome = (GenericKey, Answer<musicbrainz::CoverUrls>);
 
 /// What a disc identity teaches this plugin.
 #[derive(Debug, Clone, PartialEq)]
@@ -289,7 +289,7 @@ struct IcyOutcome {
     /// (steady state), so nothing to learn.
     pattern: Option<patterns::Pattern>,
     /// The validated pair and its cover. `None` = validation failed.
-    validated: Option<(String, String, Option<String>)>,
+    validated: Option<(String, String, Option<musicbrainz::CoverUrls>)>,
     /// **MusicBrainz did not answer** during this handling: an outage, a
     /// timeout, a 503 — never a verdict.
     ///
@@ -390,10 +390,13 @@ impl MusicBrainzPlugin {
             // This plugin does not know where playback stands: it answers on
             // a track's identity, not on its progress.
             position_s: None,
-            // The TOC lookup already carried what is needed to build the URL,
+            // The TOC lookup already carried what is needed to build the pair,
             // and the choice of level (this pressing, or the album failing a
             // front cover) was made at parse time. No additional request here.
-            cover: info.cover_url.clone().map(|url| CoverRef::Url { url }),
+            // Both halves go out: the full size the enlarged view will fetch
+            // on demand, and the thumbnail the core downloads right away.
+            cover: info.cover_url.as_ref().map(|c| CoverRef::Url { url: c.full.clone() }),
+            cover_thumb: info.cover_url.as_ref().map(|c| CoverRef::Url { url: c.thumb.clone() }),
             // Disc path: the TOC says what is playing, so it overwrites (default).
             ..Default::default()
         });
@@ -436,10 +439,11 @@ impl MusicBrainzPlugin {
         };
         self.ready = Some(Enrichment {
             identity: identity.clone(),
-            // URL already resolved by `search_release`: this path rebuilds
-            // nothing. A search carries no `cover-art-archive` block, so what
-            // comes out is the album's cover.
-            cover: Some(CoverRef::Url { url: cover_url.clone() }),
+            // The pair already resolved by `search_release`: this path
+            // rebuilds nothing. A search carries no `cover-art-archive` block,
+            // so what comes out is the album's cover.
+            cover: Some(CoverRef::Url { url: cover_url.full.clone() }),
+            cover_thumb: Some(CoverRef::Url { url: cover_url.thumb.clone() }),
             // It searched, and it found: say so too, so the origins know it
             // was queried.
             searched: true,
@@ -851,8 +855,10 @@ impl MetadataPlugin for MusicBrainzPlugin {
                                     derived_from: Some(SOURCE_ICY.to_string()),
                                     artist: Some(artist),
                                     title: Some(title),
-                                    // URL already resolved by `first_recording`.
-                                    cover: cover_url.map(|url| CoverRef::Url { url }),
+                                    // The pair already resolved by
+                                    // `first_recording`.
+                                    cover: cover_url.as_ref().map(|c| CoverRef::Url { url: c.full.clone() }),
+                                    cover_thumb: cover_url.map(|c| CoverRef::Url { url: c.thumb }),
                                     // This path **replaces** the raw ICY
                                     // string, which is precisely what is being
                                     // corrected — unlike the neighbouring
@@ -1040,7 +1046,7 @@ fn best_accepted(attempts: &[(icy::Candidate, Option<musicbrainz::Recording>)]) 
 async fn validated_by_search(
     artist: &str,
     title: &str,
-) -> Result<Option<(String, String, Option<String>)>> {
+) -> Result<Option<(String, String, Option<musicbrainz::CoverUrls>)>> {
     let Some(answer) = musicbrainz::search_recording(artist, title).await? else {
         return Ok(None);
     };
@@ -1312,12 +1318,16 @@ mod tests {
         assert_eq!(e.artist.as_deref(), Some("Miles Davis"));
         assert_eq!(e.album.as_deref(), Some("Kind of Blue"));
         assert_eq!(e.title.as_deref(), Some("Freddie Freeloader"));
-        // The MBID was already carried by the TOC lookup: the cover goes out
-        // without one more request, and this path overwrites (it knows what
-        // is playing).
+        // The MBID was already carried by the TOC lookup: the cover pair goes
+        // out without one more request, and this path overwrites (it knows
+        // what is playing). Both halves: the full size, and the thumbnail.
         assert_eq!(
             e.cover,
             Some(CoverRef::Url { url: musicbrainz::url_caa("e32a3f0b-1c19-3170-bb1c-650893774744") })
+        );
+        assert_eq!(
+            e.cover_thumb,
+            Some(CoverRef::Url { url: musicbrainz::url_caa_thumb("e32a3f0b-1c19-3170-bb1c-650893774744") })
         );
         assert!(!e.fill_only, "the disc path knows the TOC, it overwrites");
     }
@@ -1448,10 +1458,13 @@ mod tests {
         // `plugin_with_known_disc` does on the disc side.
         let mut p = test_plugin();
         let key = ("Miles Davis".to_string(), "Kind of Blue".to_string());
-        // An already resolved URL, like what `search_release` memorizes: it is
-        // the module that decides the level (album or pressing), never this
-        // path. Here a group's, the common case of a search.
-        let cover = musicbrainz::caa_group_url("8e8a594f-2175-38c7-a871-abb68ec363e7");
+        // An already resolved pair, like what `search_release` memorizes: it
+        // is the module that decides the level (album or pressing), never
+        // this path. Here a group's, the common case of a search.
+        let cover = musicbrainz::CoverUrls {
+            full: musicbrainz::caa_group_url("8e8a594f-2175-38c7-a871-abb68ec363e7"),
+            thumb: musicbrainz::caa_group_thumb_url("8e8a594f-2175-38c7-a871-abb68ec363e7"),
+        };
         p.known_cover = Some((key, Some(cover.clone())));
         p.now_playing(NowPlaying {
             source: "files".into(),
@@ -1466,7 +1479,8 @@ mod tests {
         .await;
         let e = p.next_enrichment().await;
         assert_eq!(e.identity, file_identity("/music/a.flac"), "the identity must be echoed back");
-        assert_eq!(e.cover, Some(CoverRef::Url { url: cover }));
+        assert_eq!(e.cover, Some(CoverRef::Url { url: cover.full }));
+        assert_eq!(e.cover_thumb, Some(CoverRef::Url { url: cover.thumb }));
         assert!(e.fill_only, "this path knows nothing beyond what it was given, it completes");
         assert!(
             e.artist.is_none() && e.title.is_none() && e.album.is_none(),
@@ -1607,8 +1621,13 @@ mod tests {
         // Memorization is keyed by (artist, album): a new album must change
         // the key and never redisplay the old one's cover.
         let mut p = test_plugin();
-        p.known_cover =
-            Some((("A".to_string(), "Old".to_string()), Some("11111111-1111-1111-1111-111111111111".into())));
+        p.known_cover = Some((
+            ("A".to_string(), "Old".to_string()),
+            Some(musicbrainz::CoverUrls {
+                full: "https://coverartarchive.org/release/11111111-1111-1111-1111-111111111111/front".into(),
+                thumb: "https://coverartarchive.org/release/11111111-1111-1111-1111-111111111111/front-500".into(),
+            }),
+        ));
         // Search of the new album declared "in flight": avoids any network
         // call in this test, without changing what is observed (`in_flight`
         // stops `search_cover` before the `tokio::spawn`).
@@ -1867,6 +1886,51 @@ mod tests {
         assert_eq!(e.artist.as_deref(), Some("Miles Davis"));
         assert_eq!(e.title.as_deref(), Some("So What"));
         assert_eq!(e.derived_from.as_deref(), Some(SOURCE_ICY));
+    }
+
+    #[tokio::test]
+    async fn a_validated_recording_emits_the_cover_as_a_pair_not_a_swap() {
+        // The third assembly point, and the only one with no test of its own
+        // before this one: the disc path and the generic relay each have a
+        // dedicated pair assertion, but ICY's validated match arm did not.
+        // `Some(("Artist".to_string(), "Title".to_string(), None))` is the
+        // only `validated` fixture elsewhere in this file that carries a
+        // cover slot, and it always passes `None` — nothing exercised the
+        // `Some(CoverUrls { .. })` branch, so a swap of `c.full`/`c.thumb` at
+        // the assembly site (line ~860) would have gone undetected: the
+        // enlarged view would show a stretched 500 px image for every ICY
+        // cover, same defect this whole task fixes, just reintroduced on the
+        // one path nothing was watching.
+        let mut p = test_plugin();
+        let url = "http://f";
+        p.icy_seen = Some("Miles Davis - So What".to_string());
+        let cover = musicbrainz::CoverUrls {
+            full: musicbrainz::url_caa("e32a3f0b-1c19-3170-bb1c-650893774744"),
+            thumb: musicbrainz::url_caa_thumb("e32a3f0b-1c19-3170-bb1c-650893774744"),
+        };
+        p.icy_tx
+            .send(IcyOutcome {
+                url: url.to_string(),
+                raw: "Miles Davis - So What".to_string(),
+                identity: json!({"kind": "stream", "url": url}),
+                pattern: None,
+                validated: Some(("Miles Davis".to_string(), "So What".to_string(), Some(cover.clone()))),
+                pair: Some(("Miles Davis".to_string(), "So What".to_string())),
+                unanswered: false,
+                searched: true,
+            })
+            .await
+            .unwrap();
+        let e = p.next_enrichment().await;
+        // Each field checked against its own half of the pair, by name, so a
+        // swap between `full` and `thumb` at the assembly site fails exactly
+        // one of the two assertions (checking "both are Some" would not).
+        assert_eq!(e.cover, Some(CoverRef::Url { url: cover.full }), "the full size must carry `full`, not `thumb`");
+        assert_eq!(
+            e.cover_thumb,
+            Some(CoverRef::Url { url: cover.thumb }),
+            "the thumbnail must carry `thumb`, not `full`"
+        );
     }
 
     #[tokio::test]
