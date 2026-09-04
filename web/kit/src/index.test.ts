@@ -2,11 +2,11 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import { h } from 'vue'
 import {
-  Button, cn, Dialog, DialogContent, DialogTitle, Slider, Tabs, TabsContent, TabsList,
-  TabsTrigger, UI_CONTRACT,
+  Button, cn, Dialog, DialogContent, DialogTitle, HelpButton, Slider, Tabs, TabsContent,
+  TabsList, TabsTrigger, UI_CONTRACT,
 } from './index'
-// Not part of the kit's public surface, and no reason to widen it just for
-// a test that lives inside the kit.
+// Not part of the kit's public surface, and no reason to widen it just for a
+// test that lives inside the kit.
 import { buttonVariants } from './components/ui/button'
 
 // jsdom does not provide ResizeObserver; reka-ui uses it (`useSize`) to
@@ -105,7 +105,6 @@ describe('public surface of the kit', () => {
    * one control that closes it gave no hover feedback at all.
    *
    * Asserted on the class and not on a computed style: jsdom computes none.
-   * That the browser really applies it was measured through Playwright.
    */
   describe('the hand cursor on what is clickable', () => {
     it('every button variant carries it', () => {
@@ -126,6 +125,61 @@ describe('public surface of the kit', () => {
       expect(close!.className).toContain('cursor-pointer')
       w.unmount()
       document.body.innerHTML = ''
+    })
+  })
+
+  /**
+   * The single `(?)` of the UI. It was rebuilt at each call site and had
+   * drifted three ways -- a drawn glyph on one page, a bare `?` twice on
+   * another, aligned differently from each other. What this pins is what the
+   * component exists to guarantee.
+   */
+  describe('HelpButton', () => {
+    it('names itself twice: for the screen reader and for the mouse', () => {
+      // Both, not one. A `(?)` has no text of its own, so `aria-label` is its
+      // only accessible name -- and `title` is the only hover hint a mouse
+      // user gets. The two System buttons had neither tooltip before.
+      const w = mount(HelpButton, { props: { label: 'About undervoltage' } })
+      expect(w.element.tagName).toBe('BUTTON')
+      expect(w.attributes('aria-label')).toBe('About undervoltage')
+      expect(w.attributes('title')).toBe('About undervoltage')
+      w.unmount()
+    })
+
+    it('sits on the text line, and stays round and clickable', () => {
+      // `align-middle` is the fix for the defect the owner reported: `Button`
+      // is `inline-flex`, so dropped into a sentence it aligns on the
+      // baseline, which lifts a 24 px box above the line it belongs to.
+      const w = mount(HelpButton, { props: { label: 'Help' } })
+      const cls = w.attributes('class') ?? ''
+      expect(cls).toContain('align-middle')
+      expect(cls).toContain('rounded-full')
+      expect(cls).toContain('cursor-pointer')
+      w.unmount()
+    })
+
+    it('the context chooses both dimensions, box and glyph', () => {
+      // Call sites name a context, never pixels: that is what keeps the two
+      // sizes decided in one place instead of drifting again.
+      const inline = mount(HelpButton, { props: { label: 'Help' } })
+      expect(inline.attributes('class')).toContain('size-6')
+      expect(inline.attributes('class')).toContain('[&_svg]:size-4')
+      inline.unmount()
+      const touch = mount(HelpButton, { props: { label: 'Help', size: 'touch' } })
+      // 44 px, the recommended tap target.
+      expect(touch.attributes('class')).toContain('size-11')
+      expect(touch.attributes('class')).toContain('[&_svg]:size-[18px]')
+      touch.unmount()
+    })
+
+    it('forwards a click and the caller-supplied classes', () => {
+      const w = mount(HelpButton, { props: { label: 'Help', class: 'ml-1.5' } })
+      expect(w.attributes('class')).toContain('ml-1.5')
+      w.trigger('click')
+      // No `emits` declared, so the listener lands on the root button through
+      // `$attrs`: that is what the two System call sites rely on.
+      expect(w.emitted()).toHaveProperty('click')
+      w.unmount()
     })
   })
 })

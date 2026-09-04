@@ -533,6 +533,24 @@ describe('PlayerCard', () => {
       expect(w.get('[data-link="youtube"] svg').classes()).toContain('size-5')
     })
 
+    it('gives the provenance (?) the same 44 px touch target', () => {
+      // Same reason as the anchors above, and it shares their line -- but
+      // nothing pinned it, and the glyph has since moved into the kit's
+      // `HelpButton`, whose `size="touch"` is what carries the 44 px now. A
+      // call site that forgot that prop would silently drop to 24 px on the
+      // one row where the progress bar thumb is already competing for taps.
+      const w = mountWith({
+        title: 'Get Lucky',
+        provenance: { fields: { title: 'musicbrainz' } },
+      })
+      expect(w.get('[data-provenance-open]').classes()).toContain('size-11')
+      // Named twice: `aria-label` for the screen reader, `title` for the
+      // hover. The two System `(?)` only gained the second when the
+      // affordance became one component.
+      expect(w.get('[data-provenance-open]').attributes('title')).toBeTruthy()
+      expect(w.get('[data-provenance-open]').attributes('aria-label')).toBeTruthy()
+    })
+
     it('goes in front of the overflow of the progress bar thumb', () => {
       // The thumb's 44 px hit area overflows 19 px above its track (see
       // ProgressBar.vue), while this row is only 8 px higher: without

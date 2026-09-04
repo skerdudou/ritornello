@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import {
   api, Button, Card, CardContent, CardHeader, CardTitle, Dialog, DialogContent,
-  DialogDescription, DialogHeader, DialogTitle, Input, Select, SelectContent, SelectItem,
+  DialogDescription, DialogHeader, DialogTitle, HelpButton, Input, Select, SelectContent,
+  SelectItem,
   SelectTrigger, SelectValue, Table, TableBody, TableCell, TableHead, TableHeader,
   TableRow, toast,
 } from '@ritornello/ui'
@@ -722,21 +723,19 @@ async function waitForReturn(before: number | null, maxMs: number, successKey: s
     <Card>
       <CardHeader>
         <!-- Same shape as the History card: a title holding a second,
-             lighter element on the same baseline. The `(?)` follows the
-             under-voltage one below (`data-system-voltage-help`) rather than
-             inventing a second help affordance for this tab. -->
-        <CardTitle class="flex items-baseline gap-2">
+             lighter element beside it. `items-center` and not
+             `items-baseline`: a flex container ignores the `align-middle`
+             that `HelpButton` carries for inline use, so the alignment has to
+             come from here — and a 24 px box centred against the title reads
+             level, where the baseline tilted it. -->
+        <CardTitle class="flex items-center gap-1.5">
           {{ t('system_memory') }}
-          <Button
+          <HelpButton
             type="button"
-            variant="ghost"
-            size="icon-xs"
             data-system-processes-help
-            :aria-label="t('system_processes_help')"
+            :label="t('system_processes_help')"
             @click="openProcesses"
-          >
-            ?
-          </Button>
+          />
         </CardTitle>
       </CardHeader>
       <CardContent class="space-y-2 text-sm">
@@ -934,18 +933,17 @@ async function waitForReturn(before: number | null, maxMs: number, successKey: s
                  overflowed its cell there. The help is even longer than that
                  advice, so it has even less of a place here — hence the
                  popin rather than an in-place paragraph.
-                 `size="icon-xs"`: small enough to stay a mere "(?)" next to
-                 the label, not a button competing with it. -->
-            <Button
+                 `ml-1.5`: this one sits in a line of text, where the sole
+                 separator was the collapsed whitespace of the template and
+                 the glyph read as glued to the value. The vertical placement
+                 comes from `HelpButton`'s own `align-middle`. -->
+            <HelpButton
               type="button"
-              variant="ghost"
-              size="icon-xs"
+              class="ml-1.5"
               data-system-voltage-help
-              :aria-label="t('system_voltage_help')"
+              :label="t('system_voltage_help')"
               @click="voltageHelpOpen = true"
-            >
-              ?
-            </Button>
+            />
           </div>
           <div>{{ t('system_uptime') }} : <span data-system-uptime>{{ duration(state?.uptime_s) }}</span></div>
           <div>

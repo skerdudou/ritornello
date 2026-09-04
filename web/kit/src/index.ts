@@ -33,6 +33,9 @@ export { Badge } from './components/ui/badge'
 export { Switch } from './components/ui/switch'
 export { ScrollArea } from './components/ui/scroll-area'
 export { Skeleton } from './components/ui/skeleton'
+// The single `(?)` of the whole UI. In the kit and not in the SPA so the
+// plugin admin screens get the same affordance rather than a fourth one.
+export { HelpButton } from './components/ui/help-button'
 export { Slider } from './components/ui/slider'
 // `CardAction` is what switches `CardHeader` to two columns: its class
 // `has-data-[slot=card-action]:grid-cols-[1fr_auto]` only activates in the

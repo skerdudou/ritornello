@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import {
   Badge,
-  Button,
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
+  HelpButton,
 } from '@ritornello/ui'
 import { computed } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
@@ -80,23 +80,18 @@ const hasSomethingToSay = computed(() => fields.value.length > 0 || misses.value
 <template>
   <Dialog v-if="hasSomethingToSay">
     <DialogTrigger as-child>
-      <!-- `size-11`: the recommended 44 px touch target, on a line where the
-           progress bar's slider already overflows (see PlayerCard.vue).
+      <!-- `size="touch"`: the recommended 44 px tap target, on a line where
+           the progress bar's slider already overflows (see PlayerCard.vue).
            `relative z-10` for the same reason as the neighbouring platform
-           links — getting in front of that overflow gives the tap back. -->
-      <Button
-        variant="ghost"
-        class="relative z-10 size-11 shrink-0 rounded-full text-muted-foreground"
-        :aria-label="t('provenance_open')"
-        :title="t('provenance_open')"
+           links — getting in front of that overflow gives the tap back.
+           The glyph itself now lives in `HelpButton`, which is where the two
+           System `(?)` read it from too. -->
+      <HelpButton
+        size="touch"
+        class="relative z-10"
+        :label="t('provenance_open')"
         data-provenance-open
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="9" />
-          <path d="M9.6 9.2a2.5 2.5 0 1 1 3.2 3.4c-.5.3-.8.8-.8 1.4v.4" />
-          <path d="M12 17.4h.01" />
-        </svg>
-      </Button>
+      />
     </DialogTrigger>
     <DialogContent data-provenance-popover>
       <DialogHeader>
