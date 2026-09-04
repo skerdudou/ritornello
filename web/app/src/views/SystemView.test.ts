@@ -73,6 +73,11 @@ const CATALOGUE = {
 function stub(
   body: unknown | (() => unknown),
   catalog: Record<string, string> = CATALOGUE,
+  // `log` takes `null` — not `undefined` — to mean "this route fails".
+  // Passing `undefined` to a parameter that has a default is what *selects*
+  // the default, so the failure never happened: measured, the "unreachable
+  // log" test below was quietly being served an empty list and passing for
+  // the wrong reason.
   log: unknown = { lines: [] },
   postRefusal?: string,
 ) {
@@ -96,7 +101,7 @@ function stub(
     // missing `lines` — the test would then fail for a reason that is not
     // its own.
     if (u.includes('/api/logs')) {
-      if (log === undefined) {
+      if (log === null) {
         return Promise.resolve({ ok: false, status: 503, json: async () => ({}) } as Response)
       }
       return Promise.resolve({ ok: true, json: async () => log } as Response)
@@ -1312,7 +1317,7 @@ describe('SystemView', () => {
       // The two fetches are independent, each with its own `.catch`: a
       // failing `/api/logs` must not make the machine look mute — the metrics
       // are precisely what one looks at when the log is missing.
-      stub(payload(), CATALOGUE, undefined)
+      stub(payload(), CATALOGUE, null)
       const w = await mountView()
       expect(w.findAll('[data-log-line]')).toHaveLength(0)
       expect(w.find('[data-system-unavailable]').exists()).toBe(false)
