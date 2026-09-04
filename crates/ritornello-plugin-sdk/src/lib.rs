@@ -10,8 +10,9 @@ pub use client::{
 };
 pub use runtime::Runtime;
 pub use server::{
-    bind_admin, bind_display, bind_input, bind_metadata, bind_source, run_admin_plugin,
-    run_display_plugin, run_input_plugin, run_metadata_plugin, run_source_plugin, serve_admin,
-    serve_display, serve_input, serve_metadata, serve_source, AdminPlugin, DisplayPlugin,
-    InputPlugin, MetadataPlugin, Notification, SourceOutcome, SourcePlugin,
+    bind_admin, bind_display, bind_input, bind_metadata, bind_source, is_plain_locale,
+    run_admin_plugin, run_display_plugin, run_input_plugin, run_metadata_plugin,
+    run_source_plugin, serve_admin, serve_display, serve_input, serve_metadata, serve_source,
+    AdminPlugin, DisplayPlugin, InputPlugin, MetadataPlugin, Notification, SourceOutcome,
+    SourcePlugin,
 };

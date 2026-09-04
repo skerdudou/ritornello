@@ -25,6 +25,10 @@ pub struct GenericInputAdmin {
     pub input_root: PathBuf,
     pub hub: Hub,
     pub catalog: Arc<RwLock<Catalog>>,
+    /// Root of the on-disk language packs, kept so a catalog can be rebuilt in
+    /// any requested language — `Catalog::load` only parses a TOML file, so
+    /// this costs nothing per request.
+    pub locales_root: PathBuf,
 }
 
 #[async_trait::async_trait]
@@ -43,9 +47,20 @@ impl AdminPlugin for GenericInputAdmin {
         }
     }
 
-    fn catalog(&self) -> serde_json::Value {
-        let cat = self.catalog.read().unwrap();
-        serde_json::json!(cat.entries())
+    fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
+        match lang {
+            // The language the plugin was started in: the catalog already
+            // built, no work at all.
+            None => serde_json::json!(self.catalog.read().unwrap().entries()),
+            // A language explicitly asked for. Rebuilt rather than translated
+            // from the current one: the on-disk pack is the authority, and
+            // only `Catalog::load` knows how to layer it over the embedded
+            // English.
+            Some(l) => {
+                let c = Catalog::load("generic-input", l, &self.locales_root, crate::GENERIC_INPUT_EN);
+                serde_json::json!(c.entries())
+            }
+        }
     }
 
     async fn get_data(&self) -> serde_json::Value {
@@ -178,6 +193,7 @@ mod tests {
                 input_root,
                 hub,
                 catalog,
+                locales_root: std::path::PathBuf::from("/nonexistent"),
             },
             _rx: rx,
             _dir: dir,
@@ -199,8 +215,28 @@ mod tests {
     #[test]
     fn catalog_exposes_the_component_keys() {
         let f = fixture();
-        let v = f.admin.catalog();
+        let v = f.admin.catalog(None);
         assert!(v["btn_save"].is_string(), "the catalog must carry the plugin's keys");
+    }
+
+    #[test]
+    fn a_requested_language_is_honoured_whatever_the_current_one() {
+        // The plugin is started in English; asking for another language must
+        // rebuild, not return the current catalog. This is the whole basis of
+        // the `immutable` answer served over HTTP.
+        let mut f = fixture();
+        let locales = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(locales.path().join("generic-input")).unwrap();
+        std::fs::write(
+            locales.path().join("generic-input/fr.toml"),
+            "btn_save = \"Enregistrer\"\n",
+        )
+        .unwrap();
+        f.admin.locales_root = locales.path().to_path_buf();
+        let en = f.admin.catalog(None);
+        let fr = f.admin.catalog(Some("fr"));
+        assert_ne!(en, fr);
+        assert_eq!(fr["btn_save"], "Enregistrer");
     }
 
     /// French pack shipped in the repository.

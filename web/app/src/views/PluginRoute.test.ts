@@ -152,4 +152,58 @@ describe('PluginRoute', () => {
     await flushPromises()
     expect(w.findComponent(PluginViewStub).props('cause')).toBe('')
   })
+
+  // --- Versioned catalog URL ---
+  //
+  // The gain this whole chantier was built for: a plugin catalog served
+  // `immutable` under `?lang=<locale>&v=<session>` (Task 8) is only useful
+  // once the shell actually asks for it under that URL. Two tests: the
+  // unstamped fallback first, while `usePlugins()`'s module state is still
+  // pristine (neither test below calls `refresh()` before this one) — order
+  // matters here, since this file does not reset modules between tests.
+
+  it('requests the catalog under a bare URL while the session is still unknown', async () => {
+    // `/api/status` may not have answered yet when the first plugin page
+    // mounts. A URL carrying an empty `v=` would be cached forever under a
+    // false stamp, so the fallback is no query at all, not a half-stamped one.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const PluginRoute = (await import('./PluginRoute.vue')).default
+    mount(PluginRoute, { global: { stubs: { PluginView: PluginViewStub } } })
+    await flushPromises()
+    const url = String(vi.mocked(fetch).mock.calls[0]![0])
+    expect(url).toBe('/plugins/radio/api/i18n')
+  })
+
+  it('asks for the catalog in an explicit language, under a versioned URL', async () => {
+    // Changing language then becomes a change of URL — the browser's own
+    // cache does the invalidation, and nothing has to be purged by hand. It
+    // is the systematic refetch that plays that role today.
+    //
+    // In real use, `App.vue`'s `onMounted` has already read `/api/status`
+    // before a plugin page can be navigated to; simulated here by seeding
+    // `usePlugins()` directly, since this test mounts only `PluginRoute`.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        String(url).startsWith('/api/status')
+          ? Promise.resolve(
+              new Response(
+                JSON.stringify({ plugins: [], active_source: '', session: 'sess-1', locale: 'fr' }),
+                { status: 200 },
+              ),
+            )
+          : Promise.resolve(new Response('{}', { status: 200 })),
+      ),
+    )
+    const { usePlugins } = await import('../composables/usePlugins')
+    await usePlugins().refresh()
+    const PluginRoute = (await import('./PluginRoute.vue')).default
+    mount(PluginRoute, { global: { stubs: { PluginView: PluginViewStub } } })
+    await flushPromises()
+    const call = vi.mocked(fetch).mock.calls.find((c) => String(c[0]).startsWith('/plugins/radio/'))
+    const url = String(call![0])
+    expect(url).toMatch(/^\/plugins\/radio\/api\/i18n\?/)
+    expect(url).toContain('lang=fr')
+    expect(url).toContain('v=sess-1')
+  })
 })

@@ -136,6 +136,28 @@ export default defineComponent({
      * previous behaviour (an `ETag` and a 304 per load) still applies.
      */
     uiVersion: { type: String, default: '' },
+    /**
+     * Whether `/api/status` has not yet settled once, as `PluginRoute` knows
+     * it from `usePlugins().unavailable` and whether it has read a first
+     * answer.
+     *
+     * Holds the module-loading effect back: `<RouterView/>` mounts this view
+     * before `/api/status` has answered, so on a direct load `uiVersion` is
+     * first `''`, then the real fingerprint a moment later. Letting the
+     * effect react to that change would import `ui.js` under two different
+     * URLs — evaluating the plugin's module twice, and leaving two
+     * `<style data-plugin-sheet="…">` behind, since the first is never
+     * removed. Waiting for the final value instead costs one load, at the
+     * one moment (a direct load) the versioning exists to speed up.
+     *
+     * "Settled" means answered *or* failed, never an indefinite wait: an
+     * unreachable `/api/status` must still lower this flag, exactly as a
+     * plugin that announced no fingerprint — a plugin page withheld forever
+     * because `/api/status` is down would be far worse than an uncached
+     * asset. Defaults to `false` so a caller unaware of `/api/status` —
+     * every test that mounts this view directly — behaves as before.
+     */
+    statusPending: { type: Boolean, default: false },
     loadModule: {
       type: Function as PropType<(name: string, version: string) => Promise<unknown>>,
       default: (name: string, version: string) =>
@@ -192,6 +214,10 @@ export default defineComponent({
 
     watchEffect(async () => {
       const gen = ++generation
+      // Held until `/api/status` has settled once — see `statusPending`'s
+      // doc. Read synchronously (before the first `await`) so `watchEffect`
+      // tracks it and re-runs the instant it drops.
+      if (props.statusPending) return
       component.value = null
       error.value = null
       try {

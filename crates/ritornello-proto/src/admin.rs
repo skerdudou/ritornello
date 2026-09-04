@@ -6,8 +6,16 @@ pub enum AdminReq {
     /// A UI asset of the plugin (`"ui.js"`, `"ui.css"`). The path is **opaque**
     /// to the core: the plugin decides what it exposes.
     GetAsset(String),
-    /// The plugin's i18n catalog in the current language, flattened.
-    GetCatalog,
+    /// The plugin's i18n catalog, flattened.
+    ///
+    /// `Some(lang)` asks for **that** language, whatever the plugin's current
+    /// locale; `None` keeps the historical behaviour (the current one).
+    ///
+    /// Carrying the language is what lets the HTTP answer be `immutable`: the
+    /// URL then fully determines the content. A `lang` used only as a cache
+    /// key would let a stale entry serve another language after a locale
+    /// change — the promise would be a lie.
+    GetCatalog(Option<String>),
     GetData,
     SetData(serde_json::Value),
     /// Liveness probe: the plugin answers `Pong` without touching its state or
@@ -67,11 +75,22 @@ mod tests {
 
     #[test]
     fn request_getcatalog_roundtrip() {
-        let r = AdminRequest { id: 2, deadline_ms: None, req: AdminReq::GetCatalog };
+        let r = AdminRequest { id: 2, deadline_ms: None, req: AdminReq::GetCatalog(None) };
         let json = serde_json::to_string(&r).unwrap();
-        assert_eq!(json, r#"{"id":2,"req":"GetCatalog"}"#);
+        assert_eq!(json, r#"{"id":2,"req":"GetCatalog","arg":null}"#);
         let back: AdminRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.req, AdminReq::GetCatalog);
+        assert_eq!(back.req, AdminReq::GetCatalog(None));
+    }
+
+    #[test]
+    fn request_getcatalog_with_a_language_roundtrip() {
+        // The language must be **obeyed**, not merely used as a cache key: it
+        // travels on the wire so the plugin can honour it.
+        let r = AdminRequest { id: 2, deadline_ms: None, req: AdminReq::GetCatalog(Some("fr".into())) };
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(json, r#"{"id":2,"req":"GetCatalog","arg":"fr"}"#);
+        let back: AdminRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.req, AdminReq::GetCatalog(Some("fr".into())));
     }
 
     #[test]
@@ -117,9 +136,9 @@ mod tests {
     #[test]
     fn a_request_without_deadline_still_parses() {
         // Frames written before this field existed: no `deadline_ms`.
-        let back: AdminRequest = serde_json::from_str(r#"{"id":1,"req":"GetCatalog"}"#).unwrap();
+        let back: AdminRequest = serde_json::from_str(r#"{"id":1,"req":"GetCatalog","arg":null}"#).unwrap();
         assert_eq!(back.deadline_ms, None);
-        assert_eq!(back.req, AdminReq::GetCatalog);
+        assert_eq!(back.req, AdminReq::GetCatalog(None));
     }
 
     #[test]

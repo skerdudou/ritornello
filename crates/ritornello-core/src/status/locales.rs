@@ -52,7 +52,12 @@ pub(super) struct LocaleRequest {
 /// plugins: same rigor as for the theme and the audio output, which are
 /// validated — an arbitrary string opened a path traversal
 /// (`{"locale":"../../whatever"}`) on an unauthenticated API.
-pub(super) fn valid_locale(locale: &str) -> bool {
+///
+/// `pub(crate)`, not `pub(super)`: `admin.rs` reuses this exact rule to
+/// validate the `lang` query parameter of `/plugins/<name>/api/i18n`, rather
+/// than inventing a second grammar that could drift from this one — see
+/// `admin::admin_i18n`.
+pub(crate) fn valid_locale(locale: &str) -> bool {
     !locale.is_empty()
         && locale.len() <= 16
         && locale.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')

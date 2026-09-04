@@ -134,6 +134,7 @@ async fn main() -> Result<()> {
         config_path: path,
         config: RwLock::new(config),
         catalog,
+        locales_root,
         rebind_tx: Some(rebind_tx),
     };
 

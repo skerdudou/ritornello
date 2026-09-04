@@ -19,6 +19,11 @@ mod plugin_status;
 mod logs;
 mod locales;
 use locales::{i18n_json, locale_json, locale_put};
+// Re-exported for `admin.rs`: the authority on an acceptable language code
+// (`valid_locale`) and on what is actually installed (`list_locales`) lives
+// here, next to `/api/locale` which they already gate — `admin_i18n` reuses
+// both rather than inventing a second grammar.
+pub(crate) use locales::{list_locales, valid_locale};
 use plugin_status::plugin_enabled_put;
 pub use plugin_status::{mark_plugin_disconnected, replace_plugin_lines, PluginsControl, PluginOrder, PluginStatus};
 mod settings_validation;
@@ -46,6 +51,32 @@ pub struct AppState {
     /// late must see its page appear without restarting the core.
     pub admin_backends: crate::admin::AdminBackends,
     pub admin_assets: Arc<crate::admin::AssetCache>,
+    /// Plugin catalogs already fetched, by `(plugin, lang)`. No entry for "no
+    /// language requested" — see `crate::admin::CatalogCache`'s doc for why
+    /// that case is never cached at all.
+    pub admin_catalogs: Arc<crate::admin::CatalogCache>,
+    /// Identifier of this run of the core, used as the cache stamp of the
+    /// catalogs (`?v=<session>`).
+    ///
+    /// Not a fingerprint of the content: getting one would mean already
+    /// holding the catalog, whereas the stamp has to be written into the very
+    /// URL that asks for it. Not the plugin's fingerprint either — an
+    /// operator can edit an on-disk language pack
+    /// (`/etc/ritornello/locales/<component>/<lang>.toml`) without
+    /// recompiling anything, and the catalog would then stay frozen **for
+    /// ever** in the caches, which is the danger `immutable` carries.
+    /// Editing a pack ends with a restart of the service: that is the
+    /// gesture which refreshes them all.
+    ///
+    /// **Stated limitation**: the stamp is the core's session alone, not the
+    /// plugin's. A plugin restarted *within* one core session, with a
+    /// rebuilt catalog, keeps this same `session` value, so a browser that
+    /// already cached the old catalog under `?v=<session>` goes on serving it
+    /// `immutable` until the core itself restarts. `admin::forget_page`
+    /// purges the core-side cache for exactly this case but cannot reach a
+    /// browser's copy. Accepted: a core restart clears it, and editing a
+    /// language pack ends in a service restart anyway.
+    pub session: String,
     pub cmd_tx: mpsc::Sender<ritornello_proto::InputMessage>,
     pub theme_current: Arc<RwLock<crate::theme::ThemeState>>,
     pub theme_tx: mpsc::Sender<crate::theme::ThemeState>,
@@ -105,7 +136,23 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn status_json(State(state): State<AppState>) -> Json<StatusState> {
+/// `/api/status`'s payload: the plugin lines, plus two facts about this run
+/// of the core that the shell needs before it can build a versioned catalog
+/// URL — see `AppState::session` — without a second round trip.
+#[derive(Serialize)]
+struct StatusResponse {
+    #[serde(flatten)]
+    status: StatusState,
+    session: String,
+    /// The current UI language, defaulting to `en` like the catalog itself
+    /// (`Core::new`'s `persisted.locale.as_deref().unwrap_or("en")`) when
+    /// nothing was ever selected. A plain string, not the `Option<String>` of
+    /// `/api/locale`: the shell builds `?lang=<locale>` straight from this
+    /// field, and an absent selection is not a language the URL can name.
+    locale: String,
+}
+
+async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
     let mut status = state.status.read().await.clone();
     // All probes in parallel: a busy plugin does not delay the response
     // beyond its own budget (500 ms + grace). The backends lock is released
@@ -130,7 +177,38 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusState> {
     for p in status.plugins.iter_mut() {
         p.busy = verdicts.get(&p.name).copied().unwrap_or(false);
     }
-    Json(status)
+    // Clamped to the installed set, falling back to `en`: `locale_current` can
+    // carry a language `valid_locale` accepts but `admin_i18n` refuses (a pack
+    // removed after being selected, or restored as-is from `state.json`).
+    // `admin_i18n`'s doc claims the core never refuses a language it
+    // advertises here — enforcing it here is what makes that true rather than
+    // merely asserted. Content-identical: `Catalog::load` already falls back
+    // to embedded English for an uninstalled language.
+    let installed = list_locales(&state.locales_root);
+    let locale = state
+        .locale_current
+        .read()
+        .await
+        .clone()
+        .filter(|l| installed.iter().any(|i| i == l))
+        .unwrap_or_else(|| "en".to_string());
+    Json(StatusResponse { status, session: state.session.clone(), locale })
+}
+
+/// Builds the token that identifies this run of the core — see
+/// `AppState::session`. Wall-clock nanoseconds rather than a random crate:
+/// there is no security property to uphold (nobody signs or checks it), only
+/// uniqueness across restarts, which the clock already gives for free.
+pub fn new_session() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default()
+        .hash(&mut h);
+    std::process::id().hash(&mut h);
+    format!("{:x}", h.finish())
 }
 
 /// The named presets of every source, for the tiles of the web remote. A
@@ -315,6 +393,8 @@ pub(crate) mod tests_support {
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
+            admin_catalogs: Arc::new(Default::default()),
+            session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
@@ -352,6 +432,8 @@ pub(crate) mod tests_support {
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
+            admin_catalogs: Arc::new(Default::default()),
+            session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
@@ -391,6 +473,8 @@ pub(crate) mod tests_support {
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
+            admin_catalogs: Arc::new(Default::default()),
+            session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
@@ -438,6 +522,8 @@ pub(crate) mod tests_support {
             locales_root: dir.path().to_path_buf(),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
+            admin_catalogs: Arc::new(Default::default()),
+            session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
             theme_tx: tokio::sync::mpsc::channel(4).0,
@@ -628,7 +714,7 @@ mod tests {
     #[async_trait::async_trait]
     impl crate::admin::AdminBackend for FakeOccupe {
         async fn asset(&self, _: &str) -> anyhow::Result<Option<(String, String)>> { Ok(None) }
-        async fn catalog(&self) -> anyhow::Result<serde_json::Value> { Ok(serde_json::json!({})) }
+        async fn catalog(&self, _lang: Option<&str>) -> anyhow::Result<serde_json::Value> { Ok(serde_json::json!({})) }
         async fn get_data(&self) -> anyhow::Result<serde_json::Value> { Ok(serde_json::json!({})) }
         async fn set_data(&self, _: serde_json::Value) -> anyhow::Result<Result<(), String>> { Ok(Ok(())) }
         async fn ping(&self) -> anyhow::Result<()> { Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
@@ -660,6 +746,54 @@ mod tests {
         let s: StatusState = serde_json::from_slice(&body).unwrap();
         assert_eq!(s.plugins.len(), 2);
         assert_eq!(s.active_source, "radio");
+    }
+
+    /// The shell builds a plugin catalog URL (`?lang=<locale>&v=<session>`)
+    /// straight from this one payload — the point of adding these two fields
+    /// here rather than a separate `/api/locale` round trip.
+    #[tokio::test]
+    async fn api_status_carries_the_session_and_the_current_locale() {
+        let (state, _rx, _dir) = tests_support::app_state_fr();
+        let session = state.session.clone();
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["session"], session);
+        assert_eq!(v["locale"], "fr");
+    }
+
+    #[tokio::test]
+    async fn api_status_locale_defaults_to_en_absent_a_selection() {
+        let app = router(app_state());
+        let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["locale"], "en");
+    }
+
+    /// `admin_i18n`'s doc claims the core "never refuses a language it
+    /// advertises through `/api/status`'s own `locale` field" — a guarantee
+    /// enforced only at the `admin_i18n` gate, not at the source. `PUT
+    /// /api/locale` and the value restored from `state.json` only check
+    /// `valid_locale`, not membership in the installed set: a well-formed but
+    /// uninstalled language (a pack removed after being selected, say) would
+    /// then be echoed here and refused by every plugin catalog request naming
+    /// it — every plugin page rendering raw translation keys next to a
+    /// refusal banner. Clamping here is content-identical: `Catalog::load`
+    /// already falls back to embedded English for an uninstalled language, so
+    /// nothing a user sees changes except that the URL this locale ends up
+    /// in now works.
+    #[tokio::test]
+    async fn api_status_clamps_an_uninstalled_locale_to_en() {
+        let (state, _rx, _dir) = tests_support::app_state_fr();
+        *state.locale_current.write().await = Some("de".to_string()); // valid_locale, not installed
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["locale"], "en");
     }
 
     /// The web remote tiles read the preset names here: the core already

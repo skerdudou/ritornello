@@ -77,11 +77,20 @@ pub struct MusicBrainzAdmin {
     store: Arc<StoreLock<Store>>,
     state_path: PathBuf,
     catalog: Arc<RwLock<Catalog>>,
+    /// Root of the on-disk language packs, kept so a catalog can be rebuilt in
+    /// any requested language — `Catalog::load` only parses a TOML file, so
+    /// this costs nothing per request.
+    locales_root: PathBuf,
 }
 
 impl MusicBrainzAdmin {
-    pub fn new(store: Arc<StoreLock<Store>>, state_path: PathBuf, catalog: Arc<RwLock<Catalog>>) -> Self {
-        Self { store, state_path, catalog }
+    pub fn new(
+        store: Arc<StoreLock<Store>>,
+        state_path: PathBuf,
+        catalog: Arc<RwLock<Catalog>>,
+        locales_root: PathBuf,
+    ) -> Self {
+        Self { store, state_path, catalog, locales_root }
     }
 
     /// Resolves a catalog key into the sentence of the current language.
@@ -102,9 +111,20 @@ impl AdminPlugin for MusicBrainzAdmin {
         }
     }
 
-    fn catalog(&self) -> serde_json::Value {
-        let cat = self.catalog.read().unwrap();
-        serde_json::json!(cat.entries())
+    fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
+        match lang {
+            // The language the plugin was started in: the catalog already
+            // built, no work at all.
+            None => serde_json::json!(self.catalog.read().unwrap().entries()),
+            // A language explicitly asked for. Rebuilt rather than translated
+            // from the current one: the on-disk pack is the authority, and
+            // only `Catalog::load` knows how to layer it over the embedded
+            // English.
+            Some(l) => {
+                let c = Catalog::load("musicbrainz", l, &self.locales_root, crate::MUSICBRAINZ_EN);
+                serde_json::json!(c.entries())
+            }
+        }
     }
 
     async fn get_data(&self) -> serde_json::Value {
@@ -219,6 +239,7 @@ mod tests {
                 Arc::new(StoreLock::new(Store::default())),
                 state_path.clone(),
                 catalog,
+                std::path::PathBuf::from("/nonexistent"),
             ),
             state_path,
             _dir: dir,
@@ -241,8 +262,24 @@ mod tests {
     #[test]
     fn catalog_exposes_the_components_keys() {
         let f = fixture();
-        let v = f.admin.catalog();
+        let v = f.admin.catalog(None);
         assert!(v["title"].is_string(), "the catalog must carry the plugin's keys");
+    }
+
+    #[test]
+    fn a_requested_language_is_honoured_whatever_the_current_one() {
+        // The plugin is started in English; asking for another language must
+        // rebuild, not return the current catalog. This is the whole basis of
+        // the `immutable` answer served over HTTP.
+        let mut f = fixture();
+        let locales = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(locales.path().join("musicbrainz")).unwrap();
+        std::fs::write(locales.path().join("musicbrainz/fr.toml"), "title = \"Empreintes\"\n").unwrap();
+        f.admin.locales_root = locales.path().to_path_buf();
+        let en = f.admin.catalog(None);
+        let fr = f.admin.catalog(Some("fr"));
+        assert_ne!(en, fr);
+        assert_eq!(fr["title"], "Empreintes");
     }
 
     /// French pack shipped in the repository.
@@ -429,6 +466,7 @@ mod tests {
                 std::path::Path::new("/nonexistent"),
                 crate::MUSICBRAINZ_EN,
             ))),
+            std::path::PathBuf::from("/nonexistent"),
         );
 
         let data = admin.get_data().await;

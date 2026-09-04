@@ -290,7 +290,7 @@ async fn main() -> Result<()> {
         // Nothing is playing yet: filled in at the first `Play`.
         current_url: None,
         catalog: catalog.clone(),
-        locales_root,
+        locales_root: locales_root.clone(),
         // The receiver only makes sense if an Admin half exists to emit on
         // it (see below): otherwise `poll_notification` must wait forever,
         // not fall back onto a dead channel.
@@ -307,6 +307,7 @@ async fn main() -> Result<()> {
         state_path,
         stations: stations_shared,
         catalog,
+        locales_root,
         directory: Arc::new(directory),
         search: RwLock::new(Vec::new()),
         countries: RwLock::new(Vec::new()),
@@ -626,6 +627,7 @@ mod tests {
             state_path: dir.path().join("plugin-radio.json"),
             stations: stations_shared.clone(),
             catalog: Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN))),
+            locales_root: dir.path().to_path_buf(),
             directory: Arc::new(crate::directory::HttpDirectory::from_env()),
             search: RwLock::new(Vec::new()),
             countries: RwLock::new(Vec::new()),

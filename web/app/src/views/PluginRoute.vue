@@ -15,10 +15,32 @@ const catalog = ref<Catalog>({})
  * Absent (`''`) for a plugin that announced none, or before the first
  * `/api/status` answer settles.
  */
-const { state } = usePlugins()
+const { state, locale, session, settled } = usePlugins()
 const uiVersion = computed(
   () => state.value.plugins.find((p) => p.name === name.value)?.ui_version ?? '',
 )
+
+/**
+ * Relayed to `PluginView` so it holds its module-loading effect until
+ * `/api/status` has settled once — see that prop's doc. `settled` never goes
+ * back down once raised, on failure as much as on success: a transient
+ * outage must not re-open the curtain on a page already showing.
+ */
+const statusPending = computed(() => !settled.value)
+
+/**
+ * Suffix that makes a catalog URL cacheable for good: the language it is in,
+ * and the stamp of the core's session.
+ *
+ * Empty when either is still unknown — `/api/status` may not have answered
+ * when the first plugin page mounts. An unstamped URL is merely uncached; one
+ * carrying an empty `v=` would be cached **for ever** under a false stamp.
+ */
+function catalogQuery(locale: string, session: string): string {
+  if (!locale || !session) return ''
+  return `?lang=${encodeURIComponent(locale)}&v=${encodeURIComponent(session)}`
+}
+
 /**
  * Cause of a refusal by the core, as it now carries it.
  *
@@ -73,7 +95,8 @@ watch(
     // the body of the core's refusal (`api.get` extracts its `error` field),
     // and that is the only channel carrying it.
     let reason = ''
-    const loaded = await api.get<Catalog>(`/plugins/${name.value}/api/i18n`).catch((e: unknown) => {
+    const url = `/plugins/${name.value}/api/i18n${catalogQuery(locale.value, session.value)}`
+    const loaded = await api.get<Catalog>(url).catch((e: unknown) => {
       console.warn(`plugin ${name.value}: i18n catalog unavailable`, e)
       reason = e instanceof Error ? e.message : String(e)
       return {}
@@ -103,5 +126,6 @@ watch(
     :cause="cause"
     :catalog-pending="catalogPending"
     :ui-version="uiVersion"
+    :status-pending="statusPending"
   />
 </template>

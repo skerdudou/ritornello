@@ -1239,7 +1239,7 @@ async fn main() -> Result<()> {
 
     Runtime::from_args()?
         .metadata(MusicBrainzPlugin::new(store.clone(), state_path.clone()))?
-        .admin(admin::MusicBrainzAdmin::new(store, state_path, catalog))?
+        .admin(admin::MusicBrainzAdmin::new(store, state_path, catalog, locales_root))?
         .run()
         .await
 }

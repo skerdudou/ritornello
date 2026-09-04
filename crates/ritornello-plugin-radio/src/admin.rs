@@ -46,6 +46,10 @@ pub struct RadioAdmin {
     pub state_path: PathBuf,
     pub stations: Arc<AsyncRwLock<Stations>>,
     pub catalog: Arc<RwLock<Catalog>>,
+    /// Root of the on-disk language packs, kept so a catalog can be rebuilt in
+    /// any requested language — `Catalog::load` only parses a TOML file, so
+    /// this costs nothing per request.
+    pub locales_root: PathBuf,
     /// Access to the directory behind a trait: tests inject results without
     /// ever touching the network.
     pub directory: Arc<dyn Directory>,
@@ -78,9 +82,20 @@ impl AdminPlugin for RadioAdmin {
         }
     }
 
-    fn catalog(&self) -> serde_json::Value {
-        let cat = self.catalog.read().unwrap();
-        serde_json::json!(cat.entries())
+    fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
+        match lang {
+            // The language the plugin was started in: the catalog already
+            // built, no work at all.
+            None => serde_json::json!(self.catalog.read().unwrap().entries()),
+            // A language explicitly asked for. Rebuilt rather than translated
+            // from the current one: the on-disk pack is the authority, and
+            // only `Catalog::load` knows how to layer it over the embedded
+            // English.
+            Some(l) => {
+                let c = Catalog::load("radio", l, &self.locales_root, crate::RADIO_EN);
+                serde_json::json!(c.entries())
+            }
+        }
     }
 
     async fn get_data(&self) -> serde_json::Value {
@@ -258,6 +273,7 @@ mod tests {
                 std::path::Path::new("/nonexistent"),
                 crate::RADIO_EN,
             ))),
+            locales_root: std::path::PathBuf::from("/nonexistent"),
             directory,
             search: RwLock::new(Vec::new()),
             countries: RwLock::new(Vec::new()),
@@ -300,8 +316,25 @@ mod tests {
     #[test]
     fn catalog_exposes_the_component_keys() {
         let dir = tempfile::tempdir().unwrap();
-        let v = admin(dir.path()).catalog();
+        let v = admin(dir.path()).catalog(None);
         assert!(v["btn_save"].is_string(), "the sources_catalog must carry the plugin's keys");
+    }
+
+    #[test]
+    fn a_requested_language_is_honoured_whatever_the_current_one() {
+        // The plugin is started in English; asking for another language must
+        // rebuild, not return the current catalog. This is the whole basis of
+        // the `immutable` answer served over HTTP.
+        let dir = tempfile::tempdir().unwrap();
+        let locales = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(locales.path().join("radio")).unwrap();
+        std::fs::write(locales.path().join("radio/fr.toml"), "btn_save = \"Enregistrer\"\n").unwrap();
+        let mut a = admin(dir.path());
+        a.locales_root = locales.path().to_path_buf();
+        let en = a.catalog(None);
+        let fr = a.catalog(Some("fr"));
+        assert_ne!(en, fr);
+        assert_eq!(fr["btn_save"], "Enregistrer");
     }
 
     #[tokio::test]

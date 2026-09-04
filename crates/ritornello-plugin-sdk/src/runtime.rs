@@ -434,7 +434,7 @@ mod tests {
                     _ => None,
                 }
             }
-            fn catalog(&self) -> serde_json::Value {
+            fn catalog(&self, _lang: Option<&str>) -> serde_json::Value {
                 serde_json::json!({})
             }
             async fn get_data(&self) -> serde_json::Value {

@@ -60,6 +60,10 @@ pub struct FilesAdmin {
     pub roots: Arc<AsyncRwLock<Roots>>,
     pub playlist: Arc<AsyncRwLock<Playlist>>,
     pub catalog: Arc<RwLock<Catalog>>,
+    /// Root of the on-disk language packs, kept so a catalog can be rebuilt in
+    /// any requested language — `Catalog::load` only parses a TOML file, so
+    /// this costs nothing per request.
+    pub locales_root: PathBuf,
     pub scan: Arc<Mutex<ScanProgress>>,
     /// Running scan task. Launching a new one **aborts** the previous one:
     /// two clicks must not leave two concurrent walks saturating a slow
@@ -513,9 +517,25 @@ impl AdminPlugin for FilesAdmin {
         }
     }
 
-    fn catalog(&self) -> serde_json::Value {
-        let cat = self.catalog.read().unwrap();
-        serde_json::json!(cat.entries())
+    fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
+        match lang {
+            // The language the plugin was started in: the catalog already
+            // built, no work at all.
+            None => serde_json::json!(self.catalog.read().unwrap().entries()),
+            // A language explicitly asked for. Rebuilt rather than translated
+            // from the current one: the on-disk pack is the authority, and
+            // only `Catalog::load` knows how to layer it over the embedded
+            // English.
+            Some(l) => {
+                let c = Catalog::load(
+                    "files",
+                    l,
+                    &self.locales_root,
+                    ritornello_plugin_files::FILES_EN,
+                );
+                serde_json::json!(c.entries())
+            }
+        }
     }
 
     async fn get_data(&self) -> serde_json::Value {
@@ -1175,6 +1195,7 @@ mod tests {
             roots: Arc::new(AsyncRwLock::new(Roots::default())),
             playlist: Arc::new(AsyncRwLock::new(Playlist::default())),
             catalog: sources_catalog.clone(),
+            locales_root: root_dir.clone(),
             scan: Arc::new(Mutex::new(ScanProgress::default())),
             scan_task: None,
             unresolved: Arc::new(Mutex::new(Vec::new())),
@@ -1195,6 +1216,24 @@ mod tests {
             health,
         };
         (admin, root_dir)
+    }
+
+    #[test]
+    fn a_requested_language_is_honoured_whatever_the_current_one() {
+        // The plugin is started in English; asking for another language must
+        // rebuild, not return the current catalog. This is the whole basis of
+        // the `immutable` answer served over HTTP.
+        let (admin, root_dir) = test_admin();
+        std::fs::create_dir_all(root_dir.join("files")).unwrap();
+        // `btn_save_playlist`, not a made-up key: overriding a key that
+        // actually exists in the embedded English pack is the stronger
+        // shape — it proves the French pack is *layered over* English, not
+        // merely that an unknown key was added.
+        std::fs::write(root_dir.join("files/fr.toml"), "btn_save_playlist = \"Enregistrer la liste\"\n").unwrap();
+        let en = admin.catalog(None);
+        let fr = admin.catalog(Some("fr"));
+        assert_ne!(en, fr);
+        assert_eq!(fr["btn_save_playlist"], "Enregistrer la liste");
     }
 
     fn add_share(password: &str) -> serde_json::Value {

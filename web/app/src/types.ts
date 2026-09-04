@@ -20,7 +20,25 @@ export interface PluginStatus {
    * a plugin with no admin page, or one predating the field. */
   ui_version?: string
 }
-export interface StatusPayload { plugins: PluginStatus[]; active_source: string }
+export interface StatusPayload {
+  plugins: PluginStatus[]
+  active_source: string
+  /**
+   * Identifier of this run of the core, used by the shell as the `v=` stamp
+   * of a plugin's catalog URL (see `PluginRoute.vue`'s `catalogQuery`).
+   *
+   * A restart of the core (which is also what a language pack edit ends
+   * with) changes it, which is what lets the catalog be served `immutable`
+   * without ever going stale.
+   */
+  session: string
+  /**
+   * The current UI language, always populated by the core (it defaults to
+   * `en` server-side rather than omitting the field). Used as the `lang=`
+   * stamp of a plugin's catalog URL, alongside `session`.
+   */
+  locale: string
+}
 export interface AudioDevice { name: string; description: string }
 export interface AudioPayload { devices: AudioDevice[]; current: string | null }
 export interface LocalePayload { locales: string[]; current: string | null }

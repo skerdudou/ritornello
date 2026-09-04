@@ -12,6 +12,19 @@ use rust_embed::RustEmbed;
 #[folder = "../../web/app/dist/"]
 struct Dist;
 
+/// Header of an asset a caller has stamped with a fingerprint of its own
+/// (`?v=…`): a year, and never to be revalidated, since the URL itself
+/// determines the content and a fresh fingerprint names a fresh URL.
+///
+/// One `const` used from both routers — the SPA's own assets here, and a
+/// plugin's assets/catalog in `admin.rs` — rather than four copies of the
+/// same string: a divergence between them would mean a wrong header served
+/// for a year to whichever route lagged behind. Not a shared *function*: the
+/// two routers hold no state in common, and the two "is this URL stamped?"
+/// checks are legitimately different (a bare `v=`, versus `lang` **and**
+/// `v` both present — see `admin::admin_i18n`).
+pub const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
 pub fn mime_for(path: &str) -> &'static str {
     match path.rsplit_once('.').map(|(_, ext)| ext) {
         Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
@@ -32,7 +45,7 @@ pub fn mime_for(path: &str) -> &'static str {
 pub fn cache_control(path: &str) -> &'static str {
     let name = path.rsplit('/').next().unwrap_or(path);
     if name.starts_with("app-") {
-        "public, max-age=31536000, immutable"
+        IMMUTABLE_CACHE_CONTROL
     } else {
         "no-cache"
     }
@@ -133,7 +146,7 @@ async fn asset(headers: HeaderMap, uri: Uri) -> Response {
 /// `index.html` — served `no-cache` — sends it to the new URL anyway.
 pub fn cache_control_for(path: &str, query: Option<&str>) -> &'static str {
     if query.is_some_and(|q| q.split('&').any(|p| p.starts_with("v="))) {
-        return "public, max-age=31536000, immutable";
+        return IMMUTABLE_CACHE_CONTROL;
     }
     cache_control(path)
 }

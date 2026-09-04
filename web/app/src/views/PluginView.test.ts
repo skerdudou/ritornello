@@ -430,4 +430,73 @@ describe('PluginView', () => {
     const style = document.head.querySelector('style[data-plugin-sheet="plain-sheet"]')
     expect(style?.textContent).toBe('@import url("/plugins/plain-sheet/ui.css") layer(plugin);')
   })
+
+  // --- Final review, Important 1: the module was loaded twice on a direct
+  // page load ---
+  //
+  // `<RouterView/>` mounts this view before `/api/status` has answered, so
+  // `props.uiVersion` first holds `''`, then the real fingerprint once
+  // `/api/status` settles. A `watchEffect` reacting to that change imports
+  // `ui.js` under two different URLs, hence evaluates the plugin's module
+  // twice, and `ensureStylesheet` appends a second `<style
+  // data-plugin-sheet="…">` (keyed by name **and** version) whose rules keep
+  // applying because the first is never removed.
+
+  it('loads the module once when the status settles after mount, not twice', async () => {
+    document.head.innerHTML = ''
+    const view = defineComponent({ render: () => h('p', 'ok') })
+    const loader = vi.fn(async () => ({ contract: 1, default: view }))
+    const w = mount(PluginView, {
+      props: {
+        name: 'settle-once',
+        loadModule: loader,
+        catalog: CATALOG,
+        uiVersion: '',
+        statusPending: true,
+      },
+    })
+    await flushPromises()
+    // The curtain is held: nothing has been imported yet, on the version that
+    // will be discarded a moment later.
+    expect(loader).not.toHaveBeenCalled()
+
+    // `/api/status` settles, `PluginRoute` relays the real fingerprint.
+    await w.setProps({ uiVersion: 'v2', statusPending: false })
+    await flushPromises()
+
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(loader).toHaveBeenCalledWith('settle-once', 'v2')
+    expect(
+      document.head.querySelectorAll('style[data-plugin-sheet="settle-once"]'),
+    ).toHaveLength(1)
+  })
+
+  it('lifts the curtain and uses the bare URL when /api/status never settles', async () => {
+    // "Settled" means answered *or* failed — never an indefinite wait. If
+    // `/api/status` is unreachable, `usePlugins` reports it (`unavailable`)
+    // and `PluginRoute` must lower `statusPending` anyway, exactly as for a
+    // plugin that announced no fingerprint. A plugin page that never appears
+    // because `/api/status` is down would be far worse than an uncached
+    // asset.
+    document.head.innerHTML = ''
+    const view = defineComponent({ render: () => h('p', 'ok') })
+    const loader = vi.fn(async () => ({ contract: 1, default: view }))
+    const w = mount(PluginView, {
+      props: {
+        name: 'status-down',
+        loadModule: loader,
+        catalog: CATALOG,
+        uiVersion: '',
+        statusPending: true,
+      },
+    })
+    await flushPromises()
+    expect(loader).not.toHaveBeenCalled()
+
+    await w.setProps({ statusPending: false }) // uiVersion stays '': /api/status failed
+    await flushPromises()
+
+    expect(loader).toHaveBeenCalledTimes(1)
+    expect(loader).toHaveBeenCalledWith('status-down', '')
+  })
 })

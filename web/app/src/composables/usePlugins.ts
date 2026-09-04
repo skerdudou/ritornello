@@ -24,7 +24,7 @@ import type { StatusPayload } from '../types'
  * and that source re-reads itself — see `watch`.
  */
 
-const state = ref<StatusPayload>({ plugins: [], active_source: '' })
+const state = ref<StatusPayload>({ plugins: [], active_source: '', session: '', locale: '' })
 
 /**
  * `/api/status` unreachable. Distinguished from an empty state: a navigation
@@ -32,6 +32,17 @@ const state = ref<StatusPayload>({ plugins: [], active_source: '' })
  * looking normal otherwise.
  */
 const unavailable = ref(false)
+
+/**
+ * Whether `/api/status` has been read at least once, successfully or not.
+ *
+ * Distinguished from `unavailable`, which starts `false` for two different
+ * reasons: nothing has been asked yet, or the last read succeeded. Callers
+ * that must not act on the pristine, never-asked state — `PluginView`'s
+ * module-loading curtain — need this instead: it flips to `true` on the
+ * *first* `reload()`, whatever its outcome, and never back.
+ */
+const settled = ref(false)
 
 /**
  * Re-read period while a plugin is "stalled".
@@ -79,6 +90,19 @@ const admins = computed(() => [
   ...new Set(state.value.plugins.filter((p) => p.admin).map((p) => p.name)),
 ])
 
+/**
+ * The core's run identifier and current UI language, as `/api/status` last
+ * reported them — see `StatusPayload`. Exposed alongside `plugins` because
+ * `PluginRoute.vue` needs both to build a plugin's catalog URL, and this is
+ * the same state, re-read at the same times.
+ *
+ * Empty before the first successful read, exactly like `plugins` starting
+ * empty: there is nothing to fall back on client-side, the core is the only
+ * source of truth for a session token and for the persisted language.
+ */
+const session = computed(() => state.value.session)
+const locale = computed(() => state.value.locale)
+
 /** Is there a launched plugin that has not spoken yet?
  *
  * **Both states**, and that is the trap of this re-read: since a freshly
@@ -101,6 +125,7 @@ async function reload(): Promise<void> {
   })
   unavailable.value = s === null
   if (s) state.value = s
+  settled.value = true
 }
 
 /**
@@ -181,5 +206,5 @@ async function refresh(): Promise<void> {
  * that would have to be kept in agreement with this one.
  */
 export function usePlugins() {
-  return { state, unavailable, admins, refresh }
+  return { state, unavailable, settled, admins, refresh, session, locale }
 }

@@ -73,7 +73,14 @@ async fn main() -> Result<()> {
     // remote. `Runtime::run` now holds both, each in its own task — the page
     // is no longer conditional, since the plugin itself announces that it
     // has one.
-    let admin = GenericInputAdmin { bindings_path, presets_root, input_root, hub, catalog };
+    let admin = GenericInputAdmin {
+        bindings_path,
+        presets_root,
+        input_root,
+        hub,
+        catalog,
+        locales_root,
+    };
     Runtime::from_args()?.input(EvdevInput { rx })?.admin(admin)?.run().await
 }
 

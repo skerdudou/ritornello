@@ -25,6 +25,10 @@ pub struct MpdAdmin {
     /// without re-reading the disk on every request.
     pub config: RwLock<Config>,
     pub catalog: Arc<RwLock<Catalog>>,
+    /// Root of the on-disk language packs, kept so a catalog can be rebuilt in
+    /// any requested language — `Catalog::load` only parses a TOML file, so
+    /// this costs nothing per request.
+    pub locales_root: PathBuf,
     /// How the new configuration reaches the network half, which then rebinds
     /// without a restart (see `session::listen`).
     ///
@@ -51,9 +55,20 @@ impl AdminPlugin for MpdAdmin {
         }
     }
 
-    fn catalog(&self) -> serde_json::Value {
-        let cat = self.catalog.read().unwrap();
-        serde_json::json!(cat.entries())
+    fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
+        match lang {
+            // The language the plugin was started in: the catalog already
+            // built, no work at all.
+            None => serde_json::json!(self.catalog.read().unwrap().entries()),
+            // A language explicitly asked for. Rebuilt rather than translated
+            // from the current one: the on-disk pack is the authority, and
+            // only `Catalog::load` knows how to layer it over the embedded
+            // English.
+            Some(l) => {
+                let c = Catalog::load("mpd", l, &self.locales_root, crate::MPD_EN);
+                serde_json::json!(c.entries())
+            }
+        }
     }
 
     async fn get_data(&self) -> serde_json::Value {
@@ -122,6 +137,7 @@ mod tests {
                 config_path,
                 config: RwLock::new(Config::default()),
                 catalog,
+                locales_root: std::path::PathBuf::from("/nonexistent"),
                 rebind_tx: None,
             },
             _dir: dir,
@@ -143,8 +159,29 @@ mod tests {
     #[test]
     fn catalog_exposes_the_component_keys() {
         let f = fixture();
-        let v = f.admin.catalog();
+        let v = f.admin.catalog(None);
         assert!(v["btn_save"].is_string(), "the catalog must carry the plugin keys");
+    }
+
+    #[test]
+    fn a_requested_language_is_honoured_whatever_the_current_one() {
+        // The plugin is started in English; asking for another language must
+        // rebuild, not return the current catalog. This is the whole basis of
+        // the `immutable` answer served over HTTP.
+        //
+        // Without a pack installed on disk, `Catalog::load` falls back on
+        // English and the two results would be equal — so a temporary pack is
+        // installed here, on the model of the repository's existing i18n
+        // tests (see `ritornello-plugin-radio::main::empty_preset_uses_the_catalog_after_set_locale`).
+        let mut f = fixture();
+        let locales = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(locales.path().join("mpd")).unwrap();
+        std::fs::write(locales.path().join("mpd/fr.toml"), "btn_save = \"Enregistrer\"\n").unwrap();
+        f.admin.locales_root = locales.path().to_path_buf();
+        let en = f.admin.catalog(None);
+        let fr = f.admin.catalog(Some("fr"));
+        assert_ne!(en, fr);
+        assert_eq!(fr["btn_save"], "Enregistrer");
     }
 
     /// French pack shipped in the repository.

@@ -425,6 +425,8 @@ struct HotPlugChildren {
     /// `covers`: purging a fresh, empty cache would invalidate nothing of
     /// what the routes actually serve.
     admin_assets: Arc<admin::AssetCache>,
+    /// Same sharing rule as `admin_assets`, for the plugin catalogs.
+    admin_catalogs: Arc<admin::CatalogCache>,
     /// How a closing socket makes itself known to the main loop.
     ///
     /// **This is the only path through which the death of an unsupervised
@@ -704,7 +706,7 @@ async fn hotplug<P: player::Player>(
     // Assets go with the backend: a re-announcement is the end of one process
     // followed by the start of another, and the new one may carry a rebuilt
     // `ui.js`. Keeping them served the old one until the core restarted.
-    admin::forget_page(&children.admin_backends, &children.admin_assets, &name).await;
+    admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, &name).await;
     let mut admin_connected = false;
     if announcement.admin {
         let path = ritornello_plugin_sdk::admin_socket(&prefix);
@@ -895,7 +897,7 @@ async fn hot_unplug<P: player::Player>(
     // Removed, otherwise `/plugins/<name>/` would wait out the request's
     // timeout budget before ending in error, where a plain 404 says right
     // away that there is nothing at this address.
-    admin::forget_page(&children.admin_backends, &children.admin_assets, name).await;
+    admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, name).await;
     let mut statuses = children.status_state.write().await;
     status::replace_plugin_lines(&mut statuses, name, vec![PluginStatus::disabled(name)], false);
     statuses.active_source = core.active_source().to_string();
@@ -1423,6 +1425,11 @@ async fn main() -> Result<()> {
     // loop and `hotplug` must purge **this** cache, the one the routes read,
     // never a fresh copy.
     let admin_assets: Arc<admin::AssetCache> = Arc::new(Default::default());
+    // Same reason as `admin_assets`, for the plugin catalogs.
+    let admin_catalogs: Arc<admin::CatalogCache> = Arc::new(Default::default());
+    // Computed once, here: every restart of the core (and only a restart)
+    // must produce a fresh stamp — see `AppState::session`.
+    let session = status::new_session();
 
     // Starting **with no source at all** is legitimate since hot
     // registration, and that was the last deadline that used to condemn:
@@ -1530,6 +1537,8 @@ async fn main() -> Result<()> {
             locales_root: locales_root.clone(),
             admin_backends: admin_backends.clone(),
             admin_assets: admin_assets.clone(),
+            admin_catalogs: admin_catalogs.clone(),
+            session: session.clone(),
             cmd_tx: cmd_tx.clone(),
             theme_current: theme_current.clone(),
             theme_tx: theme_tx.clone(),
@@ -1665,6 +1674,7 @@ async fn main() -> Result<()> {
         status_state: status_state.clone(),
         admin_backends: admin_backends.clone(),
         admin_assets: admin_assets.clone(),
+        admin_catalogs: admin_catalogs.clone(),
         unreachable_tx: unreachable_tx.clone(),
     };
 
@@ -1846,7 +1856,7 @@ async fn main() -> Result<()> {
                     // two other locks, and nesting them would make safety
                     // depend on an order never to reverse elsewhere.
                     drop(statuses);
-                    admin::forget_page(&admin_backends, &admin_assets, &name).await;
+                    admin::forget_page(&admin_backends, &admin_assets, &admin_catalogs, &name).await;
                 }
             }
             Some((name, update)) = source_update_rx.recv() => {
@@ -2110,7 +2120,7 @@ async fn main() -> Result<()> {
                         // deaths must leave the same state, or behavior
                         // would depend on who launched the process.
                         drop(statuses);
-                        admin::forget_page(&admin_backends, &admin_assets, &name).await;
+                        admin::forget_page(&admin_backends, &admin_assets, &admin_catalogs, &name).await;
                     }
                 }
             }
@@ -2376,6 +2386,7 @@ mod toggle_tests {
             })),
             admin_backends: Arc::new(RwLock::new(HashMap::new())),
             admin_assets: Arc::new(Default::default()),
+            admin_catalogs: Arc::new(Default::default()),
         };
 
         let mut gathered = register::Gathered::default();
