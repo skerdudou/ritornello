@@ -394,6 +394,31 @@ describe('PlayerCard', () => {
     w.unmount()
   })
 
+  it('stops waiting when the full-size image fails, instead of veiling it forever', async () => {
+    // The serving-side fall-back only covers a failed *download* of the full
+    // size: the bare URL still answers 404 for a key the core's cache has
+    // evicted or for a sleeping share, and nothing at all when the network
+    // drops -- and those fire `error`, never `load`.
+    //
+    // Named production change this guards: dropping `@error` from the
+    // enlarged `<img>` (the state this component shipped in), which leaves
+    // the veil on its "loading" wording with no way out but closing.
+    const w = mount(PlayerCard, {
+      props: { state: full({ title: 'So What', cover_href: '/api/cover/1a2b' }), seekStep: 10 },
+      attachTo: document.body,
+    })
+    await w.get('[data-cover-enlarge]').trigger('click')
+    const img = document.body.querySelector('[data-cover-enlarged] img')
+    expect(img).not.toBeNull()
+    img!.dispatchEvent(new Event('error'))
+    await nextTick()
+    expect(document.body.querySelector('[data-cover-enlarged-loading]')).toBeNull()
+    // The overlay itself stays: the reader asked for it, and the alternative
+    // text of a broken image is more honest than a veil that never lifts.
+    expect(document.body.querySelector('[data-cover-enlarged]')).not.toBeNull()
+    w.unmount()
+  })
+
   it('keeps the full-size wait independent from the thumbnail\'s own retry flag', async () => {
     // Fails if the two states were folded into one shared flag: the
     // thumbnail's `imageBroken` (with its own retry mechanics, see

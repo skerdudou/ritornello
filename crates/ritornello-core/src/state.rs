@@ -105,12 +105,16 @@ pub struct Settings {
 
     // ---- Covers: what is kept, then what is read, then what is produced ----
     //
-    // Eight settings in three groups, and the UI's two cards carry the
-    // distinction rather than decorating it.
+    // Eight settings in three groups, in **one card**, in the order a reader
+    // meets them. They were briefly drawn as two cards ("what is kept in
+    // memory", "what is read to publish"); the distinction is real and the
+    // field help below still carries it, but as card titles the two read as
+    // unrelated rubrics, and they left the page's table of contents
+    // announcing a heading no card carried.
     //
-    // `cover_cache_budget_mio` comes first, in a card of its own ("what is
-    // kept in memory"): it bounds what the appliance *holds*, and is the only
-    // one of the eight that says nothing about any single cover.
+    // `cover_cache_budget_mio` comes first: it bounds what the appliance
+    // *holds*, and is the only one of the eight that says nothing about any
+    // single cover.
     //
     // `cover_download_max_mio` and `cover_source_max_mio` bound what the core
     // agrees to bring in — the first for the internet only, the second for

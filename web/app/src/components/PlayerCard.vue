@@ -127,10 +127,18 @@ const enlarged = ref(false)
  *
  * Deliberately its own flag, not `imageBroken`: that one describes the
  * **thumbnail**, and sharing it would let a slow or unavailable full size
- * condemn the player's square, which did nothing wrong. The core now falls
- * back to serving the thumbnail bytes under the same URL when the full size
- * cannot be fetched (Task 8), so there is no failure state left to render
- * here — only a wait that always ends in a `load` event.
+ * condemn the player's square, which did nothing wrong.
+ *
+ * **The wait ends on `load` or on `error`, and the second half is not
+ * theoretical.** The core does serve the thumbnail bytes under the same URL
+ * when the *download* of the full size fails, which removes one failure
+ * case — but only that one. The bare URL still answers `404` for a key the
+ * cache has evicted (the `evicted?` warning in `cover.rs` exists for exactly
+ * that) or for a share that has gone to sleep, and answers nothing at all
+ * when the network drops. Those fire `error`, not `load`. Without the second
+ * handler the veil kept its "loading" wording for as long as the overlay
+ * stayed open, where before this worksite a broken enlargement at least
+ * showed the image's alternative text.
  */
 const enlargedLoading = ref(false)
 /**
@@ -407,6 +415,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
           :alt="t('cover_alt')"
           class="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
           @load="enlargedLoading = false"
+          @error="enlargedLoading = false"
         />
         <!-- The full size is now fetched on demand (Task 8): it can take a
              moment, and a plain dark veil with nothing in it reads as a bug.

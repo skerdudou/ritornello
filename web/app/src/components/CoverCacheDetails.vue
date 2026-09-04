@@ -8,6 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
+  HelpButton,
 } from '@ritornello/ui'
 import { ref } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
@@ -83,21 +84,14 @@ function mio(bytes: number): number {
 <template>
   <Dialog @update:open="onOpenChange">
     <DialogTrigger as-child>
-      <!-- Same affordance as ProvenanceDetails.vue, copied rather than
-           reinvented: 44 px round ghost target, same question-mark icon. -->
-      <Button
-        variant="ghost"
-        class="relative z-10 size-11 shrink-0 rounded-full text-muted-foreground"
-        :aria-label="t('cover_cache_open')"
-        :title="t('cover_cache_open')"
+      <!-- Same affordance as ProvenanceDetails.vue: the glyph now lives in
+           `HelpButton`, so it is read from there rather than redrawn here. -->
+      <HelpButton
+        size="touch"
+        class="relative z-10"
+        :label="t('cover_cache_open')"
         data-cover-cache-open
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="9" />
-          <path d="M9.6 9.2a2.5 2.5 0 1 1 3.2 3.4c-.5.3-.8.8-.8 1.4v.4" />
-          <path d="M12 17.4h.01" />
-        </svg>
-      </Button>
+      />
     </DialogTrigger>
     <DialogContent data-cover-cache-panel>
       <DialogHeader>

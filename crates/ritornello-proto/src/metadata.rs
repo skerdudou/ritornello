@@ -372,10 +372,13 @@ pub struct Enrichment {
     /// `front-500` weighs 73 KiB against 2.5 MiB for the original, and 73 KiB
     /// is almost exactly what our own encoder would produce anyway.
     ///
-    /// It is accepted **only if it respects the rule** — no wider than
-    /// `cover_max_edge_px`, no heavier than `cover_passthrough_max_ko` — the
-    /// same rule that decides whether any cover is left alone. One mechanism,
-    /// two uses.
+    /// **It is always used; the rule decides only whether it is touched.**
+    /// Within the rule — no wider than `cover_max_edge_px`, no heavier than
+    /// `cover_passthrough_max_ko`, the same rule that decides whether any
+    /// cover is left alone — it is served byte for byte. Outside it, it is
+    /// re-encoded **from itself**, and the full size is still not fetched for
+    /// that. Missing the rule costs a re-encoding, never the field. One
+    /// mechanism, two uses.
     ///
     /// The same serde attributes as `cover` just above, deliberately: a
     /// plugin that ignores the field emits exactly the frame it emitted

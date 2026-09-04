@@ -48,8 +48,8 @@ const CATALOGUE = {
     'Avec {budget} Mio de budget, un plafond de {download} Mio et des entrées d\'au plus {entry} Kio : au moins {floor} pochettes, environ {typical} pour une bibliothèque locale.',
   cover_cache_estimate_unlimited: 'Au moins {floor} pochettes ; le cache en garde quelques centaines au plus.',
   cover_predicted_weight: 'une vignette pèse environ {kio} Kio',
-  cover_download_max_label: 'Plafond réseau (Mio)',
-  cover_download_max_help: 'Plus grande pochette téléchargée depuis internet.',
+  cover_download_max_label: 'Plafond de téléchargement automatique (Mio)',
+  cover_download_max_help: 'Plus grande pochette téléchargée automatiquement depuis internet.',
   cover_source_max_label: 'Plafond de la source (Mio)',
   cover_source_max_help: 'Toujours appliqué.',
   cover_rendition_label: 'Réencoder les pochettes',
@@ -861,20 +861,37 @@ describe('ConfigView — covers', () => {
     // The direct answer to "what influences this".
     const { w } = await mountView()
     const text = w.find('[data-cover-cache-estimate]').text()
-    expect(text).toContain('50') // budget
-    expect(text).toContain('2') // download ceiling
-    expect(text).toContain('150') // cost of one entry
+    // The whole sentence, as the neighbouring test asserts it. Piecemeal
+    // `toContain` calls could not fail here: "256" contains "2", so the
+    // assertion on the download ceiling passed on the estimate's own count.
+    expect(text).toBe(
+      "Avec 50 Mio de budget, un plafond de 2 Mio et des entrées d'au plus 150 Kio : au moins 23 pochettes, environ 256 pour une bibliothèque locale.",
+    )
   })
 
   it('follows the quality into the estimate, which the old ceiling never did', async () => {
     // Under the removed ceiling, changing the quality never moved the
     // estimate an inch: it divided by a declared ceiling. This is the defect
     // this test keeps from coming back.
+    //
+    // It cannot be shown at the defaults, and this test used to move the
+    // *edge* while claiming to move the quality: the entry cost is
+    // `max(predicted, threshold)`, and at 640 px the prediction stays between
+    // 72 and 120 KiB, under the 150 KiB threshold, at every quality the page
+    // allows. The estimate is right not to move there. So the threshold is
+    // lowered until the prediction is what the budget is divided by, and the
+    // budget lowered until the `MAX_CACHE_ENTRIES` clamp is not what answers.
     const { w } = await mountView()
-    const before = w.find('[data-cover-cache-estimate]').text()
-    await w.find('[data-cover-max-edge]').setValue('1024')
+    await w.find('[data-cover-passthrough-max]').setValue('16')
+    await w.find('[data-cover-cache-budget]').setValue('8')
     await flushPromises()
-    expect(w.find('[data-cover-cache-estimate]').text()).not.toBe(before)
+    const before = w.find('[data-cover-cache-estimate]').text()
+    expect(before).toContain('98') // 0.245 x 640^2 at the default q85, in KiB
+    await w.find('[data-cover-jpeg-quality]').setValue('90')
+    await flushPromises()
+    const after = w.find('[data-cover-cache-estimate]').text()
+    expect(after).not.toBe(before)
+    expect(after).toContain('120') // 0.3 x 640^2, in KiB
   })
 
   it('drops the per-cover figure when re-encoding is off', async () => {

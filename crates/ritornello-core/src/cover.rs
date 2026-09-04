@@ -420,11 +420,26 @@ impl Rendition {
 
     /// The safety net on what the encoder **produced**, in bytes.
     ///
-    /// Derived, not configured: one byte per pixel of the thumbnail, floored
-    /// at 256 KiB. Measured against a real library, the encoder's densest
-    /// output was 0.30 byte per pixel (640 px, q90), so this leaves a factor
-    /// of three — it cannot fire at any sane setting, which is the point. It
-    /// exists only to stop the absurd.
+    /// Derived, not configured: **two** bytes per pixel of the thumbnail,
+    /// floored at 256 KiB.
+    ///
+    /// **Two and not one, and the difference between the two figures is the
+    /// difference between a median and a maximum.** The density this comment
+    /// used to quote — 0.30 byte per pixel at 640 px, q90 — is the bench's
+    /// *median* over a real library (78 covers, of which 41 were large enough
+    /// to be re-encoded at that edge). Its **maximum** on that same sample is
+    /// 246 KiB, i.e. 0.61 byte per pixel: one byte per pixel left a factor of
+    /// 1.6 over the heaviest cover measured, not the factor of three claimed
+    /// here. And q90 is not the ceiling either — `jpeg_quality` is
+    /// validated up to 100, where a JPEG commonly weighs two to three times
+    /// its q90 weight. One byte per pixel was therefore reachable by raising
+    /// a setting the admin page offers, and reaching it drops the cover: a
+    /// regression against the adjustable ceiling this net replaced. Two bytes
+    /// per pixel put the heaviest cover measured at q90 at a factor of about
+    /// 3.3, which is the headroom the old comment believed it had.
+    ///
+    /// It still exists only to stop the absurd, and it is still not a
+    /// setting.
     ///
     /// **Deliberately computed from the edge alone**, and not from the page's
     /// weight model: that model lives in `web/app` because it exists to
@@ -432,7 +447,7 @@ impl Rendition {
     /// two versions to drift apart.
     pub fn net(&self) -> usize {
         let square = (self.max_edge_px as usize).saturating_mul(self.max_edge_px as usize);
-        square.max(256 * 1024)
+        square.saturating_mul(2).max(256 * 1024)
     }
 }
 
@@ -1222,9 +1237,15 @@ impl CoverCache {
     /// rather than oversights — see `report_unfetchable` for the log side of
     /// the first:
     ///
-    /// * a **failed** fetch: a broken target clicked again costs one failed
-    ///   request per click, bounded by a human gesture and small (a 404 is a
-    ///   few hundred bytes against 2.5 MiB for a success);
+    /// * a **failed** fetch: a broken target asked again costs one failed
+    ///   request per request, and what bounds the repetition is **not** a
+    ///   human gesture — the client is a process on the local network, free
+    ///   to loop at its own cadence. What bounds it is the size of a failure:
+    ///   a 404 or a refused target is a few hundred bytes against 2.5 MiB for
+    ///   a success, and `report_unfetchable` already keeps the journal from
+    ///   growing with it. Bounding the *requests* would take a memory of
+    ///   failures — new machinery for a small cost, set aside at this stage
+    ///   rather than overlooked;
     /// * a **local** full size: `CoverRef::Path` is served and never
     ///   memoised. This module holds no local file in memory — a `File`
     ///   payload costs a path and is streamed, and a three-megabyte
@@ -1406,10 +1427,11 @@ impl CoverCache {
     /// Where the fetch is aimed: the same two doors as `fetch_ref`, spelt
     /// here because this one wants the bytes rather than a payload.
     ///
-    /// **A `Pair` can perfectly well name a local file as its other half.**
-    /// The pair forms around a thumbnail that materialized as bytes (see
-    /// `fetch`), which says nothing about the full size; refusing to serve
-    /// that case would be a hole nobody would think to look for.
+    /// **A `Pair` whose other half is a local file is no longer built** —
+    /// `fetch` pairs only over a remote full size, for the reason written
+    /// there — but this branch stays: the payload type still lets such a pair
+    /// be expressed, and answering nothing for a half whose path is in hand
+    /// would be a hole nobody would think to look for.
     ///
     /// **This whole method runs under test as it does in service** — the
     /// filter, the local read, its cap and its time bound. Only the body of a
@@ -1957,11 +1979,14 @@ async fn rendition(
     if output.len() > r.net() {
         tracing::warn!(
             "cover not pushed: rendered to {} bytes, over the {}-byte net derived from a \
-             {} px edge. This is not a setting to adjust -- at any sane edge and quality the \
-             net cannot be reached, so reaching it is a defect worth reporting.",
+             {} px edge. The net is two bytes per pixel, against the 0.61 measured at q90 on \
+             the heaviest cover of a real library, so the likeliest cause is a high quality \
+             (currently {}): lowering it is the adjustment to try first. At a moderate \
+             quality this should not be reachable, and reaching it is then worth reporting.",
             output.len(),
             r.net(),
-            r.max_edge_px
+            r.max_edge_px,
+            r.jpeg_quality
         );
         return None;
     }
@@ -2432,16 +2457,25 @@ pub async fn fetch(
     // A supplied thumbnail short-circuits the full size entirely: the full
     // size is not touched, not even to read a header.
     //
-    // **The pair only forms around bytes.** A thumbnail that materializes as
-    // a path (`CoverRef::Path`) is not paired: a local file already costs a
-    // path and nothing else, so there would be nothing to gain and a half of
-    // the pair would have to hold something other than bytes. Anything that
-    // is not bytes — a local thumbnail, or one that could not be obtained —
-    // falls through to the full size, which is the answer this function would
-    // have given without the pair. Failing over rather than failing is
-    // deliberate: a thumbnail is an optimization, and losing the cover
-    // because the optimization was unavailable would be a regression.
-    if let Some(t) = thumb {
+    // **The pair only forms around bytes, and only over a remote full size.**
+    // Two exclusions, neither of them an oversight:
+    //
+    // * a thumbnail that materializes as a path (`CoverRef::Path`) is not
+    //   paired: a local file already costs a path and nothing else, so there
+    //   would be nothing to gain and a half of the pair would have to hold
+    //   something other than bytes;
+    // * a **local full size** is not paired either. It too costs a path, it
+    //   is streamed rather than held, and `cover_get`'s bare URL serves a
+    //   pair `immutable` for a year under `"{key}"` — a promise the local
+    //   branch deliberately refuses to make, since a file on a share can
+    //   change under the appliance, which is why that branch stamps its
+    //   answers with the modification date instead. The pair would buy such
+    //   a cover nothing and would make the route lie about it. Judged
+    //   **before** the thumbnail is fetched, so nothing crosses the network
+    //   for a pair that cannot form.
+    if let Some(t) = thumb
+        && matches!(r, CoverRef::Url { .. })
+    {
         match fetch_ref(t, download_max).await {
             Some(CoverPayload::Bytes(thumb, thumb_mime)) => {
                 // `fetched` starts empty, and that is the whole economy of
@@ -2455,6 +2489,27 @@ pub async fn fetch(
                 });
             }
             other => {
+                // **A remote thumbnail that failed is not a reason to try the
+                // full size.** Both halves come from the same host, through
+                // the same door (`fetch_ref`), under the same cap, and the
+                // full size is the heavier of the two — 2.67 MiB against
+                // 73 KiB for the one shipped contributor. `download` reads
+                // chunk by chunk and ignores the announced `Content-Length`
+                // on purpose, so the refusal is only reached after the whole
+                // `download_max` has been pulled from a third party and
+                // thrown away, once per track played. A refusal on the small
+                // image is a refusal on the big one; asking is pure cost.
+                //
+                // A **local** thumbnail that yielded no bytes still falls
+                // through: it cost no network, and the full size beside it is
+                // the answer this function would have given without any
+                // thumbnail at all.
+                if matches!(t, CoverRef::Url { .. }) {
+                    tracing::debug!(
+                        "supplied thumbnail unavailable; the full size is not tried after it"
+                    );
+                    return None;
+                }
                 tracing::debug!(
                     "supplied thumbnail yielded no bytes ({}), falling back to the full size",
                     if other.is_some() { "not a network image" } else { "unavailable" }
@@ -2507,9 +2562,35 @@ async fn fetch_ref(r: &CoverRef, download_max: usize) -> Option<CoverPayload> {
                 tracing::debug!("cover fetch refused: target not allowed");
                 return None;
             }
-            download(url, download_max).await
+            download_ref(url, download_max).await
         }
     }
+}
+
+/// The body of a remote reference, in the shipped binary.
+///
+/// **A seam of exactly one call, for the reason written on
+/// `CoverCache::fetch_url`**: `allowed_target` refuses every literal IP
+/// address by design, so the local HTTP server the `download` tests use is
+/// unreachable through a `CoverRef::Url`, and a hostname would mean a suite
+/// depending on somebody else's server being up. Splitting this call out is
+/// what lets a test prove which half of a `Pair` holds which reference
+/// without a socket ever being opened — everything above it, `allowed_target`
+/// included, stays the real code.
+#[cfg(not(test))]
+async fn download_ref(url: &str, download_max: usize) -> Option<CoverPayload> {
+    download(url, download_max).await
+}
+
+/// The body of a remote reference, under test: the canned one, or nothing.
+///
+/// **The network stays unreachable by construction, not behind a flag.**
+/// Absent a canned body the answer is `None` — exactly what every test
+/// written before this seam existed already got from a URL it could not
+/// reach, which is why adding it changes none of them.
+#[cfg(test)]
+async fn download_ref(url: &str, download_max: usize) -> Option<CoverPayload> {
+    tests::canned_download(url, download_max)
 }
 
 /// ETag of a local file: unlike the cache key — which hashes the **source**
@@ -2605,7 +2686,7 @@ fn frozen_headers(key: &str, thumbnail: bool, rules: Option<Rendition>) -> (Stri
     if thumbnail {
         ("no-cache".to_string(), format!("\"{key}-v-{}\"", rules_tag(rules)))
     } else {
-        ("public, max-age=31536000, immutable".to_string(), format!("\"{key}\""))
+        (crate::web::IMMUTABLE_CACHE_CONTROL.to_string(), format!("\"{key}\""))
     }
 }
 
@@ -3258,10 +3339,10 @@ mod tests {
         (status, bytes.to_vec())
     }
 
-    /// **Un instantané qui compte des octets doit être vérifié contre des
-    /// octets connus**, pas contre lui-même. Les charges utiles sont donc
-    /// posées à la main, avec des tailles distinctes et non rondes pour
-    /// qu'une somme fausse ne puisse pas tomber juste par hasard.
+    /// **A snapshot that counts bytes must be checked against known bytes**,
+    /// not against itself. The payloads are therefore laid down by hand, with
+    /// distinct, non-round sizes so that a wrong sum could not land right by
+    /// accident.
     #[tokio::test]
     async fn the_snapshot_counts_the_bytes_it_actually_holds() {
         let cache = CoverCache::new();
@@ -3279,10 +3360,10 @@ mod tests {
         assert_eq!(s.budget_bytes, cache.settings().budget);
     }
 
-    /// La ligne qui compte le plus du panneau : le poids moyen réel d'une
-    /// vignette, à confronter au poids prédit que la page annonce. La
-    /// division est faite par la page — le cœur rend le total et le compte —
-    /// donc c'est leur exactitude qui est vérifiée ici.
+    /// The panel's most important line: the real average weight of a
+    /// thumbnail, to be set against the predicted weight the page announces.
+    /// The division is done by the page — the core renders the total and the
+    /// count — so it is their accuracy that this test checks.
     #[tokio::test]
     async fn the_snapshot_reports_the_real_weight_of_retained_thumbnails() {
         let cache = CoverCache::new();
@@ -3302,10 +3383,10 @@ mod tests {
         assert_eq!(s.used_bytes, 210_000, "renditions are charged to the budget too");
     }
 
-    /// Périmées, pas seulement anciennes. Le changement de production qui
-    /// ferait échouer ceci : compter les vignettes sans les confronter aux
-    /// règles vivantes, ce qui ferait passer pour utile ce que
-    /// `evict_to_budget` jettera en premier.
+    /// Stale, not merely old. The production change this would catch:
+    /// counting thumbnails without checking them against the live rules,
+    /// which would report as useful what `evict_to_budget` will discard
+    /// first.
     #[tokio::test]
     async fn the_snapshot_tells_stale_thumbnails_apart() {
         let cache = CoverCache::new();
@@ -3323,8 +3404,8 @@ mod tests {
                 Arc::new(vec![0u8; 1_000]),
             )
             .await;
-        // Les règles vivantes sont celles du défaut produit (640 px), donc
-        // l'identité ci-dessus ne les décrit plus.
+        // The live rules are the product's default (640 px), so the identity
+        // above no longer describes them.
         let s = cache.snapshot().await;
         assert_eq!(s.renditions, 1);
         assert_eq!(s.renditions_stale, 1, "produced under 320 px, the cache now asks 640");
@@ -3357,9 +3438,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["entries"], 1);
         assert_eq!(v["used_bytes"], 4_096);
-        // Le nom des champs est un contrat avec la page : le renommer sans
-        // toucher `CachePayload` côté web casserait le panneau en silence,
-        // TypeScript ne voyant rien d'un JSON.
+        // The field names are a contract with the page: renaming one without
+        // touching `CachePayload` on the web side would break the panel
+        // silently, since TypeScript sees nothing of a JSON body.
         assert!(v["budget_bytes"].is_number());
         assert!(v["max_entries"].is_number());
     }
@@ -3708,6 +3789,54 @@ mod tests {
         fixtures::jpeg_decodable(1200, 1200)
     }
 
+    thread_local! {
+        /// Bodies standing in for the network, by URL, for the lifetime of a
+        /// [`CannedUrl`] guard. Read by [`super::download_ref`], which is
+        /// the test binary's only substitution on the announcement path.
+        ///
+        /// **Thread-local rather than a module-level `static`, deliberately.**
+        /// `#[tokio::test]` builds a current-thread runtime, so a test's own
+        /// `fetch` runs on the very thread that installed the body, while a
+        /// `static` would be shared with every sibling test running at the
+        /// same instant — the class of leak this suite has already been bitten
+        /// by. The guard removes the entry on drop, so a panicking test leaves
+        /// nothing behind for the next one either.
+        static CANNED_URLS: std::cell::RefCell<HashMap<String, Vec<u8>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+
+    /// Serves `bytes` for `url` until the returned guard drops.
+    #[must_use]
+    fn canned_url(url: &str, bytes: Vec<u8>) -> CannedUrl {
+        CANNED_URLS.with(|m| m.borrow_mut().insert(url.to_string(), bytes));
+        CannedUrl(url.to_string())
+    }
+
+    /// Lifetime of one canned body. Bind it — `let _net = canned_url(..)` —
+    /// rather than dropping it on the spot, or the network goes away before
+    /// the fetch under test reaches it.
+    struct CannedUrl(String);
+
+    impl Drop for CannedUrl {
+        fn drop(&mut self) {
+            CANNED_URLS.with(|m| m.borrow_mut().remove(&self.0));
+        }
+    }
+
+    /// What [`super::download_ref`] answers with under test.
+    ///
+    /// **The cap and the magic bytes are applied here as `download` applies
+    /// them**, so a body over the ceiling is still refused and a body that is
+    /// not an image still yields nothing: only the socket is missing.
+    pub(super) fn canned_download(url: &str, cap: usize) -> Option<CoverPayload> {
+        let bytes = CANNED_URLS.with(|m| m.borrow().get(url).cloned())?;
+        if bytes.len() > cap {
+            return None;
+        }
+        let mime = image_type(&bytes)?;
+        Some(CoverPayload::Bytes(bytes, mime))
+    }
+
     /// **A supplied thumbnail that respects the rule is served byte for
     /// byte.** Binary identity is the assertion that counts: a
     /// decode/encode round trip would produce different bytes even at equal
@@ -3894,6 +4023,110 @@ mod tests {
             CoverPayload::File(got) => assert_eq!(got, full, "the full size, not the thumbnail"),
             other => panic!("a local thumbnail must form no pair, got {other:?}"),
         }
+    }
+
+    /// **The pair `fetch` actually builds, end to end** — and until now the
+    /// only path of this worksite with no test at all. The sixteen tests of
+    /// the `Pair` arm start from a pair written by hand, which proves what the
+    /// route does with a pair and nothing about how one is assembled.
+    ///
+    /// Named production changes this kills: writing `full: t.clone()` instead
+    /// of `r.clone()` — verified by mutation, the assertion on the full-size
+    /// half fails — pairing the full size's bytes as the thumbnail, and
+    /// dropping the `return` so the full size is fetched on announcement
+    /// anyway.
+    #[tokio::test]
+    async fn a_remote_thumbnail_pairs_its_own_bytes_with_the_full_size_reference() {
+        // **Both URLs answer**, which is what makes the interversion visible:
+        // with only one canned body, swapping the halves would fail for want
+        // of a body rather than for naming the wrong reference.
+        let thumb_bytes = fixtures::jpeg_decodable(500, 500);
+        let full_bytes = full_size_fixture();
+        let _thumb_net = canned_url("https://example.org/front-500.jpg", thumb_bytes.clone());
+        let _full_net = canned_url("https://example.org/front.jpg", full_bytes.clone());
+        assert_ne!(thumb_bytes, full_bytes, "the two halves must be distinguishable");
+
+        let full_url = "https://example.org/front.jpg";
+        let source = CoverSource::Ref(CoverRef::Url { url: full_url.into() });
+        let t = CoverRef::Url { url: "https://example.org/front-500.jpg".into() };
+        let p = fetch(&source, Some(&t), download_cap())
+            .await
+            .expect("a remote thumbnail must produce a pair");
+        match p {
+            CoverPayload::Pair { thumb, thumb_mime, full, fetched } => {
+                assert_eq!(thumb, thumb_bytes, "the thumbnail's bytes, not the full size's");
+                assert_eq!(thumb_mime, "image/jpeg");
+                assert_eq!(
+                    full,
+                    CoverRef::Url { url: full_url.into() },
+                    "the full-size half must name the full size, not the thumbnail"
+                );
+                assert!(fetched.is_none(), "nothing is downloaded at the announcement");
+            }
+            other => panic!("a remote thumbnail must form a pair, got {other:?}"),
+        }
+    }
+
+    /// **A local full size forms no pair, and its thumbnail is not even
+    /// fetched.** The pair's bare URL is served `immutable` for a year, while
+    /// a local full size is re-read on every request precisely because it can
+    /// change under the appliance: pairing it would buy nothing (a path is
+    /// already all it costs) and would make the route promise what it
+    /// disproves one branch away.
+    ///
+    /// Named production changes this kills: dropping the `matches!(r, Url)`
+    /// guard from `fetch`, which brings the contradiction back and, on the
+    /// way, spends a download on a pair that buys nothing.
+    #[tokio::test]
+    async fn a_local_full_size_forms_no_pair_and_costs_no_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let full = dir.path().join("front.jpg");
+        std::fs::write(&full, fixtures::jpeg_decodable(1200, 1200)).unwrap();
+        // A perfectly good thumbnail is waiting on the network: if the guard
+        // went, this is what would come back as half of a pair.
+        let _net = canned_url(
+            "https://example.org/front-500.jpg",
+            fixtures::jpeg_decodable(500, 500),
+        );
+
+        let source = CoverSource::Ref(CoverRef::Path {
+            path: full.to_string_lossy().into_owned(),
+        });
+        let t = CoverRef::Url { url: "https://example.org/front-500.jpg".into() };
+        let p = fetch(&source, Some(&t), download_cap())
+            .await
+            .expect("the local full size must still answer");
+        match p {
+            CoverPayload::File(got) => assert_eq!(got, full, "the file itself, not a pair"),
+            other => panic!("a local full size must form no pair, got {other:?}"),
+        }
+    }
+
+    /// **A remote thumbnail that fails takes the fetch down with it**, rather
+    /// than falling back to the full size. Both halves come from the same
+    /// host through the same door under the same cap, and the full size is
+    /// the heavier by a factor of thirty-five (2.67 MiB against 73 KiB for
+    /// the one shipped contributor): the fall-back would pull the whole
+    /// `download_max` from a third party, chunk by chunk, only to refuse it —
+    /// once per track played whose thumbnail failed.
+    ///
+    /// Named production change this kills: restoring the fall-back for a
+    /// `CoverRef::Url` thumbnail, which would answer the canned full size
+    /// here instead of nothing.
+    #[tokio::test]
+    async fn a_failed_remote_thumbnail_does_not_fall_back_to_the_full_size() {
+        // The full size *would* answer — that is the whole point. Only the
+        // thumbnail's URL is missing from the network.
+        let _net = canned_url("https://example.org/front.jpg", full_size_fixture());
+        let source = CoverSource::Ref(CoverRef::Url {
+            url: "https://example.org/front.jpg".into(),
+        });
+        let t = CoverRef::Url { url: "https://example.org/front-500.jpg".into() };
+        assert!(
+            fetch(&source, Some(&t), download_cap()).await.is_none(),
+            "a refusal on the small image is a refusal on the big one, and asking costs 2 MiB \
+             of somebody else's bandwidth per track"
+        );
     }
 
     #[tokio::test]
@@ -4389,9 +4622,15 @@ mod tests {
     /// in memory would charge the budget for something a `File` payload
     /// costs nothing at all.
     ///
-    /// It is also the one branch of `perform_full_download` that runs for
-    /// real under test — no canned body is installed here, so a served image
-    /// proves `read_file_bounded` itself ran, cap and time bound included.
+    /// **The pair used here is written by hand, and `fetch` no longer builds
+    /// one like it**: a local full size is not paired at all (see `fetch`,
+    /// and the test that pins it). What is exercised here is therefore the
+    /// route's own robustness — `CoverPayload` still lets such a pair be
+    /// expressed, and answering nothing for a half whose path is in hand
+    /// would be worse than reading it. Keeping it is what makes this the one
+    /// branch of `perform_full_download` that runs for real under test: no
+    /// canned body is installed here, so a served image proves
+    /// `read_file_bounded` itself ran, cap and time bound included.
     ///
     /// Named production changes this guards: memoising a local full size,
     /// which the budget assertion catches; and handing the read a cap it does
@@ -5748,15 +5987,19 @@ mod tests {
             pixel_cap: 16_000_000,
         }
         .net();
-        // 640^2 = 409_600 bytes, twice the 193 KiB maximum the bench observed
-        // at these settings. The floor is deliberately below this: at 512 KiB it
-        // would have won here, and the stated rule -- one byte per pixel -- would
-        // have described nothing at the product's own edge.
-        assert_eq!(at(640), 409_600);
+        // 640^2 x 2 = 819_200 bytes: two bytes per pixel, against the 246 KiB
+        // maximum -- 0.61 byte per pixel -- the bench observed at 640 px and
+        // q90, a factor of about 3.3 over the heaviest cover it measured. One
+        // byte per pixel left 1.6, which a quality above q90 can spend, and
+        // the net firing at a valid setting drops the cover.
+        //
+        // Named production change this kills: going back to one byte per
+        // pixel, and dropping either half of the `max`.
+        assert_eq!(at(640), 819_200);
         // The floor covers the small edges, where the square would fall under
         // what even a tiny thumbnail can weigh.
         assert_eq!(at(64), 256 * 1024, "the floor must win on a small edge");
-        assert_eq!(at(2048), 2048 * 2048, "and lose on a large one");
+        assert_eq!(at(2048), 2048 * 2048 * 2, "and lose on a large one");
     }
 
     #[tokio::test]

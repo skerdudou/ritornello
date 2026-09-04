@@ -607,32 +607,62 @@ user reads is now the memory itself, and the number of covers becomes a
 consequence the page estimates for them.
 
 What is charged against it: the bytes of covers **downloaded from the
-internet**, and each **retained thumbnail** (at most `cover_max_bytes_ko`
-each). What is not: a local cover — a `folder.jpg` on a share, or a picture
+internet**, and each **retained thumbnail** at its **real weight** — whatever
+the encoder actually produced, which is what `payload_cost` charges, not a
+ceiling. What is not: a local cover — a `folder.jpg` on a share, or a picture
 embedded in the audio file — which keeps only a path and so weighs on this
 budget solely through its thumbnail. Past the budget, eviction goes
 cheapest-to-rebuild first: stale thumbnails, then the oldest thumbnail, then
 the oldest source that actually costs bytes. A zero-cost source is never
 evicted to free bytes it does not have.
 
-Under the field the page prints a **live estimate**, recomputed as the boxes
-are typed in: "at least N covers in the worst case (every cover from the
-internet), about M for a library of local covers". The worst case charges
-`cover_download_max_mio + cover_max_bytes_ko` per entry; the typical one
-charges the thumbnail alone. With re-encoding off, a local cover costs
-nothing at all and the second half of the sentence is replaced by a different
-one — the cache still holds only **a few hundred** entries whatever they
-cost, an internal belt (`cover.rs::MAX_ENTRIES`, 256) against a library of
-free paths growing without end. That belt is deliberately *not* presented as
-a memory bound, because it measures something else; but the sentence must not
-promise that every cover fits either, because past it cover 257 evicts cover
-1 and the browser meets a `404` on a key the core itself published.
+The **live estimate** concludes the card rather than sitting mid-card — it
+depends on nearly every setting above it, the switch included, so naming its
+inputs only makes sense once they have all been read — and is recomputed as
+the boxes are typed in: "at least N covers in the worst case (every cover
+from the internet), about M for a library of local covers". Both figures
+divide the budget by the cost of one **entry**, `max(predicted thumbnail
+weight, cover_passthrough_max_ko)`: the honest figure whenever the threshold
+is the larger of the two, since an image already light enough to pass
+untouched is charged its own weight, up to the threshold. The worst case adds
+`cover_download_max_mio` on top of that entry cost, since every cover there
+also pays its own download; the typical one does not, since a local cover
+never leaves the share. With re-encoding off, a local cover costs nothing at
+all and the second half of the sentence is replaced by a different one — the
+cache still holds only **a few hundred** entries whatever they cost, an
+internal belt (`cover.rs::MAX_ENTRIES`, 256) against a library of free paths
+growing without end.
+
+**That belt is no longer only for re-encoding off.** At the product's own
+defaults it already decides the typical figure on its own: 50 MiB of budget
+divided by a 150 KiB entry is 341, and the page reads 256 instead — the
+entries belt, not the memory budget, is what stops the count there. The byte
+budget has quietly stopped being the limiting factor at ordinary settings; it
+only becomes one again with a larger budget, or a threshold and edge small
+enough to shrink the entry cost well under a kilobyte. That belt is
+deliberately *not* presented as a memory bound, because it measures something
+else; but the sentence must not promise that every cover fits either, because
+past it cover 257 evicts cover 1 and the browser meets a `404` on a key the
+core itself published.
+
+A small **`(?)`** next to the estimate opens the cache's **real** state —
+`GET /api/cover-cache`, read-only, loaded when the panel opens and again only
+on the reload button, never on a timer — for what the estimate, being a
+prediction, cannot show: how many entries and thumbnails are actually held
+right now, how many thumbnails are stale (produced under rules the cache no
+longer uses), and the entry-count belt itself, shown here as what it is and
+nowhere else. Its most telling figure is the **real average weight** of a
+retained thumbnail, meant to be read against the predicted weight the
+settings card announces — the ground truth behind a figure the settings card
+can only ever guess at, since the prediction is a model measured on one
+library and the cache in front of the reader is another.
 
 **`cover_download_max_mio`** (2 MiB by default, bounded **1-20**) is the
-largest cover the appliance will download from the internet and hold whole in
-memory. It is the other half of the worst-case estimate above, and it is not
-`cover_source_max_mio`: one bounds a transfer from a third party, the other
-bounds any read at all.
+largest cover the appliance will download from the internet **automatically**
+— at the moment a track is announced — and hold whole in memory. It is the
+other half of the worst-case estimate above, and it is not
+`cover_source_max_mio`: one bounds a transfer volunteered by a third party,
+the other bounds any read at all.
 
 **`cover_source_max_mio`** closes the ceilings and is never greyed out: it
 bounds what the core agrees to *read*, whatever happens next, and it is the
@@ -647,6 +677,38 @@ embedded in the audio file: `lofty` exposes no way to learn a picture's size
 without parsing the container first, so there the cap is judged only after
 the file has been parsed and the picture copied into memory — cheap to state,
 not cheap to enforce, for that source.
+
+**The two ceilings above used to be separately *named* rather than
+separately *meaningful*.** Before the pair, nothing ever downloaded a
+full-size cover from the network at all: the announcement path fetched at
+most a thumbnail, under `cover_download_max_mio`, and enlarging a cover in the
+web page only ever showed those same bytes back. A contributor may now supply
+a `cover_thumb` alongside its `cover` (see the protocol documentation) — a
+ready-made reduction of the very same image — and the core takes it at its
+word: **only the thumbnail is fetched at the announcement**, still under
+`cover_download_max_mio`, while the full-size reference is kept as a mere
+string, costing nothing more than a path, until somebody actually enlarges
+the cover. Enlarging it downloads the full size on the spot, and this
+download is bounded by `cover_source_max_mio` instead — ten times the network
+ceiling by default, because a reader who explicitly asked to see the original
+is not asking the same question as "should the appliance spend bandwidth on
+every track it plays". This is what makes a multi-megabyte cover affordable
+to announce at all, without a third setting: the two existing ceilings simply
+started applying to two different moments of the same cover's life, which is
+also what finally makes them worth explaining apart rather than merely
+naming apart.
+
+The downloaded full size is **memoised**, so a second enlargement of the same
+cover is free — charged to `cover_cache_budget_mio` like any other retained
+bytes, once it is actually in hand. **A pair only ever forms over a *remote*
+full size**: a cover whose full reference is a local file is not paired at
+all. A file on a share re-reads at no cost — the same rule that already made
+a `folder.jpg`'s own thumbnail free — so there is nothing to memoise and
+nothing to gain; and the bare URL of a pair is served `immutable` for a year,
+a promise the local branch refuses to make on purpose, since a file on a
+share can be replaced under the appliance (its answers are stamped with the
+file's modification date instead). Pairing a local cover would have bought
+nothing and made that year a false promise.
 
 **`cover_rendition`** is the switch. On (the default), the core renders a
 thumbnail before pushing a cover on a socket; off, the original bytes are
@@ -663,10 +725,64 @@ applies to JPEG only: a cover with an alpha channel is re-encoded to PNG,
 losslessly, because flattening its transparency would mean picking a
 background colour — a visual decision the device has no business making on
 someone else's artwork. The pushed frame's mime always states the format
-actually produced. **`cover_max_bytes_ko`** (512, bounded 32-8192) is a net
-rather than a target: the edge already bounds the pixel count, so a thumbnail
-only passes it on a pathologically noisy image, and past it nothing is pushed
-and the log names the setting.
+actually produced.
+
+Right there, among those two settings, the page prints the **predicted
+weight** of one thumbnail at the current edge and quality — "at these
+settings a thumbnail weighs about M KiB" — computed **in the browser**, from
+a table measured against a real library
+(`web/app/src/composables/coverWeight.ts`): 73 KiB at q75, 98 at q85, 120 at
+q90, all at the 640 px default, interpolated between those points and clamped
+rather than extrapolated outside them. This model deliberately has **no copy
+in Rust**: it exists only to explain a setting change before it is even
+saved, no decision in the core ever depends on it, and a second copy in the
+core would only give the two a chance to drift apart.
+
+At the 640/q75 default the page itself prints **72** KiB, a KiB under the 73
+KiB just quoted — not a typo. The density behind the measured 73 KiB (74 752
+bytes ÷ 640² pixels) is 0.1825 bytes/px; the model keeps only two decimals of
+it, 0.18, because a bench that measured three points has no standing to imply
+a fourth-decimal density. Multiplied back by 640² that rounded density gives
+73 728 bytes, i.e. 72.0 KiB, not 73: the model reproduces the bench's other
+two points exactly (their densities happened to round with nothing left
+over) but not this one. 73 KiB is what the bench measured; 72 KiB is what the
+rounded model says about it — both true, a KiB apart.
+
+**`cover_passthrough_max_ko`** (150, bounded 16-2048) answers a different
+question from the predicted weight above — not "what will the encoder
+produce", but "below what weight is re-encoding not worth doing at all". A
+cover already lighter than this — and no wider than `cover_max_edge_px` — is
+pushed exactly as it is. 150 is not an arbitrary round number: it is twice a
+measured 72-73 KiB, two figures that landed on the same value — what the
+product's own encoder produces at the default edge and quality (median over
+78 covers of a real library) and what Cover Art Archive's `front-500` weighs
+(73 KiB, measured). It is also the rule that decides whether a **supplied**
+thumbnail (`cover_thumb` in the protocol) is served untouched or re-encoded
+from itself — see the pair, above.
+
+It replaced a single setting, `cover_max_bytes_ko`, compared against two
+different things under two opposite intentions: the weight of the
+**original** as this threshold, and the weight of the **thumbnail the
+encoder produced** as a ceiling past which the cover was dropped. One knob
+was raised to stop dropping covers and lowered to tighten thumbnails, and no
+value ever felt right on it. That ceiling is now `Rendition::net`, described
+next, and is not a setting at all.
+
+**The safety net on what the encoder produces is not a setting**, and that
+absence is deliberate. `Rendition::net` derives it from the edge alone — two
+bytes per pixel of the thumbnail, floored at 256 KiB, which is 800 KiB at the
+640 px default. The figure it is measured against is the bench's **maximum**,
+not its median, and the distinction was got wrong once already: at 640 px and
+q90 the bench re-encoded 41 of its 78 covers, whose median output was 120 KiB
+(0.30 byte per pixel) and whose heaviest was 246 KiB (0.61). One byte per
+pixel therefore left a factor of 1.6 over the worst cover measured, not the
+factor of three first claimed here — and JPEG quality is adjustable up to
+100, where a file commonly weighs two to three times its q90 weight. The net
+could therefore fire at a **valid** setting and drop the cover, which is what
+the adjustable ceiling it replaced never did. Two bytes per pixel restore about 3.3 of headroom on that
+same worst cover. Past the net, nothing is pushed, and the log names the knob
+to try first — the quality — before treating it as a defect worth
+reporting.
 
 **`cover_max_pixels_mpx`** (16, bounded 1-64) is the decompression-bomb
 guard, and the only one that really protects: a file's size says *nothing*
@@ -740,6 +856,24 @@ the newer stamp would pin the wrong image in that browser for good — it
 revalidates, the stat still matches, the `304` returns the same stale bytes.
 The `304` itself keeps using the route's own stat, which is what makes a
 conditional request cost one `stat` and never a container parse.
+
+**Three distinct validators cohabit on this route, and they must stay
+distinct.** The full size — the bare URL, `immutable` for a year — is one:
+its bytes never change behind a given key, so the key alone is the
+validator. The thumbnail variant, `?size=thumbnail`, is a second: it now
+*also* carries the rendition rules (edge, quality, threshold, pixel cap) in
+its own tag — leaving them out used to be a defect: without them, a setting
+changed on the config page left every browser holding an unchanged validator,
+told `304`, and going on displaying the old thumbnail forever, however loudly
+the page announced the new predicted weight. And a
+**stand-in**, served only when an enlarged cover's on-demand download fails,
+is a third, carrying a validator of its own — never `immutable`, since the
+same URL will serve the real full size the moment the network recovers, and
+never the thumbnail variant's own tag either, since the two branches answer
+with different bytes as soon as a supplied thumbnail falls outside the
+acceptance rule. One validator standing in for two of these would pin a
+browser to a stale or a wrong image with no way for the server to correct it;
+three keeps every case revalidating honestly.
 
 ### Where the metadata comes from
 

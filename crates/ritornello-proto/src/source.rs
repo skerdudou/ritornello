@@ -283,8 +283,8 @@ pub struct SourceMessage {
     pub cover: Option<crate::CoverRef>,
     /// A ready-made thumbnail for the cover above. See
     /// [`crate::Enrichment::cover_thumb`] for what it is, why it is optional
-    /// and under which rule it is accepted — one description, not two to
-    /// drift apart.
+    /// and what the acceptance rule does and does not decide about it — one
+    /// description, not two to drift apart.
     ///
     /// It travels **beside** `cover`, on the same frame and from the same
     /// declaration: a thumbnail on its own describes a cover nobody

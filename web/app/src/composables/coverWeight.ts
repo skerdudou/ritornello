@@ -18,8 +18,18 @@
  *
  * From `cover::tests::the_weight_rule_of_a_thumbnail`, run in release over 78
  * covers of a real library: at a 640 px edge the p50 output was 73 KiB at q75,
- * 98 KiB at q85 and 120 KiB at q90. Divided by 640² pixels, that is the three
- * densities below.
+ * 98 KiB at q85 and 120 KiB at q90. Divided by 640² pixels that is 0.1825,
+ * 0.245 and 0.3 bytes/px; only the first carries more digits than are worth
+ * keeping (a bench that measured three points has no business reporting a
+ * fourth-decimal density), so it alone is rounded, to 0.18 below.
+ *
+ * That rounding is why `predictedThumbnailBytes(640, 75)` answers **72** KiB,
+ * a KiB under the 73 KiB actually measured at q75: 0.18 × 640² = 73 728 bytes
+ * = 72.0 KiB, where the unrounded density would have given back 73. Both
+ * figures are correct for what they are — 73 KiB is the bench's own
+ * observation, 72 KiB is this rounded model's approximation of it — so do not
+ * "fix" one to match the other; `docs/interface.md` carries the same note
+ * where it quotes the predicted-weight line.
  *
  * Only three points, and that is honest: the bench measured three. Between
  * them the model interpolates; outside them it clamps rather than

@@ -1689,6 +1689,33 @@ intentions described above.
    cover is held yet, it searches the release and asks the Cover Art
    Archive.
 
+**A contributor may announce a ready-made thumbnail alongside its cover,
+`cover_thumb` on `Enrichment` and on `SourceMessage`.** It is optional, and
+deliberately symmetrical to `cover` in its serde attributes: a plugin that
+ignores the field emits exactly the frame it emitted before, and absence
+stays absence on the wire — nothing to upgrade, nothing to break, for a
+contributor written before this field existed. `musicbrainz` is the one
+shipped contributor that fills it in, and it announces a genuine pair: the
+bare `front` (measured at 2,670,705 bytes) as `cover`, and the `front-500`
+reduction (measured at 75,249 bytes) as `cover_thumb` — the same image
+Cover Art Archive already serves at two sizes. A supplied thumbnail is
+**always used; the rule decides only whether it is touched**. Within the
+rule — no wider than `cover_max_edge_px`, no heavier than
+`cover_passthrough_max_ko`, the very same rule that decides whether *any*
+cover is left unrendered rather than re-encoded (`Rendition::leaves_alone`,
+one method and not two spellings of one predicate) — it is served byte for
+byte. Outside it, it is re-encoded **from itself**, never by going back for
+the full size. Missing the rule therefore costs a re-encoding, not the
+field. Only the thumbnail is ever fetched at the announcement,
+under `cover_download_max_mio`; the full size is kept as a bare reference
+and is fetched **on demand**, the first time somebody enlarges the cover in
+the web page, under `cover_source_max_mio` instead — see the config page
+documentation for why that finally gives the two download ceilings distinct
+work to do. The ordinary cost of a track has therefore not moved: a
+contributor that never sets `cover_thumb` sees no change at all, and one
+that does still costs the appliance exactly one small download per track,
+same as before the pair existed.
+
 Two things about steps 3 and 5 are worth spelling out, because neither is
 guessable from the general model:
 
@@ -1780,25 +1807,30 @@ none, becomes silence rather than an empty frame.
 The cache is a small table, **in memory**, and it does **not** survive a
 restart. It is bounded by memory, not by a count: `cover_cache_budget_mio`
 (8 to 256 MiB, 50 by default) is charged against the bytes of covers
-downloaded from the internet and the thumbnails kept ready to serve, while a
-local cover — a file beside the track, or one embedded in it — keeps only a
-path and so costs nothing against this budget. A count-bounded cache used to
-force the user to multiply three settings to learn what it cost, and the
-product could reach values in the hundreds of megabytes without anything
-objecting; a memory-bounded one cannot. Past the budget, eviction proceeds by
-bytes, and a cover already published in `cover_href` can answer 404 — the page
-falls back to its ♫ for an image the appliance had and lost. The config page
-shows the number of covers this implies: at least `cover_cache_budget_mio` /
-(`cover_download_max_mio` + thumbnail ceiling) in the worst case, where every
-cover comes from the internet and pays both its bytes and its thumbnail, and
-about `cover_cache_budget_mio` / thumbnail ceiling for a library of local
-covers, which pay only their thumbnail — with the defaults, at least twenty
-and about a hundred. One belt sits behind the budget and is not a memory
-bound: the table holds a few hundred entries at most, whatever they cost,
-because a library of local covers charges nothing at all and a byte budget can
-never trigger on it. Past that, the oldest entry goes and its key answers the
-same 404 as above. This is a deliberate rejection of a
-disk cache, not an oversight: a radio changes track every few minutes, a
+downloaded from the internet and the thumbnails kept ready to serve, at their
+**real** produced weight, while a local cover — a file beside the track, or
+one embedded in it — keeps only a path and so costs nothing against this
+budget. A count-bounded cache used to force the user to multiply three
+settings to learn what it cost, and the product could reach values in the
+hundreds of megabytes without anything objecting; a memory-bounded one
+cannot. Past the budget, eviction proceeds by bytes, and a cover already
+published in `cover_href` can answer 404 — the page falls back to its ♫ for
+an image the appliance had and lost. The config page shows the number of
+covers this implies: at least `cover_cache_budget_mio` / (`cover_download_max_mio`
++ the cost of one entry) in the worst case, where every cover comes from the
+internet and pays both its bytes and its entry, and about
+`cover_cache_budget_mio` / entry cost for a library of local covers, which
+pay only their entry — with the defaults, at least twenty-three. One belt
+sits behind the budget and is not a memory bound: the table holds at most 256
+entries, whatever they cost, because a library of local covers charges
+nothing at all and a byte budget can never trigger on it. **At the product's
+own defaults that belt, not the budget, is what actually answers the typical
+half of the sentence**: 50 MiB divided by a 150 KiB entry is 341, and the
+page reads 256 instead. The memory budget has quietly stopped being the
+limiting factor at ordinary settings — it only becomes one again with a
+larger budget, or a smaller entry cost. Past the belt, the oldest entry goes
+and its key answers the same 404 as above. This is a deliberate rejection of
+a disk cache, not an oversight: a radio changes track every few minutes, a
 disc's cover is already remembered per-disc inside `musicbrainz` itself,
 and a local file's cover is reread from disk in a fraction of a
 millisecond — a disk cache would buy almost nothing here, while adding a
