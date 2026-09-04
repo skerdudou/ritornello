@@ -5,6 +5,7 @@ import {
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
+import { predictedThumbnailBytes } from '../composables/coverWeight'
 import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
@@ -68,14 +69,32 @@ const coverDownloadBytes = computed(
 )
 
 /**
- * What a retained thumbnail costs, in bytes — zero when re-encoding is off,
- * since no thumbnail is produced at all in that case (see `CoverSettings` in
- * cover.rs, `rendition: None`). This is the value that can make the "typical"
- * estimate below divide by zero.
+ * What one thumbnail is predicted to weigh, in bytes — zero when re-encoding
+ * is off (none is produced at all) or while a box is momentarily empty.
  */
-const coverThumbnailBytes = computed(() =>
-  settings.value.cover_rendition ? (Number(settings.value.cover_passthrough_max_ko) || 0) * 1024 : 0,
+const coverPredictedBytes = computed(() =>
+  settings.value.cover_rendition
+    ? predictedThumbnailBytes(
+        Number(settings.value.cover_max_edge_px),
+        Number(settings.value.cover_jpeg_quality),
+      )
+    : 0,
 )
+
+/**
+ * What one **entry** of a local library costs the budget, in bytes.
+ *
+ * The conservative form, and the distinction matters: a cover light enough to
+ * pass untouched is charged its own weight, which can reach the threshold, so
+ * the threshold is the honest per-entry figure whenever it is the larger of
+ * the two. Dividing the budget by the predicted weight while the page
+ * announces a threshold twice as large would overstate the count.
+ */
+const coverEntryBytes = computed(() => {
+  if (!settings.value.cover_rendition) return 0
+  const threshold = (Number(settings.value.cover_passthrough_max_ko) || 0) * 1024
+  return Math.max(coverPredictedBytes.value, threshold)
+})
 
 /**
  * Floor of the number of covers the budget holds at once: the worst case
@@ -93,23 +112,23 @@ const coverThumbnailBytes = computed(() =>
  * actually guarantees.
  */
 const coverFloorEstimate = computed(() => {
-  const perEntry = coverDownloadBytes.value + coverThumbnailBytes.value
+  const perEntry = coverDownloadBytes.value + coverEntryBytes.value
   if (perEntry <= 0) return MAX_CACHE_ENTRIES
   return Math.min(MAX_CACHE_ENTRIES, Math.max(1, Math.floor(coverBudgetBytes.value / perEntry)))
 })
 
 /**
  * Typical count for a library of local covers, which pay only their
- * thumbnail. `null` selects the sentence for "re-encoding is off": a local
+ * entry cost. `null` selects the sentence for "re-encoding is off": a local
  * entry then costs nothing at all (only a path — see `payload_cost` in
  * cover.rs), so there is no per-entry figure to divide the budget by.
  *
  * **Gated on the switch, not on the byte value**, and that distinction is a
- * fix. `coverThumbnailBytes` is also zero while the rendered-ceiling box is
- * momentarily empty — clearing a number input to retype it is an ordinary
- * keystroke — and testing the bytes made the page announce "re-encoding is
- * off" with the switch visibly on. The switch is the only thing that answers
- * the question the sentence asks.
+ * fix. `coverEntryBytes` is also zero while the edge and threshold boxes are
+ * both momentarily empty — clearing a number input to retype it is an
+ * ordinary keystroke — and testing the bytes made the page announce
+ * "re-encoding is off" with the switch visibly on. The switch is the only
+ * thing that answers the question the sentence asks.
  *
  * A blank box with the switch on falls to the same `MAX_CACHE_ENTRIES` clamp
  * the floor already uses: a transient figure for a transient state, and the
@@ -117,15 +136,30 @@ const coverFloorEstimate = computed(() => {
  */
 const coverTypicalEstimate = computed<number | null>(() => {
   if (!settings.value.cover_rendition) return null
-  if (coverThumbnailBytes.value <= 0) return MAX_CACHE_ENTRIES
-  return Math.min(MAX_CACHE_ENTRIES, Math.floor(coverBudgetBytes.value / coverThumbnailBytes.value))
+  if (coverEntryBytes.value <= 0) return MAX_CACHE_ENTRIES
+  return Math.min(MAX_CACHE_ENTRIES, Math.floor(coverBudgetBytes.value / coverEntryBytes.value))
 })
 
-/** The live estimate shown under the budget field. */
+/** The predicted weight, or `null` while there is no figure worth showing. */
+const coverPredictedText = computed(() =>
+  coverPredictedBytes.value > 0
+    ? t.value('cover_predicted_weight', { kio: Math.round(coverPredictedBytes.value / 1024) })
+    : null,
+)
+
+/**
+ * The live estimate shown at the foot of the card: it now depends on nearly
+ * every setting above it, so its sentence names all three inputs — the
+ * budget, the download ceiling and the cost of one entry — rather than
+ * leaving the reader to guess what moves it.
+ */
 const coverCacheEstimateText = computed(() =>
   coverTypicalEstimate.value === null
     ? t.value('cover_cache_estimate_unlimited', { floor: coverFloorEstimate.value })
     : t.value('cover_cache_estimate', {
+        budget: Number(settings.value.cover_cache_budget_mio) || 0,
+        download: Number(settings.value.cover_download_max_mio) || 0,
+        entry: Math.round(coverEntryBytes.value / 1024),
         floor: coverFloorEstimate.value,
         typical: coverTypicalEstimate.value,
       }),
@@ -622,9 +656,12 @@ function goTo(id: string) {
 
       <!-- Covers. One card, one subject: everything the appliance applies to
            an album cover, in the order a reader meets it — what the cache may
-           hold, the two ceilings on what may be read, the count the budget
-           implies, then the re-encoding switch and the four settings that
-           describe nothing but the thumbnail.
+           hold, the two ceilings on what may be read, then the re-encoding
+           switch and the four settings that describe nothing but the
+           thumbnail, its predicted weight among them. The estimate concludes
+           the card rather than sitting mid-card: it depends on nearly every
+           setting above it (the switch included), so naming its inputs only
+           makes sense once they have all been read.
 
            These were briefly two cards, "what is kept in memory" and "what is
            read to publish". The distinction they drew is real and the field
@@ -661,13 +698,6 @@ function goTo(id: string) {
                 v-model="settings.cover_source_max_mio" />
               <span class="max-w-md text-xs text-muted-foreground">{{ t('cover_source_max_help') }}</span>
             </label>
-            <!-- The live estimate: what the budget above translates to, in
-                 covers, given the current download and thumbnail ceilings.
-                 Reactive to every field that feeds it, so it never lags what
-                 the user just typed. -->
-            <p class="max-w-md text-xs text-muted-foreground" data-cover-cache-estimate>
-              {{ coverCacheEstimateText }}
-            </p>
 
             <div class="border-t border-border pt-4">
               <label class="flex items-start gap-3 text-sm">
@@ -685,12 +715,24 @@ function goTo(id: string) {
 
             <!-- `aria-disabled` on top of each field's `disabled`: the whole
                  group is inactive, and a screen reader must be able to announce
-                 it once rather than field by field. -->
+                 it once rather than field by field.
+
+                 The threshold comes first: it conditions what follows (does
+                 the pipeline even reach the edge and the quality?), and the
+                 real order in cover.rs confirms it — the pixel guard, then the
+                 pass-through, then the encode. -->
             <div
               data-cover-rendition-group
               :aria-disabled="!settings.cover_rendition"
               :class="['flex flex-wrap items-start gap-4', settings.cover_rendition ? '' : 'opacity-50']"
             >
+              <label class="grid gap-1 text-sm">
+                {{ t('cover_passthrough_max_label') }}
+                <Input type="number" min="16" max="2048" class="w-28" data-cover-passthrough-max
+                  :disabled="!settings.cover_rendition"
+                  v-model="settings.cover_passthrough_max_ko" />
+                <span class="text-xs text-muted-foreground">{{ t('cover_passthrough_max_help') }}</span>
+              </label>
               <label class="grid gap-1 text-sm">
                 {{ t('cover_max_edge_label') }}
                 <Input type="number" min="64" max="2048" class="w-28" data-cover-max-edge
@@ -704,13 +746,17 @@ function goTo(id: string) {
                   v-model="settings.cover_jpeg_quality" />
                 <span class="text-xs text-muted-foreground">{{ t('cover_jpeg_quality_help') }}</span>
               </label>
-              <label class="grid gap-1 text-sm">
-                {{ t('cover_passthrough_max_label') }}
-                <Input type="number" min="16" max="2048" class="w-28" data-cover-passthrough-max
-                  :disabled="!settings.cover_rendition"
-                  v-model="settings.cover_passthrough_max_ko" />
-                <span class="text-xs text-muted-foreground">{{ t('cover_passthrough_max_help') }}</span>
-              </label>
+              <!-- Placed right after the quality, in the greyed group: it
+                   describes nothing but the thumbnail, so it lives among the
+                   settings that decide it, not near the budget it later
+                   feeds. -->
+              <p
+                v-if="coverPredictedText"
+                class="max-w-md text-xs text-muted-foreground"
+                data-cover-predicted-weight
+              >
+                {{ coverPredictedText }}
+              </p>
               <label class="grid gap-1 text-sm">
                 {{ t('cover_max_pixels_label') }}
                 <Input type="number" min="1" max="64" class="w-28" data-cover-max-pixels
@@ -718,6 +764,17 @@ function goTo(id: string) {
                   v-model="settings.cover_max_pixels_mpx" />
                 <span class="text-xs text-muted-foreground">{{ t('cover_max_pixels_help') }}</span>
               </label>
+            </div>
+
+            <!-- The live estimate concludes the card, not the greyed group
+                 above: it now depends on nearly every setting on it (budget,
+                 download ceiling, edge, quality, threshold, and the switch
+                 itself), and it must read whether re-encoding is on or off —
+                 hence not greyed. -->
+            <div class="border-t border-border pt-4">
+              <p class="max-w-md text-xs text-muted-foreground" data-cover-cache-estimate>
+                {{ coverCacheEstimateText }}
+              </p>
             </div>
 
             <Button data-cover-change @click="saveSettings">{{ t('change') }}</Button>

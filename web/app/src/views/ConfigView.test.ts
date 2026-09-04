@@ -44,8 +44,10 @@ const CATALOGUE = {
   cover_card_title: "Pochettes d'album",
   cover_cache_budget_label: 'Budget mémoire (Mio)',
   cover_cache_budget_help: 'Borne les octets réseau et les vignettes gardées.',
-  cover_cache_estimate: 'Au moins {floor} pochettes ; environ {typical} pour une bibliothèque locale.',
+  cover_cache_estimate:
+    'Avec {budget} Mio de budget, un plafond de {download} Mio et des entrées d\'au plus {entry} Kio : au moins {floor} pochettes, environ {typical} pour une bibliothèque locale.',
   cover_cache_estimate_unlimited: 'Au moins {floor} pochettes ; le cache en garde quelques centaines au plus.',
+  cover_predicted_weight: 'une vignette pèse environ {kio} Kio',
   cover_download_max_label: 'Plafond réseau (Mio)',
   cover_download_max_help: 'Plus grande pochette téléchargée depuis internet.',
   cover_source_max_label: 'Plafond de la source (Mio)',
@@ -86,7 +88,7 @@ function payloads() {
       overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
       cover_cache_budget_mio: 50, cover_download_max_mio: 2,
       cover_source_max_mio: 20, cover_rendition: true, cover_max_edge_px: 640,
-      cover_jpeg_quality: 85, cover_passthrough_max_ko: 512, cover_max_pixels_mpx: 16,
+      cover_jpeg_quality: 85, cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16,
     } as unknown,
     '/api/i18n': CATALOGUE as unknown,
   }
@@ -560,7 +562,7 @@ describe('ConfigView — settings', () => {
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
-          cover_passthrough_max_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
+          cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -580,7 +582,7 @@ describe('ConfigView — settings', () => {
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
-          cover_passthrough_max_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
+          cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -601,7 +603,7 @@ describe('ConfigView — settings', () => {
           overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
-          cover_passthrough_max_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
+          cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -651,7 +653,7 @@ describe('ConfigView — overlays', () => {
           overlay_ms: 2000, tens_window_ms: 7000, seek_step_s: 10,
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
-          cover_passthrough_max_ko: 512, cover_max_pixels_mpx: 16, cover_rendition: true,
+          cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
         },
       },
     ])
@@ -799,15 +801,80 @@ describe('ConfigView — covers', () => {
   })
 
   it('estimates a floor and a typical count from the budget', async () => {
-    // Defaults: 50 MiB budget, 2 MiB download cap, 512 KiB thumbnail cap.
-    // floor = 50 / (2 + 0.5) = 20 (worst case: every cover from the
-    // internet, paying its bytes and its thumbnail).
-    // typical = 50 / 0.5 = 100 (a library of local covers, paying only
-    // their thumbnail).
+    // Defaults: 50 MiB budget, 2 MiB download cap, 150 KiB pass-through
+    // threshold, 640 px / q85 (98 KiB predicted). The entry cost is the max
+    // of the predicted weight and the threshold, i.e. 150 KiB: a cover light
+    // enough to pass untouched can still weigh up to the threshold.
+    // floor = 50 MiB / (2 MiB + 150 KiB) = 23 (worst case: every cover from
+    // the internet, paying its download and its entry cost).
+    // typical = 50 MiB / 150 KiB = 341, clamped to 256 by MAX_CACHE_ENTRIES:
+    // at the product's own defaults, the byte budget stops being the
+    // limiting factor and the entry-count belt takes over.
     const { w } = await mountView()
     expect(w.find('[data-cover-cache-estimate]').text()).toBe(
-      'Au moins 20 pochettes ; environ 100 pour une bibliothèque locale.',
+      "Avec 50 Mio de budget, un plafond de 2 Mio et des entrées d'au plus 150 Kio : " +
+        'au moins 23 pochettes, environ 256 pour une bibliothèque locale.',
     )
+  })
+
+  it('shows the predicted weight of a thumbnail, from the edge and the quality', async () => {
+    // The figure the owner could never work out from the two settings alone.
+    // Named production change this guards: wiring the line to the threshold
+    // (what the removed ceiling used to do) instead of the weight model.
+    const { w } = await mountView()
+    expect(w.find('[data-cover-predicted-weight]').text()).toContain('98')
+
+    await w.find('[data-cover-max-edge]').setValue('320')
+    await flushPromises()
+    // 320 px is a quarter of the pixels of 640 px, hence a quarter of the
+    // weight: 98 / 4 = 24.5, which rounds up to 25.
+    expect(w.find('[data-cover-predicted-weight]').text()).toContain('25')
+  })
+
+  it('hides the predicted weight rather than announcing zero', async () => {
+    // Clearing a box to retype it is an ordinary keystroke, and `Number('')`
+    // is `0`. "A thumbnail weighs about 0 KiB" would be false and alarming.
+    const { w } = await mountView()
+    await w.find('[data-cover-max-edge]').setValue('')
+    await flushPromises()
+    expect(w.find('[data-cover-predicted-weight]').exists()).toBe(false)
+  })
+
+  it('divides the budget by the entry cost, not by the predicted weight', async () => {
+    // The arithmetic lie this test forbids: announcing a 98 KiB predicted
+    // weight and then dividing 50 MiB by 98 KiB, which would read 522 --
+    // when a cover light enough to pass untouched can weigh up to the
+    // 150 KiB threshold.
+    //
+    // And the expected figure is 256, not 341: 51200 / 150 = 341, but
+    // `coverTypicalEstimate` takes the `min` with `MAX_CACHE_ENTRIES`. At the
+    // product's own defaults the budget stops being the limiting factor and
+    // the belt does. Expecting 341 here would be expecting that `min` to
+    // disappear, which would make the estimate dishonest.
+    const { w } = await mountView()
+    const text = w.find('[data-cover-cache-estimate]').text()
+    expect(text).toContain('256')
+    expect(text).not.toContain('522')
+  })
+
+  it('names its inputs in the estimate, so nothing has to be guessed', async () => {
+    // The direct answer to "what influences this".
+    const { w } = await mountView()
+    const text = w.find('[data-cover-cache-estimate]').text()
+    expect(text).toContain('50') // budget
+    expect(text).toContain('2') // download ceiling
+    expect(text).toContain('150') // cost of one entry
+  })
+
+  it('follows the quality into the estimate, which the old ceiling never did', async () => {
+    // Under the removed ceiling, changing the quality never moved the
+    // estimate an inch: it divided by a declared ceiling. This is the defect
+    // this test keeps from coming back.
+    const { w } = await mountView()
+    const before = w.find('[data-cover-cache-estimate]').text()
+    await w.find('[data-cover-max-edge]').setValue('1024')
+    await flushPromises()
+    expect(w.find('[data-cover-cache-estimate]').text()).not.toBe(before)
   })
 
   it('drops the per-cover figure when re-encoding is off', async () => {
@@ -827,14 +894,15 @@ describe('ConfigView — covers', () => {
     expect(text).toBe('Au moins 25 pochettes ; le cache en garde quelques centaines au plus.')
   })
 
-  it('keeps the two-figure wording while the rendered ceiling is being retyped', async () => {
-    // Clearing a number input to retype it is an ordinary keystroke, and it
-    // made `Number('') || 0` collapse to zero — the same value the switch
-    // being off produces. The page then announced "re-encoding is off" with
-    // the switch visibly on, which is simply a false statement about the
-    // appliance.
+  it('keeps the two-figure wording while the pass-through threshold is being retyped', async () => {
+    // The ceiling this test named is gone; the box being retyped mid-keystroke
+    // is now the pass-through threshold. Clearing a number input to retype it
+    // is an ordinary keystroke, and it used to make `Number('') || 0` collapse
+    // to zero — the same value the switch being off produces. The page then
+    // announced "re-encoding is off" with the switch visibly on, which is
+    // simply a false statement about the appliance.
     //
-    // Named production change this guards: testing `coverThumbnailBytes <= 0`
+    // Named production change this guards: testing `coverEntryBytes <= 0`
     // instead of `settings.cover_rendition` to choose the sentence.
     const { w } = await mountView()
     await w.find('[data-cover-passthrough-max]').setValue('')
@@ -859,7 +927,7 @@ describe('ConfigView — covers', () => {
     await w.find('[data-cover-download-max]').setValue('20')
     await w.find('[data-cover-passthrough-max]').setValue('2048')
     await flushPromises()
-    expect(w.find('[data-cover-cache-estimate]').text()).toContain('Au moins 1 pochettes')
+    expect(w.find('[data-cover-cache-estimate]').text()).toContain('au moins 1 pochettes')
   })
 })
 
