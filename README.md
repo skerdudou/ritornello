@@ -1,4 +1,6 @@
-<h1 align="center">Ritornello</h1>
+<h1 align="center">
+  <img src="docs/brand/wordmark.png" width="440" alt="Ritornello">
+</h1>
 
 <p align="center"><em>A standalone internet radio and CD player, in Rust, for the Raspberry Pi — and any Linux box.</em></p>
 

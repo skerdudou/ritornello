@@ -28,7 +28,13 @@ pub enum Event {
     /// stream has no usable path, and mpv then republishes it as is (its URL),
     /// without consequence: the extraction attempt stops by itself on a scheme.
     Path(String),
-    // idle-active=false: playback has started
+    /// mpv's `file-loaded` IPC event: documented (read from mpv's own
+    /// manual, not measured against a real running mpv — no session
+    /// available to confirm it) as sent "after a file has been loaded and
+    /// playback has started". Used in place of `idle-active` turning
+    /// false, which this project found (same caveat: unmeasured) does not
+    /// reliably fire again once mpv is already playing something else —
+    /// see `player::mpv`'s own comment on that arm.
     PlaybackActive,
     PlaybackIdle,
     TrackChanged(i64),

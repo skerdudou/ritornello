@@ -162,8 +162,35 @@ pub struct Core<P: Player> {
     ///
     /// Reset to `false` where `playback` is set to `true` (a fresh `Play`)
     /// and to `true` only on `Event::PlaybackActive`, mpv's own confirmation
-    /// that something is really playing.
+    /// — as far as this project has been able to establish without a real
+    /// mpv session to measure against (see `Event::PlaybackActive`'s own
+    /// doc) — that something is really playing.
     played_since_play: bool,
+    /// When a pass was last reopened because `handle_event`'s `PlaybackIdle`
+    /// arm judged content genuinely ran to its end (`ending`, read from
+    /// `played_since_play`).
+    ///
+    /// Second, unconditional safety net against a tight loop (whole-branch
+    /// review #5): `played_since_play`'s own confirmation rests on mpv
+    /// internals this project could not measure, and by its own doc may, in
+    /// the wrong direction, turn true before the demuxer has actually opened
+    /// anything — a sleeping network share could then look exactly like a
+    /// genuine ending and reopen a fresh pass at full speed, forever.
+    /// `RETRY_BASE` already paces the *other* half of this same risk for
+    /// streams (`expecting_stream`'s own `RetryIn`); this is its
+    /// counterpart for the reopening a `repeat_all` source performs on its
+    /// own, which that path never covers.
+    ///
+    /// `tokio::time::Instant`, not `std::time::Instant`: the wait this floor
+    /// imposes is a `tokio::time::sleep`, which obeys the runtime's virtual
+    /// clock, so the elapsed-time check that decides whether to wait must be
+    /// read from the same clock. A `std::time::Instant` here would keep
+    /// ticking with the wall clock even while a test pauses tokio's clock —
+    /// under real load, the microseconds a test actually takes between its
+    /// two steps can approach `RETRY_BASE`, making the check pass for the
+    /// wrong reason and the sleep get skipped without the production code
+    /// being at fault.
+    last_pass_reopen: Option<tokio::time::Instant>,
     retry_count: u32,
     audio_device: Option<String>,
     /// Temporary overlay (volume/mute/message): the text to show plus its
@@ -377,6 +404,7 @@ impl<P: Player> Core<P> {
             playback: false,
             paused: false,
             played_since_play: false,
+            last_pass_reopen: None,
             retry_count: 0,
             audio_device: persisted.audio_device.clone(),
             overlay: None,

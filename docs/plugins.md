@@ -463,6 +463,101 @@ console display used to show "CD 1/3" for a disc sitting idle in the tray,
 it now shows "CD" alone in that state — the "audio CD" status stays visible
 throughout, only the track number disappears until playback resumes.
 
+### Tracks are chapters of one disc, not entries of a list
+
+A disc's tracks are now treated as the **chapters of a single item mpv
+loads**, `cdda://` alone, which mpv is left to chain from one chapter to
+the next by itself — not as separate entries the plugin queues and
+reorders the way `files` does. This replaces a form believed broken since
+the plugin's first version: `cdda://n`, read on trust as naming track `n`,
+but which mpv's own documentation reads instead as naming a **device**
+(see the caveat below — this reading itself is not measured against real
+hardware). Every path that built that URI — selecting a track by number,
+resuming past the first track — was therefore inert on real hardware if
+that reading holds. `next`/`prev` were separately suspect: they went
+through mpv's own `playlist-next`/`playlist-prev`, which mpv's
+documentation describes as doing nothing once the single entry playing is
+also the last one — which a one-entry list always is.
+
+Reaching a given track now goes through `SourceAction::PlayerChapter(n)`,
+which sets mpv's `chapter` property directly instead of reloading
+anything — expected to be a seek within what is already open, so that a
+continuously-mixed disc keeps its own crossfade rather than the disc
+reopening on every track change (also unmeasured, below). Because the
+whole disc must already be open before a chapter can be set, a chapter
+reached before mpv has confirmed the disc is open — an arrival resuming
+the last track played, or a digit typed before anything is loaded — cannot
+be applied directly: it is held in `pending_chapter` and applied the
+moment `player_track` confirms mpv really has the disc open. This is meant
+to be what makes selecting a track by number, "next track", and resuming
+at the last track played actually work, where the old `cdda://n` form did
+not — the whole point of this section's closing caveat is that "meant to"
+has not yet been confirmed against a real drive.
+
+The two play modes apply to a disc exactly as to a file list — see
+[the two play modes](#the-two-play-modes-random-and-repeat-all), in the
+`files` section below, for what `random` and `repeat-all` mean and how
+`has_finite_list` greys the keys that drive them. `has_finite_list` answers
+**true unconditionally**, the same reasoning as `can_eject` above: an empty
+tray still "has" a finite list in the sense that matters, since the modes
+apply to it the moment a disc is loaded — which is also why the order is
+drawn not only on the mode's own transition (as `files` does) but also
+wherever the disc's track count is actually established: the mode is
+persisted, so the core can push it before any disc has ever been in the
+tray, and only the table of contents arriving later fixes how many tracks
+there really are to draw. `random` draws a permutation of track **numbers**
+rather than list positions — a disc has no separate list of entries behind
+its tracks, hence its own injectable-draw type distinct from the files
+plugin's, even though the underlying idea is the same: walk the drawn pass
+by `next`/`prev` and by the player's own automatic advance (corrected
+toward the pass's real next entry, since mpv chains chapters on its own
+with no notion of a drawn order), stopping the disc outright once every
+entry has played once — under `repeat_all`, opening a fresh pass instead,
+drawn again rather than replayed. Reopening a pass — whether at its own
+natural end or because mpv's physical end of disc arrived before the pass
+itself was actually finished — always goes through a full reload
+(`cdda://`, with the wanted chapter armed in `pending_chapter`, exactly
+like an arrival) rather than a bare chapter seek: that idle notification
+only ever arrives once mpv has nothing loaded any more, and a seek sent to
+an empty player fails silently. A mode engaged **during** playback moves
+the entry already sounding to the head of the freshly drawn order, so that
+neither entry is lost: not skipped (an already-playing track dropped
+straight to a discarded position) nor replayed (the pass looping back over
+it later). The disc does the same at the other moment a fresh order gets
+drawn while something plays — a table of contents landing after Play was
+already pressed on a disc just inserted. And since `chapter` is an observed
+property, mpv reports the seeks the plugin itself requested exactly like
+its own natural advances; the plugin tells the two apart by the track it
+already stands on (a requested seek is written down as the current track
+before it is sent, so its echo names that track, while a natural advance
+by definition lands on another one) and ignores its own echoes — without
+that, under shuffle each correction's
+echo was read as another advance and corrected again, walking the whole
+pass in a few round trips and, under `repeat_all`, drawing the next one
+without end.
+
+**None of this has been measured on real hardware.** No CD drive and no
+reachable Raspberry Pi were available during this chantier, so the
+following are working assumptions, not measurements, and are worth
+checking before this section is trusted as fact:
+
+- that a `cdda://` URI followed by a number really is read by mpv as
+  naming a device and not a track, as its documentation says;
+- that "next track" truly did nothing at all on a disc loaded as a single
+  entry, rather than failing some other, silent way;
+- how long a chapter move actually takes in practice, and whether — under
+  shuffle, where mpv's own natural next chapter is corrected toward the
+  drawn pass's real next entry — the listener hears an instant of the
+  physically-next track before that correction lands;
+- that a disc played straight through, sequentially, crosses from one
+  chapter to the next with no audible cut, the way a single continuously
+  mixed recording should;
+- that switching away from the cd player while a disc is still physically
+  spinning does not have the drive's later idleness read as the *new*
+  source's own end of content — a disc, unlike a stream, keeps playing
+  underneath for a moment after the switch is decided, and this is not
+  something the test suite can reproduce without the drive itself.
+
 ## `ritornello-plugin-files` — audio files, local or on a share
 
 It plays audio files sitting in a **root**: a folder of the device (a USB
@@ -506,6 +601,90 @@ told to — so leaving it out would make a list loaded after a resume silently
 start on the resumed track. `Player::load_list` takes it as a parameter and
 the player exposes no way to reposition separately, which is what keeps the
 old sequence from coming back.
+
+### The two play modes: random and repeat-all
+
+A list of files is exactly the kind of finite thing the two play modes make
+sense of: **random** (draw the whole list once, without a repeat, then
+stop) and **repeat-all** (start the same list over once it ends). Both are
+settings the **core** holds and persists, not commands acting on the
+current track — a source only ever learns their current value, through
+`SourceReq::SetPlayMode { random, repeat_all }`, sent as one request rather
+than two so that a delivery race can never set one half without the other.
+
+Whether either mode has anything to apply to is a capability of its own,
+`SourcePlugin::has_finite_list` — same shape and same default as
+`can_eject` (see the cd section, above): **false** unless overridden, which
+is what leaves the radio — the one other `SourcePlugin` implementor —
+compiling unchanged, correctly declaring it has nothing for either mode to
+apply to. The web remote is the one consumer that reads it to grey its two
+mode buttons (see [interface.md](interface.md)); neither the physical
+remote's toggle keys nor the MPD server's `random`/`repeat` commands guard
+against it at all, so pressing one on a source with no finite list is
+accepted and simply changes a setting that source will never read. `files`
+and the cd player (above) are the two sources that override it to true.
+
+`random` here is **not a dice roll at every track**: `set_play_mode` draws
+a permutation of the list's entries only on the actual transition that
+turns shuffle **on**, and `next`/`prev`/the player's own automatic advance
+then step through that permutation instead of the list's natural order,
+stopping once every entry has played once rather than looping back to
+redraw on their own. Toggling `repeat_all` alone, or any redelivery of
+values that have not actually changed (a hot-plug, `push_play_mode`'s own
+broadcast), leaves an already-drawn order and the position within it
+untouched — redrawing on every call, an earlier version caught in review,
+silently overwrote that order and moved the index without ever telling
+mpv: mpv kept playing at its own position in its own file while the
+plugin's bookkeeping came to describe a different track, so every later
+translation through it (`player_track`, `next`, `prev`) reasoned about a
+list mpv did not actually have.
+
+Because `set_play_mode` has no action of its own to hand back to the core
+(see the trait's own doc), reaching mpv when shuffle actually engages or
+disengages needs its own signal: a flag distinct from the one a page edit
+raises (reusing it would draw the order a second time), read the next time
+`next`/`prev`/the player's automatic advance runs, and cleared as soon as
+that reload happens. Two things follow from doing this **while a file may
+already be playing** the old, un-shuffled m3u: first, the entry already
+sounding is moved to the *head* of the freshly drawn order rather than the
+index jumping to the draw's own first entry — reaching that same entry
+through the ordinary "move on from the current position" arithmetic a
+page edit's reload already uses would otherwise skip it outright, since it
+would move past whatever the index already pointed to; second, until that
+reload actually happens, the display and the drawn order describe a track
+mpv has not been told to play yet — closed by the very next natural
+advance, which is exactly the moment the reload is armed for.
+
+The end of a pass is decided in `SourcePlugin::end_of_content`, called when
+mpv goes idle at the end of a **finite** `Play` (see the `finite` flag
+above) — and this request is the reason this whole mechanism could not
+exist before this chantier. The core used to notify a source of a
+user-requested stop and of mpv reaching the natural end of its list
+through the very same signal; a source had no way to tell "the list ran
+out, open the next pass" from "the user asked for silence", so
+`repeat-all` had nothing to be built on. `SourceReq::EndOfContent` is the
+missing half: the core sends it only when it still believed playback was
+under way at the instant mpv went idle — every commanded stop it issues
+itself (the Stop key, entering standby) already finishes setting its own
+"not playing" bookkeeping before that idle notification is even processed,
+so an idle that still finds playback under way, in *those* two cases, can
+only mean the content itself ran out. This does not generalize to a source
+switch, though: `playback` and its `played_since_play` companion are a
+single, source-agnostic pair, not one per source, and the *new* source's
+own arrival can set `playback` back to `true` — starting to play something
+of its own — before mpv's late idle from the *old* source's own content
+(a disc, unlike a stream, keeps sounding for a moment after the switch is
+already decided) is even processed; that idle would then be misread as the
+new source's own ending. Not something the test suite can reproduce
+without hardware that keeps playing after being told to stop, so this
+remains a documented, unverified risk rather than a fixed case. `files`
+overrides `end_of_content` to open a new pass — a fresh draw under
+`random`, the identity order otherwise — when `repeat_all` is set, and to
+behave like the ordinary `stop()` every other source already had
+otherwise.
+
+The cd player answers the same two requests over its own tracks, by
+chapter rather than by list entry — see its own section above.
 
 ### Package prerequisites
 
@@ -1031,10 +1210,19 @@ gesture that works.
 *rearranging* (`delete`, `move`, `swap` — the queue is not ours to reorder, it is
 what the active source offers), no writing playlists (`save`, `rm`,
 `playlistadd` — a source's presets are edited on that source's own admin page),
-and no `update` (there is no database to index). `repeat`, `random`, `single` and
-`consume` are reported as `0` and cannot be set: reported rather than
-omitted, because clients read them unconditionally and misbehave without
-them, but writing them is refused. There is one audio output, always
+and no `update` (there is no database to index). `single` and `consume` are
+reported as `0` and cannot be set: reported rather than omitted, because
+clients read them unconditionally and misbehave without them, but writing
+them is refused — there is no writing arm for either. `repeat` and `random`
+are the two that **can**: `random 0|1` and `repeat 0|1` reach
+`Command::SetRandom`/`SetRepeatAll`, the same absolute commands the web
+remote's two mode buttons send (see [interface.md](interface.md)), and
+`status` reports the real, persisted value rather than a constant zero — see
+[the play modes](#the-two-play-modes-random-and-repeat-all) for what the
+value means and which sources honour it. Neither command guards against
+standby specially: like every command here, it is accepted and has no
+effect while the device is off, the core swallowing it before this plugin
+ever sees the difference. There is one audio output, always
 enabled, and `enableoutput`/`disableoutput` are refused — a client that sees
 no output at all displays "muted" and stops trying.
 

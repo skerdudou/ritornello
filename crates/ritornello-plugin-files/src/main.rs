@@ -127,6 +127,25 @@ struct FilesSource {
     /// tail of the exhausted order — see `activate`'s doc for the defect this
     /// avoids.
     pass_finished: bool,
+    /// `set_play_mode` engaged or disengaged shuffle since the last reload,
+    /// while a file may already have been playing under mpv's own m3u.
+    ///
+    /// Read (and cleared) by `reload_if_changed`, alongside — but distinct
+    /// from — `playlist_changed` above: reusing that flag would draw
+    /// `order` a **second** time, since `set_play_mode` already drew its
+    /// own (see its doc), desyncing an injected `Order::Sequence` queue
+    /// from the passes it is meant to describe.
+    ///
+    /// Regression #4 (whole-branch review): `set_play_mode` has no action
+    /// to return (see the trait's doc), so without a flag of its own, a
+    /// mode toggled while a file was already playing never reached mpv at
+    /// all — mpv kept walking its old file at its old position while
+    /// `order` here already described a different one, and the very next
+    /// natural advance translated mpv's reported position through the
+    /// *new* order onto the *old* file: a wrong title, identity and cover
+    /// displayed while the sound stayed sequential, until whatever later
+    /// reload finally caught up.
+    mode_changed: bool,
     state_path: PathBuf,
     /// The **generated** m3u that mpv receives. Decoupled from any user playlist.
     mpv_playlist_path: PathBuf,
@@ -373,6 +392,12 @@ impl FilesSource {
         // and `pass_finished`'s only reader is `activate`, which reads it
         // before calling here (see its doc).
         self.pass_finished = false;
+        // Whatever reload was owed for a mode change is fulfilled by this
+        // very call, however it was reached — directly (`activate`,
+        // `select`) or through `reload_if_changed`'s own check. Left set,
+        // the next `next`/`prev`/`player_track` would reload a second time
+        // for nothing.
+        self.mode_changed = false;
         // We hand mpv the playlist as it is now: the drift is closed, whatever
         // its cause was — `order` included, redrawn here if the page changed
         // the playlist since the last draw.
@@ -439,7 +464,16 @@ impl FilesSource {
     /// date as it modifies the playlist; mpv's, on the other hand, designates a
     /// position in a stale list.
     async fn reload_if_changed(&mut self, step: i64) -> Option<SourceOutcome> {
-        if !self.playlist_changed.load(std::sync::atomic::Ordering::Relaxed) {
+        // Distinct from `playlist_changed` (see `mode_changed`'s own doc),
+        // but read through the exact same `step` arithmetic below: a mode
+        // toggled mid-playback needs the same "move on from wherever the
+        // playing entry now sits in the (possibly new) order" reasoning a
+        // playlist edit already gets. Cleared as a side effect of the
+        // `play()` this function always ends with below, not here — so an
+        // `activate`/`select` that reaches `play()` some other way clears
+        // it too, without a second, redundant reload the next time this
+        // function runs.
+        if !self.playlist_changed.load(std::sync::atomic::Ordering::Relaxed) && !self.mode_changed {
             return None;
         }
         // Redrawn here, and not only inside `play()` below: the shift a few
@@ -696,16 +730,52 @@ impl SourcePlugin for FilesSource {
         // off.
         self.draw_order().await;
         if random {
-            // Start the freshly drawn pass at its own beginning. Without
-            // this, engaging shuffle mid-playlist would leave the index
-            // wherever sequential playback had left it — a position that
-            // means nothing in the new order, and could replay, later in
-            // this same pass, a track already heard before shuffle was even
-            // turned on.
-            if let Some(entry) = self.entry_at(0) {
+            if self.plays.load(std::sync::atomic::Ordering::Relaxed) {
+                // Regression #4b (whole-branch review): a mode toggled
+                // **while a file is already playing** must not jump the
+                // pass to a fresh, unrelated first entry — that track is
+                // already sounding under mpv's old m3u, and the eventual
+                // reload (armed below by `mode_changed`) reaches whatever
+                // entry it should land on through the exact `step`
+                // arithmetic a playlist edit already uses in
+                // `reload_if_changed`: it moves **on from** wherever
+                // `index` sits in `order`, by `step`. Pointing `index` at
+                // the drawn pass's own first entry (the branch below, kept
+                // for the case nothing was playing yet) only to have that
+                // same reload immediately step past it
+                // (`step == 1` for `next`/`player_track`) would skip that
+                // first entry outright — it was never actually played.
+                // Moving the entry **already playing** to the head of the
+                // draw instead needs no such correction: the reload's
+                // `step` of `1` then lands on the pass's real *second*
+                // entry, which is exactly what should follow it.
+                let current = self.playlist.read().await.index;
+                if let Some(position) = self.position_of(current)
+                    && position != 0
+                {
+                    self.order.swap(0, position);
+                }
+            } else if let Some(entry) = self.entry_at(0) {
+                // Nothing playing yet: start the freshly drawn pass at its
+                // own beginning. Without this, engaging shuffle over an
+                // idle playlist would leave the index wherever it had last
+                // been left — a position that means nothing in the new
+                // order, and could replay, later in this same pass, a
+                // track already heard before shuffle was even turned on.
                 self.playlist.write().await.index = entry;
             }
         }
+        // Regression #4 (whole-branch review): this method has no action to
+        // return (see the trait's doc), so a mode toggled while a file was
+        // already playing under mpv's own m3u would otherwise never reach
+        // mpv at all — only a page edit (`playlist_changed`) used to arm a
+        // reload. See `mode_changed`'s own doc on the struct for what that
+        // silently produced, and why this cannot simply reuse
+        // `playlist_changed`. Read (and cleared) by `reload_if_changed`,
+        // itself read from `next`/`prev`/`player_track` — the same three
+        // places a playlist edit's own reload is read from, matching the
+        // design's promise of a reload "at the next track change".
+        self.mode_changed = true;
     }
 
     /// mpv went idle at the end of the finite list `has_finite_list`
@@ -962,6 +1032,7 @@ async fn main() -> Result<()> {
         random: false,
         repeat_all: false,
         pass_finished: false,
+        mode_changed: false,
         state_path: state_path.clone(),
         mpv_playlist_path,
         catalog: catalog.clone(),
@@ -1091,6 +1162,7 @@ mod tests {
             random: false,
             repeat_all: false,
             pass_finished: false,
+            mode_changed: false,
             state_path: root.join("plugin-files.json"),
             mpv_playlist_path: root.join("plugin-files.m3u"),
             catalog: Arc::new(RwLock::new(Catalog::load("files", "en", &root, FILES_EN))),
@@ -1548,6 +1620,37 @@ mod tests {
         s.set_play_mode(true, true).await;
         assert_eq!(s.drawn_order(), &[2, 0, 1], "no random transition: no redraw");
         assert_eq!(s.current_entry(), 2, "no random transition: the index must not move");
+    }
+
+    #[tokio::test]
+    async fn engaging_shuffle_mid_playback_reloads_mpv_on_the_next_advance() {
+        // Regression #4 (whole-branch review): `set_play_mode` has no
+        // action of its own to return, so without `mode_changed` a mode
+        // toggled while a file was already playing under mpv's own m3u
+        // never actually reached mpv at all — the very next natural
+        // advance (here simulated through `player_track`, mpv still
+        // walking the *old*, sequential file) would instead have been
+        // translated through the *new* drawn order onto the *old* file: a
+        // wrong title, identity and cover, sound staying sequential, until
+        // some later reload caught up.
+        let mut s = source_with(playlist_of(4), Order::Fixed(vec![2, 0, 3, 1]));
+        s.activate().await; // sequential playback, entry 0
+        assert_eq!(s.current_entry(), 0);
+
+        s.set_play_mode(true, false).await; // shuffle engaged mid-playback
+
+        let out = s.player_track(1).await;
+        assert!(
+            matches!(out.action, SourceAction::Play { .. }),
+            "the mode change must reload mpv, got {:?}",
+            out.action
+        );
+        // Regression #4b (whole-branch review): entry 0 (already playing)
+        // sits at the head of the draw, so the reload lands on the pass's
+        // real *second* entry (2) — neither skipping it (which a naive
+        // "index := order[0], then step" would have done) nor replaying
+        // the entry already heard.
+        assert_eq!(s.current_entry(), 2);
     }
 
     #[tokio::test]

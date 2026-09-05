@@ -151,6 +151,23 @@ impl<P: Player> Core<P> {
                     // `TrackChanged`. Without this, "the Source says
                     // whether there is another pass" could not work at all.
                     Ok(Some(action)) => {
+                        if ending {
+                            // Second safety net (see `last_pass_reopen`'s own
+                            // doc): a floor between two pass reopenings,
+                            // independent of whatever judged this one
+                            // genuine. Costs nothing on the honest path — a
+                            // real pass plays for far longer than
+                            // `RETRY_BASE` — and bounds a tight, dishonest
+                            // loop to the same pace already imposed on
+                            // streams.
+                            if let Some(last) = self.last_pass_reopen {
+                                let elapsed = last.elapsed();
+                                if elapsed < RETRY_BASE {
+                                    tokio::time::sleep(RETRY_BASE - elapsed).await;
+                                }
+                            }
+                            self.last_pass_reopen = Some(tokio::time::Instant::now());
+                        }
                         if let Err(e) = self.apply(action).await {
                             tracing::warn!("applying the answer to an ending: {e}");
                         }
@@ -488,6 +505,45 @@ mod tests {
         assert!(
             calls.iter().filter(|c| c.starts_with("load_list")).count() >= 2,
             "the new pass answered by the source must actually load: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_pass_reopened_too_soon_is_held_back_by_the_floor() {
+        // Regression #5 (whole-branch review): `played_since_play`'s own
+        // confirmation is not measured to be reliable, and may (per mpv's
+        // own doc, in the wrong direction) turn true before the demuxer
+        // has actually opened anything — a sleeping network share could
+        // then keep looking like a genuine ending and reopen a fresh pass
+        // at full speed, forever. `last_pass_reopen` is a second,
+        // unconditional floor against exactly that, independent of
+        // whatever judged any one ending genuine.
+        //
+        // Simulated clock: the assertions are on how much *virtual* time
+        // elapsed, and `tokio::time::pause` lets the runtime fast-forward
+        // through the floor's own `sleep` instead of the test actually
+        // waiting on it.
+        tokio::time::pause();
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::play("/tmp/list.m3u").playlist().finite()).await.unwrap();
+        core.handle_event(Event::PlaybackActive).await;
+
+        let before_first = tokio::time::Instant::now();
+        core.handle_event(Event::PlaybackIdle).await; // first ending: reopens at once
+        assert!(
+            tokio::time::Instant::now() - before_first < RETRY_BASE,
+            "nothing has reopened before this: no floor to wait out yet"
+        );
+
+        // The fixture answers every `EndOfContent` with a fresh pass (see
+        // `setup`), so a second ending right away is exactly the runaway
+        // loop this floor exists for.
+        core.handle_event(Event::PlaybackActive).await;
+        let before_second = tokio::time::Instant::now();
+        core.handle_event(Event::PlaybackIdle).await;
+        assert!(
+            tokio::time::Instant::now() - before_second >= RETRY_BASE,
+            "a second reopening this soon must be held back by the floor"
         );
     }
 

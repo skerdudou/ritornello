@@ -11,11 +11,12 @@ and a single set of components; the difference between the phone and the
 desktop arrangement is Tailwind breakpoints, not two separate views (see
 "Layout" below).
 
-The page embeds buttons for 8 of the protocol's 17 commands: standby,
-source switch, mute, previous/next, play/pause, stop, eject. Three more
+The page embeds buttons for 10 of the protocol's 21 commands: standby,
+source switch, mute, previous/next, play/pause, stop, eject, and the two
+play modes, random and repeat-all (see "Transport" below). Three more
 commands are sent by controls that are not buttons — the preset tiles send
 `Select`, the progress bar sends `SeekTo`, the volume slider sends
-`SetVolume`. The remaining six belong elsewhere: `VolumeUp`/`VolumeDown`
+`SetVolume`. The remaining eight belong elsewhere: `VolumeUp`/`VolumeDown`
 and `SeekForward`/`SeekBackward` are the physical remote's hold-to-repeat
 and step keys (see "Physical remote" below) — the web page dropped its own
 ±5%-volume and ±`seek_step_s`-seek buttons in this refonte, in favour of
@@ -23,9 +24,12 @@ the slider and the progress bar respectively, so these four commands no
 longer have a web control at all; `Plus10` belongs to the physical remote,
 which has a single key and no other way past preset 10 (the web tiles reach
 the same numbers through their own page arrows, described under
-"Presets"); and `SelectSource` (a source named rather than cycled to)
-exists for the MPD server plugin, whose clients send `load` — see
-[plugins.md](plugins.md).
+"Presets"); `SelectSource` (a source named rather than cycled to) exists
+for the MPD server plugin, whose clients send `load` — see
+[plugins.md](plugins.md); and `ToggleRandom`/`ToggleRepeatAll` are the
+physical remote's own form of the two play-mode keys, sent instead of the
+web page's absolute `SetRandom`/`SetRepeatAll` because a physical key does
+not know the current value of the mode it flips — see "Physical remote".
 
 `Next`/`Prev` are interpreted by the active source: preset for the radio,
 track for the CD player — these are not two distinct command pairs, only a
@@ -285,10 +289,37 @@ Player having none either: the progress bar (above) and the volume
 slider (below) do that work now. `SeekForward`/`SeekBackward` and
 `VolumeUp`/`VolumeDown` remain in the protocol and drive the physical
 remote (see "Physical remote") — the web page just no longer offers a
-button for any of the four. Eight commands remain on the page (standby,
-source switch, mute, previous, play/pause, next, stop, eject); a binding
-that still expects the web UI to grey `SeekForward`/`SeekBackward` or
-expose a ±volume control is stale.
+button for any of the four. Ten commands remain on the page (standby,
+source switch, mute, previous, play/pause, next, stop, eject, random,
+repeat-all); a binding that still expects the web UI to grey
+`SeekForward`/`SeekBackward` or expose a ±volume control is stale.
+
+**Below the transport, a second row carries the two play modes**, shuffle
+and repeat-all — new controls, not a repurposing of anything that was
+there. Both are toggles rather than impulses (`aria-pressed`, filled in
+`primary` when on, muted when off, the same idiom as the active preset
+tile's dot), and both send the **absolute** form of their command,
+`SetRandom`/`SetRepeatAll` with the opposite of the value the page already
+holds — never `ToggleRandom`/`ToggleRepeatAll`, which is the physical
+remote's own form for a client with no state of its own to read (see
+"Physical remote"). Sending the toggle here too would let two clients that
+cross a change undo each other's intent instead of converging on whichever
+was pressed last. "Random" means drawing the whole list once, without a
+repeat, then stopping — not a dice roll at every track — and "repeat-all"
+means starting the same list over once it ends; see
+[plugins.md](plugins.md) for where each source actually implements them.
+Both keys are greyed, never hidden, on a source with no finite list to
+apply them to (the radio): the user asked to still see that the function
+exists, even where this particular source cannot honour it — read from
+`has_finite_list`, the capability a source declares for itself (see
+[plugins.md](plugins.md)). That greying is this page's own doing: the core
+accepts and persists both modes regardless of the active source, so
+neither the physical remote's toggle keys nor the MPD server's `random`/
+`repeat` commands are refused or guarded on a source that cannot honour
+them — a source with no finite list is simply told a mode it will never
+read. The two modes are persisted settings of the **device**, not of what
+is loaded: they survive a source change and a stop, and are read back
+after a restart.
 
 **Buttons the appliance would ignore are disabled or hidden**, never
 offered as if they worked:
@@ -504,6 +535,25 @@ fields turn red **as you type**, each naming the other action, and "Save"
 stays out of reach until one of them lets the code go. The plugin refuses
 such a table anyway; the page merely says so before the round trip rather
 than after it.
+
+Two of the table's rows are the **toggle** form of the two play modes,
+"Shuffle" and "Repeat all" — bound like any other action, and sending
+`ToggleRandom`/`ToggleRepeatAll` rather than the web remote's absolute
+`SetRandom`/`SetRepeatAll` (see "Transport" above): a physical key has no
+way to know the current value of the mode it flips, only to invert it.
+
+**A row per installed source, appended at the end of the table.** Below
+the fixed actions, the page lists every source the core currently
+announces (the same list the "change source" key cycles through), each
+bindable to a key of its own — "jump straight to the radio" rather than
+cycling to it. A source bound this way but later **uninstalled** — its
+plugin removed from `plugins.toml`, or simply switched off — keeps its row
+rather than disappearing from the table: dropping it silently would erase
+the binding itself the next time the page is saved, telling the operator
+nothing about why their key stopped working. Such an orphan row is labelled
+as such (the source's name, marked "not installed") and remains fully
+editable — its code can still be cleared or reassigned — it is only the
+source it names that is gone.
 
 ## Config page
 

@@ -63,8 +63,24 @@ impl MpvIpc {
                         };
                         let _ = tx.send(res);
                     }
-                } else if v["event"] == json!("property-change") {
-                    let ev = match (v["name"].as_str(), &v["data"]) {
+                } else if v["event"] == json!("property-change") || v["event"] == json!("file-loaded") {
+                    let ev = if v["event"] == json!("file-loaded") {
+                        // Documented by mpv (read from its own manual, not
+                        // measured against a real running mpv — no session
+                        // available here to confirm it) as sent "after a
+                        // file has been loaded and playback has started".
+                        // This is what `played_since_play` now waits for
+                        // (see `Event::PlaybackActive`'s own doc, and the
+                        // core's `last_pass_reopen` for the second, timed
+                        // safety net this project keeps regardless): unlike
+                        // a property, this event fires on *every* load,
+                        // including a reload issued while mpv was already
+                        // playing something else — which `idle-active`
+                        // turning false, used for this before, could miss
+                        // entirely (see that arm's own doc just below).
+                        Some(Event::PlaybackActive)
+                    } else {
+                        match (v["name"].as_str(), &v["data"]) {
                         (Some("media-title"), Value::String(t)) => Some(Event::Title(t.clone())),
                         // One property, two layers: the ICY header of a
                         // stream, or the tags of a file. `file_tags` stays
@@ -89,8 +105,20 @@ impl MpvIpc {
                             // Entering playback also consumes the right to
                             // swallow: if mpv announces activity first, the
                             // `true` that follows is a genuine stop.
+                            //
+                            // No longer the source of `Event::PlaybackActive`
+                            // itself (see `file-loaded` above): read from
+                            // mpv's own source (unmeasured — no real mpv
+                            // session available here to confirm it against),
+                            // this property does not toggle again on a
+                            // reload issued while mpv was already playing —
+                            // it was already `false`, and stays `false`, with
+                            // no change event through it — so the
+                            // confirmation `played_since_play` waits for
+                            // went silent from the second track onward were
+                            // it still read from here.
                             first_idle = false;
-                            Some(Event::PlaybackActive)
+                            None
                         }
                         // Established (see `OBSERVED` below): both
                         // `playlist-pos` and `chapter` are observed
@@ -138,6 +166,7 @@ impl MpvIpc {
                             n.as_i64().map(Event::TrackChanged)
                         }
                         _ => None,
+                        }
                     };
                     if let Some(ev) = ev {
                         // `mpsc` with no loss: a full channel means
@@ -600,9 +629,9 @@ pub(crate) mod tests {
         w.write_all(b"{\"event\":\"property-change\",\"name\":\"idle-active\",\"data\":true}\n")
             .await
             .unwrap();
-        w.write_all(b"{\"event\":\"property-change\",\"name\":\"idle-active\",\"data\":false}\n")
-            .await
-            .unwrap();
+        // `file-loaded`, not `idle-active` turning false: see the doc on
+        // that arm and on `Event::PlaybackActive` for why.
+        w.write_all(b"{\"event\":\"file-loaded\"}\n").await.unwrap();
         w.write_all(b"{\"event\":\"property-change\",\"name\":\"playlist-pos\",\"data\":3}\n")
             .await
             .unwrap();
@@ -611,8 +640,9 @@ pub(crate) mod tests {
         // The `idle-active: true` sent above is the **first** observed
         // value: it describes the idle daemon's starting state, not a
         // stop, and is therefore swallowed (see
-        // `the_first_observed_idle_is_not_a_stop`). This test used to
-        // expect it as an event — it encoded the defect.
+        // `the_first_observed_idle_is_not_a_stop`) — and produces no event
+        // either way now, `idle-active` no longer being the source of
+        // `PlaybackActive`.
         assert_eq!(rx.recv().await.unwrap(), Event::PlaybackActive);
         assert_eq!(rx.recv().await.unwrap(), Event::TrackChanged(3));
     }
@@ -639,24 +669,48 @@ pub(crate) mod tests {
         let _ipc = MpvIpc::from_stream(client, tx);
 
         let (_r, mut w) = server.into_split();
-        // In order: the observation's initial value, a real load, then a
-        // real stop at the end of a playlist.
-        for data in ["true", "false", "true"] {
-            w.write_all(
-                format!("{{\"event\":\"property-change\",\"name\":\"idle-active\",\"data\":{data}}}\n")
-                    .as_bytes(),
-            )
+        // In order: the observation's initial value (the idle daemon at
+        // startup), a real load (`file-loaded`, not `idle-active` turning
+        // false — see that arm's own doc), then a real stop at the end of
+        // a playlist (`idle-active` back to `true`).
+        w.write_all(b"{\"event\":\"property-change\",\"name\":\"idle-active\",\"data\":true}\n")
             .await
             .unwrap();
-        }
+        w.write_all(b"{\"event\":\"file-loaded\"}\n").await.unwrap();
+        w.write_all(b"{\"event\":\"property-change\",\"name\":\"idle-active\",\"data\":true}\n")
+            .await
+            .unwrap();
 
-        // The first `true` is swallowed: the first event received is
-        // entering playback.
+        // The first `true` is swallowed: nothing is emitted for it, and
+        // the first event actually received is the real load.
         assert_eq!(rx.recv().await.unwrap(), Event::PlaybackActive);
-        // The second one, though, follows a playback: it is a genuine
+        // The second `true`, though, follows a playback: it is a genuine
         // stop, and it must go through — otherwise the end of a playlist
         // would no longer display.
         assert_eq!(rx.recv().await.unwrap(), Event::PlaybackIdle);
+    }
+
+    #[tokio::test]
+    async fn a_reload_issued_while_already_playing_still_confirms_playback() {
+        // Regression #5 (whole-branch review): `idle-active` turning false
+        // is documented (unmeasured — no real mpv session available to
+        // confirm it) to not toggle again on a reload issued while mpv is
+        // already playing something else — already `false`, it stays
+        // `false`, with no change event through it at all. `file-loaded`
+        // fires on *every* load regardless: proven here by two of them
+        // arriving with no `idle-active` message in between at all — the
+        // old code, reading only `idle-active`, would have produced no
+        // event whatsoever for either.
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let _ipc = MpvIpc::from_stream(client, tx);
+
+        let (_r, mut w) = server.into_split();
+        w.write_all(b"{\"event\":\"file-loaded\"}\n").await.unwrap();
+        w.write_all(b"{\"event\":\"file-loaded\"}\n").await.unwrap();
+
+        assert_eq!(rx.recv().await.unwrap(), Event::PlaybackActive);
+        assert_eq!(rx.recv().await.unwrap(), Event::PlaybackActive);
     }
 
     #[tokio::test]

@@ -271,8 +271,9 @@ pub trait SourcePlugin: Send + 'static {
     ///
     /// Default implementation: behave like `activate()`, which is what every
     /// source did back when the core sent `Activate` for this too. That
-    /// default is what leaves radio, files, generic-input and mpd compiling
-    /// **and behaving** unchanged.
+    /// default is what leaves radio and files — the two `SourcePlugin`
+    /// implementors besides the cd, which overrides it — compiling **and
+    /// behaving** unchanged.
     ///
     /// A source overrides this only when arriving at it and being told to
     /// play are genuinely different things for it — the cd, whose arrival is
@@ -302,10 +303,12 @@ pub trait SourcePlugin: Send + 'static {
     /// Default implementation: behave like `stop()`, which is what every
     /// Source did before this notification existed — a radio has no finite
     /// list to begin with, and `has_finite_list` false by default already
-    /// says so. That default is what leaves radio, files, generic-input and
-    /// mpd compiling **and behaving** unchanged; a Source overrides this only
-    /// when it must react to its own list running out (starting over under
-    /// repeat-all, drawing the next unplayed entry under random).
+    /// says so. That default is what leaves radio — the one `SourcePlugin`
+    /// implementor with nothing to react to here, files and cd both
+    /// overriding it — compiling **and behaving** unchanged; a Source
+    /// overrides this only when it must react to its own list running out
+    /// (starting over under repeat-all, drawing the next unplayed entry
+    /// under random).
     async fn end_of_content(&mut self) -> SourceOutcome {
         self.stop().await
     }
@@ -1826,9 +1829,10 @@ mod tests {
 
     #[tokio::test]
     async fn play_defaults_to_activate() {
-        // What keeps radio, files, generic-input and mpd behaving exactly as
-        // before: they do not override `play()`, and the Play key must reach
-        // them as it always did.
+        // What keeps radio and files behaving exactly as before: neither
+        // overrides `play()` (only the cd does, among the three
+        // `SourcePlugin` implementors), and the Play key must reach them as
+        // it always did.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("plugin.sock");
         let socket_for_server = socket.clone();
