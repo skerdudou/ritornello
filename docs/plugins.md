@@ -550,7 +550,7 @@ When it happens, the core's `504` names the cause and distinguishes a
 request that ran past its budget from a plugin that is not answering at
 all (`502`) — the two used to look identical on the page. So every filesystem access
 a request triggers goes through a circuit
-breaker (`sante.rs`): it runs off the async thread under a 1.5 s deadline, and a
+breaker (`health.rs`): it runs off the async thread under a 1.5 s deadline, and a
 mount point whose probe never returned is remembered, so later requests are
 refused instantly instead of losing another thread — a syscall in
 uninterruptible sleep cannot be killed, not even with `SIGKILL`. The abandoned
@@ -2062,9 +2062,9 @@ protocol:
   component;
 - `GetAsset("ui.css")` → the module's stylesheet (its own Tailwind pass,
   important: the core's CSS only contains the classes the core sees). The
-  shell injects it into a **cascade layer of its own, `greffon`, declared below
+  shell injects it into a **cascade layer of its own, `plugin`, declared below
   `utilities`** by `web/app/src/app.css`, through a
-  `<style>@import url(…) layer(greffon)</style>` — the only way to put an
+  `<style>@import url(…) layer(plugin)</style>` — the only way to put an
   *external* sheet in a named layer, which also makes it work for a third-party
   plugin whose CSS nobody here builds. That is a fix, not tidiness: both passes
   used to write into the same `utilities` layer, and the plugin's sheet —
@@ -2108,14 +2108,19 @@ future at its next `await`, so an interrupted `set_data` releases the
 lock — but a blocking syscall inside `spawn_blocking` runs to completion.
 A plugin that touches a network path therefore still has to run it off
 the async thread and behind a circuit breaker
-(`crates/ritornello-plugin-files/src/sante.rs`); the protocol bounds the
+(`crates/ritornello-plugin-files/src/health.rs`); the protocol bounds the
 *wait*, not the syscall.
 
 The shell mounts the module's default component passing it **two props**,
 which are the entirety of the data-side contract:
 
 - `catalog`: the flat i18n catalog returned by `GetCatalog`, to be
-  consumed through `createT(catalog)`;
+  consumed through `createT(catalog)`. **Guaranteed settled at mount**: the
+  shell does not build the module's component until this catalog has come
+  back, so a first render never sees an empty one. "Settled" means
+  answered *or* refused — a plugin whose `GetCatalog` fails still gets its
+  component mounted, with an empty catalog, because a page withheld
+  forever would be worse than one showing keys;
 - `base`: the **absolute** prefix under which the core serves this
   plugin's routes, trailing slash included (`/plugins/<name>/`). Every
   URL in the module is built from it — `api.get(`${base}api/data`)` — and
@@ -2141,8 +2146,33 @@ generic-input, mpd) use a Vite build (see
 `crates/ritornello-plugin-radio/ui/`) to benefit from `.vue` files and
 TypeScript — a comfort choice, not a requirement.
 
-Four things learned during this work stream, to know before writing a
+Five things learned during this work stream, to know before writing a
 third-party plugin's UI:
+
+- **A translated label placed in a `Select` must be rendered by the page,
+  not left to `<SelectValue>`.** This is the one rule of this list that has
+  been reported twice by users, on two different pages. reka-ui hands an
+  option's text to its Select when the item mounts (`SelectItemText`,
+  `onMounted` → `onOptionAdd`) and **never re-reads it**, so a label that
+  changes afterwards is ignored until the list is first opened — opening
+  remounts the items, which is what eventually heals it and makes the bug
+  so puzzling to diagnose. The pattern:
+
+  ```vue
+  <!-- Wrong: shows the previous language after a language change. -->
+  <SelectTrigger><SelectValue /></SelectTrigger>
+
+  <!-- Right: an ordinary reactive binding cannot go stale. -->
+  <SelectTrigger>{{ labelOf(value) }}</SelectTrigger>
+  ```
+
+  The mount-time half of this trap is gone — a component is no longer built
+  before its catalog (see `catalog` above) — but a **language change** swaps
+  the catalog under a component that stays mounted, and that half remains.
+  It only concerns text coming from `t()`: options labelled with data from
+  the server (device names, station names) are immune, which is why most
+  pages never met it. `RadioAdmin.vue` and `CdAdmin.vue` both carry the
+  pattern, with the reason written beside it.
 
 - `assets/vue.js` is the **runtime-only** build of Vue (no embedded
   template compiler): a plugin module must ship **precompiled templates**

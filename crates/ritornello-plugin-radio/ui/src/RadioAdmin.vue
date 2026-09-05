@@ -101,11 +101,17 @@ const skeleton = useSkeleton(() => !loaded.value)
  * Country button label, rendered from **our own** state.
  *
  * This is the fix for an observed bug: the previous version entrusted this
- * label to `<SelectValue>`, which captures the selected element's text on
- * first render. But `PluginView` mounts the UI with an **empty** catalog
- * (it is loaded asynchronously), so the captured text was the translation
- * key itself — the page literally displayed "country_fr" until the list
- * was opened.
+ * label to `<SelectValue>`, which captures the selected element's text when
+ * the item mounts and never re-reads it. The page displayed "country_fr",
+ * the translation key, until the list was opened — opening remounts the
+ * items, which is what healed it.
+ *
+ * The cause it was written against — `PluginView` mounting the UI with an
+ * **empty** catalog — no longer exists: a plugin component is now never
+ * built before its catalog has settled. This binding stays for the case that
+ * remains, measured: a **language change** swaps the catalog while this
+ * component stays mounted, and `SelectValue` then keeps the previous
+ * language until the list is opened.
  */
 const countryLabel = computed(() =>
   country.value === ALL_COUNTRIES ? t.value('country_all') : countryName(country.value),

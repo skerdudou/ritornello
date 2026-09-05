@@ -107,14 +107,18 @@ async function save(): Promise<void> {
         <label class="text-sm font-medium">{{ t('arrival_label') }}</label>
         <Select v-model="onArrival">
           <!-- The label is rendered here, not left to `SelectValue`. The kit's
-               `SelectItemText` registers an item's text with the Select root
-               when that item mounts and never re-reads it, and the shell
-               mounts a plugin's component **before** its catalog arrives (on
-               purpose — see `PluginView`), so the text captured was
-               `arrival_nothing`, the untranslated key. Every other label of
-               the page recovered on the re-render; this one stayed wrong for
-               the life of the page. A plain reactive binding cannot go stale
-               that way. -->
+               `SelectItemText` hands an item's text to the Select root when
+               that item mounts and never re-reads it, so any label that
+               changes afterwards is ignored until the list is first opened
+               (opening remounts the items, which is why the wrong text
+               eventually heals).
+               The mount race that first exposed this — a component built
+               before its catalog — is now closed for every plugin page by
+               `PluginView`. What remains, and what this binding still buys, is
+               the **language change**: `PluginRoute` swaps the catalog while
+               this component stays mounted, and measured, `SelectValue` then
+               keeps the previous language. A plain reactive binding cannot go
+               stale that way. -->
           <SelectTrigger data-arrival class="w-full" :aria-label="t('arrival_label')">
             {{ label(onArrival) }}
           </SelectTrigger>
