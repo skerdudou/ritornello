@@ -441,6 +441,24 @@ plugin has nothing to pace itself. The `Play` it issues is marked
 idle at the end would look like a dropped stream and the core would
 restart the list in a loop.
 
+That starting index reaches mpv **as part of the load**, and the reason is
+worth keeping. The core used to load the list and then correct the position,
+in two commands. Measured on mpv 0.37, with a three-entry list and entry 2
+wanted: the first form publishes the `path` of entry 0 **and then** of entry 2
+— mpv really did open the first entry — while declaring `playlist-start`
+beforehand only ever publishes entry 2. Everything the core hangs off `path`
+therefore fired once on a track nobody had asked for: it read a cover off it,
+over the network share, and relayed it to the `metadata` plugins as the
+playing track, so the display flipped through it. Visible in the log as a
+cover lookup for the first track of the list moments after a resume settled on
+another one. That index is also **always** declared, "from the beginning"
+included: `playlist-start` is a persistent option — measured, a second
+`loadlist` sent without touching it starts again where the previous one was
+told to — so leaving it out would make a list loaded after a resume silently
+start on the resumed track. `Player::load_list` takes it as a parameter and
+the player exposes no way to reposition separately, which is what keeps the
+old sequence from coming back.
+
 ### Package prerequisites
 
 Two system packages, only one of which is indispensable.

@@ -22,8 +22,15 @@ impl crate::player::Player for FakePlayer {
         self.calls.lock().unwrap().push(format!("play {uri}"));
         Ok(())
     }
-    async fn load_list(&self, uri: &str) -> anyhow::Result<()> {
-        self.calls.lock().unwrap().push(format!("load_list {uri}"));
+    async fn load_list(&self, uri: &str, start: Option<i64>) -> anyhow::Result<()> {
+        // The index is recorded **in the same call**, which is the whole
+        // point: a test can no longer see a load and a positioning as two
+        // separate events, because the player no longer offers that.
+        let start = match start {
+            Some(n) => n.to_string(),
+            None => "auto".to_string(),
+        };
+        self.calls.lock().unwrap().push(format!("load_list {uri} start={start}"));
         Ok(())
     }
     async fn stop(&self) -> anyhow::Result<()> {
@@ -43,10 +50,6 @@ impl crate::player::Player for FakePlayer {
     }
     async fn prev(&self) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push("prev".into());
-        Ok(())
-    }
-    async fn set_playlist_pos(&self, n: i64) -> anyhow::Result<()> {
-        self.calls.lock().unwrap().push(format!("playlist-pos {n}"));
         Ok(())
     }
     async fn set_volume(&self, v: u8) -> anyhow::Result<()> {

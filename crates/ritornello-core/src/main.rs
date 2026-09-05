@@ -2274,7 +2274,7 @@ mod toggle_tests {
         async fn play(&self, _uri: &str) -> Result<()> {
             Ok(())
         }
-        async fn load_list(&self, _uri: &str) -> Result<()> {
+        async fn load_list(&self, _uri: &str, _start: Option<i64>) -> Result<()> {
             Ok(())
         }
         async fn stop(&self) -> Result<()> {
@@ -2287,9 +2287,6 @@ mod toggle_tests {
             Ok(())
         }
         async fn prev(&self) -> Result<()> {
-            Ok(())
-        }
-        async fn set_playlist_pos(&self, _n: i64) -> Result<()> {
             Ok(())
         }
         async fn set_volume(&self, _volume: u8) -> Result<()> {

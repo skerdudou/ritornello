@@ -426,14 +426,34 @@ impl super::Player for MpvPlayer {
         Ok(())
     }
     /// `loadlist` and not `loadfile`: the list is unfolded **before** the
-    /// command answers (its response even carries `num_entries`), so a
-    /// `playlist-pos` sent right after falls within bounds.
+    /// command answers (its response even carries `num_entries`).
     ///
     /// With `loadfile`, measured on mpv 0.37: `playlist-count` is first 1,
     /// position 0, then an `end-file` and a `start-file` come before the
-    /// count reaches 3. The requested `playlist-pos` therefore arrived out
-    /// of bounds, and the unfolding replayed the first track.
-    async fn load_list(&self, uri: &str) -> Result<()> {
+    /// count reaches 3. A requested position therefore arrived out of
+    /// bounds, and the unfolding replayed the first track.
+    ///
+    /// **`playlist-start` before `loadlist`, and never a reposition after
+    /// it.** Measured on mpv 0.37 with a three-entry list and entry 2
+    /// wanted: loading then repositioning publishes `path` for entry 0
+    /// **and then** for entry 2 — mpv really did open the first entry —
+    /// whereas declaring the index beforehand only ever publishes entry 2.
+    /// Everything the core hangs off `path` (the embedded-cover read, the
+    /// identity relayed to the Source) therefore used to fire once on a
+    /// track nobody had asked for.
+    ///
+    /// **Always sent, `auto` included.** The option is persistent, and this
+    /// is measured too: a second `loadlist` sent without touching it starts
+    /// again at the index the previous load declared. Omitting it for "from
+    /// the beginning" would make a list loaded after a resume silently
+    /// start on the resumed track. `auto` is mpv's own default, the same
+    /// convention as the audio device.
+    async fn load_list(&self, uri: &str, start: Option<i64>) -> Result<()> {
+        let start = match start {
+            Some(n) => json!(n),
+            None => json!("auto"),
+        };
+        self.ipc.command(&[json!("set_property"), json!("playlist-start"), start]).await?;
         self.ipc.command(&[json!("loadlist"), json!(uri), json!("replace")]).await?;
         self.ipc.command(&[json!("set_property"), json!("pause"), json!(false)]).await?;
         Ok(())
@@ -452,10 +472,6 @@ impl super::Player for MpvPlayer {
     }
     async fn prev(&self) -> Result<()> {
         self.ipc.command(&[json!("playlist-prev")]).await?;
-        Ok(())
-    }
-    async fn set_playlist_pos(&self, n: i64) -> Result<()> {
-        self.ipc.command(&[json!("set_property"), json!("playlist-pos"), json!(n)]).await?;
         Ok(())
     }
     async fn set_volume(&self, volume: u8) -> Result<()> {

@@ -231,16 +231,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_list_is_loaded_by_load_list_then_positioned() {
-        // The defect this test should have caught, and now catches.
+    async fn a_list_is_loaded_already_positioned() {
+        // **One operation, not two**, and this is the defect this test now
+        // forbids. Loading first and correcting the position afterwards left
+        // mpv the time to genuinely open the list's first entry: measured on
+        // mpv 0.37, the `path` property is published for entry 0 before the
+        // reposition takes effect. The core then took that entry for what was
+        // playing — it read a cover off it, on a network share, and made the
+        // display flip through a track nobody had asked for.
         //
-        // With `loadfile`, mpv only unfolds an `.m3u` **afterwards**: measured
-        // on mpv 0.37, `playlist-count` is 1, then 3 only after an
-        // `end-file`/`start-file`. The chained `playlist-pos` therefore
-        // arrived out of bounds, playback started over from the first track,
-        // and the display lost preset and title. `loadlist` unfolds on the
-        // spot — its answer even carries `num_entries` — which makes this
-        // chaining safe.
+        // Carrying the index into the load is what makes that window
+        // impossible, and the player interface no longer offers any way to
+        // express the old sequence.
         let (mut core, player_calls, _sc, _rx, _d) = setup();
         core.apply(
             SourceAction::play("/var/lib/ritornello/plugin-files.m3u")
@@ -252,10 +254,25 @@ mod tests {
         .unwrap();
         assert_eq!(
             *player_calls.lock().unwrap(),
-            vec![
-                "load_list /var/lib/ritornello/plugin-files.m3u".to_string(),
-                "playlist-pos 4".to_string()
-            ]
+            vec!["load_list /var/lib/ritornello/plugin-files.m3u start=4".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_without_a_declared_index_says_so_explicitly() {
+        // The counterpart, and it is not cosmetic: mpv's starting index is a
+        // **persistent** option — measured, a second `loadlist` sent without
+        // touching it starts again at the index the previous load declared.
+        // "Nothing declared" must therefore travel as an explicit value all
+        // the way to the player, otherwise a list loaded after a resume would
+        // silently start on the resumed track.
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::play("/var/lib/ritornello/plugin-files.m3u").playlist().finite())
+            .await
+            .unwrap();
+        assert_eq!(
+            *player_calls.lock().unwrap(),
+            vec!["load_list /var/lib/ritornello/plugin-files.m3u start=auto".to_string()]
         );
     }
 

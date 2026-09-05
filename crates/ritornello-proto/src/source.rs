@@ -71,10 +71,14 @@ pub enum SourceAction {
         /// **Requires `playlist: true`** to work, and that is a lesson paid
         /// for: a `loadfile` on an `.m3u` only unfolds it **afterwards** —
         /// measured, `playlist-count` is 1, then 3 only after an
-        /// `end-file`/`start-file`. The `playlist-pos` sent right after
-        /// therefore arrived out of bounds, playback restarted from the first
-        /// track, and the display lost everything. `loadlist` unfolds on the
-        /// spot.
+        /// `end-file`/`start-file`. The position sent right after therefore
+        /// arrived out of bounds, playback restarted from the first track,
+        /// and the display lost everything. `loadlist` unfolds on the spot.
+        ///
+        /// The core carries this index **into** the load rather than
+        /// correcting the position afterwards (see `Player::load_list`): the
+        /// two-step version really did open the list's first entry, and the
+        /// core announced it as the playing track for a moment.
         ///
         /// It is the only way for a Source to resume a list at track n — a
         /// digit from the remote, or resumption after a restart.

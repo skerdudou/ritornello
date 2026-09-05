@@ -348,16 +348,21 @@ impl<P: Player> Core<P> {
                 // `.m3u8` is a playlist for a file player and an HLS stream
                 // for a radio; sniffing the URI would break one or the other.
                 if playlist {
-                    self.player.load_list(&uri).await?;
+                    // The index goes **with** the load, in one operation. It
+                    // used to be a correction sent right after, and that
+                    // window was long enough for mpv to really open the
+                    // list's first entry — measured: it publishes that
+                    // entry's `path`, off which the core read a cover and
+                    // which it relayed as the playing track. See
+                    // `Player::load_list`.
+                    self.player.load_list(&uri, start).await?;
                 } else {
+                    // A medium, not a list: `start` has no meaning here and
+                    // the Source is not supposed to send one (see
+                    // `SourceAction::start`). Silently ignored rather than
+                    // refused — this is a display detail, never a reason to
+                    // refuse playback.
                     self.player.play(&uri).await?;
-                }
-                // Positioning after loading, and this order is only safe
-                // thanks to `loadlist`: with `loadfile`, mpv only unfolds the
-                // playlist afterwards — measured — and this index fell out of
-                // bounds before playback restarted from the first track.
-                if let Some(n) = start {
-                    self.player.set_playlist_pos(n).await?;
                 }
             }
             SourceAction::Stop => {

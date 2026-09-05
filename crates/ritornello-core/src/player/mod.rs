@@ -17,25 +17,29 @@ pub struct Progress {
 #[async_trait::async_trait]
 pub trait Player: Send + Sync + 'static {
     async fn play(&self, uri: &str) -> Result<()>;
-    /// Loads `uri` as a **playlist**, expanded right away.
+    /// Loads `uri` as a **playlist**, expanded right away and already
+    /// positioned on entry `start` (`None` = from the beginning).
     ///
     /// Distinct from `play`, and that is a lesson paid for: `loadfile` on a
     /// `.m3u` only expands it after the fact. Measured on mpv 0.37 —
     /// `playlist-count` is 1, then 3 only after an `end-file`/`start-file`.
-    /// Anything following immediately (a `playlist-pos`) therefore landed out
-    /// of bounds, and the `playlist-pos = 0` of the expansion sent playback
-    /// back to the beginning.
-    async fn load_list(&self, uri: &str) -> Result<()>;
+    /// Anything following immediately therefore landed out of bounds, and the
+    /// expansion sent playback back to the beginning.
+    ///
+    /// **The index is a parameter of the load, not a correction sent after
+    /// it**, and that too is a lesson paid for — a later one. Loading the list
+    /// and repositioning it in two steps leaves mpv the time to really open
+    /// entry 0: measured, it publishes that entry's `path` before the
+    /// reposition lands. The core, which listens to `path` to know what is
+    /// playing, then went and read a cover off a track nobody had asked for —
+    /// over a network share — and the display flipped through it. Positioning
+    /// **cannot** be a separate method for that reason: the interface would
+    /// hand back the very sequence this signature exists to forbid.
+    async fn load_list(&self, uri: &str, start: Option<i64>) -> Result<()>;
     async fn stop(&self) -> Result<()>;
     async fn toggle_pause(&self) -> Result<()>;
     async fn next(&self) -> Result<()>;
     async fn prev(&self) -> Result<()>;
-    /// Positions playback on the element at index `n` of the current list.
-    ///
-    /// Only to be used after a `load_list`, never after a `play`: it is
-    /// `loadlist` that guarantees the list is already expanded by the time this
-    /// index is applied.
-    async fn set_playlist_pos(&self, n: i64) -> Result<()>;
     async fn set_volume(&self, volume: u8) -> Result<()>;
     async fn set_mute(&self, mute: bool) -> Result<()>;
     async fn set_audio_device(&self, device: &str) -> Result<()>;
