@@ -1146,9 +1146,49 @@ impl CoverCache {
                 }
                 #[cfg(test)]
                 self.renditions_built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let (mime, bytes) = rendition(mime, bytes, rules).await?;
+                let Renditioned { mime, bytes, untouched } = rendition(mime, bytes, rules).await?;
                 let bytes = Arc::new(bytes);
-                self.remember_rendition(identity, mime, bytes.clone()).await;
+                // **A pass-through of a source already in memory is not
+                // memoized, and that is the whole of this rule.** The
+                // rendition table is a memo for work, and there are only two
+                // kinds of work it can save: an encode, and a read. A
+                // pass-through did no encode by definition — these are the
+                // source's own bytes — so the memo is worth keeping only when
+                // the *read* cost something.
+                //
+                // For a `File` or an `Embedded` it did: without the memo every
+                // display push and every uncached request goes back to a share
+                // that may be asleep, which is exactly what this table was
+                // installed to stop. For `Bytes` and `Pair` it did not: the
+                // source is already resident, so the memo held **a second copy
+                // of bytes the cache was holding anyway**. That is not a
+                // rounding error — a network cover under the threshold cost
+                // twice its size, which at the product's defaults halves how
+                // many covers fit and quietly makes the budget the limiting
+                // factor again, against the config page's own estimate, which
+                // counts one copy.
+                //
+                // What is given up is a repeat: a second request re-clones the
+                // payload and re-reads the image header. Both are bounded by
+                // `Rendition::passthrough_max`, the setting that decided the
+                // pass-through in the first place — a memcpy of at most a few
+                // hundred kibibytes with no decode, against a duplicate held
+                // for as long as the entry lives.
+                //
+                // **Residency is read off the stamp, and that is the only
+                // honest source for it.** `Frozen` is defined as a body
+                // already read whole and immutable under its key — which is
+                // residency, stated at the moment of the read. Asking the
+                // entry table instead would answer about the payload as it
+                // stands *now*: the lock is released before the read (see
+                // `bytes`), so an eviction or a replacement landing in that
+                // gap would have this decide on a source other than the one
+                // it is holding. Nothing here would be served wrong either
+                // way, but the stamp has no such gap and needs no second
+                // lock.
+                if !(untouched && matches!(stamp, SourceStamp::Frozen)) {
+                    self.remember_rendition(identity, mime, bytes.clone()).await;
+                }
                 // The stamp of the read, travelling out with the bytes it
                 // describes: whoever joined this cell after stat'ing the file
                 // must label the response with *this*, not with its own stat.
@@ -1973,13 +2013,25 @@ impl CoverCache {
 /// the source is still the one that produced those bytes — and that judgment
 /// belongs to `rendition_for`, which has the stamp to make it.
 ///
-/// `None` = nothing to push, as everywhere in this module: unreadable image,
-/// dimensions beyond the cap, or produced thumbnail beyond the safety net.
-async fn rendition(
+/// What `rendition` handed back, and **whether it produced it**.
+///
+/// The flag is not a curiosity: it is what tells a memo worth keeping from a
+/// memo that would hold a second copy of something the cache already has. See
+/// `CoverCache::rendition_for`, which is its only reader.
+#[derive(Debug, PartialEq, Eq)]
+struct Renditioned {
     mime: &'static str,
     bytes: Vec<u8>,
-    r: Rendition,
-) -> Option<(&'static str, Vec<u8>)> {
+    /// True when these are the **source's own bytes**, returned unchanged
+    /// because it already satisfied `Rendition::leaves_alone`. Nothing was
+    /// decoded, nothing was encoded, and there is therefore no work a memo
+    /// could save — only, possibly, a read.
+    untouched: bool,
+}
+
+/// `None` = nothing to push, as everywhere in this module: unreadable image,
+/// dimensions beyond the cap, or produced thumbnail beyond the safety net.
+async fn rendition(mime: &'static str, bytes: Vec<u8>, r: Rendition) -> Option<Renditioned> {
     let (width, height) = dimensions(&bytes)?;
     let pixels = u64::from(width) * u64::from(height);
     if pixels > r.pixel_cap {
@@ -1996,7 +2048,7 @@ async fn rendition(
     // written out twice.
     if r.leaves_alone(bytes.len(), (width, height)) {
         tracing::debug!("cover already small ({width}x{height}, {} bytes), pushed as it is", bytes.len());
-        return Some((mime, bytes));
+        return Some(Renditioned { mime, bytes, untouched: true });
     }
 
     // `spawn_blocking`: decoding then re-encoding a multi-megapixel image
@@ -2041,7 +2093,7 @@ async fn rendition(
         pixels * 4,
         output.len()
     );
-    Some((mime, output))
+    Some(Renditioned { mime, bytes: output, untouched: false })
 }
 
 /// Dimensions announced by the header, without decoding the image.
@@ -3455,6 +3507,122 @@ mod tests {
         let s = cache.snapshot().await;
         assert_eq!(s.renditions, 1);
         assert_eq!(s.renditions_stale, 1, "produced under 320 px, the cache now asks 640");
+    }
+
+    /// **A cover held in memory must not end up held twice.**
+    ///
+    /// The defect this pins, and it was live: a network cover under the
+    /// threshold is passed through unchanged, and the pass-through was then
+    /// memoized like any rendition — so the cache held the entry's bytes *and*
+    /// an identical copy of them, for as long as the entry lived. At the
+    /// product's defaults a MusicBrainz thumbnail cost twice its size, halving
+    /// how many covers fit and making the budget the limiting factor again,
+    /// against a config page whose estimate counts one copy.
+    ///
+    /// Asserted first of all on `used_bytes`, because bytes are what was
+    /// wrong — a memo that cost nothing would be nobody's business — with the
+    /// rendition count alongside to name the cause rather than only the
+    /// symptom.
+    #[tokio::test]
+    async fn a_cover_already_in_memory_is_not_held_a_second_time_by_its_pass_through() {
+        let cache = Arc::new(CoverCache::new());
+        // Within the product's rule on both counts -- 500 px under the 640 px
+        // edge, and well under the 150 KiB threshold -- so the route serves
+        // it untouched.
+        let thumb = fixtures::jpeg_decodable(500, 500);
+        cache.insert("k".into(), CoverPayload::Bytes(thumb.clone(), "image/jpeg")).await;
+        let resident = cache.snapshot().await.used_bytes;
+        assert_eq!(resident, thumb.len(), "the entry alone, to begin with");
+
+        let (status, body) = served_body(&cache, "k", "?size=thumbnail").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, thumb, "passed through, so the bytes must be the source's own");
+        assert_eq!(
+            cache.snapshot().await.used_bytes,
+            resident,
+            "serving it must not have made the cache hold a second copy"
+        );
+        assert_eq!(cache.snapshot().await.renditions, 0);
+    }
+
+    /// **The same defect on the path that actually produces it**, and the one
+    /// the test above does not reach.
+    ///
+    /// A MusicBrainz cover is a `Pair`, and a browser asking for its
+    /// thumbnail never reaches `rendition_for` at all — `cover_get`'s `Pair`
+    /// arm answers first. The doubling therefore happened on the *display*
+    /// side: `line` reads the thumbnail through `bytes`, which clones it out
+    /// of the payload, and the pass-through was then memoized. So the
+    /// duplicate appeared the moment an MPD relay subscribed, for the very
+    /// covers this whole mechanism exists to serve untouched.
+    ///
+    /// The production change this kills and the test above does not: leaving
+    /// `Pair` out of whatever decides residency. That mutation passes both
+    /// the `Bytes` test and the `File` one while restoring the defect
+    /// entirely.
+    #[tokio::test]
+    async fn a_supplied_thumbnail_pushed_to_a_display_is_not_held_a_second_time() {
+        let cache = Arc::new(CoverCache::new());
+        let thumb = fixtures::jpeg_decodable(500, 500);
+        cache.insert("k".into(), paired_entry(thumb.clone())).await;
+        let resident = cache.snapshot().await.used_bytes;
+        assert_eq!(resident, thumb.len(), "the pair's thumbnail, and nothing else");
+
+        cache.line("k", "/api/cover/k").await.expect("the display must get a frame");
+
+        assert_eq!(
+            cache.snapshot().await.used_bytes,
+            resident,
+            "pushing it to a display must not have made the cache hold it twice"
+        );
+        assert_eq!(cache.snapshot().await.renditions, 0);
+    }
+
+    /// **The other half of the same rule, and the reason it is not simply
+    /// "never memoize a pass-through".** A local cover costs a read from a
+    /// share that may be asleep, and the rendition table is what spares it.
+    /// A pass-through of one is therefore still worth keeping: there is no
+    /// duplicate to avoid, since a `File` entry holds a path and no bytes.
+    ///
+    /// The production change this kills: widening the fix above to every
+    /// pass-through, which would send each display push and each uncached
+    /// request back to the NAS for an image the cache had already read.
+    #[tokio::test]
+    async fn a_pass_through_read_from_a_file_is_still_memoized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cover.jpg");
+        // Same image as the tests above, so the *only* difference under test
+        // is where the source lives.
+        let on_the_share = fixtures::jpeg_decodable(500, 500);
+        std::fs::write(&path, &on_the_share).unwrap();
+        let stamp = SourceStamp::of_file(&std::fs::metadata(&path).unwrap());
+        let cache = Arc::new(CoverCache::new());
+        cache.insert("k".into(), CoverPayload::File(path.clone())).await;
+
+        let (status, body) = served_body(&cache, "k", "?size=thumbnail").await;
+        assert_eq!(status, 200);
+        // **That this is a pass-through at all is asserted, not assumed.** A
+        // decode/encode round trip cannot give back the file's own bytes.
+        // Without this line the test would keep passing if the fixture ever
+        // grew past the threshold — while quietly testing the branch it is
+        // not about.
+        assert_eq!(body, on_the_share, "the file's own bytes, so nothing was produced");
+        assert_eq!(
+            cache.snapshot().await.renditions,
+            1,
+            "a read is work, and the memo is what spares it a second time"
+        );
+
+        // **The memo answers with no file left to read**, which is the claim
+        // being made and the only way to prove it. A test on
+        // `renditions_built` would not: the lookup that runs *after* the read
+        // returns without counting either, so an unchanged counter cannot
+        // tell a spared read from a repeated one.
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            cache.rendition_for("k", Some(stamp)).await.is_some(),
+            "the retained rendition must be served without going back to the share"
+        );
     }
 
     /// **The line the panel was missing, and the reason it was missing it.**
@@ -6041,7 +6209,11 @@ mod tests {
         let output = rendition("image/jpeg", source.clone(), test_rendition(640, 512 * 1024, 16_000_000))
             .await
             .expect("a small image must pass");
-        assert_eq!(output, ("image/jpeg", source));
+        // `untouched` is asserted here rather than trusted: it is what
+        // `rendition_for` reads to decide whether a memo would duplicate a
+        // buffer, so a pass-through that failed to announce itself would
+        // silently restore the double-holding this flag exists to end.
+        assert_eq!(output, Renditioned { mime: "image/jpeg", bytes: source, untouched: true });
     }
 
     /// **The whole point of the split, in one test.** A single number used to
@@ -6064,7 +6236,7 @@ mod tests {
             passthrough_max: 16 * 1024,
             pixel_cap: 16_000_000,
         };
-        let (mime, output) = rendition("image/jpeg", source.clone(), r)
+        let Renditioned { mime, bytes: output, .. } = rendition("image/jpeg", source.clone(), r)
             .await
             .expect("the net is derived from the edge and must not refuse a normal thumbnail");
         assert_eq!(mime, "image/jpeg");
@@ -6109,7 +6281,8 @@ mod tests {
         // Verified by **decoding the output**, not by taking the code's word
         // for it.
         let source = fixtures::jpeg_decodable(300, 150);
-        let (mime, output) = rendition("image/jpeg", source.clone(), test_rendition(100, 512 * 1024, 16_000_000))
+        let Renditioned { mime, bytes: output, .. } =
+            rendition("image/jpeg", source.clone(), test_rendition(100, 512 * 1024, 16_000_000))
             .await
             .expect("a large image must be shrunk, not refused");
         assert_eq!(mime, "image/jpeg");
@@ -6129,7 +6302,8 @@ mod tests {
         // changes, so the pushed frame declares it — a display receiving
         // `image/jpeg` with PNG bytes would show a broken square.
         let source = fixtures::png_alpha(300, 300);
-        let (mime, output) = rendition("image/png", source, test_rendition(100, 512 * 1024, 16_000_000))
+        let Renditioned { mime, bytes: output, .. } =
+            rendition("image/png", source, test_rendition(100, 512 * 1024, 16_000_000))
             .await
             .expect("an alpha png must be rendered");
         assert_eq!(mime, "image/png", "the mime must follow the format actually produced");
@@ -6356,7 +6530,7 @@ mod tests {
                     passed_through += 1;
                     continue;
                 }
-                if let Some((_, out)) = rendition("image/jpeg", bytes.clone(), r).await {
+                if let Some(Renditioned { bytes: out, .. }) = rendition("image/jpeg", bytes.clone(), r).await {
                     produced.push(out.len());
                 }
             }

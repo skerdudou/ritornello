@@ -836,6 +836,33 @@ and the stamp changes; lower the longest edge and the rules change; either
 way the old thumbnail is never looked up again, and the next reconciliation
 of the budget throws it out.
 
+**A pass-through of a cover already held in memory is the one thing not
+memoised**, and the rule behind that is worth stating because it is not
+"memoise everything that was served". The table is a memo for *work*, and
+there are only two kinds it can save: an encode and a read. A pass-through
+performed no encode — the bytes handed back are the source's own — so the memo
+is worth keeping only when obtaining the source cost something. For a cover on
+a share or embedded in a track it did, and the memo is what spares a second
+trip to a share that may be asleep. For a cover downloaded from the internet
+there is nothing to spare: those bytes are already in the cache, so the memo
+held **a second copy of them**, charged to the budget alongside the first, for
+as long as the entry lived, so a cover of this kind cost twice its size.
+
+Where that bit hardest is worth naming, because it is not the browser. A cover
+supplied as a pair is answered by the route before the rendition machinery is
+reached at all, so it was never doubled that way; the doubling appeared on the
+**display** side, where the thumbnail is read out of the payload to be put on
+the wire — which means it appeared the moment an MPD relay subscribed, for
+exactly the covers the pair exists to serve untouched. What
+that changed is which bound the cache actually hits: at the threshold's own
+value, a doubled entry costs 300 KiB, and the 50 MiB budget then stops at
+around 170 covers — the entry belt, which is meant to be what bounds a cache of
+cheap entries, never gets to apply. Undoubled, 256 of them fit in 38 MiB and
+the belt is again what binds, as designed. What is given up in exchange is a
+repeat: a second request re-copies the payload and re-reads the image header,
+both bounded by the very threshold that decided the pass-through, and neither
+involving a decode.
+
 The rendition serves the HTTP route too, but **only on request**.
 `GET /api/cover/{key}` streams a `folder.jpg` from a share without ever
 holding it whole, but that guarantee does not extend to a cover embedded in
