@@ -244,6 +244,22 @@ pub trait SourcePlugin: Send + 'static {
         false
     }
 
+    /// Does this Source have a finite list to shuffle or repeat?
+    ///
+    /// A **capability of the Source**, not of what it has loaded — the same
+    /// convention as `can_eject`. The sdk stamps it on every frame, the core
+    /// relays it in `PlayerState`, and the web remote greys out its
+    /// random/repeat-all keys wherever neither mode has a meaning (the
+    /// radio), instead of emitting a command the Source silently drops.
+    ///
+    /// Default **false**: not knowing means offering nothing. That is what
+    /// keeps the capability accurate without touching the plugins that have
+    /// no finite list (radio, generic-input): they compile unchanged and
+    /// their keys turn grey.
+    fn has_finite_list(&self) -> bool {
+        false
+    }
+
     /// Wake-up (boot / leaving standby). By default, behaves like
     /// `activate()` (play) — suited to the radio and to any simple source.
     /// A plugin that must not play on its own at wake-up (cd) overrides it.
@@ -279,6 +295,29 @@ pub trait SourcePlugin: Send + 'static {
     async fn stop(&mut self) -> SourceOutcome {
         SourceOutcome::new(SourceAction::Noop).plays_nothing()
     }
+
+    /// mpv went idle at the end of a **finite** list, as opposed to a live
+    /// stream cutting out (see `SourceReq::EndOfContent`).
+    ///
+    /// Default implementation: behave like `stop()`, which is what every
+    /// Source did before this notification existed — a radio has no finite
+    /// list to begin with, and `has_finite_list` false by default already
+    /// says so. That default is what leaves radio, files, generic-input and
+    /// mpd compiling **and behaving** unchanged; a Source overrides this only
+    /// when it must react to its own list running out (starting over under
+    /// repeat-all, drawing the next unplayed entry under random).
+    async fn end_of_content(&mut self) -> SourceOutcome {
+        self.stop().await
+    }
+
+    /// The two play modes, set together (see `SourceReq::SetPlayMode` for why
+    /// they travel as one request).
+    ///
+    /// Default implementation: does nothing — correct for a Source without a
+    /// finite list, and for one that has not been taught the modes yet. Not a
+    /// `SourceOutcome`: nothing about what is playing changes just because a
+    /// mode was armed or disarmed, unlike every other request above.
+    async fn set_play_mode(&mut self, _random: bool, _repeat_all: bool) {}
 
     /// The player moved on its own to the track at index `n`.
     ///
@@ -395,6 +434,11 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                         SourceOutcome::new(SourceAction::Noop)
                             .presets(plugin.list_presets().await)
                     }
+                    SourceReq::EndOfContent => plugin.end_of_content().await,
+                    SourceReq::SetPlayMode { random, repeat_all } => {
+                        plugin.set_play_mode(random, repeat_all).await;
+                        SourceOutcome::new(SourceAction::Noop)
+                    }
                 };
                 let msg = SourceMessage {
                     id: Some(req.id),
@@ -410,6 +454,11 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     // forgotten on a single path would give a button that
                     // flickers between active and greyed out as frames go by.
                     can_eject: Some(plugin.can_eject()),
+                    // Stamped here, once, for the same reason as `can_eject`
+                    // just above: a capability forgotten on a single
+                    // declaration path would give a button that flickers
+                    // between active and greyed out as frames go by.
+                    has_finite_list: Some(plugin.has_finite_list()),
                     presets: outcome.presets,
                     // A response to a request (Activate, Select…) never
                     // carries a cover: `SourceOutcome` does not declare it,
@@ -434,6 +483,10 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             preset_name: n.preset_name,
                             status: n.status,
                             can_eject: Some(plugin.can_eject()),
+                            // Same reason as the reply path above: stamped on
+                            // **every** frame, so the spontaneous notification
+                            // is not the one path that forgets it.
+                            has_finite_list: Some(plugin.has_finite_list()),
                             presets: n.presets,
                             cover: n.cover,
                             cover_thumb: n.cover_thumb,
@@ -1502,6 +1555,156 @@ mod tests {
             Some(true),
             "path 2: the spontaneous notification must stamp the capability too: {spont_line}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_finite_list_capability_is_stamped_on_both_frame_paths() {
+        // The twin of `can_eject_is_stamped_on_both_frame_paths`, and for the
+        // same reason: a capability that only rides the correlated reply
+        // disappears the moment a source speaks spontaneously.
+        struct FiniteSource {
+            announced: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for FiniteSource {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            fn has_finite_list(&self) -> bool {
+                true
+            }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.announced {
+                    std::future::pending().await
+                } else {
+                    self.announced = true;
+                    Some(Notification::new().cover(ritornello_proto::CoverRef::Path {
+                        path: "/mnt/nas/A/folder.jpg".into(),
+                    }))
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(FiniteSource { announced: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"Activate\"}\n").await.unwrap();
+
+        let mut correlated = None;
+        let mut spontaneous = None;
+        for _ in 0..2 {
+            let line = lines.next_line().await.unwrap().expect("the plugin must write two frames");
+            let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+            if msg.id.is_some() {
+                correlated = Some((msg, line));
+            } else {
+                spontaneous = Some((msg, line));
+            }
+        }
+
+        let (correlated, corr_line) = correlated.expect("the response correlated to Activate");
+        assert_eq!(
+            correlated.has_finite_list,
+            Some(true),
+            "path 1: the correlated response must stamp the capability: {corr_line}"
+        );
+
+        let (spontaneous, spont_line) = spontaneous.expect("the spontaneous notification");
+        assert!(
+            spontaneous.identity.is_none() && spontaneous.status.is_none(),
+            "otherwise the frame would qualify by itself and the stamp would no longer be \
+             load-bearing: {spont_line}"
+        );
+        assert_eq!(
+            spontaneous.has_finite_list,
+            Some(true),
+            "path 2: the spontaneous notification must stamp the capability too: {spont_line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn end_of_content_falls_back_on_stop_for_a_plugin_that_ignores_it() {
+        // Additive by construction: every existing plugin stays correct
+        // without being touched.
+        struct OnlyStop {
+            stopped: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for OnlyStop {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn stop(&mut self) -> SourceOutcome {
+                self.stopped = true;
+                SourceOutcome::new(SourceAction::Noop).plays_nothing()
+            }
+        }
+        let mut p = OnlyStop { stopped: false };
+        p.end_of_content().await;
+        assert!(p.stopped, "the default must reach stop(), or radio would go silent on an ending");
+    }
+
+    #[tokio::test]
+    async fn set_play_mode_is_dispatched_to_the_plugin() {
+        // Symmetrical to `overridden_wake_is_dispatched`: proves the request
+        // reaches the plugin with both flags, and that the correlation still
+        // releases on a `Noop` (see `SetLocale`'s precedent, right above the
+        // dispatch arm).
+        struct RecordingSource {
+            seen: std::sync::Arc<std::sync::Mutex<Option<(bool, bool)>>>,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for RecordingSource {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn set_play_mode(&mut self, random: bool, repeat_all: bool) {
+                *self.seen.lock().unwrap() = Some((random, repeat_all));
+            }
+        }
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        let server_seen = seen.clone();
+        tokio::spawn(async move {
+            run_source_plugin(RecordingSource { seen: server_seen }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write
+            .write_all(b"{\"id\":1,\"req\":\"SetPlayMode\",\"arg\":{\"random\":true,\"repeat_all\":false}}\n")
+            .await
+            .unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, Some(1), "the oneshot must be released, exactly like SetLocale");
+        assert_eq!(msg.action, Some(SourceAction::Noop));
+        assert_eq!(*seen.lock().unwrap(), Some((true, false)));
     }
 
     /// Source whose notification stream dries up: first call `None`, then

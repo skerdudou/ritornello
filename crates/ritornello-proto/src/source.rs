@@ -57,6 +57,23 @@ pub enum SourceReq {
     /// is playing. Without this notification, the display and the metadata
     /// stayed on the previous track until the next command.
     PlayerTrack(i64),
+    /// mpv went idle at the end of a **finite** list (see
+    /// `SourceAction::Play::finite`), as opposed to a live stream cutting out.
+    ///
+    /// The core sends `Stop` for both the Stop key and mpv's idle event that
+    /// follows it; only the core can tell the two apart, by whether it still
+    /// believed playback was under way when idle arrived. `EndOfContent` is
+    /// that answer: the source finished its list on its own. SDK-side
+    /// default: behaves like `Stop`; a plugin may override `end_of_content()`
+    /// to advance to the next pass under random/repeat-all.
+    EndOfContent,
+    /// The two play modes together: `random` (draw the whole list without a
+    /// repeat, then stop) and `repeat_all` (start over). A single request for
+    /// both because they are read by the same source at the same instant, and
+    /// splitting them would let a delivery race set one without the other.
+    /// SDK-side default: `set_play_mode` does nothing, for a source with no
+    /// finite list to shuffle or repeat.
+    SetPlayMode { random: bool, repeat_all: bool },
 }
 
 /// A named preset. `index` is **1-based**, the one `Command::Select` expects,
@@ -292,6 +309,34 @@ pub struct SourceMessage {
     /// declares an identity or a status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub can_eject: Option<bool>,
+    /// Whether this source has a **finite** list to play through — a
+    /// **capability of the source**, not of what is loaded: an empty CD tray
+    /// still "has" a finite list in the sense that matters here (the modes
+    /// below apply to it, once it holds a disc). It is what lets the web
+    /// remote grey out its random/repeat-all buttons on a source, the radio,
+    /// for which "draw without repeat, then stop" and "start the list over"
+    /// have no meaning.
+    ///
+    /// One capability governs both play modes: a source that cannot repeat
+    /// cannot draw at random either, since drawing at random is itself a form
+    /// of exhausting and restarting a list.
+    ///
+    /// The SDK stamps it on **every** frame from
+    /// `SourcePlugin::has_finite_list`, so a plugin author overrides one
+    /// method and never has to remember a builder call on each declaration
+    /// path. Absent = "this frame says nothing", keep the previous value —
+    /// same convention as `can_eject`, so a hand-written plugin that ignores
+    /// the field keeps working (the core then never leaves its `false`
+    /// default, and offering nothing is the right answer when nobody claims
+    /// the capability).
+    ///
+    /// Deliberately **not** part of the "is this frame worth forwarding"
+    /// predicate in `SourceClient`, for the same reason as `can_eject`: a
+    /// frame carrying only a capability must stay inert, because a permanent
+    /// frame without `status` *erases* the remembered status — waking up
+    /// frames that are dropped today would wipe "NO DISC" off the display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_finite_list: Option<bool>,
     /// The named presets of this source, when it knows how to enumerate them.
     /// Outside correlation, like `preset_count`: it is a fact about the source,
     /// not an answer to a question — and that is what avoids widening
@@ -354,6 +399,7 @@ mod tests {
             preset_name: None,
             status: None,
             can_eject: None,
+            has_finite_list: None,
             presets: None,
             cover: None,
             cover_thumb: None,
@@ -604,6 +650,42 @@ mod tests {
         // An explicit `false` is distinct from absence, and travels.
         let refusal: SourceMessage = serde_json::from_str(r#"{"id":4,"can_eject":false}"#).unwrap();
         assert_eq!(refusal.can_eject, Some(false));
+    }
+
+    #[test]
+    fn end_of_content_is_not_stop() {
+        // The whole point of the new request: a source must be able to tell a
+        // user's Stop from a list that ran out, because only the second one
+        // may start another pass.
+        let r = SourceReq::EndOfContent;
+        assert_eq!(serde_json::to_string(&r).unwrap(), r#"{"req":"EndOfContent"}"#);
+        assert_ne!(r, SourceReq::Stop);
+    }
+
+    #[test]
+    fn set_play_mode_carries_both_flags() {
+        let r = SourceReq::SetPlayMode { random: true, repeat_all: false };
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<SourceReq>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn an_absent_finite_list_capability_stays_absent_on_the_wire() {
+        // Same idiom as `can_eject`: a hand-written plugin that ignores the
+        // field keeps working, and the core keeps its `false` default —
+        // offering nothing is the right answer when nobody claims it.
+        let m = SourceMessage::default();
+        assert_eq!(m.has_finite_list, None);
+        assert!(!serde_json::to_string(&m).unwrap().contains("has_finite_list"));
+        // The additive promise itself: a frame written **before this field
+        // existed** must still read back — that is what lets an old plugin
+        // binary keep working unmodified after this protocol change.
+        let old: SourceMessage = serde_json::from_str(r#"{"id":4}"#).unwrap();
+        assert_eq!(old.has_finite_list, None);
+        // An explicit `false` is distinct from absence, and travels: refusing
+        // the capability is a statement, not the same as staying silent on it.
+        let refusal: SourceMessage = serde_json::from_str(r#"{"id":4,"has_finite_list":false}"#).unwrap();
+        assert_eq!(refusal.has_finite_list, Some(false));
     }
 
     #[test]

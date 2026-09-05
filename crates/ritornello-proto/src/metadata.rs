@@ -735,6 +735,38 @@ pub struct PlayerState {
     /// state would have no rendering of its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_eject: bool,
+    /// The active Source has a finite list to shuffle or repeat (see
+    /// `SourceMessage::has_finite_list`): this is what lets the web remote
+    /// grey out its random/repeat-all keys on a source, the radio, for which
+    /// neither mode has a meaning.
+    ///
+    /// **False by default**: not knowing is offering nothing — the same
+    /// convention as `can_eject`, above.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_finite_list: bool,
+    /// Random play is on: the active list is drawn without a repeat, then
+    /// playback stops.
+    ///
+    /// **A persisted setting of the device, like `volume`** — not a
+    /// capability of the active source, and not masked by one: it keeps
+    /// whatever value it was last set to across a source change or standby,
+    /// exactly like the volume does. A client that means to grey out its
+    /// random/repeat-all keys on a source for which neither mode has a
+    /// meaning must read `has_finite_list` for that, not infer it from this
+    /// field being `false` — the two are independent, and this one can
+    /// legitimately be `true` while `has_finite_list` is `false` (random was
+    /// armed on `files`, the active source is now the radio).
+    ///
+    /// Additive, in the idiom of `seekable` and `can_eject`: absent from the
+    /// JSON at its default value, so no existing frame changes shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub random: bool,
+    /// Repeat-all is on: the active list starts over once exhausted, instead
+    /// of stopping. Same convention as `random`, just above: a persisted
+    /// setting, independent of `has_finite_list`, which is what a client
+    /// must read to grey out the key instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repeat_all: bool,
     /// How this device writes a time and a date, as its owner set it.
     ///
     /// **A rendering preference in the state frame, and it has to be said

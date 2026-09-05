@@ -41,6 +41,12 @@ pub struct SourceUpdate {
     /// carrying only this field (see below), so its exception does not have to
     /// be written twice. See the field's doc for the why.
     pub can_eject: Option<bool>,
+    /// See `SourceMessage::has_finite_list`. Same convention and same
+    /// exception as `can_eject`, and for the same reason: the sdk stamps it
+    /// on *every* frame, so it must not arm the relayable-frame predicate on
+    /// its own, or a bare capability-only frame would wake up and erase the
+    /// memorized status (see `inert`, below).
+    pub has_finite_list: Option<bool>,
     /// See `SourceMessage::presets`. Arms the relayable-frame predicate by
     /// itself, unlike `can_eject`: it is the only way a list reaches the core,
     /// the response correlated to `ListPresets` being just a `Noop`.
@@ -165,6 +171,7 @@ impl SourceClient {
                     preset_name: msg.preset_name,
                     status: msg.status,
                     can_eject: msg.can_eject,
+                    has_finite_list: msg.has_finite_list,
                     presets: msg.presets,
                     cover: msg.cover,
                     cover_thumb: msg.cover_thumb,
@@ -190,11 +197,12 @@ impl SourceClient {
                 // default value is precisely "nothing declared", which is what
                 // an inert frame must carry.
                 //
-                // `can_eject` is the only field stamped on every frame (see
-                // its doc on the `SourceMessage` side), so the only one taken
-                // over from the received frame. A frame that would carry only
-                // it thus stays dropped, which was the original choice and
-                // must remain so: waking those frames would erase
+                // `can_eject` and `has_finite_list` are the only fields
+                // stamped on every frame (see their doc on the
+                // `SourceMessage` side), so the only two taken over from the
+                // received frame. A frame that would carry only one or both
+                // of them thus stays dropped, which was the original choice
+                // and must remain so: waking those frames would erase
                 // "PAS DE DISQUE" from the screen, a permanent frame without a
                 // status meaning erasure core-side.
                 //
@@ -204,7 +212,11 @@ impl SourceClient {
                 // the core disarms an in-flight `+NN` there, and nothing else:
                 // the frame recomposes the view, so the memorized status is
                 // not touched.
-                let inert = SourceUpdate { can_eject: update.can_eject, ..Default::default() };
+                let inert = SourceUpdate {
+                    can_eject: update.can_eject,
+                    has_finite_list: update.has_finite_list,
+                    ..Default::default()
+                };
                 if update != inert && update_tx.try_send((name.clone(), update)).is_err() {
                     // A lost status or preset is repaired by the next frame, a
                     // lost **identity** never is — the Source only re-emits it
@@ -773,6 +785,67 @@ mod tests {
         assert_eq!(name, "cd");
         assert_eq!(update.status.as_deref(), Some("AUDIO CD"), "the bare frame should not have been relayed");
         assert_eq!(update.can_eject, Some(true), "the capability travels with the frame that counts");
+    }
+
+    #[test]
+    fn a_frame_carrying_only_capabilities_stays_inert() {
+        // The load-bearing invariant: a permanent frame without a status
+        // ERASES the memorised status core-side. A frame that says nothing
+        // but "I have a finite list" — or "I can eject", or both — must
+        // therefore not be forwarded, exactly as if it carried neither
+        // capability at all.
+        let update = SourceUpdate { can_eject: Some(true), has_finite_list: Some(true), ..Default::default() };
+        let inert =
+            SourceUpdate { can_eject: update.can_eject, has_finite_list: update.has_finite_list, ..Default::default() };
+        assert_eq!(update, inert);
+    }
+
+    #[tokio::test]
+    async fn a_frame_carrying_only_the_finite_list_capability_stays_inert_but_travels_with_the_rest() {
+        // The end-to-end twin of the unit test above, mirroring
+        // `a_frame_carrying_only_the_eject_capability_stays_inert_but_travels_with_the_rest`:
+        // proves the drop happens for real, through `SourceClient`, and not
+        // only on a hand-built `SourceUpdate`.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            // First request: response carrying **only** the capability.
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let bare = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                has_finite_list: Some(true),
+                ..Default::default()
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&bare).unwrap()).as_bytes()).await.unwrap();
+            // Second request: the same capability, this time accompanied by a
+            // status — that is how it reaches the core for real.
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let dressed = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                status: Some("AUDIO CD".into()),
+                has_finite_list: Some(true),
+                ..Default::default()
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&dressed).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "cd".into(), update_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        let (name, update) = update_rx.recv().await.unwrap();
+        assert_eq!(name, "cd");
+        assert_eq!(update.status.as_deref(), Some("AUDIO CD"), "the bare frame should not have been relayed");
+        assert_eq!(update.has_finite_list, Some(true), "the capability travels with the frame that counts");
     }
 
     #[tokio::test]

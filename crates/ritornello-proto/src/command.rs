@@ -43,6 +43,21 @@ pub enum Command {
     /// An unknown name is silently ignored by the core, like an unbound key:
     /// the emitter is the one who knows what it offers.
     SelectSource(String),
+    /// Flip random play on/off. Meaningless for a source without a finite
+    /// list (see `SourceMessage::has_finite_list`) — a remote key has no room
+    /// for both an on and an off key, so it toggles, exactly like `Plus10`
+    /// toggling its own pending state.
+    ToggleRandom,
+    /// Flip repeat-all on/off. Same reasoning and the same physical-key
+    /// constraint as `ToggleRandom`.
+    ToggleRepeatAll,
+    /// Absolute value of random play. Serves the SPA and MPD's `random`
+    /// command; no physical key emits it — same reason for being as
+    /// `SetVolume` beside `VolumeUp`: two clients that cross a toggle must
+    /// not undo each other's intent.
+    SetRandom(bool),
+    /// Absolute value of repeat-all. Same reason for being as `SetRandom`.
+    SetRepeatAll(bool),
 }
 
 /// One line of the input protocol: the command, plus whether it comes from a
@@ -145,6 +160,23 @@ mod tests {
             let json = serde_json::to_string(&cmd).unwrap();
             assert_eq!(json, expected);
             assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), cmd);
+        }
+    }
+
+    #[test]
+    fn play_mode_commands_round_trip() {
+        // Toggles for a physical key (a remote has no room for an on and an
+        // off key), absolute values for the SPA and for MPD — the same pair
+        // as `VolumeUp` beside `SetVolume`, and for the same reason: two
+        // clients that cross must not undo each other.
+        for (cmd, expected) in [
+            (Command::ToggleRandom, r#"{"cmd":"ToggleRandom"}"#),
+            (Command::ToggleRepeatAll, r#"{"cmd":"ToggleRepeatAll"}"#),
+            (Command::SetRandom(true), r#"{"cmd":"SetRandom","arg":true}"#),
+            (Command::SetRepeatAll(false), r#"{"cmd":"SetRepeatAll","arg":false}"#),
+        ] {
+            assert_eq!(serde_json::to_string(&cmd).unwrap(), expected);
+            assert_eq!(serde_json::from_str::<Command>(expected).unwrap(), cmd);
         }
     }
 }

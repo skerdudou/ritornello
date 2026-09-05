@@ -136,6 +136,17 @@ impl<P: Player> Core<P> {
             // it is the Source that has the tray. Standby is the only state
             // that cancels it, because it lets no command through.
             can_eject: self.can_eject && !self.standby,
+            // Same reasoning as `can_eject`, just above: nothing to do with
+            // what plays, and standby is the only state that cancels it.
+            has_finite_list: self.has_finite_list && !self.standby,
+            // Unlike `can_eject`/`has_finite_list`, these two are a setting
+            // persisted like the volume, not a capability described by the
+            // active source: they are not reset on standby or source
+            // change, and standby does not mask them either — a client that
+            // reads the state while the device sleeps still sees what it
+            // will do on wake.
+            random: self.random,
+            repeat_all: self.repeat_all,
             // A rendering preference, pushed with the rest: a display never
             // fetches anything on the side, and the clock it draws in
             // standby is something it shows. It only moves on a user

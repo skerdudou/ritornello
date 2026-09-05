@@ -67,6 +67,8 @@ impl<P: Player> Core<P> {
             theme: self.theme.clone(),
             mode: self.mode.clone(),
             settings: self.settings.clone(),
+            random: self.random,
+            repeat_all: self.repeat_all,
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistence failed: {e}");
@@ -96,6 +98,8 @@ mod tests {
             theme: None,
             mode: None,
             settings: crate::state::Settings::default(),
+            random: false,
+            repeat_all: false,
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));

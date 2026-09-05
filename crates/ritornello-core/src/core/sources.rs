@@ -103,6 +103,9 @@ impl<P: Player> Core<P> {
         // the Eject key active until the radio's first frame — and for good
         // if it stayed silent.
         self.can_eject = false;
+        // Same reasoning for the finite-list capability: describes the
+        // Source that is leaving, not the one arriving.
+        self.has_finite_list = false;
         self.retry_count = 0;
         // Persist **before** `Activate`: if the new source does not answer
         // (the SDK's 5 s timeout), the in-memory state, the on-disk state and
@@ -110,6 +113,16 @@ impl<P: Player> Core<P> {
         // plays. Without this, the failure left the switch half done: "cd" on
         // screen, "radio" in state.json.
         self.persist();
+        // Handed to the incoming source again here, right before `Activate`:
+        // the fourth point of delivery the mode needs, alongside wake,
+        // hotplug and the four commands. `push_play_mode`'s broadcast already
+        // reaches this source whenever the mode itself changes — this call
+        // instead reaffirms it right as the Source is about to decide what to
+        // play, rather than relying solely on however long ago that
+        // broadcast last reached it. Best-effort like `send_play_mode_to`
+        // itself, though: a failed request here still leaves the source
+        // with whatever it last knew.
+        self.send_play_mode_to(&self.active_source).await;
         if let Some(action) = self.active_request(SourceReq::Activate).await? {
             self.apply(action).await?;
         }
@@ -153,11 +166,11 @@ impl<P: Player> Core<P> {
     ///
     /// What is forgotten anyway: the named presets (the sources_catalog must
     /// not offer to act on a dead plugin) and, if it was the active one, the
-    /// two **capabilities** it had declared — `preset_count` and `can_eject`.
-    /// Those describe what a plugin can do, and it is no longer there to do
-    /// it: leaving the Eject key lit or the preset grid open would give
-    /// commands that can no longer succeed. `cycle_source` already clears
-    /// them for this exact reason.
+    /// three **capabilities** it had declared — `preset_count`, `can_eject`
+    /// and `has_finite_list`. Those describe what a plugin can do, and it is
+    /// no longer there to do it: leaving the Eject key lit or the preset grid
+    /// open would give commands that can no longer succeed. `cycle_source`
+    /// already clears them for this exact reason.
     ///
     /// What is kept, and this is also intended: `source_status` and the
     /// identity of what plays. They describe **the current track**, which is
@@ -178,10 +191,12 @@ impl<P: Player> Core<P> {
         if self.active_source == name {
             self.preset_count = None;
             self.can_eject = false;
+            self.has_finite_list = false;
         }
         self.publish_catalog();
-        // Publish the state too: `can_eject` and `preset_count` are part of
-        // it, and no other path will do it — this arm is not a command.
+        // Publish the state too: `can_eject`, `has_finite_list` and
+        // `preset_count` are part of it, and no other path will do it — this
+        // arm is not a command.
         self.publish_state();
         true
     }
@@ -260,14 +275,15 @@ impl<P: Player> Core<P> {
     /// Two paths, and keeping them together here is the whole point:
     ///
     /// - **First source of the core** (the table was empty): startup is
-    ///   replayed by `resume`, so `SetLocale` then `Wake`, in that order.
-    ///   `add_source` only designates the active one; without this wake, a
-    ///   source arriving at t+30 s would be active and **silent** until the
-    ///   user touched something — the device would look broken while
-    ///   everything is wired.
-    /// - **Additional source, or core in standby**: only the language is due.
-    ///   Waking here would relight a device that was deliberately switched
-    ///   off, and would change what plays because a plugin finished starting.
+    ///   replayed by `resume`, so `SetLocale`, the play mode, then `Wake`, in
+    ///   that order. `add_source` only designates the active one; without
+    ///   this wake, a source arriving at t+30 s would be active and
+    ///   **silent** until the user touched something — the device would look
+    ///   broken while everything is wired.
+    /// - **Additional source, or core in standby**: only the language and the
+    ///   play mode are due. Waking here would relight a device that was
+    ///   deliberately switched off, and would change what plays because a
+    ///   plugin finished starting.
     ///
     /// The state is published in both cases: the source's name just appeared
     /// in the frame, and the SPA as well as the displays were announcing "no
@@ -283,6 +299,7 @@ impl<P: Player> Core<P> {
             self.resume().await?;
         } else {
             self.send_locale_to(&name).await;
+            self.send_play_mode_to(&name).await;
             self.publish_state();
         }
         Ok(replacement)
@@ -310,6 +327,46 @@ impl<P: Player> Core<P> {
             && let Err(e) = src.request(SourceReq::SetLocale(locale)).await
         {
             tracing::warn!("SetLocale to {name}: {e}");
+        }
+    }
+
+    /// Pushes the current play mode to **a single** source: the counterpart
+    /// of `send_locale_to`, for `SourceReq::SetPlayMode` instead of
+    /// `SetLocale`.
+    ///
+    /// No "nothing set yet" guard here, unlike `send_locale_to`: `random`
+    /// and `repeat_all` always have a value (`false` by default, read from
+    /// `PersistedState` at construction), so there is never a reason to skip
+    /// this send.
+    ///
+    /// Best-effort, same reason as `send_locale_to`: a source that does not
+    /// answer must not prevent its wiring, nor abort the command that
+    /// triggered this push.
+    pub async fn send_play_mode_to(&self, name: &str) {
+        if let Some(src) = self.sources.get(name)
+            && let Err(e) = src
+                .request(SourceReq::SetPlayMode { random: self.random, repeat_all: self.repeat_all })
+                .await
+        {
+            tracing::warn!("SetPlayMode to {name}: {e}");
+        }
+    }
+
+    /// Broadcasts the current play mode to **every** wired source, active or
+    /// not: unlike `can_eject`/`has_finite_list`, which describe the active
+    /// source's own capabilities, `random`/`repeat_all` are a setting of the
+    /// device, and every source is entitled to know it — the SDK's default
+    /// `set_play_mode` already no-ops for one that has no finite list to
+    /// shuffle or repeat (see `SourcePlugin::set_play_mode`).
+    ///
+    /// Called at every point that changes the mode (the four commands) or
+    /// that makes a source newly reachable (wake, hotplug, activation of an
+    /// already-known one) — see `send_play_mode_to`'s callers for the full
+    /// list, and the doc of `SetLocale`'s own three points for why a single
+    /// broadcast function is not enough on its own.
+    pub(super) async fn push_play_mode(&self) {
+        for name in self.source_order.clone() {
+            self.send_play_mode_to(&name).await;
         }
     }
 
@@ -343,6 +400,12 @@ impl<P: Player> Core<P> {
                 // and nowhere else, that `paused` must fall back, otherwise
                 // yesterday's pause would make a fresh playback "paused".
                 self.paused = false;
+                // Same reasoning for `played_since_play`: a fresh `Play`
+                // has not opened anything yet — only `Event::PlaybackActive`
+                // proves that — so a `PlaybackIdle` arriving before mpv ever
+                // confirms it (a sleeping share, a file gone) must not be
+                // read as "the list ran out".
+                self.played_since_play = false;
                 // `loadlist` for a playlist, `loadfile` for a medium: it is
                 // the Source that declares it, and the core does not guess. An
                 // `.m3u8` is a playlist for a file player and an HLS stream
@@ -592,6 +655,12 @@ mod tests {
         let (mut core, player_calls, source_calls, state_rx, _d) = setup();
         core.handle_command(Command::PlayPause).await.unwrap(); // the radio plays
         core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP")]));
+        // Both capabilities must be `true` **before** the death, otherwise
+        // they already sit at their `false` default and the reset this test
+        // claims to prove below is never actually exercised (verified:
+        // deleting `forget_dead_source`'s two reset lines still left this
+        // test green without this call).
+        core.handle_source_update("radio", update_with_capabilities(Some(true), Some(true)));
         assert_eq!(state_rx.borrow().playback, Playback::Playing);
         player_calls.lock().unwrap().clear();
         source_calls.lock().unwrap().clear();
@@ -625,7 +694,11 @@ mod tests {
         assert!(!core.presets_par_source.contains_key("radio"));
         // The dead source's capabilities are forgotten: a lit Eject key or an
         // open preset grid would offer commands that can no longer succeed.
+        // `has_finite_list` follows the exact same rule (see
+        // `forget_dead_source`'s doc): asserted alongside so a future change
+        // cannot desync the two capabilities without a test noticing.
         assert!(!state_rx.borrow().can_eject);
+        assert!(!state_rx.borrow().has_finite_list);
         assert_eq!(state_rx.borrow().preset_count, None);
     }
 
@@ -728,12 +801,14 @@ mod tests {
                 preset_name: Some("France Inter".into()),
                 status: Some("EN DIRECT".into()),
                 can_eject: Some(true),
+                has_finite_list: Some(true),
                 ..Default::default()
             },
         );
         assert_eq!(state_rx.borrow().source, "radio");
         assert_eq!(state_rx.borrow().preset_count, Some(23));
         assert!(state_rx.borrow().can_eject);
+        assert!(state_rx.borrow().has_finite_list);
 
         assert!(core.remove_source("radio").await.unwrap());
 
@@ -742,6 +817,7 @@ mod tests {
         assert_eq!(state.preset_count, None, "the outgoing one's preset count must not survive");
         assert_eq!(state.status, None, "the outgoing one's status must not survive");
         assert!(!state.can_eject, "the eject capability describes the outgoing one, not the incoming one");
+        assert!(!state.has_finite_list, "same reason: it describes the outgoing one too");
     }
 
     #[tokio::test]
@@ -827,12 +903,15 @@ mod tests {
         .await
         .unwrap();
 
-        // The language, and **nothing else**: `files` is not the core's first
-        // source, so it is not woken — what plays does not change because a
-        // plugin finished starting.
+        // The language and the play mode, and **nothing else**: `files` is
+        // not the core's first source, so it is not woken — what plays does
+        // not change because a plugin finished starting.
         assert_eq!(
             late_calls.lock().unwrap().as_slice(),
-            ["files:SetLocale(\"fr\")".to_string()]
+            [
+                "files:SetLocale(\"fr\")".to_string(),
+                "files:SetPlayMode { random: false, repeat_all: false }".to_string()
+            ]
         );
         assert_eq!(core.active_source(), "radio");
         assert_eq!(
@@ -843,11 +922,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_set_language_nothing_is_pushed_to_the_hot_wired_source() {
+    async fn a_source_that_arrives_late_learns_the_current_mode() {
+        // The lesson of `SetLocale`, which had to be pushed at three moments
+        // for exactly this reason: a plugin that missed the rendezvous
+        // window would otherwise play in order while the SPA shows
+        // "shuffle".
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_command(Command::SetRandom(true)).await.unwrap();
+
+        let late_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        core.hotplug_source(
+            "files".into(),
+            Arc::new(FakeSource { name: "files", calls: late_calls.clone() }),
+        )
+        .await
+        .unwrap();
+
+        let calls = late_calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| c.starts_with("files:SetPlayMode")
+                && c.contains("random: true")
+                && c.contains("repeat_all: false")),
+            "the late source must learn the mode already in force: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_source_hands_the_mode_to_the_new_one() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_command(Command::SetRandom(true)).await.unwrap();
+        // Cleared so what follows is attributable to the switch alone, not
+        // to the broadcast the `SetRandom` command already did to every
+        // wired source.
+        source_calls.lock().unwrap().clear();
+
+        core.handle_command(Command::SourceCycle).await.unwrap(); // radio -> cd
+
+        let calls = source_calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| c.starts_with("cd:SetPlayMode")
+                && c.contains("random: true")
+                && c.contains("repeat_all: false")),
+            "the newly active source must be handed the mode at its activation: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn waking_up_restates_the_mode_to_every_source() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::SetRandom(true)).await.unwrap();
+        core.handle_command(Command::Power).await.unwrap(); // standby
+        source_calls.lock().unwrap().clear();
+
+        core.handle_command(Command::Power).await.unwrap(); // wake, replays resume()
+
+        let calls = source_calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| c.starts_with("radio:SetPlayMode")
+                && c.contains("random: true")
+                && c.contains("repeat_all: false")),
+            "radio must relearn the mode on wake: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.starts_with("cd:SetPlayMode")
+                && c.contains("random: true")
+                && c.contains("repeat_all: false")),
+            "cd, though inactive, must relearn it too: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_set_language_only_the_play_mode_is_pushed_to_the_hot_wired_source() {
         // No language on the core side: the plugin keeps its default, which
         // is the same. Pushing `SetLocale(None)` does not exist, and pushing
         // "en" by force would overwrite a plugin launched with its own
-        // language.
+        // language. The play mode has no such "unset" state — `random` and
+        // `repeat_all` are always `false` or `true` — so it is still pushed,
+        // at its default value here.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let late_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         core.hotplug_source(
@@ -856,7 +1008,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(late_calls.lock().unwrap().is_empty());
+        assert_eq!(
+            late_calls.lock().unwrap().as_slice(),
+            ["files:SetPlayMode { random: false, repeat_all: false }".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -881,8 +1036,12 @@ mod tests {
 
         assert_eq!(
             seen.lock().unwrap().as_slice(),
-            ["radio:SetLocale(\"fr\")".to_string(), "radio:Wake".into()],
-            "the language BEFORE the wake, exactly as at startup"
+            [
+                "radio:SetLocale(\"fr\")".to_string(),
+                "radio:SetPlayMode { random: false, repeat_all: false }".into(),
+                "radio:Wake".into()
+            ],
+            "the language and the play mode BEFORE the wake, exactly as at startup"
         );
         // The `Play` returned by `Wake` was applied: something plays.
         assert!(core.player.calls.lock().unwrap().contains(&"play http://fip".to_string()));
@@ -893,8 +1052,9 @@ mod tests {
     #[tokio::test]
     async fn the_first_hot_wired_source_does_not_wake_a_core_in_standby() {
         // Standby is a **wanted** state: a plugin's arrival does not relaunch
-        // the device. Only the language is due, so that the source does not
-        // compose its first frame in the language of its launch.
+        // the device. Only the language and the play mode are due, so that
+        // the source does not compose its first frame in the language of its
+        // launch, nor with the wrong play mode.
         let (mut core, _rx, dir) = setup_without_source();
         core.set_locale("fr".into()).await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
@@ -906,7 +1066,13 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(seen.lock().unwrap().as_slice(), ["radio:SetLocale(\"fr\")".to_string()]);
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [
+                "radio:SetLocale(\"fr\")".to_string(),
+                "radio:SetPlayMode { random: false, repeat_all: false }".to_string()
+            ]
+        );
         assert!(
             !core.player.calls.lock().unwrap().iter().any(|c| c.starts_with("play")),
             "nothing must start playing during standby"

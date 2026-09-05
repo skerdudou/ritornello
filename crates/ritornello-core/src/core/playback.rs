@@ -17,6 +17,11 @@ impl<P: Player> Core<P> {
                 }
             }
         }
+        // The play mode, like the language just above: every wired source is
+        // owed it at boot and at every wake, not only the active one — a
+        // source made active later by a switch would otherwise start from
+        // whatever default `set_play_mode` never corrected.
+        self.push_play_mode().await;
         if let Some(action) = self.active_request(SourceReq::Wake).await? {
             self.apply(action).await?;
         }
@@ -44,8 +49,19 @@ impl<P: Player> Core<P> {
             // deadline) and this counter follow the same verdict via
             // `StreamAlive`, instead of duplicating the list of variants on
             // both sides.
-            Event::Title(_) | Event::PlaybackActive => {
+            Event::Title(_) => {
                 self.retry_count = 0;
+                return EventOutcome::StreamAlive;
+            }
+            // mpv's own confirmation that something is really playing — the
+            // one signal `played_since_play` waits for. Separate from
+            // `Title` above (which shares its verdict on `retry_count`
+            // only): an ICY title never proves playback on its own (a
+            // station can send one then go silent), so it must not stand in
+            // for this confirmation.
+            Event::PlaybackActive => {
+                self.retry_count = 0;
+                self.played_since_play = true;
                 return EventOutcome::StreamAlive;
             }
             // Deliberately without effect on `retry_count`: the liveness of
@@ -98,23 +114,49 @@ impl<P: Player> Core<P> {
                     self.retry_count = (self.retry_count + 1).min(4);
                     return EventOutcome::RetryIn(delay);
                 }
-                // Eof of **normal** playback (end of disc, notably): tell the
-                // Source, the only one able to realign its playback state,
-                // its view and its identity — the core cannot invent
-                // "nothing plays anymore" in its place, the identity is
-                // opaque. Without this, the end of a disc left the last
-                // track and its metadata displayed indefinitely.
-                // Idempotent when the stop comes from a command (the Source
-                // has already been told by `Command::Stop`).
-                //
-                // Nothing plays anymore: without this, the tags of the last
-                // file would remain admissible and a final refresh from mpv
-                // would put them back on screen after the end of the list.
+                // **The discriminant.** mpv goes idle after every stop,
+                // commanded ones included: every commanded path (`Command::
+                // Stop`, `Command::Power` entering standby, `cycle_source`)
+                // finishes setting `playback = false` synchronously, as part
+                // of handling that command, strictly before the core ever
+                // gets to process the idle notification mpv sends back. So
+                // an idle arriving while the core still believed it was
+                // playing is the only one that can mean "the content ran
+                // out" rather than "the user (or a source switch) stopped
+                // it". `played_since_play` rules out the third case, a list
+                // that was asked to play but never actually opened (see its
+                // doc): that one is neither a user's stop nor a real ending.
+                let ending = self.playback && self.played_since_play;
                 self.playback = false;
-                if !self.standby
-                    && let Err(e) = self.active_request(SourceReq::Stop).await
-                {
-                    tracing::debug!("stop notification to source: {e}");
+                if self.standby {
+                    return EventOutcome::Nothing;
+                }
+                // Eof of **normal** playback (end of disc, end of a file
+                // list, or a real stop): tell the Source, the only one able
+                // to realign its playback state, its view and its identity
+                // — the core cannot invent "nothing plays anymore" in its
+                // place, the identity is opaque. Without this, the end of a
+                // disc left the last track and its metadata displayed
+                // indefinitely.
+                //
+                // `EndOfContent` only on a real ending: it is what lets a
+                // Source open another pass under random/repeat-all, which
+                // must never happen on a Stop the user asked for.
+                // Idempotent otherwise when the stop comes from a command
+                // (the Source has already been told by `Command::Stop`).
+                let req = if ending { SourceReq::EndOfContent } else { SourceReq::Stop };
+                match self.active_request(req).await {
+                    // The answer is **applied**, not logged and dropped —
+                    // the same class of defect just fixed above for
+                    // `TrackChanged`. Without this, "the Source says
+                    // whether there is another pass" could not work at all.
+                    Ok(Some(action)) => {
+                        if let Err(e) = self.apply(action).await {
+                            tracing::warn!("applying the answer to an ending: {e}");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!("stop notification to source: {e}"),
                 }
             }
         }
@@ -399,5 +441,65 @@ mod tests {
         source_calls.lock().unwrap().clear();
         core.handle_event(Event::TrackChanged(2)).await;
         assert!(source_calls.lock().unwrap().is_empty(), "nothing must leave in standby");
+    }
+
+    #[tokio::test]
+    async fn an_ending_is_told_apart_from_a_commanded_stop() {
+        // Pressing Stop makes mpv go idle too. Emitting the end-of-content
+        // signal on that idle would restart playback under "repeat all" —
+        // the very defect this signal exists to remove, moved one floor up.
+        // `Command::Stop` sets `playback = false` before it ever talks to
+        // mpv, so the idle that follows finds `playback` already false: the
+        // discriminant below reads that as "not an ending".
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_command(Command::Stop).await.unwrap();
+        core.handle_event(Event::PlaybackIdle).await;
+        let calls = source_calls.lock().unwrap();
+        assert!(calls.iter().any(|c| c == "radio:Stop"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c == "radio:EndOfContent"), "a user's stop is not an ending: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn a_real_ending_reaches_the_source_as_such() {
+        // The counterpart: nobody told the core to stop, so `playback` is
+        // still true when the idle arrives — `played_since_play` (set by the
+        // `PlaybackActive` just below) is what tells this idle apart from
+        // one firing on content that never actually opened (see the next
+        // test).
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.apply(SourceAction::play("/tmp/list.m3u").playlist().finite()).await.unwrap();
+        core.handle_event(Event::PlaybackActive).await;
+        core.handle_event(Event::PlaybackIdle).await;
+        assert!(source_calls.lock().unwrap().iter().any(|c| c == "radio:EndOfContent"));
+    }
+
+    #[tokio::test]
+    async fn the_answer_to_an_ending_is_executed_not_dropped() {
+        // Regression guard for the same class of defect just fixed above for
+        // `TrackChanged` (see `a_track_notification_action_is_applied_not_dropped`):
+        // without applying the reply, "the source says whether there is
+        // another pass" cannot work at all — the core used to only log the
+        // `Err` case here and throw away any action carried by an `Ok`.
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::play("/tmp/list.m3u").playlist().finite()).await.unwrap();
+        core.handle_event(Event::PlaybackActive).await;
+        core.handle_event(Event::PlaybackIdle).await;
+        let calls = player_calls.lock().unwrap();
+        assert!(
+            calls.iter().filter(|c| c.starts_with("load_list")).count() >= 2,
+            "the new pass answered by the source must actually load: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_content_that_never_played_does_not_start_another_pass() {
+        // A sleeping NAS: loadlist, immediate idle, ending, loadlist… at full
+        // speed, outside the exponential backoff which only covers streams.
+        // No `PlaybackActive` fires here, so `played_since_play` stays false
+        // and the idle is read as "never opened", not as "ran out".
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.apply(SourceAction::play("/tmp/gone.m3u").playlist().finite()).await.unwrap();
+        core.handle_event(Event::PlaybackIdle).await; // no PlaybackActive in between
+        assert!(!source_calls.lock().unwrap().iter().any(|c| c == "radio:EndOfContent"));
     }
 }

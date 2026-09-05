@@ -277,6 +277,18 @@ impl<P: Player> Core<P> {
                 // would keep it wrong and later announce metadata for a
                 // stopped track. Best effort: a silent Source prevents
                 // nothing.
+                //
+                // Any action the reply carries is deliberately ignored, not
+                // merely uncollected: the user asked to stop, and a Source
+                // answering with something to play would contradict that —
+                // applying it here would be the defect, not an improvement.
+                // Same doctrine as `cycle_source`'s `Deactivate` and standby
+                // entry's `Deactivate` just below: a discarded reply that is
+                // actually the right call, spelled out so it reads the same
+                // as those two rather than like the two drop-by-omission
+                // bugs found on the event paths in `playback.rs`
+                // (`TrackChanged`, `PlaybackIdle`'s `EndOfContent`/`Stop`) —
+                // neither of which ever lived in this file.
                 if let Err(e) = self.active_request(SourceReq::Stop).await {
                     tracing::debug!("stop notification to source: {e}");
                 }
@@ -310,6 +322,9 @@ impl<P: Player> Core<P> {
                     // command gets through anyway (`handle_command`), and the
                     // Source will redeclare it on wake.
                     self.can_eject = false;
+                    // Same fate again for the finite-list capability, for the
+                    // same reason.
+                    self.has_finite_list = false;
                     // The volume/mute overlay does not survive entering
                     // standby: it keeps priority in `player_state`, and
                     // "VOLUME 65 %" stayed on screen for up to 2 s after
@@ -402,6 +417,33 @@ impl<P: Player> Core<P> {
                     self.player.seek_absolute(position_s).await?;
                     self.refresh_position().await;
                 }
+            }
+            // The remote only has room for one physical key per mode, so it
+            // toggles (see `Command::ToggleRandom`'s doc); the SPA and MPD
+            // send the absolute value instead, like `SetVolume` beside
+            // `VolumeUp`. Both persist and broadcast, exactly like the
+            // volume: a setting, not a session state, and every wired
+            // source must learn the new value at once, whether or not it is
+            // the active one (see `push_play_mode`, in `sources.rs`).
+            Command::ToggleRandom => {
+                self.random = !self.random;
+                self.persist();
+                self.push_play_mode().await;
+            }
+            Command::ToggleRepeatAll => {
+                self.repeat_all = !self.repeat_all;
+                self.persist();
+                self.push_play_mode().await;
+            }
+            Command::SetRandom(v) => {
+                self.random = v;
+                self.persist();
+                self.push_play_mode().await;
+            }
+            Command::SetRepeatAll(v) => {
+                self.repeat_all = v;
+                self.persist();
+                self.push_play_mode().await;
             }
         }
         Ok(())
@@ -966,6 +1008,46 @@ mod tests {
         assert!(!wakes(StartupPower::Standby, false).await, "\"standby\" never wakes");
         assert!(wakes(StartupPower::Previous, false).await, "was on: we relaunch");
         assert!(!wakes(StartupPower::Previous, true).await, "was in standby: we stay there");
+    }
+
+    #[tokio::test]
+    async fn the_two_modes_travel_in_the_published_state() {
+        let (mut core, _pc, _sc, state_rx, _d) = setup();
+        assert!(!state_rx.borrow().random);
+        core.handle_command(Command::SetRandom(true)).await.unwrap();
+        assert!(state_rx.borrow().random);
+        core.handle_command(Command::ToggleRandom).await.unwrap();
+        assert!(!state_rx.borrow().random, "the toggle serves the physical key");
+        core.handle_command(Command::SetRepeatAll(true)).await.unwrap();
+        assert!(state_rx.borrow().repeat_all);
+        core.handle_command(Command::ToggleRepeatAll).await.unwrap();
+        assert!(!state_rx.borrow().repeat_all, "the toggle serves the physical key here too");
+        core.handle_command(Command::ToggleRepeatAll).await.unwrap();
+        assert!(state_rx.borrow().repeat_all, "applied twice, the toggle returns to its starting value");
+    }
+
+    #[tokio::test]
+    async fn the_modes_survive_a_restart() {
+        // Same treatment as the volume: a setting, not a session state.
+        let (mut core, _pc, _sc, _rx, dir) = setup();
+        core.handle_command(Command::SetRandom(true)).await.unwrap();
+        core.handle_command(Command::SetRepeatAll(true)).await.unwrap();
+
+        let persisted = crate::state::load(&dir.path().join("state.json"));
+        let (reloaded, _pc2, _sc2, _rx2, _d2) = setup_persisted(persisted);
+        assert!(reloaded.player_state().random, "random must survive a restart");
+        assert!(reloaded.player_state().repeat_all, "repeat_all must survive a restart");
+    }
+
+    #[tokio::test]
+    async fn standby_lets_no_mode_change_through() {
+        // `handle_command` returns at once on anything but Power while
+        // asleep: an MPD `random 1` is acknowledged without effect, and that
+        // is consistent with every other command in standby.
+        let (mut core, _pc, _sc, state_rx, _d) = setup();
+        core.handle_command(Command::Power).await.unwrap();
+        core.handle_command(Command::SetRandom(true)).await.unwrap();
+        assert!(!state_rx.borrow().random, "standby swallows the command like every other one");
     }
 
     #[tokio::test]

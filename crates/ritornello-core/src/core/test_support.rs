@@ -123,6 +123,10 @@ impl Source for FakeSource {
             // own (a seek owed since the disc was not open yet), and it is
             // this arm the regression for that path (C1) drives.
             ("cd", SourceReq::PlayerTrack(0)) => SourceAction::PlayerChapter(4),
+            // Models a source's own "next pass" answer to an ending: without
+            // this arm this fake falls through to `Noop`, and a test could
+            // not tell an applied answer from one silently dropped.
+            ("radio", SourceReq::EndOfContent) => SourceAction::play("/tmp/list.m3u").playlist().finite(),
             _ => SourceAction::Noop,
         })
     }
@@ -411,24 +415,30 @@ pub(super) fn update_with_name(name: Option<&str>) -> SourceUpdate {
     }
 }
 
-/// Update carrying only the eject capability declared by the Source.
-pub(super) fn update_with_eject(can: Option<bool>) -> SourceUpdate {
+/// Update carrying the two capabilities the sdk stamps on **every** frame it
+/// writes (`can_eject`, `has_finite_list`) — the shape a real plugin's frame
+/// actually has. Lets a test exercise both capabilities' identical lifecycle
+/// (remembered, published, forgotten on source change/standby/death) in
+/// lockstep, without asserting they always carry the *same* value — they are
+/// independent capabilities that merely share a wire idiom.
+pub(super) fn update_with_capabilities(can_eject: Option<bool>, has_finite_list: Option<bool>) -> SourceUpdate {
     SourceUpdate {
-        can_eject: can,
+        can_eject,
+        has_finite_list,
         ..Default::default()
     }
 }
 
-/// Frame in the shape `serve_source` really produces: `can_eject`
-/// stamped, because the SDK stamps it on **every** frame it writes (see
-/// the doc of `SourceMessage::can_eject`).
+/// Frame in the shape `serve_source` really produces: `can_eject` and
+/// `has_finite_list` stamped, because the SDK stamps both on **every** frame
+/// it writes (see the doc of `SourceMessage::can_eject`).
 ///
 /// To be preferred over `bare_update()` in any test that claims to
 /// describe a frame coming from a real plugin: `SourceUpdate::default()`
-/// leaves `can_eject` at `None`, a shape the SDK cannot emit, and a test
-/// built on it may attest a failure mode that does not exist.
+/// leaves both at `None`, a shape the SDK cannot emit, and a test built on
+/// it may attest a failure mode that does not exist.
 pub(super) fn sdk_frame() -> SourceUpdate {
-    SourceUpdate { can_eject: Some(false), ..SourceUpdate::default() }
+    SourceUpdate { can_eject: Some(false), has_finite_list: Some(false), ..SourceUpdate::default() }
 }
 
 /// Short timings so pacing tests run in tens of milliseconds. The core does

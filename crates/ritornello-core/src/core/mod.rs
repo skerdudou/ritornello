@@ -141,6 +141,29 @@ pub struct Core<P: Player> {
     /// `position_s`: a single point cannot be forgotten, whereas five
     /// separate resets could be missed at the sixth path added.
     paused: bool,
+    /// Has anything actually **opened** since the last `Play`?
+    ///
+    /// Two things depend on it. A `PlaybackIdle` arriving **without** it is
+    /// content that never opened (a sleeping NAS share, a file gone), not a
+    /// list that ran out — treating it as an ending would reload at full
+    /// speed, outside the exponential backoff, which only covers streams.
+    /// And it is what lets `PlaybackIdle` tell an ending apart from a
+    /// commanded stop: `main`'s `select!` loop processes one command to
+    /// completion before it ever pops the next event off the queue, so by
+    /// the time a `PlaybackIdle` from a commanded stop is read, `playback`
+    /// is already set — it is that ordering guarantee of the loop, not the
+    /// order of the statements inside any one command handler, that makes
+    /// `playback` alone reliable for half of the distinction. On the
+    /// standby path there is a second, independent net: `standby` is
+    /// checked right after this verdict is computed, so a wrong verdict
+    /// there is never *acted on*, even though both fields are still read to
+    /// produce it. This field is the other half of the distinction, ruling
+    /// out a list that was asked to play but never actually got anywhere.
+    ///
+    /// Reset to `false` where `playback` is set to `true` (a fresh `Play`)
+    /// and to `true` only on `Event::PlaybackActive`, mpv's own confirmation
+    /// that something is really playing.
+    played_since_play: bool,
     retry_count: u32,
     audio_device: Option<String>,
     /// Temporary overlay (volume/mute/message): the text to show plus its
@@ -186,6 +209,19 @@ pub struct Core<P: Player> {
     /// declares: not knowing means offering nothing, so the web remote greys
     /// its Eject key rather than sending a command into the void.
     can_eject: bool,
+    /// Whether the active source has a finite list to shuffle or repeat, as
+    /// last declared (`SourceMessage::has_finite_list`). Same convention and
+    /// same reset timing as `can_eject`, for the same reason: it describes
+    /// the source that is gone.
+    has_finite_list: bool,
+    /// Random play, a setting persisted like the volume — not forgotten on
+    /// source change or standby, unlike `has_finite_list` and the other
+    /// source-described capabilities above. Read from `PersistedState` at
+    /// construction, pushed to every source (see `push_play_mode`) whenever
+    /// it changes.
+    random: bool,
+    /// Repeat-all, same persistence and same push as `random`.
+    repeat_all: bool,
     /// The named presets **of each source**, indexed by source name, as each
     /// declared them (`SourceMessage::presets`).
     ///
@@ -340,6 +376,7 @@ impl<P: Player> Core<P> {
             expecting_stream: false,
             playback: false,
             paused: false,
+            played_since_play: false,
             retry_count: 0,
             audio_device: persisted.audio_device.clone(),
             overlay: None,
@@ -349,6 +386,9 @@ impl<P: Player> Core<P> {
             standby_status,
             preset_count: None,
             can_eject: false,
+            has_finite_list: false,
+            random: persisted.random,
+            repeat_all: persisted.repeat_all,
             presets_par_source: HashMap::new(),
             pending_tens: 0,
             state_path,
@@ -467,6 +507,7 @@ impl<P: Player> Core<P> {
             preset_name,
             status,
             can_eject,
+            has_finite_list,
             presets,
             cover,
             cover_thumb,
@@ -498,6 +539,9 @@ impl<P: Player> Core<P> {
         }
         if let Some(e) = can_eject {
             self.can_eject = e;
+        }
+        if let Some(f) = has_finite_list {
+            self.has_finite_list = f;
         }
         // **The two paths, and which of the two actually carries the
         // safety.**
@@ -541,9 +585,10 @@ impl<P: Player> Core<P> {
         // and `transient` joins them because a transient word is a
         // statement about what is playing (it must keep its overlay and
         // disarm a `+NN` in flight). `preset`, `preset_name`,
-        // `preset_count`, `can_eject`, `presets`, `cover` and `cover_thumb`
-        // attest nothing: all of them follow the "absent = keep" convention,
-        // so none can prove the frame describes the whole view.
+        // `preset_count`, `can_eject`, `has_finite_list`, `presets`, `cover`
+        // and `cover_thumb` attest nothing: all of them follow the
+        // "absent = keep" convention, so none can prove the frame describes
+        // the whole view.
         let recomposes_the_view = transient || identity.is_some() || status.is_some();
         // **`cover_thumb` is in this disjunction, and leaving it out would
         // repeat the defect recorded above word for word.** A frame carrying
@@ -556,6 +601,7 @@ impl<P: Player> Core<P> {
         let carries_a_fact = carries_presets
             || preset_count.is_some()
             || can_eject.is_some()
+            || has_finite_list.is_some()
             || preset.is_some()
             || preset_name.is_some()
             || cover.is_some()
@@ -757,14 +803,22 @@ mod tests {
         // False by default: not knowing means offering nothing — the web
         // remote greys its Eject key until someone has claimed it. A frame
         // silent on the subject does not clear it.
+        //
+        // `has_finite_list` asserted in lockstep throughout: it follows the
+        // exact same convention (see `Core::has_finite_list`'s doc), and
+        // nothing pins that down but this test.
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
         assert!(!state_rx.borrow().can_eject, "nothing declared: nothing offered");
-        core.handle_source_update("radio", update_with_eject(Some(true)));
+        assert!(!state_rx.borrow().has_finite_list, "same convention, same default");
+        core.handle_source_update("radio", update_with_capabilities(Some(true), Some(true)));
         assert!(state_rx.borrow().can_eject);
-        core.handle_source_update("radio", update_with_eject(None));
+        assert!(state_rx.borrow().has_finite_list);
+        core.handle_source_update("radio", update_with_capabilities(None, None));
         assert!(state_rx.borrow().can_eject, "a silent frame does not remove the capability");
-        core.handle_source_update("radio", update_with_eject(Some(false)));
+        assert!(state_rx.borrow().has_finite_list, "a silent frame does not remove this one either");
+        core.handle_source_update("radio", update_with_capabilities(Some(false), Some(false)));
         assert!(!state_rx.borrow().can_eject);
+        assert!(!state_rx.borrow().has_finite_list);
     }
 
     #[tokio::test]
@@ -773,12 +827,18 @@ mod tests {
         // reason: the capability describes the Source, not what is
         // playing. Stopping does not change the fact the player has a
         // drawer; changing source does.
+        //
+        // `has_finite_list` shares the exact same schedule (see
+        // `Core::has_finite_list`'s doc): asserted alongside, so a future
+        // change cannot desync the two without a test noticing.
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
-        core.handle_source_update("radio", update_with_eject(Some(true)));
+        core.handle_source_update("radio", update_with_capabilities(Some(true), Some(true)));
         core.handle_command(Command::Stop).await.unwrap();
         assert!(state_rx.borrow().can_eject, "a drawer does not disappear on stop");
+        assert!(state_rx.borrow().has_finite_list, "nor does a finite list, on stop");
         core.handle_command(Command::SourceCycle).await.unwrap();
         assert!(!state_rx.borrow().can_eject, "the capability describes the source that is leaving");
+        assert!(!state_rx.borrow().has_finite_list, "same reason, same timing");
     }
 
     #[tokio::test]
@@ -788,11 +848,16 @@ mod tests {
         // `SourceCycle`, nothing guarantees "radio" is still the active
         // source, so nothing guarantees a frame concerning it clears
         // `handle_source_update`'s guard.
+        //
+        // `has_finite_list` asserted alongside: standby forgets it for the
+        // same reason it forgets `can_eject`.
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
-        core.handle_source_update("radio", update_with_eject(Some(true)));
+        core.handle_source_update("radio", update_with_capabilities(Some(true), Some(true)));
         assert!(state_rx.borrow().can_eject);
+        assert!(state_rx.borrow().has_finite_list);
         core.handle_command(Command::Power).await.unwrap();
         assert!(!state_rx.borrow().can_eject);
+        assert!(!state_rx.borrow().has_finite_list);
     }
 
     #[tokio::test]

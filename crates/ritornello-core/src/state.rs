@@ -297,11 +297,29 @@ pub struct PersistedState {
     /// Behavior settings (hold-to-repeat timings, startup power state).
     #[serde(default)]
     pub settings: Settings,
+    /// Random play: a setting, not a session state, exactly like the volume —
+    /// it must read back the same after a restart, not fall back to "off".
+    #[serde(default)]
+    pub random: bool,
+    /// Repeat-all: same reasoning and same persistence as `random`.
+    #[serde(default)]
+    pub repeat_all: bool,
 }
 
 impl Default for PersistedState {
     fn default() -> Self {
-        Self { active_source: "radio".into(), volume: 60, standby: false, audio_device: None, locale: None, theme: None, mode: None, settings: Settings::default() }
+        Self {
+            active_source: "radio".into(),
+            volume: 60,
+            standby: false,
+            audio_device: None,
+            locale: None,
+            theme: None,
+            mode: None,
+            settings: Settings::default(),
+            random: false,
+            repeat_all: false,
+        }
     }
 }
 
@@ -349,6 +367,8 @@ mod tests {
             theme: None,
             mode: None,
             settings: Settings::default(),
+            random: false,
+            repeat_all: false,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -376,6 +396,8 @@ mod tests {
             theme: None,
             mode: None,
             settings: Settings::default(),
+            random: false,
+            repeat_all: false,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -396,6 +418,8 @@ mod tests {
             theme: Some("cyberpunk".into()),
             mode: Some("dark".into()),
             settings: Settings::default(),
+            random: false,
+            repeat_all: false,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
