@@ -22,40 +22,9 @@ is a small Rust orchestrator driving [mpv](https://mpv.io); everything
 else — content sources, inputs, displays, metadata — lives in **plugins
 running as separate processes**, replaceable without touching the core.
 
-## Why Ritornello?
-
-It started as a personal itch. A Raspberry Pi 2, a CD drive and an
-amplifier were sitting in the living room, and the software that used to
-run them had moved on: the current releases of [Volumio](https://volumio.com)
-and [moOde](https://moodeaudio.org) no longer target that generation of
-hardware, and the family had never quite adopted [Mopidy](https://mopidy.com).
-What the household actually wanted was simpler than any of them — press
-`3` on the remote, hear the third station; put a disc in, hear the disc;
-glance at the screen to know what is playing.
-
-So Ritornello is opinionated about a few things:
-
-- **Runs on modest hardware, for real.** The Pi 2 (1 GB of RAM, 32-bit ARM)
-  is the daily-use reference machine, not a best effort. Rust and mpv
-  keep the footprint small; there is no interpreter, no database server,
-  no desktop stack.
-- **Portable by construction.** Nothing in the code is Pi-specific: the
-  remote goes through `evdev`, sound through ALSA/mpv, IPC through Unix
-  sockets. The same binaries build for `armv7`, `aarch64` and `x86_64`,
-  and the whole thing runs on a laptop for development.
-- **Robust by construction.** Every plugin is a supervised process — its
-  death is tolerated and reported, never propagated. The service runs
-  **unprivileged** under a hardened systemd unit (dedicated user, device
-  access through groups, `ProtectSystem=strict`).
-- **Built to be extended.** A Bluetooth source, an OLED display, a
-  rotary encoder or another metadata provider is one more binary that
-  speaks a small line-delimited JSON protocol — in any language. The core
-  and the other plugins do not change.
-
-It was written for one household first, but it is meant to be shared: the
-plugin boundary, the two-language UI, the TOML configuration and the
-end-to-end test suite are all there so that the next person can add *their*
-station directory, *their* screen or *their* remote without asking anyone.
+The reference machine is a **Raspberry Pi 2** — 32-bit ARM, 1 GB of RAM,
+in daily use — and the same binaries build for `armv7`, `aarch64` (Pi 3, 4
+and 5) and `x86_64`, so a plain Linux PC runs it just as well.
 
 ## Highlights
 
@@ -175,6 +144,42 @@ PC, are in [docs/installation.md](docs/installation.md).
 
 To try it **without any hardware**, a local instance runs in five minutes:
 [docs/development.md](docs/development.md).
+
+## Why Ritornello?
+
+It started as a personal itch. A Raspberry Pi 2, a CD drive and an
+amplifier were sitting in the living room, and the software that used to
+run them had moved on: the current releases of [Volumio](https://volumio.com)
+and [moOde](https://moodeaudio.org) no longer target that generation of
+hardware. What the household actually wanted was simpler than either —
+press `3` on the remote, hear the third station; put a disc in, hear the
+disc; glance at the screen to know what is playing. ([Mopidy](https://mopidy.com)
+might well have done the job; the author only came across it long after
+this had started.)
+
+So Ritornello is opinionated about a few things:
+
+- **Runs on modest hardware, for real.** The Pi 2 (1 GB of RAM, 32-bit ARM)
+  is the daily-use reference machine, not a best effort. Rust and mpv
+  keep the footprint small; there is no interpreter, no database server,
+  no desktop stack.
+- **Portable by construction.** Nothing in the code is Pi-specific: the
+  remote goes through `evdev`, sound through ALSA/mpv, IPC through Unix
+  sockets. The same binaries build for `armv7`, `aarch64` and `x86_64`,
+  and the whole thing runs on a laptop for development.
+- **Robust by construction.** Every plugin is a supervised process — its
+  death is tolerated and reported, never propagated. The service runs
+  **unprivileged** under a hardened systemd unit (dedicated user, device
+  access through groups, `ProtectSystem=strict`).
+- **Built to be extended.** A Bluetooth source, an OLED display, a
+  rotary encoder or another metadata provider is one more binary that
+  speaks a small line-delimited JSON protocol — in any language. The core
+  and the other plugins do not change.
+
+It was written for one household first, but it is meant to be shared: the
+plugin boundary, the two-language UI, the TOML configuration and the
+end-to-end test suite are all there so that the next person can add *their*
+station directory, *their* screen or *their* remote without asking anyone.
 
 ## Extending it
 
