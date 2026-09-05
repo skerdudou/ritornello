@@ -71,11 +71,25 @@ impl<P: Player> Core<P> {
             // has just realigned itself): it then sends back the same
             // identity, which the core recognizes as unchanged, and the
             // identical view is not pushed again.
+            //
+            // The reply can carry an action of its own — the cd answers a
+            // track notification with `PlayerChapter(n)` when it owed a seek
+            // that could not happen before mpv confirmed the disc was open
+            // (see `pending_chapter` in the cd plugin). Before this arm
+            // applied it, that action was silently dropped: the identity on
+            // screen moved to the resumed track, but mpv itself stayed on
+            // whatever it had opened, so the sound did not follow.
             Event::TrackChanged(n) => {
-                if !self.standby
-                    && let Err(e) = self.active_request(SourceReq::PlayerTrack(n)).await
-                {
-                    tracing::debug!("track notification to source: {e}");
+                if !self.standby {
+                    match self.active_request(SourceReq::PlayerTrack(n)).await {
+                        Ok(Some(action)) => {
+                            if let Err(e) = self.apply(action).await {
+                                tracing::debug!("applying the source's track-notification action: {e}");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::debug!("track notification to source: {e}"),
+                    }
                 }
             }
             Event::PlaybackIdle => {
@@ -231,16 +245,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_list_is_loaded_by_load_list_then_positioned() {
-        // The defect this test should have caught, and now catches.
+    async fn a_list_is_loaded_already_positioned() {
+        // **One operation, not two**, and this is the defect this test now
+        // forbids. Loading first and correcting the position afterwards left
+        // mpv the time to genuinely open the list's first entry: measured on
+        // mpv 0.37, the `path` property is published for entry 0 before the
+        // reposition takes effect. The core then took that entry for what was
+        // playing — it read a cover off it, on a network share, and made the
+        // display flip through a track nobody had asked for.
         //
-        // With `loadfile`, mpv only unfolds an `.m3u` **afterwards**: measured
-        // on mpv 0.37, `playlist-count` is 1, then 3 only after an
-        // `end-file`/`start-file`. The chained `playlist-pos` therefore
-        // arrived out of bounds, playback started over from the first track,
-        // and the display lost preset and title. `loadlist` unfolds on the
-        // spot — its answer even carries `num_entries` — which makes this
-        // chaining safe.
+        // Carrying the index into the load is what makes that window
+        // impossible, and the player interface no longer offers any way to
+        // express the old sequence.
         let (mut core, player_calls, _sc, _rx, _d) = setup();
         core.apply(
             SourceAction::play("/var/lib/ritornello/plugin-files.m3u")
@@ -252,10 +268,25 @@ mod tests {
         .unwrap();
         assert_eq!(
             *player_calls.lock().unwrap(),
-            vec![
-                "load_list /var/lib/ritornello/plugin-files.m3u".to_string(),
-                "playlist-pos 4".to_string()
-            ]
+            vec!["load_list /var/lib/ritornello/plugin-files.m3u start=4".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_without_a_declared_index_says_so_explicitly() {
+        // The counterpart, and it is not cosmetic: mpv's starting index is a
+        // **persistent** option — measured, a second `loadlist` sent without
+        // touching it starts again at the index the previous load declared.
+        // "Nothing declared" must therefore travel as an explicit value all
+        // the way to the player, otherwise a list loaded after a resume would
+        // silently start on the resumed track.
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::play("/var/lib/ritornello/plugin-files.m3u").playlist().finite())
+            .await
+            .unwrap();
+        assert_eq!(
+            *player_calls.lock().unwrap(),
+            vec!["load_list /var/lib/ritornello/plugin-files.m3u start=auto".to_string()]
         );
     }
 
@@ -324,6 +355,40 @@ mod tests {
         core.resume().await.unwrap();
         core.handle_event(Event::TrackChanged(2)).await;
         assert!(source_calls.lock().unwrap().iter().any(|c| c == "radio:PlayerTrack(2)"));
+    }
+
+    #[tokio::test]
+    async fn a_chapter_action_moves_the_player_without_reloading() {
+        // Tracks of an audio CD are chapters of a single mpv entry: a chapter
+        // action must reach the player as a seek, never as a fresh load —
+        // reloading would reopen the disc and cut the continuously-mixed
+        // join between tracks.
+        let (mut core, player_calls, _sc, _rx, _d) = setup();
+        core.apply(SourceAction::PlayerChapter(4)).await.unwrap();
+        let calls = player_calls.lock().unwrap();
+        assert!(calls.iter().any(|c| c == "chapter 4"), "{calls:?}");
+        assert!(
+            !calls.iter().any(|c| c.starts_with("load_list") || c.starts_with("play ")),
+            "a chapter is a seek, never a reload: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_track_notification_action_is_applied_not_dropped() {
+        // Regression (review 1, C1): `active_request` returns the action the
+        // Source's reply carries, but this arm used to look only at the
+        // `Err` case. The cd's own resume-then-seek mechanism answers a
+        // `PlayerTrack` notification with `PlayerChapter(n)` — a real
+        // command for the player, not a spontaneous refresh — and it was
+        // silently dropped: the identity on screen moved to the resumed
+        // track while mpv itself stayed wherever it had opened.
+        let (mut core, player_calls, _sc, _rx, _d) = setup_persisted(PersistedState {
+            active_source: "cd".into(),
+            ..PersistedState::default()
+        });
+        core.handle_event(Event::TrackChanged(0)).await;
+        let calls = player_calls.lock().unwrap();
+        assert!(calls.iter().any(|c| c == "chapter 4"), "{calls:?}");
     }
 
     #[tokio::test]

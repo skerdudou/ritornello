@@ -1,0 +1,24 @@
+{
+  "name": "ritornello-plugin-cd-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && node ../../../scripts/check-plugin-dist.mjs",
+    "test": "vitest run",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "devDependencies": {
+    "@ritornello/ui": "^0.1.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/test-utils": "^2.5.0",
+    "jsdom": "^30.0.1",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^6.0.3",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11",
+    "vue": "^3.5.42",
+    "vue-tsc": "^3.3.11"
+  }
+}

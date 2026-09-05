@@ -233,7 +233,9 @@ that is the only visibility the split introduced.
 `.github/workflows/ci.yml` runs those five commands on every push and pull
 request, on Ubuntu, in four jobs:
 
-- `web` — `npm ci`, build of the six workspaces, `vue-tsc`, vitest; it
+- `web` — `npm ci`, build of the npm workspaces (the SPA, the kit, and one
+  per plugin UI — a count deliberately not written here, it drifts every
+  time a plugin gains a page), `vue-tsc`, vitest; it
   publishes the `dist/` directories as an artifact, because they are
   git-ignored and the Rust jobs need them;
 - `rust` — downloads the dist, **refuses to go on if one is missing**

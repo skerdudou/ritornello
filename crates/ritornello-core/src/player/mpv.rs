@@ -92,16 +92,48 @@ impl MpvIpc {
                             first_idle = false;
                             Some(Event::PlaybackActive)
                         }
-                        // Two properties for the same fact, track advance:
-                        // mpv exposes a CD's tracks either as playlist
-                        // entries or as chapters, depending on how the disc
-                        // was opened (whole `cdda://` or `cdda://<track>`).
-                        // Only one of the two speaks at a time, then, and
-                        // the core relays the same thing in both cases — it
-                        // is the Source that knows what "track n" means. A
-                        // negative index (mpv says `-1` when there is no
-                        // chapter) is passed through as-is and discarded by
-                        // the Source.
+                        // Established (see `OBSERVED` below): both
+                        // `playlist-pos` and `chapter` are observed
+                        // unconditionally, every session, regardless of
+                        // what is loaded — not one or the other depending
+                        // on the source. Folding both into a single event
+                        // rests on an assumption that is **not measured on
+                        // real hardware**: that for a playlist-based load
+                        // (the files plugin's m3u) only `playlist-pos`
+                        // actually keeps changing while `chapter` stays put
+                        // after its own first report, and conversely that
+                        // for a whole-disc `cdda://` load (the cd, one
+                        // playlist entry) only `chapter` keeps changing
+                        // while `playlist-pos` stays put. If that
+                        // assumption is wrong, the core would relay a bogus
+                        // track number it has no way to tell from a real
+                        // one — the Source is not told which property
+                        // produced it.
+                        //
+                        // The core relays the same event in both cases
+                        // regardless, since only the Source knows what
+                        // "track n" means for what it is playing. A
+                        // negative value is passed through as-is and
+                        // discarded by the Source, on the working — and
+                        // itself unmeasured, not sourced to a specific
+                        // manual section — assumption that `-1` is what
+                        // `chapter` reads on a file with none. Plausible
+                        // readings not ruled out: the property could
+                        // instead be absent from mpv's replies for such a
+                        // file (nothing to fold in this arm at all), or
+                        // `-1` could mean "before the first chapter" on a
+                        // file that does have some.
+                        //
+                        // Also not measured, and worth measuring
+                        // separately: `playlist-pos` is documented to
+                        // reflect whatever entry mpv currently considers
+                        // current, which may flip before that entry's
+                        // demuxer has actually opened. A `chapter` seek
+                        // issued in that window (see the cd plugin's
+                        // `pending_chapter`) could be refused by mpv; the
+                        // error would only reach `debug` upstream, and the
+                        // seek would be lost with no retry (see
+                        // `player_track` in the cd plugin).
                         (Some("playlist-pos") | Some("chapter"), Value::Number(n)) => {
                             n.as_i64().map(Event::TrackChanged)
                         }
@@ -426,14 +458,34 @@ impl super::Player for MpvPlayer {
         Ok(())
     }
     /// `loadlist` and not `loadfile`: the list is unfolded **before** the
-    /// command answers (its response even carries `num_entries`), so a
-    /// `playlist-pos` sent right after falls within bounds.
+    /// command answers (its response even carries `num_entries`).
     ///
     /// With `loadfile`, measured on mpv 0.37: `playlist-count` is first 1,
     /// position 0, then an `end-file` and a `start-file` come before the
-    /// count reaches 3. The requested `playlist-pos` therefore arrived out
-    /// of bounds, and the unfolding replayed the first track.
-    async fn load_list(&self, uri: &str) -> Result<()> {
+    /// count reaches 3. A requested position therefore arrived out of
+    /// bounds, and the unfolding replayed the first track.
+    ///
+    /// **`playlist-start` before `loadlist`, and never a reposition after
+    /// it.** Measured on mpv 0.37 with a three-entry list and entry 2
+    /// wanted: loading then repositioning publishes `path` for entry 0
+    /// **and then** for entry 2 — mpv really did open the first entry —
+    /// whereas declaring the index beforehand only ever publishes entry 2.
+    /// Everything the core hangs off `path` (the embedded-cover read, the
+    /// identity relayed to the Source) therefore used to fire once on a
+    /// track nobody had asked for.
+    ///
+    /// **Always sent, `auto` included.** The option is persistent, and this
+    /// is measured too: a second `loadlist` sent without touching it starts
+    /// again at the index the previous load declared. Omitting it for "from
+    /// the beginning" would make a list loaded after a resume silently
+    /// start on the resumed track. `auto` is mpv's own default, the same
+    /// convention as the audio device.
+    async fn load_list(&self, uri: &str, start: Option<i64>) -> Result<()> {
+        let start = match start {
+            Some(n) => json!(n),
+            None => json!("auto"),
+        };
+        self.ipc.command(&[json!("set_property"), json!("playlist-start"), start]).await?;
         self.ipc.command(&[json!("loadlist"), json!(uri), json!("replace")]).await?;
         self.ipc.command(&[json!("set_property"), json!("pause"), json!(false)]).await?;
         Ok(())
@@ -452,10 +504,6 @@ impl super::Player for MpvPlayer {
     }
     async fn prev(&self) -> Result<()> {
         self.ipc.command(&[json!("playlist-prev")]).await?;
-        Ok(())
-    }
-    async fn set_playlist_pos(&self, n: i64) -> Result<()> {
-        self.ipc.command(&[json!("set_property"), json!("playlist-pos"), json!(n)]).await?;
         Ok(())
     }
     async fn set_volume(&self, volume: u8) -> Result<()> {
@@ -502,6 +550,11 @@ impl super::Player for MpvPlayer {
             .command(&[json!("seek"), json!(position_s), json!("absolute")])
             .await
             .map(|_| ())
+    }
+
+    async fn set_chapter(&self, n: i64) -> Result<()> {
+        self.ipc.command(&[json!("set_property"), json!("chapter"), json!(n)]).await?;
+        Ok(())
     }
 }
 

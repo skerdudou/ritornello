@@ -251,6 +251,20 @@ pub trait SourcePlugin: Send + 'static {
         self.activate().await
     }
 
+    /// The user pressed Play while nothing was loaded.
+    ///
+    /// Default implementation: behave like `activate()`, which is what every
+    /// source did back when the core sent `Activate` for this too. That
+    /// default is what leaves radio, files, generic-input and mpd compiling
+    /// **and behaving** unchanged.
+    ///
+    /// A source overrides this only when arriving at it and being told to
+    /// play are genuinely different things for it — the cd, whose arrival is
+    /// configurable and may legitimately play nothing, while Play cannot.
+    async fn play(&mut self) -> SourceOutcome {
+        self.activate().await
+    }
+
     /// The core stopped playback without consulting the Source (Stop key).
     ///
     /// Default implementation: declare that nothing is playing anymore, which
@@ -352,6 +366,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                 let outcome = match req.req {
                     SourceReq::Activate => plugin.activate().await,
                     SourceReq::Wake => plugin.wake().await,
+                    SourceReq::Play => plugin.play().await,
                     SourceReq::Deactivate => plugin.deactivate().await,
                     SourceReq::Select(n) => plugin.select(n).await,
                     SourceReq::Next => plugin.next().await,
@@ -1604,6 +1619,64 @@ mod tests {
         let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
         // wake() dispatched (http://wake), NOT activate() (http://activate).
         assert_eq!(msg.action, Some(SourceAction::play("http://wake")));
+    }
+
+    #[tokio::test]
+    async fn play_defaults_to_activate() {
+        // What keeps radio, files, generic-input and mpd behaving exactly as
+        // before: they do not override `play()`, and the Play key must reach
+        // them as it always did.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(EchoSource, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"Play\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.action, Some(SourceAction::play("http://fip")));
+    }
+
+    #[tokio::test]
+    async fn overridden_play_is_dispatched() {
+        struct PlayingSource;
+        #[async_trait::async_trait]
+        impl SourcePlugin for PlayingSource {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn play(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::play("cdda://")) }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(PlayingSource, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"Play\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
+        // play() dispatched, NOT activate() — which here plays nothing, the
+        // very situation that made the Play key inert on the cd.
+        assert_eq!(msg.action, Some(SourceAction::play("cdda://")));
     }
 
     #[tokio::test]

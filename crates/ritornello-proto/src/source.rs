@@ -8,6 +8,23 @@ pub enum SourceReq {
     /// Plugin-driven wake-up (boot / leaving standby). SDK-side default:
     /// behaves like `Activate`; a plugin may override `wake()`.
     Wake,
+    /// The user asked to **play**, explicitly — the Play key, while nothing
+    /// is loaded. SDK-side default: behaves like `Activate`; a plugin may
+    /// override `play()`.
+    ///
+    /// Distinct from `Activate` because the two are different intentions
+    /// that used to travel as one signal. `Activate` means "this source is
+    /// now the one" — a source switch, or a boot — and a source is entitled
+    /// to answer that by playing nothing. `Play` means "start now", and
+    /// there is no reading of it under which playing nothing is right.
+    ///
+    /// The distinction was invisible as long as every source answered
+    /// `Activate` by playing: the cd gained a setting whose default is to
+    /// play nothing on arrival, and the Play key — which went through
+    /// `Activate` — went inert with it. Rather than have the cd guess which
+    /// of the two situations it was in, the core says which, since it is the
+    /// only one that knows.
+    Play,
     Deactivate,
     Select(u8),
     Next,
@@ -71,10 +88,14 @@ pub enum SourceAction {
         /// **Requires `playlist: true`** to work, and that is a lesson paid
         /// for: a `loadfile` on an `.m3u` only unfolds it **afterwards** —
         /// measured, `playlist-count` is 1, then 3 only after an
-        /// `end-file`/`start-file`. The `playlist-pos` sent right after
-        /// therefore arrived out of bounds, playback restarted from the first
-        /// track, and the display lost everything. `loadlist` unfolds on the
-        /// spot.
+        /// `end-file`/`start-file`. The position sent right after therefore
+        /// arrived out of bounds, playback restarted from the first track,
+        /// and the display lost everything. `loadlist` unfolds on the spot.
+        ///
+        /// The core carries this index **into** the load rather than
+        /// correcting the position afterwards (see `Player::load_list`): the
+        /// two-step version really did open the list's first entry, and the
+        /// core announced it as the playing track for a moment.
         ///
         /// It is the only way for a Source to resume a list at track n — a
         /// digit from the remote, or resumption after a restart.
@@ -103,6 +124,19 @@ pub enum SourceAction {
     Stop,
     PlayerNext,
     PlayerPrev,
+    /// Go to chapter `n` of what is loaded — **the tracks of an audio CD**,
+    /// expected to be chapters of the single entry mpv opens for the whole
+    /// disc, rather than playlist entries. Not measured on real hardware;
+    /// a working assumption (see the cd plugin's `pending_chapter` for
+    /// where the gap between "assumed" and "confirmed" matters).
+    ///
+    /// This is what `PlayerNext` could never do here: without a flag,
+    /// mpv's `playlist-next` is documented as doing nothing when the last
+    /// (here: the only) entry is playing. Setting the `chapter` property is
+    /// expected to be a seek rather than a reload — again unmeasured — so a
+    /// continuously-mixed CD would keep its seamless join instead of the
+    /// disc reopening.
+    PlayerChapter(i64),
 }
 
 impl SourceAction {
@@ -164,8 +198,9 @@ pub struct SourceMessage {
     /// Identity of what is playing **after** this action, when the Source has
     /// what it takes to update it.
     ///
-    /// A CD changes track without a new `Play` (`PlayerNext` advances mpv), so
-    /// the identity would change without any `Play` being emitted. Every
+    /// A CD changes track without a new `Play` (`PlayerChapter` seeks mpv
+    /// without reopening the disc), so the identity would change without
+    /// any `Play` being emitted. Every
     /// occasion on which a Source reports something new (status, preset) thus
     /// becomes an occasion to correct the identity — which covers a disc's
     /// track change, the selection of a preset and the deferred arrival of a
@@ -670,6 +705,17 @@ mod tests {
     /// Local factory: avoids repeating the path in several tests.
     fn ritornello_proto_test_cover() -> crate::CoverRef {
         crate::CoverRef::Path { path: "/mnt/nas/Album/folder.jpg".into() }
+    }
+
+    #[test]
+    fn player_chapter_round_trips() {
+        // Tracks of an audio CD are chapters of a single mpv entry, not
+        // playlist entries: positioning them is the only way to move inside a
+        // disc without reloading it.
+        let a = SourceAction::PlayerChapter(4);
+        let json = serde_json::to_string(&a).unwrap();
+        assert_eq!(json, r#"{"action":"PlayerChapter","data":4}"#);
+        assert_eq!(serde_json::from_str::<SourceAction>(&json).unwrap(), a);
     }
 
     #[test]
