@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ritornello</title>
     <!--
-      Tab icon: the musical repeat sign, which is what a ritornello is — a
-      thick barline, a thin one, and the two dots that send you back.
+      Tab icon: the `R` of the logo, the wordmark's initial standing on its
+      own — the same mark, cut from the same drawing as the banner in the
+      README.
 
       Inlined as a data URI rather than served as a file, and that is the
       point: a declared icon is the only thing that stops a browser asking
@@ -14,33 +15,38 @@
       request at all. It travels with the document, which is served
       `no-cache` anyway.
 
-      Readable source of the same mark, since the encoded form below is not:
+      **32 px and no larger.** That is exactly the tab strip's 16 px slot on
+      a 2x screen, the only size this icon is ever drawn at; a larger source
+      would only hand the browser a downsampling job we can do better here,
+      and would pay for it in the shell on every single load.
 
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-          <rect width="32" height="32" rx="7" fill="#34a85a"/>
-          <g fill="#fff">
-            <rect x="6" y="6" width="6" height="20" rx="1"/>
-            <rect x="14.5" y="6" width="3.5" height="20" rx="1"/>
-            <circle cx="23" cy="12" r="3.2"/>
-            <circle cx="23" cy="20" r="3.2"/>
-          </g>
-        </svg>
+      The bytes come from `docs/brand/mark.png`, and not by a plain
+      downscale. The whole recipe, so it can be reproduced rather than
+      guessed at: crop on `alpha >= 110`, which is the solid glyph and not
+      the wide glow around it; 4% margin; hue held at 0.723 — the drawing's
+      own violet, the median hue of its saturated pixels; saturation
+      `min(1, 0.34 + 1.20 s)`; value clamped to `[0.48, 0.94]`; Lanczos to
+      32 px.
 
-      The green is `--primary` of the default preset (Northern Lights); a
-      filled tile rather than a bare glyph, so the mark stays legible on a
-      light tab strip and on a dark one without depending on either.
+      **Crop on the glyph, not on the glow.** That halo is a third of the
+      drawing's height and reads as nothing at all once shrunk: cropped on
+      it, the R filled 78% of the box and looked small inside its own icon.
 
-      The weights are chosen for **16 px**, the size a tab actually uses, not
-      for how the mark looks enlarged. A first draft used a 2.5-unit thin bar,
-      which is 1.25 px at tab size — below one pixel, so it blurred into its
-      neighbour and the sign stopped reading as a repeat. Rendered side by side
-      at real size, the heavier weights below keep the three elements apart.
+      **The colour curve, because the drawing is built for a wide banner.**
+      Its median pixel sits at value 0.97 with saturation 0.44 — a lilac
+      washed toward white, 2.3:1 against a white tab strip, which is to say
+      invisible. Holding the hue while pushing saturation and capping the
+      value gives 7.1:1 on white and 6.4:1 on Chrome's grey strip. The hue
+      is *held*, not merely boosted: raising the saturation of those pale
+      highlights on their own hue turned them pink.
+
+      What this costs is the dark tab strip, where the untouched mark was
+      strongest — 2.3:1 on the median pixel. The shape survives there on the
+      light top of the R, still at 4.5:1. No tile behind the glyph either
+      way; both were looked at at 16 px over white, over Chrome's grey and
+      over a dark strip before this was settled.
     -->
-    <link
-      rel="icon"
-      type="image/svg+xml"
-      href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='7'%20fill='%2334a85a'/%3E%3Cg%20fill='%23fff'%3E%3Crect%20x='6'%20y='6'%20width='6'%20height='20'%20rx='1'/%3E%3Crect%20x='14.5'%20y='6'%20width='3.5'%20height='20'%20rx='1'/%3E%3Ccircle%20cx='23'%20cy='12'%20r='3.2'/%3E%3Ccircle%20cx='23'%20cy='20'%20r='3.2'/%3E%3C/g%3E%3C/svg%3E"
-    />
+    <link rel="icon" type="image/png" href="data:image/png;base64,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" />
     <!--IMPORTMAP-->
   </head>
   <body>
