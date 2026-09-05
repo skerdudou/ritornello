@@ -45,7 +45,12 @@ and 5) and `x86_64`, so a plain Linux PC runs it just as well.
   including a USB infrared receiver; keys are learned from the browser,
   presets ship with the project (MCE, keyboard).
 - **MPD server** — the device shows up as an MPD server on port 6600, so
-  existing phone clients (tested with M.A.L.P.) drive it out of the box.
+  existing phone clients (tested with M.A.L.P.) drive playback, volume and
+  cover art out of the box, each source appearing as a stored playlist. A
+  deliberate **subset** of the protocol, cut to what the device is: there is
+  no tag database, so searching or browsing a music library answers empty,
+  and the queue — the active source's presets — is neither reorderable nor
+  savable.
 - **Embedded web UI** — Vue 3, served by the core binary: player state
   pushed continuously (SSE), full remote control, light/dark toggle and 42
   themes, English/French extensible through TOML language packs, a system
@@ -104,7 +109,7 @@ executable.
 | `musicbrainz` | metadata | Album, year, cover art and platform links for discs and streams |
 | `ouifm-metas` | metadata | OUI FM's now-playing feed (21 webradios) |
 | `radiofrance-metas` | metadata | Radio France's live endpoint (74 stations without ICY) |
-| `mpd` | server | Exposes the device as an MPD server for existing clients |
+| `mpd` | server | Exposes the device as an MPD server for existing clients — a protocol subset: no tag database, no queue editing |
 
 A Rust SDK ([`ritornello-plugin-sdk`](crates/ritornello-plugin-sdk)) provides
 the traits and the runtime for each kind; the wire protocol
