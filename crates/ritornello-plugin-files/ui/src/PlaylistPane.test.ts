@@ -328,4 +328,105 @@ describe('current queue pane', () => {
     expect(w.find('[data-no-saved]').text()).toBe('No saved playlist')
     expect(w.find('[data-empty-playlist]').text()).toBe('Empty queue')
   })
+  it('shows the full path of a track in a tooltip', async () => {
+    // The displayed name is the `#EXTINF` title, failing that the file name
+    // without its extension: neither says which folder — nor which source —
+    // the track comes from. Two namesakes taken from two albums are
+    // indistinguishable without this.
+    const { w } = await mountAdmin({ playlist: THREE })
+    expect(w.findAll('[data-track-name]')[1]!.attributes('title')).toBe('Albums/Jazz/02.mp3')
+  })
+
+  it('toggles the full path under the track when it is clicked', async () => {
+    // A tooltip requires hovering, which a touchscreen cannot do: without this
+    // click the information would simply not exist on a phone — the very
+    // device this page is driven from.
+    const { w } = await mountAdmin({ playlist: THREE })
+    expect(w.find('[data-track-path]').exists()).toBe(false)
+    await w.findAll('[data-track-name]')[1]!.trigger('click')
+    expect(w.find('[data-track-path]').text()).toBe('Albums/Jazz/02.mp3')
+    await w.findAll('[data-track-name]')[1]!.trigger('click')
+    expect(w.find('[data-track-path]').exists()).toBe(false)
+  })
+
+  it('keeps a single path open at a time', async () => {
+    const { w } = await mountAdmin({ playlist: THREE })
+    await w.findAll('[data-track-name]')[0]!.trigger('click')
+    await w.findAll('[data-track-name]')[2]!.trigger('click')
+    const open = w.findAll('[data-track-path]')
+    expect(open).toHaveLength(1)
+    expect(open[0]!.text()).toBe('Albums/Jazz/03.mp3')
+  })
+
+  it('adds no track row when a path is revealed', async () => {
+    // The revealed path is a row of the same table. Were it to carry
+    // `data-track-row`, the pagination tests — which count a hundred rows then
+    // fifty — would be counting something else, and so would every other
+    // reading of the list through that marker.
+    const { w } = await mountAdmin({ playlist: THREE })
+    await w.findAll('[data-track-name]')[0]!.trigger('click')
+    expect(w.findAll('[data-track-row]')).toHaveLength(3)
+  })
+
+  it('lets one read a path while the pane is frozen', async () => {
+    // A send in flight greys the pane out, buttons included. Reading a path
+    // modifies nothing: denying it exactly when a running operation makes one
+    // wonder which file is concerned would deny it when it is most useful.
+    const { w, s } = await mountAdmin({ playlist: THREE })
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    // Cast: `getMockImplementation` announces a union that includes a
+    // constructor, which is not callable.
+    const answer = s.spy.getMockImplementation() as (
+      url: string,
+      init?: RequestInit,
+    ) => Promise<Response>
+    s.spy.mockImplementation(async (url: string, init?: RequestInit) => {
+      // Held open, so the send never finishes: that is what keeps the pane
+      // frozen for the length of the assertions below.
+      if (init?.method === 'PUT') await held
+      return (await answer(url, init)) as Response
+    })
+    await w.findAll('[data-track-down]')[0]!.trigger('click')
+    await flushPromises()
+    expect((w.findAll('[data-track-remove]')[0]!.element as HTMLButtonElement).disabled).toBe(true)
+
+    await w.findAll('[data-track-name]')[0]!.trigger('click')
+    expect(w.find('[data-track-path]').text()).toBe('Albums/Jazz/01.mp3')
+    release()
+    await flushPromises()
+  })
+
+  it('closes the revealed path when a track is moved', async () => {
+    // A reorder shuffles the ranks under one's eyes; a row left hanging open
+    // is then read as belonging to whatever has come to sit above it. Closing
+    // is the unambiguous answer, and it is the one asked for.
+    const { w } = await mountAdmin({ playlist: THREE })
+    await w.findAll('[data-track-name]')[0]!.trigger('click')
+    expect(w.find('[data-track-path]').exists()).toBe(true)
+    await w.findAll('[data-track-down]')[0]!.trigger('click')
+    await flushPromises()
+    expect(w.find('[data-track-path]').exists()).toBe(false)
+  })
+
+  it('takes the revealed path away with the track it belongs to', async () => {
+    // The open row is designated by the track's own path, not by its rank in
+    // the list: a rank designates another track as soon as the list moves, and
+    // the displayed path would then name a file that is no longer the one on
+    // the line above it. Keyed by the path, the row follows its track through
+    // a reorder and vanishes on its own when the track leaves — there is no
+    // invariant left to maintain by hand in each of the four operations that
+    // touch the list.
+    const { w, s } = await mountAdmin({ playlist: THREE })
+    await w.findAll('[data-track-name]')[1]!.trigger('click')
+    expect(w.find('[data-track-path]').text()).toBe('Albums/Jazz/02.mp3')
+
+    s.onPut = (payload) => {
+      if (payload.op === 'remove') s.data.playlist = [THREE[0]!, THREE[2]!]
+    }
+    await w.findAll('[data-track-remove]')[1]!.trigger('click')
+    await flushPromises()
+    expect(w.findAll('[data-track-row]')).toHaveLength(2)
+    expect(w.find('[data-track-path]').exists()).toBe(false)
+  })
 })

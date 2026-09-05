@@ -66,6 +66,28 @@ const window = computed(() =>
     : tracks.value,
 )
 
+/**
+ * Path of the track whose full path is shown, or `null`.
+ *
+ * The displayed name is the `#EXTINF` title, failing that the file name
+ * without its extension: neither says which folder — nor which source — the
+ * track comes from, and two namesakes taken from two albums are otherwise
+ * indistinguishable. The tooltip answers that with a hover; this row answers
+ * it with a tap, the only gesture a touchscreen has.
+ *
+ * Held as the **path** and not as the track's rank: a rank designates another
+ * track as soon as the list moves, and the open row would then name a file
+ * that is no longer the one above it. Keyed by the path it cannot say the
+ * wrong thing, and it goes away on its own when its track leaves the list —
+ * `remove`, `clear` and `load` have nothing to maintain by hand. `move` does
+ * close it, but for the eye and not for correctness: see there.
+ */
+const openPath = ref<string | null>(null)
+
+function togglePath(path: string): void {
+  openPath.value = openPath.value === path ? null : path
+}
+
 /** Save destinations: internal storage, then the writable roots. */
 const destinations = computed(() => [
   INTERNAL,
@@ -90,6 +112,12 @@ watch(
 
 function move(from: number, to: number): void {
   if (to < 0 || to >= tracks.value.length) return
+  // A reorder shuffles the ranks under the user's eyes. The open row could not
+  // name the wrong file — keyed by its path, it follows its own track — but
+  // one no longer knows, at a glance, which of the tracks that have just moved
+  // it belongs to. Closing is the unambiguous answer. Covers the drag as well:
+  // `drop` comes through here.
+  openPath.value = null
   void props.send({ op: 'move', from, to })
 }
 
@@ -218,92 +246,136 @@ function load(): void {
           <!-- Draggable rows, like the station grid of the radio plugin.
                `dragover.prevent` is essential: without it the browser
                refuses the drop. The rank sent to the plugin is **absolute**
-               (`offset + i`) and not the page's own. -->
-          <tr
-            v-for="(p, i) in window"
-            :key="`${offset + i}:${p.path}`"
-            data-track-row
-            class="border-t border-border"
-            :class="[
-              offset + i === data.index ? 'bg-muted/50' : '',
-              dragging === offset + i ? 'opacity-50' : '',
-            ]"
-            :draggable="!frozen"
-            @dragstart="dragging = offset + i"
-            @dragover.prevent
-            @drop.prevent="drop(offset + i)"
-            @dragend="dragging = null"
-          >
-            <!-- `data-track-num` carries the **number alone**, not the cell:
-                 the drag handle also lives in it, and a test reading the
-                 cell's text would find the glyph in it. -->
-            <td class="whitespace-nowrap tabular-nums text-muted-foreground">
-              <span class="cursor-grab select-none pr-1" :title="t('reorder_hint')" data-drag-handle>
-                ⠿
-              </span>
-              <span data-track-num>{{ offset + i + 1 }}</span>
-            </td>
-            <td class="py-1 pr-2">
-              <span data-track-name>{{ p.name }}</span>
-              <!-- A missing track is **flagged, never hidden**: a list that
-                   shrinks on its own is a defect that takes months to
-                   attribute, whereas an unmounted share is diagnosed in one
-                   second when the tracks stay there, flagged. -->
-              <span
-                v-if="p.missing === true"
-                data-track-missing
-                :title="p.path"
-                class="ml-2 rounded border border-destructive px-1 text-xs text-destructive"
+               (`offset + i`) and not the page's own.
+
+               A `<template>` and not a bare `<tr>`: each track may be
+               followed by a second row carrying its full path, and the two
+               belong to the same iteration. -->
+          <template v-for="(p, i) in window" :key="`${offset + i}:${p.path}`">
+            <tr
+              data-track-row
+              class="border-t border-border"
+              :class="[
+                offset + i === data.index ? 'bg-muted/50' : '',
+                dragging === offset + i ? 'opacity-50' : '',
+              ]"
+              :draggable="!frozen"
+              @dragstart="dragging = offset + i"
+              @dragover.prevent
+              @drop.prevent="drop(offset + i)"
+              @dragend="dragging = null"
+            >
+              <!-- `data-track-num` carries the **number alone**, not the cell:
+                   the drag handle also lives in it, and a test reading the
+                   cell's text would find the glyph in it. -->
+              <td class="whitespace-nowrap tabular-nums text-muted-foreground">
+                <span
+                  class="cursor-grab select-none pr-1"
+                  :title="t('reorder_hint')"
+                  data-drag-handle
+                >
+                  ⠿
+                </span>
+                <span data-track-num>{{ offset + i + 1 }}</span>
+              </td>
+              <td class="py-1 pr-2">
+                <!-- A button and not plain text: the full path is reachable by
+                     hovering (the `title`) as much as by tapping, and a
+                     touchscreen only has the second gesture. Never disabled by
+                     `frozen`, unlike the buttons on the right — reading a path
+                     modifies nothing, and refusing it while an operation runs
+                     would refuse it exactly when one wonders which file is
+                     concerned. The dotted underline is what says, without any
+                     hover, that there is something under the name. -->
+                <button
+                  type="button"
+                  data-track-name
+                  class="cursor-pointer text-left underline decoration-dotted underline-offset-4"
+                  :title="p.path"
+                  :aria-expanded="openPath === p.path"
+                  @click="togglePath(p.path)"
+                >
+                  {{ p.name }}
+                </button>
+                <!-- A missing track is **flagged, never hidden**: a list that
+                     shrinks on its own is a defect that takes months to
+                     attribute, whereas an unmounted share is diagnosed in one
+                     second when the tracks stay there, flagged. -->
+                <span
+                  v-if="p.missing === true"
+                  data-track-missing
+                  :title="p.path"
+                  class="ml-2 rounded border border-destructive px-1 text-xs text-destructive"
+                >
+                  {{ t('missing_badge') }}
+                </span>
+                <!-- `null`: the mount was not answering, so it is not known. A
+                     distinct, discreet badge, grey rather than red — saying
+                     "missing" here would blame the file for a failure that is
+                     the share's. The banner above gives the cause. -->
+                <span
+                  v-else-if="p.missing === null"
+                  data-track-unknown
+                  :title="p.path"
+                  class="ml-2 rounded border border-muted-foreground px-1 text-xs text-muted-foreground"
+                >
+                  {{ t('missing_unknown') }}
+                </span>
+              </td>
+              <td class="tabular-nums text-muted-foreground">{{ formatDuration(p.duration_s) }}</td>
+              <td class="whitespace-nowrap">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  data-track-up
+                  :aria-label="t('btn_move_up')"
+                  :disabled="frozen || offset + i === 0"
+                  @click="move(offset + i, offset + i - 1)"
+                >
+                  ▲
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  data-track-down
+                  :aria-label="t('btn_move_down')"
+                  :disabled="frozen || offset + i === tracks.length - 1"
+                  @click="move(offset + i, offset + i + 1)"
+                >
+                  ▼
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  data-track-remove
+                  :aria-label="t('btn_remove_track')"
+                  :disabled="frozen"
+                  @click="remove(offset + i)"
+                >
+                  ✕
+                </Button>
+              </td>
+            </tr>
+            <!-- The full path, revealed by the name above it. It carries no
+                 `data-track-row`: that marker counts the tracks — pagination
+                 asserts a hundred of them, then fifty — and a second row per
+                 track would make it count something else. No `border-t`
+                 either, so it reads as the continuation of its track and not
+                 as a row of its own; it takes over the highlight of the track
+                 being played for the same reason.
+
+                 `break-all`: an absolute path on a share has no space to break
+                 at, and would otherwise widen the table past the screen. -->
+            <tr v-if="openPath === p.path" :class="offset + i === data.index ? 'bg-muted/50' : ''">
+              <td
+                colspan="4"
+                data-track-path
+                class="break-all pb-1 pl-8 pr-2 text-xs text-muted-foreground"
               >
-                {{ t('missing_badge') }}
-              </span>
-              <!-- `null`: the mount was not answering, so it is not known. A
-                   distinct, discreet badge, grey rather than red — saying
-                   "missing" here would blame the file for a failure that is
-                   the share's. The banner above gives the cause. -->
-              <span
-                v-else-if="p.missing === null"
-                data-track-unknown
-                :title="p.path"
-                class="ml-2 rounded border border-muted-foreground px-1 text-xs text-muted-foreground"
-              >
-                {{ t('missing_unknown') }}
-              </span>
-            </td>
-            <td class="tabular-nums text-muted-foreground">{{ formatDuration(p.duration_s) }}</td>
-            <td class="whitespace-nowrap">
-              <Button
-                variant="ghost"
-                size="icon"
-                data-track-up
-                :aria-label="t('btn_move_up')"
-                :disabled="frozen || offset + i === 0"
-                @click="move(offset + i, offset + i - 1)"
-              >
-                ▲
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                data-track-down
-                :aria-label="t('btn_move_down')"
-                :disabled="frozen || offset + i === tracks.length - 1"
-                @click="move(offset + i, offset + i + 1)"
-              >
-                ▼
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                data-track-remove
-                :aria-label="t('btn_remove_track')"
-                :disabled="frozen"
-                @click="remove(offset + i)"
-              >
-                ✕
-              </Button>
-            </td>
-          </tr>
+                {{ p.path }}
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
 
