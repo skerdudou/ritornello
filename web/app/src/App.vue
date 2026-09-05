@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { Toaster } from '@ritornello/ui'
-import { onMounted } from 'vue'
+import { Skeleton, Toaster, useSkeleton } from '@ritornello/ui'
+import { computed, onMounted } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import BottomNav from './components/BottomNav.vue'
 import ThemeToggle from './components/ThemeToggle.vue'
@@ -8,7 +8,30 @@ import { useCatalog } from './composables/useCatalog'
 import { usePlugins } from './composables/usePlugins'
 import { useMetrics } from './composables/useMetrics'
 
-const { t, reload } = useCatalog()
+const { t, reload, settled } = useCatalog()
+
+/**
+ * The routed view waits for the catalog, and only it.
+ *
+ * A view mounted before the catalog has arrived renders translation keys.
+ * Most recover on the re-render that follows; a dropdown does not, because
+ * the kit's `SelectItemText` hands its text to the Select once, when the item
+ * mounts, and never again. That is what showed `audio_default_device` in the
+ * audio-output list on the configuration page, for the life of the page.
+ * Holding the view back fixes every such list at once — and the ones nobody
+ * has written yet — instead of making each dropdown remember to work around
+ * it.
+ *
+ * The header and the bottom nav are deliberately **not** held back: their
+ * labels are plain bindings that do recover on their own, and hiding the
+ * whole chrome would trade a fixed defect for a bigger visual jump.
+ */
+const catalogPending = computed(() => !settled.value)
+
+// Nothing for the first fraction of a second, a placeholder only if the wait
+// outlasts it — the rhythm the kit holds for the whole appliance, so this
+// wait looks like every other one.
+const skeleton = useSkeleton(catalogPending)
 // Shared with `ConfigView` at module level: this is what makes a toggle made
 // on the configuration page remove or restore the menu entry here, without
 // reloading the page. See `usePlugins`, which writes the previous default.
@@ -103,7 +126,18 @@ onMounted(async () => {
       </nav>
     </header>
     <main class="mx-auto max-w-5xl px-4 py-6 pb-24 md:pb-6">
-      <RouterView />
+      <!-- `role="status"` carries the only text: the blocks themselves are
+           `aria-hidden`, so a screen reader hears the wait announced once
+           rather than a run of empty boxes. Same shape as the placeholder
+           `PluginView` draws, so the two waits look alike. -->
+      <div v-if="skeleton" data-catalog-skeleton role="status" class="space-y-3">
+        <span class="sr-only">{{ t('loading') }}</span>
+        <Skeleton class="h-7 w-48" />
+        <Skeleton class="h-4 w-full" />
+        <Skeleton class="h-4 w-5/6" />
+        <Skeleton class="h-4 w-2/3" />
+      </div>
+      <RouterView v-if="!catalogPending" />
     </main>
     <BottomNav />
     <!-- Centered at the bottom and colored by type: on a living-room screen,
