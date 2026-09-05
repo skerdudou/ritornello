@@ -63,3 +63,9 @@ act_prev = "Précédent"
 act_eject = "Éjecter"
 act_source_cycle = "Changement de source"
 act_power = "Veille"
+
+# lignes de raccourci vers une source, ajoutees a la fin du tableau (une par
+# source annoncee par le coeur via `/api/presets`, plus une pour une source
+# encore liee mais qui n'est plus installee)
+act_select_source = "Source : {source}"
+act_select_source_unknown = "Source : {source} (absente)"

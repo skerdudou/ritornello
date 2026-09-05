@@ -184,60 +184,6 @@ const devices = computed(() => {
   return list
 })
 
-/**
- * Labels of the trigger of each `Select` on this page, computed here rather
- * than left to `SelectValue`'s own text.
- *
- * reka-ui hands an option's text to its Select when that item **mounts**
- * (`SelectItemText`, `onMounted` → `onOptionAdd`) and never re-reads it. So a
- * label coming from `t()` freezes at the language it had then: changing the
- * language from the picker just below reloads the catalog, every other label
- * on the page follows — and these triggers kept the old language until the
- * list was opened, opening being what remounts the items and heals it.
- *
- * Reported from use, twice, on two different pages. A plain reactive binding
- * cannot go stale that way, and `SelectValue` renders the slot it is given in
- * preference to its captured text — which is what `SystemView` already did.
- *
- * The audio one is not a catalog label alone: the system default is
- * translated, the devices are named by the server. It still needs the same
- * treatment for its first entry, and gets the whole thing so there is one rule
- * on this page rather than two.
- */
-const deviceLabel = computed(() => {
-  if (device.value === SYSTEM_DEFAULT) return t.value('audio_default_device')
-  const found = devices.value.find((d) => d.name === device.value)
-  return found?.description || found?.name || device.value
-})
-
-const languageLabel = computed(() => (lang.value ? languageName(lang.value) : ''))
-
-const startupLabel = computed(() => {
-  switch (settings.value.startup_power) {
-    case 'on':
-      return t.value('startup_on')
-    case 'standby':
-      return t.value('startup_standby')
-    default:
-      return t.value('startup_previous')
-  }
-})
-
-const dateFormatLabel = computed(() => {
-  switch (settings.value.date_format) {
-    case 'year_month_day':
-      return t.value('clock_date_ymd')
-    case 'month_day_year':
-      return t.value('clock_date_mdy')
-    default:
-      return t.value('clock_date_dmy')
-  }
-})
-
-const clockHoursLabel = computed(() =>
-  settings.value.clock_24h ? t.value('clock_24h') : t.value('clock_12h'),
-)
-
 async function loadAll() {
   // Needed here, not redundant: this is what reloads the catalog after a
   // successful language change (see `changeLanguage` below), in place of the
@@ -560,7 +506,7 @@ function goTo(id: string) {
             <!-- The card title is not associated with the trigger: without an
                  aria-label, the selector has no accessible name at all. -->
             <Select v-model="device">
-              <SelectTrigger class="min-w-64" :aria-label="t('audio_output')"><SelectValue>{{ deviceLabel }}</SelectValue></SelectTrigger>
+              <SelectTrigger class="min-w-64" :aria-label="t('audio_output')"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem :value="SYSTEM_DEFAULT" data-audio-default>
                   {{ t('audio_default_device') }}
@@ -586,7 +532,7 @@ function goTo(id: string) {
           <CardHeader><CardTitle>{{ t('language') }}</CardTitle></CardHeader>
           <CardContent class="flex flex-wrap items-center gap-2">
             <Select v-model="lang">
-              <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue>{{ languageLabel }}</SelectValue></SelectTrigger>
+              <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <!-- Name of the language and not its code: "français" is read,
                      "fr" is guessed. The code remains the value sent to the core. -->
@@ -605,7 +551,7 @@ function goTo(id: string) {
           <CardHeader><CardTitle>{{ t('startup_title') }}</CardTitle></CardHeader>
           <CardContent class="flex flex-wrap items-center gap-2">
             <Select v-model="settings.startup_power">
-              <SelectTrigger class="min-w-32" data-startup-select :aria-label="t('startup_title')"><SelectValue>{{ startupLabel }}</SelectValue></SelectTrigger>
+              <SelectTrigger class="min-w-32" data-startup-select :aria-label="t('startup_title')"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="on">{{ t('startup_on') }}</SelectItem>
                 <SelectItem value="standby">{{ t('startup_standby') }}</SelectItem>
@@ -629,7 +575,7 @@ function goTo(id: string) {
             <label class="grid gap-1 text-sm">
               {{ t('clock_date_label') }}
               <Select v-model="settings.date_format">
-                <SelectTrigger class="min-w-36" data-date-format-select :aria-label="t('clock_date_label')"><SelectValue>{{ dateFormatLabel }}</SelectValue></SelectTrigger>
+                <SelectTrigger class="min-w-36" data-date-format-select :aria-label="t('clock_date_label')"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="day_month_year">{{ t('clock_date_dmy') }}</SelectItem>
                   <SelectItem value="year_month_day">{{ t('clock_date_ymd') }}</SelectItem>
@@ -644,7 +590,7 @@ function goTo(id: string) {
                    labelled "24 h" would read badly when unchecked. -->
               <Select :model-value="settings.clock_24h ? '24' : '12'"
                       @update:model-value="(v) => (settings.clock_24h = v === '24')">
-                <SelectTrigger class="min-w-36" data-clock-hours-select :aria-label="t('clock_hours_label')"><SelectValue>{{ clockHoursLabel }}</SelectValue></SelectTrigger>
+                <SelectTrigger class="min-w-36" data-clock-hours-select :aria-label="t('clock_hours_label')"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="24">{{ t('clock_24h') }}</SelectItem>
                   <SelectItem value="12">{{ t('clock_12h') }}</SelectItem>

@@ -362,54 +362,6 @@ loaded), the same field the radio plugin uses — this drives the same
 preset grid described in [interface.md](interface.md), tracks standing
 in for stations.
 
-### What it does on arrival
-
-The plugin serves an admin page carrying its one setting: what happens when
-this source is arrived at. Three values — play nothing (the default), start at
-track 1, resume the track last played — stored in
-`/var/lib/ritornello/plugin-cd.json` (`RITORNELLO_CD_STATE`).
-
-**One value governs both ways of arriving**, the source key (`Activate`) and a
-boot or standby exit (`Wake`). That is the point of the setting, and it
-replaces a disagreement nobody had decided: `wake` was overridden to play
-nothing while `activate` started track 1, so whichever of the two the owner
-had in mind, the other was going to surprise them. The default is the old
-`wake` behaviour — starting a drive is a physical act, it spins up and it is
-audible, and it should not happen unasked.
-
-**The Play key is not an arrival**, and giving the cd a setting is what forced
-that distinction into the open. The core used to send `Activate` for both —
-"this source is now the active one" and "the user pressed Play while nothing
-was loaded" — which was invisible as long as every source answered by playing.
-With an arrival that may legitimately play nothing, the Play key went inert
-with it: only a track number could start the disc. So `SourceReq::Play` now
-exists alongside `Activate` and `Wake`, the core being the only party that can
-tell the two situations apart. The SDK's `play()` defaults to `activate()`, so
-radio, files, generic-input and mpd behave exactly as before; the cd is the
-only source that overrides it, and it starts — obeying the setting on *where*
-to start (a resume stays a resume) while ignoring its "play nothing", which
-answers a question the key did not ask.
-
-Resuming is tied to the **disc**, not to a track number floating free: the
-remembered entry carries the TOC the plugin already reads to tell a disc swap
-from a flicker of the tray. Insert another disc and playback starts at track 1
-instead, which is also what happens when nothing has been remembered yet, when
-the remembered number falls outside the disc (the file is editable by hand),
-and when the TOC has not been read yet. That last case is a real limitation
-worth stating: the read is asynchronous, and a plugin cannot ask for playback
-after the fact — a spontaneous notification carries a state, never an action
-— so a boot that outruns the TOC read resumes at the first track. Pressing the
-source key on a disc that has been sitting in the drive, the everyday case,
-has had its TOC read long since.
-
-Only one disc is remembered, the last one: swapping discs and coming back
-loses the position, which is the honest reading of "the last track played".
-The resume point is written on every track change — including the disc
-advancing on its own, otherwise listening straight through an album would
-only ever remember a track picked by hand. The two halves of the plugin write
-into that same file, the page for the setting and the source for the resume
-point, each through a read-modify-write that preserves the other's field.
-
 It never fills `preset_name`: a track number is not a name, and what is
 interesting about a disc (album, title, artist) already arrives through the
 `metadata` path (see below), not through the preset name. For the same reason
@@ -489,24 +441,6 @@ plugin has nothing to pace itself. The `Play` it issues is marked
 idle at the end would look like a dropped stream and the core would
 restart the list in a loop.
 
-That starting index reaches mpv **as part of the load**, and the reason is
-worth keeping. The core used to load the list and then correct the position,
-in two commands. Measured on mpv 0.37, with a three-entry list and entry 2
-wanted: the first form publishes the `path` of entry 0 **and then** of entry 2
-— mpv really did open the first entry — while declaring `playlist-start`
-beforehand only ever publishes entry 2. Everything the core hangs off `path`
-therefore fired once on a track nobody had asked for: it read a cover off it,
-over the network share, and relayed it to the `metadata` plugins as the
-playing track, so the display flipped through it. Visible in the log as a
-cover lookup for the first track of the list moments after a resume settled on
-another one. That index is also **always** declared, "from the beginning"
-included: `playlist-start` is a persistent option — measured, a second
-`loadlist` sent without touching it starts again where the previous one was
-told to — so leaving it out would make a list loaded after a resume silently
-start on the resumed track. `Player::load_list` takes it as a parameter and
-the player exposes no way to reposition separately, which is what keeps the
-old sequence from coming back.
-
 ### Package prerequisites
 
 Two system packages, only one of which is indispensable.
@@ -550,7 +484,7 @@ When it happens, the core's `504` names the cause and distinguishes a
 request that ran past its budget from a plugin that is not answering at
 all (`502`) — the two used to look identical on the page. So every filesystem access
 a request triggers goes through a circuit
-breaker (`health.rs`): it runs off the async thread under a 1.5 s deadline, and a
+breaker (`sante.rs`): it runs off the async thread under a 1.5 s deadline, and a
 mount point whose probe never returned is remembered, so later requests are
 refused instantly instead of losing another thread — a syscall in
 uninterruptible sleep cannot be killed, not even with `SIGKILL`. The abandoned
@@ -2062,9 +1996,9 @@ protocol:
   component;
 - `GetAsset("ui.css")` → the module's stylesheet (its own Tailwind pass,
   important: the core's CSS only contains the classes the core sees). The
-  shell injects it into a **cascade layer of its own, `plugin`, declared below
+  shell injects it into a **cascade layer of its own, `greffon`, declared below
   `utilities`** by `web/app/src/app.css`, through a
-  `<style>@import url(…) layer(plugin)</style>` — the only way to put an
+  `<style>@import url(…) layer(greffon)</style>` — the only way to put an
   *external* sheet in a named layer, which also makes it work for a third-party
   plugin whose CSS nobody here builds. That is a fix, not tidiness: both passes
   used to write into the same `utilities` layer, and the plugin's sheet —
@@ -2108,19 +2042,14 @@ future at its next `await`, so an interrupted `set_data` releases the
 lock — but a blocking syscall inside `spawn_blocking` runs to completion.
 A plugin that touches a network path therefore still has to run it off
 the async thread and behind a circuit breaker
-(`crates/ritornello-plugin-files/src/health.rs`); the protocol bounds the
+(`crates/ritornello-plugin-files/src/sante.rs`); the protocol bounds the
 *wait*, not the syscall.
 
 The shell mounts the module's default component passing it **two props**,
 which are the entirety of the data-side contract:
 
 - `catalog`: the flat i18n catalog returned by `GetCatalog`, to be
-  consumed through `createT(catalog)`. **Guaranteed settled at mount**: the
-  shell does not build the module's component until this catalog has come
-  back, so a first render never sees an empty one. "Settled" means
-  answered *or* refused — a plugin whose `GetCatalog` fails still gets its
-  component mounted, with an empty catalog, because a page withheld
-  forever would be worse than one showing keys;
+  consumed through `createT(catalog)`;
 - `base`: the **absolute** prefix under which the core serves this
   plugin's routes, trailing slash included (`/plugins/<name>/`). Every
   URL in the module is built from it — `api.get(`${base}api/data`)` — and
@@ -2146,34 +2075,8 @@ generic-input, mpd) use a Vite build (see
 `crates/ritornello-plugin-radio/ui/`) to benefit from `.vue` files and
 TypeScript — a comfort choice, not a requirement.
 
-Five things learned during this work stream, to know before writing a
+Four things learned during this work stream, to know before writing a
 third-party plugin's UI:
-
-- **A translated label placed in a `Select` must be rendered by the page,
-  not left to `<SelectValue>`.** This is the one rule of this list that has
-  been reported twice by users, on two different pages. reka-ui hands an
-  option's text to its Select when the item mounts (`SelectItemText`,
-  `onMounted` → `onOptionAdd`) and **never re-reads it**, so a label that
-  changes afterwards is ignored until the list is first opened — opening
-  remounts the items, which is what eventually heals it and makes the bug
-  so puzzling to diagnose. The pattern:
-
-  ```vue
-  <!-- Wrong: shows the previous language after a language change. -->
-  <SelectTrigger><SelectValue /></SelectTrigger>
-
-  <!-- Right: `SelectValue` renders the slot it is given in preference to the
-       text it captured, and an ordinary reactive binding cannot go stale. -->
-  <SelectTrigger><SelectValue>{{ labelOf(value) }}</SelectValue></SelectTrigger>
-  ```
-
-  The mount-time half of this trap is gone — a component is no longer built
-  before its catalog (see `catalog` above) — but a **language change** swaps
-  the catalog under a component that stays mounted, and that half remains.
-  It only concerns text coming from `t()`: options labelled with data from
-  the server (device names, station names) are immune, which is why most
-  pages never met it. `RadioAdmin.vue` and `CdAdmin.vue` both carry the
-  pattern, with the reason written beside it.
 
 - `assets/vue.js` is the **runtime-only** build of Vue (no embedded
   template compiler): a plugin module must ship **precompiled templates**

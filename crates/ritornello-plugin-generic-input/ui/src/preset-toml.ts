@@ -1,14 +1,27 @@
-export interface Command { cmd: string; arg?: number }
+export interface Command { cmd: string; arg?: number | string | boolean }
 export interface Binding extends Command { code: number }
 export interface DeviceBindings { name: string; bindings: Binding[] }
 export interface BindingTable { devices: DeviceBindings[] }
+
+/**
+ * One row of the bindings table. Either it names a catalogue key (the 23
+ * fixed actions) or it carries an already-resolved label (a source
+ * shortcut, whose label is the source's own name and which no catalogue
+ * knows). Never both, and never neither.
+ */
+export interface Row { key?: string; label?: string; cmd: Command }
+
+/** Resolves a row's displayed label: translates the key, or passes the already-resolved label through. */
+export function rowLabel(row: Row, t: (k: string) => string): string {
+  return row.key ? t(row.key) : (row.label ?? '')
+}
 
 // The 23 actions, in the old page's order (minus the two "next/previous
 // preset" entries, merged into `act_next`/`act_prev`: same protocol
 // command, interpreted by the active source - preset for radio, track for
 // cd). The label is translated by the plugin's catalog (`key`), the
 // command is a serialized `ritornello_proto::Command` (`cmd`/`arg`).
-export const ACTIONS: Array<{ key: string; cmd: Command }> = [
+export const ACTIONS: Row[] = [
   ...Array.from({ length: 9 }, (_, i) => ({
     key: `act_select_${i + 1}`,
     cmd: { cmd: 'Select', arg: i + 1 },
@@ -30,6 +43,54 @@ export const ACTIONS: Array<{ key: string; cmd: Command }> = [
   { key: 'act_source_cycle', cmd: { cmd: 'SourceCycle' } },
   { key: 'act_power', cmd: { cmd: 'Power' } },
 ]
+
+/**
+ * The source shortcut rows, appended after the fixed actions: one per
+ * source the core announces (`/api/presets`), in the catalogue's order —
+ * which is the order of the "change source" key, so the page and the key
+ * agree.
+ *
+ * Then one row per source **bound on this device but absent from the
+ * catalogue**: the plugin providing it may have been uninstalled since, and
+ * silently dropping its row would drop the binding at the next save without
+ * telling the operator why their key stopped working.
+ *
+ * `t` composes the label itself (`act_select_source`/
+ * `act_select_source_unknown`, each carrying a `{source}` placeholder)
+ * rather than a plain key: a source row has no catalogue key of its own
+ * (see `Row`), so the label must already be resolved by the time it is
+ * built, unlike the fixed `ACTIONS`.
+ */
+export function sourceRows(
+  sources: string[],
+  table: BindingTable,
+  device: string,
+  t: (k: string) => string,
+): Row[] {
+  const label = (key: string, name: string) => t(key).replace('{source}', name)
+  const known = sources.map((name) => ({
+    label: label('act_select_source', name),
+    cmd: { cmd: 'SelectSource', arg: name } as Command,
+  }))
+  const bound = table.devices.find((d) => d.name === device)?.bindings ?? []
+  // A source can be bound on several codes; de-duplicated, or an
+  // uninstalled source with two bindings would print its orphan row twice.
+  const orphans = [
+    ...new Set(
+      bound
+        .filter((b) => b.cmd === 'SelectSource' && typeof b.arg === 'string')
+        .map((b) => b.arg as string)
+        .filter((name) => !sources.includes(name)),
+    ),
+  ]
+  return [
+    ...known,
+    ...orphans.map((name) => ({
+      label: label('act_select_source_unknown', name),
+      cmd: { cmd: 'SelectSource', arg: name } as Command,
+    })),
+  ]
+}
 
 const sameCmd = (a: Command, b: Command) => a.cmd === b.cmd && (a.arg ?? null) === (b.arg ?? null)
 
@@ -58,12 +119,12 @@ export function parseField(raw: string): number[] {
 
 // Rebuilds the complete table: the other devices are preserved as-is, only
 // the current device is rewritten from the array. `codes` is indexed like
-// `ACTIONS`.
-export function collect(table: BindingTable, device: string, codes: string[]): BindingTable {
+// `rows`.
+export function collect(table: BindingTable, device: string, rows: Row[], codes: string[]): BindingTable {
   const devices = table.devices.filter((d) => d.name !== device)
   const bindings: Binding[] = []
-  ACTIONS.forEach((a, i) => {
-    for (const code of parseField(codes[i] ?? '')) bindings.push({ code, ...a.cmd })
+  rows.forEach((r, i) => {
+    for (const code of parseField(codes[i] ?? '')) bindings.push({ code, ...r.cmd })
   })
   if (device) devices.push({ name: device, bindings })
   return { devices }
@@ -78,7 +139,13 @@ export function presetToml(bindings: Binding[]): string {
   return bindings
     .map((b) => {
       let block = `[[bindings]]\ncode = ${b.code}\ncmd = "${b.cmd}"\n`
-      if (b.arg !== undefined && b.arg !== null) block += `arg = ${b.arg}\n`
+      if (b.arg !== undefined && b.arg !== null) {
+        // TOML types: a string needs quotes, a number and a boolean are bare
+        // words. Getting this wrong only shows on the export/re-import round
+        // trip, which is why it is pinned by a test rather than by review.
+        const value = typeof b.arg === 'string' ? JSON.stringify(b.arg) : String(b.arg)
+        block += `arg = ${value}\n`
+      }
       return block
     })
     .join('\n')
@@ -87,45 +154,45 @@ export function presetToml(bindings: Binding[]): string {
 export interface Conflict {
   /** The faulty code. */
   code: number
-  /** i18n keys of the *other* actions carrying this code, in `ACTIONS`'s order. Empty if the duplicate is internal to the field. */
+  /** Labels of the *other* rows carrying this code, in `rows`'s order. Empty if the duplicate is internal to the field. */
   others: string[]
 }
 
-// Detects, for each displayed action, the first faulty code in its field:
-// either a code already carried by another action (exactly what the server
+// Detects, for each displayed row, the first faulty code in its field:
+// either a code already carried by another row (exactly what the server
 // would reject at save time, `duplicate_code`, but visible beforehand), or
 // a code entered several times in the same field. A single conflict per
 // row, chosen in the field's order, so that there is never more than one
 // message to display under a given field.
-export function conflicts(codes: string[]): Array<Conflict | null> {
-  // The traversal follows `ACTIONS`, not `codes`: the result always has one
-  // entry per action, whatever the length of the received array (`codes`
-  // is indexed like `ACTIONS`, a shorter array simply means empty fields).
-  // And each row carries its own i18n key, which replaces looking up
-  // `ACTIONS[j]` from an index coming from the input array -- which used to
+export function conflicts(rows: Row[], codes: string[], t: (k: string) => string): Array<Conflict | null> {
+  // The traversal follows `rows`, not `codes`: the result always has one
+  // entry per row, whatever the length of the received array (`codes` is
+  // indexed like `rows`, a shorter array simply means empty fields). And
+  // each entry carries its own resolved label, which replaces looking up
+  // `rows[j]` from an index coming from the input array -- which used to
   // yield `undefined`, and so throw a `TypeError`, for any caller passing
-  // more codes than there are actions.
-  const rows = ACTIONS.map((a, i) => ({ key: a.key, codes: parseField(codes[i] ?? '') }))
+  // more codes than there are rows.
+  const entries = rows.map((r, i) => ({ label: rowLabel(r, t), codes: parseField(codes[i] ?? '') }))
 
-  // For each code, the rows that carry it at least once — used to spot
-  // cross-action duplicates without rescanning the whole table for each
+  // For each code, the entries that carry it at least once — used to spot
+  // cross-row duplicates without rescanning the whole table for each
   // candidate code.
-  const rowsByCode = new Map<number, typeof rows>()
-  for (const row of rows) {
-    for (const code of new Set(row.codes)) {
-      const carriers = rowsByCode.get(code) ?? []
-      carriers.push(row)
-      rowsByCode.set(code, carriers)
+  const entriesByCode = new Map<number, typeof entries>()
+  for (const entry of entries) {
+    for (const code of new Set(entry.codes)) {
+      const carriers = entriesByCode.get(code) ?? []
+      carriers.push(entry)
+      entriesByCode.set(code, carriers)
     }
   }
 
-  return rows.map((row) => {
-    for (const code of row.codes) {
-      const otherRows = (rowsByCode.get(code) ?? []).filter((r) => r !== row)
-      if (otherRows.length > 0) {
-        return { code, others: otherRows.map((r) => r.key) }
+  return entries.map((entry) => {
+    for (const code of entry.codes) {
+      const others = (entriesByCode.get(code) ?? []).filter((e) => e !== entry)
+      if (others.length > 0) {
+        return { code, others: others.map((e) => e.label) }
       }
-      const occurrences = row.codes.filter((c) => c === code).length
+      const occurrences = entry.codes.filter((c) => c === code).length
       if (occurrences >= 2) {
         return { code, others: [] }
       }

@@ -140,6 +140,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_preset_reads_a_quoted_string_argument() {
+        // Mirrors what the admin page's TypeScript export now produces for a
+        // source shortcut: a quoted `arg`, not a bare word (which is not
+        // valid TOML for a string at all).
+        let toml = "[[bindings]]\ncode = 100\ncmd = \"SelectSource\"\narg = \"radio\"\n";
+        let b = parse_preset(toml).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].command(), Some(Command::SelectSource("radio".into())));
+    }
+
+    #[test]
     fn parse_preset_invalid_toml_gives_an_error() {
         assert!(parse_preset("this is not = toml [").is_err());
     }

@@ -54,10 +54,11 @@ function sourceFiles(dir: string): string[] {
 // literal key. KNOWN, ACCEPTED LIMITATION: a key built dynamically
 // (variable, template literal, computed property) escapes this regex —
 // that is the case for the 19 `act_*` keys: `InputAdmin.vue` does
-// `t(a.key)` in a loop over `ACTIONS`, and `ACTIONS` itself builds
-// `act_select_1`..`act_select_9` via a template literal (`preset-toml.ts`).
-// None of these keys ever appears literally in a `t(...)` call: they are
-// added explicitly via the `ACTIONS` import rather than by the regex.
+// `rowLabel(a, t)` (which translates `a.key` inside) in a loop over
+// `ACTIONS`, and `ACTIONS` itself builds `act_select_1`..`act_select_9` via
+// a template literal (`preset-toml.ts`). None of these keys ever appears
+// literally in a `t(...)` call: they are added explicitly via the `ACTIONS`
+// import rather than by the regex.
 function literalCallKeys(files: string[]): Set<string> {
   const keys = new Set<string>()
   const pattern = /\bt(?:\.value)?\(\s*['"]([A-Za-z0-9_]+)['"]/g
@@ -77,10 +78,18 @@ describe('i18n keys used by the generic-input plugin', () => {
 
     const used = new Set([
       ...literalCallKeys(sourceFiles(join(PACKAGE_ROOT, 'src'))),
-      ...ACTIONS.map((a) => a.key),
+      // `Row.key` is optional (a labelled row, e.g. a future source
+      // shortcut, has none): every current `ACTIONS` entry does carry one,
+      // but the type no longer guarantees it, hence the filter.
+      ...ACTIONS.map((a) => a.key).filter((k): k is string => k !== undefined),
     ])
 
     const missing = [...used].filter((key) => !catalog.has(key)).sort()
     expect(missing).toEqual([])
+
+    // Source rows are labelled by the source's own name, but the row still
+    // needs a word around it, and an uninstalled source needs to say so.
+    expect(catalog.has('act_select_source')).toBe(true)
+    expect(catalog.has('act_select_source_unknown')).toBe(true)
   })
 })

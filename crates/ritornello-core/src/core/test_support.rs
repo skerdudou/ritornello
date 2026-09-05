@@ -22,15 +22,8 @@ impl crate::player::Player for FakePlayer {
         self.calls.lock().unwrap().push(format!("play {uri}"));
         Ok(())
     }
-    async fn load_list(&self, uri: &str, start: Option<i64>) -> anyhow::Result<()> {
-        // The index is recorded **in the same call**, which is the whole
-        // point: a test can no longer see a load and a positioning as two
-        // separate events, because the player no longer offers that.
-        let start = match start {
-            Some(n) => n.to_string(),
-            None => "auto".to_string(),
-        };
-        self.calls.lock().unwrap().push(format!("load_list {uri} start={start}"));
+    async fn load_list(&self, uri: &str) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("load_list {uri}"));
         Ok(())
     }
     async fn stop(&self) -> anyhow::Result<()> {
@@ -50,6 +43,10 @@ impl crate::player::Player for FakePlayer {
     }
     async fn prev(&self) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push("prev".into());
+        Ok(())
+    }
+    async fn set_playlist_pos(&self, n: i64) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("playlist-pos {n}"));
         Ok(())
     }
     async fn set_volume(&self, v: u8) -> anyhow::Result<()> {
@@ -104,16 +101,6 @@ impl Source for FakeSource {
             (_, SourceReq::Eject) if self.name == "cd" => SourceAction::Stop,
             ("radio", SourceReq::Wake) => SourceAction::play("http://fip"),
             ("cd", SourceReq::Wake) => SourceAction::Noop,
-            // The Play key. This fake answers it like an arrival, which is
-            // the SDK's default for any source that does not override
-            // `play()` — it is not a model of the real cd plugin, whose
-            // arrival is configurable and may play nothing while Play still
-            // starts the disc. What matters here is that the core sends a
-            // distinct request at all: without these two arms the fake
-            // would fall through to `Noop` and the Play key would look
-            // inert in the tests too.
-            ("radio", SourceReq::Play) => SourceAction::play("http://fip"),
-            ("cd", SourceReq::Play) => SourceAction::play("cdda://").finite(),
             _ => SourceAction::Noop,
         })
     }

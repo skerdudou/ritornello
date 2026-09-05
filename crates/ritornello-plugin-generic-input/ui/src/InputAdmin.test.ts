@@ -17,6 +17,11 @@ const CATALOG = {
   conflict_dup: 'le code {code} est saisi deux fois',
   save_conflicts: 'Corrigez les codes en double avant d’enregistrer',
   act_mute: 'Muet', act_power: 'Veille',
+  // Stand-ins for the catalogue keys task 4 adds to the shipped locales
+  // (`act_select_source`/`act_select_source_unknown`): same `{source}`
+  // placeholder shape, so a source row's label already resolves to the
+  // source's own name here, ahead of the real translations landing.
+  act_select_source: '{source}', act_select_source_unknown: '{source} (unknown)',
 }
 
 const DATA = {
@@ -121,6 +126,122 @@ describe('InputAdmin', () => {
     const { w } = await mountLoaded()
     expect(w.findAll('[data-action-row]')).toHaveLength(23)
     expect(w.find('[data-device-select]').exists()).toBe(true)
+  })
+
+  it('appends one row per source from `/api/presets`, at the end of the table', async () => {
+    const spy = vi.fn(async (u: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204 })
+      if (u === '/api/presets') {
+        return new Response(JSON.stringify({ sources: [{ name: 'radio' }, { name: 'files' }] }), { status: 200 })
+      }
+      return new Response(JSON.stringify(DATA), { status: 200 })
+    })
+    vi.stubGlobal('fetch', spy)
+    const w = mountView()
+    await flushPromises()
+    const rows = w.findAll('[data-action-row]')
+    expect(rows).toHaveLength(25)
+    expect(rows[23]!.find('td').text()).toBe('radio')
+    expect(rows[24]!.find('td').text()).toBe('files')
+  })
+
+  it('keeps the 23 fixed rows and shows no error when the source catalogue call fails', async () => {
+    const spy = vi.fn(async (u: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204 })
+      if (u === '/api/presets') return new Response(null, { status: 500 })
+      return new Response(JSON.stringify(DATA), { status: 200 })
+    })
+    vi.stubGlobal('fetch', spy)
+    const w = mountView()
+    await flushPromises()
+    expect(w.findAll('[data-action-row]')).toHaveLength(23)
+    expect(w.text()).not.toContain('Erreur')
+  })
+
+  it('tolerates a body with no `sources` field: no source row, and no crash', async () => {
+    // Precaution, not a measured fact: `SourcesCatalog` (`ritornello-proto`)
+    // has no `skip_serializing_if` on `sources` (only `SourceCatalog.presets`
+    // does), so the real `/api/presets` always serializes the field, even
+    // empty. This guards `catalogue.sources ?? []` regardless -- a stub
+    // shaped like some other view's fixture, or a future change to the wire
+    // format, could still hand this view a body with the field missing.
+    const spy = vi.fn(async (u: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204 })
+      if (u === '/api/presets') return new Response(JSON.stringify({}), { status: 200 })
+      return new Response(JSON.stringify(DATA), { status: 200 })
+    })
+    vi.stubGlobal('fetch', spy)
+    const w = mountView()
+    await flushPromises()
+    expect(w.findAll('[data-action-row]')).toHaveLength(23)
+  })
+
+  it("a source row's conflict message names the other row without translating it a second time", async () => {
+    // `rowLabel` passes a source row's label through as-is (it has no
+    // catalogue key), and `conflicts` resolves every row's label exactly
+    // once; `conflictText` then embeds `Conflict.others` verbatim. A
+    // regression that wraps `others` in a second `t.value(...)` call would
+    // normally slip past every conflict test in this file, `createT`'s
+    // catalogue: `catalog[key] ?? key`. A translated label ("Muet", "radio")
+    // never happens to collide with a real catalogue key, so the fallback
+    // returns it unchanged either way -- a double translation is invisible.
+    //
+    // This catalogue defines a key that DOES collide, on purpose: `radio`
+    // itself, mapped to a telltale string. The correct code never looks up
+    // `catalog['radio']`; a regressed one would, and the row would display
+    // the telltale string instead of the source's name.
+    const catalog = { ...CATALOG, radio: 'DOUBLE-TRANSLATED' }
+    const spy = vi.fn(async (u: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204 })
+      if (u === '/api/presets') return new Response(JSON.stringify({ sources: [{ name: 'radio' }] }), { status: 200 })
+      return new Response(JSON.stringify(DATA), { status: 200 })
+    })
+    vi.stubGlobal('fetch', spy)
+    const w = mount(InputAdmin, { props: { catalog, base: BASE }, attachTo: document.body })
+    await flushPromises()
+
+    // "Muet" already carries code 9 (from `DATA`); typing it into the
+    // "radio" source row puts both rows in conflict.
+    const radioRow = actionRow(w, 'radio')
+    await radioRow.find('input').setValue('9')
+
+    const muteText = actionRow(w, 'Muet').find('[data-conflict]').text()
+    const radioText = radioRow.find('[data-conflict]').text()
+    expect(muteText).toContain('radio')
+    expect(muteText).not.toContain('DOUBLE-TRANSLATED')
+    expect(radioText).toContain('Muet')
+  })
+
+  it('a binding to a source no longer in the catalogue survives a save (orphan row)', async () => {
+    // Exactly the case the brief warns about: dropping the row on an
+    // uninstalled source would drop its binding at the next save, in
+    // silence. `sourceRows` (which keeps the orphan row) and `collect`
+    // (which turns rows into bindings) are each tested alone elsewhere;
+    // this composes them through an actual `save`.
+    const bindings = {
+      devices: [{
+        name: 'mce',
+        bindings: [{ code: 9, cmd: 'Mute' }, { code: 50, cmd: 'SelectSource', arg: 'tape' }],
+      }],
+    }
+    const spy = vi.fn(async (u: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204 })
+      if (u === '/api/presets') return new Response(JSON.stringify({ sources: [{ name: 'radio' }] }), { status: 200 })
+      return new Response(JSON.stringify({ ...DATA, bindings }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', spy)
+    const w = mountView()
+    await flushPromises()
+
+    await w.find('[data-save]').trigger('click')
+    await flushPromises()
+
+    const put = spy.mock.calls.find(
+      (c) => (c[1] as RequestInit)?.method === 'PUT' && JSON.parse(String((c[1] as RequestInit).body)).op === 'save',
+    )!
+    const body = JSON.parse(String((put[1] as RequestInit).body))
+    const device = body.bindings.devices.find((d: { name: string }) => d.name === 'mce')
+    expect(device.bindings).toContainEqual({ code: 50, cmd: 'SelectSource', arg: 'tape' })
   })
 
   it('prefills the codes of the selected device', async () => {
@@ -362,9 +483,13 @@ describe('InputAdmin', () => {
     await flushPromises()
     await w.find('[data-save]').trigger('click')
     await flushPromises()
-    expect(spy.mock.calls.length).toBeGreaterThan(1)
-    for (const call of spy.mock.calls) {
-      expect(call[0]).toBe('/plugins/remote/api/data')
+    // `/api/presets` is the one deliberate exception: it belongs to the
+    // core, not to this plugin, and is fetched from an absolute path rather
+    // than through `url(...)` (see the source-catalogue call in `reload`).
+    const calls = spy.mock.calls.map((c) => c[0])
+    expect(calls.filter((u) => u !== '/api/presets').length).toBeGreaterThan(1)
+    for (const call of calls) {
+      expect(call === '/plugins/remote/api/data' || call === '/api/presets').toBe(true)
     }
   })
 

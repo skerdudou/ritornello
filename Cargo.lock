@@ -1198,7 +1198,6 @@ dependencies = [
  "ritornello-i18n",
  "ritornello-plugin-sdk",
  "ritornello-proto",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",

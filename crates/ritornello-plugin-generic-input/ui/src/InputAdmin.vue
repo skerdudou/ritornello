@@ -6,8 +6,8 @@ import {
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import LearnDialog from './LearnDialog.vue'
 import {
-  ACTIONS, codesFor, collect, conflicts, parseField, presetToml, sanitiseDeviceName,
-  type BindingTable, type Conflict,
+  ACTIONS, codesFor, collect, conflicts, parseField, presetToml, rowLabel, sanitiseDeviceName,
+  sourceRows, type BindingTable, type Conflict, type Row,
 } from './preset-toml'
 
 // `base` is part of the plugin UI contract, same as `catalog`: the
@@ -48,6 +48,23 @@ interface Data {
 const data = ref<Data>({ devices: [], bindings: { devices: [] }, presets: [], learning: null })
 const device = ref('')
 const preset = ref('')
+// Source names, in the core's switching order (the same order `SourceCycle`
+// follows). Empty until `/api/presets` answers, and empty for good if the
+// call fails: the page stays fully usable without the source rows, it
+// simply does not offer them.
+const sources = ref<string[]>([])
+
+// The complete table: the 23 fixed actions, then one row per source. A
+// `computed`, not a plain array like the old `ACTIONS` alias, because its
+// tail depends on data that arrives asynchronously (`sources`, and the
+// current device's bindings, for the orphan rows) — every caller that used
+// to read `ACTIONS` now reads this instead, so a source row is never
+// missing from validation, saving or the learning popup.
+const rows = computed<Row[]>(() => [
+  ...ACTIONS,
+  ...sourceRows(sources.value, data.value.bindings, device.value, t.value),
+])
+
 const codes = ref<string[]>(ACTIONS.map(() => ''))
 const message = ref('')
 // Row (index into `ACTIONS`) whose key is being learned, `null` otherwise:
@@ -70,8 +87,8 @@ const add = ref(false)
 /** Translated label of the learned action, for the popup's title. */
 const learnedActionLabel = computed(() => {
   const i = learnedRow.value
-  const key = i === null ? undefined : ACTIONS[i]?.key
-  return key ? t.value(key) : ''
+  const row = i === null ? undefined : rows.value[i]
+  return row ? rowLabel(row, t.value) : ''
 })
 let timer: ReturnType<typeof setInterval> | null = null
 // Synchronous guard against the race described in review (round 1): `timer`
@@ -84,8 +101,11 @@ let timer: ReturnType<typeof setInterval> | null = null
 // before any `await`, so it takes effect immediately.
 let learnInFlight = false
 
+// Indexed like `rows.value`, not `ACTIONS`: a table sized to the fixed
+// actions alone would leave the source rows' cells forever empty, and
+// `collect` would then never see a code to save for them.
 function fillCodes() {
-  codes.value = ACTIONS.map((a) => (device.value ? codesFor(data.value.bindings, device.value, a.cmd) : ''))
+  codes.value = rows.value.map((a) => (device.value ? codesFor(data.value.bindings, device.value, a.cmd) : ''))
 }
 
 async function reload() {
@@ -101,10 +121,56 @@ async function reload() {
   } catch (e) {
     message.value = t.value('load_error') + (e as Error).message
   }
+  try {
+    // The catalogue the core already keeps for the displays
+    // (`web/app/src/composables/usePresets.ts` reads the same route). An
+    // **absolute** path, not built from `props.base`: `/api/presets`
+    // belongs to the core, not to this plugin, unlike every `url(...)` call
+    // above. A failure is not fatal -- the source rows simply do not
+    // appear, same as a plugin that ships none.
+    const catalogue = await api.get<{ sources?: Array<{ name: string }> }>('/api/presets')
+    sources.value = (catalogue.sources ?? []).map((s) => s.name)
+  } catch {
+    sources.value = []
+  }
 }
 
 onMounted(reload)
 onUnmounted(() => stopTimer())
+
+// A stable identity for a row, independent of its *position* in `rows` and
+// of its *label* text: a fixed action's catalogue key, or a source row's
+// serialized command. The command, not the label -- a source row's label
+// depends on whether it is currently known or orphaned
+// (`act_select_source` vs. `act_select_source_unknown`), but the binding it
+// represents (`SelectSource("tape")`) is the same row before and after that
+// status changes, and its typed-in code must follow it across the switch.
+function rowIdentity(r: Row): string {
+  return r.key ?? JSON.stringify(r.cmd)
+}
+
+// Keeps each row's already-typed code attached to that row when `rows`
+// changes shape (a source announced after the initial load, the catalogue
+// call finally resolving, or a device switch), by matching on identity
+// rather than on index.
+//
+// Position alone is not safe here: `sourceRows` always lists **known**
+// sources ahead of **orphan** ones (see its doc comment), so an orphan row
+// rendered before the catalogue answers can find itself pushed one slot to
+// the right the moment a known source is inserted ahead of it -- an
+// index-based "only append at the tail" fill (the first version of this
+// watcher) would then read that orphan's old code from the wrong new
+// index, duplicating it onto whichever row now sits there. Measured: two
+// rows ended up sharing one code and blocking "Save" behind a false
+// conflict, in exactly that sequence.
+watch(rows, (current, previous) => {
+  const byIdentity = new Map(previous.map((r, i) => [rowIdentity(r), codes.value[i] ?? '']))
+  codes.value = current.map((r) => {
+    const kept = byIdentity.get(rowIdentity(r))
+    if (kept !== undefined) return kept
+    return device.value ? codesFor(data.value.bindings, device.value, r.cmd) : ''
+  })
+})
 
 // Changing device cancels the ongoing learning session **before**
 // repopulating the table, like the old handler used to
@@ -265,14 +331,15 @@ async function learn(i: number) {
 // `codes` being an array `ref` bound by `v-model` — a code arriving via
 // learning also flows through it, since `applyCode` writes into this same
 // array.
-const conflictsByAction = computed(() => conflicts(codes.value))
+const conflictsByAction = computed(() => conflicts(rows.value, codes.value, t.value))
 const hasConflicts = computed(() => conflictsByAction.value.some((c) => c !== null))
 
 /** Sentence displayed below a faulty field. */
 function conflictText(c: Conflict): string {
   if (c.others.length) {
-    // The **translated** labels of the other actions, never their i18n keys.
-    return t.value('conflict_code', { code: c.code, action: c.others.map((k) => t.value(k)).join(', ') })
+    // `others` already holds resolved labels (`conflicts` translated them):
+    // no second translation pass here.
+    return t.value('conflict_code', { code: c.code, action: c.others.join(', ') })
   }
   return t.value('conflict_dup', { code: c.code })
 }
@@ -286,7 +353,7 @@ async function save() {
     message.value = t.value('no_device')
     return
   }
-  const table = collect(data.value.bindings, device.value, codes.value)
+  const table = collect(data.value.bindings, device.value, rows.value, codes.value)
   const err = await api.put(url('api/data'), { op: 'save', bindings: table })
   if (err) {
     message.value = t.value('save_error') + err
@@ -403,8 +470,8 @@ function export_() {
         </tr>
       </thead>
       <tbody>
-        <tr v-for="(a, i) in ACTIONS" :key="a.key" data-action-row class="border-t border-border">
-          <td class="py-1">{{ t(a.key) }}</td>
+        <tr v-for="(a, i) in rows" :key="a.key ?? a.label" data-action-row class="border-t border-border">
+          <td class="py-1">{{ rowLabel(a, t) }}</td>
           <td class="py-1 pr-2">
             <!-- No red class to add: the kit's `Input` already carries
                  `aria-invalid:border-destructive` and the red ring. Setting

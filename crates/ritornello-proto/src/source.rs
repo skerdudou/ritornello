@@ -8,23 +8,6 @@ pub enum SourceReq {
     /// Plugin-driven wake-up (boot / leaving standby). SDK-side default:
     /// behaves like `Activate`; a plugin may override `wake()`.
     Wake,
-    /// The user asked to **play**, explicitly — the Play key, while nothing
-    /// is loaded. SDK-side default: behaves like `Activate`; a plugin may
-    /// override `play()`.
-    ///
-    /// Distinct from `Activate` because the two are different intentions
-    /// that used to travel as one signal. `Activate` means "this source is
-    /// now the one" — a source switch, or a boot — and a source is entitled
-    /// to answer that by playing nothing. `Play` means "start now", and
-    /// there is no reading of it under which playing nothing is right.
-    ///
-    /// The distinction was invisible as long as every source answered
-    /// `Activate` by playing: the cd gained a setting whose default is to
-    /// play nothing on arrival, and the Play key — which went through
-    /// `Activate` — went inert with it. Rather than have the cd guess which
-    /// of the two situations it was in, the core says which, since it is the
-    /// only one that knows.
-    Play,
     Deactivate,
     Select(u8),
     Next,
@@ -88,14 +71,10 @@ pub enum SourceAction {
         /// **Requires `playlist: true`** to work, and that is a lesson paid
         /// for: a `loadfile` on an `.m3u` only unfolds it **afterwards** —
         /// measured, `playlist-count` is 1, then 3 only after an
-        /// `end-file`/`start-file`. The position sent right after therefore
-        /// arrived out of bounds, playback restarted from the first track,
-        /// and the display lost everything. `loadlist` unfolds on the spot.
-        ///
-        /// The core carries this index **into** the load rather than
-        /// correcting the position afterwards (see `Player::load_list`): the
-        /// two-step version really did open the list's first entry, and the
-        /// core announced it as the playing track for a moment.
+        /// `end-file`/`start-file`. The `playlist-pos` sent right after
+        /// therefore arrived out of bounds, playback restarted from the first
+        /// track, and the display lost everything. `loadlist` unfolds on the
+        /// spot.
         ///
         /// It is the only way for a Source to resume a list at track n — a
         /// digit from the remote, or resumption after a restart.

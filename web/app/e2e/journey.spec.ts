@@ -263,7 +263,7 @@ test('a file the app does not have gets a 404, not the whole page', async ({ pag
   const icon = page.locator('link[rel="icon"]')
   await expect(icon).toHaveCount(1)
   // Inlined, so the icon costs no request of its own.
-  expect(await icon.getAttribute('href')).toMatch(/^data:image\/png;base64,/)
+  expect(await icon.getAttribute('href')).toMatch(/^data:image\/svg\+xml,/)
 })
 
 test('the usable width does not move when content starts or stops scrolling', async ({ page }) => {

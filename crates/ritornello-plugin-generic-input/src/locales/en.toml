@@ -67,3 +67,9 @@ act_prev = "Previous"
 act_eject = "Eject"
 act_source_cycle = "Change source"
 act_power = "Standby"
+
+# source shortcut rows, appended at the end of the table (one per source the
+# core announces via `/api/presets`, plus one for a source still bound but
+# no longer installed)
+act_select_source = "Source: {source}"
+act_select_source_unknown = "Source: {source} (not installed)"
