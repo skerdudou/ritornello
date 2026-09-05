@@ -52,6 +52,9 @@ function full(state: Partial<PlayerPayload>): PlayerPayload {
     position_s: null,
     seekable: false,
     can_eject: false,
+    has_finite_list: false,
+    random: false,
+    repeat_all: false,
     ...state,
   }
 }

@@ -155,7 +155,9 @@ pub const COMMANDS: &[&str] = &[
     "playlistinfo",
     "plchanges",
     "previous",
+    "random",
     "readpicture",
+    "repeat",
     "search",
     "seek",
     "seekcur",
@@ -326,6 +328,24 @@ pub fn handle(
         // the current volume, and clamped here (see `volume`) rather than
         // letting `Command::SetVolume`, which is absolute, overflow.
         "volume" => volume(inst, index, remainder),
+        // `random 0|1` / `repeat 0|1`: absolute values, unlike the physical
+        // remote's toggle keys. Always emitted, never guarded by the current
+        // state: unlike `pause`'s toggle, `SetRandom`/`SetRepeatAll` carry no
+        // ambiguity a resend could double, so there is no race to close here
+        // — see `SharedState::acknowledge_optimistic` for where the
+        // comparison actually lives (it decides whether to wake `options`,
+        // not whether to emit).
+        //
+        // **In standby, this still answers `OK` and has no effect** — the
+        // core ignores every command but `Power` while standing by (see
+        // `Core::handle_command`), and this module has no guard against it
+        // anywhere else either (`next`, `stop`… all emit unconditionally).
+        // Nothing to special-case here: an MPD client that toggles shuffle
+        // while the device is off gets a truthful acknowledgement of a
+        // command that did nothing, the same as every other key on this
+        // device.
+        "random" => play_mode(index, "random", remainder, Command::SetRandom),
+        "repeat" => play_mode(index, "repeat", remainder, Command::SetRepeatAll),
         // `seek`/`seekid` ignore their first argument (position or id):
         // `SeekTo` cannot change track at the same time, and MPD only sends
         // this kind of command about what is already playing.
@@ -692,11 +712,16 @@ fn published_volume(inst: &Snapshot) -> u8 {
 fn status(inst: &Snapshot) -> Vec<String> {
     let queue = queue(inst);
     let mut lines = vec![line("volume", published_volume(inst))];
-    // Reported as zero and **not omitted**: clients always read them, and
-    // their absence makes them misbehave. *Writing* them is refused
-    // (Task 7), so this is the only place where the plugin publishes a value
-    // it cannot change — see the spec, § What the plugin does not do.
-    for key in ["repeat", "random", "single", "consume"] {
+    lines.push(line("repeat", u8::from(inst.state.repeat_all)));
+    lines.push(line("random", u8::from(inst.state.random)));
+    // `single` and `consume` stay reported as zero and **not omitted**:
+    // clients always read them, and their absence makes them misbehave.
+    // Unlike `repeat`/`random`, they have no writing arm — `single` and
+    // `consume` are not in `COMMANDS` and fall into the default refusal — so
+    // this is the only place where the plugin publishes a value it cannot
+    // change, and it can only ever be zero. See the spec, § What the plugin
+    // does not do.
+    for key in ["single", "consume"] {
         lines.push(line(key, 0));
     }
     lines.push(line("playlist", inst.queue_version));
@@ -1127,7 +1152,7 @@ fn stats(inst: &Snapshot) -> Vec<String> {
 
 /// What a subsystem name written in an `idle` amounts to.
 enum IdleName {
-    /// One of the four this plugin can make move.
+    /// One of the five this plugin can make move.
     Ours(Subsystem),
     /// An MPD-vocabulary subsystem we will **never** emit.
     NeverEmitted,
@@ -1155,12 +1180,16 @@ fn idle_name(name: &str) -> IdleName {
         "mixer" => IdleName::Ours(Subsystem::Mixer),
         "playlist" => IdleName::Ours(Subsystem::Playlist),
         "stored_playlist" => IdleName::Ours(Subsystem::StoredPlaylist),
+        // `options` used to be in the never-emitted list below: it is MPD's
+        // name for the play-mode subsystem, and this task is precisely what
+        // opens it — see `Subsystem::Options`.
+        "options" => IdleName::Ours(Subsystem::Options),
         // The rest of MPD's vocabulary. None of these has a trigger here:
         // there is no database to index (`database`, `update`), a single
-        // output we do not steer (`output`), no modifiable option
-        // (`options`), no partition, no attached sticker, no subscription,
-        // no message, no neighbor, no mount announced on this protocol.
-        "database" | "update" | "output" | "options" | "partition" | "sticker"
+        // output we do not steer (`output`), no partition, no attached
+        // sticker, no subscription, no message, no neighbor, no mount
+        // announced on this protocol.
+        "database" | "update" | "output" | "partition" | "sticker"
         | "subscription" | "message" | "neighbor" | "mount" => IdleName::NeverEmitted,
         _ => IdleName::Unknown,
     }
@@ -1174,6 +1203,7 @@ fn idle(index: usize, args: &[String]) -> Outcome {
             Subsystem::Mixer,
             Subsystem::Playlist,
             Subsystem::StoredPlaylist,
+            Subsystem::Options,
         ]);
     }
     let mut subsystems = Vec::new();
@@ -1276,6 +1306,21 @@ fn playid(inst: &Snapshot, index: usize, args: &[String]) -> Outcome {
         Outcome::acting(Command::Select(id))
     } else {
         Outcome::Reject(ack(Ack::Arg, index, "playid", "no such song"))
+    }
+}
+
+/// `random 0|1` / `repeat 0|1`: translates the boolean argument into the
+/// absolute-value command the core expects.
+///
+/// **No argument-less form**, unlike `pause`: MPD's `random`/`repeat` always
+/// carry the `0`/`1` a client toggled on its own side, where `pause` alone is
+/// the Play/Pause key itself. A missing or non-boolean argument is therefore
+/// always an `Ack::Arg`, never a toggle guessed from the current mode.
+fn play_mode(index: usize, name: &str, args: &[String], to_command: fn(bool) -> Command) -> Outcome {
+    match args.first().map(String::as_str) {
+        Some("0") => Outcome::acting(to_command(false)),
+        Some("1") => Outcome::acting(to_command(true)),
+        _ => Outcome::Reject(ack(Ack::Arg, index, name, "boolean expected")),
     }
 }
 
@@ -1896,6 +1941,26 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_the_real_play_modes() {
+        // `repeat`/`random` must publish the device's real modes, not a
+        // constant zero: a client reads them to draw its shuffle/repeat
+        // buttons. `single`/`consume` stay at zero — they are refused (see
+        // the "not supported" test) and each would add a case to every
+        // surface already delivered for this task.
+        let inst = snapshot_from(PlayerState { random: true, repeat_all: false, ..radio_stopped() });
+        let lines = handle_ok(&inst, &["status"]);
+        assert!(lines.contains(&"random: 1".to_string()), "{lines:?}");
+        assert!(lines.contains(&"repeat: 0".to_string()), "{lines:?}");
+        assert!(lines.contains(&"single: 0".to_string()), "{lines:?}");
+        assert!(lines.contains(&"consume: 0".to_string()), "{lines:?}");
+
+        let inst = snapshot_from(PlayerState { random: false, repeat_all: true, ..radio_stopped() });
+        let lines = handle_ok(&inst, &["status"]);
+        assert!(lines.contains(&"random: 0".to_string()), "{lines:?}");
+        assert!(lines.contains(&"repeat: 1".to_string()), "{lines:?}");
+    }
+
+    #[test]
     fn status_returns_zero_volume_when_the_sound_is_cut() {
         // MPD has no mute: clients cut the sound by setting `setvol 0`, so
         // they expect to read 0 back when it is cut.
@@ -2368,14 +2433,15 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn idle_without_an_argument_waits_on_the_four_subsystems() {
+    fn idle_without_an_argument_waits_on_the_five_subsystems() {
         assert_eq!(
             handle_words(&snapshot_stopped(), 0, &["idle"]),
             Outcome::Wait(vec![
                 Subsystem::Player,
                 Subsystem::Mixer,
                 Subsystem::Playlist,
-                Subsystem::StoredPlaylist
+                Subsystem::StoredPlaylist,
+                Subsystem::Options,
             ])
         );
     }
@@ -2409,6 +2475,10 @@ mod tests {
         // practice `database update stored_playlist playlist player mixer
         // output options`. Rejecting a **legal** word would earn it an
         // `ACK` on its first `idle`, hence a loop or giving up.
+        //
+        // `options` is no longer among the words this proves — it moved to
+        // `Subsystem::Options` (see `idle_name`), and this task is exactly
+        // what made that true.
         let inst = snapshot_stopped();
         let words = [
             "idle",
@@ -2419,13 +2489,12 @@ mod tests {
             "player",
             "mixer",
             "output",
-            "options",
         ];
         assert_eq!(
             handle_words(&inst, 0, &words),
             Outcome::Wait(vec![Subsystem::StoredPlaylist, Subsystem::Playlist, Subsystem::Player, Subsystem::Mixer])
         );
-        // And the four other names of the vocabulary, the ones no current
+        // And the other names of the vocabulary, the ones no current
         // client sends but MPD knows.
         for word in ["partition", "sticker", "subscription", "message", "neighbor", "mount"] {
             assert_eq!(
@@ -2434,6 +2503,18 @@ mod tests {
                 "{word} should be accepted then dropped"
             );
         }
+    }
+
+    #[test]
+    fn idle_options_maps_to_the_options_subsystem() {
+        // Where `options` used to fall into `IdleName::NeverEmitted`. A
+        // client asking for it must now really be woken when a mode changes
+        // (see `state.rs`'s `apply_state`), not wait forever on a legal word
+        // silently dropped.
+        assert_eq!(
+            handle_words(&snapshot_stopped(), 0, &["idle", "options"]),
+            Outcome::Wait(vec![Subsystem::Options])
+        );
     }
 
     #[test]
@@ -2699,6 +2780,63 @@ mod tests {
         assert_eq!(
             cmds(&snapshot_at_volume(50), &["volume", "-32768"]),
             vec![Command::SetVolume(0)]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // `random` / `repeat`
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn random_and_repeat_translate_zero_and_one() {
+        let inst = snapshot_stopped();
+        assert_eq!(cmds(&inst, &["random", "1"]), vec![Command::SetRandom(true)]);
+        assert_eq!(cmds(&inst, &["random", "0"]), vec![Command::SetRandom(false)]);
+        assert_eq!(cmds(&inst, &["repeat", "1"]), vec![Command::SetRepeatAll(true)]);
+        assert_eq!(cmds(&inst, &["repeat", "0"]), vec![Command::SetRepeatAll(false)]);
+    }
+
+    #[test]
+    fn random_and_repeat_refuse_a_missing_or_non_boolean_argument() {
+        // Unlike `pause`, there is no argument-less toggle: MPD's own
+        // `random`/`repeat` always carry the `0`/`1` and are refused
+        // otherwise — never guessed from the current mode.
+        //
+        // **The exact `ACK`, not merely `Reject(_)`**: the default arm of
+        // `handle` refuses *any* unrecognised command name with the same
+        // `Outcome::Reject` shape, so a bare `matches!` here would pass just
+        // as well against the code from before this task, when `random` and
+        // `repeat` were not handled at all. Checking for `Ack::Arg`'s code
+        // (`2`) and message ("boolean expected") rather than `Ack::Unknown`'s
+        // ("unsupported") is what proves the argument is really being parsed
+        // by these two arms — the same code/message pair `setvol` uses for
+        // its own "invalid volume" (see `protocol.rs`'s `ack` test).
+        let inst = snapshot_stopped();
+        for cmd in ["random", "repeat"] {
+            let expected = format!("ACK [2@0] {{{cmd}}} boolean expected");
+            assert_eq!(
+                handle_words(&inst, 0, &[cmd]),
+                Outcome::Reject(expected.clone()),
+                "{cmd} without an argument"
+            );
+            assert_eq!(handle_words(&inst, 0, &[cmd, "2"]), Outcome::Reject(expected.clone()), "{cmd} 2");
+            assert_eq!(handle_words(&inst, 0, &[cmd, "yes"]), Outcome::Reject(expected), "{cmd} yes");
+        }
+    }
+
+    #[test]
+    fn random_and_repeat_are_accepted_and_single_is_still_refused() {
+        // The pair this task actually asked for, and the boundary it must
+        // not cross: `single` (and `consume`, its twin) is not offered, so it
+        // is refused rather than silently ignored — see the "not supported"
+        // test for the exhaustive list.
+        let inst = snapshot_stopped();
+        assert!(matches!(handle_words(&inst, 0, &["random", "1"]), Outcome::Reply { .. }));
+        assert!(matches!(handle_words(&inst, 0, &["repeat", "1"]), Outcome::Reply { .. }));
+        assert_eq!(
+            handle_words(&inst, 0, &["single", "1"]),
+            Outcome::Reject("ACK [5@0] {single} unsupported".to_string()),
+            "not offered, so refused rather than silently ignored"
         );
     }
 
@@ -3027,8 +3165,10 @@ mod tests {
             "rename",
             "playlistadd",
             "playlistdelete",
-            "repeat",
-            "random",
+            // `repeat` and `random` came out of it: this task's whole point.
+            // `single` and `consume` stay, deliberately — not asked for, and
+            // each would add a case to every surface `repeat`/`random` just
+            // touched.
             "single",
             "consume",
             "crossfade",

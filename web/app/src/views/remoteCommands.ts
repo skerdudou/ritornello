@@ -9,7 +9,7 @@ export interface RemoteCommand {
 // channel as the one fed by the Input plugins, so no business logic is
 // duplicated here.
 //
-// Eight commands on the page, out of the seventeen of the protocol: the ±10 s
+// Ten commands on the page, out of the twenty-one of the protocol: the ±10 s
 // and the step-by-step volume no longer have a web key (see `REMOTE_TRANSPORT`).
 
 /**
@@ -73,8 +73,28 @@ export const REMOTE_TRANSPORT_SECONDARY: RemoteCommand[] = [
 ]
 
 /**
+ * The two play modes, random and repeat-all: persisted settings of the
+ * device (see `PlayerPayload.random`/`repeat_all`), not commands that act on
+ * the current playback the way `Stop` or `Next` do — but toggles all the
+ * same, hence set apart from the plain impulses of `REMOTE_TRANSPORT` and
+ * `REMOTE_TRANSPORT_SECONDARY`. `Transport.vue` is what gives them their
+ * visible pressed state, new to that component.
+ *
+ * `SetRandom`/`SetRepeatAll` and not `ToggleRandom`/`ToggleRepeatAll`: the
+ * SPA already knows the current value (it is in the pushed state), so it
+ * sends the absolute form with the opposite of what it knows. The `Toggle…`
+ * commands exist for a client that does not know the state, the physical
+ * remote — see `preset-toml.ts` of the generic-input plugin. Sending the
+ * toggle here as well would let two clients that cross a change undo each
+ * other's intent instead of converging on the last one pressed.
+ */
+export const REMOTE_RANDOM: RemoteCommand = { key: 'remote_random', cmd: { cmd: 'SetRandom' } }
+export const REMOTE_REPEAT_ALL: RemoteCommand = { key: 'remote_repeat_all', cmd: { cmd: 'SetRepeatAll' } }
+export const REMOTE_MODES: RemoteCommand[] = [REMOTE_RANDOM, REMOTE_REPEAT_ALL]
+
+/**
  * All the commands of the page: used by the i18n safeguard
- * (`i18nKeysUsed.test.ts`) and to lock the count of eight.
+ * (`i18nKeysUsed.test.ts`) and to lock the count of ten.
  */
 export const REMOTE_COMMANDS: RemoteCommand[] = [
   REMOTE_POWER,
@@ -82,23 +102,33 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [
   REMOTE_MUTE,
   ...REMOTE_TRANSPORT,
   ...REMOTE_TRANSPORT_SECONDARY,
+  ...REMOTE_MODES,
 ]
 
 /**
  * A command the device would ignore in the current state: its button is
  * greyed rather than offered.
  *
- * A single rule now: in **standby**, the core returns without doing anything
- * on everything that is not `Power` (first line of `handle_command`), preset
- * grid included. Seeking no longer has a key (it is the bar that goes inert,
- * on `seekable`), and eject is **hidden** rather than greyed — see `hidden`.
+ * In **standby**, the core returns without doing anything on everything that
+ * is not `Power` (first line of `handle_command`), preset grid included.
+ * Seeking no longer has a key (it is the bar that goes inert, on
+ * `seekable`), and eject is **hidden** rather than greyed — see `hidden`.
+ *
+ * The two mode keys have a second rule: they need a list with an end, a
+ * capability the active source declares for itself (`has_finite_list`,
+ * exactly like `can_eject`) — never the modes' own value, `random`/
+ * `repeat_all`, which are persisted settings independent of it (see their
+ * doc in `types.ts`). Greyed and not hidden, unlike eject: the user asked to
+ * still see that the function exists on a source that cannot honour it.
  *
  * A state not yet received (`null`) greys nothing: the remote opens usable,
  * and the frame corrects at once.
  */
 export function unavailable(name: string, state: PlayerPayload | null): boolean {
   if (!state) return false
-  return state.standby && name !== 'Power'
+  if (state.standby && name !== 'Power') return true
+  if (name === 'SetRandom' || name === 'SetRepeatAll') return !state.has_finite_list
+  return false
 }
 
 /**

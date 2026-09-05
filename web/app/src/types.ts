@@ -249,13 +249,33 @@ export interface PlayerPayload {
    */
   can_eject: boolean
   /**
+   * The active source has a finite list to shuffle or repeat (radio has
+   * none). This is the capability the web remote reads to grey out the
+   * random/repeat-all keys — not `random`/`repeat_all` below, which are
+   * independent persisted settings and stay whatever they were set to on a
+   * source that cannot honour them.
+   *
+   * Same convention as `can_eject`: `false` by default, not knowing means
+   * offering nothing.
+   */
+  has_finite_list: boolean
+  /**
+   * Random play is on. A persisted setting of the device, like `volume` —
+   * it survives a source change or standby unchanged, and is not masked by
+   * `has_finite_list` (see that field's doc).
+   */
+  random: boolean
+  /** Repeat-all is on. Same persistence and the same relation to `has_finite_list` as `random`. */
+  repeat_all: boolean
+  /**
    * What the player is doing: `playing`, `paused`, or absent when nothing is
    * playing. This is what picks the play button's icon (▶ or ❚❚). The field
    * was already travelling without being read.
    */
   playback?: Playback
 }
-export type Command = { cmd: string; arg?: number }
+/** `arg` also carries a boolean: `SetRandom`/`SetRepeatAll` send the absolute value of a mode. */
+export type Command = { cmd: string; arg?: number | boolean }
 /** What the player is doing. Absent from the frame when it is stopped (`seekable` idiom). */
 export type Playback = 'playing' | 'paused'
 /** A named preset as `GET /api/presets` serves it. */

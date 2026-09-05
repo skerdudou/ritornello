@@ -4,7 +4,7 @@ export interface DeviceBindings { name: string; bindings: Binding[] }
 export interface BindingTable { devices: DeviceBindings[] }
 
 /**
- * One row of the bindings table. Either it names a catalogue key (the 23
+ * One row of the bindings table. Either it names a catalogue key (the 25
  * fixed actions) or it carries an already-resolved label (a source
  * shortcut, whose label is the source's own name and which no catalogue
  * knows). Never both, and never neither.
@@ -16,7 +16,7 @@ export function rowLabel(row: Row, t: (k: string) => string): string {
   return row.key ? t(row.key) : (row.label ?? '')
 }
 
-// The 23 actions, in the old page's order (minus the two "next/previous
+// The 25 actions, in the old page's order (minus the two "next/previous
 // preset" entries, merged into `act_next`/`act_prev`: same protocol
 // command, interpreted by the active source - preset for radio, track for
 // cd). The label is translated by the plugin's catalog (`key`), the
@@ -41,6 +41,12 @@ export const ACTIONS: Row[] = [
   { key: 'act_prev', cmd: { cmd: 'Prev' } },
   { key: 'act_eject', cmd: { cmd: 'Eject' } },
   { key: 'act_source_cycle', cmd: { cmd: 'SourceCycle' } },
+  // The toggle forms, not the absolute ones (`SetRandom`/`SetRepeatAll`): a
+  // physical key does not know the current value of the mode it flips,
+  // unlike the web remote — see `remoteCommands.ts` of the SPA, which binds
+  // the absolute forms instead for exactly that reason.
+  { key: 'act_toggle_random', cmd: { cmd: 'ToggleRandom' } },
+  { key: 'act_toggle_repeat_all', cmd: { cmd: 'ToggleRepeatAll' } },
   { key: 'act_power', cmd: { cmd: 'Power' } },
 ]
 

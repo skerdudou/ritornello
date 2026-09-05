@@ -66,6 +66,8 @@ act_next = "Next"
 act_prev = "Previous"
 act_eject = "Eject"
 act_source_cycle = "Change source"
+act_toggle_random = "Shuffle"
+act_toggle_repeat_all = "Repeat all"
 act_power = "Standby"
 
 # source shortcut rows, appended at the end of the table (one per source the

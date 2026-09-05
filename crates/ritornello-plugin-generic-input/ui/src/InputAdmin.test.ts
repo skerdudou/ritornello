@@ -122,9 +122,9 @@ describe('InputAdmin', () => {
   })
   afterEach(() => vi.useRealTimers())
 
-  it('lists the devices, the presets and the 23 actions', async () => {
+  it('lists the devices, the presets and the 25 actions', async () => {
     const { w } = await mountLoaded()
-    expect(w.findAll('[data-action-row]')).toHaveLength(23)
+    expect(w.findAll('[data-action-row]')).toHaveLength(25)
     expect(w.find('[data-device-select]').exists()).toBe(true)
   })
 
@@ -140,12 +140,12 @@ describe('InputAdmin', () => {
     const w = mountView()
     await flushPromises()
     const rows = w.findAll('[data-action-row]')
-    expect(rows).toHaveLength(25)
-    expect(rows[23]!.find('td').text()).toBe('radio')
-    expect(rows[24]!.find('td').text()).toBe('files')
+    expect(rows).toHaveLength(27)
+    expect(rows[25]!.find('td').text()).toBe('radio')
+    expect(rows[26]!.find('td').text()).toBe('files')
   })
 
-  it('keeps the 23 fixed rows and shows no error when the source catalogue call fails', async () => {
+  it('keeps the 25 fixed rows and shows no error when the source catalogue call fails', async () => {
     const spy = vi.fn(async (u: string, init?: RequestInit) => {
       if (init?.method === 'PUT') return new Response(null, { status: 204 })
       if (u === '/api/presets') return new Response(null, { status: 500 })
@@ -154,7 +154,7 @@ describe('InputAdmin', () => {
     vi.stubGlobal('fetch', spy)
     const w = mountView()
     await flushPromises()
-    expect(w.findAll('[data-action-row]')).toHaveLength(23)
+    expect(w.findAll('[data-action-row]')).toHaveLength(25)
     expect(w.text()).not.toContain('Erreur')
   })
 
@@ -173,7 +173,7 @@ describe('InputAdmin', () => {
     vi.stubGlobal('fetch', spy)
     const w = mountView()
     await flushPromises()
-    expect(w.findAll('[data-action-row]')).toHaveLength(23)
+    expect(w.findAll('[data-action-row]')).toHaveLength(25)
   })
 
   it("a source row's conflict message names the other row without translating it a second time", async () => {

@@ -53,6 +53,8 @@ remote_prev = "Précédent"
 remote_eject = "Éjecter"
 remote_source = "Source"
 remote_power = "Veille"
+remote_random = "Aléatoire"
+remote_repeat_all = "Tout répéter"
 seek_step_label = "Pas de déplacement (s)"
 # Pochettes d'album. Une seule carte : la mémoire que le cache peut occuper
 # (un budget, pas un compte), puis les plafonds de ce que le cœur accepte de

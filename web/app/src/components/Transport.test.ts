@@ -7,7 +7,7 @@ const state = (e: Partial<PlayerPayload>): PlayerPayload => ({
   source: 'radio', volume: 60, muted: false, standby: false, preset: null, preset_count: null,
   preset_name: null, status: null, overlay: null, artist: null, title: null, album: null,
   duration_s: null, origin: null, cover_href: null, cover_origin: null, position_s: null,
-  seekable: false, can_eject: false, ...e,
+  seekable: false, can_eject: false, has_finite_list: false, random: false, repeat_all: false, ...e,
 })
 const mounted = (e: Partial<PlayerPayload> | null) => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
@@ -18,7 +18,7 @@ describe('Transport', () => {
   it('renders |◀ ▶ ▶| ■ in that order, without Eject on a source without a tray', () => {
     const w = mounted({})
     expect(w.findAll('[data-remote-command]').map((b) => b.attributes('data-remote-command')))
-      .toEqual(['Prev', 'PlayPause', 'Next', 'Stop'])
+      .toEqual(['Prev', 'PlayPause', 'Next', 'Stop', 'SetRandom', 'SetRepeatAll'])
   })
 
   it('Eject appears when the source declares a tray', () => {
@@ -42,6 +42,45 @@ describe('Transport', () => {
   it('in standby everything is greyed out', () => {
     const w = mounted({ standby: true })
     for (const b of w.findAll('[data-remote-command]')) expect(b.attributes('disabled')).toBeDefined()
+  })
+
+  it('greys the two mode buttons on a source without a finite list', () => {
+    // The radio has neither a list to shuffle nor an end to loop: both keys
+    // are greyed, not hidden (see `remoteCommands.ts`'s `unavailable`) — the
+    // user asked to still see that the function exists.
+    const w = mounted({ has_finite_list: false })
+    expect(w.get('[data-remote-command="SetRandom"]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-remote-command="SetRepeatAll"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('the two mode buttons stay enabled on a source with a finite list', () => {
+    const w = mounted({ has_finite_list: true })
+    expect(w.get('[data-remote-command="SetRandom"]').attributes('disabled')).toBeUndefined()
+    expect(w.get('[data-remote-command="SetRepeatAll"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('shows the mode buttons as pressed when the mode is on', () => {
+    // Toggles carry a visible state, unlike every other button of this
+    // component, which are mere impulses.
+    const on = mounted({ has_finite_list: true, random: true, repeat_all: false })
+    expect(on.get('[data-remote-command="SetRandom"]').attributes('aria-pressed')).toBe('true')
+    expect(on.get('[data-remote-command="SetRepeatAll"]').attributes('aria-pressed')).toBe('false')
+  })
+
+  it('sends the absolute value, the inverse of the known state — never the toggle', () => {
+    // Two clients (a second tab, the physical remote) that cross a plain
+    // toggle would undo each other's intent: the SPA already knows the
+    // current value, so it must send `SetRandom`/`SetRepeatAll` with the
+    // opposite of what it knows, not `ToggleRandom`/`ToggleRepeatAll` (the
+    // form reserved for a client that does not know the state — see
+    // `Command`'s doc in the proto crate).
+    const w = mounted({ has_finite_list: true, random: false, repeat_all: true })
+    w.get('[data-remote-command="SetRandom"]').trigger('click')
+    w.get('[data-remote-command="SetRepeatAll"]').trigger('click')
+    expect(w.emitted('command')).toEqual([
+      [{ cmd: 'SetRandom', arg: true }],
+      [{ cmd: 'SetRepeatAll', arg: false }],
+    ])
   })
 
   it('centres the transport trio without counting the secondary group', () => {

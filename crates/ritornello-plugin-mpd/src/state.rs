@@ -25,13 +25,13 @@ use tokio::sync::{Notify, RwLock};
 /// Number of subsystems, hence the size of the counter array. A constant and
 /// not a `Subsystem::len()`: it is the bound of the array, it must be known at
 /// compile time.
-const SUBSYSTEM_COUNT: usize = 4;
+const SUBSYSTEM_COUNT: usize = 5;
 
 /// The subsystems that `idle` knows how to name, in the order in which they
 /// index the counter array.
 ///
-/// An `enum #[repr(usize)]` used as an index into a `[u64; 4]`, and not an
-/// associative table: the four subsystems are known at compile time, and
+/// An `enum #[repr(usize)]` used as an index into a `[u64; 5]`, and not an
+/// associative table: the five subsystems are known at compile time, and
 /// `versions[subsystem as usize]` cannot fail — no `unwrap` on a `get`, no
 /// subsystem one would have forgotten to insert at construction.
 ///
@@ -54,6 +54,15 @@ pub enum Subsystem {
     /// moves it — otherwise a client subscribed to stored playlists alone
     /// would be woken at every second of playback.
     StoredPlaylist = 3,
+    /// The play modes: `random` and `repeat_all`.
+    ///
+    /// MPD's own name for this subsystem is `options`, and it is deliberately
+    /// separate from `Player`: a physical remote or the SPA changes a mode
+    /// without touching what is playing, so a client that only listens to
+    /// `player` — the common case — must be able to ignore it, and one that
+    /// only listens to `options` must not be woken by every second of
+    /// playback the way `player` used to be (see `position_jump`).
+    Options = 4,
 }
 
 /// The current cover, as the plugin holds it between two tracks.
@@ -311,7 +320,7 @@ fn mark(moved: &mut Vec<Subsystem>, subsystem: Subsystem) {
 /// What an `idle` learned: the subsystems to announce, and the counters of the
 /// instant they were observed.
 ///
-/// A struct and not a bare `(Vec, [u64; 4])`: the two fields would get mixed
+/// A struct and not a bare `(Vec, [u64; 5])`: the two fields would get mixed
 /// up in use, and the second one carries the subtlety — it is not "the current
 /// counters" but "the ones that decided this wakeup".
 #[derive(Debug, PartialEq)]
@@ -386,6 +395,12 @@ impl SharedState {
 
             if state.volume != before.volume || state.muted != before.muted {
                 mark(&mut moved, Subsystem::Mixer);
+            }
+            if state.random != before.random || state.repeat_all != before.repeat_all {
+                // Its own subsystem and not `Player`: see `Subsystem::Options`
+                // for why a mode change must not be bundled with what is
+                // playing.
+                mark(&mut moved, Subsystem::Options);
             }
             if state.source != before.source {
                 // Two subsystems for a single field: the queue *is* the preset
@@ -581,12 +596,13 @@ impl SharedState {
     /// Acknowledges what the plugin has just emitted, before the core confirms
     /// it.
     ///
-    /// **Three commands only**, and that is deliberate: `PlayPause` (toggles
-    /// `Playing`↔`Paused`), `SetVolume` (sets the volume) and `Mute` (toggles
-    /// the mute). Everything else is ignored, because guessing the effect of a
-    /// `Select` on the position, the track or the preset would be wrong more
-    /// often than right — the active source decides, and it alone. A slightly
-    /// late `status` is benign; a `status` that invents a track is not.
+    /// **Five commands only**, and that is deliberate: `PlayPause` (toggles
+    /// `Playing`↔`Paused`), `SetVolume` (sets the volume), `Mute` (toggles the
+    /// mute), and `SetRandom`/`SetRepeatAll` (set a play mode). Everything
+    /// else is ignored, because guessing the effect of a `Select` on the
+    /// position, the track or the preset would be wrong more often than
+    /// right — the active source decides, and it alone. A slightly late
+    /// `status` is benign; a `status` that invents a track is not.
     ///
     /// **`Mute` joined the list along with the unmuting `setvol`** (see
     /// `commands::setvol`), and without it that unmute would have been
@@ -663,6 +679,28 @@ impl SharedState {
                     Command::Mute => {
                         inst.state.muted = !inst.state.muted;
                         mark(&mut moved, Subsystem::Mixer);
+                    }
+                    // Same shape as `SetVolume`, and for the same reason: the
+                    // core honours the absolute value unconditionally (see
+                    // `Core::handle_command`'s `SetRandom`/`SetRepeatAll`
+                    // arms), so without the increment done here the confirming
+                    // frame would be identical to the previous one and nobody
+                    // would be woken. Comparison and not blind assignment: an
+                    // MPD client resending its current mode must not wake
+                    // every other client for nothing.
+                    Command::SetRandom(v) => {
+                        let v = *v;
+                        if inst.state.random != v {
+                            inst.state.random = v;
+                            mark(&mut moved, Subsystem::Options);
+                        }
+                    }
+                    Command::SetRepeatAll(v) => {
+                        let v = *v;
+                        if inst.state.repeat_all != v {
+                            inst.state.repeat_all = v;
+                            mark(&mut moved, Subsystem::Options);
+                        }
                     }
                     _ => {}
                 }
@@ -804,6 +842,25 @@ mod tests {
         e.apply_state(PlayerState { muted: true, ..Default::default() }).await;
         let after = e.versions().await;
         assert_ne!(before[Subsystem::Mixer as usize], after[Subsystem::Mixer as usize]);
+    }
+
+    #[tokio::test]
+    async fn a_frame_changing_random_or_repeat_all_wakes_options_alone() {
+        // Each field tested separately: forgetting one of the two would leave
+        // a client's mode button unrefreshed for the life of the connection,
+        // since nothing else moves `Options`.
+        for (name, frame) in [
+            ("random", PlayerState { random: true, ..Default::default() }),
+            ("repeat_all", PlayerState { repeat_all: true, ..Default::default() }),
+        ] {
+            let e = SharedState::default();
+            let before = e.versions().await;
+            e.apply_state(frame).await;
+            let after = e.versions().await;
+            assert_ne!(before[Subsystem::Options as usize], after[Subsystem::Options as usize], "{name} should move options");
+            assert_eq!(before[Subsystem::Player as usize], after[Subsystem::Player as usize], "{name} is not player's business");
+            assert_eq!(before[Subsystem::Mixer as usize], after[Subsystem::Mixer as usize], "{name} does not touch the mixer");
+        }
     }
 
     #[tokio::test]
@@ -1422,6 +1479,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acknowledging_random_publishes_it_at_once_and_wakes_options() {
+        // A client sending `random 1` then `status` in the same breath must
+        // read `random: 1` right away: the confirming frame, for its part,
+        // will be identical and move nothing.
+        //
+        // **Alone**, and not alongside `SetRepeatAll`: a batched test would
+        // stay green even if this arm's `mark(&mut moved, Subsystem::Options)`
+        // (or its comparison) were dropped, since the other command's own
+        // marking would still move the counter and its own assignment would
+        // still make `inst.state.repeat_all` true — the assertion on
+        // `random` would be all that catches a regression here, and nothing
+        // would be left to catch one on the mirror field. See the sibling
+        // test just below for that half.
+        let e = SharedState::default();
+        let before = e.versions().await;
+
+        e.acknowledge_optimistic(&[Command::SetRandom(true)]).await;
+
+        let inst = e.read().await;
+        assert!(inst.state.random);
+        assert_ne!(before[Subsystem::Options as usize], e.versions().await[Subsystem::Options as usize]);
+    }
+
+    #[tokio::test]
+    async fn acknowledging_repeat_all_publishes_it_at_once_and_wakes_options() {
+        // The mirror of the test above, proved in isolation for the same
+        // reason: a batched acknowledgement would let a broken `SetRepeatAll`
+        // arm hide behind `SetRandom`'s own marking and assignment.
+        let e = SharedState::default();
+        let before = e.versions().await;
+
+        e.acknowledge_optimistic(&[Command::SetRepeatAll(true)]).await;
+
+        let inst = e.read().await;
+        assert!(inst.state.repeat_all);
+        assert_ne!(before[Subsystem::Options as usize], e.versions().await[Subsystem::Options as usize]);
+    }
+
+    #[tokio::test]
+    async fn acknowledging_the_play_mode_already_in_place_wakes_nobody() {
+        let e = SharedState::default();
+        e.apply_state(PlayerState { random: true, ..Default::default() }).await;
+        let before = e.versions().await;
+
+        e.acknowledge_optimistic(&[Command::SetRandom(true)]).await;
+
+        assert_eq!(before, e.versions().await);
+    }
+
+    #[tokio::test]
     async fn acknowledging_ignores_commands_whose_effect_cannot_be_guessed() {
         // Guessing what a `Select` does to the position, the track or the
         // preset would be wrong more often than right: the active source
@@ -1508,6 +1615,7 @@ mod tests {
             Subsystem::Mixer as usize,
             Subsystem::Playlist as usize,
             Subsystem::StoredPlaylist as usize,
+            Subsystem::Options as usize,
         ];
         let mut seen = [false; SUBSYSTEM_COUNT];
         for i in indices {

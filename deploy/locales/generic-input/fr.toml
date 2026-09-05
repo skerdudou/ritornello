@@ -62,6 +62,8 @@ act_next = "Suivant"
 act_prev = "Précédent"
 act_eject = "Éjecter"
 act_source_cycle = "Changement de source"
+act_toggle_random = "Aléatoire"
+act_toggle_repeat_all = "Tout répéter"
 act_power = "Veille"
 
 # lignes de raccourci vers une source, ajoutees a la fin du tableau (une par

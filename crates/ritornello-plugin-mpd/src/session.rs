@@ -340,7 +340,7 @@ struct Connection {
     /// The subsystem counters this connection has already seen: the reference
     /// of all its `idle`s. Read by `execute`, advanced only by `wait_idle`,
     /// and only for the subsystems a wakeup announces.
-    seen: [u64; 4],
+    seen: [u64; 5],
     /// The chunk size this client accepts for binary responses (see
     /// `commands::binarylimit`). `MAX_CHUNK` as long as it has asked for
     /// nothing — the protocol default.
@@ -942,7 +942,7 @@ async fn wait_idle(
     writer: &mut OwnedWriteHalf,
     state: &SharedState,
     subsystems: &[Subsystem],
-    seen: &mut [u64; 4],
+    seen: &mut [u64; 5],
 ) -> Result<Next> {
     // Two outcomes, and both must be listened to: the wakeup, and what the
     // client says during the wait — `noidle`, the only command MPD allows
@@ -1032,6 +1032,7 @@ fn subsystem_name(subsystem: Subsystem) -> &'static str {
         Subsystem::Mixer => "mixer",
         Subsystem::Playlist => "playlist",
         Subsystem::StoredPlaylist => "stored_playlist",
+        Subsystem::Options => "options",
     }
 }
 
@@ -1484,7 +1485,7 @@ mod tests {
         assert!(after.iter().any(|l| l.starts_with("volume: ")), "{after:?}");
         // And nothing moved in the state: `noidle` cancels a wait, it does
         // not publish a change.
-        assert_eq!(s.state.read().await.versions, [0, 0, 0, 0]);
+        assert_eq!(s.state.read().await.versions, [0, 0, 0, 0, 0]);
     }
 
     #[tokio::test]
@@ -1616,6 +1617,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn changing_a_mode_wakes_an_idling_client() {
+        // The point of opening `options` at all: without it, a client that
+        // toggled shuffle from the room's remote never learns to refresh its
+        // button — it is sitting in `idle`, and nothing tells it anything
+        // moved. Same clock-free shape as the test above: the frame lands
+        // between two commands, and a session that swallowed it would make
+        // this test hang instead of failing loudly.
+        let (s, _rx) = server().await;
+        let mut c = s.client_ready().await;
+        c.send_frame("ping").await;
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
+
+        s.state.apply_state(PlayerState { random: true, ..Default::default() }).await;
+
+        c.send_frame("idle options").await;
+        assert_eq!(c.response().await, vec!["changed: options".to_string(), "OK".to_string()]);
+    }
+
+    #[tokio::test]
     async fn a_wakeup_only_consumes_the_subsystems_it_announces() {
         // The fine half of the same mechanism. The wakeup advances the
         // connection's reference **subsystem by subsystem**, just as MPD
@@ -1736,7 +1756,7 @@ mod tests {
             "a dead input half closes the session"
         );
         assert_eq!(s.state.read().await.state.volume, 0, "nothing is acknowledged if the channel refused");
-        assert_eq!(s.state.read().await.versions, [0, 0, 0, 0], "and nobody is woken");
+        assert_eq!(s.state.read().await.versions, [0, 0, 0, 0, 0], "and nobody is woken");
     }
 
     #[tokio::test]
@@ -2147,7 +2167,9 @@ mod tests {
         // nothing ties the two together at compile time: a hyphenated
         // `stored-playlist` here would announce a subsystem no client could
         // ask for again. Verify it by passing each name to `idle`.
-        for subsystem in [Subsystem::Player, Subsystem::Mixer, Subsystem::Playlist, Subsystem::StoredPlaylist] {
+        for subsystem in
+            [Subsystem::Player, Subsystem::Mixer, Subsystem::Playlist, Subsystem::StoredPlaylist, Subsystem::Options]
+        {
             let args = vec!["idle".to_string(), subsystem_name(subsystem).to_string()];
             assert_eq!(
                 handle(&Snapshot::default(), 0, &args, MAX_CHUNK),

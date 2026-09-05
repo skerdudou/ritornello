@@ -53,6 +53,8 @@ remote_prev = "Previous"
 remote_eject = "Eject"
 remote_source = "Source"
 remote_power = "Standby"
+remote_random = "Shuffle"
+remote_repeat_all = "Repeat all"
 seek_step_label = "Seek step (s)"
 # Album covers. One card: the memory the cache may occupy (a budget, not a
 # count), then the ceilings on what the core agrees to read, then the

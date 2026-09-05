@@ -5,13 +5,14 @@ import {
 } from './preset-toml'
 
 describe('ACTIONS', () => {
-  it('covers the 23 protocol actions', () => {
-    expect(ACTIONS).toHaveLength(23)
+  it('covers the 25 protocol actions', () => {
+    expect(ACTIONS).toHaveLength(25)
     expect(ACTIONS.slice(0, 9).map((a) => a.cmd.arg)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
     expect(ACTIONS.slice(0, 9).every((a) => a.cmd.cmd === 'Select')).toBe(true)
     expect(ACTIONS.slice(9).map((a) => a.cmd.cmd)).toEqual([
       'Select', 'Plus10', 'VolumeUp', 'VolumeDown', 'Mute', 'PlayPause', 'Stop',
-      'SeekBackward', 'SeekForward', 'Next', 'Prev', 'Eject', 'SourceCycle', 'Power',
+      'SeekBackward', 'SeekForward', 'Next', 'Prev', 'Eject', 'SourceCycle',
+      'ToggleRandom', 'ToggleRepeatAll', 'Power',
     ])
     // The 0 key and +10 are inserted right after act_select_9.
     expect(ACTIONS[9]).toEqual({ key: 'act_select_0', cmd: { cmd: 'Select', arg: 0 } })
@@ -23,6 +24,15 @@ describe('ACTIONS', () => {
     expect(keys).toContain('act_seek_back')
     expect(keys).toContain('act_seek_forward')
     expect(keys.indexOf('act_seek_back')).toBeLessThan(keys.indexOf('act_seek_forward'))
+  })
+
+  it('offers the two play mode toggles', () => {
+    // The toggle forms, not the absolute ones: a physical key does not know
+    // the current state, so it cannot send `SetRandom`/`SetRepeatAll` — the
+    // web remote does that instead (see `remoteCommands.ts` of the SPA).
+    const cmds = ACTIONS.map((a) => a.cmd.cmd)
+    expect(cmds).toContain('ToggleRandom')
+    expect(cmds).toContain('ToggleRepeatAll')
   })
 })
 
