@@ -79,6 +79,15 @@ function averageKio(s: CachePayload): number | null {
 function mio(bytes: number): number {
   return Math.round(bytes / 1024 / 1024)
 }
+
+/**
+ * The same in kibibytes, for supplied thumbnails: a hundred of them is a
+ * handful of MiB, and rounding those to mebibytes would print "0" beside a
+ * count that is visibly not zero.
+ */
+function kio(bytes: number): number {
+  return Math.round(bytes / 1024)
+}
 </script>
 
 <template>
@@ -135,6 +144,25 @@ function mio(bytes: number): number {
           <dt class="text-muted-foreground">{{ t('cover_cache_stale') }}</dt>
           <dd class="font-medium">{{ snapshot.renditions_stale }}</dd>
 
+          <!-- Covers riding on a thumbnail their contributor supplied. They
+               appear on none of the three lines above, by construction: the
+               route serves them without ever reaching the encoder. This is
+               the only place the pair's effect is visible, and the effect is
+               a re-encoding that did not happen. -->
+          <dt class="text-muted-foreground">{{ t('cover_cache_supplied') }}</dt>
+          <dd class="font-medium" data-cover-cache-supplied>
+            {{ snapshot.pairs }}
+            <span v-if="snapshot.pairs > 0" class="font-normal text-muted-foreground">
+              ({{ kio(snapshot.pairs_bytes) }} {{ t('cover_cache_supplied_weight') }})
+            </span>
+          </dd>
+
+          <!-- The heaviest thing this cache can hold, and until now the only
+               one it never mentioned: one enlargement memoises a full-size
+               original, megabytes at a time. -->
+          <dt class="text-muted-foreground">{{ t('cover_cache_full_fetched') }}</dt>
+          <dd class="font-medium" data-cover-cache-full>{{ snapshot.pairs_full_fetched }}</dd>
+
           <!-- The only place `max_entries` is ever shown, and shown as what
                it is: a bound on a **count**, not on bytes. The settings page
                stays silent about it. -->
@@ -142,7 +170,12 @@ function mio(bytes: number): number {
           <dd class="font-medium">{{ snapshot.max_entries }}</dd>
         </dl>
 
-        <p v-if="snapshot.renditions === 0" class="text-sm text-muted-foreground">
+        <!-- **Emptiness is about entries, not about renditions.** Tested on
+             the rendition count, this sentence declared an empty cache while
+             the line just above announced forty entries — and it did so in
+             the case this panel exists to describe, a device whose covers all
+             arrive with a thumbnail already attached. -->
+        <p v-if="snapshot.entries === 0 && snapshot.renditions === 0" class="text-sm text-muted-foreground">
           {{ t('cover_cache_empty') }}
         </p>
       </template>

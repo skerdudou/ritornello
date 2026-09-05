@@ -559,15 +559,39 @@ pub struct CacheSnapshot {
     /// embedded in the audio file (see `payload_cost`). This is the line that
     /// makes `MAX_ENTRIES` legible: it exists because these cost zero.
     pub entries_free: usize,
-    /// Retained thumbnails, and what they weigh together. The page divides one
-    /// by the other to show the real average, which is the ground truth behind
-    /// the weight it predicts.
+    /// Thumbnails the encoder **produced**, and what they weigh together. The
+    /// page divides one by the other to show the real average, which is the
+    /// ground truth behind the weight it predicts.
+    ///
+    /// **Not a count of the thumbnails the cache holds**, and the distinction
+    /// is the reason `pairs` below exists: a supplied thumbnail served under
+    /// `cover_get`'s `Pair` arm never enters this table, because that arm
+    /// answers before reaching `rendition_for`. Folding the two together would
+    /// be worse than leaving them apart — the average is what confronts the
+    /// page's *prediction*, and a prediction about what the encoder produces
+    /// cannot be checked against images the encoder never saw.
     pub renditions: usize,
     pub renditions_bytes: usize,
     /// Of those, how many were produced under rules the cache no longer uses
     /// (see `rendition_is_current`). They are pure waste, and the first thing
     /// eviction reclaims.
     pub renditions_stale: usize,
+    /// Entries carrying a **supplied** thumbnail — a `CoverPayload::Pair` —
+    /// and what those thumbnails weigh.
+    ///
+    /// This is the measure of whether the pair earns its keep, and nothing
+    /// else on this panel can stand in for it. Every one of these is a
+    /// re-encoding that did not happen: the source announced a thumbnail that
+    /// already satisfies the threshold, so the core kept it as it is. Without
+    /// this line the effect is invisible — worse than invisible, since the
+    /// thumbnail line above goes *down* as the mechanism works better.
+    pub pairs: usize,
+    pub pairs_bytes: usize,
+    /// Of those pairs, how many have had their full size actually downloaded
+    /// (`Pair`'s `fetched`). Each one is a reader who enlarged a cover, and
+    /// megabytes the budget is now carrying — by far the heaviest thing this
+    /// cache can hold, and the only line that says so.
+    pub pairs_full_fetched: usize,
     /// The belt on the entry count, `MAX_ENTRIES`. Shown **here** and nowhere
     /// else: this is the one place it can be presented as what it is, a bound
     /// on a count, without being mistaken for a memory bound.
@@ -593,6 +617,28 @@ impl CoverCache {
             renditions_stale: renditions
                 .iter()
                 .filter(|r| !rendition_is_current(&r.identity, settings.rendition))
+                .count(),
+            pairs: entries
+                .iter()
+                .filter(|(_, p)| matches!(p, CoverPayload::Pair { .. }))
+                .count(),
+            pairs_bytes: entries
+                .iter()
+                .filter_map(|(_, p)| match p {
+                    CoverPayload::Pair { thumb, .. } => Some(thumb.len()),
+                    _ => None,
+                })
+                .sum(),
+            // **The acceptance verdict is deliberately not computed here.**
+            // Whether a supplied thumbnail satisfies the current rule is a
+            // per-request question that needs the image header, and this walk
+            // must stay a walk. The panel does not need it either: a pair
+            // whose thumbnail is refused produces a rendition, so it shows up
+            // on the line above — the two lines already tell the two outcomes
+            // apart.
+            pairs_full_fetched: entries
+                .iter()
+                .filter(|(_, p)| matches!(p, CoverPayload::Pair { fetched: Some(_), .. }))
                 .count(),
             max_entries: MAX_ENTRIES,
         }
@@ -3411,6 +3457,58 @@ mod tests {
         assert_eq!(s.renditions_stale, 1, "produced under 320 px, the cache now asks 640");
     }
 
+    /// **The line the panel was missing, and the reason it was missing it.**
+    /// A supplied thumbnail served under `cover_get`'s `Pair` arm answers
+    /// before `rendition_for` is ever reached, so it enters no rendition
+    /// table — which is correct, and is precisely why counting renditions
+    /// could not describe what the cache holds. On a device fed by
+    /// MusicBrainz this is the *ordinary* case, so the panel used to report
+    /// zero thumbnails while holding a cacheful of them.
+    ///
+    /// The production changes this kills: counting pairs on the rendition
+    /// line (the two would become indistinguishable, and the average weight
+    /// would silently stop describing the encoder), charging a pair's
+    /// full-size *reference* as though it were held, and counting a pair
+    /// that nobody has enlarged among those that have been.
+    #[tokio::test]
+    async fn the_snapshot_counts_supplied_thumbnails_apart_from_produced_ones() {
+        let cache = CoverCache::new();
+        cache.insert("net".into(), CoverPayload::Bytes(vec![0u8; 7_777], "image/jpeg")).await;
+        // Two pairs nobody has enlarged: bytes for the thumbnail, a URL for
+        // the other half. Distinct, non-round sizes so a wrong sum cannot
+        // land right by accident.
+        cache.insert("mb1".into(), paired_entry(vec![0u8; 91_111])).await;
+        cache.insert("mb2".into(), paired_entry(vec![0u8; 73_333])).await;
+        // And one that somebody did enlarge, so its full size is now held.
+        cache
+            .insert(
+                "mb3".into(),
+                CoverPayload::Pair {
+                    thumb: vec![0u8; 55_555],
+                    thumb_mime: "image/jpeg",
+                    full: CoverRef::Url { url: "https://example.org/front.jpg".into() },
+                    fetched: Some((Arc::new(vec![0u8; 2_222_222]), "image/jpeg")),
+                },
+            )
+            .await;
+
+        let s = cache.snapshot().await;
+        assert_eq!(s.pairs, 3, "the Bytes entry is not a pair");
+        assert_eq!(s.pairs_bytes, 91_111 + 73_333 + 55_555, "thumbnails only, never the full size");
+        assert_eq!(s.pairs_full_fetched, 1, "two of the three were never enlarged");
+        assert_eq!(
+            s.renditions, 0,
+            "not one of them went through the encoder — that is the whole point of the pair"
+        );
+        assert_eq!(s.entries, 4);
+        assert_eq!(s.entries_free, 0, "a pair holds its thumbnail, so none of these is free");
+        assert_eq!(
+            s.used_bytes,
+            7_777 + 91_111 + 73_333 + 55_555 + 2_222_222,
+            "the budget carries the downloaded full size too, and it dwarfs the rest"
+        );
+    }
+
     async fn served_cache_json(cache: &Arc<CoverCache>) -> (u16, Vec<u8>) {
         use axum::body::Body;
         use axum::http::Request;
@@ -3443,6 +3541,9 @@ mod tests {
         // silently, since TypeScript sees nothing of a JSON body.
         assert!(v["budget_bytes"].is_number());
         assert!(v["max_entries"].is_number());
+        assert!(v["pairs"].is_number());
+        assert!(v["pairs_bytes"].is_number());
+        assert!(v["pairs_full_fetched"].is_number());
     }
 
     /// The same request as `served_body`, plus the validator the route puts on

@@ -657,6 +657,27 @@ settings card announces — the ground truth behind a figure the settings card
 can only ever guess at, since the prediction is a model measured on one
 library and the cache in front of the reader is another.
 
+**Re-encoded and supplied thumbnails are counted on separate lines, and that
+separation is the panel's one non-obvious property.** A thumbnail a source
+supplied never reaches the encoder — the route serves it and answers, without
+producing anything — so it enters no rendition table and appears on none of
+the three rendition lines. Counted together they could not be told apart, and
+worse, the average weight would stop meaning anything: it exists to be read
+against a *prediction about what the encoder produces*, and cannot be checked
+against images the encoder never saw. Counted apart, the supplied line becomes
+the only measure of whether the pair earns its keep — every entry on it is a
+re-encoding that did not happen. The panel reports it as a count with a total
+weight, alongside how many of those pairs have had their **full size
+downloaded**: one enlargement memoises a full-size original, which is by a
+wide margin the heaviest thing this cache can hold.
+
+The consequence to keep in mind when reading the panel is that on a device fed
+by MusicBrainz the *ordinary* state is a cache full of supplied thumbnails and
+few or no re-encoded ones. A rendition count of zero is therefore not an idle
+cache, and emptiness is judged on entries — the panel said "the cache is
+empty" under a line announcing forty entries for exactly as long as it judged
+emptiness on renditions.
+
 **`cover_download_max_mio`** (2 MiB by default, bounded **1-20**) is the
 largest cover the appliance will download from the internet **automatically**
 — at the moment a track is announced — and hold whole in memory. It is the

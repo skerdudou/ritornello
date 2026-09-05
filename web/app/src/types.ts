@@ -85,6 +85,9 @@ export interface CachePayload {
   renditions: number
   renditions_bytes: number
   renditions_stale: number
+  pairs: number
+  pairs_bytes: number
+  pairs_full_fetched: number
   max_entries: number
 }
 

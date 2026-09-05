@@ -8,9 +8,12 @@ const CATALOGUE = {
   cover_cache_used: 'Occupé',
   cover_cache_entries: 'Entrées',
   cover_cache_entries_free: 'dont sans coût mémoire',
-  cover_cache_renditions: 'Vignettes retenues',
+  cover_cache_renditions: 'Vignettes réencodées',
   cover_cache_average: 'Poids moyen réel',
   cover_cache_stale: 'Vignettes périmées',
+  cover_cache_supplied: 'Vignettes fournies',
+  cover_cache_supplied_weight: 'Kio au total',
+  cover_cache_full_fetched: 'Pleins formats téléchargés',
   cover_cache_belt: 'Plafond du nombre d’entrées',
   cover_cache_empty: 'Le cache est vide.',
   cover_cache_failed: 'Relevé indisponible.',
@@ -25,6 +28,9 @@ const SNAPSHOT = {
   renditions: 12,
   renditions_bytes: 1_260_000,
   renditions_stale: 2,
+  pairs: 18,
+  pairs_bytes: 1_474_560,
+  pairs_full_fetched: 3,
   max_entries: 256,
 }
 
@@ -82,12 +88,49 @@ describe('CoverCacheDetails', () => {
     expect(document.body.querySelector('[data-cover-cache-average]')?.textContent).toContain('103')
   })
 
-  it('says the cache is empty rather than dividing by zero', async () => {
-    // `renditions: 0` would show `NaN` or `Infinity` to the user.
+  it('counts supplied thumbnails on their own line, with their weight', async () => {
+    // **The line the panel was missing.** A supplied thumbnail never reaches
+    // the encoder, so it appears on none of the rendition lines -- and on a
+    // device fed by MusicBrainz that is the ordinary case, which used to make
+    // the panel report a cacheful of covers as zero thumbnails.
+    // 1,474,560 / 1024 = 1440 KiB.
+    const w = await mountPanel()
+    await w.find('[data-cover-cache-open]').trigger('click')
+    await flushPromises()
+    const line = document.body.querySelector('[data-cover-cache-supplied]')?.textContent
+    expect(line).toContain('18')
+    expect(line).toContain('1440')
+    expect(document.body.querySelector('[data-cover-cache-full]')?.textContent).toContain('3')
+  })
+
+  it('hides the average rather than dividing by zero, and does not call that empty', async () => {
+    // Two defects in one fixture. `renditions: 0` would show `NaN` or
+    // `Infinity`; and testing emptiness on that same zero -- which is what
+    // this panel used to do -- announced an empty cache directly underneath a
+    // line reading "42 entries". A cache holding nothing but pairs is the
+    // normal state of this device, not an empty one.
     const w = await mountPanel({ ...SNAPSHOT, renditions: 0, renditions_bytes: 0 })
     await w.find('[data-cover-cache-open]').trigger('click')
     await flushPromises()
     expect(document.body.querySelector('[data-cover-cache-average]')).toBeNull()
+    expect(document.body.querySelector('[data-cover-cache-panel]')?.textContent).not.toContain(
+      'vide',
+    )
+  })
+
+  it('says the cache is empty when it really holds nothing', async () => {
+    const w = await mountPanel({
+      ...SNAPSHOT,
+      entries: 0,
+      entries_free: 0,
+      renditions: 0,
+      renditions_bytes: 0,
+      pairs: 0,
+      pairs_bytes: 0,
+      pairs_full_fetched: 0,
+    })
+    await w.find('[data-cover-cache-open]').trigger('click')
+    await flushPromises()
     expect(document.body.querySelector('[data-cover-cache-panel]')?.textContent).toContain('vide')
   })
 
