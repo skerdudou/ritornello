@@ -8,6 +8,23 @@ pub enum SourceReq {
     /// Plugin-driven wake-up (boot / leaving standby). SDK-side default:
     /// behaves like `Activate`; a plugin may override `wake()`.
     Wake,
+    /// The user asked to **play**, explicitly — the Play key, while nothing
+    /// is loaded. SDK-side default: behaves like `Activate`; a plugin may
+    /// override `play()`.
+    ///
+    /// Distinct from `Activate` because the two are different intentions
+    /// that used to travel as one signal. `Activate` means "this source is
+    /// now the one" — a source switch, or a boot — and a source is entitled
+    /// to answer that by playing nothing. `Play` means "start now", and
+    /// there is no reading of it under which playing nothing is right.
+    ///
+    /// The distinction was invisible as long as every source answered
+    /// `Activate` by playing: the cd gained a setting whose default is to
+    /// play nothing on arrival, and the Play key — which went through
+    /// `Activate` — went inert with it. Rather than have the cd guess which
+    /// of the two situations it was in, the core says which, since it is the
+    /// only one that knows.
+    Play,
     Deactivate,
     Select(u8),
     Next,

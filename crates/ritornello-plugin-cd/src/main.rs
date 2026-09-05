@@ -7,12 +7,25 @@
 //! call therefore no longer lives in the process that must answer track
 //! commands.
 
+mod admin;
 mod cd;
+// Only compiled under `cargo test`: `ui_placeholder_js` is used nowhere at
+// run time in this crate, only by `build.rs` (separate compilation, via
+// `include!`) and by its own tests. Compiling it permanently into the binary
+// would trigger a `dead_code` that `-D warnings` would refuse (see
+// `mpd/src/main.rs`, same trap).
+#[cfg(test)]
+mod placeholder;
+mod state;
+
+use admin::CdAdmin;
 
 use anyhow::Result;
 use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
 use ritornello_proto::SourceAction;
+use state::{OnArrival, Remembered};
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
 use ritornello_i18n::Catalog;
@@ -50,8 +63,24 @@ struct CdSource {
     presence_rx: mpsc::Receiver<bool>,
     toc_tx: mpsc::Sender<ReadToc>,
     toc_rx: mpsc::Receiver<ReadToc>,
-    catalog: Catalog,
+    /// Shared with the Admin half, which serves it to its page — the same
+    /// arrangement as the radio, and for the same reason: `SetLocale` reaches
+    /// the Source half only, and a private copy on each side would leave the
+    /// page in the old language until the plugin restarted.
+    catalog: Arc<RwLock<Catalog>>,
     locales_root: PathBuf,
+    /// What to do when the source is arrived at, shared with the Admin half
+    /// that writes it. Read at each arrival rather than copied at startup: a
+    /// setting changed from the page must apply to the next press, not to the
+    /// next reboot.
+    on_arrival: Arc<RwLock<OnArrival>>,
+    /// Where the setting and the resume point live. Written by this half for
+    /// the resume point only, always through `state::update` — the Admin half
+    /// writes the setting into the same file.
+    state_path: PathBuf,
+    /// In-memory copy of the resume point, so an arrival does not read the
+    /// disk. Kept in step with the file by `remember`.
+    remembered: Option<Remembered>,
 }
 
 impl CdSource {
@@ -61,9 +90,9 @@ impl CdSource {
         // The Source's permanent status: what the SPA's Player card now
         // displays (see `SourceMessage::status`).
         let outcome = if self.present {
-            outcome.status(self.catalog.get("cd_audio"))
+            outcome.status(self.catalog.read().unwrap().get("cd_audio"))
         } else {
-            outcome.status(self.catalog.get("no_disc"))
+            outcome.status(self.catalog.read().unwrap().get("no_disc"))
         };
         // The count is a property of the inserted disc, not of playback: it is
         // declared on every frame, 0 when no TOC is known (no disc, or the
@@ -123,6 +152,134 @@ impl CdSource {
         });
     }
 
+    /// What the source does when it is arrived at — by the source key
+    /// (`Activate`) or by a boot / standby exit (`Wake`), which both land
+    /// here on purpose.
+    ///
+    /// The setting is read at each arrival and never cached in this struct: a
+    /// value changed from the page must apply to the next press, not to the
+    /// next restart.
+    fn arrive(&mut self) -> SourceOutcome {
+        let setting = *self.on_arrival.read().unwrap();
+        self.start(setting)
+    }
+
+    /// The Play key, which is **not** an arrival: the user asked to play, so
+    /// something plays.
+    ///
+    /// The setting is still obeyed on *where* to start — that part of it is
+    /// a preference about the disc, not about arriving — but its "play
+    /// nothing" answers a question nobody asked here. "Nothing" describes
+    /// what an arrival should do; pressing Play is not arriving, and there
+    /// is no reading of that key under which playing nothing is right.
+    ///
+    /// Falling back on the first track rather than on the resume: the two
+    /// are the same when a resume point exists, and the first track is the
+    /// only answer that needs no memory at all.
+    fn play_now(&mut self) -> SourceOutcome {
+        let where_to = match *self.on_arrival.read().unwrap() {
+            OnArrival::Nothing => OnArrival::FirstTrack,
+            elsewhere => elsewhere,
+        };
+        self.start(where_to)
+    }
+
+    /// Shared by both entries above, so the two can never drift on what
+    /// "start at track 1" or "resume" means.
+    fn start(&mut self, setting: OnArrival) -> SourceOutcome {
+        // No disc: nothing can start, whatever the setting says. `playback`
+        // goes false so the frame announces a status without an identity —
+        // `issue` requires both, and a disc absent from the tray is not a
+        // track being played.
+        if !self.present {
+            self.playback = false;
+            return self.issue(SourceAction::Noop);
+        }
+        match setting {
+            OnArrival::Nothing => {
+                self.playback = false;
+                self.issue(SourceAction::Noop)
+            }
+            OnArrival::FirstTrack => {
+                self.track = 0;
+                self.playback = true;
+                // The whole disc, exactly as before this setting existed:
+                // mpv then exposes the tracks as it prefers, and the plugin
+                // learns the index through `player_track`.
+                self.issue(SourceAction::play("cdda://").finite())
+            }
+            OnArrival::LastTrack => {
+                let track = self.resume_track();
+                self.track = track;
+                self.playback = true;
+                // 1-based in the URI, and **the same expression as
+                // `select`**: `cdda://n` plays from track n to the end of the
+                // disc. Going through the same form as a digit pressed on the
+                // remote is deliberate — a resume then behaves exactly like a
+                // selection, which is one behaviour to understand instead of
+                // two.
+                self.issue(SourceAction::play(format!("cdda://{}", track + 1)).finite())
+            }
+        }
+    }
+
+    /// The track a resume must start on; `0` — the first — when there is
+    /// nothing to resume.
+    ///
+    /// Three cases fall back to the first track, and they are deliberately
+    /// **not** told apart: the setting says start the disc, so the disc
+    /// starts.
+    /// - nothing remembered yet;
+    /// - a different disc in the tray. Applying the remembered number would
+    ///   drop the listener into the middle of an unrelated record, or outside
+    ///   its track count altogether. This is what the TOC is for, and the
+    ///   plugin already reads it to tell a swap from a flicker of the tray;
+    /// - the TOC not read yet. This one is a genuine limitation and it is
+    ///   worth stating: the read is asynchronous (`spawn_toc_read`), and a
+    ///   plugin has no way to ask for playback later — a spontaneous
+    ///   notification carries a state, never an action. So a boot whose TOC
+    ///   read has not landed yet resumes at the first track. The everyday
+    ///   case, pressing the source key on a disc that has been sitting in the
+    ///   drive, has had its TOC read long since.
+    fn resume_track(&self) -> i64 {
+        let (Some(toc), Some(remembered)) = (&self.toc, &self.remembered) else {
+            return 0;
+        };
+        if &remembered.toc != toc {
+            return 0;
+        }
+        // The same TOC is the same disc, so an out-of-range number should not
+        // happen — but this file is editable by hand on the device, and a bad
+        // value must not send mpv outside the disc.
+        if self.total_tracks > 0 && remembered.track >= self.total_tracks as i64 {
+            return 0;
+        }
+        remembered.track.max(0)
+    }
+
+    /// Records the track being listened to, so a later resume can find it.
+    ///
+    /// Called from every path that moves `self.track` while something plays.
+    /// Recorded **whatever the setting is**: switching the setting on should
+    /// work right away, not from the next track change onwards.
+    ///
+    /// Nothing is recorded while the TOC is unknown: a track number without
+    /// the disc it belongs to is precisely what `resume_track` refuses to
+    /// trust.
+    fn remember(&mut self) {
+        let Some(toc) = self.toc.clone() else {
+            return;
+        };
+        let remembered = Remembered { toc, track: self.track };
+        self.remembered = Some(remembered.clone());
+        // Logged, never propagated — the same policy as the files plugin's
+        // `persist`: a read-only `/var/lib` must cost the resume after a
+        // reboot, not the playback in progress.
+        if let Err(e) = state::update(&self.state_path, |s| s.remembered = Some(remembered)) {
+            tracing::warn!("persisting the current track: {e}");
+        }
+    }
+
     /// Reset on disc change: the epoch invalidates any TOC read still in
     /// flight.
     fn forget_disc(&mut self) {
@@ -143,23 +300,27 @@ impl CdSource {
 #[async_trait::async_trait]
 impl SourcePlugin for CdSource {
     async fn activate(&mut self) -> SourceOutcome {
-        self.playback = self.present;
-        if self.present {
-            self.issue(SourceAction::play("cdda://").finite())
-        } else {
-            self.issue(SourceAction::Noop)
-        }
+        self.arrive()
     }
     async fn deactivate(&mut self) -> SourceOutcome {
         self.playback = false;
         SourceOutcome::new(SourceAction::Stop).plays_nothing()
     }
     async fn wake(&mut self) -> SourceOutcome {
-        // Wake: refresh the display ("no disc" / disc info) without emitting a
-        // Play — the cd does not start by itself, so nothing plays and there is
-        // no metadata to look up.
-        self.playback = false;
-        self.issue(SourceAction::Noop)
+        // **The same function as `activate`, and that is the point of the
+        // setting.** These two used to disagree without anyone having decided
+        // it: the source key started track 1 while a boot started nothing,
+        // because this method was overridden and the other was not. Whoever
+        // owned the appliance was going to be surprised by one of the two.
+        // Now a single value governs both, and its default — play nothing —
+        // is what the old `wake` did.
+        self.arrive()
+    }
+    async fn play(&mut self) -> SourceOutcome {
+        // The only source that needs to override this: for the others,
+        // arriving and being told to play are the same thing. See
+        // `play_now`.
+        self.play_now()
     }
     async fn select(&mut self, n: u8) -> SourceOutcome {
         if !self.present || n == 0 {
@@ -170,6 +331,7 @@ impl SourcePlugin for CdSource {
         }
         self.track = (n - 1) as i64;
         self.playback = true;
+        self.remember();
         self.issue(SourceAction::play(format!("cdda://{n}")).finite())
     }
     async fn next(&mut self) -> SourceOutcome {
@@ -186,6 +348,7 @@ impl SourcePlugin for CdSource {
         if self.total_tracks > 0 {
             self.track = (self.track + 1).min(self.total_tracks as i64 - 1);
         }
+        self.remember();
         self.issue(SourceAction::PlayerNext)
     }
     async fn prev(&mut self) -> SourceOutcome {
@@ -194,6 +357,7 @@ impl SourcePlugin for CdSource {
             return SourceOutcome::new(SourceAction::Noop);
         }
         self.track = (self.track - 1).max(0);
+        self.remember();
         self.issue(SourceAction::PlayerPrev)
     }
     async fn stop(&mut self) -> SourceOutcome {
@@ -228,6 +392,10 @@ impl SourcePlugin for CdSource {
         // plugin believed until now. This is also what repairs the state after
         // a presence flicker of the drive.
         self.playback = true;
+        // The disc advancing on its own is exactly what a resume must find
+        // again: without this, listening straight through an album would
+        // remember only the track the listener had picked by hand.
+        self.remember();
         self.issue(SourceAction::Noop)
     }
     /// The drive has a tray, disc or not: it is even without a disc that it is
@@ -251,7 +419,7 @@ impl SourcePlugin for CdSource {
     }
 
     async fn set_locale(&mut self, locale: String) {
-        self.catalog = Catalog::load("cd", &locale, &self.locales_root, CD_EN);
+        *self.catalog.write().unwrap() = Catalog::load("cd", &locale, &self.locales_root, CD_EN);
     }
 
     async fn poll_notification(&mut self) -> Option<Notification> {
@@ -351,6 +519,14 @@ async fn main() -> Result<()> {
 
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
 
+    let state_path =
+        PathBuf::from(env_or("RITORNELLO_CD_STATE", "/var/lib/ritornello/plugin-cd.json"));
+    let persisted = state::load(&state_path);
+    // Shared, not copied into each half: the page writes it and the Source
+    // half reads it at every arrival, so a change applies to the next press.
+    let on_arrival = Arc::new(RwLock::new(persisted.on_arrival));
+    let catalog = Arc::new(RwLock::new(Catalog::load("cd", "en", &locales_root, CD_EN)));
+
     let source = CdSource {
         cd_dev,
         present: false,
@@ -363,10 +539,14 @@ async fn main() -> Result<()> {
         presence_rx,
         toc_tx,
         toc_rx,
-        catalog: Catalog::load("cd", "en", &locales_root, CD_EN),
-        locales_root,
+        catalog: catalog.clone(),
+        locales_root: locales_root.clone(),
+        on_arrival: on_arrival.clone(),
+        state_path: state_path.clone(),
+        remembered: persisted.remembered,
     };
-    Runtime::from_args()?.source(source)?.run().await
+    let admin = CdAdmin { state_path, on_arrival, catalog, locales_root };
+    Runtime::from_args()?.source(source)?.admin(admin)?.run().await
 }
 
 #[cfg(test)]
@@ -389,10 +569,38 @@ mod tests {
             presence_rx,
             toc_tx: toc_tx.clone(),
             toc_rx,
-            catalog: Catalog::load("cd", "en", std::path::Path::new("/nonexistent"), CD_EN),
+            catalog: Arc::new(RwLock::new(Catalog::load(
+                "cd",
+                "en",
+                std::path::Path::new("/nonexistent"),
+                CD_EN,
+            ))),
             locales_root: std::path::PathBuf::from("/nonexistent"),
+            on_arrival: Arc::new(RwLock::new(OnArrival::default())),
+            // A writable path that no test reads: `remember` is called by
+            // every track change, and pointing it at an unwritable place
+            // would fill the test output with warnings for nothing. The tests
+            // that do look at what was persisted set this field to a
+            // `TempDir` of their own (see `source_remembering_into`).
+            state_path: std::env::temp_dir().join("ritornello-cd-tests").join("plugin-cd.json"),
+            remembered: None,
         };
         (source, presence_tx, toc_tx)
+    }
+
+    /// A disc read and playing, whose resume point is persisted into a
+    /// directory the caller owns — the only way to assert on the file.
+    fn source_remembering_into(dir: &tempfile::TempDir) -> CdSource {
+        let mut source = playing_source();
+        source.state_path = dir.path().join("plugin-cd.json");
+        source
+    }
+
+    /// The same, arriving with `setting` in force.
+    fn source_arriving_with(setting: OnArrival) -> CdSource {
+        let source = playing_source();
+        *source.on_arrival.write().unwrap() = setting;
+        source
     }
 
     /// Disc read and playing: the state where the identity is complete.
@@ -770,6 +978,191 @@ mod tests {
         assert_eq!(out.action, SourceAction::Noop, "cd must not play on wake");
         assert_eq!(out.status.as_deref(), Some("no disc"));
         assert_eq!(out.identity, Some(IdentityUpdate::Nothing));
+    }
+
+    #[tokio::test]
+    async fn arriving_plays_nothing_by_default() {
+        // The owner's decision: starting the drive is a physical act, and the
+        // default must not perform it. Note this changes what the source key
+        // used to do — it started track 1 — which is the point of the
+        // setting.
+        let mut source = playing_source();
+        source.playback = false;
+        let out = source.activate().await;
+        assert_eq!(out.action, SourceAction::Noop);
+        assert_eq!(out.identity, Some(IdentityUpdate::Nothing), "nothing plays, nothing to enrich");
+        assert!(!source.playback);
+    }
+
+    #[tokio::test]
+    async fn one_setting_governs_the_source_key_and_the_boot_alike() {
+        // The whole reason this setting exists. These two used to disagree
+        // without anyone deciding it: the key started track 1, a boot started
+        // nothing. Whichever of the two the owner had in mind, the other was
+        // going to surprise them.
+        let expected = SourceAction::play("cdda://").finite();
+        let mut by_key = source_arriving_with(OnArrival::FirstTrack);
+        assert_eq!(by_key.activate().await.action, expected);
+        let mut by_boot = source_arriving_with(OnArrival::FirstTrack);
+        assert_eq!(by_boot.wake().await.action, expected);
+
+        let mut by_key = source_arriving_with(OnArrival::Nothing);
+        assert_eq!(by_key.activate().await.action, SourceAction::Noop);
+        let mut by_boot = source_arriving_with(OnArrival::Nothing);
+        assert_eq!(by_boot.wake().await.action, SourceAction::Noop);
+    }
+
+    #[tokio::test]
+    async fn an_absent_disc_plays_nothing_whatever_the_setting_says() {
+        for setting in [OnArrival::Nothing, OnArrival::FirstTrack, OnArrival::LastTrack] {
+            let mut source = source_arriving_with(setting);
+            source.present = false;
+            let out = source.activate().await;
+            assert_eq!(out.action, SourceAction::Noop, "{setting:?} on an empty tray");
+            assert!(!source.playback, "{setting:?} must not claim a playback");
+        }
+    }
+
+    #[tokio::test]
+    async fn resuming_finds_the_track_back_on_the_same_disc() {
+        let mut source = source_arriving_with(OnArrival::LastTrack);
+        source.remembered =
+            Some(Remembered { toc: "3 150 22767 41887 63000".into(), track: 2 });
+        let out = source.activate().await;
+        // 1-based in the URI, like a digit pressed on the remote: `cdda://3`
+        // plays from track 3 to the end of the disc.
+        assert_eq!(out.action, SourceAction::play("cdda://3").finite());
+        assert_eq!(source.track, 2);
+        assert_eq!(out.preset, Some(3), "the highlighted key must be the resumed track");
+    }
+
+    #[tokio::test]
+    async fn resuming_on_another_disc_starts_at_the_first_track() {
+        // The guard that matters: a track number applied to whatever disc is
+        // in the tray would drop the listener into the middle of an unrelated
+        // record. The plugin already knows the difference — it reads the TOC.
+        let mut source = source_arriving_with(OnArrival::LastTrack);
+        source.remembered = Some(Remembered { toc: "9 150 30000 60000".into(), track: 2 });
+        let out = source.activate().await;
+        assert_eq!(out.action, SourceAction::play("cdda://1").finite());
+        assert_eq!(source.track, 0);
+    }
+
+    #[tokio::test]
+    async fn resuming_starts_at_the_first_track_when_nothing_is_known_yet() {
+        // Two cases, one behaviour, and it is deliberate: the setting says
+        // start the disc, so the disc starts.
+        //
+        // Nothing remembered — a fresh install:
+        let mut fresh = source_arriving_with(OnArrival::LastTrack);
+        assert_eq!(fresh.activate().await.action, SourceAction::play("cdda://1").finite());
+
+        // TOC not read yet — the read is asynchronous, and a plugin cannot
+        // ask for playback later on (a spontaneous notification carries a
+        // state, never an action). So a boot that outruns the TOC read
+        // resumes at the first track rather than trusting a number it cannot
+        // check.
+        let mut unread = source_arriving_with(OnArrival::LastTrack);
+        unread.toc = None;
+        unread.remembered =
+            Some(Remembered { toc: "3 150 22767 41887 63000".into(), track: 2 });
+        assert_eq!(unread.activate().await.action, SourceAction::play("cdda://1").finite());
+    }
+
+    #[tokio::test]
+    async fn resuming_refuses_a_track_outside_the_disc() {
+        // The same TOC is the same disc, so this should not happen — but the
+        // state file is editable by hand on the device, and mpv must not be
+        // sent outside the disc.
+        let mut source = source_arriving_with(OnArrival::LastTrack);
+        source.remembered =
+            Some(Remembered { toc: "3 150 22767 41887 63000".into(), track: 7 });
+        assert_eq!(source.total_tracks, 3);
+        assert_eq!(source.activate().await.action, SourceAction::play("cdda://1").finite());
+    }
+
+    #[tokio::test]
+    async fn the_disc_advancing_on_its_own_is_what_a_resume_finds_back() {
+        // Without persisting on this path, listening straight through an
+        // album would only ever remember the track the listener picked by
+        // hand.
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = source_remembering_into(&dir);
+        source.player_track(2).await;
+        let persisted = state::load(&source.state_path).remembered.expect("a resume point");
+        assert_eq!(persisted.track, 2);
+        assert_eq!(persisted.toc, "3 150 22767 41887 63000", "the disc must travel with the track");
+    }
+
+    #[tokio::test]
+    async fn every_way_of_changing_track_is_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = source_remembering_into(&dir);
+        source.select(3).await;
+        assert_eq!(state::load(&source.state_path).remembered.unwrap().track, 2, "select");
+        source.next().await;
+        assert_eq!(state::load(&source.state_path).remembered.unwrap().track, 2, "next, bounded");
+        source.prev().await;
+        assert_eq!(state::load(&source.state_path).remembered.unwrap().track, 1, "prev");
+    }
+
+    #[tokio::test]
+    async fn a_track_is_never_remembered_without_its_disc() {
+        // A number alone is exactly what `resume_track` refuses to trust, so
+        // recording one would be recording a value we have decided to ignore.
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = source_remembering_into(&dir);
+        source.toc = None;
+        source.player_track(2).await;
+        assert!(state::load(&source.state_path).remembered.is_none());
+        assert!(source.remembered.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_play_key_starts_the_disc_even_when_arrival_plays_nothing() {
+        // The defect this exists to forbid: "play nothing" describes an
+        // arrival, and the Play key is not an arrival. With the two sharing
+        // one signal, the default setting made that key inert — only a track
+        // number could start the disc.
+        let mut source = source_arriving_with(OnArrival::Nothing);
+        source.playback = false;
+        let out = source.play().await;
+        assert_eq!(out.action, SourceAction::play("cdda://").finite());
+        assert!(source.playback);
+        // And arriving still plays nothing: the fix must not have quietly
+        // turned the default into "start".
+        let mut arriving = source_arriving_with(OnArrival::Nothing);
+        assert_eq!(arriving.activate().await.action, SourceAction::Noop);
+    }
+
+    #[tokio::test]
+    async fn the_play_key_still_obeys_where_to_start() {
+        // The half of the setting that is a preference about the disc rather
+        // than about arriving: someone who asked to resume expects Play to
+        // resume too.
+        let mut source = source_arriving_with(OnArrival::LastTrack);
+        source.remembered = Some(Remembered { toc: "3 150 22767 41887 63000".into(), track: 2 });
+        assert_eq!(source.play().await.action, SourceAction::play("cdda://3").finite());
+    }
+
+    #[tokio::test]
+    async fn the_play_key_cannot_start_an_empty_tray() {
+        let mut source = source_arriving_with(OnArrival::FirstTrack);
+        source.present = false;
+        let out = source.play().await;
+        assert_eq!(out.action, SourceAction::Noop);
+        assert!(!source.playback);
+    }
+
+    #[tokio::test]
+    async fn the_setting_is_read_at_each_arrival_never_cached() {
+        // Changing it from the page must apply to the next press, not to the
+        // next restart — which is why the Source half holds the shared value
+        // and not a copy of it.
+        let mut source = source_arriving_with(OnArrival::Nothing);
+        assert_eq!(source.activate().await.action, SourceAction::Noop);
+        *source.on_arrival.write().unwrap() = OnArrival::FirstTrack;
+        assert_eq!(source.activate().await.action, SourceAction::play("cdda://").finite());
     }
 
     #[test]

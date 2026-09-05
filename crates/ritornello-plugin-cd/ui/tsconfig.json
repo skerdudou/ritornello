@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "lib": ["ES2022", "DOM"],
+    "types": ["vitest/globals", "vite/client"],
+    "skipLibCheck": true,
+    "noEmit": true,
+    // This package has no `@/` alias of its own (flat src): this mapping
+    // exists only so that `vue-tsc` resolves `@/lib/utils` and
+    // `@/components/ui/button`, referenced by the kit's `.vue` files
+    // (`@ritornello/ui` exposes its raw sources, never compiled) when their
+    // type is checked from this program. Same alias as the one
+    // `vitest.config.ts` (`kitAlias`) already redirects to `web/kit/src` at
+    // build/test time.
+    "paths": { "@/*": ["../../../web/kit/src/*"] }
+  },
+  "include": ["src", "*.ts"]
+}

@@ -240,14 +240,24 @@ impl<P: Player> Core<P> {
                     // "toggle pause" has nothing left to resume. The Play key
                     // therefore did nothing at all after a Stop, on every
                     // source — measured on the radio as well as on files. We
-                    // ask the active source to play again, which is exactly
-                    // what the key promises.
+                    // ask the active source to play, which is exactly what
+                    // the key promises.
+                    //
+                    // **`Play` and not `Activate`**, and the difference is
+                    // one the core is the only one able to make: "the user
+                    // pressed Play" and "this source has just become the
+                    // active one" are two intentions that used to share a
+                    // signal. A source may answer the second by playing
+                    // nothing — the cd, whose arrival is configurable, does
+                    // so by default — and the key went inert with it. The
+                    // SDK's default keeps `Play` behaving as `Activate`, so
+                    // no other source changes.
                     //
                     // `playback` and not `expecting_stream`: the first says
                     // "something plays, of whatever nature", the second only
                     // holds for restartable streams. A pause touches neither —
                     // so resuming stays a simple toggle, without reloading.
-                    if let Some(action) = self.active_request(SourceReq::Activate).await? {
+                    if let Some(action) = self.active_request(SourceReq::Play).await? {
                         self.apply(action).await?;
                     }
                 }
@@ -527,6 +537,23 @@ mod tests {
         core.player.pause_fails.store(false, std::sync::atomic::Ordering::SeqCst);
         core.handle_command(Command::PlayPause).await.unwrap();
         assert_eq!(core.player_state().playback, Playback::Paused);
+    }
+
+    #[tokio::test]
+    async fn the_play_key_asks_the_source_to_play_not_to_activate() {
+        // Two intentions that used to share one signal. A source is entitled
+        // to answer "this source is now the active one" by playing nothing —
+        // the cd, whose arrival is configurable, does so by default — and
+        // the Play key went inert with it. Only the core can tell the two
+        // apart, so it is the core that must say which.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert_eq!(*source_calls.lock().unwrap(), vec!["radio:Play".to_string()]);
+        // And a real pause stays a plain toggle: nothing is asked of the
+        // source once something is playing.
+        source_calls.lock().unwrap().clear();
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert!(source_calls.lock().unwrap().is_empty(), "a pause must not reload anything");
     }
 
     #[tokio::test]

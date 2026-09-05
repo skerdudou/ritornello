@@ -104,6 +104,16 @@ impl Source for FakeSource {
             (_, SourceReq::Eject) if self.name == "cd" => SourceAction::Stop,
             ("radio", SourceReq::Wake) => SourceAction::play("http://fip"),
             ("cd", SourceReq::Wake) => SourceAction::Noop,
+            // The Play key. This fake answers it like an arrival, which is
+            // the SDK's default for any source that does not override
+            // `play()` — it is not a model of the real cd plugin, whose
+            // arrival is configurable and may play nothing while Play still
+            // starts the disc. What matters here is that the core sends a
+            // distinct request at all: without these two arms the fake
+            // would fall through to `Noop` and the Play key would look
+            // inert in the tests too.
+            ("radio", SourceReq::Play) => SourceAction::play("http://fip"),
+            ("cd", SourceReq::Play) => SourceAction::play("cdda://").finite(),
             _ => SourceAction::Noop,
         })
     }

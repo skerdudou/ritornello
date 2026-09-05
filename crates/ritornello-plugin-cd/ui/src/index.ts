@@ -1,0 +1,8 @@
+import { UI_CONTRACT } from '@ritornello/ui'
+import CdAdmin from './CdAdmin.vue'
+import './ui.css'
+
+// Contract version this module is compiled against. The shell compares it
+// with its own before mounting the component.
+export const contract = UI_CONTRACT
+export default CdAdmin

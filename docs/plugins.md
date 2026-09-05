@@ -362,6 +362,54 @@ loaded), the same field the radio plugin uses — this drives the same
 preset grid described in [interface.md](interface.md), tracks standing
 in for stations.
 
+### What it does on arrival
+
+The plugin serves an admin page carrying its one setting: what happens when
+this source is arrived at. Three values — play nothing (the default), start at
+track 1, resume the track last played — stored in
+`/var/lib/ritornello/plugin-cd.json` (`RITORNELLO_CD_STATE`).
+
+**One value governs both ways of arriving**, the source key (`Activate`) and a
+boot or standby exit (`Wake`). That is the point of the setting, and it
+replaces a disagreement nobody had decided: `wake` was overridden to play
+nothing while `activate` started track 1, so whichever of the two the owner
+had in mind, the other was going to surprise them. The default is the old
+`wake` behaviour — starting a drive is a physical act, it spins up and it is
+audible, and it should not happen unasked.
+
+**The Play key is not an arrival**, and giving the cd a setting is what forced
+that distinction into the open. The core used to send `Activate` for both —
+"this source is now the active one" and "the user pressed Play while nothing
+was loaded" — which was invisible as long as every source answered by playing.
+With an arrival that may legitimately play nothing, the Play key went inert
+with it: only a track number could start the disc. So `SourceReq::Play` now
+exists alongside `Activate` and `Wake`, the core being the only party that can
+tell the two situations apart. The SDK's `play()` defaults to `activate()`, so
+radio, files, generic-input and mpd behave exactly as before; the cd is the
+only source that overrides it, and it starts — obeying the setting on *where*
+to start (a resume stays a resume) while ignoring its "play nothing", which
+answers a question the key did not ask.
+
+Resuming is tied to the **disc**, not to a track number floating free: the
+remembered entry carries the TOC the plugin already reads to tell a disc swap
+from a flicker of the tray. Insert another disc and playback starts at track 1
+instead, which is also what happens when nothing has been remembered yet, when
+the remembered number falls outside the disc (the file is editable by hand),
+and when the TOC has not been read yet. That last case is a real limitation
+worth stating: the read is asynchronous, and a plugin cannot ask for playback
+after the fact — a spontaneous notification carries a state, never an action
+— so a boot that outruns the TOC read resumes at the first track. Pressing the
+source key on a disc that has been sitting in the drive, the everyday case,
+has had its TOC read long since.
+
+Only one disc is remembered, the last one: swapping discs and coming back
+loses the position, which is the honest reading of "the last track played".
+The resume point is written on every track change — including the disc
+advancing on its own, otherwise listening straight through an album would
+only ever remember a track picked by hand. The two halves of the plugin write
+into that same file, the page for the setting and the source for the resume
+point, each through a read-modify-write that preserves the other's field.
+
 It never fills `preset_name`: a track number is not a name, and what is
 interesting about a disc (album, title, artist) already arrives through the
 `metadata` path (see below), not through the preset name. For the same reason

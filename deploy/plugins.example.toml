@@ -6,6 +6,9 @@
 name = "radio"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
 
+# Its page carries one setting: what happens on arriving at this source —
+# play nothing (the default), start at track 1, or resume the track last
+# played on that same disc. It governs the source key and a boot alike.
 [[plugin]]
 name = "cd"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-cd"
