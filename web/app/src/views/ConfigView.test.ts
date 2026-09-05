@@ -406,6 +406,42 @@ describe('ConfigView — language', () => {
     expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBeGreaterThan(before)
   })
 
+  it('every dropdown follows a language change, without waiting to be opened', async () => {
+    // Reported from use, twice, on two different pages. reka-ui hands an
+    // option's text to its Select when that item **mounts** and never re-reads
+    // it, so a label coming from `t()` froze at the language it had then:
+    // changing the language reloaded the catalog, every other label on the
+    // page followed, and these triggers kept the old one until the list was
+    // opened — opening is what remounts the items and heals it, which is what
+    // made the defect so puzzling.
+    //
+    // The catalog served changes between the two GETs, which is exactly what
+    // the language picker causes. `mountView`'s payload table is the very
+    // object its stub reads on each call, so swapping the entry mid-test is
+    // enough — no second harness to keep in step with the first.
+    const { w, table } = await mountView()
+
+    expect(w.get('[data-startup-select]').text()).toContain('allumé')
+    expect(w.get('[data-clock-hours-select]').text()).toContain('12 h (1:05 PM)')
+
+    // The language change itself: the page PUTs, then re-reads the catalog.
+    ;(table as Record<string, unknown>)['/api/i18n'] = {
+      ...CATALOGUE,
+      startup_on: 'on',
+      clock_12h: '12 h (en)',
+      clock_date_dmy: '31/12/2026 (en)',
+      audio_default_device: 'System default',
+    }
+    await w.findAllComponents(Select)[1]!.vm.$emit('update:modelValue', 'en')
+    await w.find('[data-lang-change]').trigger('click')
+    await flushPromises()
+
+    expect(w.get('[data-startup-select]').text()).toContain('on')
+    expect(w.get('[data-startup-select]').text()).not.toContain('allumé')
+    expect(w.get('[data-clock-hours-select]').text()).toBe('12 h (en)')
+    expect(w.get('[data-date-format-select]').text()).toContain('(en)')
+  })
+
   it('shows the name of the language and not its code', async () => {
     // "français" is read, "fr" is guessed. The code remains the value sent to
     // the core (checked by the PUT test above).

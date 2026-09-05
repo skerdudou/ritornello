@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
   api, Button, Card, CardContent, CardHeader, CardTitle, createT,
-  Select, SelectContent, SelectItem, SelectTrigger, toast,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue, toast,
   type Catalog,
 } from '@ritornello/ui'
 import { computed, onMounted, ref } from 'vue'
@@ -106,7 +106,8 @@ async function save(): Promise<void> {
              accessible name. Same arrangement as `InputAdmin.vue`. -->
         <label class="text-sm font-medium">{{ t('arrival_label') }}</label>
         <Select v-model="onArrival">
-          <!-- The label is rendered here, not left to `SelectValue`. The kit's
+          <!-- The label is handed to `SelectValue` as a slot, rather than left
+               to the text it captured. The kit's
                `SelectItemText` hands an item's text to the Select root when
                that item mounts and never re-reads it, so any label that
                changes afterwards is ignored until the list is first opened
@@ -120,7 +121,7 @@ async function save(): Promise<void> {
                keeps the previous language. A plain reactive binding cannot go
                stale that way. -->
           <SelectTrigger data-arrival class="w-full" :aria-label="t('arrival_label')">
-            {{ label(onArrival) }}
+            <SelectValue>{{ label(onArrival) }}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem v-for="choice in CHOICES" :key="choice" :value="choice">

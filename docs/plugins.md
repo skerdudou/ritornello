@@ -2162,8 +2162,9 @@ third-party plugin's UI:
   <!-- Wrong: shows the previous language after a language change. -->
   <SelectTrigger><SelectValue /></SelectTrigger>
 
-  <!-- Right: an ordinary reactive binding cannot go stale. -->
-  <SelectTrigger>{{ labelOf(value) }}</SelectTrigger>
+  <!-- Right: `SelectValue` renders the slot it is given in preference to the
+       text it captured, and an ordinary reactive binding cannot go stale. -->
+  <SelectTrigger><SelectValue>{{ labelOf(value) }}</SelectValue></SelectTrigger>
   ```
 
   The mount-time half of this trap is gone — a component is no longer built
