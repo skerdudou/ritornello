@@ -56,14 +56,20 @@ const cause = ref('')
 
 /**
  * Whether the catalog request is still in flight, for `PluginView` to hold the
- * reveal.
+ * plugin component's **mount**.
  *
- * Mounting the plugin's component as soon as its module arrives shows the
+ * Building the plugin's component as soon as its module arrives shows the
  * translation **keys** — `col_num`, `btn_save` — which the real labels replace
  * a moment later; they do not have the same length, so every label of the page
  * shifts once it is already on screen. This flag is what lets the view wait for
- * both answers before drawing anything. The two requests are unchanged and
- * still leave together: nothing is serialised, only the curtain is held.
+ * both answers before building anything.
+ *
+ * It used to hold only the *reveal*, the component being mounted underneath
+ * behind a `display: none`. That was not enough, and a bug reported from use
+ * proved it: a hidden component is a running component, and a value captured
+ * at mount — a Select's option text, see `PluginView` — never recovered.
+ * The two requests still leave together; what is now serialised, when the
+ * catalog is the slower of the two, is the plugin's own `onMounted` request.
  *
  * Starts raised: at the very first render the request has not been sent yet,
  * and a flag that started down would reveal an empty catalog before raising

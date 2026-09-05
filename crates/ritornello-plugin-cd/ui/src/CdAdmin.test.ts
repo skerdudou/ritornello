@@ -63,6 +63,32 @@ describe('CdAdmin', () => {
     expect(trigger.text()).not.toContain('first_track')
   })
 
+  it('follows a language change without waiting for the list to be opened', async () => {
+    // The reason this page renders its own label instead of leaving it to
+    // `SelectValue`, and the one that survives the framework fix.
+    //
+    // The kit's `SelectItemText` hands an item's text to the Select when the
+    // item mounts and never re-reads it. `PluginView` no longer builds a
+    // plugin component before its catalog has settled, so the mount race is
+    // gone — but a language change swaps the catalog while this component
+    // **stays mounted**, and measured, a plain `SelectValue` then keeps the
+    // previous language until the list is first opened.
+    //
+    // Swapping the catalog on a mounted component is exactly what
+    // `PluginRoute` does when the language changes.
+    const spy = vi.fn(async () => new Response(JSON.stringify({ on_arrival: 'nothing' }), { status: 200 }))
+    vi.stubGlobal('fetch', spy)
+    const w = mount(CdAdmin, { props: { catalog: CATALOG, base: BASE } })
+    await flushPromises()
+    expect(w.get('[data-arrival]').text()).toContain(CATALOG.arrival_nothing)
+
+    await w.setProps({ catalog: { ...CATALOG, arrival_nothing: 'Play nothing' } })
+    await flushPromises()
+    const trigger = w.get('[data-arrival]')
+    expect(trigger.text()).toContain('Play nothing')
+    expect(trigger.text()).not.toContain(CATALOG.arrival_nothing)
+  })
+
   it('names the control for a screen reader', async () => {
     // The kit's `Select` does not associate a neighbouring `<label for>` with
     // its trigger, so without this the control has no accessible name at all.

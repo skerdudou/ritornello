@@ -254,13 +254,28 @@ describe('PluginView', () => {
       expect(status.text()).toBe('Loading…')
     })
 
-    it('holds the page back until the catalog has settled', async () => {
-      // **This is the i18n jump.** The module can be ready while the plugin's
-      // catalog is still in flight; mounting then shows raw keys (`col_num`,
-      // `btn_save`) which the real labels later replace — and those do not
-      // have the same length, so every label shifts. Both requests still leave
-      // together: only the curtain is held.
-      const view = defineComponent({ render: () => h('p', 'plugin UI') })
+    it('does not even build the plugin while its catalog is unsettled', async () => {
+      // **This is the i18n jump, and more than that.** The module can be ready
+      // while the plugin's catalog is still in flight; mounting then shows raw
+      // keys (`col_num`, `btn_save`) which the real labels later replace — and
+      // those do not have the same length, so every label shifts.
+      //
+      // This test used to assert the component was mounted and merely hidden.
+      // That was not enough, and a bug reported from use is what proved it: a
+      // `display: none` curtain hides a component that is fully mounted and
+      // running, and the kit's `SelectItemText` hands its option's text to the
+      // Select in `onMounted`, once. A dropdown built behind the curtain
+      // registered the raw key and still showed it when the curtain lifted.
+      // Hence a real absence, checked here through the component's `setup`
+      // rather than through what is on screen — the whole point is that
+      // nothing of it runs.
+      const built: number[] = []
+      const view = defineComponent({
+        setup: () => {
+          built.push(1)
+          return () => h('p', 'plugin UI')
+        },
+      })
       const w = mount(PluginView, {
         props: {
           name: 'demo',
@@ -270,28 +285,52 @@ describe('PluginView', () => {
         },
       })
       await flushPromises()
-      // Mounted underneath — see the test above — but nothing of it reaches
-      // the reader, nor a screen reader: `display: none` hides it from both.
-      //
-      // The style attribute rather than `isVisible()`: that helper disagrees
-      // with the DOM here, reporting a hidden element after the very patch
-      // that removes the rule (the rendered HTML carries no `style` at all).
-      // The attribute is the mechanism itself and cannot drift from it.
-      expect(hiddenContent(w)).toBe(true)
+      expect(built).toHaveLength(0)
+      expect(w.find('[data-plugin-content]').exists()).toBe(false)
 
       await w.setProps({ catalogPending: false })
       await flushPromises()
+      expect(built).toHaveLength(1)
       expect(hiddenContent(w)).toBe(false)
       expect(w.text()).toContain('plugin UI')
     })
 
-    it('mounts the plugin behind the placeholder, so its own loading starts at once', async () => {
-      // The floor keeps the placeholder on screen for a moment after the
-      // module has arrived. Were the component only mounted once that floor
-      // expired, its `onMounted` fetch would start up to 300 ms late — pure
-      // latency added to the slow path, the one case where it hurts — and the
-      // reader would get placeholder, blank, then the plugin's own
-      // placeholder. It is mounted underneath instead: hidden, but working.
+    it('builds the plugin even when its catalog request failed', async () => {
+      // "Settled" means answered **or** refused. `PluginRoute` lowers the flag
+      // on a refusal too, handing down an empty catalog: the page then shows
+      // keys, which is bad, but a page withheld forever would be worse. The
+      // guarantee this view offers a plugin author is therefore "your
+      // component is never built with an *unsettled* catalog" — never "with a
+      // translated one".
+      const built: number[] = []
+      const view = defineComponent({
+        setup: () => {
+          built.push(1)
+          return () => h('p', 'plugin UI')
+        },
+      })
+      const w = mount(PluginView, {
+        props: {
+          name: 'demo',
+          loadModule: async () => ({ contract: 1, default: view }),
+          catalog: {},
+          catalogPending: false,
+        },
+      })
+      await flushPromises()
+      expect(built).toHaveLength(1)
+      expect(w.text()).toContain('plugin UI')
+    })
+
+    it('with its catalog settled, mounts behind the placeholder so its loading starts at once', async () => {
+      // What the `display: none` curtain is still for, now that an unsettled
+      // catalog withholds the mount outright (see the test above): the floor
+      // keeps the placeholder on screen for a moment after the module has
+      // arrived, and a component only mounted once that floor expired would
+      // start its own fetch up to 300 ms late — pure latency added to the slow
+      // path, the one case where it hurts — then paint its own placeholder
+      // after a blank gap. With the catalog already settled, it is mounted
+      // underneath for that tail instead: hidden, but working.
       const mounted: number[] = []
       let resolve: (m: unknown) => void = () => {}
       const view = defineComponent({

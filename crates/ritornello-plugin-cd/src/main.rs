@@ -21,6 +21,7 @@ mod state;
 use admin::CdAdmin;
 
 use anyhow::Result;
+use rand::seq::SliceRandom;
 use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
 use ritornello_proto::SourceAction;
 use state::{OnArrival, Remembered};
@@ -92,6 +93,88 @@ struct CdSource {
     /// no seek is owed (the disc was already loaded, so a direct
     /// `PlayerChapter` was enough).
     pending_chapter: Option<i64>,
+    /// Where the next `order` comes from: a real shuffle in production
+    /// (`CdOrder::Random`, built in `main()`), an injected permutation or
+    /// queue of permutations in tests (see `CdOrder`'s doc for why this is
+    /// its own type rather than sharing `ritornello-plugin-files`'s `Order`
+    /// — a disc's tracks are their own numbering, with no separate list of
+    /// entries behind them).
+    draw: CdOrder,
+    /// The two play modes, learned from `set_play_mode` and consulted by
+    /// `player_track`/`end_of_content`/`next`/`prev` to know whether a track
+    /// number should come from the disc's own order or from `order` below.
+    random: bool,
+    repeat_all: bool,
+    /// The pass currently being walked when `random` is on: a permutation of
+    /// `0..total_tracks`, drawn by `set_play_mode` on the transition that
+    /// turns shuffle on (empty otherwise — sequential playback never reads
+    /// it). `next`/`prev` (a manual skip) and `player_track` (mpv's own
+    /// natural advance, corrected toward the pass — see its doc) move
+    /// `cursor` through it instead of stepping `track` directly, exactly the
+    /// translation `ritornello-plugin-files` keeps between mpv's position
+    /// and a playlist entry, here between a position in the pass and a
+    /// track number. Cleared where a disc swap is *confirmed* — the TOC
+    /// arrival in `poll_notification`, and `eject` — so it never holds a
+    /// track number the new disc does not have; deliberately **not**
+    /// cleared by `forget_disc`, which runs on every presence change
+    /// including a mere flicker (see its own doc for why that distinction
+    /// matters here specifically).
+    order: Vec<i64>,
+    /// The position in `order` currently playing. Distinct from `track`,
+    /// which already holds the track number itself: `order[cursor] ==
+    /// track` is the invariant `next`/`prev`/`player_track` keep by moving
+    /// along it instead of re-deriving a position from a track number every
+    /// time — an invariant `select` and a resumed track must restore by
+    /// hand (`sync_cursor_to_track`) since they set `track` directly.
+    cursor: usize,
+}
+
+/// Where a drawn playback order comes from, for the disc's random mode.
+///
+/// Same discipline as `ritornello-plugin-files`'s `Order` — the draw is
+/// **injected**, never left to a real RNG in a test, so that a check
+/// against a full pass is exact rather than statistical (see
+/// `a_shuffled_disc_plays_every_track_once_then_stops`) — but a distinct
+/// type: a disc has no separate list of entries to shuffle behind its
+/// tracks, so what gets drawn here is directly a permutation of track
+/// numbers, not of positions into some other list.
+// `main()` only ever builds `CdOrder::Random`: the other two variants are
+// constructed by test code alone, so a plain (non-test) build sees them as
+// unconstructed — same situation as `ritornello-plugin-files`'s `Order`.
+#[allow(dead_code)]
+enum CdOrder {
+    /// A single permutation, injected in tests that only ever open one
+    /// pass: every draw hands back the same vector.
+    Fixed(Vec<i64>),
+    /// A queue of permutations, injected in tests that must open a second
+    /// pass and prove it was drawn again, not replayed: each draw pops the
+    /// next entry. Falls back to the identity permutation once exhausted,
+    /// rather than panicking on a test that happens to draw once too often.
+    Sequence(Vec<Vec<i64>>),
+    /// Production: a fresh Fisher-Yates shuffle against the thread RNG at
+    /// every draw.
+    Random,
+}
+
+impl CdOrder {
+    /// Hands back a permutation of `0..total_tracks`, consuming one draw.
+    fn draw(&mut self, total_tracks: usize) -> Vec<i64> {
+        match self {
+            CdOrder::Fixed(order) => order.clone(),
+            CdOrder::Sequence(queue) => {
+                if queue.is_empty() {
+                    (0..total_tracks as i64).collect()
+                } else {
+                    queue.remove(0)
+                }
+            }
+            CdOrder::Random => {
+                let mut order: Vec<i64> = (0..total_tracks as i64).collect();
+                order.shuffle(&mut rand::rng());
+                order
+            }
+        }
+    }
 }
 
 impl CdSource {
@@ -218,7 +301,17 @@ impl CdSource {
                 self.issue(SourceAction::Noop)
             }
             OnArrival::FirstTrack => {
-                self.track = 0;
+                // Under shuffle, "first" is the first entry of the drawn
+                // pass (`order`, drawn by `set_play_mode`), not literally
+                // track 0 — the random mode decides the order of the pass,
+                // this setting only decides that a pass starts at all.
+                // Falls back to 0 when nothing has been drawn yet (shuffle
+                // never engaged, or the TOC was not yet read at the time it
+                // was): a degraded but sane default, the same spirit as
+                // `resume_track`'s own "TOC not read yet" fallback.
+                let first = self.order.first().copied().unwrap_or(0);
+                self.cursor = 0;
+                self.track = first;
                 self.playback = true;
                 // Arms the same way `LastTrack` does, even though 0 is
                 // also where mpv is expected to open on its own: without
@@ -230,7 +323,7 @@ impl CdSource {
                 // exists to close. Costs nothing on the ordinary path:
                 // `player_track`'s own guard already treats `wanted == n`
                 // as a no-op seek.
-                self.pending_chapter = Some(0);
+                self.pending_chapter = Some(first);
                 // The whole disc, exactly as before this setting existed:
                 // mpv then exposes the tracks as it prefers, and the plugin
                 // learns the index through `player_track`.
@@ -239,6 +332,11 @@ impl CdSource {
             OnArrival::LastTrack => {
                 let track = self.resume_track();
                 self.track = track;
+                // Regression I3 (review 1): resuming used to leave `cursor`
+                // wherever the last mode transition had put it, so
+                // next/prev under shuffle walked away from the resumed
+                // track instead of onward from it.
+                self.sync_cursor_to_track();
                 self.playback = true;
                 // Nothing is loaded on an arrival: `cdda://` is the only URI
                 // known to open, and the resumed track is reached afterwards
@@ -329,6 +427,104 @@ impl CdSource {
         }
         self.total_tracks = 0;
         self.epoch = self.epoch.wrapping_add(1);
+        // Deliberately does **not** touch `order`/`cursor` either, for the
+        // exact same reason as `pending_chapter` above: this runs on every
+        // presence change, flicker included, and a drawn order has no
+        // automatic redraw the way `total_tracks` does (recomputed the
+        // moment a TOC returns, flicker or not) — nothing else would
+        // restore it. Regression P1 (review 2): an earlier version cleared
+        // it here, reasoning it followed `total_tracks`'s own precedent;
+        // that precedent does not hold, and the result was a flicker during
+        // a shuffled pass silently emptying `order`, after which
+        // `next`/`prev` and `player_track`'s correction (both bounded by
+        // its length) went quiet and the disc kept playing sequentially —
+        // with nothing to redraw it short of a fresh `set_play_mode`. The
+        // TOC arrival in `poll_notification` is where a swap is actually
+        // told apart from a flicker, and that is where `order`/`cursor` are
+        // cleared instead (see its own comment).
+    }
+
+    /// `next`/`prev` under shuffle: walks `cursor` within the drawn `order`
+    /// by `delta` (`1` or `-1`) instead of stepping the physical track
+    /// number — a manual skip, unrelated to the automatic corrections
+    /// `player_track` makes when mpv advances on its own (see its doc).
+    ///
+    /// No wrap-around at either end of the pass, the same convention the
+    /// disc's own physical order already keeps in `next`/`prev` — a listener
+    /// pressing "next" past the pass's last drawn entry gets silence, not a
+    /// jump back to its first one.
+    fn step_drawn_order(&mut self, delta: i64) -> SourceOutcome {
+        let target = self.cursor as i64 + delta;
+        if target < 0 || target as usize >= self.order.len() {
+            return self.issue(SourceAction::Noop);
+        }
+        let position = target as usize;
+        // Regression P1 (review 3): this used to be the *only* guard, and
+        // it is not enough. The sequential path is protected by
+        // `total_tracks` resetting to 0 on every presence change
+        // (`forget_disc`, unconditional); this one has no such automatic
+        // bound, since `order` deliberately survives a mere flicker (see
+        // `forget_disc`'s own doc). A disc pulled through a path this
+        // plugin cannot observe as a *confirmed* swap or an explicit
+        // `eject` — the drive's own physical eject button, never followed
+        // by a fresh TOC read — leaves `order`/`cursor` alive indefinitely,
+        // and `playback` is deliberately not reset by a presence change
+        // either (see `poll_notification`): without this, a manual
+        // next/prev pressed in that window would still emit a real seek
+        // toward a track of a disc that is no longer there.
+        //
+        // Only two conditions, not three (review 4): `self.present` is
+        // absent from this check on purpose. `forget_disc` runs on *every*
+        // presence change and unconditionally zeroes `total_tracks`, and a
+        // TOC read completing later carries the epoch it was spawned
+        // with — stale once that reset has bumped `self.epoch` — so
+        // `!self.present` never holds while `total_tracks > 0`; it added
+        // nothing a `total_tracks == 0` check does not already catch, and
+        // no test could tell the two apart. `total_tracks == 0` earns its
+        // own line rather than folding into the entry check below (`0` is
+        // also a lower bound no drawn entry can ever be under, which would
+        // make it true trivially the same way): it names the actual
+        // condition this guard cares about — the disc's track count is not
+        // presently known — including while the disc is still reported
+        // present but its TOC has not landed yet (see
+        // `next_and_prev_stay_blocked_while_present_but_the_toc_is_not_yet_known`).
+        if self.total_tracks == 0 || self.order[position] >= self.total_tracks as i64 {
+            return self.issue(SourceAction::Noop);
+        }
+        self.cursor = position;
+        self.track = self.order[self.cursor];
+        self.remember();
+        if self.pending_chapter.is_some() {
+            // A load is still in flight (see `select`): nothing to seek
+            // yet, only the destination the eventual notification will
+            // apply changes.
+            self.pending_chapter = Some(self.track);
+            return self.issue(SourceAction::Noop);
+        }
+        self.issue(SourceAction::PlayerChapter(self.track))
+    }
+
+    /// Keeps `order[cursor] == track` true after `track` was set by
+    /// something other than walking the pass — a digit typed by hand
+    /// (`select`) or a resumed track (`start`'s `OnArrival::LastTrack`).
+    ///
+    /// Regression I3 (review 1): without this, `next`/`prev` after either
+    /// one kept walking wherever the pass had last been left, sending the
+    /// listener toward a track already heard instead of one that follows
+    /// what was just picked or resumed.
+    ///
+    /// Leaves `cursor` untouched when `track` is not found in `order` (no
+    /// draw yet, or one cleared by a disc swap — see `forget_disc`): there
+    /// is nothing sound to reposition to, and next/prev's own bound on
+    /// `order`'s length already turns that into silence rather than a wrong
+    /// jump.
+    fn sync_cursor_to_track(&mut self) {
+        if !self.random {
+            return;
+        }
+        if let Some(position) = self.order.iter().position(|&t| t == self.track) {
+            self.cursor = position;
+        }
     }
 }
 
@@ -378,6 +574,11 @@ impl SourcePlugin for CdSource {
         let loading = self.pending_chapter.is_some();
         let already_open = self.playback && !loading;
         self.track = (n - 1) as i64;
+        // Regression I3 (review 1): a digit typed mid-pass under shuffle
+        // must move the pass to where it was just pointed, or next/prev
+        // right after would walk toward wherever the pass had been left —
+        // a track already heard, not the one the listener just picked.
+        self.sync_cursor_to_track();
         self.playback = true;
         self.remember();
         if already_open {
@@ -404,6 +605,12 @@ impl SourcePlugin for CdSource {
         // artist and a title without a sound.
         if !self.playback {
             return SourceOutcome::new(SourceAction::Noop);
+        }
+        // Under shuffle, the disc's own numbering is not what a listener
+        // pressing next/prev means: it means the drawn pass. See
+        // `step_drawn_order`.
+        if self.random {
+            return self.step_drawn_order(1);
         }
         // The player does not report the real index: we track the requested
         // index, bounded to the last known track (no wrap-around).
@@ -434,6 +641,9 @@ impl SourcePlugin for CdSource {
         // See `next`: same guard, same reason.
         if !self.playback {
             return SourceOutcome::new(SourceAction::Noop);
+        }
+        if self.random {
+            return self.step_drawn_order(-1);
         }
         let before = self.track;
         self.track = (self.track - 1).max(0);
@@ -467,6 +677,89 @@ impl SourcePlugin for CdSource {
         self.pending_chapter = None;
         self.issue(SourceAction::Noop)
     }
+    /// A disc's tracks are exactly the kind of finite list random/repeat-all
+    /// are for — unlike the radio, which has none. A constant, not derived
+    /// from whether a disc is currently in the tray: an empty tray still has
+    /// a shape to shuffle or repeat once a disc is inserted, the same way it
+    /// still opens (see `can_eject`'s doc).
+    fn has_finite_list(&self) -> bool {
+        true
+    }
+
+    /// Learns the two play modes together (see `SourcePlugin::set_play_mode`
+    /// for why they travel as one call).
+    ///
+    /// Only draws (and resets the cursor) on an actual **transition** of
+    /// `random`, the same guard `ritornello-plugin-files` keeps: the core
+    /// rediffuses this request whenever *either* mode changes, and also at
+    /// wake-up and hot-plug, so most calls land here with `random`
+    /// unchanged — redrawing unconditionally would throw away a pass
+    /// already under way for nothing.
+    ///
+    /// Deliberately does **not** move `track` or emit a seek: this method
+    /// has no action to return (see the trait's doc), so a shuffle engaged
+    /// mid-playback only prepares the order the *next* pass-boundary event
+    /// (`next`/`prev`, or `player_track`'s own correction toward it) will
+    /// read — mpv's own position is corrected the moment one of those
+    /// actually fires, not immediately.
+    async fn set_play_mode(&mut self, random: bool, repeat_all: bool) {
+        let random_changed = random != self.random;
+        self.random = random;
+        self.repeat_all = repeat_all;
+        if !random_changed {
+            return;
+        }
+        // Identity when `random` just turned false, so a mode change never
+        // leaves a stale shuffled order behind once shuffle is turned back
+        // off — mirroring `ritornello-plugin-files`'s own reasoning, even
+        // though sequential playback here never reads `order` at all.
+        self.order = if random {
+            self.draw.draw(self.total_tracks)
+        } else {
+            (0..self.total_tracks as i64).collect()
+        };
+        self.cursor = 0;
+    }
+
+    /// mpv went idle at the end of the finite list `has_finite_list`
+    /// declares.
+    ///
+    /// Corrected (review 1, C1 — the original brief had this method walk
+    /// the drawn pass one track at a time, which does not happen: the whole
+    /// disc is **one loaded item**, so mpv never goes idle between its
+    /// chapters — it advances to the physically next one on its own, and
+    /// that is reported through `player_track`, not here (see its doc for
+    /// the shuffle correction it now carries). This fires once, whether
+    /// shuffling or not, at the disc's true end — the same convention
+    /// `ritornello-plugin-files`'s `end_of_content` documents.
+    ///
+    /// Without repeat-all, behaves like the default `stop()`. With it,
+    /// unlike files (which reissues `Play` to rebuild its m3u), the disc is
+    /// already loaded: going back to the first track — the drawn pass's own
+    /// first entry when shuffling, a fresh draw so the next pass is drawn
+    /// again and not replayed — is a plain chapter seek.
+    async fn end_of_content(&mut self) -> SourceOutcome {
+        // A real end-of-content cannot fire on a disc mpv has not actually
+        // opened yet: any seek still owed from an arrival or a `select` is
+        // moot once mpv itself reports the list ran its course.
+        self.pending_chapter = None;
+        if !self.repeat_all {
+            return self.stop().await;
+        }
+        self.cursor = 0;
+        self.track = if self.random {
+            // The next pass is drawn again, not replayed: see `CdOrder`'s
+            // doc on why `Sequence` exists to prove exactly this.
+            self.order = self.draw.draw(self.total_tracks);
+            self.order.first().copied().unwrap_or(0)
+        } else {
+            0
+        };
+        self.playback = true;
+        self.remember();
+        self.issue(SourceAction::PlayerChapter(self.track))
+    }
+
     async fn player_track(&mut self, n: i64) -> SourceOutcome {
         // The disc advances by itself at the end of a track: this is the
         // **only** path by which the plugin learns it, mpv not reporting the
@@ -513,14 +806,72 @@ impl SourcePlugin for CdSource {
         // destination the disc turns out too short for once its real TOC
         // lands; this is what actually catches that, not a hypothetical
         // race.
-        if self.total_tracks > 0
-            && let Some(wanted) = self.pending_chapter.take()
-            && wanted < self.total_tracks as i64
-            && wanted != n
-        {
-            self.track = wanted;
+        if self.total_tracks > 0 && self.pending_chapter.is_some() {
+            let wanted = self.pending_chapter.take().expect("checked above");
+            if wanted < self.total_tracks as i64 && wanted != n {
+                self.track = wanted;
+                self.remember();
+                return self.issue(SourceAction::PlayerChapter(wanted));
+            }
+            // Confirmed on this very notification — directly (`wanted ==
+            // n`), or a now-invalid destination discarded (`wanted >=
+            // total_tracks`, see
+            // `a_selection_made_before_the_toc_is_read_is_abandoned_if_it_turns_out_invalid`).
+            // Either way, this is mpv reporting the disc *just* opened, not
+            // yet a natural mid-pass advance under shuffle: falling into
+            // the correction below on this same notification would jump
+            // away from the pass's own first entry the instant it was
+            // confirmed, skipping it without ever having played a note of
+            // it.
+            self.track = n;
+            // P2 (review 2): this branch sets `track` directly rather than
+            // through `step_drawn_order`, so it must restore
+            // `order[cursor] == track` itself — a discarded, out-of-range
+            // destination (the `wanted >= total_tracks` case just above)
+            // would otherwise leave `cursor` wherever it was, and the next
+            // correction would walk from a position that no longer matches
+            // what is actually playing.
+            self.sync_cursor_to_track();
             self.remember();
-            return self.issue(SourceAction::PlayerChapter(wanted));
+            return self.issue(SourceAction::Noop);
+        }
+        // Corrected (review 1, C1): a disc's chapters cannot be reordered
+        // for mpv the way a playlist can, so under shuffle it is *this*
+        // natural advance — not `end_of_content`, which only fires once, at
+        // the disc's true physical end — that must be redirected toward the
+        // pass's real next entry. Only past the confirmation above: while a
+        // load is still in flight, the destination is `pending_chapter`'s
+        // job, not this one's.
+        //
+        // Bounded by `self.order.get`/`total_tracks` (review 1, I2 —
+        // corrected review 2, P2: `order` is cleared only on a *confirmed*
+        // swap or an explicit `eject`, deliberately not on every presence
+        // change, see `forget_disc`'s own doc — so a disc changed through a
+        // path neither one observes can leave it holding a track number
+        // the disc no longer has): a target outside the disc's own known
+        // track count must never turn into a seek; falling through to
+        // trust mpv's own report is the safe default.
+        if self.random
+            && self.total_tracks > 0
+            && self.cursor + 1 < self.order.len()
+            && let Some(&expected) = self.order.get(self.cursor + 1)
+            && expected < self.total_tracks as i64
+        {
+            self.cursor += 1;
+            self.track = expected;
+            self.remember();
+            if expected == n {
+                // mpv's own physically next chapter happens to coincide
+                // with the pass's next drawn entry: nothing to correct.
+                return self.issue(SourceAction::Noop);
+            }
+            // The assumed (unmeasured — no CD drive available to confirm
+            // it against real hardware) cost of not using an EDL to bound
+            // each chapter — rejected because applying it to a different
+            // chapter means reloading the disc, the same broken cost
+            // `select`'s own doc already rules out: mpv keeps playing `n`
+            // physically forward for an instant before this seek lands.
+            return self.issue(SourceAction::PlayerChapter(expected));
         }
         self.track = n;
         // The disc advancing on its own is exactly what a resume must find
@@ -546,10 +897,14 @@ impl SourcePlugin for CdSource {
         self.present = false;
         self.playback = false;
         self.forget_disc();
-        // Unlike `forget_disc`'s callers, this one is decided by the user:
-        // the tray is really opening, not flickering, so any seek still
-        // owed is owed to nothing any more.
+        // Unlike `forget_disc`'s own reset, this one is decided by the
+        // user: the tray is really opening, not flickering, so any seek
+        // still owed is owed to nothing any more — same reasoning the
+        // confirmed-swap branch of `poll_notification` applies to `order`
+        // and `cursor` below.
         self.pending_chapter = None;
+        self.order.clear();
+        self.cursor = 0;
         self.issue(SourceAction::Stop)
     }
 
@@ -619,6 +974,15 @@ impl SourcePlugin for CdSource {
                     // track notification then landing on track 1 and
                     // overwriting the real resume point with it.
                     self.pending_chapter = None;
+                    // Same reasoning, same place (regression P1, review 2):
+                    // a drawn order surviving a swap could hold track
+                    // numbers the new disc does not have, so it is cleared
+                    // here — confirmed swap, not a flicker — and nowhere
+                    // earlier (see `forget_disc`'s own doc for the version
+                    // of this that clears it on every presence change, and
+                    // why that broke shuffle across a mere flicker).
+                    self.order.clear();
+                    self.cursor = 0;
                 }
                 self.toc = toc;
                 // Deferred arrival of the TOC: this is the moment the track
@@ -702,6 +1066,11 @@ async fn main() -> Result<()> {
         state_path: state_path.clone(),
         remembered: persisted.remembered,
         pending_chapter: None,
+        draw: CdOrder::Random,
+        random: false,
+        repeat_all: false,
+        order: Vec::new(),
+        cursor: 0,
     };
     let admin = CdAdmin { state_path, on_arrival, catalog, locales_root };
     Runtime::from_args()?.source(source)?.admin(admin)?.run().await
@@ -743,6 +1112,16 @@ mod tests {
             state_path: std::env::temp_dir().join("ritornello-cd-tests").join("plugin-cd.json"),
             remembered: None,
             pending_chapter: None,
+            // Unused unless a test overrides it (see
+            // `source_with_disc_and_order`/`source_with_disc_and_draw_queue`):
+            // no test relies on `main()`'s own `CdOrder::Random` producing a
+            // particular value, since that would be statistical rather than
+            // exact.
+            draw: CdOrder::Fixed(Vec::new()),
+            random: false,
+            repeat_all: false,
+            order: Vec::new(),
+            cursor: 0,
         };
         (source, presence_tx, toc_tx)
     }
@@ -787,6 +1166,402 @@ mod tests {
     fn remember_track(source: &mut CdSource, track: i64) {
         let toc = source.toc.clone().expect("fixture carries a toc");
         source.remembered = Some(Remembered { toc, track });
+    }
+
+    /// A disc with `tracks` tracks, read and not yet arrived (`playback`
+    /// false, matching `source_arriving_with`'s own starting point). The
+    /// TOC's actual content does not matter to any of these tests: every
+    /// guard in this file checks `total_tracks`, not the string itself.
+    fn disc_with(tracks: i64) -> CdSource {
+        let mut source = source_arriving_with(OnArrival::FirstTrack);
+        source.total_tracks = tracks as usize;
+        source.toc = Some(format!("{tracks} 150"));
+        source
+    }
+
+    /// A disc wired to draw a fixed order for its random pass — the same
+    /// discipline `ritornello-plugin-files`'s `Order` follows for shuffle,
+    /// injected here too so a full pass is proven exact rather than
+    /// statistical (see `CdOrder`'s doc for why this is its own type).
+    fn source_with_disc_and_order(tracks: i64, order: Vec<i64>) -> CdSource {
+        let mut source = disc_with(tracks);
+        source.draw = CdOrder::Fixed(order);
+        source
+    }
+
+    /// The same, wired to draw a queue of permutations — for the one test
+    /// that must prove a second pass under repeat-all is drawn again, not
+    /// replayed (see `CdOrder::Sequence`'s doc).
+    fn source_with_disc_and_draw_queue(tracks: i64, queue: Vec<Vec<i64>>) -> CdSource {
+        let mut source = disc_with(tracks);
+        source.draw = CdOrder::Sequence(queue);
+        source
+    }
+
+    /// A disc with no injected draw — for tests that only exercise
+    /// `repeat_all` under sequential order, or the capability flag, where
+    /// the draw mechanism never runs.
+    async fn source_with_disc(tracks: usize) -> CdSource {
+        disc_with(tracks as i64)
+    }
+
+    #[tokio::test]
+    async fn a_shuffled_pass_advances_through_player_track_and_covers_every_track_once() {
+        // Regression C1 (review 1): the original version of this test drove
+        // the pass through `end_of_content`, which does not happen — the
+        // whole disc is one loaded item, so mpv never goes idle between
+        // chapters; it advances to the physically next one on its own, and
+        // the core reports *that* as `player_track`. This is the path that
+        // actually carries a shuffled pass, and no test exercised it before
+        // this one — which is why the defect passed review.
+        //
+        // The physical values fed below are deliberately **not** a
+        // no-repeat traversal of their own (`1` three times): a plugin that
+        // merely accepted mpv's report (`self.track = n`) would produce
+        // `[2, 1, 1, 1]` here, not each track once — only a correction
+        // toward the drawn order does.
+        let mut s = source_with_disc_and_order(4, vec![2, 0, 3, 1]);
+        s.set_play_mode(true, false).await;
+        let arrival = s.activate().await;
+        assert_eq!(arrival.action, SourceAction::play("cdda://").finite());
+        // mpv confirms the disc open at its own first physical chapter:
+        // the already-armed `pending_chapter` (see `start`) turns that into
+        // the pass's real first entry, not yet a correction (see
+        // `player_track`'s doc on why this one notification is exempt).
+        assert_eq!(s.player_track(0).await.action, SourceAction::PlayerChapter(2));
+
+        let mut seen = vec![s.track];
+        for physically_next in [1, 1, 1] {
+            match s.player_track(physically_next).await.action {
+                SourceAction::PlayerChapter(t) => seen.push(t),
+                SourceAction::Noop => seen.push(s.track),
+                other => panic!("{other:?}"),
+            }
+        }
+        seen.sort();
+        assert_eq!(seen, vec![0, 1, 2, 3], "each track exactly once");
+    }
+
+    #[tokio::test]
+    async fn a_shuffled_pass_without_repeat_stops_at_the_disc_true_end() {
+        // `end_of_content` fires once, at the disc's real physical end —
+        // corrected (C1) from walking the pass itself, which `player_track`
+        // now does.
+        let mut s = source_with_disc_and_order(4, vec![2, 0, 3, 1]);
+        s.set_play_mode(true, false).await;
+        s.activate().await;
+        assert!(matches!(s.end_of_content().await.action, SourceAction::Noop));
+    }
+
+    #[tokio::test]
+    async fn repeat_all_reloads_the_disc_from_the_first_track() {
+        let mut s = source_with_disc(3).await;
+        s.set_play_mode(false, true).await;
+        s.activate().await;
+        assert_eq!(s.end_of_content().await.action, SourceAction::PlayerChapter(0));
+    }
+
+    #[tokio::test]
+    async fn the_disc_declares_a_finite_list() {
+        assert!(source_with_disc(3).await.has_finite_list());
+    }
+
+    #[tokio::test]
+    async fn repeat_all_under_shuffle_draws_a_fresh_order_for_the_next_pass() {
+        // The same trap `ritornello-plugin-files` guards against (see its
+        // `repeat_all_opens_a_new_pass_with_a_new_draw`): a `Fixed` order
+        // would pass a test like this one just by replaying the same
+        // permutation forever. Only a queue proves the second pass was
+        // actually drawn again, not replayed.
+        let mut s = source_with_disc_and_draw_queue(3, vec![vec![2, 0, 1], vec![1, 2, 0]]);
+        s.set_play_mode(true, true).await;
+        s.activate().await;
+        // `end_of_content` fires once, at the disc's true end (see C1):
+        // the first drawn pass's interior is `player_track`'s concern, not
+        // exercised here.
+        let out = s.end_of_content().await;
+        assert_eq!(
+            out.action,
+            SourceAction::PlayerChapter(1),
+            "first entry of the freshly drawn second pass"
+        );
+        assert_eq!(s.order, vec![1, 2, 0], "the next pass is drawn again, not replayed");
+    }
+
+    #[tokio::test]
+    async fn a_flicker_during_a_shuffled_pass_leaves_the_drawn_order_intact() {
+        // Regression P1 (review 2): an earlier version cleared `order` and
+        // `cursor` in `forget_disc`, which runs on *every* presence change
+        // — the exact reason this same function already had to give up
+        // clearing `pending_chapter` a few rounds ago (see its own doc). A
+        // test that calls `forget_disc` directly would only prove the
+        // clearing itself works, not that it runs in the right place — the
+        // same lesson as C1: for a mechanism triggered by an event, the
+        // test must start from the event.
+        let mut source = playing_source();
+        source.random = true;
+        source.order = vec![2, 0, 1];
+        source.cursor = 0;
+        source.track = 2;
+
+        let (toc_tx, toc_rx) = mpsc::channel(4);
+        source.toc_tx = toc_tx.clone();
+        source.toc_rx = toc_rx;
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+
+        presence_tx.send(false).await.unwrap();
+        source.poll_notification().await;
+        presence_tx.send(true).await.unwrap();
+        source.poll_notification().await;
+        // The TOC confirms it really was a flicker: same disc as before.
+        let epoch = source.epoch;
+        let toc = "3 150 22767 41887 63000".to_string();
+        toc_tx.send((epoch, Some(toc), 3)).await.unwrap();
+        source.poll_notification().await;
+
+        assert_eq!(source.order, vec![2, 0, 1], "a flicker must not clear the drawn order");
+        assert_eq!(source.cursor, 0);
+        // And the pass still corrects afterward, proving the order was not
+        // merely left in place but still usable.
+        assert_eq!(source.player_track(1).await.action, SourceAction::PlayerChapter(0));
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_disc_swap_clears_the_drawn_order() {
+        // Regression I2 (review 1), moved to the branch that actually
+        // confirms a swap (P1, review 2): a stale order surviving one could
+        // hold track numbers that do not exist on the new disc. Cleared in
+        // the same branch, and for the same reason, `pending_chapter`
+        // already is (see `a_confirmed_disc_swap_disarms_a_pending_chapter`).
+        let mut source = playing_source();
+        source.random = true;
+        source.order = vec![2, 0, 1];
+        source.cursor = 1;
+
+        let (toc_tx, toc_rx) = mpsc::channel(4);
+        source.toc_tx = toc_tx.clone();
+        source.toc_rx = toc_rx;
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+
+        presence_tx.send(false).await.unwrap();
+        source.poll_notification().await;
+        presence_tx.send(true).await.unwrap();
+        source.poll_notification().await;
+        // A genuinely different disc, not the one the order was drawn for.
+        let epoch = source.epoch;
+        let toc = "5 150 20000 40000 60000 80000 100000".to_string();
+        toc_tx.send((epoch, Some(toc), 5)).await.unwrap();
+        source.poll_notification().await;
+
+        assert!(source.order.is_empty());
+        assert_eq!(source.cursor, 0);
+    }
+
+    #[tokio::test]
+    async fn ejecting_clears_the_drawn_order() {
+        // P3 (review 3): symmetric to the confirmed-swap test above, which
+        // had one; `eject`'s own reset did not.
+        let mut source = playing_source();
+        source.random = true;
+        source.order = vec![2, 0, 1];
+        source.cursor = 1;
+        source.eject().await;
+        assert!(source.order.is_empty());
+        assert_eq!(source.cursor, 0);
+    }
+
+    #[tokio::test]
+    async fn next_and_prev_do_not_seek_after_the_disc_is_pulled_without_a_confirmed_swap() {
+        // Regression P1 (review 3): fixing where `order` gets cleared (P1,
+        // review 2) removed an accidental protection along with the bug —
+        // while `order` was cleared on *every* presence change, a pulled
+        // disc left nothing for `step_drawn_order` to walk. Now that it
+        // only clears on a confirmed swap or an explicit `eject`, a disc
+        // pulled through neither path (the drive's own physical eject
+        // button, never followed by a fresh TOC read) leaves `order` and
+        // `cursor` alive — and `playback` is not reset by a presence change
+        // either (see `poll_notification`'s own doc) — so nothing used to
+        // stop a manual next/prev from emitting a real seek toward a track
+        // that is no longer there. The sequential path never had this
+        // hole: `total_tracks` resets to 0 on every presence change, and
+        // `next`/`prev`'s own bound on it already caught it there.
+        //
+        // What actually blocks it below is `total_tracks == 0` — a
+        // presence change always zeroes it (`forget_disc`) — not a check on
+        // `self.present` directly, which this guard does not carry (see
+        // `step_drawn_order`'s own comment on why not). This test alone
+        // cannot tell the two apart, since both are true together here;
+        // `next_and_prev_stay_blocked_while_present_but_the_toc_is_not_yet_known`,
+        // right below, at least separates "present" from "track count
+        // known" — though no test data can go further and isolate
+        // `total_tracks == 0` from the entry-bound condition too (see that
+        // test's own comment on why not).
+        let mut source = playing_source();
+        source.random = true;
+        source.order = vec![2, 0, 1];
+        source.cursor = 1;
+        source.track = 0;
+
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        presence_tx.send(false).await.unwrap();
+        source.poll_notification().await;
+
+        assert_eq!(source.next().await.action, SourceAction::Noop);
+        assert_eq!(source.prev().await.action, SourceAction::Noop);
+    }
+
+    #[tokio::test]
+    async fn next_and_prev_stay_blocked_while_present_but_the_toc_is_not_yet_known() {
+        // Review 4/5: a regression fixture for the window this guard must
+        // cover, not a proof that `total_tracks == 0` is the only thing
+        // blocking here — no test data can isolate that condition from the
+        // entry-bound one below it, and that is not for lack of trying:
+        // every entry in `order` is a non-negative track index, so once
+        // `total_tracks` is 0 the entry check already reads `index >= 0`,
+        // trivially true on its own (the same fact `step_drawn_order`'s own
+        // comment admits two paragraphs up). Removing `total_tracks == 0`
+        // from the guard leaves this test green too. What it does fix in
+        // place: the disc **present**, but its track count not yet known —
+        // the flicker window between a presence return and its TOC
+        // actually landing (see `an_inserted_but_unread_disc_is_not_a_track`
+        // for the same window elsewhere in this file) — must not let a
+        // manual next/prev through.
+        let mut source = playing_source();
+        source.random = true;
+        source.order = vec![2, 0, 1];
+        source.cursor = 1;
+        source.track = 0;
+        source.total_tracks = 0;
+        source.toc = None;
+
+        assert_eq!(source.next().await.action, SourceAction::Noop);
+        assert_eq!(source.prev().await.action, SourceAction::Noop);
+    }
+
+    #[tokio::test]
+    async fn a_correction_pointing_outside_the_known_disc_is_not_applied() {
+        // Defense in depth for I2: even if a stale `order` survived somehow
+        // (its own clearing is the confirmed-swap branch's job, proven
+        // above), a target beyond the disc's own known track count must
+        // never be sent to mpv as a seek.
+        let mut source = playing_source();
+        source.total_tracks = 2;
+        source.toc = Some("2 150".into());
+        source.random = true;
+        source.order = vec![0, 5]; // 5 does not exist on a 2-track disc
+        source.cursor = 0;
+        source.track = 0;
+
+        let out = source.player_track(1).await;
+        assert_eq!(out.action, SourceAction::Noop, "no correction applied outside the known disc");
+        assert_eq!(source.track, 1, "falls back to trusting mpv's own report");
+    }
+
+    #[tokio::test]
+    async fn a_discarded_pending_chapter_still_resyncs_the_cursor_under_shuffle() {
+        // P2 (review 2): the branch of `player_track` that discards an
+        // out-of-range `pending_chapter` sets `track` directly (mpv's own
+        // report), not through `step_drawn_order` — so it must resync
+        // `cursor` itself, or a later correction would walk from wherever
+        // the pass had last been rather than from the track just accepted.
+        let mut source = playing_source();
+        source.total_tracks = 4;
+        source.toc = Some("4 150".into());
+        source.random = true;
+        source.order = vec![2, 0, 3, 1];
+        source.cursor = 0;
+        source.pending_chapter = Some(9); // out of range on a 4-track disc
+
+        let out = source.player_track(0).await;
+        assert_eq!(out.action, SourceAction::Noop);
+        assert_eq!(source.track, 0);
+        assert_eq!(source.cursor, 1, "cursor resynced to where track 0 sits in the drawn order");
+
+        // Proves the resync happened, not just its value: from cursor 1 the
+        // next expected entry is `order[2] == 3`; a cursor left at 0 would
+        // have expected `order[1] == 0` instead and corrected to that
+        // different track.
+        assert_eq!(source.player_track(1).await.action, SourceAction::PlayerChapter(3));
+    }
+
+    #[tokio::test]
+    async fn selecting_a_track_while_shuffling_repositions_the_cursor_there() {
+        // Regression I3 (review 1): without this, `next`/`prev` after a
+        // digit typed by hand kept walking wherever the pass had last been
+        // left, sending the listener toward a track already heard rather
+        // than one that follows what was just picked.
+        let mut source = playing_source();
+        source.total_tracks = 4;
+        source.toc = Some("4 150".into());
+        source.random = true;
+        source.order = vec![2, 0, 3, 1];
+        source.cursor = 0;
+        source.track = 2;
+
+        // Picks track 4 (index 3), which sits at position 2 of the drawn
+        // order (`order[2] == 3`).
+        source.select(4).await;
+        assert_eq!(source.cursor, 2);
+        assert_eq!(source.next().await.action, SourceAction::PlayerChapter(1));
+    }
+
+    #[tokio::test]
+    async fn resuming_while_shuffling_repositions_the_cursor_to_the_remembered_track() {
+        // Same regression (I3), the resume half: `start`'s `LastTrack` arm
+        // also sets `track` directly.
+        let mut source = source_arriving_with(OnArrival::LastTrack);
+        source.total_tracks = 4;
+        source.toc = Some("4 150".into());
+        source.random = true;
+        source.order = vec![2, 0, 3, 1];
+        remember_track(&mut source, 3);
+
+        source.activate().await;
+        assert_eq!(source.cursor, 2, "track 3 sits at position 2 of the drawn order");
+        // mpv confirms the disc open exactly at the resumed chapter: the
+        // armed `pending_chapter` resolves without a correction (see
+        // `player_track`'s doc on why this one notification is exempt) —
+        // only past it does `next` mean anything to seek.
+        source.player_track(3).await;
+        assert_eq!(source.next().await.action, SourceAction::PlayerChapter(1));
+    }
+
+    #[tokio::test]
+    async fn next_and_prev_follow_the_drawn_order_under_shuffle() {
+        // The trap the pass mechanism exists to avoid: a naive next/prev
+        // bounded on the physical track number would go from 2 to 3 (its
+        // physical neighbour); the drawn order says the entry after 2 is 0.
+        let mut source = playing_source();
+        source.total_tracks = 4;
+        source.toc = Some("4 150".into());
+        source.random = true;
+        source.order = vec![2, 0, 3, 1];
+        source.cursor = 0;
+        source.track = 2;
+
+        assert_eq!(source.next().await.action, SourceAction::PlayerChapter(0));
+        assert_eq!(source.next().await.action, SourceAction::PlayerChapter(3));
+        assert_eq!(source.prev().await.action, SourceAction::PlayerChapter(0));
+    }
+
+    #[tokio::test]
+    async fn next_and_prev_do_not_wrap_the_drawn_order() {
+        let mut source = playing_source();
+        source.total_tracks = 4;
+        source.toc = Some("4 150".into());
+        source.random = true;
+        source.order = vec![2, 0, 3, 1];
+
+        source.cursor = 0;
+        source.track = 2;
+        assert_eq!(source.prev().await.action, SourceAction::Noop, "already at the first drawn entry");
+
+        source.cursor = 3;
+        source.track = 1;
+        assert_eq!(source.next().await.action, SourceAction::Noop, "already at the last drawn entry");
     }
 
     #[tokio::test]

@@ -74,15 +74,31 @@ impl Playlist {
         true
     }
 
-    /// Writes the playlist meant for mpv: **absolute** paths, so that it
-    /// depends on no current directory. Atomic write — a power cut must not
-    /// leave a truncated m3u that mpv would half read.
-    pub fn write_for_mpv(&self, path: &Path) -> std::io::Result<()> {
+    /// Writes the playlist meant for mpv, walking `entries` in `order` rather
+    /// than in their stored positions: **absolute** paths, so that it depends
+    /// on no current directory. Atomic write — a power cut must not leave a
+    /// truncated m3u that mpv would half read.
+    ///
+    /// `order` is a permutation of `0..entries.len()`, drawn by `FilesSource`
+    /// (see its `order` field) — this is what makes a random pass a
+    /// reordering of the same m3u rather than a reload between every track,
+    /// with the silence that would cause. The **displayed** list, `entries`
+    /// itself, never moves: only the copy handed to mpv is permuted, so the
+    /// grid and the remote's digits keep naming the same tracks by the same
+    /// numbers regardless of the pass in progress.
+    pub fn write_for_mpv(&self, path: &Path, order: &[usize]) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // An index past `entries` is silently skipped rather than panicking:
+        // `order` is redrawn from the admin's `playlist_changed` flag, but a
+        // caller building it by hand (tests) could still hand over a stale
+        // length. Skipping keeps this a rendering concern, not a place to
+        // fail playback over.
+        let entries_in_order: Vec<Entry> =
+            order.iter().filter_map(|&i| self.entries.get(i).cloned()).collect();
         let tmp = path.with_extension("m3u.tmp");
-        std::fs::write(&tmp, render(&self.entries, None))?;
+        std::fs::write(&tmp, render(&entries_in_order, None))?;
         std::fs::rename(tmp, path)
     }
 }
@@ -171,12 +187,28 @@ mod tests {
         // relative path would resolve there against mpv's current directory.
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("plugin-files.m3u");
-        playlist_of(2).write_for_mpv(&f).unwrap();
+        playlist_of(2).write_for_mpv(&f, &[0, 1]).unwrap();
         let text = std::fs::read_to_string(&f).unwrap();
         assert!(text.starts_with("#EXTM3U\n"));
         assert!(text.contains("\n/musique/01.mp3\n"), "{text}");
         assert!(text.contains("\n/musique/02.mp3\n"), "{text}");
         // And nothing lingers from the temporary file.
         assert!(!dir.path().join("plugin-files.m3u.tmp").exists());
+    }
+
+    #[test]
+    fn the_m3u_follows_the_given_order_and_the_display_list_does_not() {
+        // The order is what mpv walks; the entries are what the screen, the
+        // grid and the remote's digits show. Shuffling must never move the
+        // second one.
+        let list = playlist_of(3);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mpv.m3u");
+        list.write_for_mpv(&path, &[2, 0, 1]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = text.lines().filter(|l| l.ends_with(".mp3")).collect();
+        assert!(lines[0].ends_with("03.mp3"));
+        assert!(lines[1].ends_with("01.mp3"));
+        assert_eq!(list.entries[0].path.file_name().unwrap(), "01.mp3", "the entries themselves never move");
     }
 }

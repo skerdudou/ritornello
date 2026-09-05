@@ -1153,6 +1153,21 @@ TOML packs**, decentralized per component:
   TOML) is ignored **with a trace in the logs**.
 - The initial French packs ship in `deploy/locales/` and are copied by
   `deploy/deploy.sh`.
+- **A routed view is not rendered before the catalog has come back.** Not a
+  matter of polish: a view mounted without a catalog renders translation
+  keys, and while most labels recover on the next render, a dropdown does
+  not — the kit's `SelectItemText` hands its text to the Select once, when
+  the item mounts, and never re-reads it. `audio_default_device` therefore
+  stayed in the audio-output list on the configuration page for the life of
+  the page, reported from use. Holding the view back fixes every list at
+  once, present and future, where patching each dropdown would have held
+  only until the next one was written. "Come back" means **answered or
+  failed** — a page withheld forever because `/api/i18n` is down would be
+  worse than one showing keys — and the gate is one-way, so the language
+  picker does not blank the page each time it is used. The header and the
+  bottom nav are deliberately not held back: their labels are plain
+  bindings that recover on their own, and hiding the whole chrome would
+  trade a fixed defect for a bigger visual jump.
 
 ## Theme
 

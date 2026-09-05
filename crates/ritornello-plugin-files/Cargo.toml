@@ -43,6 +43,16 @@ tracing-subscriber = "0.3"
 # `default-features = false` was tried and **does not compile**: the ID3v2 error
 # types live behind a default feature. Do not retry without checking.
 lofty = "0.25.1"
+# The production draw of `Order::Random` (see `main.rs`): a fresh
+# Fisher-Yates shuffle of the playlist at every pass. Tests inject `Fixed`
+# or `Sequence` instead and never touch this dependency.
+#
+# `0.10`, not `0.8`: the network stack (core + four plugins) already pulls
+# `rand 0.10` transitively, and pinning `0.8` here grew a second, incompatible
+# major line in `Cargo.lock` — six extra packages (`rand 0.8.8`, `rand_chacha`,
+# `rand_core 0.6`, `ppv-lite86`, `zerocopy` and its derive) that "0.10" avoids
+# entirely. Caught in review.
+rand = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

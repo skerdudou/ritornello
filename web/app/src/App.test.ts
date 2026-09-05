@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
+import { resetCatalog, useCatalog } from './composables/useCatalog'
 import { resetMetrics } from './composables/useMetrics'
 import { router } from './router'
 
@@ -43,6 +44,11 @@ async function mountAt(path: string) {
 
 describe('shell navigation', () => {
   afterEach(() => {
+    // `catalog` and `settled` live at module level: without this, the first
+    // test to let a catalog land leaves every later one believing the shell
+    // is already ready, and the two tests below would pass for the wrong
+    // reason.
+    resetCatalog()
     resetMetrics()
     vi.unstubAllGlobals()
   })
@@ -124,6 +130,77 @@ describe('shell navigation', () => {
     expect(w.get('[data-top-nav]').classes()).toContain('hidden')
     expect(w.get('[data-top-nav]').classes()).toContain('md:flex')
     expect(w.find('[data-bottom-nav]').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('withholds the routed view until the catalog has come back', async () => {
+    // The defect this exists to forbid, reported on the configuration page:
+    // a view mounted before the catalog renders translation keys, and while
+    // most labels recover on the next render, a dropdown does not — the
+    // kit's `SelectItemText` hands its text to the Select once, at mount.
+    // `audio_default_device` therefore stayed on screen for the life of the
+    // page. Holding the view back is what fixes every list at once.
+    let release: (v: Response) => void = () => {}
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        String(url).includes('/api/i18n')
+          ? pending
+          : Promise.resolve({ ok: true, json: async () => ({ plugins: [] }) } as Response),
+      ),
+    )
+    await router.push('/')
+    await router.isReady()
+    const w = mount(App, { global: { plugins: [router], stubs: { RouterView: true } } })
+    await flushPromises()
+    expect(w.find('router-view-stub').exists()).toBe(false)
+    // The chrome is deliberately not held back: its labels recover on their
+    // own, and hiding it would trade a fixed defect for a bigger jump.
+    expect(w.find('[data-bottom-nav]').exists()).toBe(true)
+
+    release({ ok: true, json: async () => CATALOG } as Response)
+    await flushPromises()
+    expect(w.find('router-view-stub').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('reveals the routed view even when the catalog request fails', async () => {
+    // "Settled" must mean answered **or** failed. A page withheld forever
+    // because `/api/i18n` is down would be far worse than one showing keys —
+    // the same rule `PluginView` already applies to `/api/status`.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        String(url).includes('/api/i18n')
+          ? Promise.reject(new Error('network down'))
+          : Promise.resolve({ ok: true, json: async () => ({ plugins: [] }) } as Response),
+      ),
+    )
+    await router.push('/')
+    await router.isReady()
+    const w = mount(App, { global: { plugins: [router], stubs: { RouterView: true } } })
+    await flushPromises()
+    expect(w.find('router-view-stub').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('does not hide the page again when the language changes', async () => {
+    // `reload()` runs again on a language change. If the gate fell back, the
+    // whole page would blank out every time the language is switched — a
+    // regression that would only show up in use, which is why it is pinned
+    // here.
+    const w = await mountAt('/')
+    expect(w.find('router-view-stub').exists()).toBe(true)
+    const { reload } = useCatalog()
+    const inFlight = reload()
+    await Promise.resolve()
+    expect(w.find('router-view-stub').exists()).toBe(true)
+    await inFlight
+    await flushPromises()
+    expect(w.find('router-view-stub').exists()).toBe(true)
     w.unmount()
   })
 })

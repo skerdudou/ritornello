@@ -44,9 +44,10 @@ const injectedStylesheets = new Set<string>()
  * buttons failed.
  *
  * The URL is cosmetic; the coupling is not: it is a documented contract for
- * third-party plugin authors (see the "Plugin UI" section of the README),
- * which silently depended on the trailing slash. The router besides redirects
- * the slash-less form to the one with a slash (see `router.ts`).
+ * third-party plugin authors (see "A plugin's UI" in `docs/plugins.md`; the
+ * README only points there), which silently depended on the trailing slash.
+ * The router besides redirects the slash-less form to the one with a slash
+ * (see `router.ts`).
  */
 export function pluginBase(name: string): string {
   return `/plugins/${name}/`
@@ -120,9 +121,29 @@ export default defineComponent({
      * Mounting the plugin's component before its catalog has arrived shows the
      * translation **keys** — `col_num`, `btn_save` — which the real labels then
      * replace. Those do not have the same length, so every label of the page
-     * shifts a fraction of a second after it appeared. Holding the curtain
-     * until both the module and the catalog have settled costs nothing: the
-     * two requests still leave together, only the reveal waits.
+     * shifts a fraction of a second after it appeared.
+     *
+     * **It also holds the component's mount, not merely its reveal**, and
+     * that is the part paid for by a bug reported from use. A curtain of
+     * `display: none` hides a component that is fully mounted and running,
+     * and some values are computed once, at mount: the kit's `SelectItemText`
+     * hands an option's text to its Select in `onMounted` and never re-reads
+     * it, so a dropdown built behind the curtain registered the raw key and
+     * still showed it when the curtain lifted — `country_fr`, then
+     * `arrival_nothing`, both reported. Ordinary bindings recover on the next
+     * render; a captured value never does. So the guarantee this prop gives a
+     * plugin author is that their component is **never rendered with an
+     * unsettled catalog** — see `docs/plugins.md`, "A plugin's UI".
+     *
+     * The cost, honestly: the plugin's own `onMounted` request no longer
+     * overlaps its catalog request. Nil when the catalog wins the race
+     * against the JS module, which is the ordinary case (a small JSON that
+     * leaves first — the module waits for `statusPending`). When the catalog
+     * is the slower of the two, the two requests serialize. And in the one
+     * case where the catalog lands after the module *and* after the
+     * skeleton's floor has elapsed, the component mounts already revealed and
+     * paints its own placeholder, so the reader may see this placeholder, a
+     * blank, then the plugin's. Rare, and preferred to a wrong label.
      *
      * Defaults to `false` so that a caller that knows nothing of the catalog —
      * every test that mounts this view directly — behaves as before.
@@ -273,7 +294,15 @@ export default defineComponent({
         : null
 
       let content: VNode | null = null
-      if (component.value) {
+      // **Not built at all while the catalog is unsettled**, where this used
+      // to build it and hide it. `props.catalogPending` alone gates it, never
+      // `pending` or `skeleton`: the component must mount the moment its
+      // catalog lands, and then wait out the skeleton's floor **hidden**,
+      // exactly as before — that is what still lets its own request leave
+      // during the tail of the wait. Gating on the reveal instead would push
+      // that request behind the whole floor, which is the 300 ms this file
+      // was written to avoid.
+      if (component.value && !props.catalogPending) {
         // `catalog` must be passed explicitly: `h()` does not forward
         // PluginView's props to the component it mounts (this is not
         // "attribute fallthrough", which only concerns undeclared attributes).
@@ -302,15 +331,21 @@ export default defineComponent({
         content = h('p', { class: 'text-muted-foreground' }, message)
       }
 
-      // Mounted as soon as it exists, **shown** only once the wait is over.
+      // Mounted as soon as the module **and** the catalog are there, **shown**
+      // only once the wait is over.
       //
-      // Hiding rather than withholding is what keeps the slow path honest: the
-      // floor keeps the placeholder up for a moment after the module lands,
-      // and a component only mounted at the end of it would start its own data
-      // request that much later — up to 300 ms of pure latency added exactly
-      // where it hurts — then paint its own placeholder after a blank gap.
-      // Mounted underneath, it loads during the wait and is usually ready by
-      // the time the placeholder gives way.
+      // The curtain keeps a job of its own, and it is not the one it was
+      // written for: the floor keeps the placeholder up for a moment after
+      // both have landed, and a component only mounted at the end of it would
+      // start its own data request that much later — up to 300 ms of pure
+      // latency added exactly where it hurts — then paint its own placeholder
+      // after a blank gap. Mounted underneath for that tail, it loads during
+      // the wait and is usually ready by the time the placeholder gives way.
+      //
+      // What it no longer does is hide a component built without its
+      // catalog: that is now impossible, because a value captured at mount —
+      // a Select's option text — never recovered from it (see
+      // `catalogPending` above).
       //
       // `display: none` and not a `v-if`: hidden from sight and from assistive
       // technology alike, while the component keeps living. Moving it between

@@ -106,8 +106,22 @@ async function save(): Promise<void> {
              accessible name. Same arrangement as `InputAdmin.vue`. -->
         <label class="text-sm font-medium">{{ t('arrival_label') }}</label>
         <Select v-model="onArrival">
+          <!-- The label is handed to `SelectValue` as a slot, rather than left
+               to the text it captured. The kit's
+               `SelectItemText` hands an item's text to the Select root when
+               that item mounts and never re-reads it, so any label that
+               changes afterwards is ignored until the list is first opened
+               (opening remounts the items, which is why the wrong text
+               eventually heals).
+               The mount race that first exposed this — a component built
+               before its catalog — is now closed for every plugin page by
+               `PluginView`. What remains, and what this binding still buys, is
+               the **language change**: `PluginRoute` swaps the catalog while
+               this component stays mounted, and measured, `SelectValue` then
+               keeps the previous language. A plain reactive binding cannot go
+               stale that way. -->
           <SelectTrigger data-arrival class="w-full" :aria-label="t('arrival_label')">
-            <SelectValue />
+            <SelectValue>{{ label(onArrival) }}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem v-for="choice in CHOICES" :key="choice" :value="choice">

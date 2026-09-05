@@ -14,6 +14,7 @@ mod cover;
 mod state;
 
 use anyhow::Result;
+use rand::seq::SliceRandom;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
@@ -29,6 +30,60 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Where a drawn playback order comes from.
+///
+/// One type for both play modes: `set_play_mode` draws a fresh order when
+/// shuffle engages, and `end_of_content` draws again when repeat-all opens a
+/// new pass. Both go through the same `draw` call, so a real shuffle
+/// (`Random`) must hand back a different permutation each time it is asked —
+/// which is exactly what `Sequence` below lets a test prove: an injected
+/// queue of permutations shows that a second pass is drawn again and not
+/// replayed, something no statistical check on a real RNG could show.
+// `main()` only ever builds `Order::Random`: the other three variants are
+// constructed by test code alone (see `source_with`), so a plain (non-test)
+// build sees them as unconstructed — same situation as
+// `ritornello-core::placeholder`.
+#[allow(dead_code)]
+enum Order {
+    /// Positions and entries coincide: `0, 1, 2, …`. What `FilesSource` falls
+    /// back to whenever shuffle is off — the identity permutation, not a
+    /// distinct code path.
+    Sequential,
+    /// A single permutation, injected in tests that only ever open one pass:
+    /// every draw hands back the same vector.
+    Fixed(Vec<usize>),
+    /// A queue of permutations, injected in tests that must open a second
+    /// pass and prove it was drawn again, not replayed: each draw pops the
+    /// next entry. Falls back to the identity permutation once exhausted,
+    /// rather than panicking on a test that happens to draw once too often.
+    Sequence(Vec<Vec<usize>>),
+    /// Production: a fresh Fisher-Yates shuffle against the thread RNG at
+    /// every draw.
+    Random,
+}
+
+impl Order {
+    /// Hands back a permutation of `0..len`, consuming one draw.
+    fn draw(&mut self, len: usize) -> Vec<usize> {
+        match self {
+            Order::Sequential => (0..len).collect(),
+            Order::Fixed(order) => order.clone(),
+            Order::Sequence(queue) => {
+                if queue.is_empty() {
+                    (0..len).collect()
+                } else {
+                    queue.remove(0)
+                }
+            }
+            Order::Random => {
+                let mut order: Vec<usize> = (0..len).collect();
+                order.shuffle(&mut rand::rng());
+                order
+            }
+        }
+    }
+}
+
 struct FilesSource {
     /// Shared with the Admin half, which modifies it from the page.
     playlist: Arc<AsyncRwLock<Playlist>>,
@@ -42,6 +97,36 @@ struct FilesSource {
     playlist_changed: Arc<std::sync::atomic::AtomicBool>,
     /// Are we playing right now. Read by the page (see `plays` on the Admin side).
     plays: Arc<std::sync::atomic::AtomicBool>,
+    /// The order mpv actually walks: mpv position `i` plays `playlist`
+    /// entry `order[i]`. A permutation of `0..entries.len()`, identity when
+    /// shuffle is off — so `position_of`/`entry_at` never need a separate
+    /// "not shuffling" case.
+    ///
+    /// Deliberately **not** carried by `Playlist`: the admin page mutates
+    /// `entries`/`index` at seven places (add, remove, three cases of move,
+    /// clear, load), each with its own arithmetic, and an order stored there
+    /// would need repairing at every one of them. Instead it lives here and
+    /// is redrawn wholesale from `playlist_changed` (see `play`,
+    /// `reload_if_changed`) — a modification mid-pass restarts the pass,
+    /// which is the accepted price of not keeping seven arithmetics correct.
+    order: Vec<usize>,
+    /// Where the next `order` comes from: a real shuffle in production
+    /// (`Order::Random`, built in `main()`), an injected permutation or
+    /// queue of permutations in tests. Kept across draws, not thrown away
+    /// after the first one, because a repeated pass under repeat-all must
+    /// draw again rather than replay the same permutation.
+    draw: Order,
+    /// The two play modes, learned from `set_play_mode` and consulted by
+    /// `end_of_content`/`activate` to know whether a finished pass should
+    /// open another one.
+    random: bool,
+    repeat_all: bool,
+    /// Set by `end_of_content` when it was called without repeat-all — which
+    /// only happens once mpv's list has run to its end. The next `Play` then
+    /// opens a fresh pass instead of replaying the single entry left at the
+    /// tail of the exhausted order — see `activate`'s doc for the defect this
+    /// avoids.
+    pass_finished: bool,
     state_path: PathBuf,
     /// The **generated** m3u that mpv receives. Decoupled from any user playlist.
     mpv_playlist_path: PathBuf,
@@ -129,6 +214,49 @@ impl FilesSource {
     /// a `metadata` plugin would read to recognise a track.
     fn identity(path: &Path) -> serde_json::Value {
         serde_json::json!({ "kind": "file", "path": path.to_string_lossy() })
+    }
+
+    /// Redraws `order` for the playlist's current length: identity when not
+    /// shuffling — position and entry then coincide, and `entry_at`/
+    /// `position_of` need no separate case for it — a fresh permutation from
+    /// `self.draw` otherwise.
+    async fn draw_order(&mut self) {
+        let len = self.playlist.read().await.entries.len();
+        self.order = if self.random { self.draw.draw(len) } else { (0..len).collect() };
+    }
+
+    /// If the page modified the playlist since the last draw, redraws
+    /// `order` for its new length and clears the flag. Idempotent: called a
+    /// second time right after, it finds the flag already clear and does
+    /// nothing — which is what lets both `play` and `reload_if_changed` call
+    /// it without drawing twice for one modification (a second draw would
+    /// desync a `Order::Sequence` queue from the passes it is meant to
+    /// describe).
+    async fn resync_order_if_changed(&mut self) {
+        if self.playlist_changed.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            self.draw_order().await;
+        }
+    }
+
+    /// mpv position `position` -> the playlist entry that plays there.
+    fn entry_at(&self, position: usize) -> Option<usize> {
+        self.order.get(position).copied()
+    }
+
+    /// Playlist entry `entry` -> the mpv position that plays it.
+    ///
+    /// Linear search: `order` holds one small playlist's worth of positions
+    /// (a device's local library, not a streaming catalogue), and is walked
+    /// at most once per command — a reverse index would be premature here.
+    fn position_of(&self, entry: usize) -> Option<usize> {
+        self.order.iter().position(|&e| e == entry)
+    }
+
+    /// The order currently handed to mpv, for tests that must tell a fresh
+    /// draw from a replayed one apart.
+    #[allow(dead_code)] // read only from test code (see `source_with`'s callers)
+    fn drawn_order(&self) -> &[usize] {
+        &self.order
     }
 
     fn phrase(&self, key: &str) -> String {
@@ -240,9 +368,15 @@ impl FilesSource {
 
     /// Starts the playlist at the current index, after rewriting mpv's m3u.
     async fn play(&mut self) -> SourceOutcome {
+        // A pass that just ended is over and done with: whatever brought us
+        // here (a fresh activation, a selection) is a new listening session,
+        // and `pass_finished`'s only reader is `activate`, which reads it
+        // before calling here (see its doc).
+        self.pass_finished = false;
         // We hand mpv the playlist as it is now: the drift is closed, whatever
-        // its cause was.
-        self.playlist_changed.store(false, std::sync::atomic::Ordering::Relaxed);
+        // its cause was — `order` included, redrawn here if the page changed
+        // the playlist since the last draw.
+        self.resync_order_if_changed().await;
         let playlist = self.playlist.read().await;
         let count = playlist.preset_count();
         let Some(entry) = playlist.current().cloned() else {
@@ -253,7 +387,7 @@ impl FilesSource {
                 .plays_nothing();
         };
         self.plays.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Err(e) = playlist.write_for_mpv(&self.mpv_playlist_path) {
+        if let Err(e) = playlist.write_for_mpv(&self.mpv_playlist_path, &self.order) {
             tracing::warn!("writing the mpv playlist: {e}");
         }
         let index = playlist.index;
@@ -264,6 +398,12 @@ impl FilesSource {
         // never probe for nothing.
         self.arm_cover(&entry.path);
 
+        // The **mpv position**, not the entry index: `order` may have moved
+        // this entry away from its own position in the displayed list. Falls
+        // back to `index` itself if it is somehow missing from `order` (it
+        // should not be, `order` being a permutation of the same length) —
+        // starting somewhere is better than a panic here.
+        let start = self.position_of(index).unwrap_or(index);
         let action = SourceAction::play(self.mpv_playlist_path.to_string_lossy().to_string())
             // Without this declaration, the core would load the m3u as a
             // single media: mpv would only expand it afterwards, the starting
@@ -271,7 +411,7 @@ impl FilesSource {
             // would replay the first one while losing the display. Measured,
             // and fixed here.
             .playlist()
-            .starting_at(index as i64)
+            .starting_at(start as i64)
             // A list of files has a normal end: without this declaration,
             // mpv's inactivity at the end of the list would pass for a stream
             // cut and the restart would replay the list in a loop.
@@ -302,6 +442,13 @@ impl FilesSource {
         if !self.playlist_changed.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
+        // Redrawn here, and not only inside `play()` below: the shift a few
+        // lines down is computed in **position** space, from `order`, which
+        // must already reflect the playlist's new length before that
+        // arithmetic runs. `resync_order_if_changed` is idempotent, so
+        // `play()`'s own call further down finds the flag already clear and
+        // does not draw a second time for this one modification.
+        self.resync_order_if_changed().await;
         {
             let mut playlist = self.playlist.write().await;
             if playlist.entries.is_empty() {
@@ -310,11 +457,19 @@ impl FilesSource {
                 drop(playlist);
                 return Some(self.play().await);
             }
-            let n = playlist.entries.len() as i64;
+            let n = self.order.len() as i64;
+            // The step walks **mpv positions**, not playlist entries: with
+            // shuffle engaged, `index + step` names a different track than
+            // "the next one mpv would play". `position_of` finds where the
+            // current entry sits in the drawn order, the step moves within
+            // that order, and `entry_at` translates the landing position
+            // back to an entry.
+            let position = self.position_of(playlist.index).unwrap_or(0) as i64;
             // Wrap around at the bounds, as mpv does from one end of its own
             // list to the other: the user must not end up stuck because a
             // modification left them on the last track.
-            playlist.index = (((playlist.index as i64 + step) % n + n) % n) as usize;
+            let next_position = (((position + step) % n + n) % n) as usize;
+            playlist.index = self.entry_at(next_position).unwrap_or(playlist.index);
         }
         Some(self.play().await)
     }
@@ -361,6 +516,21 @@ impl SourcePlugin for FilesSource {
         // being unreliable, the distinction is abandoned rather than guessed —
         // at the cost of one detail: after a playlist that ran to its end, the
         // Play key replays the last track.
+        //
+        // **Except when the last pass genuinely ran out** (`pass_finished`,
+        // set by `end_of_content` without repeat-all): the entry the kept
+        // index designates then sits at the very tail of the exhausted
+        // order, with nothing drawn after it. Replaying from there would
+        // give exactly one track before mpv goes idle again — a fresh pass
+        // is opened instead, drawn again under shuffle.
+        if self.pass_finished {
+            if self.random {
+                self.draw_order().await;
+            }
+            if let Some(entry) = self.entry_at(0) {
+                self.playlist.write().await.index = entry;
+            }
+        }
         self.play().await
     }
 
@@ -427,7 +597,18 @@ impl SourcePlugin for FilesSource {
                 return outcome;
             }
         }
-        if !self.playlist.write().await.set_index(n) {
+        // `n` is an **mpv position**, not a playlist entry index: shuffled,
+        // the two diverge, and setting the raw position as the index would
+        // have the display name the wrong track (see `entry_at`'s doc on
+        // `FilesSource`). A negative `n` has no position to translate and
+        // falls through unchanged, which `set_index` below discards exactly
+        // as it always has.
+        let entry = usize::try_from(n)
+            .ok()
+            .and_then(|pos| self.entry_at(pos))
+            .map(|e| e as i64)
+            .unwrap_or(n);
+        if !self.playlist.write().await.set_index(entry) {
             // mpv says `-1` at the end of the list — **and also transiently at
             // every playlist reload**, hence at every track change: this is
             // measured, and that is why no conclusion is drawn from it.
@@ -472,6 +653,82 @@ impl SourcePlugin for FilesSource {
             outcome = outcome.preset(n);
         }
         outcome
+    }
+
+    /// A list of files is exactly the kind of finite list random/repeat-all
+    /// are for — unlike the radio, which has none. A constant, not derived
+    /// from whether the playlist currently holds anything: an empty playlist
+    /// still has a shape to shuffle or repeat once tracks are added, the same
+    /// way an empty disc tray still opens (see `can_eject`'s doc).
+    fn has_finite_list(&self) -> bool {
+        true
+    }
+
+    /// Learns the two play modes together (see `SourcePlugin::set_play_mode`
+    /// for why they travel as one call).
+    ///
+    /// Only draws (and repositions) on an actual **transition** of `random`.
+    ///
+    /// The core rediffuses this request to every source whenever *either*
+    /// mode changes, and also at wake-up and hot-plug — so most calls land
+    /// here with `random` unchanged. Redrawing unconditionally (an earlier
+    /// version, caught in review) silently overwrote `order` and moved the
+    /// index without ever rewriting mpv's m3u or emitting an action: mpv kept
+    /// walking its own file at its own position while `order` came to
+    /// describe a different one, so every later translation through it
+    /// (`player_track`, `next`, `prev`) reasoned about a list mpv did not
+    /// have — the screen naming the wrong track, next/prev landing at the
+    /// wrong position, with nothing to see in any single frame.
+    async fn set_play_mode(&mut self, random: bool, repeat_all: bool) {
+        let random_changed = random != self.random;
+        self.random = random;
+        self.repeat_all = repeat_all;
+        if !random_changed {
+            return;
+        }
+        // A mode change that actually (dis)engages shuffle opens a pass, in
+        // the sense that matters here: the "finished" state from a previous
+        // pass no longer describes anything once shuffle has just been
+        // toggled.
+        self.pass_finished = false;
+        // Identity when `random` just turned false, so a mode change never
+        // leaves a stale shuffled order behind once shuffle is turned back
+        // off.
+        self.draw_order().await;
+        if random {
+            // Start the freshly drawn pass at its own beginning. Without
+            // this, engaging shuffle mid-playlist would leave the index
+            // wherever sequential playback had left it — a position that
+            // means nothing in the new order, and could replay, later in
+            // this same pass, a track already heard before shuffle was even
+            // turned on.
+            if let Some(entry) = self.entry_at(0) {
+                self.playlist.write().await.index = entry;
+            }
+        }
+    }
+
+    /// mpv went idle at the end of the finite list `has_finite_list`
+    /// declares — as opposed to a live stream cutting out, which has no
+    /// equivalent here.
+    ///
+    /// Without repeat-all, behaves like the default `stop()` fallback always
+    /// did — but remembers that the pass is over, for `activate` to read (see
+    /// its doc). With repeat-all, opens a new pass: drawn again under
+    /// shuffle, replayed identically otherwise, starting at that pass's
+    /// first entry either way.
+    async fn end_of_content(&mut self) -> SourceOutcome {
+        if !self.repeat_all {
+            self.pass_finished = true;
+            return self.stop().await;
+        }
+        if self.random {
+            self.draw_order().await;
+        }
+        if let Some(entry) = self.entry_at(0) {
+            self.playlist.write().await.index = entry;
+        }
+        self.play().await
     }
 
     async fn set_locale(&mut self, locale: String) {
@@ -670,6 +927,9 @@ async fn main() -> Result<()> {
         Roots::default()
     });
     let catalog = Arc::new(RwLock::new(Catalog::load("files", "en", &locales_root, FILES_EN)));
+    // Captured before the move below: the Source's initial `order` is the
+    // identity permutation of this same length (see its construction).
+    let entries_len = entries.len();
     let playlist = Arc::new(AsyncRwLock::new(Playlist { entries, index }));
     let roots = Arc::new(AsyncRwLock::new(roots));
     let (preset_count_tx, preset_count_rx) =
@@ -694,6 +954,14 @@ async fn main() -> Result<()> {
         playlist: playlist.clone(),
         playlist_changed: playlist_changed.clone(),
         plays: plays.clone(),
+        // Identity permutation matching what `playlist` was just built with:
+        // shuffle is off until the core's first `SetPlayMode`, so position and
+        // entry coincide from the start.
+        order: (0..entries_len).collect(),
+        draw: Order::Random,
+        random: false,
+        repeat_all: false,
+        pass_finished: false,
         state_path: state_path.clone(),
         mpv_playlist_path,
         catalog: catalog.clone(),
@@ -796,16 +1064,33 @@ mod tests {
         assert!(frame_to_log(&frame("my_crate::lofty_helper", tracing::Level::WARN)));
     }
 
+    /// A Source with no shuffle involved: `test_source(p)` used to be the
+    /// whole builder, and stays the shorthand for every test that does not
+    /// care about the drawn order.
     fn test_source(playlist: Playlist) -> FilesSource {
+        source_with(playlist, Order::Sequential)
+    }
+
+    /// A Source whose draws come from `draw` rather than a real shuffle —
+    /// what makes a pass reproducible enough to assert on in a test (see
+    /// `Order`'s doc: a check against a real RNG would only ever be
+    /// statistical).
+    fn source_with(playlist: Playlist, draw: Order) -> FilesSource {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         // The tempdir is deliberately leaked: the Source lives for the duration
         // of the test, and dropping it would erase the paths it writes.
         std::mem::forget(dir);
+        let order = (0..playlist.entries.len()).collect();
         FilesSource {
             playlist: Arc::new(AsyncRwLock::new(playlist)),
             playlist_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             plays: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            order,
+            draw,
+            random: false,
+            repeat_all: false,
+            pass_finished: false,
             state_path: root.join("plugin-files.json"),
             mpv_playlist_path: root.join("plugin-files.m3u"),
             catalog: Arc::new(RwLock::new(Catalog::load("files", "en", &root, FILES_EN))),
@@ -815,6 +1100,29 @@ mod tests {
             cover_by_dir: Arc::new(Mutex::new(None)),
             health: Arc::new(ritornello_plugin_files::health::Health::new()),
         }
+    }
+
+    /// Reads the entry currently designated by the playlist's index,
+    /// synchronously: every test reaches this between two `.await` points, at
+    /// which point nothing else holds the lock, so `try_read` never blocks.
+    impl FilesSource {
+        fn current_entry(&self) -> usize {
+            self.playlist.try_read().expect("lock held only across .await points").index
+        }
+    }
+
+    /// Entry played at the start of a `Play` outcome, read through the
+    /// 1-based `preset` the outcome already carries — the same number the
+    /// screen and the grid show.
+    fn started_entry(out: &SourceOutcome) -> usize {
+        usize::from(out.preset.expect("a Play outcome carries a preset")) - 1
+    }
+
+    /// Entry that sits at `position` in the drawn order — without driving
+    /// playback there, since the point of `a_drawn_pass_plays_every_track_once`
+    /// is to check the whole order was covered, not to replay it.
+    fn entry_at_position(s: &FilesSource, position: usize) -> usize {
+        s.entry_at(position).expect("a full pass covers every position")
     }
 
     fn playlist_of(n: usize) -> Playlist {
@@ -828,6 +1136,52 @@ mod tests {
                 .collect(),
             index: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn a_drawn_pass_plays_every_track_once() {
+        // The whole promise: not "a random pick at each next", but a pass that
+        // covers everything without repeating. The draw is injected, so this is
+        // exact and not statistical.
+        let mut s = source_with(playlist_of(5), Order::Fixed(vec![3, 0, 4, 1, 2]));
+        s.set_play_mode(true, false).await;
+        let mut seen = vec![];
+        let out = s.activate().await;
+        seen.push(started_entry(&out));
+        for position in 1..5 {
+            seen.push(entry_at_position(&s, position));
+        }
+        seen.sort();
+        assert_eq!(seen, vec![0, 1, 2, 3, 4], "each track exactly once");
+    }
+
+    #[tokio::test]
+    async fn a_position_reported_by_mpv_is_read_through_the_order() {
+        // The trap: `player_track(n)` used to take the mpv position for an
+        // entry index. With a drawn order they are two different spaces, and
+        // the screen would name the wrong track.
+        let mut s = source_with(playlist_of(3), Order::Fixed(vec![2, 0, 1]));
+        s.set_play_mode(true, false).await;
+        s.activate().await;
+        s.player_track(1).await; // second position of the drawn order
+        assert_eq!(s.current_entry(), 0, "position 1 holds entry 0");
+    }
+
+    #[tokio::test]
+    async fn next_after_toggling_shuffle_follows_the_drawn_order() {
+        // `reload_if_changed(1)` walked `index + 1` in entry space: with this
+        // order that would have landed on entry 0 (preset 1) once shuffle was
+        // engaged. Reading the step through the drawn order instead lands on
+        // entry 1 (preset 2).
+        let mut s = source_with(playlist_of(3), Order::Fixed(vec![2, 1, 0]));
+        s.set_play_mode(true, false).await;
+        s.activate().await;
+        // Simulate a playlist edit from the admin page: the one channel that
+        // makes `next()` reload instead of delegating to mpv.
+        s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
+        let out = s.next().await;
+        assert!(matches!(out.action, SourceAction::Play { .. }), "{:?}", out.action);
+        assert_eq!(out.preset, Some(2), "position-space next, not entry-space +1");
     }
 
     #[tokio::test]
@@ -1169,6 +1523,90 @@ mod tests {
             n.cover,
             Some(ritornello_proto::CoverRef::Path { path: "/nas/Album/cover.jpg".into() })
         );
+    }
+
+    #[tokio::test]
+    async fn toggling_repeat_all_alone_leaves_a_drawn_order_and_its_index_untouched() {
+        // The trap: the core rediffuses `SetPlayMode` to every source on
+        // every mode change — *either* mode — and also at wake-up and
+        // hot-plug, so `random` is unchanged on most calls here. Redrawing
+        // and repositioning regardless (an earlier version) silently moved
+        // `order` and the index without ever rewriting mpv's m3u or emitting
+        // an action: mpv kept walking its own file at its own position while
+        // `order` came to describe a different one.
+        // `Order::Sequence` with **two distinct** permutations, deliberately:
+        // `Fixed` hands back the same vector on every draw, so a version that
+        // wrongly redraws on every call would still pass this test by
+        // accident — the second draw would just repeat the first. Only two
+        // different permutations can tell "redrawn again" from "left alone"
+        // apart.
+        let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![1, 0, 2]]));
+        s.set_play_mode(true, false).await; // engages shuffle: draws [2, 0, 1]
+        assert_eq!(s.drawn_order(), &[2, 0, 1]);
+        assert_eq!(s.current_entry(), 2, "the pass starts on the first drawn entry");
+        // `random` stays `true`; only `repeat_all` moves.
+        s.set_play_mode(true, true).await;
+        assert_eq!(s.drawn_order(), &[2, 0, 1], "no random transition: no redraw");
+        assert_eq!(s.current_entry(), 2, "no random transition: the index must not move");
+    }
+
+    #[tokio::test]
+    async fn toggling_repeat_all_alone_without_shuffle_leaves_the_index_untouched() {
+        let mut p = playlist_of(3);
+        p.index = 2;
+        let mut s = source_with(p, Order::Sequential);
+        s.set_play_mode(false, false).await;
+        s.set_play_mode(false, true).await;
+        assert_eq!(s.current_entry(), 2, "repeat-all alone never moves the index");
+    }
+
+    #[tokio::test]
+    async fn a_pass_without_repeat_stops_at_the_end() {
+        let mut s = source_with(playlist_of(3), Order::Fixed(vec![2, 0, 1]));
+        s.set_play_mode(true, false).await;
+        let out = s.end_of_content().await;
+        assert!(matches!(out.action, SourceAction::Noop), "nothing more to play");
+        assert_eq!(out.identity, Some(IdentityUpdate::Nothing));
+    }
+
+    #[tokio::test]
+    async fn repeat_all_opens_a_new_pass_with_a_new_draw() {
+        let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![1, 2, 0]]));
+        s.set_play_mode(true, true).await;
+        let out = s.end_of_content().await;
+        assert!(matches!(out.action, SourceAction::Play { .. }), "{:?}", out.action);
+        assert_eq!(s.drawn_order(), &[1, 2, 0], "the next pass is drawn again, not replayed");
+    }
+
+    #[tokio::test]
+    async fn repeat_all_without_shuffle_restarts_at_the_first_entry() {
+        let mut s = source_with(playlist_of(3), Order::Sequential);
+        s.set_play_mode(false, true).await;
+        let out = s.end_of_content().await;
+        match out.action {
+            SourceAction::Play { start, .. } => assert_eq!(start, Some(0)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn play_after_a_finished_pass_draws_a_fresh_one() {
+        // Otherwise the documented behaviour ("Play replays the last track"
+        // after a list ran out) would give one track and then a stop: the tail
+        // of an exhausted order holds only the entry that was already the
+        // last one played.
+        let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![1, 2, 0]]));
+        s.set_play_mode(true, false).await; // no repeat: a pass really ends
+        s.activate().await; // opens the first pass, order = [2, 0, 1]
+        s.end_of_content().await; // the pass ends without opening another one
+        let out = s.activate().await; // Play key pressed again
+        assert!(matches!(out.action, SourceAction::Play { .. }), "{:?}", out.action);
+        assert_eq!(s.drawn_order(), &[1, 2, 0], "a fresh pass is drawn, not the exhausted one replayed");
+    }
+
+    #[tokio::test]
+    async fn the_source_declares_a_finite_list() {
+        assert!(source_with(playlist_of(1), Order::Sequential).has_finite_list());
     }
 
     #[tokio::test]
