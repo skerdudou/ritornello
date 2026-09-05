@@ -63,6 +63,33 @@ describe('CdAdmin', () => {
     expect(trigger.text()).not.toContain('first_track')
   })
 
+  it('shows the label even when the catalog arrives after mounting', async () => {
+    // The bug the owner hit: the trigger showed `arrival_nothing`, the raw
+    // key, while the rest of the page was correctly translated.
+    //
+    // `PluginView` mounts a plugin's component **before** its catalog has
+    // arrived, on purpose — hidden behind the skeleton, so the component's
+    // own request leaves during the wait instead of after it. So the first
+    // render really does happen with an empty catalog, and `createT` then
+    // falls back on the key. Every other label recovers on the re-render;
+    // the one inside the Select did not, because the kit's `SelectItemText`
+    // registers an item's text with the Select root when the item mounts and
+    // never re-reads it.
+    //
+    // Mounting with `{}` then handing over the real catalog is exactly what
+    // the shell does, and it is the only way this test can see the defect —
+    // the previous ones all mounted with a complete catalog.
+    const spy = vi.fn(async () => new Response(JSON.stringify({ on_arrival: 'nothing' }), { status: 200 }))
+    vi.stubGlobal('fetch', spy)
+    const w = mount(CdAdmin, { props: { catalog: {}, base: BASE } })
+    await flushPromises()
+    await w.setProps({ catalog: CATALOG })
+    await flushPromises()
+    const trigger = w.get('[data-arrival]')
+    expect(trigger.text()).toContain(CATALOG.arrival_nothing)
+    expect(trigger.text()).not.toContain('arrival_nothing')
+  })
+
   it('names the control for a screen reader', async () => {
     // The kit's `Select` does not associate a neighbouring `<label for>` with
     // its trigger, so without this the control has no accessible name at all.
