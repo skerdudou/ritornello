@@ -17,7 +17,7 @@
 # URLs — hence the ones a directory references and a user copies. See
 # `scripts/fetch-webradios.mjs` for how they were measured.
 #
-# Measured on 2026-07-27. 21 streams.
+# Measured on 2026-09-06. 21 streams.
 
 [[webradio]]
 label = "Oüi FM"
