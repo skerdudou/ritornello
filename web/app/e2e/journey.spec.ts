@@ -49,11 +49,21 @@ test('navigation between the home page, the config and the plugin pages', async 
   await page.goto('/plugins/radio/')
   await expect(page.locator('[data-save]')).toBeVisible()
   await page.goto('/plugins/generic-input/')
-  // Twenty-three since the addition of the two seek keys in the track.
+  // Twenty-five fixed rows — the two seek keys, then the two play modes —
+  // plus one per source the core announces, here `files` and `radio`.
+  //
   // This count is the only lock that counts the **rendered** rows: the unit
   // tests lock the `ACTIONS` list upstream, but none of them mounts the real
-  // page.
-  await expect(page.locator('[data-action-row]')).toHaveCount(23)
+  // page, and none of them fetches the source catalogue over HTTP. Keep it
+  // exact rather than a lower bound — it is what caught the source rows and
+  // the play-mode toggles landing while it still said twenty-three.
+  await expect(page.locator('[data-action-row]')).toHaveCount(27)
+  // And they are the last rows, in the catalogue's order, which is the order
+  // the source key walks. A count alone would not notice a row rendering
+  // empty — precisely what an unreachable catalogue would produce.
+  const labels = page.locator('[data-action-row] td:first-child')
+  await expect(labels.nth(25)).toHaveText(/files/)
+  await expect(labels.nth(26)).toHaveText(/radio/)
 })
 
 test('a single Vue instance serves the shell and the plugin modules', async ({ page }) => {

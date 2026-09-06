@@ -11,7 +11,14 @@ test('on a phone: bottom bar, top nav absent, named tile', async ({ page }) => {
   await expect(tile.locator('[data-preset-name]')).toHaveText('FIP')
   // The transport has neither ±10 s nor step-by-step volume, and no Eject on the radio.
   await expect(page.locator('[data-remote-command="Eject"]')).toHaveCount(0)
-  await expect(page.locator('[data-remote-command]')).toHaveCount(5) // Prev PlayPause Next Stop Mute
+  // Prev, PlayPause, Next, Stop, Mute, and the two play modes.
+  await expect(page.locator('[data-remote-command]')).toHaveCount(7)
+  // The radio has no finite list, so the two modes are **greyed and still
+  // rendered** — not removed like Eject. Those are two different answers to
+  // two different questions ("this source has no tray" versus "this source
+  // has nothing to shuffle"), and only the second one was asked for here.
+  await expect(page.locator('[data-remote-command="SetRandom"]')).toBeDisabled()
+  await expect(page.locator('[data-remote-command="SetRepeatAll"]')).toBeDisabled()
 })
 
 test('on a phone: dragging the volume slider sends a SetVolume that the core echoes back', async ({ page }) => {
