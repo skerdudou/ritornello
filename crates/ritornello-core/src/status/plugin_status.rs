@@ -543,6 +543,7 @@ mod tests {
                 PluginStatus::kind("cd", "source", true, false),
             ],
             active_source: "radio".into(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
         };
         mark_plugin_disconnected(&mut st, "cd");
         assert!(!st.plugins.iter().find(|p| p.name == "cd").unwrap().connected);
@@ -565,6 +566,7 @@ mod tests {
                 PluginStatus::kind("radio", "source", true, true),
             ],
             active_source: "files".into(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
         };
         mark_plugin_disconnected(&mut st, "files");
         assert!(
@@ -585,6 +587,7 @@ mod tests {
         let mut st = StatusState {
             plugins: vec![PluginStatus::unknown_kind("files", true)],
             active_source: "radio".into(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
         };
         mark_plugin_disconnected(&mut st, "files");
         let line = &st.plugins[0];
@@ -603,6 +606,7 @@ mod tests {
         let mut st = StatusState {
             plugins: vec![PluginStatus::startup("cd")],
             active_source: "radio".into(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
         };
         mark_plugin_disconnected(&mut st, "cd");
         let line = &st.plugins[0];
@@ -625,6 +629,7 @@ mod tests {
                 PluginStatus::kind("radio", "source", true, true),
             ],
             active_source: "radio".into(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
         };
         mark_plugin_disconnected(&mut st, "files");
         assert!(
@@ -667,6 +672,7 @@ mod tests {
                 PluginStatus::kind("radio", "source", true, true),
             ],
             active_source: "radio".into(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
         };
         // First announcement: the stalled one becomes two kind lines.
         replace_plugin_lines(
@@ -710,6 +716,7 @@ mod tests {
                 PluginStatus::kind("radio", "source", true, false),
             ],
             active_source: "radio".into(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
         };
         replace_plugin_lines(&mut st, "files", vec![], false);
 
@@ -729,7 +736,11 @@ mod tests {
         // construction: without the flag carried up to here, the UI displayed
         // no link to a page that exists — the exact opposite of what the rule
         // "the flag follows what was reached" was after.
-        let mut st = StatusState { plugins: vec![], active_source: String::new() };
+        let mut st = StatusState {
+            plugins: vec![],
+            active_source: String::new(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+        };
         replace_plugin_lines(&mut st, "files", vec![], true);
 
         let line = &st.plugins[0];

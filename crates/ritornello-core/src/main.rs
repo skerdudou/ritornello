@@ -1551,6 +1551,7 @@ async fn main() -> Result<()> {
     let status_state = Arc::new(RwLock::new(StatusState {
         plugins: plugin_statuses,
         active_source: persisted.active_source.clone(),
+        protocol: ritornello_proto::PROTOCOL_VERSION,
     }));
     let audio_current = Arc::new(RwLock::new(persisted.audio_device.clone()));
     let locale_current = Arc::new(RwLock::new(persisted.locale.clone()));
@@ -2500,6 +2501,7 @@ mod toggle_tests {
                 // is not the shape of the status line.
                 plugins: vec![PluginStatus::kind("mpd", "display", true, true)],
                 active_source: String::new(),
+                protocol: ritornello_proto::PROTOCOL_VERSION,
             })),
             admin_backends: Arc::new(RwLock::new(HashMap::new())),
             admin_assets: Arc::new(Default::default()),
@@ -2548,7 +2550,11 @@ mod toggle_tests {
     }
 
     fn statuses_of(lines: Vec<PluginStatus>) -> StatusState {
-        StatusState { plugins: lines, active_source: String::new() }
+        StatusState {
+            plugins: lines,
+            active_source: String::new(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+        }
     }
 
     /// The right word at the right time: "starting" observes, "stalled"

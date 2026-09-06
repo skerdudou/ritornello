@@ -421,7 +421,11 @@ mod tests {
         let mut backends: HashMap<String, Arc<dyn AdminBackend>> = HashMap::new();
         backends.insert("radio".into(), Arc::new(fake));
         AppState {
-            status: Arc::new(tokio::sync::RwLock::new(StatusState { plugins: vec![], active_source: "radio".into() })),
+            status: Arc::new(tokio::sync::RwLock::new(StatusState {
+                plugins: vec![],
+                active_source: "radio".into(),
+                protocol: ritornello_proto::PROTOCOL_VERSION,
+            })),
             logs: Arc::new(LogBuffer::new(10)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,

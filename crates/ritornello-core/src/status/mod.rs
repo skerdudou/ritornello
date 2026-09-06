@@ -35,6 +35,14 @@ pub use settings_validation::validate_settings;
 pub struct StatusState {
     pub plugins: Vec<PluginStatus>,
     pub active_source: String,
+    /// Protocol this core speaks.
+    ///
+    /// The other half of what the configuration page needs to explain a
+    /// refused plugin: the line carries what the binary claims, this carries
+    /// what the core expects. Here rather than on the system metadata because
+    /// the configuration page already fetches this payload and never fetches
+    /// that one — the fact lives where its only reader reads.
+    pub protocol: u32,
 }
 
 #[derive(Clone)]
@@ -371,6 +379,7 @@ pub(crate) mod tests_support {
                 PluginStatus::kind("cd", "source", false, false),
             ],
             active_source: "radio".into(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
         }
     }
 
@@ -553,6 +562,25 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
+
+    #[test]
+    fn the_status_payload_carries_the_core_s_own_protocol() {
+        // Once, on the payload, and not on every plugin line: the core's
+        // protocol is a property of the core. The page needs both numbers to
+        // write "built for 2, this core speaks 1", and this is the half that
+        // never varies from one line to the next.
+        //
+        // On `/api/status` rather than on the system metadata because the
+        // configuration page — the only reader — already fetches this one and
+        // never fetches that one.
+        let s = StatusState {
+            plugins: Vec::new(),
+            active_source: String::new(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+        };
+        let j = serde_json::to_string(&s).unwrap();
+        assert!(j.contains(r#""protocol":1"#), "the page cannot explain a refusal without it: {j}");
+    }
 
     /// Variant with an observable `theme_tx`, for the `/api/theme` tests.
     fn app_state_with_theme() -> (AppState, tokio::sync::mpsc::Receiver<crate::theme::ThemeState>) {
