@@ -54,12 +54,21 @@ fn text(v: &Value, key: &str) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
-/// Comparison form for "is the station naming itself": lowercase, accents
-/// dropped, `&` read as `et`, everything else non-alphanumeric removed.
+/// Comparison form for "is the station naming itself": lowercase, `&` read as
+/// `et`, everything else non-alphanumeric removed.
 ///
 /// The normalization is not cosmetic. Measured, the station `NRJ HITS MIXES`
 /// announces itself as `NRJ HITSMIXES` — a raw comparison would have missed
 /// it, and the screen would have shown the station's own name as an artist.
+///
+/// **Accented letters are kept, not folded.** `char::is_alphanumeric` is
+/// Unicode-aware and accepts them as-is, so `"Chérie"` normalizes to
+/// `"chérie"`, not `"cherie"`. A station whose name and announced artist
+/// differ only by a diacritic would therefore not be recognized as a filler.
+/// Not observed across the 365 stations measured — Chérie FM itself announces
+/// the unaccented `CHERIE FM` on both sides — so proper diacritic folding
+/// (Unicode normalization, a new dependency) is deliberately not built for a
+/// case nothing measured requires.
 fn normalized(s: &str) -> String {
     s.to_lowercase()
         .replace('&', "et")
@@ -258,6 +267,19 @@ mod tests {
             assert_eq!(m.cover.as_deref(), Some("https://x/640.png"), "{name}: the logo");
             assert_eq!(m.cover_thumb.as_deref(), Some("https://x/173.png"), "{name}");
         }
+    }
+
+    #[test]
+    fn accents_are_kept_so_a_diacritic_only_difference_is_not_recognized() {
+        // Pins a known, deliberate gap: `normalized` folds case, spacing and
+        // `&`/`et`, but not diacritics — accent folding needs Unicode
+        // normalization, a dependency nothing measured across the 365
+        // stations justifies (see `normalized`'s doc comment). So this one is
+        // NOT recognized as the station naming itself, unlike the spacing-only
+        // case right below, which is.
+        assert_ne!(normalized("Chérie"), normalized("Cherie"));
+        // The measured case this rule does have to catch still works.
+        assert_eq!(normalized("NRJ HITS MIXES"), normalized("NRJ HITSMIXES"));
     }
 
     #[test]
