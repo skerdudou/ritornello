@@ -402,6 +402,42 @@ fn should_downgrade(statuses: &StatusState, name: &str) -> bool {
     statuses.plugins.iter().any(|l| l.name == name && l.starting)
 }
 
+/// The status lines of every plugin that did not end up wired: the silent
+/// ones (stalled), the gone ones (dead), and the ones refused for speaking
+/// another protocol.
+///
+/// Extracted from `main`'s inline assembly for one reason: it was the only
+/// part of this page's construction that no test could reach, and its failure
+/// mode is a plugin silently vanishing from the page — worse than a plugin
+/// shown broken.
+fn unwired_plugin_lines(gathered: &register::Gathered) -> Vec<PluginStatus> {
+    let mut lines = Vec::new();
+
+    // One "unknown kind" line per plugin not announced, distinguishing the
+    // stalled from the dead: the former is still running and can still
+    // announce itself, the latter has nothing left to say. That is the
+    // difference the operator must see before going to relaunch anything.
+    for (name, stalled) in gathered
+        .stalled
+        .iter()
+        .map(|n| (n, true))
+        .chain(gathered.dead.iter().map(|n| (n, false)))
+    {
+        lines.push(PluginStatus::unknown_kind(name, stalled));
+    }
+
+    // Third source of lines, after the stalled and the dead: a plugin refused
+    // for speaking another protocol. It belongs to neither list — it spoke,
+    // on time, and what it said was that it cannot be understood — so without
+    // this loop it would have no line at all and would simply vanish from the
+    // page. Disappearing is the one thing a broken plugin must never do.
+    for (name, found) in &gathered.incompatible {
+        lines.push(PluginStatus::incompatible_line(name, *found));
+    }
+
+    lines
+}
+
 struct HotPlugChildren {
     sockets_dir: PathBuf,
     /// Manifest names in file order: the authority on accepted names, and
@@ -1290,27 +1326,11 @@ async fn main() -> Result<()> {
     // relaunched plugin is picked back up.
     tokio::spawn(register::accept_forever(register_listener, late_tx));
 
-    // One "unknown kind" line per plugin not announced, distinguishing the
-    // stalled from the dead: the former is still running and can still
-    // announce itself, the latter has nothing left to say. That is the
-    // difference the operator must see before going to relaunch anything.
-    for (name, stalled) in gathered
-        .stalled
-        .iter()
-        .map(|n| (n, true))
-        .chain(gathered.dead.iter().map(|n| (n, false)))
-    {
-        plugin_statuses.push(PluginStatus::unknown_kind(name, stalled));
-    }
-
-    // Third source of lines, after the stalled and the dead: a plugin refused
-    // for speaking another protocol. It belongs to neither list — it spoke,
-    // on time, and what it said was that it cannot be understood — so without
-    // this loop it would have no line at all and would simply vanish from the
-    // page. Disappearing is the one thing a broken plugin must never do.
-    for (name, found) in &gathered.incompatible {
-        plugin_statuses.push(PluginStatus::incompatible_line(name, *found));
-    }
+    // The silent, the gone, and the refused: see `unwired_plugin_lines`.
+    // Extracted so a test could reach it — this was the one part of the
+    // startup assembly no test could drive, and its failure mode is a plugin
+    // silently vanishing from the page.
+    plugin_statuses.extend(unwired_plugin_lines(&gathered));
 
     // `metadata` plugins announced, **in manifest order**: this order is the
     // arbitration priority, and it is a configuration property, not a
@@ -2802,6 +2822,85 @@ mod toggle_tests {
         let json = serde_json::to_string(line).unwrap();
         assert!(json.contains(&format!("\"incompatible\":{foreign}")), "{json}");
         assert!(!json.contains("stalled"), "{json}");
+    }
+
+    #[test]
+    fn each_unwired_source_produces_its_own_line() {
+        // Three different plugins, one of each kind of silence: `unwired`
+        // for the still-running one, `gone` for the observed death, and
+        // `foreign` for the one that spoke but cannot be understood.
+        let g = register::Gathered {
+            stalled: vec!["unwired".to_string()],
+            dead: vec!["gone".to_string()],
+            incompatible: HashMap::from([("foreign".to_string(), 7u32)]),
+            ..Default::default()
+        };
+
+        let lines = unwired_plugin_lines(&g);
+        assert_eq!(lines.len(), 3, "one line per plugin, none invented, none dropped");
+
+        let stalled = lines.iter().find(|l| l.name == "unwired").unwrap();
+        assert!(stalled.stalled, "still running: it may yet speak");
+
+        let dead = lines.iter().find(|l| l.name == "gone").unwrap();
+        assert!(!dead.stalled, "its exit was observed, it is not silent");
+
+        let refused = lines.iter().find(|l| l.name == "foreign").unwrap();
+        assert_eq!(refused.incompatible, Some(7));
+        assert!(!refused.connected, "nothing of it was wired");
+        assert!(!refused.disabled, "nobody switched it off");
+        assert!(!refused.stalled, "it spoke, on time");
+    }
+
+    #[tokio::test]
+    async fn an_incompatible_name_never_gets_a_second_line_from_stalled() {
+        // The guarantee this function leans on lives in `register::gather`,
+        // not here: a name refused for its protocol is excluded from
+        // `stalled` at the source (register.rs, the filter task 4 added).
+        // Building the `Gathered` by hand would only prove this function
+        // once; going through a real `gather()` call proves the two stay in
+        // agreement, and would fail if that exclusion were ever removed.
+        let dir = tempfile::tempdir().unwrap();
+        let register_path = dir.path().join("register.sock");
+        let listener = tokio::net::UnixListener::bind(&register_path).unwrap();
+        let foreign = ritornello_proto::PROTOCOL_VERSION + 1;
+        let r = register_path.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let mut s = tokio::net::UnixStream::connect(&r).await.unwrap();
+            s.write_all(
+                format!(r#"{{"name":"radio","kinds":["source"],"protocol":{foreign}}}"#).as_bytes(),
+            )
+            .await
+            .unwrap();
+            s.write_all(b"\n").await.unwrap();
+            s.shutdown().await.unwrap();
+        });
+
+        let (tx, mut rx) = mpsc::channel::<Announcement>(16);
+        let g = register::gather(
+            &listener,
+            &["radio".to_string()],
+            futures::stream::pending::<String>(),
+            std::time::Duration::from_secs(3600),
+            &tx,
+            &mut rx,
+        )
+        .await;
+        assert!(g.incompatible.contains_key("radio"), "bench precondition");
+        assert!(!g.stalled.contains(&"radio".to_string()), "bench precondition");
+
+        let lines = unwired_plugin_lines(&g);
+        assert_eq!(
+            lines.iter().filter(|l| l.name == "radio").count(),
+            1,
+            "one line, not one for stalled and one for incompatible"
+        );
+    }
+
+    #[test]
+    fn an_empty_gathering_yields_no_lines() {
+        assert!(unwired_plugin_lines(&register::Gathered::default()).is_empty());
     }
 }
 
