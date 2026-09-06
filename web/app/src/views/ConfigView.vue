@@ -273,6 +273,8 @@ interface PluginRow {
   disabled: boolean
   busy: boolean
   admin: boolean
+  version?: string
+  incompatible?: number
 }
 
 /** Intermediate accumulator: the raw kinds, before we decide what must stay in
@@ -287,6 +289,8 @@ interface PluginAccumulator {
   disabled: boolean
   busy: boolean
   admin: boolean
+  version?: string
+  incompatible?: number
 }
 
 /**
@@ -311,6 +315,8 @@ const plugins = computed<PluginRow[]>(() => {
         disabled: !!p.disabled,
         busy: !!p.busy,
         admin: p.admin,
+        version: p.version,
+        incompatible: p.incompatible,
       })
       continue
     }
@@ -321,6 +327,11 @@ const plugins = computed<PluginRow[]>(() => {
     acc.disabled = acc.disabled || !!p.disabled
     acc.busy = acc.busy || !!p.busy
     acc.admin = acc.admin || p.admin
+    // All lines of a plugin carry the same version and the same refusal: the
+    // first one to define it suffices. `??`, not `||`, so a refusal at
+    // protocol 0 (were that ever to happen) is not mistaken for "none".
+    acc.version = acc.version ?? p.version
+    acc.incompatible = acc.incompatible ?? p.incompatible
   }
   return [...byName.values()].map((acc) => {
     // "unknown" is never shown next to a real kind: we only keep it when it is
@@ -339,9 +350,17 @@ const plugins = computed<PluginRow[]>(() => {
       disabled: acc.disabled,
       busy: acc.busy,
       admin: acc.admin,
+      version: acc.version,
+      incompatible: acc.incompatible,
     }
   })
 })
+
+/** The protocol this core speaks, as `/api/status` last reported it (loaded
+ * alongside `status.value.plugins` — see `usePlugins`). The other half of the
+ * sentence a refused plugin's badge writes: the line carries what its binary
+ * announced, this carries what the core expects. */
+const protocol = computed(() => status.value.protocol)
 
 // Names of the plugins whose toggle is in flight: disabling the only source
 // can cost up to 15 s (stop + Deactivate + Activate, each capped at 5 s) when
@@ -482,6 +501,7 @@ function goTo(id: string) {
                 <tr>
                   <th class="text-left font-normal">{{ t('col_plugin') }}</th>
                   <th class="text-left font-normal">{{ t('col_kind') }}</th>
+                  <th class="text-left font-normal">{{ t('col_version') }}</th>
                   <th class="text-left font-normal">{{ t('col_state') }}</th>
                   <th class="text-left font-normal">{{ t('col_admin') }}</th>
                   <th class="text-left font-normal">{{ t('col_enabled') }}</th>
@@ -491,41 +511,49 @@ function goTo(id: string) {
                 <tr v-for="p in plugins" :key="p.name" data-plugin-row class="border-t border-border">
                   <td class="py-1" data-plugin-name>{{ p.name }}</td>
                   <td data-plugin-kind>{{ p.kinds }}</td>
+                  <td>{{ p.version ?? '—' }}</td>
                   <td data-plugin-state>
                     <Badge
                       :variant="
-                        p.disabled
-                          ? 'outline'
-                          : p.busy
+                        p.incompatible
+                          ? 'destructive'
+                          : p.disabled
                             ? 'outline'
-                            : p.connected
-                              ? 'secondary'
-                              : p.starting
+                            : p.busy
+                              ? 'outline'
+                              : p.connected
                                 ? 'secondary'
-                                : p.stalled
-                                  ? 'outline'
-                                  : 'destructive'
+                                : p.starting
+                                  ? 'secondary'
+                                  : p.stalled
+                                    ? 'outline'
+                                    : 'destructive'
                       "
                     >
-                      <!-- "Busy" comes **before** "connected": a busy plugin is
-                           reachable, and that is precisely why "connected" says
-                           nothing useful. "Starting" comes **before** "stalled":
-                           both say the plugin has not spoken yet, and only the
-                           elapsed time tells them apart. Showing "stalled"
-                           during a normal startup wrongly accused a perfectly
-                           healthy binary. -->
+                      <!-- "Incompatible" comes **first**: a refused plugin is
+                           neither connected, nor busy, nor merely silent, and
+                           any other position would describe it with a word
+                           that is false. "Busy" comes **before** "connected": a
+                           busy plugin is reachable, and that is precisely why
+                           "connected" says nothing useful. "Starting" comes
+                           **before** "stalled": both say the plugin has not
+                           spoken yet, and only the elapsed time tells them
+                           apart. Showing "stalled" during a normal startup
+                           wrongly accused a perfectly healthy binary. -->
                       {{
-                        p.disabled
-                          ? t('disabled')
-                          : p.busy
-                            ? t('busy')
-                            : p.connected
-                              ? t('connected')
-                            : p.starting
-                              ? t('starting')
-                              : p.stalled
-                                ? t('stalled')
-                                : t('unavailable')
+                        p.incompatible
+                          ? t('plugin_incompatible', { found: p.incompatible, expected: protocol })
+                          : p.disabled
+                            ? t('disabled')
+                            : p.busy
+                              ? t('busy')
+                              : p.connected
+                                ? t('connected')
+                              : p.starting
+                                ? t('starting')
+                                : p.stalled
+                                  ? t('stalled')
+                                  : t('unavailable')
                       }}
                     </Badge>
                   </td>

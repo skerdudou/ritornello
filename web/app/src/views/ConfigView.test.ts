@@ -21,8 +21,10 @@ const CATALOGUE = {
   config_title: 'Configuration',
   plugins_title: 'Plugins',
   col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_admin: 'Admin', col_enabled: 'Actif',
+  col_version: 'Version',
   connected: 'connecté', unavailable: 'unavailable', stalled: 'figé', disabled: 'désactivé',
   starting: 'démarrage', busy: 'occupé',
+  plugin_incompatible: 'Compilé pour le protocole {found} ; ce cœur parle le {expected}',
   admin_link: 'admin', toggle_plugin: 'Activer ou désactiver {name}',
   plugin_enabled: '{name} activé.', plugin_disabled: '{name} désactivé.',
   audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
@@ -180,7 +182,7 @@ function resetMocks() {
 describe('ConfigView — plugin table', () => {
   beforeEach(resetMocks)
 
-  it('renders one row per plugin with its five columns', async () => {
+  it('renders one row per plugin with its six columns', async () => {
     const { w } = await mountView()
     const rows = w.findAll('[data-plugin-row]')
     expect(rows).toHaveLength(2)
@@ -188,9 +190,9 @@ describe('ConfigView — plugin table', () => {
     expect(rows[0]!.find('[data-plugin-kind]').text()).toBe('source')
     expect(rows[1]!.find('[data-plugin-name]').text()).toBe('cd')
     expect(rows[1]!.find('[data-plugin-kind]').text()).toBe('source')
-    // The five headers are translated from the core catalog.
+    // The six headers are translated from the core catalog.
     const headers = w.findAll('th').map((h) => h.text())
-    expect(headers).toEqual(['Plugin', 'Genre', 'État', 'Admin', 'Actif'])
+    expect(headers).toEqual(['Plugin', 'Genre', 'Version', 'État', 'Admin', 'Actif'])
   })
 
   it('distinguishes the connected state from the unavailable state', async () => {
@@ -347,6 +349,35 @@ describe('ConfigView — plugin table', () => {
       active_source: 'files',
     })
     expect(wrapper.find('[data-plugin-state]').text()).toBe('unavailable')
+  })
+
+  it('says which protocol a refused plugin was built for', async () => {
+    // The number must reach the screen through the catalog, never concatenated:
+    // a language places its own numbers, and a test that accepted "protocol 2"
+    // glued to a label would let an untranslatable string through.
+    const w = await mountWithStatus({
+      plugins: [{ name: 'radio', kind: 'unknown', connected: false, admin: false, incompatible: 2 }],
+      active_source: '',
+      protocol: 1,
+    })
+    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'radio')!
+    expect(row.get('[data-plugin-state]').text()).toContain('2')
+    expect(row.get('[data-plugin-state]').text()).toContain('1')
+    // The raw key must never reach the screen: that is what a missing catalog
+    // entry looks like, and this repo has a test class dedicated to catching it.
+    expect(row.text()).not.toContain('plugin_incompatible')
+  })
+
+  it('shows the version each plugin announced', async () => {
+    // They legitimately differ once a single plugin has been replaced, which is
+    // the whole point of packaging them separately.
+    const w = await mountWithStatus({
+      plugins: [{ name: 'radio', kind: 'source', connected: true, admin: false, version: '0.2.1' }],
+      active_source: '',
+      protocol: 1,
+    })
+    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'radio')!
+    expect(row.text()).toContain('0.2.1')
   })
 
   it('encodes the plugin name in the toggle URL', async () => {

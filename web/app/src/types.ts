@@ -19,10 +19,21 @@ export interface PluginStatus {
   /** Fingerprint of the plugin's UI assets, when it announced one. Absent for
    * a plugin with no admin page, or one predating the field. */
   ui_version?: string
+  /** Version of the plugin binary, as its announcement gave it. Absent for a
+   * binary predating the field. */
+  version?: string
+  /** Protocol this binary announced, present **only** when it differs from
+   * this core's own (see `StatusPayload.protocol`). Its presence is the
+   * refusal itself. */
+  incompatible?: number
 }
 export interface StatusPayload {
   plugins: PluginStatus[]
   active_source: string
+  /** Protocol this core speaks. The other half of what the configuration page
+   * needs to explain a refused plugin: a line carries what its binary
+   * claimed, this carries what the core expects. */
+  protocol: number
   /**
    * Identifier of this run of the core, used by the shell as the `v=` stamp
    * of a plugin's catalog URL (see `PluginRoute.vue`'s `catalogQuery`).
