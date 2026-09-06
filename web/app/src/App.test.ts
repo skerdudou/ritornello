@@ -203,4 +203,47 @@ describe('shell navigation', () => {
     expect(w.find('router-view-stub').exists()).toBe(true)
     w.unmount()
   })
+
+  /**
+   * The badge belongs to the header and not to a page, because the question
+   * it answers — does the device still reply? — is worth the same on the
+   * plugin pages, where nothing else would say so.
+   *
+   * Asserted on `/config` rather than on the home page precisely to pin that:
+   * a badge mounted inside a view would disappear here.
+   */
+  it('carries the connection badge in the header, on every page', async () => {
+    const w = await mountAt('/config')
+    expect(w.get('header [data-connection]').attributes('data-connection')).toBe('online')
+    w.unmount()
+  })
+
+  /**
+   * The header is deliberately not held back by the catalog wait (see the
+   * comment on `catalogPending` in `App.vue`), and the badge must not become
+   * the exception: an unreachable core is exactly the case where `/api/i18n`
+   * never lands, so a badge that waited for the catalog would stay invisible
+   * in the one situation it exists for.
+   */
+  it('shows the badge while the catalog is still pending', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        String(url).includes('/api/i18n')
+          ? new Promise(() => {})
+          : Promise.resolve({ ok: true, json: async () => ({ plugins: [] }) } as Response),
+      ),
+    )
+    await router.push('/')
+    await router.isReady()
+    const w = mount(App, { global: { plugins: [router], stubs: { RouterView: true } } })
+    await flushPromises()
+
+    // The withheld view is what proves the catalog has not landed — and not
+    // the skeleton, which `useSkeleton` only draws once the wait outlasts a
+    // delay this test does not run through.
+    expect(w.find('router-view-stub').exists()).toBe(false)
+    expect(w.find('header [data-connection]').exists()).toBe(true)
+    w.unmount()
+  })
 })

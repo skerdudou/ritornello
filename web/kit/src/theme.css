@@ -34,6 +34,7 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -49,4 +50,25 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* Status green, the counterpart of `destructive`.
+
+   No preset defines a `success` key today, so this value is the one every
+   theme gets; a preset that later declares one overrides it, the engine
+   writing its variables inline on `documentElement` where this rule only
+   dresses `:root`. That is why it is declared as a variable here rather than
+   written into a component: the day a theme wants its own green, no code
+   changes.
+
+   Deliberately **not** a `dark:` pair. No `@custom-variant dark` is declared
+   anywhere in this project, so Tailwind's `dark:` still keys off the
+   operating system's preference, whereas the theme's mode is chosen in the
+   app and applied as CSS variables. A `dark:` variant here would follow the
+   wrong signal. One value, legible on both grounds, is the honest answer.
+
+   Where it is used the colour never carries meaning on its own: the
+   connection badge always renders its label next to the dot. */
+:root {
+  --success: #22c55e;
 }

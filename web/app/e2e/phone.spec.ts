@@ -21,6 +21,29 @@ test('on a phone: bottom bar, top nav absent, named tile', async ({ page }) => {
   await expect(page.locator('[data-remote-command="SetRepeatAll"]')).toBeDisabled()
 })
 
+/**
+ * The connection badge keeps its dot on a phone and drops its word.
+ *
+ * Only a real browser can tell: `sr-only` is a stylesheet rule, and jsdom
+ * computes no style — the unit test can therefore assert the classes and the
+ * presence of the text, never that the label actually takes no room here.
+ *
+ * `toBeHidden()` would be wrong for the same reason it is tempting: `sr-only`
+ * leaves a 1×1 box, which Playwright counts as visible. The width is what
+ * carries the claim.
+ */
+test('on a phone: the connection badge shows its dot without its label', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.locator('[data-connection]')).toHaveAttribute('data-connection', 'online')
+  const label = page.locator('[data-connection-label]')
+  // Still in the DOM, hence still announced by a screen reader: dropping the
+  // word visually must not drop it from the accessibility tree.
+  await expect(label).toHaveText(/^(Online|En ligne)$/)
+  const box = await label.boundingBox()
+  if (!box) throw new Error('the label should still occupy a (1×1) box')
+  expect(box.width).toBeLessThanOrEqual(1)
+})
+
 test('on a phone: dragging the volume slider sends a SetVolume that the core echoes back', async ({ page }) => {
   // The end-to-end proof of the Slider: a real touch gesture, a single
   // command on release, and the SSE frame that comes back with the value.

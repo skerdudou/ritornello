@@ -234,7 +234,7 @@ function start() {
   // timestamps (`xValues`, in `views/sparkline.ts`), the plot stays correct;
   // and so does the CPU delta, the jiffies of `/proc/stat` being cumulative —
   // a one-minute gap gives an average over the minute, not a wrong figure.
-  if (paused || timer !== null) return
+  if (paused.value || timer !== null) return
   if (wait !== null) return
   // Resume at the deadline, not on the spot: changing the period must not
   // cost a probe. We only probe immediately if the new rhythm makes the
@@ -288,15 +288,18 @@ function stop() {
  * just been switched off.
  *
  * Counterpart not to lose sight of: left at `true`, it freezes the graph for
- * *all* pages, not only the one that paused, and nothing on screen explains
- * it — `unavailable` stays false, the graph keeps its last points. Every exit
- * path of a power action must therefore call `resume()`. A single exception:
+ * *all* pages, not only the one that paused, and the graph keeps its last
+ * points without saying so. The header badge now reads this flag (see
+ * `connection`), so a forgotten pause at least shows as a red "offline" —
+ * which is the truth during a real power action, and a lie once it is over.
+ * A visible symptom, then, but not a licence: every exit path of a power
+ * action must still call `resume()`. A single exception:
  * the **shutdown** of the machine, where the device leaves for good. The
  * reboot of the machine is not one, against intuition: the Pi comes back in
  * 20 to 40 s and the tab, for its part, has not moved — `confirm` therefore
  * waits for it as it waits for the return of the service.
  */
-let paused = false
+const paused = ref(false)
 
 /**
  * Without `export`, deliberately, like `stop()`: the only door is the object
@@ -307,12 +310,12 @@ let paused = false
  * remedy than a full reload of the page.
  */
 function pause(): void {
-  paused = true
+  paused.value = true
   stop()
 }
 
 function resume(): void {
-  paused = false
+  paused.value = false
   start()
 }
 
@@ -355,13 +358,46 @@ const windowMinutes = computed(() => {
 })
 
 /**
+ * Is the core answering? Derived here rather than in the header badge that
+ * displays it, because the facts live here: the badge would otherwise have to
+ * know that `unavailable` starts at `false` before anything has been
+ * measured, and that a power action suspends probing — two subtleties that
+ * would be re-derived, and eventually got wrong, by every future consumer.
+ *
+ * `unknown` covers a single case, and a short one: the page has loaded and
+ * the first probe has not answered yet. Painting the badge green there would
+ * assert something nobody has checked, and painting it red would flash a
+ * false alarm on every page load. The grey also holds the badge's width in
+ * the header, where an element appearing a moment later would shift the
+ * layout.
+ *
+ * A power action in progress reads as `offline`, not as a state of its own,
+ * and that is a deliberate choice: the machine really is going away, and the
+ * page that ordered it already says why, in its own words, right under the
+ * buttons. A distinct state here would also make the badge change colour
+ * merely because the user left the System tab — `waitForReturn` stops with
+ * the view and hands probing back, so the same absent machine would read grey
+ * on one page and red on the next. The badge answers one question, "does it
+ * answer?", and answers it the same way everywhere.
+ *
+ * It follows that a **poweroff** leaves the badge red for good, which is the
+ * point: that path never calls `resume()`, the device coming back only
+ * through a physical gesture.
+ */
+const connection = computed<'online' | 'offline' | 'unknown'>(() => {
+  if (unavailable.value || paused.value) return 'offline'
+  if (state.value === null) return 'unknown'
+  return 'online'
+})
+
+/**
  * Complete reset. **For tests only**: the state lives at module level, so
  * without this a test leaves its history, its period and its timer to the
  * next one. To be called in a `beforeEach`.
  */
 export function resetMetrics(): void {
   stop()
-  paused = false
+  paused.value = false
   failureReported = false
   lastProbe = null
   state.value = null
@@ -376,6 +412,7 @@ export function useMetrics() {
   return {
     state,
     unavailable,
+    connection,
     history,
     currentCpuUsage,
     periodMs,

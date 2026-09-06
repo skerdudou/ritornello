@@ -223,6 +223,27 @@ test('System tab: metrics and buttons present', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('[data-top-nav] a[href="/system"]')).toBeVisible()
 })
+
+/**
+ * The connection badge, against a real core.
+ *
+ * Its whole chain only exists here: the probe of `/api/system`, the state
+ * `useMetrics` derives from the answer, and the header that renders it. The
+ * unit tests stub the probe, so they prove the mapping and never that a
+ * running server turns the badge green.
+ */
+test('the header reports the core as reachable, on every page', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.locator('[data-connection]')).toHaveAttribute('data-connection', 'online')
+  // A regex and not a fixed string: what must be caught here is a raw
+  // translation key reaching the screen (`connection_online`), not the
+  // language the disposable core happens to start in.
+  await expect(page.locator('[data-connection-label]')).toHaveText(/^(Online|En ligne)$/)
+  // It belongs to the shell, so it survives navigation — including onto a
+  // plugin page, where nothing else would report a device that went away.
+  await page.goto('/plugins/radio/')
+  await expect(page.locator('[data-connection]')).toHaveAttribute('data-connection', 'online')
+})
 /**
  * **A plugin's CSS must not undo the shell's.**
  *

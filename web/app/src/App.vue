@@ -3,6 +3,7 @@ import { Skeleton, Toaster, useSkeleton } from '@ritornello/ui'
 import { computed, onMounted } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import BottomNav from './components/BottomNav.vue'
+import ConnectionStatus from './components/ConnectionStatus.vue'
 import ThemeToggle from './components/ThemeToggle.vue'
 import { useCatalog } from './composables/useCatalog'
 import { usePlugins } from './composables/usePlugins'
@@ -122,7 +123,13 @@ onMounted(async () => {
             {{ name }}
           </RouterLink>
         </div>
-        <ThemeToggle class="ml-auto" />
+        <!-- In the header rather than in a view: the question it answers is
+             worth the same on every page, including the plugin ones where
+             nothing else would report a device that stopped replying. It
+             takes the `ml-auto` the toggle used to carry, and the nav's
+             `gap-4` separates the two. -->
+        <ConnectionStatus class="ml-auto" />
+        <ThemeToggle />
       </nav>
     </header>
     <main class="mx-auto max-w-5xl px-4 py-6 pb-24 md:pb-6">

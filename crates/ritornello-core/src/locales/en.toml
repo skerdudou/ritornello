@@ -142,6 +142,12 @@ nav_label = "Navigation"
 nav_listen = "Listen"
 nav_plugins = "Plugins"
 nav_settings = "Settings"
+# Header indicator: is the core answering? Three states and not two, because
+# "not measured yet" is not "reachable" — see `connection` in
+# `useMetrics.ts`, which also explains why a power action reads as offline.
+connection_online = "Online"
+connection_offline = "Offline"
+connection_unknown = "Connecting…"
 plugins_list_title = "Plugin pages"
 plugins_list_empty = "No plugin offers a page."
 system_cpu = "CPU"
