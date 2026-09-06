@@ -56,7 +56,7 @@ that the core opens before launching a single plugin:
    describing exactly what it just bound, e.g.:
 
    ```json
-   {"name":"mpd","kinds":["input","display"],"admin":true,"covers":true}
+   {"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":1,"version":"0.2.0"}
    ```
 
    before closing the connection. That last flag is a display's opt-in for
@@ -64,6 +64,49 @@ that the core opens before launching a single plugin:
    below — like `admin`, it is **derived** from what the binary actually
    implements rather than asked of its author, which is the invariant of
    this handshake: an announcement cannot lie.
+
+The announcement carries two more fields, `protocol` and `version`, both
+**derived** the same way `admin` and `covers` are — the SDK writes them,
+never the plugin's author, so an announcement cannot misreport either. The
+version is `env!("CARGO_PKG_VERSION")` expanded in the *plugin's own* crate,
+at `Runtime::from_args`: written inside the SDK instead, it would report the
+SDK's version rather than the plugin's, since that is whose `Cargo.toml` a
+Rust binary compiles against. `protocol` is `ritornello_proto::PROTOCOL_VERSION`
+as the plugin was built, a single number shared by the whole protocol crate,
+not one per message kind.
+
+The core compares that number to its own `PROTOCOL_VERSION` by **strict
+equality**, at both doors an announcement can come through — the startup
+rendezvous and a plugin re-announcing hot, hours or months later. A mismatch
+gets the plugin **refused**: nothing of it is wired, its process is
+terminated when the core owns it (`SIGTERM`, the same grace as switching a
+plugin off), and when the core does not own it, the log says so rather than
+pretending it stopped anything. Either way the core keeps running and every
+other plugin is unaffected — the same tolerance a merely dead plugin already
+gets. The configuration page names the cause, "Built for protocol N; this
+core speaks M", both numbers placed by the language rather than concatenated
+into it.
+
+This refusal is deliberately **not** the `enabled` switch described below,
+and persists nothing: no file is written, so a plugin refused today is
+simply wired again the moment a matching binary replaces the incompatible
+one — there is no manifest entry to undo, because there was never one to
+write.
+
+`PROTOCOL_VERSION` itself is expected to move rarely, and **only on a break
+of the wire format, never on an addition**: every field this protocol has
+gained so far — `admin`, `covers`, `ui_version`, the eject capability, and
+now `protocol` and `version` themselves — was absorbed by a serde default,
+so an old plugin and a new core (or the reverse) keep understanding each
+other, with tests pinning that an old announcement still parses. A number
+that moves this rarely is exactly what makes it trustworthy when it does:
+seeing it change is the signal that something must actually be
+recompiled, not routine noise. Because a protocol break changes what a
+plugin and the core can promise each other, it carries a minor version bump
+of the whole product — the single version declared once in
+`[workspace.package]` and inherited by every crate, `ritornello-proto`
+included (see `ritornello_proto::PROTOCOL_VERSION`'s own doc comment,
+which this paragraph mirrors).
 
 This "bind first, announce second" order is not merely a convention:
 the SDK's `Runtime` enforces it structurally (see [Writing a `metadata`

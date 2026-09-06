@@ -82,8 +82,8 @@ pub struct PluginStatus {
     ///
     /// Its presence is the refusal — one field rather than a boolean beside a
     /// number, so the two can never contradict each other. The screen turns it
-    /// into a sentence with the core's own protocol, which travels once in the
-    /// system metadata rather than on every line.
+    /// into a sentence with the core's own protocol, which travels in the
+    /// `/api/status` payload rather than on every line.
     ///
     /// Deliberately **not** `disabled`: that one writes `enabled = false` into
     /// the manifest and would survive the fix.

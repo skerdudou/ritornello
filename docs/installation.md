@@ -47,6 +47,59 @@ possible with `cross`: `aarch64-unknown-linux-gnu` (64-bit ARM boards, Pi
 3/4/5 class — untested on this project for lack of hardware, but with no
 reason not to work).
 
+## Installing from a release
+
+Pushing a tag `vX.Y.Z` builds a **draft** GitHub release carrying prebuilt
+archives, one per architecture and per component:
+`ritornello-core-<version>-<arch>.tar.gz`, `ritornello-plugins-<version>-<arch>.tar.gz`
+(every bundled plugin together) and one
+`ritornello-plugin-<name>-<version>-<arch>.tar.gz` per plugin, for installing
+or upgrading a single one. A single `SHA256SUMS` covers every archive of the
+release, whatever the architecture. This is an alternative to
+`deploy.sh`, not a replacement for it: `deploy.sh` still builds from source
+over SSH and remains the development path (see [Deploying](#deploying)
+below); a release archive is for putting a specific tagged version onto a
+device with no build toolchain at all.
+
+The common case — the core and every plugin, from a fresh download — is the
+recipe each release's own notes repeat with its actual version filled in:
+
+    sha256sum -c SHA256SUMS --ignore-missing
+    sudo tar -C / -xzf ritornello-core-<version>-<arch>.tar.gz
+    sudo tar -C / -xzf ritornello-plugins-<version>-<arch>.tar.gz
+    sudo chown -R ritornello: /etc/ritornello
+    sudo systemctl daemon-reload && sudo systemctl restart ritornello
+
+Replacing a single plugin (an upgrade, or a fix confined to one binary) is
+the same two commands with that plugin's own archive in place of the bundle.
+
+**Why a blind `sudo tar -C /` cannot clobber a configuration.** Each
+archive's tree holds files only at the exact path they occupy on the
+device — the binary, its systemd unit, its polkit rule, its language packs —
+and never `stations.toml`, `input-bindings.toml` or `plugins.toml`, the
+three files that hold what an operator produced (stations added from the
+browser, bindings learned, which plugins to launch). Those are structurally
+absent from the tree, the same guarantee `deploy.sh` gives by never
+overwriting a file that already exists (see [Deploying](#deploying)): there
+is nothing to guard against, because there is nothing there to overwrite.
+
+What an archive carries **beside** its tree, to be copied by hand rather
+than extracted onto the device: the example config for the plugins that
+have one (`stations.example.toml`, `media-roots.example.toml`, and so on),
+and — for a single plugin's archive — `plugins.toml.fragment`, the
+`[[plugin]]` block that `deploy/plugins.example.toml` would otherwise carry
+for it. A plugin installed on its own has no other way to tell the core to
+launch it: appending that fragment to `/etc/ritornello/plugins.toml` is what
+actually starts the new binary (see [Declaring the
+plugins](plugins.md#declaring-the-plugins)).
+
+Three architectures are built for every release: `armv7` (Raspberry Pi 2
+and similar, the reference hardware), `x86_64` (this project's own test and
+end-to-end target, exercised on every commit rather than merely
+cross-compiled) and `arm64` (Pi 3/4/5 class) — cross-compiled on every
+release but **never started on real hardware**, for lack of a device to try
+it on.
+
 ## Example: Raspberry Pi 2
 
 Two distributions are exercised on this project's hardware: Raspberry Pi
