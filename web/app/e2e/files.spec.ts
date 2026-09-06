@@ -115,6 +115,18 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   // plugin side (`Root` does not carry the field), verified here end to end.
   expect(JSON.stringify(afterRoots)).not.toContain('password')
 
+  // The archiving control, on the local root the journey just declared. A
+  // device folder has no read-only mount, so it is offered straight away —
+  // and this is the only root the journey ever gets, no SMB mount being able
+  // to succeed without privilege.
+  await expect(page.locator('[data-archive-covers]')).toBeVisible()
+  await expect(page.locator('[data-archive-covers]')).toBeEnabled()
+  await page.locator('[data-archive-covers]').check()
+  // Read back from the plugin, not merely displayed: it is the only way to
+  // prove the flag reached `media-roots.toml`.
+  const afterArchive = await (await request.get('/plugins/files/api/data')).json()
+  expect(afterArchive.roots[0].archive_covers).toBe(true)
+
   // --- Browse, then add the folder recursively --------------------------------
   // No reload here, and that is the regression this step pins down: the Browse
   // panel requests its first level from a watcher that fires **during** the

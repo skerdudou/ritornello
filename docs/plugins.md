@@ -916,6 +916,29 @@ entry is retried under the root — and whatever stays unresolved is
 **reported on the page rather than dropped**: a playlist that silently
 shrinks is a defect that takes months to attribute.
 
+**Archiving a cover onto a root is its own permission, separate from
+`writable`.** A per-root flag, `archive_covers`, false by default and
+toggled by its own admin op, `set_archive_covers`. It is deliberately not
+folded into `writable`: that flag drives the cifs mount options, so
+flipping it calls `reconcile_roots` and remounts the share, possibly
+restarting the unit and raising a polkit prompt — an owner who only wants
+to let the appliance write a `cover.jpg` next to the tracks is not asking
+for any of that. `archive_covers` remounts nothing at all: it is read at
+every write, and the toggle takes effect on the very next track, not on the
+next mount. That absence of a mount is exactly why the control is offered
+on a local root too, with no writability question attached — a device
+folder has no read-only mount to speak of, so a switch gated on `writable`
+would sit grey there for ever, on a kind of root where writing is never in
+question. Only an SMB share that is mounted read-only greys it. The plugin
+still refuses to write far more often than an owner might expect, and it
+says why in the journal rather than leaving a bare errno: the root was
+never armed, or — for a share — is not mounted writable; an image already
+occupies the name a cover would take; the folder's audio files disagree
+about which album they belong to, or the very file being played names none
+to compare against; or the write onto the share itself fails. A cover
+written into the wrong folder would win over the network for good, so the
+module would rather say nothing at all than guess.
+
 **Updating an existing installation.** As for every other plugin,
 `deploy.sh` installs the binary and, on a device already in service,
 appends the `files` entry to `/etc/ritornello/plugins.toml` if it is
@@ -1973,6 +1996,18 @@ work to do. The ordinary cost of a track has therefore not moved: a
 contributor that never sets `cover_thumb` sees no change at all, and one
 that does still costs the appliance exactly one small download per track,
 same as before the pair existed.
+
+**Archiving a cover onto a `files` root, when the owner has armed it, goes
+through this very same door.** The core hands the retained key to
+`CoverCache::full_size` exactly as an enlargement in the web page does —
+the same `cover_source_max_mio` ceiling, the same rendezvous collapsing
+concurrent callers into one download, and the same memo holding the result
+for whoever asks next. So the two operations are free for one another, in
+both directions: a listener who enlarges a cover just ahead of the plugin
+finds the original already in the memo and pays nothing again for it, and
+a folder the plugin has just archived costs a later enlargement nothing
+either — there was never a second full-size download to begin with, only
+the one this door already had a place for.
 
 Two things about steps 3 and 5 are worth spelling out, because neither is
 guessable from the general model:
