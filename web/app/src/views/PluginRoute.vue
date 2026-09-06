@@ -32,9 +32,15 @@ const statusPending = computed(() => !settled.value)
  * Suffix that makes a catalog URL cacheable for good: the language it is in,
  * and the stamp of the core's session.
  *
- * Empty when either is still unknown — `/api/status` may not have answered
- * when the first plugin page mounts. An unstamped URL is merely uncached; one
+ * Empty when either is still unknown. An unstamped URL is merely uncached; one
  * carrying an empty `v=` would be cached **for ever** under a false stamp.
+ *
+ * That emptiness used to be the ordinary case on a hard reload — the watch
+ * below ran before `/api/status` had answered — and it costs more than a cache
+ * miss: without `lang`, the core hands back the plugin's **ambient** language
+ * (see `admin_i18n`), which is English on a fresh core because `SetLocale`
+ * only ever reaches source plugins. The watch now waits for that answer, so
+ * this stays empty in one case only: `/api/status` itself failed.
  */
 function catalogQuery(locale: string, session: string): string {
   if (!locale || !session) return ''
@@ -85,8 +91,19 @@ const catalogPending = ref(true)
 let generation = 0
 
 watch(
-  () => route.params.name,
-  async (value) => {
+  // **`settled` and `locale` are sources, not just readings**, and that is a
+  // fix. Watching the route name alone, the immediate run fired before
+  // `/api/status` had answered: `catalogQuery` then had no language to put in
+  // the URL, and the plugin replied in whatever language it happens to hold —
+  // English on a fresh core, since `SetLocale` reaches source plugins only.
+  // Nothing re-ran the request afterwards, the language not being watched, so
+  // a hard reload on a plugin page stayed in English until the reader
+  // navigated away and back. Reported from use, on every plugin page.
+  //
+  // `session` joins them for the same reason it is in the URL: a core that
+  // restarted invalidates the stamp, and the answer must be fetched again.
+  [() => route.params.name, settled, locale, session],
+  async ([value]) => {
     name.value = String(value ?? '')
     if (!name.value) return
     // Raised **before** the request leaves, and synchronously: a navigation to
@@ -94,6 +111,13 @@ watch(
     // incoming page is revealed for one frame carrying the previous plugin's
     // catalog.
     catalogPending.value = true
+    // Nothing leaves before `/api/status` has settled: that answer carries the
+    // language, and asking without it gets the plugin's ambient one. Waiting
+    // cannot hang — `settled` is raised on failure as much as on success (see
+    // `usePlugins.reload`), and the request then goes out unstamped, which is
+    // the honest degradation: `/api/status` is down, so nobody knows the
+    // language.
+    if (!settled.value) return
     const localGeneration = ++generation
     // An unreachable catalog must not prevent the UI from showing: `t()` then
     // falls back on the keys, which stays readable. The log keeps the trace,

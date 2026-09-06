@@ -14,10 +14,39 @@ const PluginViewStub = {
   template: '<div data-stub />',
 }
 
+/**
+ * Seeds `usePlugins()` as `App.vue` does before any plugin page can be
+ * reached: `/api/status` answered, so the language and the session stamp are
+ * known.
+ *
+ * Necessary since the catalog request waits for that answer — without it no
+ * request leaves at all, which is the whole point of the fix. It also has to
+ * be done per test rather than once: that state lives at module level, and a
+ * test that needs it *unsettled* must be able to say so without leaking into
+ * the next one.
+ */
+async function statusAnswered(locale = 'fr', session = 'sess-1') {
+  const { usePlugins } = await import('../composables/usePlugins')
+  const p = usePlugins()
+  p.state.value = { plugins: [], active_source: '', session, locale }
+  p.settled.value = true
+  return p
+}
+
+/** The counterpart: `/api/status` has not answered yet. */
+async function statusPending() {
+  const { usePlugins } = await import('../composables/usePlugins')
+  const p = usePlugins()
+  p.state.value = { plugins: [], active_source: '', session: '', locale: '' }
+  p.settled.value = false
+  return p
+}
+
 describe('PluginRoute', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.unstubAllGlobals()
     route.params.name = 'radio'
+    await statusAnswered()
   })
 
   it('a late catalog does not replace that of the displayed plugin', async () => {
@@ -162,16 +191,67 @@ describe('PluginRoute', () => {
   // pristine (neither test below calls `refresh()` before this one) — order
   // matters here, since this file does not reset modules between tests.
 
-  it('requests the catalog under a bare URL while the session is still unknown', async () => {
-    // `/api/status` may not have answered yet when the first plugin page
-    // mounts. A URL carrying an empty `v=` would be cached forever under a
-    // false stamp, so the fallback is no query at all, not a half-stamped one.
+  it('asks nothing before /api/status has answered', async () => {
+    // The defect, reported from use on every plugin page: a hard reload on a
+    // plugin page came back in **English** while the appliance was set to
+    // French, and returned to French only after navigating away and back.
+    //
+    // The request used to leave on the immediate run of the watch, before
+    // `/api/status` had answered. With no language to put in the URL, the core
+    // hands back the plugin's *ambient* language — English on a fresh core,
+    // `SetLocale` reaching source plugins only — and nothing re-ran the
+    // request afterwards, the language not being watched.
+    await statusPending()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const PluginRoute = (await import('./PluginRoute.vue')).default
+    const w = mount(PluginRoute, { global: { stubs: { PluginView: PluginViewStub } } })
+    await flushPromises()
+    expect(vi.mocked(fetch).mock.calls).toHaveLength(0)
+    // And the reader is not shown a page in the meantime: the curtain stays
+    // shut, which is what `PluginView` now keys the plugin's mount on.
+    expect(w.findComponent(PluginViewStub).props('catalogPending')).toBe(true)
+
+    // The answer lands: the request leaves, in the right language.
+    const p = await statusAnswered()
+    expect(p.settled.value).toBe(true)
+    await flushPromises()
+    const url = String(vi.mocked(fetch).mock.calls[0]![0])
+    expect(url).toContain('lang=fr')
+    expect(w.findComponent(PluginViewStub).props('catalogPending')).toBe(false)
+  })
+
+  it('falls back to a bare URL when /api/status itself failed', async () => {
+    // `settled` is raised on failure as much as on success, so the wait above
+    // cannot hang. Nobody then knows the language, and asking for the
+    // plugin's ambient one is the honest degradation — a URL carrying an
+    // empty `v=` would be cached forever under a false stamp, so the fallback
+    // is no query at all, not a half-stamped one.
+    const { usePlugins } = await import('../composables/usePlugins')
+    const p = usePlugins()
+    p.state.value = { plugins: [], active_source: '', session: '', locale: '' }
+    p.settled.value = true
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
     const PluginRoute = (await import('./PluginRoute.vue')).default
     mount(PluginRoute, { global: { stubs: { PluginView: PluginViewStub } } })
     await flushPromises()
     const url = String(vi.mocked(fetch).mock.calls[0]![0])
     expect(url).toBe('/plugins/radio/api/i18n')
+  })
+
+  it('asks again, in the new language, when the language changes', async () => {
+    // The picker lives on the configuration page, so this happens on the way
+    // back to a plugin page — but watching the language rather than relying on
+    // the navigation is what makes it true regardless of the route taken.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
+    const PluginRoute = (await import('./PluginRoute.vue')).default
+    mount(PluginRoute, { global: { stubs: { PluginView: PluginViewStub } } })
+    await flushPromises()
+    expect(String(vi.mocked(fetch).mock.calls[0]![0])).toContain('lang=fr')
+
+    await statusAnswered('en')
+    await flushPromises()
+    const urls = vi.mocked(fetch).mock.calls.map((c) => String(c[0]))
+    expect(urls.some((u) => u.includes('lang=en'))).toBe(true)
   })
 
   it('asks for the catalog in an explicit language, under a versioned URL', async () => {

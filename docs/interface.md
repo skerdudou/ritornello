@@ -1202,6 +1202,15 @@ TOML packs**, decentralized per component:
   TOML) is ignored **with a trace in the logs**.
 - The initial French packs ship in `deploy/locales/` and are copied by
   `deploy/deploy.sh`.
+- **A plugin page's catalog is asked for in an explicit language**, and the
+  request waits for `/api/status` — the answer that carries the selected
+  language. Asked without it, the core hands back the plugin's *ambient*
+  language, which is English on a fresh core: `SetLocale` only ever reaches
+  source plugins, so an admin-only plugin never learns the language at all.
+  That is what made a hard reload on a plugin page come back in English on an
+  appliance set to French, and return to French only after navigating away and
+  back. The bare, unstamped URL remains the fallback for the one case where
+  nobody knows the language: `/api/status` itself failed.
 - **A routed view is not rendered before the catalog has come back.** Not a
   matter of polish: a view mounted without a catalog renders translation
   keys, and while most labels recover on the next render, a dropdown does
