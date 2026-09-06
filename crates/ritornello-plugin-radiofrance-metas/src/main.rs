@@ -189,7 +189,7 @@ async fn main() -> Result<()> {
     ));
     let table = Table::load(&table_path);
     tracing::info!("{} station(s) known (bundled table + {})", table.stations.len(), table_path.display());
-    Runtime::from_args()?.metadata(RadioFranceMetas::new(table))?.run().await
+    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.metadata(RadioFranceMetas::new(table))?.run().await
 }
 
 #[cfg(test)]

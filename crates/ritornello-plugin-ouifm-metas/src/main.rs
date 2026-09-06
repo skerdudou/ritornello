@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
         table.webradios.len(),
         table_path.display()
     );
-    Runtime::from_args()?.metadata(OuiFmMetas::new(table))?.run().await
+    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.metadata(OuiFmMetas::new(table))?.run().await
 }
 
 #[cfg(test)]

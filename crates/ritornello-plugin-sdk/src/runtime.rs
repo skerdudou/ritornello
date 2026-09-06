@@ -50,6 +50,13 @@ pub struct Runtime {
     /// Fingerprint of the admin page's UI assets, computed in `.admin()`
     /// while the plugin is still in hand — see `ui_fingerprint` below.
     ui_version: Option<String>,
+    /// Version of the **plugin's** crate, handed in by the caller.
+    ///
+    /// Not read from `env!` here: that macro expands where it is written, so a
+    /// version read in this file would be the SDK's. The two match today only
+    /// because the whole workspace shares one number — a coincidence that
+    /// would turn into the announcement lying the day they diverge.
+    version: &'static str,
 }
 
 /// Fingerprint of a plugin's UI assets.
@@ -71,17 +78,18 @@ pub fn ui_fingerprint(plugin: &impl AdminPlugin) -> String {
 
 impl Runtime {
     /// Builds a `Runtime` from the arguments passed by the core.
-    pub fn from_args() -> Result<Self> {
+    pub fn from_args(version: &'static str) -> Result<Self> {
         Ok(Self::new(
             crate::plugin_name(),
             crate::register_socket(),
             crate::socket_prefix(),
+            version,
         ))
     }
 
     /// Useful for tests, which don't go through `std::env::args`.
-    pub fn new(name: String, register: PathBuf, prefix: PathBuf) -> Self {
-        Self { name, register, prefix, halves: Vec::new(), admin: None, ui_version: None }
+    pub fn new(name: String, register: PathBuf, prefix: PathBuf, version: &'static str) -> Self {
+        Self { name, register, prefix, halves: Vec::new(), admin: None, ui_version: None, version }
     }
 
     pub fn source(mut self, plugin: impl SourcePlugin) -> Result<Self> {
@@ -139,14 +147,11 @@ impl Runtime {
         Ok(self)
     }
 
-    /// Announces, then serves all halves until one of them stops.
-    ///
-    /// Each half runs in its own task: a failure of the admin
-    /// page must not cut the audio, and vice versa — this is
-    /// exactly what the `radio`, `files` and `generic-input` plugins
-    /// used to do by hand before this constructor.
-    pub async fn run(self) -> Result<()> {
-        let announcement = Announcement {
+    /// The announcement this runtime will write, split out of `run` so it can
+    /// be read without binding anything: a test that had to open sockets to
+    /// check one field would be testing the wrong thing.
+    fn announcement(&self) -> Announcement {
+        Announcement {
             name: self.name.clone(),
             kinds: self.halves.iter().map(|m| m.kind).collect(),
             admin: self.admin.is_some(),
@@ -156,8 +161,18 @@ impl Runtime {
             covers: self.halves.iter().any(|m| m.covers),
             ui_version: self.ui_version.clone(),
             protocol: ritornello_proto::PROTOCOL_VERSION,
-            version: None,
-        };
+            version: Some(self.version.to_string()),
+        }
+    }
+
+    /// Announces, then serves all halves until one of them stops.
+    ///
+    /// Each half runs in its own task: a failure of the admin
+    /// page must not cut the audio, and vice versa — this is
+    /// exactly what the `radio`, `files` and `generic-input` plugins
+    /// used to do by hand before this constructor.
+    pub async fn run(self) -> Result<()> {
+        let announcement = self.announcement();
         let mut stream = UnixStream::connect(&self.register)
             .await
             .with_context(|| format!("connecting to {}", self.register.display()))?;
@@ -277,7 +292,7 @@ mod tests {
 
         let (_tx, rx) = tokio::sync::mpsc::channel(4);
         let received = Arc::new(Mutex::new(Vec::new()));
-        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone())
+        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone(), "0.0.0-test")
             .display(PlaceholderDisplay { received })
             .unwrap()
             .input(PlaceholderInput { rx })
@@ -308,7 +323,7 @@ mod tests {
             let listener = UnixListener::bind(&register).unwrap();
             let prefix = dir.path().join("display");
 
-            let rt = Runtime::new("display".into(), register.clone(), prefix.clone());
+            let rt = Runtime::new("display".into(), register.clone(), prefix.clone(), "0.0.0-test");
             let rt = if plugin == 0 {
                 // Does not override `wants_covers`: the default body decides.
                 rt.display(PlaceholderDisplay { received: Arc::new(Mutex::new(Vec::new())) })
@@ -338,7 +353,7 @@ mod tests {
         let prefix = dir.path().join("input");
 
         let (_tx, rx) = tokio::sync::mpsc::channel(4);
-        let rt = Runtime::new("input".into(), register.clone(), prefix.clone())
+        let rt = Runtime::new("input".into(), register.clone(), prefix.clone(), "0.0.0-test")
             .input(PlaceholderInput { rx })
             .unwrap();
         tokio::spawn(async move { rt.run().await.unwrap() });
@@ -359,7 +374,7 @@ mod tests {
 
         let (_tx, rx) = tokio::sync::mpsc::channel(4);
         let received = Arc::new(Mutex::new(Vec::new()));
-        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone())
+        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone(), "0.0.0-test")
             .display(PlaceholderDisplay { received })
             .unwrap()
             .input(PlaceholderInput { rx })
@@ -386,7 +401,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let received = Arc::new(Mutex::new(Vec::new()));
         let received_test = received.clone();
-        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone())
+        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone(), "0.0.0-test")
             .display(PlaceholderDisplay { received })
             .unwrap()
             .input(PlaceholderInput { rx })
@@ -420,6 +435,23 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("the state did not reach the display even though the input was working");
+    }
+
+    #[test]
+    fn the_runtime_announces_the_protocol_and_the_version_it_was_given() {
+        // Written from what the Runtime was constructed with, not from a
+        // constant re-read here: the point of the parameter is that the
+        // version comes from the plugin's crate, so a test that recomputed it
+        // locally would prove nothing.
+        let r = Runtime::new(
+            "radio".into(),
+            std::path::PathBuf::from("/tmp/register.sock"),
+            std::path::PathBuf::from("/tmp/radio"),
+            "9.9.9",
+        );
+        let a = r.announcement();
+        assert_eq!(a.protocol, ritornello_proto::PROTOCOL_VERSION);
+        assert_eq!(a.version.as_deref(), Some("9.9.9"), "the version must be the plugin's, verbatim");
     }
 
     #[test]

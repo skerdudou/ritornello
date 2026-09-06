@@ -1243,7 +1243,7 @@ async fn main() -> Result<()> {
         MUSICBRAINZ_EN,
     )));
 
-    Runtime::from_args()?
+    Runtime::from_args(env!("CARGO_PKG_VERSION"))?
         .metadata(MusicBrainzPlugin::new(store.clone(), state_path.clone()))?
         .admin(admin::MusicBrainzAdmin::new(store, state_path, catalog, locales_root))?
         .run()

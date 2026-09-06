@@ -1252,7 +1252,7 @@ async fn main() -> Result<()> {
         cursor: 0,
     };
     let admin = CdAdmin { state_path, on_arrival, catalog, locales_root };
-    Runtime::from_args()?.source(source)?.admin(admin)?.run().await
+    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.source(source)?.admin(admin)?.run().await
 }
 
 #[cfg(test)]

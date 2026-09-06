@@ -1083,7 +1083,7 @@ async fn main() -> Result<()> {
         browse: Arc::new(Mutex::new(serde_json::json!({}))),
         preset_count_tx,
     };
-    Runtime::from_args()?.source(source)?.admin(admin)?.run().await
+    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.source(source)?.admin(admin)?.run().await
 }
 
 #[cfg(test)]

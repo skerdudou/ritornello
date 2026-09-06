@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     let display = Arc::new(Mutex::new(ConsoleDisplay::open(&tty)?));
     let last = Arc::new(Mutex::new(None));
     tokio::spawn(tick_clock(display.clone(), last.clone()));
-    Runtime::from_args()?.display(ConsolePlugin { display, last })?.run().await
+    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.display(ConsolePlugin { display, last })?.run().await
 }
 
 #[cfg(test)]

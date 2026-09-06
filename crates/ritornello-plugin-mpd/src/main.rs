@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
         rebind_tx: Some(rebind_tx),
     };
 
-    Runtime::from_args()?
+    Runtime::from_args(env!("CARGO_PKG_VERSION"))?
         .input(MpdInput { rx: cmd_rx })?
         .display(MpdDisplay { state })?
         .admin(admin)?

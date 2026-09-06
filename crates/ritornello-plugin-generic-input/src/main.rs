@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
         catalog,
         locales_root,
     };
-    Runtime::from_args()?.input(EvdevInput { rx })?.admin(admin)?.run().await
+    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.input(EvdevInput { rx })?.admin(admin)?.run().await
 }
 
 #[cfg(test)]
