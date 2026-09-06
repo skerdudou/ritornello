@@ -92,11 +92,7 @@ impl Order {
 /// `Option<Option<CoverRef>>`, that distinction is one missing `.flatten()`
 /// away from disappearing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// `NotProbed` echoing the enum's own name is exactly the point: it names the
-// one state the whole type exists to keep distinct from the other two (see
-// above), and clippy has no way to know that the repetition is deliberate.
-#[allow(clippy::enum_variant_names)]
-enum Probed {
+enum FolderState {
     NotProbed,
     NoImage,
     Image,
@@ -107,8 +103,8 @@ enum Probed {
 /// A free function, and not a method: it is a decision over three values, so
 /// it is provable without a `FilesSource`, without a channel and without a
 /// clock.
-fn offers_archive(roots: &Roots, file: &Path, probed: Probed) -> bool {
-    if probed != Probed::NoImage {
+fn offers_archive(roots: &Roots, file: &Path, probed: FolderState) -> bool {
+    if probed != FolderState::NoImage {
         return false;
     }
     let Some(root) = roots.root_of(file) else { return false };
@@ -903,7 +899,7 @@ impl SourcePlugin for FilesSource {
             // archive one. The channel cannot tell that case apart from a
             // share that timed out — both send `None` — so this reads the
             // `cover_by_dir` memo instead, which is where `arm_cover` records
-            // the difference (see `Probed`'s doc).
+            // the difference (see `FolderState`'s doc).
             //
             // `self.cover_by_dir.lock()` and `self.current_file` are both read
             // here, in their own statement: the `std::sync::MutexGuard` this
@@ -911,12 +907,12 @@ impl SourcePlugin for FilesSource {
             // lines below is a suspension point. Computing `probed` first lets
             // the guard drop at the end of this statement, before that await.
             let probed = match &result {
-                Ok(Some(_)) => Probed::Image,
+                Ok(Some(_)) => FolderState::Image,
                 _ => match (&self.current_file, &*self.cover_by_dir.lock().unwrap()) {
                     (Some(file), Some((dir, None))) if file.parent() == Some(dir.as_path()) => {
-                        Probed::NoImage
+                        FolderState::NoImage
                     }
-                    _ => Probed::NotProbed,
+                    _ => FolderState::NotProbed,
                 },
             };
             let mut n = Notification::new();
@@ -1227,17 +1223,17 @@ mod tests {
         };
 
         // Probed, nothing found: the one case that deserves an offer.
-        assert!(offers_archive(&table, &file, Probed::NoImage));
+        assert!(offers_archive(&table, &file, FolderState::NoImage));
 
         // A cover was found: there is nothing to archive.
-        assert!(!offers_archive(&table, &file, Probed::Image));
+        assert!(!offers_archive(&table, &file, FolderState::Image));
 
         // **Not probed at all** — a share that did not answer in time stores
         // nothing. "Unknown" must never read as "no cover": offering here
         // would archive over an image nobody has looked for. Three named
         // states rather than two nested `Option`s, precisely because this is
         // the distinction this whole feature turns on.
-        assert!(!offers_archive(&table, &file, Probed::NotProbed));
+        assert!(!offers_archive(&table, &file, FolderState::NotProbed));
     }
 
     #[test]
@@ -1247,12 +1243,12 @@ mod tests {
 
         // The flag off: no offer, whatever the mount says.
         let off = Roots { root: vec![Root { writable: true, ..base.clone() }] };
-        assert!(!offers_archive(&off, file, Probed::NoImage));
+        assert!(!offers_archive(&off, file, FolderState::NoImage));
 
         // The flag on but the share read-only: no offer. The control is
         // greyed in the page, but a table edited by hand must not slip past.
         let ro = Roots { root: vec![Root { archive_covers: true, ..base.clone() }] };
-        assert!(!offers_archive(&ro, file, Probed::NoImage));
+        assert!(!offers_archive(&ro, file, FolderState::NoImage));
 
         // A **local** root has no read-only mount to speak of: the flag alone
         // decides, and the filesystem has the last word at write time.
@@ -1267,13 +1263,14 @@ mod tests {
             }],
         };
         let on_usb = std::path::Path::new("/media/usb/Album/01.flac");
-        assert!(offers_archive(&local, on_usb, Probed::NoImage));
+        assert!(offers_archive(&local, on_usb, FolderState::NoImage));
     }
 
     #[test]
     fn a_path_owned_by_no_root_is_never_offered() {
         let table = Roots { root: vec![] };
-        assert!(!offers_archive(&table, std::path::Path::new("/tmp/x/01.flac"), Probed::NoImage));
+        let file = std::path::Path::new("/tmp/x/01.flac");
+        assert!(!offers_archive(&table, file, FolderState::NoImage));
     }
 
     /// Builds a test `Metadata` for a (target, level) pair.
