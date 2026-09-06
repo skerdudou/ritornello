@@ -127,7 +127,7 @@ real title.
 
 ## Regenerating the table
 
-    node scripts/fetch-stations.mjs
+    node crates/ritornello-plugin-nrj-metas/scripts/fetch-stations.mjs
 
 Rewrites `src/stations.toml` from the four brands' own `/onair.json`
 endpoints. With `--verifier` it writes nothing and exits nonzero if the

@@ -1954,7 +1954,7 @@ the MPD plugin's page.
 
 ### The cover chain
 
-Five contributors can resolve a cover, and the order among them is not a
+Six contributors can resolve a cover, and the order among them is not a
 list of priorities written anywhere — it falls out of the layers and
 intentions described above.
 
@@ -1977,7 +1977,11 @@ intentions described above.
    same SSE feed — a ready-made URL when the feed carries one, else one
    composed from an identifier the same way the station's own player
    composes it.
-5. **`musicbrainz`** — the generic resolver. On a disc it already
+5. **`nrj-metas`** — the station's own image for the track, overwriting,
+   from the same on-air endpoint it already reads for the text —
+   suppressed when that image is the station's own wallpaper rather than
+   the track's own artwork (see the plugin's own README).
+6. **`musicbrainz`** — the generic resolver. On a disc it already
    recognizes by its table of contents it overwrites, using the release
    identifier its lookup already carries. Everywhere else it
    **completes**: given both an artist and an album, and only while no
