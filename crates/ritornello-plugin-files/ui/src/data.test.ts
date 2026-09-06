@@ -24,7 +24,10 @@ describe('root normalization', () => {
   })
 
   it('defaults archive_covers to false, never to undefined', () => {
-    // Absent on the wire (`skip_serializing_if`) must read as false, never
+    // `archive_covers` carries no `skip_serializing_if`: the plugin always
+    // serializes it. `normalizeRoot` is a defensive parser of `unknown`
+    // regardless — this fixture omits the field the way a stale response or
+    // a hand-built object would — and an omission must read as false, never
     // as undefined: the checkbox would then be neither on nor off.
     expect(normalizeRoot({ name: 'x' }).archive_covers).toBe(false)
   })

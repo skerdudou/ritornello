@@ -930,12 +930,21 @@ on a local root too, with no writability question attached — a device
 folder has no read-only mount to speak of, so a switch gated on `writable`
 would sit grey there for ever, on a kind of root where writing is never in
 question. Only an SMB share that is mounted read-only greys it. The plugin
-still refuses to write far more often than an owner might expect, and it
-says why in the journal rather than leaving a bare errno: the root was
-never armed, or — for a share — is not mounted writable; an image already
-occupies the name a cover would take; the folder's audio files disagree
-about which album they belong to, or the very file being played names none
-to compare against; or the write onto the share itself fails. A cover
+still refuses to write far more often than an owner might expect, and every
+one of these is a **decision**, not an accident: nothing to retry, and the
+journal says so in a sentence of its own rather than a bare errno. In order —
+the echo the core handed over is not this source's own file shape, or names a
+path with no parent directory to write into; no declared root owns the
+folder; the root was never armed to archive covers, or — for a share — is
+not mounted writable; an image already occupies the name a cover would take;
+the file being played names no album to compare against, or the folder's
+audio files disagree about which one they belong to; or the staged original
+the core handed over is not bytes this module recognises as an image.
+Separately, an **accident** can still end the attempt without writing
+anything — the folder cannot be listed, the staged file cannot be read back,
+or the write onto the share itself fails — and that is reported the same way
+a refusal is, but it is not one: the share coming back turns a failure into a
+success next time, where none of the refusals above ever will. A cover
 written into the wrong folder would win over the network for good, so the
 module would rather say nothing at all than guess.
 

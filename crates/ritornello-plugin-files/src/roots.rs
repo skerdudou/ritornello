@@ -174,14 +174,27 @@ impl Roots {
     /// Longest and not first: nesting arises between **local** roots, whose
     /// `base_dir()` is the declared path and which `validate` does not forbid
     /// from nesting; two SMB roots cannot nest, their mount point being derived
-    /// from a unique name. The table's order carries no meaning. Containment is
-    /// judged by `Path::starts_with`, which compares **components** — a string
-    /// prefix would accept `/mnt/ritornello/nas-old` as being inside
+    /// from a unique name. The table's order carries no meaning **for
+    /// nesting** — but it is not entirely inert either: `max_by_key` returns
+    /// the *last* of equal maxima, and `validate` dedupes roots by **name**,
+    /// not by path, so two differently-named local roots may declare the very
+    /// same `path`. Between two such roots this method picks whichever sits
+    /// later in the table, arbitrarily. Containment is judged by
+    /// `Path::starts_with`, which compares **components** — a string prefix
+    /// would accept `/mnt/ritornello/nas-old` as being inside
     /// `/mnt/ritornello/nas`.
     ///
     /// No `canonicalize` here: this answers about the path a Source is
     /// playing, which it built from a `base_dir()` itself, and touching the
     /// filesystem would make a table lookup wait on a sleeping share.
+    ///
+    /// **This is also why a symlink is never resolved.** A subdirectory inside
+    /// a declared root that happens to be a symlink pointing outside it is
+    /// still reported as owned by this root — `starts_with` only compares the
+    /// path's own components, never what the filesystem makes of them. Low
+    /// risk in practice (it takes a symlink planted inside a share the owner
+    /// already trusted enough to declare), but a real one for a caller that
+    /// writes at the path this returns, such as `archive::store`.
     pub fn root_of(&self, path: &Path) -> Option<&Root> {
         self.root
             .iter()

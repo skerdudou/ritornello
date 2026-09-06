@@ -736,6 +736,18 @@ impl ArchivingRig {
         }
     }
 
+    /// Plays `path` without ever sending the offer notification — the shape
+    /// of a folder-probe that found a cover already in place, and so never
+    /// declares `cover_archivable(true)`. `poll_notification` never sends
+    /// `(false)`: `set_identity`, triggered by the identity frame this sends,
+    /// is the *only* thing that can withdraw an offer a previous folder made.
+    pub(super) async fn play_file_in_a_folder_with_its_own_cover(&mut self, path: &str) {
+        self.core.handle_source_update(
+            ARCHIVING_SOURCE,
+            plays(serde_json::json!({"kind": "file", "path": path})),
+        );
+    }
+
     /// A contributor announces a cover it found **on the internet**, and the
     /// fetch of its thumbnail completes.
     pub(super) async fn declare_network_cover(&mut self, url: &str) {
@@ -761,15 +773,37 @@ impl ArchivingRig {
     /// thumbnail the detached task would have deposited, then `cover_arrived`
     /// — which is where archiving is decided.
     ///
+    /// **A `Pair`, not bare `Bytes`.** `fetch` never deposits `Bytes` for a
+    /// `Ref` — only a `Pair` (see `cover::fetch`'s doc) — and `remember_full`,
+    /// the memo `full_size` writes back after a download, only ever finds a
+    /// `Pair` to write onto (`entries.iter_mut().find(...)` matches nothing
+    /// else). A rig depositing `Bytes` would make every enlargement download
+    /// again forever, silently: `full_size` still returns bytes either way,
+    /// so nothing here would fail, only a test asserting on
+    /// `full_downloads()` around the archive path — the one proof this
+    /// feature's design calls "iso to an enlargement" — would fail, or worse,
+    /// never get written because the rig could not carry it.
+    ///
     /// Then **awaits** whatever archive task that decision detached. A
     /// detached task nobody awaits is a race, not a background job: without
     /// this the assertions below would read a record the task had not written
     /// yet, and would pass or fail on the scheduler's mood.
     async fn finish_the_fetch(&mut self, s: crate::cover::CoverSource) {
         let key = crate::cover::key(&s);
+        let crate::cover::CoverSource::Ref(full) = s else {
+            unreachable!("this rig only ever declares covers by reference");
+        };
         self.core
             .covers
-            .insert(key.clone(), crate::cover::CoverPayload::Bytes(deposited_thumbnail(), "image/jpeg"))
+            .insert(
+                key.clone(),
+                crate::cover::CoverPayload::Pair {
+                    thumb: deposited_thumbnail(),
+                    thumb_mime: "image/jpeg",
+                    full,
+                    fetched: None,
+                },
+            )
             .await;
         self.core.cover_arrived(key, true).await;
         self.core.settle_cover_archive().await;

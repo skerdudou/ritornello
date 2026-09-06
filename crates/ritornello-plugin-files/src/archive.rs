@@ -51,6 +51,29 @@ pub enum Outcome {
 /// the network — and the one other players read too.
 const NAME: &str = "cover";
 
+/// How many neighbours the homogeneity check reads before it stops asking.
+///
+/// **A bound, and it is not about speed.** Each neighbour costs one
+/// `lofty::Probe::open(...).read()` over SMB, and the whole of `store` runs
+/// inside a single `Health::bounded` whose expiry marks the **mount point**
+/// unreachable — not this call. A hundred-track box set would therefore let a
+/// background convenience take the plugin's health down with it: every other
+/// health-gated operation would answer "unknown" until the abandoned thread
+/// came back, which the owner reads as "the share went away" and as "this
+/// track has no cover".
+///
+/// Twenty-four costs almost nothing in exchange, because of what the check is
+/// looking for: a catch-all folder disagrees **early** by construction — its
+/// files are unrelated, so the first handful already differ — while an album
+/// agrees all the way down and gains nothing from being read to the end. The
+/// case the cap can get wrong is a large folder holding one stray track, and
+/// there the price is a cover written into a folder that is an album for all
+/// practical purposes.
+///
+/// Reaching the cap is not silent: `decide` logs that the folder was accepted
+/// on a sample rather than in full.
+const HOMOGENEITY_SAMPLE: usize = 24;
+
 /// The file the echo designates, if the echo is one of ours and is safe.
 ///
 /// Public because the caller needs it *before* calling `store`: `Health::bounded`
@@ -163,15 +186,32 @@ fn decide(
     // A neighbour's silence, on the other hand, is not disagreement. A badly
     // tagged album is still an album, and demanding unanimity of the tagged
     // *and* the mute would write nothing, ever.
+    let mut consulted = 0usize;
+    let mut capped = false;
     for neighbour in &neighbours {
         if neighbour == &played {
             continue;
         }
+        if consulted == HOMOGENEITY_SAMPLE {
+            capped = true;
+            break;
+        }
+        consulted += 1;
         if let Some(other) = album_of(neighbour)
             && !same_album(&album, &other)
         {
             return Outcome::Refused("the folder holds more than one album");
         }
+    }
+    if capped {
+        // Said out loud, because the folder was **not** fully verified. An
+        // accepted write that rests on a sample deserves a line of its own,
+        // rather than reading in the journal exactly like a folder every one
+        // of whose files was asked.
+        tracing::info!(
+            "{}: the homogeneity check was capped at {HOMOGENEITY_SAMPLE} neighbours",
+            dir.display()
+        );
     }
 
     // 6. The bytes decide the extension, never the staged name. A PNG written
@@ -541,6 +581,60 @@ mod tests {
         let reader = albums(&[("01.flac", "Kind of Blue"), ("02.flac", "A Love Supreme")]);
         assert_eq!(
             match store(&table, &identity(&dir.path().join("01.flac")), staged.path(), &reader) {
+                Outcome::Refused(why) => why,
+                other => panic!("expected a refusal: {other:?}"),
+            },
+            "the folder holds more than one album"
+        );
+        assert!(!dir.path().join("cover.jpg").exists());
+    }
+
+    /// Names for a folder of `n` tracks, `01.flac` upwards.
+    fn track_names(n: usize) -> Vec<String> {
+        (1..=n).map(|i| format!("{i:02}.flac")).collect()
+    }
+
+    #[test]
+    fn a_folder_larger_than_the_sample_is_accepted_on_that_sample() {
+        // The cap exists so that a box set cannot take the whole plugin's
+        // health down (see `HOMOGENEITY_SAMPLE`). What it must not do is turn
+        // a long agreeing folder into a refusal: the write still happens, and
+        // `decide` says in the journal that it rested on a sample.
+        let names = track_names(HOMOGENEITY_SAMPLE + 10);
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (dir, table, albums) = local_root_with(&refs, "The Complete Recordings");
+        let staged = staged_jpeg();
+        assert!(matches!(
+            store(&table, &identity(&dir.join("01.flac")), staged.path(), &albums),
+            Outcome::Written(_)
+        ));
+    }
+
+    #[test]
+    fn a_large_catch_all_is_still_refused_despite_the_sample() {
+        // The case the cap must not break. `read_dir` gives no order, so
+        // *which* neighbours the sample falls on is the filesystem's business:
+        // this folder is built so that every one of them disagrees, which is
+        // what a catch-all looks like and what makes the assertion true
+        // whatever order the walk produced.
+        let names = track_names(HOMOGENEITY_SAMPLE + 10);
+        let dir = tempfile::tempdir().unwrap();
+        for name in &names {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+        let pairs: Vec<(&str, &str)> = names
+            .iter()
+            .map(|n| (n.as_str(), if n == "01.flac" { "Kind of Blue" } else { "Something Else" }))
+            .collect();
+        let table = local_table(dir.path());
+        let staged = staged_jpeg();
+        assert_eq!(
+            match store(
+                &table,
+                &identity(&dir.path().join("01.flac")),
+                staged.path(),
+                &albums(&pairs)
+            ) {
                 Outcome::Refused(why) => why,
                 other => panic!("expected a refusal: {other:?}"),
             },

@@ -122,6 +122,11 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   await expect(page.locator('[data-archive-covers]')).toBeVisible()
   await expect(page.locator('[data-archive-covers]')).toBeEnabled()
   await page.locator('[data-archive-covers]').check()
+  // `check()` resolves as soon as the DOM property flips, which races the
+  // send: `frozen = loadFailed || inProgress` disables the control for the
+  // duration of the PUT, so waiting for it to re-enable is an exact gate on
+  // the round trip rather than a sleep guessing at its length.
+  await expect(page.locator('[data-archive-covers]')).toBeEnabled()
   // Read back from the plugin, not merely displayed: it is the only way to
   // prove the flag reached `media-roots.toml`.
   const afterArchive = await (await request.get('/plugins/files/api/data')).json()

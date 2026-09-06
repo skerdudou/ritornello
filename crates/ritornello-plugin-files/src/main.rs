@@ -864,24 +864,59 @@ impl SourcePlugin for FilesSource {
             // to one share, and a sleeping NAS must give up once, not once per
             // neighbour.
             let target = staged.clone();
-            let work =
-                move || archive::store(&table, &identity, &target, &archive::album_from_tags);
-            match health.bounded(&guarded, work).await {
-                Some(archive::Outcome::Written(p)) => {
-                    tracing::info!("cover archived at {}", p.display())
+            // **Read before `bounded`, and that order is the whole point.**
+            // `bounded` answers `None` for two situations that call for
+            // opposite treatments here, and only this reading tells them
+            // apart: a mount *already* known silent means the closure never
+            // ran, while an elapsed bound means it is still running and owns
+            // both the staged file and the duty to report. Read afterwards,
+            // the flag would be true in both cases — the timeout marks the
+            // mount on its way out — and the wrong branch would be taken for
+            // the one case that must not be touched. A mount that falls
+            // silent *between* these two lines leaves one staged file in the
+            // appliance's tmpfs; that is a leak, where the reverse order
+            // risks truncating a cover being written into a music library.
+            let already_silent = health.unreachable(&guarded);
+            // **The outcome is logged from inside the closure**, not from the
+            // result of `bounded`. An elapsed bound hands the `JoinHandle` to
+            // the recovery watcher, which discards what the closure returned:
+            // reporting from out here would leave every slow attempt — the
+            // successes included — with no line at all, which is precisely
+            // the silence this feature is not allowed to produce.
+            let work = move || {
+                match archive::store(&table, &identity, &target, &archive::album_from_tags) {
+                    archive::Outcome::Written(p) => {
+                        tracing::info!("cover archived at {}", p.display())
+                    }
+                    archive::Outcome::Refused(why) => {
+                        tracing::info!("cover not archived: {why}")
+                    }
+                    archive::Outcome::Failed(e) => tracing::warn!("cover not archived: {e}"),
                 }
-                Some(archive::Outcome::Refused(why)) => {
-                    tracing::info!("cover not archived: {why}")
+            };
+            if health.bounded(&guarded, work).await.is_none() {
+                if already_silent {
+                    // Nothing ran, so nothing said anything and nothing reaped
+                    // the staged file. Both are owed here: the file is ours
+                    // from the moment the path arrived, the core never comes
+                    // back for it.
+                    tracing::warn!(
+                        "cover not archived: {} is not answering",
+                        guarded.display()
+                    );
+                    let _ = std::fs::remove_file(&staged);
+                } else {
+                    // The bound elapsed — the share has not said no, it has
+                    // not said anything *yet*. The abandoned thread still
+                    // holds the staged file and will report for itself, so
+                    // this must neither claim an outcome nor unlink under it.
+                    tracing::warn!(
+                        "cover not archived yet: {} did not answer within the bound; \
+                         the attempt continues in the background and will report itself",
+                        guarded.display()
+                    );
                 }
-                Some(archive::Outcome::Failed(e)) => tracing::warn!("cover not archived: {e}"),
-                None => tracing::warn!("cover not archived: the share did not answer in time"),
             }
-            // `store` reaps the staged file on every path it takes, but
-            // `bounded` has two of its own that never run it at all: a mount
-            // already known to be silent, and a timeout. The file is ours from
-            // the moment the path arrived — the core never comes back for it —
-            // so the last word on it belongs here.
-            let _ = std::fs::remove_file(&staged);
         });
     }
 
@@ -936,6 +971,15 @@ impl SourcePlugin for FilesSource {
         // cancel-safe, and the receiver lives in `self` — not in a local
         // variable of this future — so nothing is lost if this round is
         // interrupted: the next one resumes waiting on the same task.
+        //
+        // **And nothing suspends between that answer and the `return` below**,
+        // which is the other half of the same guarantee. The SDK cancels this
+        // future the instant a core request arrives; once `cover_in_flight`
+        // has been cleared, the received cover exists only in this future's
+        // locals, so a single `.await` in the lines that follow would drop it
+        // with nothing left to resume — the cover would never be announced for
+        // that track, and nothing would say so. That is why the offer below is
+        // computed with `try_read` and not `read().await`.
         if let Some(rx) = &mut self.cover_in_flight {
             let result = rx.await;
             // Cleared only after the probe has answered — this is what makes
@@ -954,9 +998,10 @@ impl SourcePlugin for FilesSource {
             //
             // `self.cover_by_dir.lock()` and `self.current_file` are both read
             // here, in their own statement: the `std::sync::MutexGuard` this
-            // produces is not `Send`, and `self.roots.read().await` a few
-            // lines below is a suspension point. Computing `probed` first lets
-            // the guard drop at the end of this statement, before that await.
+            // produces is not `Send`, and this function suspends again further
+            // down (`rx.changed().await`) when there is nothing to announce.
+            // Computing `probed` first lets the guard drop at the end of this
+            // statement, before any of that.
             let probed = match &result {
                 Ok(Some(_)) => FolderState::Image,
                 _ => match (&self.current_file, &*self.cover_by_dir.lock().unwrap()) {
@@ -970,8 +1015,19 @@ impl SourcePlugin for FilesSource {
             if let Ok(Some(cover)) = &result {
                 n = n.cover(cover.clone());
             }
+            // `try_read` and **never** `read().await`: see the cancel-safety
+            // note at the top of this function. The lock is only ever held for
+            // writing while the Admin half saves a table, so the failure is
+            // rare — and losing an offer costs nothing that does not come
+            // back, since the next track probes its folder and offers again,
+            // where losing the cover received two statements above would be
+            // silent and permanent.
             let offer = match &self.current_file {
-                Some(file) => offers_archive(&*self.roots.read().await, file, probed),
+                Some(file) => self
+                    .roots
+                    .try_read()
+                    .map(|table| offers_archive(&table, file, probed))
+                    .unwrap_or(false),
                 None => false,
             };
             if offer {
@@ -2134,5 +2190,43 @@ mod tests {
     #[test]
     fn embedded_en_files_is_not_empty() {
         assert!(!ritornello_i18n::try_parse(FILES_EN).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_mount_already_silent_is_reaped_rather_than_left_for_the_watcher() {
+        // `already_silent` and an elapsed bound both make `bounded` answer
+        // `None`, and only one of the two owns the staged file: on this
+        // branch nothing ran, so nothing will ever come back for it. Built
+        // with `Health::for_test`'s `silent` list rather than an actual
+        // sleeping mount, so this reaches the branch deterministically and
+        // without a three-second wait.
+        let mut s = test_source(playlist_of(1));
+        let dir = tempfile::tempdir().unwrap();
+        let track = dir.path().join("01.flac");
+        s.health = Arc::new(ritornello_plugin_files::health::Health::for_test(
+            std::time::Duration::from_millis(50),
+            String::new(),
+            vec![track.clone()],
+        ));
+        let staged = dir.path().join("staged.jpg");
+        std::fs::write(&staged, b"not a real image").unwrap();
+        let identity = serde_json::json!({"kind": "file", "path": track.to_string_lossy()});
+
+        s.archive_cover(identity, staged.to_string_lossy().into_owned()).await;
+
+        // `archive_cover` detaches its work: poll rather than assume it has
+        // run by the time this line is reached. The already-silent branch
+        // never spawns anything blocking, so this settles almost at once.
+        for _ in 0..50 {
+            if !staged.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !staged.exists(),
+            "a mount already known silent must have its staged file reaped, \
+             since nothing else ever will"
+        );
     }
 }

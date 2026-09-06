@@ -1743,7 +1743,7 @@ mod tests {
         // nothing.
         let mut core = core_without_offer().await;
         core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
-        core.declare_network_cover("https://coverartarchive.org/release/a/front").await;
+        core.declare_network_cover("https://coverartarchive.org/release/h/front").await;
         assert!(core.archive_requests().is_empty());
     }
 
@@ -1801,6 +1801,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn moving_to_a_folder_that_already_has_a_cover_withdraws_the_offer() {
+        // `source_cover_archivable` is not one guard among three: it is the
+        // only mechanism that can withdraw an offer, because
+        // `poll_notification` only ever sends `cover_archivable(true)`, never
+        // `(false)`. Without `set_identity` clearing it on every identity
+        // change, an offer made for one folder would survive a move into the
+        // next one — even one that already has its own cover and never
+        // re-declares the offer at all.
+        let mut core = archiving_core().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.play_file_in_a_folder_with_its_own_cover("/mnt/ritornello/nas/Autre/01.flac").await;
+        core.declare_network_cover("https://coverartarchive.org/release/i/front").await;
+        assert!(core.archive_requests().is_empty(), "the stale offer must not survive the move");
+    }
+
+    #[tokio::test]
     async fn a_hand_over_whose_reply_never_comes_leaves_the_staged_file_alone() {
         // `SourceClient::request` gives up after five seconds, and the SDK
         // awaits `archive_cover` **inline** before writing its reply: a copy
@@ -1827,5 +1843,37 @@ mod tests {
         let (identity, file) = core.archive_requests().pop().unwrap();
         assert_eq!(identity["path"], "/mnt/ritornello/nas/Album/01.flac");
         assert_eq!(std::fs::read(&file).unwrap(), original());
+    }
+
+    #[tokio::test]
+    async fn archiving_and_enlarging_share_the_one_download() {
+        // The design's own claim (`docs/plugins.md`): archiving is *iso* to
+        // an enlargement from the page. Both go through `CoverCache::full_size`
+        // and its rendezvous, so whichever comes first pays for the download
+        // and the other reads the memo `remember_full` wrote back — never a
+        // second trip to the network for the same key.
+        let url = "https://coverartarchive.org/release/g/front";
+        let mut core = archiving_core().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.declare_network_cover(url).await;
+        assert_eq!(core.archive_requests().len(), 1, "the archive itself must have run");
+        assert_eq!(core.app_covers().full_downloads(), 1, "the archive paid for the one download");
+
+        let key = crate::cover::key(&CoverSource::Ref(ritornello_proto::CoverRef::Url {
+            url: url.to_string(),
+        }));
+        let full = ritornello_proto::CoverRef::Url { url: url.to_string() };
+        let cap = core.app_covers().settings().source_max;
+        let enlarged = core.app_covers().full_size(&key, &full, cap).await;
+        assert_eq!(
+            enlarged.map(|(_, bytes)| bytes.to_vec()),
+            Some(original()),
+            "the enlargement must read back the very same original"
+        );
+        assert_eq!(
+            core.app_covers().full_downloads(),
+            1,
+            "one download total: the enlargement found the memo `remember_full` wrote, and did not download again"
+        );
     }
 }
