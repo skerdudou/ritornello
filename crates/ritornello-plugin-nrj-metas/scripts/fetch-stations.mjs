@@ -10,7 +10,23 @@
 // identifier — it is what tells the plugin which host to query.
 //
 // cheriefm.fr answers 403 without a full browser User-Agent. Measured: it is
-// the header, not the request rate.
+// the header, not the request rate — with `curl`.
+//
+// That qualifier matters: measured the same minute, on the same machine,
+// Node's own HTTP stack (`fetch`, and raw `https.request` underneath it)
+// gets a 403 from cheriefm.fr REGARDLESS of headers, while the other three
+// hosts answer it 200 without complaint. `curl` with the same full browser
+// User-Agent gets 200 from all four, cheriefm included. So there are two
+// independent facts, not one: cheriefm additionally wants a real
+// User-Agent (true for both clients), AND it separately refuses Node's HTTP
+// stack outright (true regardless of headers) — most likely a TLS/HTTP
+// client fingerprint its Cloudflare front end blocks, since PowerShell's
+// .NET-based client is refused the same way. This is why this script shells
+// out to `curl` instead of using `fetch`: it is not a style choice, it is
+// the only one of the two clients tried that this endpoint accepts at all.
+// A future "modernization" back to `fetch` would silently drop a quarter of
+// the table (cheriefm) with no error, since the other three brands would
+// keep working.
 //
 // Why this table is embedded rather than fetched at boot: a device that starts
 // unattended must not depend on a third party's page to recognize its
@@ -19,7 +35,13 @@
 // Usage: node scripts/fetch-stations.mjs
 //        node scripts/fetch-stations.mjs --verifier   (writes nothing, exits
 //        nonzero if the bundled table differs from the sources)
+//
+// Requires `curl` on PATH. Development-machine-only script (never runs on
+// the appliance), and curl ships with Windows 10+ and every mainstream Linux
+// distribution, so this dependency is acceptable here where it would not be
+// in the plugin itself.
 
+import { execFileSync } from 'node:child_process'
 import { writeFileSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -38,12 +60,26 @@ const UA =
 const URL_FIELDS = ['url_128k_mp3', 'url_64k_aac', 'url_hd_aac']
 const TOKEN = /^[a-z0-9]{12}$/
 
-async function fetchBrand({ brand, host }) {
-  const res = await fetch(`https://${host}/onair.json`, {
-    headers: { 'User-Agent': UA, 'Accept-Language': 'fr-FR,fr;q=0.9' },
-  })
-  if (!res.ok) throw new Error(`${host}: HTTP ${res.status}`)
-  const list = await res.json()
+/**
+ * GETs `url` through `curl`, full browser headers included, and returns its
+ * body and status code. `-w` appends the status code after the body on its
+ * own line, which is how a plain `-o -` invocation lets us see it without a
+ * second request.
+ */
+function curlGet(url) {
+  const out = execFileSync(
+    'curl',
+    ['-s', '-A', UA, '-H', 'Accept-Language: fr-FR,fr;q=0.9', '-w', '\n%{http_code}', url],
+    { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
+  )
+  const i = out.lastIndexOf('\n')
+  return { body: out.slice(0, i), status: Number(out.slice(i + 1)) }
+}
+
+function fetchBrand({ brand, host }) {
+  const { body, status } = curlGet(`https://${host}/onair.json`)
+  if (status !== 200) throw new Error(`${host}: HTTP ${status}`)
+  const list = JSON.parse(body)
   if (!Array.isArray(list) || list.length === 0) throw new Error(`${host}: empty list`)
   return list.map((s) => {
     const tokens = []
