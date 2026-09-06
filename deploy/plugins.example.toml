@@ -60,7 +60,16 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-ouifm-metas"
 name = "radiofrance-metas"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radiofrance-metas"
 
-# `musicbrainz` comes AFTER the two station-specific plugins above, and that
+# `nrj-metas` likewise needs no configuration: the table of the NRJ group's
+# 365 webradios (NRJ, Nostalgie, Chérie FM, Rire & Chansons) is embedded in its
+# binary. Optional file: /etc/ritornello/nrj-metas.toml (see
+# nrj-metas.example.toml). The three station tables never overlap, so their
+# relative order does not matter here.
+[[plugin]]
+name = "nrj-metas"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-nrj-metas"
+
+# `musicbrainz` comes AFTER the three station-specific plugins above, and that
 # position is a requirement rather than an accident. `metadata` plugins are
 # arbitrated by declaration order, and the winner's block is taken WHOLE — the
 # core never merges field by field. So a `musicbrainz` declared before
@@ -70,7 +79,7 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radiofrance-metas"
 # It matters more since this plugin learned to split a radio's single metadata
 # string into artist and title: on that path it overwrites (it has validated its
 # guess against MusicBrainz), where its cover-only path merely fills in. Keep it
-# last of the three.
+# last of the four.
 [[plugin]]
 name = "musicbrainz"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-musicbrainz"
