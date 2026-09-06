@@ -359,13 +359,23 @@ fn net_delay(ends_at: Option<f64>) -> Duration {
 
 /// Follows a station until the task is aborted.
 ///
-/// Returns only when the plugin drops its sender (`tx`) or the channel it
-/// reads pokes from is itself dropped — the ordinary way this task ends is
-/// the caller aborting it (`abort`) when the station changes, not this
-/// function returning on its own. Each reading is tagged with the `(brand,
-/// id)` pair (see `main`'s `same_station`): a reading already queued at the
-/// moment of the stop must be discardable, and discardable unambiguously —
-/// `id` alone is not unique across an operator's override file.
+/// The ordinary way this task ends is the caller aborting it (`abort`) when
+/// the station changes, not this function returning on its own. It does
+/// return on exactly three conditions, and naming all three matters because
+/// the third is the one somebody debugging a permanently silent station would
+/// be hunting for:
+///
+/// * the plugin drops the **receiver** this task sends readings to, so
+///   `tx.send` fails — `tx` is this task's own sender, the plugin holds the
+///   other end;
+/// * the plugin drops the poke **sender**, so `poke.recv()` yields `None`;
+/// * the HTTP client cannot be built at all, at startup — nothing is retried
+///   after that, and the station stays silent until it changes.
+///
+/// Each reading is tagged with the `(brand, id)` pair (see `main`'s
+/// `same_station`): a reading already queued at the moment of the stop must be
+/// discardable, and discardable unambiguously — `id` alone is not unique
+/// across an operator's override file.
 ///
 /// **Only changes are emitted.** The first reading always goes out: this task
 /// is born with the station, so its "last seen" is empty, and the display
@@ -383,12 +393,15 @@ fn net_delay(ends_at: Option<f64>) -> Duration {
 /// whose cart code never moves, the net is the *only* thing that would ever
 /// wake it up again, so a poke could not rescue it either.
 ///
-/// **A poke cannot shrink that backoff below `DEBOUNCE`.** The debounce loop
-/// below restarts on every poke with `wait = DEBOUNCE`, discarding whatever
-/// longer wait a prior failure had set — see the hard floor right after it,
-/// which is precisely what stops a station whose cart code changes faster
-/// than the backoff from sustaining a steady query rate against a host that
-/// is failing every time.
+/// **A poke cannot shorten the spacing below the current backoff.** Not
+/// below `DEBOUNCE` — below the *backoff*, which is the stronger guarantee
+/// and the one that matters. The debounce loop below does restart on every
+/// poke with `wait = DEBOUNCE`, discarding whatever longer wait a prior
+/// failure had set; the hard floor right after it then holds
+/// `max(DEBOUNCE, backoff)`, measured from the last query actually sent. That
+/// is what stops a station whose cart code changes faster than the backoff
+/// from sustaining a steady query rate against a host that is failing every
+/// time.
 pub async fn follows(
     brand: String,
     id: u32,
