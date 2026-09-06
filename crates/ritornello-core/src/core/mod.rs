@@ -539,7 +539,14 @@ impl<P: Player> Core<P> {
             presets,
             cover,
             cover_thumb,
-            cover_archivable,
+            // Not yet used here: reading its value into the wake-the-core
+            // decision (`carries_a_fact` below) and applying it are one
+            // decision, assigned to a later task together with the state
+            // field it will feed and the tests that cover it. Bound with a
+            // leading underscore so this destructuring stays purely
+            // mechanical — forced by the field existing on `SourceUpdate` —
+            // rather than smuggling in a behavioural change.
+            cover_archivable: _cover_archivable,
         } = update;
         // Read **before** the guard below, and this is intentional: the
         // sources_catalog describes every source, not the one that is
@@ -627,13 +634,6 @@ impl<P: Player> Core<P> {
         // though a lone thumbnail is applied to nothing (see
         // `apply_source_cover`): the guard's job is to let the frame *reach*
         // the decision, not to make it.
-        // `cover_archivable` joins this disjunction for exactly the reason
-        // `cover_thumb` does, word for word: nothing at the bottom of this
-        // function consumes it yet (no core state exists for it, a later
-        // task's job), so leaving it out would cost nothing *today* — but a
-        // Source frame carrying only this offer would still be dropped in
-        // silence, which is precisely the defect this predicate exists to
-        // avoid the day something does read it.
         let carries_a_fact = carries_presets
             || preset_count.is_some()
             || can_eject.is_some()
@@ -641,8 +641,7 @@ impl<P: Player> Core<P> {
             || preset.is_some()
             || preset_name.is_some()
             || cover.is_some()
-            || cover_thumb.is_some()
-            || cover_archivable.is_some();
+            || cover_thumb.is_some();
         if carries_a_fact && !recomposes_the_view {
             // A **single** call, and that is the point: the "absent =
             // keep" fields that must be applied after identity all live in
