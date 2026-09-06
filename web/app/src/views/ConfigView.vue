@@ -496,7 +496,7 @@ function goTo(id: string) {
         <Card>
           <CardHeader><CardTitle>{{ t('plugins_title') }}</CardTitle></CardHeader>
           <CardContent>
-            <table class="w-full text-sm">
+            <table class="w-full text-sm" data-plugins-table>
               <thead class="text-muted-foreground">
                 <tr>
                   <th class="text-left font-normal">{{ t('col_plugin') }}</th>
@@ -511,11 +511,11 @@ function goTo(id: string) {
                 <tr v-for="p in plugins" :key="p.name" data-plugin-row class="border-t border-border">
                   <td class="py-1" data-plugin-name>{{ p.name }}</td>
                   <td data-plugin-kind>{{ p.kinds }}</td>
-                  <td>{{ p.version ?? '—' }}</td>
+                  <td data-plugin-version>{{ p.version ?? '—' }}</td>
                   <td data-plugin-state>
                     <Badge
                       :variant="
-                        p.incompatible
+                        p.incompatible !== undefined
                           ? 'destructive'
                           : p.disabled
                             ? 'outline'
@@ -539,9 +539,17 @@ function goTo(id: string) {
                            **before** "stalled": both say the plugin has not
                            spoken yet, and only the elapsed time tells them
                            apart. Showing "stalled" during a normal startup
-                           wrongly accused a perfectly healthy binary. -->
+                           wrongly accused a perfectly healthy binary.
+
+                           `!== undefined` and not a truthiness test, in both
+                           chains: `"protocol":0` deserializes perfectly well
+                           and the serde default only applies when the key is
+                           *absent*, so a refusal at protocol 0 would read as
+                           "no refusal" and be shown as merely unavailable.
+                           The accumulator already takes that care with `??`;
+                           testing `p.incompatible` here would undo it. -->
                       {{
-                        p.incompatible
+                        p.incompatible !== undefined
                           ? t('plugin_incompatible', { found: p.incompatible, expected: protocol })
                           : p.disabled
                             ? t('disabled')

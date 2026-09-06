@@ -361,11 +361,33 @@ describe('ConfigView — plugin table', () => {
       protocol: 1,
     })
     const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'radio')!
-    expect(row.get('[data-plugin-state]').text()).toContain('2')
-    expect(row.get('[data-plugin-state]').text()).toContain('1')
+    // The **whole** sentence, not `toContain('2')` and `toContain('1')` side by
+    // side: those two pass just as well with `found` and `expected` swapped in
+    // the `t()` call, and swapping them tells the operator to install exactly
+    // the binary they already have. The full string is the only assertion that
+    // fixes which number goes where.
+    expect(row.get('[data-plugin-state]').text().replace(/\s+/g, ' ')).toBe(
+      'Compilé pour le protocole 2 ; ce cœur parle le 1',
+    )
     // The raw key must never reach the screen: that is what a missing catalog
     // entry looks like, and this repo has a test class dedicated to catching it.
     expect(row.text()).not.toContain('plugin_incompatible')
+  })
+
+  it('treats a refusal at protocol 0 as a refusal, not as "no refusal"', async () => {
+    // `"incompatible":0` deserializes perfectly well — serde's default only
+    // applies when the key is *absent* — so the badge must test `!== undefined`
+    // and never truthiness. A truthy test shows the plugin as merely
+    // "unavailable" and loses the one piece of information that explains it.
+    const w = await mountWithStatus({
+      plugins: [{ name: 'radio', kind: 'unknown', connected: false, admin: false, incompatible: 0 }],
+      active_source: '',
+      protocol: 1,
+    })
+    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'radio')!
+    expect(row.get('[data-plugin-state]').text().replace(/\s+/g, ' ')).toBe(
+      'Compilé pour le protocole 0 ; ce cœur parle le 1',
+    )
   })
 
   it('shows the version each plugin announced', async () => {

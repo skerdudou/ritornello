@@ -26,6 +26,24 @@ test('navigation between the home page, the config and the plugin pages', async 
   // caught.
   await expect(page.getByRole('cell', { name: 'radio', exact: true })).toBeVisible()
 
+  // The plugins table's columns, against a real core. Nothing here counted
+  // them before, so the Version column could have been added — or dropped
+  // again — without a single test noticing, while the design assumed this
+  // journey was the barrier that kept them in sync. Six headers, exact: that
+  // is what makes it a lock rather than a lower bound.
+  const pluginsTable = page.locator('[data-plugins-table]')
+  await expect(pluginsTable.locator('thead th')).toHaveCount(6)
+  // And the cell under it carries a real version. Asserted as "not the em
+  // dash placeholder" rather than as a fixed string: the SDK derives the
+  // number from the plugin crate's own `CARGO_PKG_VERSION`, so a version is
+  // certainly there, but pinning it here would mean editing this file at
+  // every bump — a test that fails for being right.
+  const radioVersion = pluginsTable
+    .locator('[data-plugin-row]', { has: page.getByText('radio', { exact: true }) })
+    .locator('[data-plugin-version]')
+  await expect(radioVersion).toBeVisible()
+  await expect(radioVersion).not.toHaveText('—')
+
   // A save announces its outcome with a notification. Reported in use: the
   // vue-sonner stylesheet was imported nowhere, so the message rendered
   // **in the document flow** -- a bare text at the bottom of the page, which
