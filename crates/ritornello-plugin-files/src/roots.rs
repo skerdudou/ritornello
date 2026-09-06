@@ -586,30 +586,8 @@ path = "/media/usb"
         // nothing.
         let table = Roots {
             root: vec![
-                Root {
-                    name: "usb".into(),
-                    kind: RootKind::Local,
-                    path: Some("/media/usb".into()),
-                    host: String::new(),
-                    share: String::new(),
-                    subpath: None,
-                    user: String::new(),
-                    domain: String::new(),
-                    writable: false,
-                    archive_covers: false,
-                },
-                Root {
-                    name: "albums".into(),
-                    kind: RootKind::Local,
-                    path: Some("/media/usb/Albums".into()),
-                    host: String::new(),
-                    share: String::new(),
-                    subpath: None,
-                    user: String::new(),
-                    domain: String::new(),
-                    writable: false,
-                    archive_covers: false,
-                },
+                local_root(),
+                Root { name: "albums".into(), path: Some("/media/usb/Albums".into()), ..local_root() },
             ],
         };
         let inside = std::path::Path::new("/media/usb/Albums/Kind of Blue/01.flac");
