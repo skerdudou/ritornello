@@ -96,6 +96,11 @@ pub struct SourceUpdate {
     /// precisely what kept `cover` from being dropped in silence a second
     /// time.
     pub cover_thumb: Option<CoverRef>,
+    /// See `SourceMessage::cover_archivable`. Entering `SourceUpdate` is what
+    /// puts it inside the "interesting frame" predicate, which is derived from
+    /// `PartialEq` against an inert frame rather than enumerated: nothing to
+    /// edit in the comparison itself.
+    pub cover_archivable: Option<bool>,
 }
 
 pub struct SourceClient {
@@ -175,6 +180,7 @@ impl SourceClient {
                     presets: msg.presets,
                     cover: msg.cover,
                     cover_thumb: msg.cover_thumb,
+                    cover_archivable: msg.cover_archivable,
                 };
                 // And here is the "the answer is forced too" half. The
                 // predicate deciding whether this frame is worth relaying is
@@ -1087,6 +1093,37 @@ mod tests {
             update.cover_thumb,
             Some(CoverRef::Url { url: "https://example.org/front-500.jpg".into() })
         );
+    }
+
+    #[tokio::test]
+    async fn a_frame_carrying_only_the_archive_offer_is_relayed() {
+        // The offer alone is a fact, like the count or the cover: it must wake
+        // the core even without an identity or a status on the same frame.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                cover_archivable: Some(true),
+                ..Default::default()
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "files".into(), update_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        let (name, update) = update_rx.recv().await.unwrap();
+        assert_eq!(name, "files");
+        assert_eq!(update.cover_archivable, Some(true));
     }
 
     #[tokio::test]

@@ -139,6 +139,8 @@ pub struct Notification {
     /// See `SourceMessage::cover_thumb`. Set through
     /// [`Notification::cover_with_thumb`], which takes both halves at once.
     pub cover_thumb: Option<ritornello_proto::CoverRef>,
+    /// See `SourceMessage::cover_archivable`.
+    pub cover_archivable: Option<bool>,
 }
 
 impl Notification {
@@ -215,6 +217,14 @@ impl Notification {
     ) -> Self {
         self.cover = Some(full);
         self.cover_thumb = Some(thumb);
+        self
+    }
+
+    /// Declares that this Source would keep the full-size original of a
+    /// network cover for what it is playing. See
+    /// `SourceMessage::cover_archivable`.
+    pub fn cover_archivable(mut self, yes: bool) -> Self {
+        self.cover_archivable = Some(yes);
         self
     }
 }
@@ -321,6 +331,16 @@ pub trait SourcePlugin: Send + 'static {
     /// `SourceOutcome`: nothing about what is playing changes just because a
     /// mode was armed or disarmed, unlike every other request above.
     async fn set_play_mode(&mut self, _random: bool, _repeat_all: bool) {}
+
+    /// The core obtained the full-size original of the retained cover and left
+    /// it at `file`. See `SourceReq::ArchiveCover` for why `identity`
+    /// designates a folder rather than gating a comparison.
+    ///
+    /// **Return at once.** The reply unties the core's correlation, which
+    /// gives up after five seconds; a copy onto a share belongs in a detached
+    /// task. Default: the file is ignored, and the core's temp file is left for
+    /// the system to reap.
+    async fn archive_cover(&mut self, _identity: serde_json::Value, _file: String) {}
 
     /// The player moved on its own to the track at index `n`.
     ///
@@ -442,6 +462,10 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                         plugin.set_play_mode(random, repeat_all).await;
                         SourceOutcome::new(SourceAction::Noop)
                     }
+                    SourceReq::ArchiveCover { identity, file } => {
+                        plugin.archive_cover(identity, file).await;
+                        SourceOutcome::new(SourceAction::Noop)
+                    }
                 };
                 let msg = SourceMessage {
                     id: Some(req.id),
@@ -470,6 +494,9 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     // same route — the pair is never split.
                     cover: None,
                     cover_thumb: None,
+                    // Same reasoning as `cover` just above: a reply never
+                    // declares this, only the spontaneous notification does.
+                    cover_archivable: None,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -493,6 +520,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             presets: n.presets,
                             cover: n.cover,
                             cover_thumb: n.cover_thumb,
+                            cover_archivable: n.cover_archivable,
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }
@@ -1708,6 +1736,54 @@ mod tests {
         assert_eq!(msg.id, Some(1), "the oneshot must be released, exactly like SetLocale");
         assert_eq!(msg.action, Some(SourceAction::Noop));
         assert_eq!(*seen.lock().unwrap(), Some((true, false)));
+    }
+
+    #[tokio::test]
+    async fn archive_cover_is_dispatched_and_answers_noop_at_once() {
+        // The reply must be immediate: `SourceClient::request` gives up after
+        // five seconds, and a copy onto a sleeping NAS takes longer than that.
+        // The plugin acknowledges, then works in its own detached task.
+        struct RecordingArchive {
+            seen: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for RecordingArchive {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn archive_cover(&mut self, _identity: serde_json::Value, file: String) {
+                *self.seen.lock().unwrap() = Some(file);
+            }
+        }
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        let server_seen = seen.clone();
+        tokio::spawn(async move {
+            run_source_plugin(RecordingArchive { seen: server_seen }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write
+            .write_all(
+                b"{\"id\":1,\"req\":\"ArchiveCover\",\"arg\":{\"identity\":{\"kind\":\"file\",\"path\":\"/m/a/01.flac\"},\"file\":\"/tmp/c.jpg\"}}\n",
+            )
+            .await
+            .unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, Some(1), "the oneshot must be released immediately");
+        assert_eq!(msg.action, Some(SourceAction::Noop));
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("/tmp/c.jpg"));
     }
 
     /// Source whose notification stream dries up: first call `None`, then
