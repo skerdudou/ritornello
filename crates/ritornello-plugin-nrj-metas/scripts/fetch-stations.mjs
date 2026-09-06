@@ -61,6 +61,20 @@ const URL_FIELDS = ['url_128k_mp3', 'url_64k_aac', 'url_hd_aac']
 const TOKEN = /^[a-z0-9]{12}$/
 
 /**
+ * Line endings, neutralized for comparison.
+ *
+ * The checkout is a Windows one (the project is developed under Windows +
+ * WSL), so git hands `stations.toml` back with CRLF while this script
+ * composes with LF. Comparing them raw made `--verifier` report a drift on
+ * every run after a checkout or a rebase — a false alarm on the one check
+ * meant to catch a real one.
+ */
+const sameLineEndings = (t) => t.replace(/\r\n/g, '\n')
+
+/** Rewrites `rendered` with the line endings the file on disk already uses. */
+const asOnDisk = (rendered, current) => (current.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered)
+
+/**
  * GETs `url` through `curl`, full browser headers included, and returns its
  * body and status code. `-w` appends the status code after the body on its
  * own line, which is how a plain `-o -` invocation lets us see it without a
@@ -148,17 +162,23 @@ for (const s of stations) {
 }
 
 const text = render(stations)
+const current = readFileSync(out, 'utf8')
+
 if (process.argv.includes('--verifier')) {
-  const current = readFileSync(out, 'utf8')
   // The header carries the generation date, which changes on every run: the
-  // comparison is on the entries alone.
-  const entries = (s) => s.slice(s.indexOf('[[station]]'))
+  // comparison is on the entries alone. Line endings are normalized first, or
+  // a fresh Windows checkout (CRLF on disk vs. this script's LF) would report
+  // a drift that is not there.
+  const entries = (s) => {
+    const n = sameLineEndings(s)
+    return n.slice(n.indexOf('[[station]]'))
+  }
   if (entries(current) !== entries(text)) {
     console.error('stations.toml differs from the sources')
     process.exit(1)
   }
   console.log(`stations.toml matches the sources (${stations.length} stations)`)
 } else {
-  writeFileSync(out, text)
+  writeFileSync(out, asOnDisk(text, current))
   console.log(`${out}: ${stations.length} stations`)
 }
