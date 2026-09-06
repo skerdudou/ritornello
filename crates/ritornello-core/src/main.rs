@@ -558,6 +558,26 @@ async fn hotplug<P: player::Player>(
         gathered.dead.retain(|n| n != &name);
         gathered.incompatible.insert(name.clone(), announcement.protocol);
         core.set_metadata_order(register::metadata_order(&children.manifest_order, gathered));
+        // **Unwired if it was a Source**, exactly like `hot_unplug`. Neither
+        // ordinary cleanup path can compensate for its absence here: the call
+        // site bumps `wirings[name]` *before* calling us, so the closing of
+        // the killed process's sockets reaches `unreachable_rx` with a stale
+        // wiring number and takes the `debug!` branch; and the kill sets
+        // `requested = true` in `supervise`, so `plugin_waits` routes to the
+        // "stopped: disabled from the admin UI" branch, which forgets
+        // nothing. Without this line the core would keep the source client of
+        // an incarnation it just killed: still listed in the sources catalog,
+        // still offered by the remote, and every command sent into a dead
+        // socket.
+        //
+        // `forget_dead_source` and not `remove_source`, the same distinction
+        // `hot_unplug`'s doc draws: nobody requested this shutdown, so nothing
+        // should switch sources. The music keeps its name and it is the
+        // conjunction "active source X, X refused" that carries the honest
+        // diagnosis.
+        if !core.forget_dead_source(&name) {
+            tracing::debug!("refused plugin {name} was not a wired source, nothing to unwire");
+        }
         // The screen, too, must stop describing the previous incarnation. The
         // startup assembly builds these lines once; a refusal arriving hot has
         // to correct them itself, or the page keeps showing "connected" for a
@@ -569,7 +589,16 @@ async fn hotplug<P: player::Player>(
             vec![PluginStatus::incompatible_line(&name, announcement.protocol)],
             false,
         );
+        // Under the same lock as the line above, like `hot_unplug`: the
+        // refusal and the name of the active source describe one instant.
+        statuses.active_source = core.active_source().to_string();
         drop(statuses);
+        // After the status lock, not before: `forget_page` takes two other
+        // locks, and nesting them would make safety depend on an order never
+        // to reverse elsewhere. Without it, `/api/admin/<name>` and
+        // `/plugins/<name>/` would burn the request's whole timeout budget
+        // against a dead backend instead of answering 404 right away.
+        admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, &name).await;
         // Nothing is persisted: this is a refusal to run, not the `disabled`
         // switch. `enabled = false` written here would keep the plugin off
         // even after a matching binary was installed, and the fix would look
@@ -1013,6 +1042,13 @@ async fn hot_unplug<P: player::Player>(
     gathered.announcements.remove(name);
     gathered.stalled.retain(|n| n != name);
     gathered.dead.retain(|n| n != name);
+    // The fourth collection, cleared for the same reason as the other three:
+    // a name belongs to only one of them. A plugin switched off from the UI
+    // is `disabled`, not `refused for its protocol`, and leaving a stale
+    // `incompatible` entry would make the call site in `main`'s `select!`
+    // read the next announcement of this name as "just refused" and kill the
+    // very process a turn-on had relaunched.
+    gathered.incompatible.remove(name);
     core.set_metadata_order(register::metadata_order(&children.manifest_order, gathered));
     // Removed, otherwise `/plugins/<name>/` would wait out the request's
     // timeout budget before ending in error, where a plain 404 says right
@@ -1930,10 +1966,20 @@ async fn main() -> Result<()> {
                 // would still read as refused here and be killed on sight.
                 if gathered.incompatible.contains_key(&refused_name) {
                     match liveness(&refused_name, &kill_triggers, &non_supervised) {
-                        Liveness::OutOfReach => tracing::warn!(
+                        // `Off` gets the **same** warning as `OutOfReach`, and
+                        // the arms are written out rather than left to a `_`.
+                        // A name only enters `non_supervised` on `hotplug`'s
+                        // *accepted* path, so a plugin launched by hand and
+                        // refused on its very first hot announcement is `Off`:
+                        // the catch-all silently did nothing at all — no kill,
+                        // no line — for exactly the case docs/plugins.md
+                        // promises the log covers. From the operator's
+                        // standpoint a process the core never launched is
+                        // identically out of reach, and the remedy is the same.
+                        Liveness::OutOfReach | Liveness::Off => tracing::warn!(
                             "{refused_name} speaks another protocol but the core does not own its process, so it cannot be stopped — kill it yourself"
                         ),
-                        _ => {
+                        Liveness::Supervised => {
                             if let Some(tx) = kill_triggers.remove(&refused_name) {
                                 let _ = tx.send(());
                             }
@@ -2466,6 +2512,21 @@ mod toggle_tests {
         }
     }
 
+    /// A source client that answers nothing useful. No test here sends it a
+    /// request: what they ask is whether the **core still holds it**, which is
+    /// exactly the question a hot refusal must answer with "no".
+    struct SilentSource;
+
+    #[async_trait::async_trait]
+    impl crate::core::Source for SilentSource {
+        async fn request(
+            &self,
+            _req: ritornello_proto::SourceReq,
+        ) -> anyhow::Result<ritornello_proto::SourceAction> {
+            Ok(ritornello_proto::SourceAction::Noop)
+        }
+    }
+
     struct Bench {
         children: HotPlugChildren,
         core: core::Core<MutePlayer>,
@@ -2838,6 +2899,97 @@ mod toggle_tests {
         assert!(!lines[0].connected, "a refused plugin must not read as connected");
     }
 
+    /// The half of a hot refusal that **no other path can supply**.
+    ///
+    /// The call site bumps this plugin's wiring number *before* calling
+    /// `hotplug`, so the closing of the killed process's sockets reaches
+    /// `unreachable_rx` carrying a stale number and takes the `debug!` branch;
+    /// and the kill it then performs sets `requested` in `supervise`, so
+    /// `plugin_waits` routes the exit to the "disabled from the admin UI"
+    /// branch, which forgets nothing either. Both ordinary cleanups are
+    /// therefore ruled out by construction: if the refusal branch does not
+    /// unwire, nothing ever will, and the core goes on offering — to the
+    /// sources catalog and to the remote — a source whose socket it has just
+    /// killed.
+    #[tokio::test]
+    async fn a_hot_refusal_unwires_the_source_the_previous_incarnation_served() {
+        let mut b = bench();
+        b.core.add_source("mpd".to_string(), Arc::new(SilentSource));
+        assert_eq!(
+            b.core.sources_catalog().sources.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["mpd"],
+            "bench precondition: the source is wired and offered"
+        );
+        assert_eq!(b.core.active_source(), "mpd", "bench precondition: and it is the active one");
+
+        let foreign = ritornello_proto::PROTOCOL_VERSION + 1;
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Source],
+            admin: true,
+            covers: false,
+            ui_version: None,
+            protocol: foreign,
+            version: Some("0.2.0".into()),
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
+            .await;
+
+        assert!(
+            b.core.sources_catalog().sources.is_empty(),
+            "the refused plugin must stop being offered as a source: selecting it would send commands into a dead socket"
+        );
+        // `forget_dead_source` and not `remove_source`: nobody asked for this
+        // shutdown, so nothing switches. The name stays, and it is the
+        // conjunction "active source mpd, mpd refused" that names the fault.
+        assert_eq!(
+            b.core.active_source(),
+            "mpd",
+            "a refusal is not a request to change source: the honest diagnosis is the conjunction"
+        );
+        let statuses = b.children.status_state.read().await;
+        assert_eq!(
+            statuses.active_source, "mpd",
+            "and the page must carry that same instant, rewritten under the refusal's own lock"
+        );
+    }
+
+    /// The admin half of the same gap. A cached asset stands in for the whole
+    /// page — backend, assets and catalogs are forgotten by one call — because
+    /// it needs no stub: `forget_page` either ran or it did not.
+    ///
+    /// What its absence costs is not cosmetic: `/plugins/<name>/` would keep
+    /// serving the dead incarnation's bundle, and `/api/admin/<name>` would
+    /// burn the request's whole timeout budget against a socket nobody is
+    /// listening on, where a plain 404 answers at once.
+    #[tokio::test]
+    async fn a_hot_refusal_forgets_the_previous_incarnation_admin_page() {
+        let mut b = bench();
+        b.children.admin_assets.write().await.insert(
+            ("mpd".to_string(), "ui.js".to_string()),
+            ("text/javascript".to_string(), "stale".to_string(), "etag".to_string()),
+        );
+
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: true,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION + 1,
+            version: Some("0.2.0".into()),
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
+            .await;
+
+        assert!(
+            b.children.admin_assets.read().await.is_empty(),
+            "the refused incarnation's page must be forgotten, exactly as `hot_unplug` forgets it"
+        );
+    }
+
     #[tokio::test]
     async fn the_status_page_says_why_a_plugin_was_refused() {
         // From the announcement to the JSON the page reads: proving the
@@ -2874,7 +3026,7 @@ mod toggle_tests {
         let g = register::Gathered {
             stalled: vec!["unwired".to_string()],
             dead: vec!["gone".to_string()],
-            incompatible: HashMap::from([("foreign".to_string(), 7u32)]),
+            incompatible: std::collections::BTreeMap::from([("foreign".to_string(), 7u32)]),
             ..Default::default()
         };
 
@@ -2955,7 +3107,7 @@ mod toggle_tests {
         // rely on: the entry leaves `kill_triggers`, and its receiver
         // actually gets the kill signal, rather than merely being dropped.
         let g = register::Gathered {
-            incompatible: HashMap::from([("radio".to_string(), 99u32)]),
+            incompatible: std::collections::BTreeMap::from([("radio".to_string(), 99u32)]),
             ..Default::default()
         };
         let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
@@ -2976,7 +3128,7 @@ mod toggle_tests {
     #[test]
     fn kill_incompatible_plugins_leaves_every_other_entry_untouched() {
         let g = register::Gathered {
-            incompatible: HashMap::from([("radio".to_string(), 99u32)]),
+            incompatible: std::collections::BTreeMap::from([("radio".to_string(), 99u32)]),
             ..Default::default()
         };
         let (radio_tx, _radio_rx) = tokio::sync::oneshot::channel::<()>();
@@ -2997,7 +3149,7 @@ mod toggle_tests {
         // comment: a send error (here, no sender to find) means the process
         // is already gone, nothing to catch up on.
         let g = register::Gathered {
-            incompatible: HashMap::from([("radio".to_string(), 99u32)]),
+            incompatible: std::collections::BTreeMap::from([("radio".to_string(), 99u32)]),
             ..Default::default()
         };
         let mut kill_triggers: HashMap<String, tokio::sync::oneshot::Sender<()>> = HashMap::new();

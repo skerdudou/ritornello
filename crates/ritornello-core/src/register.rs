@@ -40,7 +40,15 @@ pub struct Gathered {
     /// A fourth state next to `stalled` and `dead`, and not a variant of
     /// either: this plugin is neither silent nor gone — it spoke, correctly,
     /// and what it said was that it cannot be understood.
-    pub incompatible: std::collections::HashMap<String, u32>,
+    ///
+    /// A `BTreeMap` and not a `HashMap`, for the same reason `stalled` and
+    /// `dead` are `Vec`s kept in declared order: `unwired_plugin_lines`
+    /// iterates this collection to build the refused rows, and the
+    /// configuration page renders them in that order. A `HashMap` shuffles
+    /// them at every restart, so the operator's page would reorder itself for
+    /// no reason. Alphabetical is not the manifest's order, but it is *an*
+    /// order, and a stable one.
+    pub incompatible: std::collections::BTreeMap<String, u32>,
 }
 
 /// Time given to a connection to write its announcement line.
@@ -124,7 +132,7 @@ where
     // report, exactly the diagnosis this gathering exists to name.
     let mut remaining: Vec<String> = expected.to_vec();
     let mut announcements: HashMap<String, Announcement> = HashMap::new();
-    let mut incompatible: HashMap<String, u32> = HashMap::new();
+    let mut incompatible: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
     // The **observed** deaths. This is what separates a living silent plugin
     // from a dead one: without this trace, the deadline could only deduce, and
     // a merely slow plugin would be reported as a lost one.
