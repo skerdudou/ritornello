@@ -78,16 +78,14 @@ export interface Provenance {
  * silence.
  */
 export interface CachePayload {
+  thumbnails: number
+  thumbnails_bytes: number
+  full_sizes: number
+  full_sizes_bytes: number
+  renditions_built: number
+  /** Always `thumbnails_bytes + full_sizes_bytes` — see `CacheSnapshot`. */
   used_bytes: number
   budget_bytes: number
-  entries: number
-  entries_free: number
-  renditions: number
-  renditions_bytes: number
-  pairs: number
-  pairs_bytes: number
-  pairs_full_fetched: number
-  max_entries: number
 }
 
 export interface SettingsPayload {

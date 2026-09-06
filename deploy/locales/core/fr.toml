@@ -81,27 +81,37 @@ cover_passthrough_max_label = "Ne pas réencoder en dessous de (Kio)"
 cover_passthrough_max_help = "Une pochette déjà plus légère que ça, et pas plus large que le côté ci-dessous, part exactement telle quelle : la réencoder ne l'allégerait pas. C'est aussi la règle qui fait accepter sans y toucher une vignette fournie par un greffon."
 cover_max_pixels_label = "Plafond de décodage (Mpx)"
 cover_max_pixels_help = "Lu dans l'en-tête avant toute allocation : l x h x 4 octets de tampon, donc 16 Mpx font 64 Mio. Un PNG de 200 Kio peut annoncer 30000 x 30000 pixels."
-# Ce que le cache contient vraiment, derrière le « (?) » à côté de l'estimation
-# ci-dessus — le relevé réel, lu une fois à l'ouverture du panneau, à
-# confronter à la prédiction de l'estimation.
-cover_cache_open = "Voir ce que contient le cache"
-cover_cache_title = "Ce que le cache contient vraiment"
+# Derrière le « (?) » posé sur le titre de la carte — et non plus à côté de
+# l'estimation, où il se lisait comme une note de bas de page sur cette seule
+# phrase : ce qu'il ouvre est l'état du cache que toute la carte règle.
+# Le titre dit « mémoire » et non « ce que le cache contient » : le panneau ne
+# compte que des octets, et une pochette locale, qui ne coûte qu'un chemin,
+# n'y figure nulle part.
+cover_cache_open = "Voir la mémoire occupée par les pochettes"
+cover_cache_title = "Mémoire occupée par les pochettes"
 cover_cache_hint = "Relevé au moment de l'ouverture."
-cover_cache_used = "Occupé (Mio)"
-cover_cache_entries = "Entrées"
-# Une phrase entière et non un suffixe : le nombre est dedans, car chaque langue
-# le place où elle veut. En français il suit « dont » — accolé à un libellé, il
-# ne formait aucune phrase.
-cover_cache_entries_free = "dont {count} sans coût mémoire"
-cover_cache_renditions = "Vignettes réencodées"
-cover_cache_average = "Poids moyen réel (Kio)"
-# Une miniature fournie n'atteint jamais l'encodeur : elle n'apparaît sur
-# aucune des deux lignes ci-dessus. Chacune est un réencodage évité.
-cover_cache_supplied = "Vignettes fournies"
-cover_cache_supplied_weight = "{kio} Kio au total"
-cover_cache_full_fetched = "Pleins formats téléchargés"
-cover_cache_belt = "Plafond du nombre d'entrées"
-cover_cache_empty = "Le cache est vide."
+# Deux lignes, et tout ce qui est détenu tombe sur l'une des deux : les deux
+# poids font l'occupé. Le panneau listait auparavant des *mécanismes* —
+# vignettes produites, vignettes fournies, pleins formats téléchargés — et sur
+# un appareil qui écoute la radio les trois affichaient zéro pendant que la
+# mémoire montait, une pochette annoncée par une seule URL n'étant aucun des
+# trois.
+cover_cache_thumbnails = "Vignettes"
+cover_cache_full_sizes = "Pleins formats"
+# Des passages de l'encodeur depuis le démarrage, et non des vignettes
+# détenues : dit si l'appareil dépense du calcul, ce qu'aucune quantité
+# *détenue* ne peut dire.
+cover_cache_renditions = "Réencodages"
+cover_cache_used = "Occupé"
+# L'unité voyage avec son nombre, jamais collée à un libellé : chaque langue
+# les place où elle veut, et toutes ne mettent pas l'unité en dernier.
+cover_cache_kio = "{n} Kio"
+cover_cache_mio = "{n} Mio"
+cover_cache_used_value = "{used} sur {budget}"
+# « En mémoire », et non « vide » : une bibliothèque de pochettes locales tient
+# des centaines d'entrées qui ne coûtent qu'un chemin, et les dire vides serait
+# faux.
+cover_cache_empty = "Aucune pochette en mémoire."
 cover_cache_failed = "Relevé indisponible."
 seek_card_title = "Déplacement"
 position_label = "Position"

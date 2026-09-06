@@ -20,8 +20,15 @@ import type { CachePayload } from '../types'
  * The estimate above the settings card *predicts* what a setting change
  * would do, from a model measured on one library. This panel reads the
  * actual snapshot the core keeps (`GET /api/cover-cache`), so the two can be
- * compared instead of trusted — the real average weight of a retained
- * thumbnail is the figure that matters here.
+ * compared instead of trusted.
+ *
+ * **It answers one question — where does the memory go — and its shape is
+ * that answer: two lines whose weights add up to the total.** It used to
+ * report *mechanisms* instead (thumbnails re-encoded, thumbnails supplied,
+ * full sizes downloaded), and the owner found the hole by looking at it while
+ * playing a radio: all three read zero while the memory climbed, because a
+ * cover announced as a single URL is none of the three. A panel where a held
+ * byte belongs to no line cannot be read, whatever each line says.
  *
  * **Read at the moment of opening, and again only on demand** (the reload
  * button) — never on a timer. A periodic refresh would repeat the fault
@@ -66,27 +73,39 @@ function onOpenChange(open: boolean): void {
   void load()
 }
 
-/**
- * Real average weight of one retained thumbnail, in KiB, rounded — `null`
- * rather than `NaN` or `Infinity` when the cache holds none.
- */
-function averageKio(s: CachePayload): number | null {
-  if (s.renditions <= 0) return null
-  return Math.round(s.renditions_bytes / s.renditions / 1024)
-}
-
-/** Bytes never display raw ("12582912" informs nobody): mebibytes, rounded. */
-function mio(bytes: number): number {
-  return Math.round(bytes / 1024 / 1024)
-}
+/** One mebibyte, the threshold at which `weight` switches units. */
+const MIO = 1024 * 1024
 
 /**
- * The same in kibibytes, for supplied thumbnails: a hundred of them is a
- * handful of MiB, and rounding those to mebibytes would print "0" beside a
- * count that is visibly not zero.
+ * Bytes as a phrase a reader can act on — never raw, since "12582912"
+ * informs nobody.
+ *
+ * **The unit is chosen per value, and that is not cosmetic.** Fixed at
+ * mebibytes, a handful of radio covers printed "0" beside a count that was
+ * visibly not zero: the panel showed nothing occupied while it held several
+ * hundred kibibytes, which is exactly the blindness this rewrite exists to
+ * remove. Below a mebibyte the value is therefore given in kibibytes.
+ *
+ * The number goes **into** the translated string rather than in front of it:
+ * a language is free to place its unit where it wants, and not all of them
+ * put it last.
  */
-function kio(bytes: number): number {
-  return Math.round(bytes / 1024)
+function weight(bytes: number): string {
+  return bytes < MIO
+    ? t.value('cover_cache_kio', { n: Math.round(bytes / 1024) })
+    : t.value('cover_cache_mio', { n: Math.round(bytes / MIO) })
+}
+
+/**
+ * The budget is always stated in mebibytes, whatever the occupied side reads:
+ * it is a setting the user typed in mebibytes, on the card just above, and
+ * echoing it in another unit would stop the two from being comparable.
+ */
+function used(s: CachePayload): string {
+  return t.value('cover_cache_used_value', {
+    used: weight(s.used_bytes),
+    budget: t.value('cover_cache_mio', { n: Math.round(s.budget_bytes / MIO) }),
+  })
 }
 </script>
 
@@ -94,13 +113,15 @@ function kio(bytes: number): number {
   <Dialog @update:open="onOpenChange">
     <DialogTrigger as-child>
       <!-- Same affordance as ProvenanceDetails.vue: the glyph now lives in
-           `HelpButton`, so it is read from there rather than redrawn here. -->
-      <HelpButton
-        size="touch"
-        class="relative z-10"
-        :label="t('cover_cache_open')"
-        data-cover-cache-open
-      />
+           `HelpButton`, so it is read from there rather than redrawn here.
+           **`inline`, and no `z-10`, unlike ProvenanceDetails.** Those two
+           were the crowding workaround this button needed at the foot of the
+           card, where it shared a line with an estimate free to overflow into
+           it. In a `CardHeader` it shares its line with a title and nothing
+           else, so the 44 px target and the stacking rescue are both answers
+           to a problem that no longer exists — and a 44 px box beside a card
+           title reads as a second heading. -->
+      <HelpButton :label="t('cover_cache_open')" data-cover-cache-open />
     </DialogTrigger>
     <DialogContent data-cover-cache-panel>
       <DialogHeader>
@@ -119,64 +140,57 @@ function kio(bytes: number): number {
         <!-- A definition list and not a table: two columns, one of which
              fits in a single word, on a panel that must stay readable on
              the phone. -->
+        <!-- **Read top-down: the summary, then its breakdown.** Work done
+             first, since it is the only line that is not memory at all and
+             would sit oddly in the middle of ones that are; then the total;
+             then the two lines that make it up, heaviest first. The two do
+             still add up to the total above them — the order changes where a
+             reader meets the sum, not the arithmetic. -->
         <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-          <dt class="text-muted-foreground">{{ t('cover_cache_used') }}</dt>
-          <dd class="font-medium">{{ mio(snapshot.used_bytes) }} / {{ mio(snapshot.budget_bytes) }}</dd>
-
-          <dt class="text-muted-foreground">{{ t('cover_cache_entries') }}</dt>
-          <dd class="font-medium">
-            {{ snapshot.entries }}
-            <!-- The count goes **into** the phrase, not in front of it. Glued
-                 to a label it read "30 of which cost no memory", which in
-                 French came out as no sentence at all: the number belongs
-                 after "dont", and only the translation can know that. -->
-            <span class="font-normal text-muted-foreground">
-              ({{ t('cover_cache_entries_free', { count: snapshot.entries_free }) }})
-            </span>
-          </dd>
-
+          <!-- Work done, not memory held. Cumulative since boot, so it
+               answers "is this appliance re-encoding" rather than "what is it
+               holding" — which is why it opens the list instead of joining
+               the two lines that account for bytes. -->
           <dt class="text-muted-foreground">{{ t('cover_cache_renditions') }}</dt>
-          <dd class="font-medium">{{ snapshot.renditions }}</dd>
+          <dd class="font-medium" data-cover-cache-renditions>{{ snapshot.renditions_built }}</dd>
 
-          <!-- The line that matters: the real average weight, confronted
-               against the predicted weight shown on the settings card. -->
-          <template v-if="averageKio(snapshot) !== null">
-            <dt class="text-muted-foreground">{{ t('cover_cache_average') }}</dt>
-            <dd class="font-medium" data-cover-cache-average>{{ averageKio(snapshot) }}</dd>
-          </template>
+          <dt class="text-muted-foreground">{{ t('cover_cache_used') }}</dt>
+          <dd class="font-medium" data-cover-cache-used>{{ used(snapshot) }}</dd>
 
-          <!-- Covers riding on a thumbnail their contributor supplied. They
-               appear on neither of the two lines above, by construction: the
-               route serves them without ever reaching the encoder. This is
-               the only place the pair's effect is visible, and the effect is
-               a re-encoding that did not happen. -->
-          <dt class="text-muted-foreground">{{ t('cover_cache_supplied') }}</dt>
-          <dd class="font-medium" data-cover-cache-supplied>
-            {{ snapshot.pairs }}
-            <span v-if="snapshot.pairs > 0" class="font-normal text-muted-foreground">
-              ({{ t('cover_cache_supplied_weight', { kio: kio(snapshot.pairs_bytes) }) }})
+          <!-- The heaviest thing the cache can hold: a cover downloaded whole
+               from the network, and every full size somebody enlarged. A
+               station announcing a single URL lands here, and landing nowhere
+               at all is what this panel used to do with it. -->
+          <dt class="text-muted-foreground">{{ t('cover_cache_full_sizes') }}</dt>
+          <dd class="font-medium" data-cover-cache-full>
+            {{ snapshot.full_sizes }}
+            <span v-if="snapshot.full_sizes > 0" class="font-normal text-muted-foreground">
+              ({{ weight(snapshot.full_sizes_bytes) }})
             </span>
           </dd>
 
-          <!-- The heaviest thing this cache can hold, and until now the only
-               one it never mentioned: one enlargement memoises a full-size
-               original, megabytes at a time. -->
-          <dt class="text-muted-foreground">{{ t('cover_cache_full_fetched') }}</dt>
-          <dd class="font-medium" data-cover-cache-full>{{ snapshot.pairs_full_fetched }}</dd>
-
-          <!-- The only place `max_entries` is ever shown, and shown as what
-               it is: a bound on a **count**, not on bytes. The settings page
-               stays silent about it. -->
-          <dt class="text-muted-foreground">{{ t('cover_cache_belt') }}</dt>
-          <dd class="font-medium">{{ snapshot.max_entries }}</dd>
+          <!-- Every thumbnail the cache holds, on one line: the ones a
+               contributor supplied and the ones the encoder produced. They
+               cost the same memory, which is the only thing this panel
+               accounts for — where each came from is what the re-encoding
+               count above tells, in one number, without splitting the
+               accounting in two. -->
+          <dt class="text-muted-foreground">{{ t('cover_cache_thumbnails') }}</dt>
+          <dd class="font-medium" data-cover-cache-thumbnails>
+            {{ snapshot.thumbnails }}
+            <span v-if="snapshot.thumbnails > 0" class="font-normal text-muted-foreground">
+              ({{ weight(snapshot.thumbnails_bytes) }})
+            </span>
+          </dd>
         </dl>
 
-        <!-- **Emptiness is about entries, not about renditions.** Tested on
-             the rendition count, this sentence declared an empty cache while
-             the line just above announced forty entries — and it did so in
-             the case this panel exists to describe, a device whose covers all
-             arrive with a thumbnail already attached. -->
-        <p v-if="snapshot.entries === 0 && snapshot.renditions === 0" class="text-sm text-muted-foreground">
+        <!-- **"Nothing in memory", which is not the same as "nothing at
+             all".** A library of local covers holds hundreds of entries that
+             cost a path and no bytes: they legitimately appear on neither
+             line, and the sentence must not claim the cache is empty. Judged
+             on the total rather than on either line, so it cannot contradict
+             a figure printed just above it. -->
+        <p v-if="snapshot.used_bytes === 0" class="text-sm text-muted-foreground">
           {{ t('cover_cache_empty') }}
         </p>
       </template>

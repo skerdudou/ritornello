@@ -80,27 +80,33 @@ cover_passthrough_max_label = "Leave alone below (KiB)"
 cover_passthrough_max_help = "A cover already lighter than this, and no wider than the edge below, is pushed exactly as it is: re-encoding it would not lighten it. It is also how a thumbnail supplied by a plugin is accepted without being touched."
 cover_max_pixels_label = "Decode ceiling (Mpx)"
 cover_max_pixels_help = "Read from the header before any allocation: w x h x 4 bytes of buffer, so 16 Mpx is 64 MiB. A 200 KiB PNG can claim 30000 x 30000 pixels."
-# What the cache really holds, behind the "(?)" next to the estimate above —
-# the actual snapshot, read once when the panel opens, next to the estimate's
-# prediction.
-cover_cache_open = "See what the cache holds"
-cover_cache_title = "What the cache really holds"
+# Behind the "(?)" set on the card's own title — no longer beside the estimate,
+# where it read as a footnote on that one sentence: what it opens is the state
+# of the cache the whole card configures.
+# The title says "memory" rather than "what the cache holds": the panel counts
+# bytes only, and a local cover, which costs a path, appears nowhere in it.
+cover_cache_open = "See the memory the covers occupy"
+cover_cache_title = "Memory the covers occupy"
 cover_cache_hint = "Read at the moment this opened."
-cover_cache_used = "Occupied (MiB)"
-cover_cache_entries = "Entries"
-# A whole phrase and not a suffix: the count sits inside it, because a language
-# is free to want it anywhere. French puts it after "dont", where appending it
-# to a label produced no sentence at all.
-cover_cache_entries_free = "of which {count} cost no memory"
-cover_cache_renditions = "Thumbnails re-encoded"
-cover_cache_average = "Real average weight (KiB)"
-# A supplied thumbnail never reaches the encoder, so it appears on neither of
-# the two lines above. Every one of these is a re-encoding that did not happen.
-cover_cache_supplied = "Thumbnails supplied"
-cover_cache_supplied_weight = "{kio} KiB in all"
-cover_cache_full_fetched = "Full sizes downloaded"
-cover_cache_belt = "Cap on the number of entries"
-cover_cache_empty = "The cache is empty."
+# Two lines, and everything held is on one of them: the two weights add up to
+# what is occupied. The panel used to list *mechanisms* instead — renditions
+# produced, thumbnails supplied, full sizes downloaded — and on a device
+# playing radio all three read zero while the memory climbed, because a cover
+# announced as a single URL is none of the three.
+cover_cache_thumbnails = "Thumbnails"
+cover_cache_full_sizes = "Full-size images"
+# Encoder runs since boot, and not thumbnails held: this says whether the
+# appliance is spending CPU re-encoding, which nothing the cache *holds* can.
+cover_cache_renditions = "Re-encodings"
+cover_cache_used = "Occupied"
+# The unit travels with its number, never glued to a label: a language places
+# both where it wants, and some do not put the unit last.
+cover_cache_kio = "{n} KiB"
+cover_cache_mio = "{n} MiB"
+cover_cache_used_value = "{used} of {budget}"
+# "In memory", not "empty": a library of local covers holds hundreds of
+# entries that cost a path and no bytes, and calling that empty would be false.
+cover_cache_empty = "No cover is held in memory."
 cover_cache_failed = "Snapshot unavailable."
 seek_card_title = "Seeking"
 position_label = "Position"
