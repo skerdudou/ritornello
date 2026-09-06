@@ -498,6 +498,85 @@ describe('SystemView', () => {
     w.unmount()
   })
 
+  /** Every GET stays pending once the action has been posted: the machine is
+   *  away, and the wait can only end by reaching its cap. That is what lets a
+   *  test measure the cap itself. */
+  function stubSilentAfterPost() {
+    let posted = false
+    const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posted = true
+        return Promise.resolve({ ok: true, json: async () => ({}) } as Response)
+      }
+      if (String(url).includes('/api/i18n')) {
+        return Promise.resolve({ ok: true, json: async () => CATALOGUE } as Response)
+      }
+      if (posted) return new Promise<Response>(() => {})
+      return Promise.resolve({ ok: true, json: async () => payload() } as Response)
+    })
+    vi.stubGlobal('fetch', f)
+  }
+
+  async function confirmReboot() {
+    const w = await mountView()
+    await w.get('[data-power-reboot]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
+    await flushPromises()
+    return w
+  }
+
+  it('waits four minutes for a machine reboot, not two', async () => {
+    // A Pi that stops to check its filesystem, or one whose SD card is slow,
+    // comes back well past two minutes. Giving up then left the user with a
+    // failure message about a machine that was merely taking its time.
+    stubSilentAfterPost()
+    const w = await confirmReboot()
+
+    await vi.advanceTimersByTimeAsync(130_000)
+    await flushPromises()
+    expect(w.find('[data-power-progress]').exists()).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(120_000)
+    await flushPromises()
+    expect(w.find('[data-power-progress]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('counts the wait out loud while the machine is away', async () => {
+    // Four minutes of an unchanging sentence reads as a page that has hung.
+    // The figure is what says the wait is still running — and it is the
+    // elapsed time, not a countdown: a Pi comes back in 20 to 40 s, and
+    // counting down from 4:00 would present the cap as the normal duration.
+    stubSilentAfterPost()
+    const w = await confirmReboot()
+
+    await vi.advanceTimersByTimeAsync(42_000)
+    await flushPromises()
+
+    expect(w.get('[data-power-elapsed]').text()).toBe('0:42')
+    w.unmount()
+  })
+
+  it('offers no counter for a shutdown, which promises no return', async () => {
+    // `poweroff` is the one action that waits for nothing: the device comes
+    // back through a physical gesture. A figure climbing under it would
+    // promise a return that nobody is waiting for.
+    stubSilentAfterPost()
+    const w = await mountView()
+    await w.get('[data-power-poweroff]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-power-confirm]')!.click()
+    await flushPromises()
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    await flushPromises()
+
+    expect(w.find('[data-power-progress]').exists()).toBe(true)
+    expect(w.find('[data-power-elapsed]').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('unmounting during the wait lets the probing resume', async () => {
     // The old process still answers, so its uptime **grows** with the clock —
     // that is what a process still alive does. The return condition compares

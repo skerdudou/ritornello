@@ -9,6 +9,7 @@ import {
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import { PERIODS_S, useMetrics } from '../composables/useMetrics'
+import { formatPosition } from '../composables/usePlayer'
 import type {
   DateFormat, LogsPayload, ProcessEntry, ProcessesPayload, SettingsPayload, SystemPayload,
   SystemUsage,
@@ -193,6 +194,9 @@ onMounted(() => {
 })
 onUnmounted(() => {
   mounted = false
+  // The loop only notices the unmount on its next turn, up to four seconds
+  // later; the clock stops now rather than ticking on a view nobody sees.
+  stopWaitClock()
 })
 
 // "°C" and "MHz" are not translated: they are SI symbols, identical in both
@@ -493,13 +497,19 @@ const RESUME_MS = 2000
  *  within a second (`Restart=always`), 30 s comfortably cover a slow
  *  startup. */
 const MAX_RESUME_MS = 30000
-/** Waiting cap for a **machine** reboot: four times as much, because a Pi
- *  does not come back like a process — services stopping, kernel boot,
+/** Waiting cap for a **machine** reboot: eight times the service one, because
+ *  a Pi does not come back like a process — services stopping, kernel boot,
  *  mounts, network, and only then the service. On the order of 20 to 40 s on
- *  healthy hardware (not measured here); 120 s leave margin for a slow SD
- *  card or an incidental `fsck`, without leaving the user in front of a
- *  message that never concludes. */
-const MAX_RESUME_REBOOT_MS = 120_000
+ *  healthy hardware (not measured here).
+ *
+ *  Four minutes, and not the two this cap held at first: a slow SD card or an
+ *  incidental `fsck` overran two minutes in use, and giving up then put a
+ *  failure message in front of a machine that was merely taking its time —
+ *  the worst of both, since it neither waits nor tells the truth. The cost of
+ *  waiting longer is now bounded by what the wait itself displays: the
+ *  elapsed counter says the page is still working (see `waited`), so a long
+ *  wait no longer reads as a hung page. */
+const MAX_RESUME_REBOOT_MS = 240_000
 
 /** Action awaiting confirmation, and action in progress. */
 const dialog = ref<PowerAction | null>(null)
@@ -524,6 +534,59 @@ const currentMessage = computed(() => {
   return ''
 })
 
+/**
+ * Start of the wait for the return, and the second-by-second clock that dates
+ * it. `null` outside a wait, which is what makes the counter appear and
+ * disappear with it — and why a **poweroff** shows none: that action calls no
+ * `waitForReturn`, waiting for nothing that will come back on its own.
+ *
+ * Its own one-second interval rather than a value read off the polling loop:
+ * that loop turns every 4 s (a 2 s sleep, then a probe raced against a 2 s
+ * delay), and a figure refreshed on its rhythm would climb four seconds at a
+ * time — read as a stuck display, exactly the impression the counter exists
+ * to dispel.
+ */
+const waitStartedAt = ref<number | null>(null)
+const waitNow = ref(0)
+let waitTicker: ReturnType<typeof setInterval> | null = null
+
+function startWaitClock(): void {
+  const now = Date.now()
+  waitStartedAt.value = now
+  waitNow.value = now
+  waitTicker = setInterval(() => {
+    waitNow.value = Date.now()
+  }, 1000)
+}
+
+/** Idempotent, and it has to be: it runs from `waitForReturn`'s `finally` and
+ *  from the unmount hook, which can fire while a wait is still sleeping. */
+function stopWaitClock(): void {
+  if (waitTicker !== null) {
+    clearInterval(waitTicker)
+    waitTicker = null
+  }
+  waitStartedAt.value = null
+}
+
+/**
+ * How long the wait has lasted, as `m:ss`.
+ *
+ * Elapsed time and not a countdown, deliberately. A Pi comes back in 20 to
+ * 40 s where the cap allows four minutes: a figure counting down from 4:00
+ * would present the cap as the expected duration and make an ordinary reboot
+ * look alarming. Climbing, it only says what is true — the page is still
+ * waiting, and here is since when.
+ *
+ * `formatPosition` and not a fourth formatter: it is the one that accepts
+ * zero, which a wait starts at.
+ */
+const waited = computed(() =>
+  waitStartedAt.value === null
+    ? null
+    : formatPosition(Math.floor((waitNow.value - waitStartedAt.value) / 1000)),
+)
+
 /** The confirmation button is only painted "destructive" for the actions
  *  that really are: restarting the service leaves the device powered on,
  *  which its own consequence sentence promises. */
@@ -538,10 +601,14 @@ const confirmVariant = computed(() => (dialog.value === 'restart-service' ? 'def
  * suspended: poweroff. A machine reboot is awaited like a service restart —
  * longer, see `MAX_RESUME_REBOOT_MS` — because the device comes back while
  * the tab, for its part, stayed open. Leaving the polling paused would
- * freeze the chart of **every** page until a full reload, with nothing on
- * screen to explain it: `inProgress` is local to the view and disappears
- * with it, `unavailable` stays false. Only poweroff justifies the permanent
- * suspension, the device coming back only through a physical gesture.
+ * freeze the chart of **every** page until a full reload, and nothing here
+ * would explain it: `inProgress` is local to the view and disappears with
+ * it, `unavailable` stays false. The header badge is the one thing that
+ * would still speak — it reads the pause and shows "offline" — but it
+ * reports the pause, not the machine, so it would go on claiming an absent
+ * device long after this one came back. Only poweroff justifies the
+ * permanent suspension, the device coming back only through a physical
+ * gesture.
  */
 async function confirm() {
   const action = dialog.value
@@ -565,6 +632,25 @@ async function confirm() {
     await waitForReturn(uptimeBefore, MAX_RESUME_MS, 'system_restarted')
   } else if (action === 'reboot') {
     await waitForReturn(uptimeBefore, MAX_RESUME_REBOOT_MS, 'system_device_restarted')
+  }
+}
+
+/**
+ * The wait for the return, and the lifetime of the counter that dates it.
+ *
+ * Two functions and not one, because two lifetimes are at stake: the polling
+ * below can leave by four different doors (the machine came back, the cap
+ * expired, the view was unmounted, or a throw the loop lets through), and the
+ * clock must stop at every one of them. A `finally` says that once; the same
+ * invariant spelled out at each exit is the kind that survives two edits and
+ * breaks on the third — `resume()`, right below, already carries the scars.
+ */
+async function waitForReturn(before: number | null, maxMs: number, successKey: string) {
+  startWaitClock()
+  try {
+    await pollUntilBack(before, maxMs, successKey)
+  } finally {
+    stopWaitClock()
   }
 }
 
@@ -601,7 +687,7 @@ async function confirm() {
  * this comment used to fear — the timer outlives every view anyway, that is
  * its reason for being. Only the failure message stays gated on `mounted`.
  */
-async function waitForReturn(before: number | null, maxMs: number, successKey: string) {
+async function pollUntilBack(before: number | null, maxMs: number, successKey: string) {
   const t0 = Date.now()
   const deadline = t0 + maxMs
   while (mounted && Date.now() < deadline) {
@@ -973,6 +1059,10 @@ async function waitForReturn(before: number | null, maxMs: number, successKey: s
       <CardContent class="space-y-3">
         <p v-if="inProgress" data-power-progress aria-live="polite" class="text-sm text-muted-foreground">
           {{ currentMessage }}
+          <!-- `tabular-nums`: without it the digits change width every second
+               and the figure jitters. Absent on a poweroff, which waits for
+               nothing — see `waited`. -->
+          <span v-if="waited" data-power-elapsed class="tabular-nums">{{ waited }}</span>
         </p>
         <p
           v-else-if="state && (!state.can_power_off || !state.can_reboot)"
