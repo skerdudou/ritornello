@@ -55,18 +55,34 @@ fn stream_url(identity: &Value) -> Option<&str> {
 /// Extracted as a pure function so the created-task guard is provable
 /// without ever spawning `live::follows`: `just_created` is true only the
 /// very first time a task is created for a station, and a task in that state
-/// already queries immediately on its own (`live::follows`'s
-/// `wait = Duration::ZERO`) — poking it at that same instant would only push
-/// that first query out by `DEBOUNCE`, reintroducing the very blank the
-/// immediate query exists to remove. Otherwise: only a genuine **change**
-/// is worth a poke, since Icecast repeats the same cart code throughout an
-/// item.
+/// already queries on its own, almost immediately (`live::follows`'s
+/// `INITIAL_WAIT`) — poking it at that same instant would only push that
+/// first query further out, reintroducing the very blank the near-immediate
+/// query exists to remove. Otherwise: only a genuine **change** is worth a
+/// poke, since Icecast repeats the same cart code throughout an item.
 fn should_poke(just_created: bool, code: &Option<String>, last_code: &Option<String>) -> bool {
     !just_created && code.is_some() && code != last_code
 }
 
+/// Whether `tracked` already designates this exact station.
+///
+/// Extracted as a pure function so the guard against re-spawning a task —
+/// and the staleness filter in `next_enrichment` — are both provable
+/// without ever spawning `live::follows`: comparing `id` alone, as an
+/// earlier version did, is only correct as long as no two stations ever
+/// share an id, an invariant the embedded table's own test enforces but
+/// which the operator's override file can break at will (see
+/// `Table::load`). A collision would keep the old task alive across a
+/// switch and query the *wrong host* for as long as the session lasts,
+/// silently — the same wrong-station failure `parse_station`'s own id
+/// check already prevents, one layer up.
+fn same_station(tracked: Option<(&str, u32)>, brand: &str, id: u32) -> bool {
+    tracked == Some((brand, id))
+}
+
 /// The station being followed, and the two handles onto its task.
 struct Tracked {
+    brand: String,
     id: u32,
     task: tokio::task::JoinHandle<()>,
     /// Poked when the stream's cart code changes. Bounded and non-blocking:
@@ -87,8 +103,10 @@ struct NrjMetas {
     tracked: Option<Tracked>,
     /// Last cart code seen on this station, so that only a **change** pokes.
     last_code: Option<String>,
-    metas_tx: mpsc::Sender<(u32, Meta)>,
-    metas_rx: mpsc::Receiver<(u32, Meta)>,
+    /// Tagged `(brand, id, meta)`: see `same_station` for why the id alone
+    /// is not enough to tell a reading belongs to the tracked station.
+    metas_tx: mpsc::Sender<(String, u32, Meta)>,
+    metas_rx: mpsc::Receiver<(String, u32, Meta)>,
 }
 
 impl NrjMetas {
@@ -100,7 +118,7 @@ impl NrjMetas {
     /// Stops the current tracking, if there is one.
     fn stop(&mut self) {
         if let Some(t) = self.tracked.take() {
-            tracing::debug!("stopped following station {}", t.id);
+            tracing::debug!("stopped following station {} ({})", t.id, t.brand);
             t.task.abort();
         }
         self.last_code = None;
@@ -110,19 +128,17 @@ impl NrjMetas {
     /// which case the running task is kept. That is the case of every item
     /// change on the same station.
     ///
-    /// Returns whether this call **created** the task — the caller must not
-    /// poke a task it just created: `follows` in `live.rs` already queries
-    /// immediately on a fresh task, and a poke queued at the same moment
-    /// would only push that first query out by `DEBOUNCE`.
+    /// Returns whether this call **created** the task — see `should_poke`
+    /// for why the caller must not poke a task it just created.
     fn follows(&mut self, brand: String, id: u32) -> bool {
-        if self.tracked.as_ref().is_some_and(|t| t.id == id) {
+        if same_station(self.tracked.as_ref().map(|t| (t.brand.as_str(), t.id)), &brand, id) {
             return false;
         }
         self.stop();
         let (poke, poke_rx) = mpsc::channel(1);
         let tx = self.metas_tx.clone();
-        let task = tokio::spawn(live::follows(brand, id, poke_rx, tx));
-        self.tracked = Some(Tracked { id, task, poke });
+        let task = tokio::spawn(live::follows(brand.clone(), id, poke_rx, tx));
+        self.tracked = Some(Tracked { brand, id, task, poke });
         true
     }
 }
@@ -155,10 +171,9 @@ impl MetadataPlugin for NrjMetas {
                         let _ = t.poke.try_send(());
                     }
                 } else if just_created {
-                    // Record without poking: `should_poke` always refuses on
-                    // a fresh task, but the code still needs to be recorded
-                    // so the next call can tell a genuine change from a
-                    // repeat.
+                    // Record without poking (see `should_poke`): the code
+                    // still needs to be recorded so the next call can tell a
+                    // genuine change from a repeat.
                     self.last_code = code;
                 }
             }
@@ -186,13 +201,14 @@ impl MetadataPlugin for NrjMetas {
             // `recv` is cancellable without loss: if a `NowPlaying` arrives
             // first, the runner drops this future without any received reading
             // being lost.
-            let Some((id, meta)) = self.metas_rx.recv().await else {
+            let Some((brand, id, meta)) = self.metas_rx.recv().await else {
                 // Impossible in practice (the plugin keeps a Sender).
                 std::future::pending().await
             };
             // Reading from a station we no longer follow: it was waiting in
-            // the queue at the moment of the change.
-            if !self.tracked.as_ref().is_some_and(|t| t.id == id) {
+            // the queue at the moment of the change. Checked on the pair,
+            // not `id` alone — see `same_station`.
+            if !same_station(self.tracked.as_ref().map(|t| (t.brand.as_str(), t.id)), &brand, id) {
                 continue;
             }
             if let Some(identity) = &self.identity {
@@ -243,6 +259,7 @@ mod tests {
     /// Real stream URL of Rire & Chansons, as the site publishes it.
     const URL: &str = "https://streaming.nrjaudio.fm/ou8o8xgk7oiu?origine=fluxradios";
     const ID: u32 = 200;
+    const BRAND: &str = "rireetchansons";
 
     fn stream_identity(url: &str) -> Value {
         json!({ "kind": "stream", "url": url })
@@ -254,7 +271,7 @@ mod tests {
         let mut p = NrjMetas::new(Table::embedded());
         let task = tokio::spawn(std::future::pending::<()>());
         let (poke_tx, _poke_rx) = mpsc::channel(1);
-        p.tracked = Some(Tracked { id, task, poke: poke_tx });
+        p.tracked = Some(Tracked { brand: BRAND.into(), id, task, poke: poke_tx });
         p
     }
 
@@ -323,7 +340,7 @@ mod tests {
         let mut p = NrjMetas::new(Table::embedded());
         let task = tokio::spawn(std::future::pending::<()>());
         let (poke_tx, mut poke_rx) = mpsc::channel(4);
-        p.tracked = Some(Tracked { id: ID, task, poke: poke_tx });
+        p.tracked = Some(Tracked { brand: BRAND.into(), id: ID, task, poke: poke_tx });
         p.identity = Some(stream_identity(URL));
         p.last_code = Some("DD25-19 - DD25-19".into());
         p.now_playing(now_playing_with(URL, Some("NGV4-14 - NGV4-14"))).await;
@@ -337,7 +354,7 @@ mod tests {
         let mut p = NrjMetas::new(Table::embedded());
         let task = tokio::spawn(std::future::pending::<()>());
         let (poke_tx, mut poke_rx) = mpsc::channel(4);
-        p.tracked = Some(Tracked { id: ID, task, poke: poke_tx });
+        p.tracked = Some(Tracked { brand: BRAND.into(), id: ID, task, poke: poke_tx });
         p.identity = Some(stream_identity(URL));
         p.last_code = Some("NGV4-14 - NGV4-14".into());
         p.now_playing(now_playing_with(URL, Some("NGV4-14 - NGV4-14"))).await;
@@ -352,10 +369,8 @@ mod tests {
     // `live::follows`.
     #[test]
     fn a_fresh_task_is_never_poked_regardless_of_the_code() {
-        // `follows` in `live.rs` already queries immediately on a brand new
-        // task. A poke queued at the same moment would only push that first
-        // query out by DEBOUNCE, reintroducing the very blank the immediate
-        // query exists to remove.
+        // See `should_poke`'s own doc comment for why a task just created is
+        // never poked.
         assert!(!should_poke(true, &Some("DD25-19 - DD25-19".into()), &None));
         assert!(!should_poke(true, &Some("DD25-19 - DD25-19".into()), &Some("other".into())));
         assert!(!should_poke(true, &None, &None));
@@ -390,6 +405,7 @@ mod tests {
         p.now_playing(now_playing_with(URL, None)).await;
         p.metas_tx
             .send((
+                BRAND.into(),
                 ID,
                 Meta {
                     artist: Some("TOM VILLA".into()),
@@ -423,14 +439,46 @@ mod tests {
         let mut p = following_plugin(ID);
         p.now_playing(now_playing_with(URL, None)).await;
         p.metas_tx
-            .send((999, Meta { title: Some("stale".into()), ..Default::default() }))
+            .send((BRAND.into(), 999, Meta { title: Some("stale".into()), ..Default::default() }))
             .await
             .unwrap();
         p.metas_tx
-            .send((ID, Meta { title: Some("fresh".into()), ..Default::default() }))
+            .send((BRAND.into(), ID, Meta { title: Some("fresh".into()), ..Default::default() }))
             .await
             .unwrap();
         let e = p.next_enrichment().await;
         assert_eq!(e.title.as_deref(), Some("fresh"));
+    }
+
+    #[tokio::test]
+    async fn a_reading_of_the_same_id_but_a_different_brand_is_discarded() {
+        // The bug fixed here: two stations of different brands can collide
+        // on `id` — the embedded table's own test guards the shipped table,
+        // but the operator's override file can break the invariant at will
+        // (see `Table::load`). Keying the staleness filter on `id` alone, as
+        // an earlier version did, would have accepted this as belonging to
+        // the tracked station and displayed the wrong host's titles.
+        let mut p = following_plugin(ID); // tracked under BRAND ("rireetchansons")
+        p.now_playing(now_playing_with(URL, None)).await;
+        p.metas_tx
+            .send(("nrj".into(), ID, Meta { title: Some("wrong brand".into()), ..Default::default() }))
+            .await
+            .unwrap();
+        p.metas_tx
+            .send((BRAND.into(), ID, Meta { title: Some("right brand".into()), ..Default::default() }))
+            .await
+            .unwrap();
+        let e = p.next_enrichment().await;
+        assert_eq!(e.title.as_deref(), Some("right brand"));
+    }
+
+    #[test]
+    fn same_station_requires_both_the_brand_and_the_id() {
+        assert!(same_station(Some(("nrj", 158)), "nrj", 158));
+        // The collision this whole guard exists for: same id, another
+        // brand — not the same station, and must not be read as one.
+        assert!(!same_station(Some(("nrj", 158)), "nostalgie", 158));
+        assert!(!same_station(Some(("nrj", 158)), "nrj", 200));
+        assert!(!same_station(None, "nrj", 158));
     }
 }

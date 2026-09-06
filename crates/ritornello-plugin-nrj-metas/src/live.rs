@@ -25,8 +25,15 @@ pub struct Meta {
     /// wallpaper — see `is_wallpaper`.
     pub cover: Option<String>,
     /// The same image at `/200x/`, offered so the appliance does not re-encode
-    /// what is already the right size. Only an indication: measured on one
-    /// image, so the full size stays the one that counts.
+    /// what is already the right size. Measured on 51 images across the four
+    /// brands — `/600x/` and `/200x/` both present on all 51, averaging
+    /// 75,497 and 12,694 bytes — which is why this derivation is kept despite
+    /// resting on a sample rather than a documented contract: the pair saves
+    /// six times the bytes the core's cover cache is budgeted in.
+    /// **If a `/200x/` variant is ever missing, the core does not fall
+    /// back to the full size** (`cover.rs`: a failed thumbnail fetch is not a
+    /// reason to try the full size) — that track then shows no cover at all.
+    /// This is why the derivation rests on measurement, not on assumption.
     pub cover_thumb: Option<String>,
     /// End of the current item, in seconds since the Unix epoch, as the server
     /// announces it. Raw: it is `main` that turns it into a deadline, so this
@@ -48,13 +55,43 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// request. It has to clear a jingle (4 s) without approaching the server's
 /// own lag (30 to 70 s), which dominates the total anyway — so the wait costs
 /// nothing in perceived reactivity.
+///
+/// **A cart code that changes faster than this starves the station.** The
+/// coalescing loop keeps restarting the wait on every poke and never reaches
+/// a query — and the very same restart is what discards whatever wait the
+/// safety net had set, so neither a query nor the net ever fires. Safe: no
+/// request rate results. But the display then stays on a stale title until
+/// the code finally holds still for a whole `DEBOUNCE`.
 const DEBOUNCE: Duration = Duration::from_secs(6);
+
+/// Wait before the very first query on a freshly created task, instead of at
+/// once.
+///
+/// Small on purpose, not zero: presets and the +10 grid are first-class
+/// features of this appliance, and scrolling through several of them within
+/// a few seconds is an ordinary gesture. Each switch aborts the previous
+/// station's task (see `main`'s `follows`), so without this wait a ten-preset
+/// scroll in ten seconds would fire ten requests instead of collapsing to
+/// the one for the preset actually landed on. Kept short enough to stay
+/// imperceptible next to the measured 30 s connection advert either way, and
+/// well under it: the first real cart code only arrives at t+61 s (see the
+/// module doc), so waiting for a *change* instead of a short fixed delay
+/// would leave the screen blank for a minute after every station change.
+const INITIAL_WAIT: Duration = Duration::from_secs(2);
 
 /// Spacing of the retries when the server has not caught up yet.
 ///
 /// Measured twice: the JSON followed the ICY within 33 seconds, and it was 40
 /// to 70 seconds past its own `end_timestamp`. Three retries cover the
 /// measured window; beyond that we stop rather than keep asking.
+///
+/// **The ladder cannot tell the two apart.** "The server has not caught up
+/// yet" and "the content genuinely did not change" look identical here — both
+/// are a fresh reading equal to the last one emitted (see `verdict`). A poke
+/// on a station stuck on filler therefore costs four requests, not one: the
+/// query the poke triggered, plus all three retries before giving up. Filler
+/// is not the exception on some stations either — a 30-sample poll of
+/// Nostalgie's main station found it filler on 24 of 30.
 const RETRIES: [Duration; 3] =
     [Duration::from_secs(10), Duration::from_secs(20), Duration::from_secs(40)];
 
@@ -136,6 +173,15 @@ fn split_year(title: &str) -> (String, Option<u16>) {
         return (title.to_string(), None);
     };
     let inner = &trimmed[open + 1..trimmed.len() - 1];
+    // `ritornello_proto::valid_year` is prefix-based (it accepts
+    // "19860101"): `inner` only has to *start* with four digits, not equal
+    // them. Without this length check, a title ending "(2011 Remaster)"
+    // would have its remaster's year sliced off and shown, since "2011
+    // Remaster" starts with a plausible year. Only a parenthesized group
+    // that is *exactly* four characters may denote one.
+    if inner.chars().count() != 4 {
+        return (title.to_string(), None);
+    }
     let Some(year) = ritornello_proto::valid_year(inner) else {
         return (title.to_string(), None);
     };
@@ -265,26 +311,61 @@ fn verdict(last_seen: Option<&Meta>, fresh: &Meta, attempt: usize) -> Verdict {
     }
 }
 
+/// The announced deadline, read from the caller's own clock.
+///
+/// Kept distinct from a bare `Option<Duration>` so "already past" cannot
+/// collapse onto "not announced at all" the way it did before this fix: both
+/// used to feed `net_delay_from` as a plain `None`, which parked a station
+/// whose deadline had merely elapsed behind the same `NET_MAX` (15 min) as
+/// one that never announced one at all — the worst outcome on exactly the
+/// station the net exists for, one whose cart code does not move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Deadline {
+    /// Still ahead, by this much.
+    Remaining(Duration),
+    /// Already in the past.
+    Elapsed,
+    /// No `end_timestamp` in the response at all.
+    Absent,
+}
+
 /// How long to sleep before the safety net fires, given the announced
 /// deadline. Pure, so the clamping is testable without a clock.
-fn net_delay_from(remaining: Option<Duration>) -> Duration {
-    remaining.map(|r| (r + NET_MARGIN).min(NET_MAX)).unwrap_or(NET_MAX)
+fn net_delay_from(deadline: Deadline) -> Duration {
+    match deadline {
+        Deadline::Remaining(r) => (r + NET_MARGIN).min(NET_MAX),
+        // Measured, the server is late on its own deadline — this is the
+        // ordinary case for a station whose cart code has stopped moving,
+        // not a fault. `NET_MARGIN` alone, not `NET_MAX`: a fresh wake-up is
+        // due soon, not in fifteen minutes.
+        Deadline::Elapsed => NET_MARGIN,
+        // Nothing else to go on: the ceiling applies.
+        Deadline::Absent => NET_MAX,
+    }
 }
 
 fn net_delay(ends_at: Option<f64>) -> Duration {
-    let remaining = ends_at.and_then(|end| {
-        let now =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
-        (end > now).then(|| Duration::from_secs_f64(end - now))
-    });
-    net_delay_from(remaining)
+    let deadline = match ends_at.zip(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64()),
+    ) {
+        // No `end_timestamp`, or a clock that reads before the Unix epoch:
+        // either way nothing reliable to compare against.
+        None => Deadline::Absent,
+        Some((end, now)) if end > now => Deadline::Remaining(Duration::from_secs_f64(end - now)),
+        Some(_) => Deadline::Elapsed,
+    };
+    net_delay_from(deadline)
 }
 
 /// Follows a station until the task is aborted.
 ///
-/// Never returns. The caller stops this task (`abort`) when the station
-/// changes — hence the tagging of each reading with the `id`: a reading
-/// already queued at the moment of the stop must be discardable.
+/// Returns only when the plugin drops its sender (`tx`) or the channel it
+/// reads pokes from is itself dropped — the ordinary way this task ends is
+/// the caller aborting it (`abort`) when the station changes, not this
+/// function returning on its own. Each reading is tagged with the `(brand,
+/// id)` pair (see `main`'s `same_station`): a reading already queued at the
+/// moment of the stop must be discardable, and discardable unambiguously —
+/// `id` alone is not unique across an operator's override file.
 ///
 /// **Only changes are emitted.** The first reading always goes out: this task
 /// is born with the station, so its "last seen" is empty, and the display
@@ -301,15 +382,30 @@ fn net_delay(ends_at: Option<f64>) -> Duration {
 /// behind a transient blip for up to `NET_MAX` (15 min) — and for a station
 /// whose cart code never moves, the net is the *only* thing that would ever
 /// wake it up again, so a poke could not rescue it either.
+///
+/// **A poke cannot shrink that backoff below `DEBOUNCE`.** The debounce loop
+/// below restarts on every poke with `wait = DEBOUNCE`, discarding whatever
+/// longer wait a prior failure had set — see the hard floor right after it,
+/// which is precisely what stops a station whose cart code changes faster
+/// than the backoff from sustaining a steady query rate against a host that
+/// is failing every time.
 pub async fn follows(
     brand: String,
     id: u32,
     mut poke: mpsc::Receiver<()>,
-    tx: mpsc::Sender<(u32, Meta)>,
+    tx: mpsc::Sender<(String, u32, Meta)>,
 ) {
     let client = match reqwest::Client::builder()
         // Measured: cheriefm.fr answers 403 without a full browser
         // User-Agent. This is a condition of access, not a courtesy.
+        //
+        // The stack itself was measured too, separately from the header:
+        // `reqwest` + `rustls`, with this exact User-Agent, gets HTTP 200
+        // from all four brands, cheriefm included, and all four bodies
+        // parse. `scripts/fetch-stations.mjs` shells out to `curl` instead
+        // (see its own header comment) because Node's stack is refused by
+        // cheriefm regardless of headers — that refusal does not apply
+        // here.
         .user_agent(
             "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) \
              Chrome/128.0 Safari/537.36 ritornello",
@@ -326,10 +422,10 @@ pub async fn follows(
     };
     let mut backoff = BACKOFF_BASE;
     let mut last_seen: Option<Meta> = None;
-    // The first pass queries at once, with no debounce: measured, the first
-    // cart code arrives 61 s after connecting, and waiting for a *change*
-    // would leave the screen empty for a minute right after a station change.
-    let mut wait = Duration::ZERO;
+    let mut last_query: Option<tokio::time::Instant> = None;
+    // The first query fires after a short, fixed wait rather than at once —
+    // see `INITIAL_WAIT`'s own doc comment for why it is small but not zero.
+    let mut wait = INITIAL_WAIT;
     loop {
         // Coalesce pokes: any poke arriving during the wait restarts it, so a
         // jingle shorter than DEBOUNCE never causes a request.
@@ -341,6 +437,24 @@ pub async fn follows(
                 Err(_) => break,
             }
         }
+        // Hard floor: the coalescing above can only ever shrink `wait` down
+        // to `DEBOUNCE`, discarding a longer failure backoff on the way (see
+        // `follows`'s own doc comment). Measured from the last query actually
+        // *sent*, not from the last poke, so a cart code that keeps changing
+        // cannot repeatedly reset the clock and hold the spacing at bare
+        // `DEBOUNCE` forever — the very thing that let a permanently failing
+        // host be queried at the stream's own rate. The happy path is
+        // untouched: `backoff` sits at `BACKOFF_BASE` after every success, so
+        // the floor there is `DEBOUNCE`, exactly what the debounce loop above
+        // already guaranteed.
+        let floor = DEBOUNCE.max(backoff);
+        if let Some(last) = last_query {
+            let elapsed = last.elapsed();
+            if elapsed < floor {
+                tokio::time::sleep(floor - elapsed).await;
+            }
+        }
+        last_query = Some(tokio::time::Instant::now());
         let mut attempt = 0usize;
         // The inner loop resolves directly to the next `wait`, so an error
         // and a give-up both set it explicitly rather than falling through
@@ -360,7 +474,7 @@ pub async fn follows(
                         Verdict::Emit => {
                             let ends_at = meta.ends_at;
                             last_seen = Some(meta.clone());
-                            if tx.send((id, meta)).await.is_err() {
+                            if tx.send((brand.clone(), id, meta)).await.is_err() {
                                 return;
                             }
                             break net_delay(ends_at);
@@ -373,10 +487,11 @@ pub async fn follows(
                     // nobody would ever see anything.
                     tracing::info!("metadata query failed for station {id} ({brand}): {e}");
                     // No sleep here: the current `backoff` becomes the next
-                    // `wait`, which the debounce loop at the top already
-                    // turns into a wait via `timeout(wait, poke.recv())` — a
-                    // poke still pre-empts it, exactly like the safety net's
-                    // wait does. Sleeping here too would double the delay.
+                    // `wait`, and unlike before this fix, a poke can no
+                    // longer make the next query happen any sooner than
+                    // `backoff` allows — the hard floor at the top of the
+                    // outer loop enforces that regardless of how `wait` is
+                    // spent.
                     let this_backoff = backoff;
                     backoff = next_backoff(backoff);
                     break this_backoff;
@@ -534,6 +649,24 @@ mod tests {
     }
 
     #[test]
+    fn a_remaster_suffix_is_not_read_as_a_year() {
+        // `ritornello_proto::valid_year` is prefix-based (it accepts
+        // "19860101"), so a careless rule would slice "2011" off the end of
+        // "(2011 Remaster)" — the parenthesized content merely *starts* with
+        // a plausible year — and display the remaster's year as if it were
+        // the track's.
+        let body = response(
+            "NRJ",
+            "PIXIES",
+            "Where Is My Mind (2011 Remaster)",
+            "https://x/img/600x/v4_1-2.JPG",
+        );
+        let m = parse_station(&body, 200).unwrap();
+        assert_eq!(m.title.as_deref(), Some("Where Is My Mind (2011 Remaster)"));
+        assert_eq!(m.year, None);
+    }
+
+    #[test]
     fn an_unexpected_shape_is_discarded_without_noise() {
         // The endpoint is private and undocumented: a redesign must translate
         // into silence, not a wrong display.
@@ -559,10 +692,22 @@ mod tests {
         // Measured: the server updates 40 to 70 seconds after its own
         // end_timestamp. A net firing on the dot would query for the item
         // that just ended.
-        assert_eq!(net_delay_from(Some(Duration::from_secs(30))), Duration::from_secs(120));
-        // A deadline already past, or absurd, must not park the station.
-        assert_eq!(net_delay_from(None), NET_MAX);
-        assert_eq!(net_delay_from(Some(Duration::from_secs(9999))), NET_MAX);
+        assert_eq!(
+            net_delay_from(Deadline::Remaining(Duration::from_secs(30))),
+            Duration::from_secs(120)
+        );
+        // An absurdly distant deadline must not park the station past the
+        // ceiling either.
+        assert_eq!(net_delay_from(Deadline::Remaining(Duration::from_secs(9999))), NET_MAX);
+        // Never announced at all: nothing else to go on, so the ceiling
+        // applies.
+        assert_eq!(net_delay_from(Deadline::Absent), NET_MAX);
+        // Already elapsed — the exact case the net exists for, a station
+        // whose cart code has stopped moving — must NOT be parked for
+        // NET_MAX (15 min) the way an absent deadline is: a regression
+        // collapsing this back onto `Absent` would starve that station of
+        // its only remaining wake-up for a quarter of an hour.
+        assert_eq!(net_delay_from(Deadline::Elapsed), NET_MARGIN);
     }
 
     #[test]
@@ -621,6 +766,24 @@ mod tests {
         assert_eq!(
             station_url("cheriefm", 190),
             "https://www.cheriefm.fr/api/webradios/get-by-ids?ids[]=190"
+        );
+    }
+
+    #[test]
+    fn next_backoff_doubles_then_caps_at_backoff_max() {
+        // Pure and trivially testable, and the cap is a third-party-courtesy
+        // invariant nothing else guards: deleting `.min(BACKOFF_MAX)` from
+        // `next_backoff` would fail no other test in this module.
+        assert_eq!(next_backoff(BACKOFF_BASE), Duration::from_secs(4));
+        assert_eq!(
+            next_backoff(Duration::from_secs(45)),
+            BACKOFF_MAX,
+            "doubling past the cap must clamp, not overshoot it"
+        );
+        assert_eq!(
+            next_backoff(BACKOFF_MAX),
+            BACKOFF_MAX,
+            "the cap does not creep upward under its own repeated input"
         );
     }
 }

@@ -138,6 +138,16 @@ mod tests {
         // plugin's logical build fail rather than its startup.
         let t = Table::embedded();
         assert!(t.stations.len() > 300, "four brands, {} stations", t.stations.len());
+        // The loose count above would still pass if a whole brand vanished —
+        // Chérie FM is exactly the brand the generator's own history says can
+        // silently drop out (see `scripts/fetch-stations.mjs`'s handling of
+        // its 403). Each brand must appear at least once.
+        for brand in ["nrj", "nostalgie", "cheriefm", "rireetchansons"] {
+            assert!(
+                t.stations.iter().any(|s| s.brand == brand),
+                "brand {brand:?} is entirely missing from the embedded table"
+            );
+        }
         let mut ids = std::collections::HashSet::new();
         let mut tokens = std::collections::HashSet::new();
         for s in &t.stations {
