@@ -18,7 +18,7 @@ use rand::seq::SliceRandom;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
-use ritornello_plugin_files::roots::Roots;
+use ritornello_plugin_files::roots::{RootKind, Roots};
 use ritornello_plugin_files::FILES_EN;
 use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
 use ritornello_proto::{Preset, SourceAction};
@@ -81,6 +81,46 @@ impl Order {
                 order
             }
         }
+    }
+}
+
+/// What `arm_cover`'s per-directory memo says about a folder.
+///
+/// **Three named states and not two nested `Option`s.** `NotProbed` is the one
+/// that matters: a share that timed out stores nothing, and reading "unknown"
+/// as "no image" would archive over a cover nobody has looked for. Written
+/// `Option<Option<CoverRef>>`, that distinction is one missing `.flatten()`
+/// away from disappearing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `NotProbed` echoing the enum's own name is exactly the point: it names the
+// one state the whole type exists to keep distinct from the other two (see
+// above), and clippy has no way to know that the repetition is deliberate.
+#[allow(clippy::enum_variant_names)]
+enum Probed {
+    NotProbed,
+    NoImage,
+    Image,
+}
+
+/// Should this Source offer to keep a network cover for `file`?
+///
+/// A free function, and not a method: it is a decision over three values, so
+/// it is provable without a `FilesSource`, without a channel and without a
+/// clock.
+fn offers_archive(roots: &Roots, file: &Path, probed: Probed) -> bool {
+    if probed != Probed::NoImage {
+        return false;
+    }
+    let Some(root) = roots.root_of(file) else { return false };
+    if !root.archive_covers {
+        return false;
+    }
+    // `writable` gates the cifs mount options, so it only means something for
+    // a share. A local root is writable or not according to its filesystem,
+    // which answers at write time (and is refused with a line in the journal).
+    match root.kind {
+        RootKind::Smb => root.writable,
+        RootKind::Local => true,
     }
 }
 
@@ -224,6 +264,22 @@ struct FilesSource {
     /// indefinitely (see `health`): without this bound, a sleeping NAS would
     /// freeze the probe task above indefinitely.
     health: Arc<ritornello_plugin_files::health::Health>,
+    /// The roots table, shared with the Admin half, which is the only writer.
+    ///
+    /// Consulted by `poll_notification` alone, through `offers_archive`, to
+    /// learn whether the root that owns the current file welcomes a network
+    /// cover (`archive_covers`, and for a share, `writable`). Nothing here
+    /// ever touches a filesystem: `offers_archive` reads this table and the
+    /// `cover_by_dir` memo, never a directory.
+    roots: Arc<AsyncRwLock<Roots>>,
+    /// The file whose identity was last declared, set at the top of
+    /// `arm_cover` regardless of which of its three branches is taken.
+    ///
+    /// `poll_notification` needs it once the probe answers, to resolve which
+    /// root — hence which `archive_covers` — the offer would be about: the
+    /// `path` local of the probe itself lives only inside the spawned task,
+    /// and is gone by the time its result reaches us.
+    current_file: Option<PathBuf>,
 }
 
 impl FilesSource {
@@ -326,6 +382,10 @@ impl FilesSource {
     /// terminal for the SDK — an `Err` from the receiver as well as an
     /// `Ok(None)` both fall through to the rest of the function.
     fn arm_cover(&mut self, file: &Path) {
+        // Set unconditionally, ahead of the three branches below: whichever
+        // one answers, `poll_notification` must find here the file this
+        // very call was about (see the field's doc).
+        self.current_file = Some(file.to_path_buf());
         // A fresh receiver replaces the one of a probe still in flight: this is
         // what discards the cover of a track already left (see the doc of
         // `cover_in_flight`).
@@ -835,17 +895,50 @@ impl SourcePlugin for FilesSource {
             // the guarantee above true: as long as no answer has arrived, the
             // field stays in place for the next round.
             self.cover_in_flight = None;
-            // Two distinct failures meet here without any difference: `Err`
-            // (the task vanished without answering, for instance if it
-            // panicked) and an `Ok(None)` (the circuit breaker said "we don't
-            // know", or the lookup itself said "nothing certain"). In every
-            // case, there is nothing to announce — above all not an empty
-            // notification, and above all not `None`, which is terminal for
-            // the SDK (see the comment on `preset_count_rx` just below). We
-            // simply fall through to the rest of the function, which waits for
-            // the next event.
-            if let Ok(Some(cover)) = result {
-                return Some(Notification::new().cover(cover));
+            // `Err` (the task vanished without answering) and `Ok(None)` (the
+            // circuit breaker said "we don't know", or the lookup itself said
+            // "nothing certain") both mean "no cover to announce", but they no
+            // longer mean "nothing at all to say": a folder the memo confirms
+            // was probed and holds no image may still be worth an offer to
+            // archive one. The channel cannot tell that case apart from a
+            // share that timed out — both send `None` — so this reads the
+            // `cover_by_dir` memo instead, which is where `arm_cover` records
+            // the difference (see `Probed`'s doc).
+            //
+            // `self.cover_by_dir.lock()` and `self.current_file` are both read
+            // here, in their own statement: the `std::sync::MutexGuard` this
+            // produces is not `Send`, and `self.roots.read().await` a few
+            // lines below is a suspension point. Computing `probed` first lets
+            // the guard drop at the end of this statement, before that await.
+            let probed = match &result {
+                Ok(Some(_)) => Probed::Image,
+                _ => match (&self.current_file, &*self.cover_by_dir.lock().unwrap()) {
+                    (Some(file), Some((dir, None))) if file.parent() == Some(dir.as_path()) => {
+                        Probed::NoImage
+                    }
+                    _ => Probed::NotProbed,
+                },
+            };
+            let mut n = Notification::new();
+            if let Ok(Some(cover)) = &result {
+                n = n.cover(cover.clone());
+            }
+            let offer = match &self.current_file {
+                Some(file) => offers_archive(&*self.roots.read().await, file, probed),
+                None => false,
+            };
+            if offer {
+                n = n.cover_archivable(true);
+            }
+            // A frame carrying neither a cover nor an offer says nothing, and
+            // the SDK's "interesting frame" predicate would drop it anyway:
+            // returning it would only cost a wake-up. Above all not `None`
+            // here either way — that is terminal for the SDK (see the comment
+            // on `preset_count_rx` just below) — so a frame with nothing to
+            // say simply falls through to the rest of the function, which
+            // waits for the next event.
+            if matches!(result, Ok(Some(_))) || offer {
+                return Some(n);
             }
         }
         let Some(rx) = &mut self.preset_count_rx else {
@@ -1041,6 +1134,10 @@ async fn main() -> Result<()> {
         cover_in_flight: None,
         cover_by_dir: Arc::new(Mutex::new(None)),
         health: health.clone(),
+        // Cloned, not moved: `admin` below takes the table itself, and the
+        // Source only ever reads it (see the field's doc).
+        roots: roots.clone(),
+        current_file: None,
     };
 
     // Probed at startup rather than on use: the page must be able to grey out
@@ -1089,7 +1186,95 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ritornello_plugin_files::roots::Root;
     use ritornello_proto::IdentityUpdate;
+
+    /// An SMB root on `share`, with every field a `Root` must carry filled in
+    /// with an otherwise-inert value — callers override only what their test
+    /// cares about with `..smb_root(share)`.
+    ///
+    /// **Deliberately no `subpath`**: the sibling helper in `roots.rs` sets one
+    /// ("Albums"), which is exactly wrong here — these tests build a file path
+    /// under the root's plain mount point (`/mnt/ritornello/<name>/…`), and a
+    /// subpath would make `base_dir()` a component longer than that, so
+    /// `root_of` would no longer see the file as owned by this root.
+    fn smb_root(share: &str) -> Root {
+        Root {
+            name: "nas".into(),
+            kind: RootKind::Smb,
+            path: None,
+            host: "192.168.1.20".into(),
+            share: share.into(),
+            subpath: None,
+            user: "steven".into(),
+            domain: String::new(),
+            writable: false,
+            archive_covers: false,
+        }
+    }
+
+    #[test]
+    fn an_offer_is_made_only_for_a_probed_folder_without_an_image() {
+        let dir = std::path::Path::new("/mnt/ritornello/nas/Album");
+        let file = dir.join("01.flac");
+        let table = Roots {
+            root: vec![Root {
+                name: "nas".into(),
+                archive_covers: true,
+                writable: true,
+                ..smb_root("musique")
+            }],
+        };
+
+        // Probed, nothing found: the one case that deserves an offer.
+        assert!(offers_archive(&table, &file, Probed::NoImage));
+
+        // A cover was found: there is nothing to archive.
+        assert!(!offers_archive(&table, &file, Probed::Image));
+
+        // **Not probed at all** — a share that did not answer in time stores
+        // nothing. "Unknown" must never read as "no cover": offering here
+        // would archive over an image nobody has looked for. Three named
+        // states rather than two nested `Option`s, precisely because this is
+        // the distinction this whole feature turns on.
+        assert!(!offers_archive(&table, &file, Probed::NotProbed));
+    }
+
+    #[test]
+    fn an_offer_needs_the_flag_and_a_writable_share() {
+        let file = std::path::Path::new("/mnt/ritornello/nas/Album/01.flac");
+        let base = Root { name: "nas".into(), ..smb_root("musique") };
+
+        // The flag off: no offer, whatever the mount says.
+        let off = Roots { root: vec![Root { writable: true, ..base.clone() }] };
+        assert!(!offers_archive(&off, file, Probed::NoImage));
+
+        // The flag on but the share read-only: no offer. The control is
+        // greyed in the page, but a table edited by hand must not slip past.
+        let ro = Roots { root: vec![Root { archive_covers: true, ..base.clone() }] };
+        assert!(!offers_archive(&ro, file, Probed::NoImage));
+
+        // A **local** root has no read-only mount to speak of: the flag alone
+        // decides, and the filesystem has the last word at write time.
+        let local = Roots {
+            root: vec![Root {
+                name: "usb".into(),
+                kind: RootKind::Local,
+                path: Some("/media/usb".into()),
+                archive_covers: true,
+                writable: false,
+                ..base
+            }],
+        };
+        let on_usb = std::path::Path::new("/media/usb/Album/01.flac");
+        assert!(offers_archive(&local, on_usb, Probed::NoImage));
+    }
+
+    #[test]
+    fn a_path_owned_by_no_root_is_never_offered() {
+        let table = Roots { root: vec![] };
+        assert!(!offers_archive(&table, std::path::Path::new("/tmp/x/01.flac"), Probed::NoImage));
+    }
 
     /// Builds a test `Metadata` for a (target, level) pair.
     ///
@@ -1171,6 +1356,8 @@ mod tests {
             cover_in_flight: None,
             cover_by_dir: Arc::new(Mutex::new(None)),
             health: Arc::new(ritornello_plugin_files::health::Health::new()),
+            roots: Arc::new(AsyncRwLock::new(Roots::default())),
+            current_file: None,
         }
     }
 
