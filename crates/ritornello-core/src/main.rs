@@ -473,6 +473,34 @@ async fn hotplug<P: player::Player>(
         tracing::warn!("late announcement from unknown plugin {name}, ignored");
         return;
     }
+    // Same rule as at the startup rendezvous, at the second and last door an
+    // announcement can come through. A check placed only in `gather` would
+    // leave this one open, and nothing at startup would reveal it — a plugin
+    // relaunched by hand a month later is exactly the case that matters.
+    if announcement.protocol != ritornello_proto::PROTOCOL_VERSION {
+        tracing::error!(
+            "{} speaks protocol {} and this core speaks {}: refused",
+            name,
+            announcement.protocol,
+            ritornello_proto::PROTOCOL_VERSION
+        );
+        // A previously wired incarnation must go: the binary on disk was
+        // replaced by an incompatible one, and keeping the old wiring would
+        // show a plugin that works while the installed file does not.
+        gathered.announcements.remove(&name);
+        gathered.stalled.retain(|n| n != &name);
+        gathered.dead.retain(|n| n != &name);
+        gathered.incompatible.insert(name.clone(), announcement.protocol);
+        core.set_metadata_order(register::metadata_order(&children.manifest_order, gathered));
+        // Nothing is persisted: this is a refusal to run, not the `disabled`
+        // switch. `enabled = false` written here would keep the plugin off
+        // even after a matching binary was installed, and the fix would look
+        // like it had not worked. `hotplug` has no manifest path to write to
+        // in the first place: the persistence lives in the HTTP layer, in
+        // `PluginsControl.manifest`, out of reach from here — structurally,
+        // not just by choice.
+        return;
+    }
     tracing::info!(
         "{name} announced late {:?} (admin: {}), wiring it now",
         announcement.kinds,
@@ -1777,6 +1805,10 @@ async fn main() -> Result<()> {
                 let wiring = wirings.entry(announcement.name.clone()).or_insert(0);
                 *wiring += 1;
                 let wiring = *wiring;
+                // Captured before the call: `hotplug` consumes the
+                // `Announcement`, and this is the only handle left on its
+                // name afterwards.
+                let refused_name = announcement.name.clone();
                 hotplug(
                     announcement,
                     &hot_children,
@@ -1787,6 +1819,23 @@ async fn main() -> Result<()> {
                     wiring,
                 )
                 .await;
+                // The refusal happened inside `hotplug`, which only holds a
+                // shared reference to the kill triggers. Stopping the process
+                // needs ownership, so it happens here — the same idiom as
+                // `hot_unplug`, and for the same reason: a refused plugin that
+                // stays alive holds its sockets and its memory for nothing.
+                if gathered.incompatible.contains_key(&refused_name) {
+                    match liveness(&refused_name, &kill_triggers, &non_supervised) {
+                        Liveness::OutOfReach => tracing::warn!(
+                            "{refused_name} speaks another protocol but the core does not own its process, so it cannot be stopped — kill it yourself"
+                        ),
+                        _ => {
+                            if let Some(tx) = kill_triggers.remove(&refused_name) {
+                                let _ = tx.send(());
+                            }
+                        }
+                    }
+                }
                 status_state.write().await.active_source = core.active_source().to_string();
             }
             // A plugin's socket has closed. **This is what makes the death
@@ -2562,6 +2611,54 @@ mod toggle_tests {
         let mut b = bench();
         assert!(turn_off(&mut b).await);
         assert!(line(&b).await.disabled);
+    }
+
+    #[tokio::test]
+    async fn a_late_announcement_with_a_foreign_protocol_is_refused_and_unwires_the_old_one() {
+        // The hot path, not the startup one: a plugin restarted by hand
+        // announces on the same socket long after `gather` returned. A check
+        // placed only in `gather` would leave this door open, and nothing at
+        // startup would reveal it.
+        //
+        // The bench starts with mpd ALREADY announced and wired, which is what
+        // makes this test worth writing: the binary on disk has just been
+        // replaced by an incompatible one, so the previous wiring must go. A
+        // core that kept it would show a working plugin while the installed
+        // file cannot work.
+        let mut b = bench();
+        assert!(b.gathered.announcements.contains_key("mpd"), "bench precondition");
+
+        let foreign = ritornello_proto::PROTOCOL_VERSION + 1;
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: foreign,
+            version: Some("0.2.0".into()),
+        };
+
+        hotplug(
+            a,
+            &b.children,
+            &mut b.core,
+            &mut b.gathered,
+            &b.kill_triggers,
+            &mut b.non_supervised,
+            1,
+        )
+        .await;
+
+        assert!(
+            !b.gathered.announcements.contains_key("mpd"),
+            "the stale wiring of the previous incarnation must be dropped"
+        );
+        assert_eq!(
+            b.gathered.incompatible.get("mpd"),
+            Some(&foreign),
+            "the refusal must carry the number, otherwise the screen cannot say why"
+        );
     }
 }
 
