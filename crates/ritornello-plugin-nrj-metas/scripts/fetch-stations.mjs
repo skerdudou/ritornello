@@ -28,6 +28,14 @@
 // the table (cheriefm) with no error, since the other three brands would
 // keep working.
 //
+// This does NOT extend to the plugin's own runtime path. Measured
+// separately: `reqwest` + `rustls`, with the plugin's exact runtime
+// User-Agent, gets 200 from all four brands, cheriefm included, and all
+// four bodies parsed — so `live::follows` keeps using `reqwest` rather than
+// also shelling out to `curl`. Only this generation script needs the
+// external binary; record this here so a later reader does not re-open the
+// question against the wrong client.
+//
 // Why this table is embedded rather than fetched at boot: a device that starts
 // unattended must not depend on a third party's page to recognize its
 // stations, and such a failure would be silent.

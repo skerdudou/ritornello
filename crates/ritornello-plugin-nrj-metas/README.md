@@ -125,6 +125,13 @@ bounded at twenty MusicBrainz requests, ever, per NRJ station, whether or not
 existing anchoring rule already absorbs a station whose ICY never carries a
 real title.
 
+**Upgrading an existing installation.** `deploy/deploy.sh` only ever appends
+a missing plugin's block to an existing `/etc/ritornello/plugins.toml`, at
+the end of the file (see [docs/plugins.md](../../docs/plugins.md)). On a
+device already in service, that lands `nrj-metas` *after* `musicbrainz`,
+the opposite of the order this section relies on — move the appended block
+above `musicbrainz` by hand.
+
 ## Regenerating the table
 
     node crates/ritornello-plugin-nrj-metas/scripts/fetch-stations.mjs

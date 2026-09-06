@@ -1695,6 +1695,11 @@ end, hence last to break a tie should one ever arise; since the three
 answer for disjoint content, that costs nothing. Reorder the blocks by
 hand if you add a plugin that overlaps one of them.
 
+`nrj-metas` is exactly such a plugin: it must be declared **before**
+`musicbrainz` (see its own README), but an appended block always lands at
+the end of the file, after `musicbrainz`. On a device already in service,
+move it above `musicbrainz` by hand once the deployment has completed it.
+
 A `plugins.toml` completed by an older version of the script, which only
 ever provisioned the file, is brought up to date by the next deployment
 without anything being lost: the entries already there are not touched.
