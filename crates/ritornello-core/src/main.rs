@@ -559,6 +559,13 @@ async fn hotplug<P: player::Player>(
     // reader.
     gathered.stalled.retain(|n| n != &name);
     gathered.dead.retain(|n| n != &name);
+    // This plugin has just announced a protocol we speak, so any record of a
+    // past incompatibility is stale — and stale here is expensive twice over:
+    // the call site reads this map to decide whether to stop the process it
+    // just wired, and the configuration page builds its "incompatible" line
+    // from it. Without this, a plugin fixed by installing a matching binary
+    // would be killed on sight and shown as broken while it works.
+    gathered.incompatible.remove(&name);
     gathered.announcements.insert(name.clone(), announcement.clone());
     core.set_metadata_order(register::metadata_order(&children.manifest_order, gathered));
 
@@ -1824,6 +1831,13 @@ async fn main() -> Result<()> {
                 // needs ownership, so it happens here — the same idiom as
                 // `hot_unplug`, and for the same reason: a refused plugin that
                 // stays alive holds its sockets and its memory for nothing.
+                //
+                // `contains_key` is only trustworthy as "this exact
+                // announcement was just refused" because `hotplug`'s accepted
+                // path removes the name from `incompatible` the instant a
+                // matching protocol is wired. The two lines are coupled:
+                // without that removal, a plugin fixed by a matching binary
+                // would still read as refused here and be killed on sight.
                 if gathered.incompatible.contains_key(&refused_name) {
                     match liveness(&refused_name, &kill_triggers, &non_supervised) {
                         Liveness::OutOfReach => tracing::warn!(
@@ -2658,6 +2672,48 @@ mod toggle_tests {
             b.gathered.incompatible.get("mpd"),
             Some(&foreign),
             "the refusal must carry the number, otherwise the screen cannot say why"
+        );
+    }
+
+    /// The recovery half of the same guarantee. `incompatible` is written by
+    /// the refusal branch and by nothing else in `hotplug` — nothing clears
+    /// it on its own. If a matching announcement did not remove the stale
+    /// entry, the call site in `main`'s `select!` would read it as "just
+    /// refused" and kill the very process this call just wired: fixed once,
+    /// killed forever.
+    #[tokio::test]
+    async fn a_plugin_that_comes_back_with_a_matching_protocol_stops_being_incompatible() {
+        let mut b = bench();
+        b.gathered.incompatible.insert("mpd".to_string(), ritornello_proto::PROTOCOL_VERSION + 1);
+
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: Some("0.3.0".into()),
+        };
+
+        hotplug(
+            a,
+            &b.children,
+            &mut b.core,
+            &mut b.gathered,
+            &b.kill_triggers,
+            &mut b.non_supervised,
+            1,
+        )
+        .await;
+
+        assert!(
+            !b.gathered.incompatible.contains_key("mpd"),
+            "a past incompatibility must not survive a matching re-announcement"
+        );
+        assert!(
+            b.gathered.announcements.contains_key("mpd"),
+            "the matching announcement must be wired"
         );
     }
 }
