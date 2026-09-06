@@ -30,6 +30,17 @@ each plugin travel beside the tree, to be copied by hand.
 
 Replacing a single plugin is the same two commands with that plugin's archive.
 
+The `files` plugin brings a unit of its own. After installing
+`ritornello-plugin-files` (or the bundle) for the first time:
+
+```sh
+sudo systemctl enable ritornello-media-mount.service
+```
+
+Enabled, **not** started: what it is enabled for is machine boot, where it
+reconciles the declared network shares. Skip it and declared shares silently
+stop being mounted after a reboot.
+
 ## Architectures
 
 - `armv7` — Raspberry Pi 2 and similar, the reference hardware.

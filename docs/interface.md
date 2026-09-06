@@ -1070,7 +1070,7 @@ set of keys stays stable:
   "uptime_s": 84213, "service_uptime_s": 3600,
   "hostname": "ritornello", "ip": "192.168.1.20",
   "os": "Debian GNU/Linux 12 (bookworm)", "kernel": "6.6.51+rpt-rpi-v7",
-  "version": "0.1.0", "can_power_off": true, "can_reboot": true,
+  "version": "0.2.0", "can_power_off": true, "can_reboot": true,
   "logind_reachable": true,
   "cpu_total_jiffies": 9880976, "cpu_idle_jiffies": 9877777
 }

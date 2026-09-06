@@ -61,8 +61,22 @@ over SSH and remains the development path (see [Deploying](#deploying)
 below); a release archive is for putting a specific tagged version onto a
 device with no build toolchain at all.
 
-The common case — the core and every plugin, from a fresh download — is the
-recipe each release's own notes repeat with its actual version filled in:
+**This is an upgrade path, not a fresh install.** The archives carry
+binaries, units, polkit rules and language packs — nothing else. They do not
+create the `ritornello` system user, install `mpv`/`cd-discid`/`eject`/
+`cifs-utils`, create `/var/lib/ritornello`, `/mnt/ritornello` or
+`/etc/ritornello/media-credentials`, nor enable any unit. Extracting them
+onto a virgin machine leaves a device that cannot start, and the very first
+command below (`chown -R ritornello:`) fails outright for want of that user.
+Prepare the device once as [Example: Raspberry Pi 2](#example-raspberry-pi-2)
+describes — the packages, the audio, then a first `deploy.sh` that provisions
+`/etc/ritornello`, creates the user and enables the units — and use release
+archives from then on.
+
+The common case — the core and every plugin, from a fresh download. The
+release's own notes carry the same recipe; since the release is published as
+a **draft**, whoever reviews it can fill `<version>` and `<arch>` in before
+publishing, and the template ships them as placeholders:
 
     sha256sum -c SHA256SUMS --ignore-missing
     sudo tar --no-same-owner -C / -xzf ritornello-core-<version>-<arch>.tar.gz
@@ -83,6 +97,18 @@ a non-root uid is a local privilege escalation. The same reasoning covers
 
 Replacing a single plugin (an upgrade, or a fix confined to one binary) is
 the same two commands with that plugin's own archive in place of the bundle.
+
+One plugin needs a unit enabled by hand the first time it is installed from
+an archive — `files`, whose archive carries
+`ritornello-media-mount.service`:
+
+    sudo systemctl enable ritornello-media-mount.service
+
+Enabled, **not** started: what it is enabled for is machine boot, where it
+reconciles the declared network shares (see [Network
+shares](#network-shares)). `deploy.sh` does this for you; an archive cannot,
+so a `files` plugin installed from a release and never enabled this way stops
+reconciling shares at the next reboot, in silence.
 
 **Why a blind `sudo tar -C /` cannot clobber a configuration.** Each
 archive's tree holds files only at the exact path they occupy on the
