@@ -15,6 +15,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# The floor, so that the one escalation below is a real one. Without this
+# block every job would inherit the repository's default token permissions —
+# read/write-all on many repositories — and `release`, which runs
+# `cargo install cross` and `cross build` (arbitrary build scripts, on a tag
+# push), would hold a token that can write to the repository for no reason.
+permissions:
+  contents: read
+
 jobs:
   web:
     name: Web UI (build, typecheck, vitest)
@@ -125,10 +133,17 @@ jobs:
         # Without this, v0.3.0 pushed on a workspace still at 0.2.0 would
         # produce 33 archives named after a version nothing carries — and the
         # mistake would only surface on a device.
+        #
+        # The tag travels through the environment rather than being spliced
+        # into the script: `${{ }}` is substituted before the shell parses the
+        # line, so a ref name is shell text, while "$TAG" is one word whatever
+        # it contains.
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          [ "v$v" = "${{ github.ref_name }}" ] \
-            || { echo "tag ${{ github.ref_name }} != workspace version $v" >&2; exit 1; }
+          [ "v$v" = "$TAG" ] \
+            || { echo "tag $TAG != workspace version $v" >&2; exit 1; }
       - run: cargo install cross --locked
       - run: cross build --release --workspace --target ${{ matrix.target }}
       - run: ./scripts/package-release.sh ${{ matrix.target }} ${{ matrix.arch }}
@@ -160,11 +175,15 @@ jobs:
         # installs from them — that is where "Nothing to do" or "Action
         # required" is decided. `gh` ships on the runner, so no third-party
         # action is involved in the one step that holds write permission.
+        #
+        # `TAG` through the environment, for the same reason as in `release`:
+        # a ref name spliced into the script by `${{ }}` becomes shell text.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release create "${{ github.ref_name }}" \
+          gh release create "$TAG" \
             --draft \
-            --title "${{ github.ref_name }}" \
+            --title "$TAG" \
             --notes-file .github/release-notes-template.md \
             assets/*
