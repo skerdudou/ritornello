@@ -217,7 +217,7 @@ pub async fn query(client: &reqwest::Client, brand: &str, id: u32) -> Result<Met
 }
 
 /// Next backoff after a failure, given the current backoff.
-pub fn next_backoff(backoff: Duration) -> Duration {
+fn next_backoff(backoff: Duration) -> Duration {
     (backoff * 2).min(BACKOFF_MAX)
 }
 
@@ -232,6 +232,37 @@ pub fn next_backoff(backoff: Duration) -> Duration {
 /// one display write and one SSE frame per station, silently.
 fn without_ends_at(meta: &Meta) -> Meta {
     Meta { ends_at: None, ..meta.clone() }
+}
+
+/// What to do with a fresh reading, given the last one emitted and how many
+/// retries have already been spent waiting for the JSON to catch up.
+///
+/// Extracted so decision 1 (the `ends_at`-blind comparison) and the retry
+/// ladder are both provable without a clock or a socket: a regression on
+/// either — comparing whole `Meta`s again, or losing the ladder — would fail
+/// a test here rather than only show up as a silent re-emission in
+/// production.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// A genuinely new item: emit it.
+    Emit,
+    /// The server has not caught up yet: wait this long, then ask again.
+    Retry(Duration),
+    /// The server never caught up within the ladder: stop asking until the
+    /// next poke or the safety net.
+    GiveUp,
+}
+
+fn verdict(last_seen: Option<&Meta>, fresh: &Meta, attempt: usize) -> Verdict {
+    if last_seen.map(without_ends_at) != Some(without_ends_at(fresh)) {
+        return Verdict::Emit;
+    }
+    // The server has not caught up yet: measured, it can be a full minute
+    // behind the stream.
+    match RETRIES.get(attempt) {
+        Some(delay) => Verdict::Retry(*delay),
+        None => Verdict::GiveUp,
+    }
 }
 
 /// How long to sleep before the safety net fires, given the announced
@@ -264,6 +295,12 @@ fn net_delay(ends_at: Option<f64>) -> Duration {
 /// The rhythm therefore comes from `poke`, fed by the core's ICY cart code
 /// (see `main`'s `now_playing`), with the announced deadline kept only as a
 /// safety net for a station whose cart code stops moving.
+///
+/// **A query failure sets the next wait to the backoff, not to the safety
+/// net.** Falling through to `net_delay` on error would strand a station
+/// behind a transient blip for up to `NET_MAX` (15 min) — and for a station
+/// whose cart code never moves, the net is the *only* thing that would ever
+/// wake it up again, so a poke could not rescue it either.
 pub async fn follows(
     brand: String,
     id: u32,
@@ -305,41 +342,47 @@ pub async fn follows(
             }
         }
         let mut attempt = 0usize;
-        let ends_at = loop {
+        // The inner loop resolves directly to the next `wait`, so an error
+        // and a give-up both set it explicitly rather than falling through
+        // to a shared `net_delay(ends_at)` line that an error path could
+        // silently reuse.
+        wait = loop {
             match query(&client, &brand, id).await {
                 Ok(meta) => {
                     backoff = BACKOFF_BASE;
-                    let ends_at = meta.ends_at;
-                    if last_seen.as_ref().map(without_ends_at) == Some(without_ends_at(&meta)) {
-                        // The server has not caught up yet: measured, it can
-                        // be a full minute behind the stream.
-                        if let Some(delay) = RETRIES.get(attempt) {
+                    match verdict(last_seen.as_ref(), &meta, attempt) {
+                        Verdict::Retry(delay) => {
                             attempt += 1;
-                            tokio::time::sleep(*delay).await;
+                            tokio::time::sleep(delay).await;
                             continue;
                         }
-                        break ends_at;
+                        Verdict::GiveUp => break net_delay(meta.ends_at),
+                        Verdict::Emit => {
+                            let ends_at = meta.ends_at;
+                            last_seen = Some(meta.clone());
+                            if tx.send((id, meta)).await.is_err() {
+                                return;
+                            }
+                            break net_delay(ends_at);
+                        }
                     }
-                    last_seen = Some(meta.clone());
-                    if tx.send((id, meta)).await.is_err() {
-                        return;
-                    }
-                    break ends_at;
                 }
                 Err(e) => {
                     // Every failure is logged: without that, a station that
                     // stops answering would leave no trace in `/api/logs` and
                     // nobody would ever see anything.
                     tracing::info!("metadata query failed for station {id} ({brand}): {e}");
-                    tokio::time::sleep(backoff).await;
+                    // No sleep here: the current `backoff` becomes the next
+                    // `wait`, which the debounce loop at the top already
+                    // turns into a wait via `timeout(wait, poke.recv())` — a
+                    // poke still pre-empts it, exactly like the safety net's
+                    // wait does. Sleeping here too would double the delay.
+                    let this_backoff = backoff;
                     backoff = next_backoff(backoff);
-                    break None;
+                    break this_backoff;
                 }
             }
         };
-        // The safety net: without a poke, wake up past the announced deadline.
-        // On a station whose cart code moves, a poke always comes first.
-        wait = net_delay(ends_at);
     }
 }
 
@@ -532,6 +575,41 @@ mod tests {
         let b = Meta { title: Some("X".into()), ends_at: Some(100.735), ..Default::default() };
         assert_ne!(a, b, "whole-Meta equality still sees the drift");
         assert_eq!(without_ends_at(&a), without_ends_at(&b), "but the filtered form does not");
+    }
+
+    /// The pure decision behind `follows`'s inner loop, covering both
+    /// decision 1 (the `ends_at`-blind comparison) and the retry ladder,
+    /// without a clock or a socket. A regression on either — comparing whole
+    /// `Meta`s again, or losing the ladder — fails here rather than only
+    /// showing up as a silent re-emission or an inert backoff in production.
+    #[test]
+    fn a_first_reading_is_always_emitted() {
+        let fresh = Meta { title: Some("X".into()), ends_at: Some(100.0), ..Default::default() };
+        assert_eq!(verdict(None, &fresh, 0), Verdict::Emit);
+    }
+
+    #[test]
+    fn a_genuinely_different_reading_is_emitted() {
+        let last = Meta { title: Some("X".into()), ends_at: Some(100.0), ..Default::default() };
+        let fresh = Meta { title: Some("Y".into()), ends_at: Some(200.0), ..Default::default() };
+        assert_eq!(verdict(Some(&last), &fresh, 0), Verdict::Emit);
+    }
+
+    #[test]
+    fn the_same_reading_up_to_ends_at_drift_is_retried_then_given_up_on() {
+        // `ends_at` alone differing must NOT count as "genuinely different":
+        // this is the property decision 1 exists for. Comparing whole
+        // `Meta`s here (a regression) would make this assert `Verdict::Emit`
+        // instead, re-emitting the same track on every safety-net wake-up.
+        let last = Meta { title: Some("X".into()), ends_at: Some(100.0), ..Default::default() };
+        let fresh = Meta { title: Some("X".into()), ends_at: Some(100.735), ..Default::default() };
+        assert_eq!(verdict(Some(&last), &fresh, 0), Verdict::Retry(Duration::from_secs(10)));
+        assert_eq!(verdict(Some(&last), &fresh, 1), Verdict::Retry(Duration::from_secs(20)));
+        assert_eq!(verdict(Some(&last), &fresh, 2), Verdict::Retry(Duration::from_secs(40)));
+        // The ladder has three rungs: past it, we stop asking rather than
+        // keep retrying forever.
+        assert_eq!(verdict(Some(&last), &fresh, 3), Verdict::GiveUp);
+        assert_eq!(verdict(Some(&last), &fresh, 100), Verdict::GiveUp);
     }
 
     #[test]

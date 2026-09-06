@@ -50,6 +50,21 @@ fn stream_url(identity: &Value) -> Option<&str> {
     (!url.trim().is_empty()).then_some(url)
 }
 
+/// Whether a fresh cart code should poke the tracking task.
+///
+/// Extracted as a pure function so the created-task guard is provable
+/// without ever spawning `live::follows`: `just_created` is true only the
+/// very first time a task is created for a station, and a task in that state
+/// already queries immediately on its own (`live::follows`'s
+/// `wait = Duration::ZERO`) — poking it at that same instant would only push
+/// that first query out by `DEBOUNCE`, reintroducing the very blank the
+/// immediate query exists to remove. Otherwise: only a genuine **change**
+/// is worth a poke, since Icecast repeats the same cart code throughout an
+/// item.
+fn should_poke(just_created: bool, code: &Option<String>, last_code: &Option<String>) -> bool {
+    !just_created && code.is_some() && code != last_code
+}
+
 /// The station being followed, and the two handles onto its task.
 struct Tracked {
     id: u32,
@@ -128,22 +143,10 @@ impl MetadataPlugin for NrjMetas {
                 tracing::debug!("station recognized: {label} ({brand}, id {id})");
                 self.identity = np.identity;
                 let just_created = self.follows(brand, id);
-                // The cart code says *when*. Only a change is worth a poke:
-                // Icecast repeats the same header throughout an item. And
-                // never on the very first recognition of a station: the task
-                // already queries immediately on its own, and a poke queued
-                // at that moment would only push that first query out by
-                // `DEBOUNCE`, reintroducing the blank the immediate query
-                // exists to remove.
+                // The cart code says *when*: see `should_poke` for the guard
+                // against the very first recognition of a station.
                 let code = np.known.stream_title;
-                if just_created {
-                    // Record without poking: a fresh task already queries
-                    // immediately on its own (see `live::follows`), so a poke
-                    // queued at this same moment would only push that first
-                    // query out by `DEBOUNCE` — reintroducing the very blank
-                    // the immediate query exists to remove.
-                    self.last_code = code;
-                } else if code.is_some() && code != self.last_code {
+                if should_poke(just_created, &code, &self.last_code) {
                     self.last_code = code;
                     if let Some(t) = &self.tracked {
                         // `try_send`: a full channel already carries a poke,
@@ -151,6 +154,12 @@ impl MetadataPlugin for NrjMetas {
                         // delay the core.
                         let _ = t.poke.try_send(());
                     }
+                } else if just_created {
+                    // Record without poking: `should_poke` always refuses on
+                    // a fresh task, but the code still needs to be recorded
+                    // so the next call can tell a genuine change from a
+                    // repeat.
+                    self.last_code = code;
                 }
             }
             None => {
@@ -292,11 +301,19 @@ mod tests {
     async fn a_track_change_on_the_same_station_keeps_the_task() {
         // Restarting it would lose the "last seen" that keeps the same track
         // from being re-emitted, and would query a third party for nothing.
+        //
+        // The assertion is on the **task's** identity (`JoinHandle::id()`),
+        // not the station id: the station id is the same before and after by
+        // construction (`URL` resolves to `ID` both times), so asserting on
+        // it alone could not catch `follows` losing its early return and
+        // respawning on every frame — this is what the sibling crate checks
+        // too (`radiofrance-metas/src/main.rs`).
         let mut p = following_plugin(ID);
         p.now_playing(now_playing_with(URL, Some("DD25-19 - DD25-19"))).await;
-        let first = p.tracked.as_ref().map(|t| t.id);
+        let before = p.tracked.as_ref().map(|t| (t.id, t.task.id()));
         p.now_playing(now_playing_with(URL, Some("NGV4-14 - NGV4-14"))).await;
-        assert_eq!(p.tracked.as_ref().map(|t| t.id), first, "same task kept");
+        let after = p.tracked.as_ref().map(|t| (t.id, t.task.id()));
+        assert_eq!(before, after, "same task kept");
     }
 
     #[tokio::test]
@@ -327,18 +344,44 @@ mod tests {
         assert!(poke_rx.try_recv().is_err(), "nothing to relay");
     }
 
-    #[tokio::test]
-    async fn the_first_recognition_of_a_station_does_not_poke_the_fresh_task() {
+    // `should_poke` is tested directly and in isolation rather than through
+    // `now_playing`: driving `just_created = true` through `now_playing`
+    // would require `self.tracked` to start `None`, which makes
+    // `NrjMetas::follows` spawn the *real* `live::follows` — a live HTTP call
+    // to a third party from CI. No test in this module may reach
+    // `live::follows`.
+    #[test]
+    fn a_fresh_task_is_never_poked_regardless_of_the_code() {
         // `follows` in `live.rs` already queries immediately on a brand new
         // task. A poke queued at the same moment would only push that first
         // query out by DEBOUNCE, reintroducing the very blank the immediate
         // query exists to remove.
-        let mut p = NrjMetas::new(Table::embedded());
-        p.now_playing(now_playing_with(URL, Some("DD25-19 - DD25-19"))).await;
-        let poke = &p.tracked.as_ref().unwrap().poke;
-        // The channel has capacity 1 and nothing has drained it: if a poke had
-        // been sent, it would be full and this second send would fail.
-        assert!(poke.try_send(()).is_ok(), "no poke was queued on first recognition");
+        assert!(!should_poke(true, &Some("DD25-19 - DD25-19".into()), &None));
+        assert!(!should_poke(true, &Some("DD25-19 - DD25-19".into()), &Some("other".into())));
+        assert!(!should_poke(true, &None, &None));
+    }
+
+    #[test]
+    fn an_existing_tasks_change_of_cart_code_pokes() {
+        assert!(should_poke(
+            false,
+            &Some("NGV4-14 - NGV4-14".into()),
+            &Some("DD25-19 - DD25-19".into())
+        ));
+        // Also true starting from an unknown last code.
+        assert!(should_poke(false, &Some("NGV4-14 - NGV4-14".into()), &None));
+    }
+
+    #[test]
+    fn an_existing_tasks_repeated_cart_code_does_not_poke() {
+        let code = Some("NGV4-14 - NGV4-14".into());
+        assert!(!should_poke(false, &code, &code));
+    }
+
+    #[test]
+    fn an_absent_cart_code_never_pokes() {
+        assert!(!should_poke(false, &None, &None));
+        assert!(!should_poke(false, &None, &Some("DD25-19 - DD25-19".into())));
     }
 
     #[tokio::test]
