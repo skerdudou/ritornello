@@ -88,14 +88,16 @@ cover_cache_title = "What the cache really holds"
 cover_cache_hint = "Read at the moment this opened."
 cover_cache_used = "Occupied (MiB)"
 cover_cache_entries = "Entries"
-cover_cache_entries_free = "of which cost no memory"
+# A whole phrase and not a suffix: the count sits inside it, because a language
+# is free to want it anywhere. French puts it after "dont", where appending it
+# to a label produced no sentence at all.
+cover_cache_entries_free = "of which {count} cost no memory"
 cover_cache_renditions = "Thumbnails re-encoded"
 cover_cache_average = "Real average weight (KiB)"
-cover_cache_stale = "Stale thumbnails"
-# A supplied thumbnail never reaches the encoder, so it appears on none of the
-# three lines above. Every one of these is a re-encoding that did not happen.
+# A supplied thumbnail never reaches the encoder, so it appears on neither of
+# the two lines above. Every one of these is a re-encoding that did not happen.
 cover_cache_supplied = "Thumbnails supplied"
-cover_cache_supplied_weight = "KiB in all"
+cover_cache_supplied_weight = "{kio} KiB in all"
 cover_cache_full_fetched = "Full sizes downloaded"
 cover_cache_belt = "Cap on the number of entries"
 cover_cache_empty = "The cache is empty."

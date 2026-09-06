@@ -699,8 +699,7 @@ A small **`(?)`** next to the estimate opens the cache's **real** state —
 `GET /api/cover-cache`, read-only, loaded when the panel opens and again only
 on the reload button, never on a timer — for what the estimate, being a
 prediction, cannot show: how many entries and thumbnails are actually held
-right now, how many thumbnails are stale (produced under rules the cache no
-longer uses), and the entry-count belt itself, shown here as what it is and
+right now, and the entry-count belt itself, shown here as what it is and
 nowhere else. Its most telling figure is the **real average weight** of a
 retained thumbnail, meant to be read against the predicted weight the
 settings card announces — the ground truth behind a figure the settings card
@@ -711,7 +710,7 @@ library and the cache in front of the reader is another.
 separation is the panel's one non-obvious property.** A thumbnail a source
 supplied never reaches the encoder — the route serves it and answers, without
 producing anything — so it enters no rendition table and appears on none of
-the three rendition lines. Counted together they could not be told apart, and
+the rendition lines. Counted together they could not be told apart, and
 worse, the average weight would stop meaning anything: it exists to be read
 against a *prediction about what the encoder produces*, and cannot be checked
 against images the encoder never saw. Counted apart, the supplied line becomes

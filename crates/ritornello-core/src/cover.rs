@@ -572,10 +572,6 @@ pub struct CacheSnapshot {
     /// cannot be checked against images the encoder never saw.
     pub renditions: usize,
     pub renditions_bytes: usize,
-    /// Of those, how many were produced under rules the cache no longer uses
-    /// (see `rendition_is_current`). They are pure waste, and the first thing
-    /// eviction reclaims.
-    pub renditions_stale: usize,
     /// Entries carrying a **supplied** thumbnail — a `CoverPayload::Pair` —
     /// and what those thumbnails weigh.
     ///
@@ -614,10 +610,6 @@ impl CoverCache {
             entries_free: entries.iter().filter(|(_, p)| payload_cost(p) == 0).count(),
             renditions: renditions.len(),
             renditions_bytes,
-            renditions_stale: renditions
-                .iter()
-                .filter(|r| !rendition_is_current(&r.identity, settings.rendition))
-                .count(),
             pairs: entries
                 .iter()
                 .filter(|(_, p)| matches!(p, CoverPayload::Pair { .. }))
@@ -3477,36 +3469,7 @@ mod tests {
         let s = cache.snapshot().await;
         assert_eq!(s.renditions, 3);
         assert_eq!(s.renditions_bytes, 210_000);
-        assert_eq!(s.renditions_stale, 0, "all three were produced under the live rules");
         assert_eq!(s.used_bytes, 210_000, "renditions are charged to the budget too");
-    }
-
-    /// Stale, not merely old. The production change this would catch:
-    /// counting thumbnails without checking them against the live rules,
-    /// which would report as useful what `evict_to_budget` will discard
-    /// first.
-    #[tokio::test]
-    async fn the_snapshot_tells_stale_thumbnails_apart() {
-        let cache = CoverCache::new();
-        let stamp = SourceStamp::Frozen;
-        let old = Rendition {
-            max_edge_px: 320,
-            jpeg_quality: 85,
-            passthrough_max: 150 * 1024,
-            pixel_cap: 16_000_000,
-        };
-        cache
-            .remember_rendition(
-                rendition_identity("k", &stamp, &old),
-                "image/jpeg",
-                Arc::new(vec![0u8; 1_000]),
-            )
-            .await;
-        // The live rules are the product's default (640 px), so the identity
-        // above no longer describes them.
-        let s = cache.snapshot().await;
-        assert_eq!(s.renditions, 1);
-        assert_eq!(s.renditions_stale, 1, "produced under 320 px, the cache now asks 640");
     }
 
     /// **A cover held in memory must not end up held twice.**

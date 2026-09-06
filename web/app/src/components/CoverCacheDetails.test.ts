@@ -7,12 +7,11 @@ const CATALOGUE = {
   cover_cache_hint: 'Relevé au moment de l’ouverture.',
   cover_cache_used: 'Occupé',
   cover_cache_entries: 'Entrées',
-  cover_cache_entries_free: 'dont sans coût mémoire',
+  cover_cache_entries_free: 'dont {count} sans coût mémoire',
   cover_cache_renditions: 'Vignettes réencodées',
   cover_cache_average: 'Poids moyen réel',
-  cover_cache_stale: 'Vignettes périmées',
   cover_cache_supplied: 'Vignettes fournies',
-  cover_cache_supplied_weight: 'Kio au total',
+  cover_cache_supplied_weight: '{kio} Kio au total',
   cover_cache_full_fetched: 'Pleins formats téléchargés',
   cover_cache_belt: 'Plafond du nombre d’entrées',
   cover_cache_empty: 'Le cache est vide.',
@@ -27,7 +26,6 @@ const SNAPSHOT = {
   entries_free: 30,
   renditions: 12,
   renditions_bytes: 1_260_000,
-  renditions_stale: 2,
   pairs: 18,
   pairs_bytes: 1_474_560,
   pairs_full_fetched: 3,
@@ -86,6 +84,21 @@ describe('CoverCacheDetails', () => {
     // The dialog is mounted in a portal: it lives in document.body (same
     // convention as SystemView.test.ts and PlayerCard.test.ts).
     expect(document.body.querySelector('[data-cover-cache-average]')?.textContent).toContain('103')
+  })
+
+  it('fills the counts into their phrases rather than printing the placeholder', async () => {
+    // Both parenthetical lines are whole sentences carrying their number, so
+    // that a language may place it where its grammar wants -- French needs it
+    // after "dont". The production change this kills: rendering the label
+    // without passing the value, which shows a literal `{count}` to the user
+    // and which no assertion on the surrounding text would notice.
+    const w = await mountPanel()
+    await w.find('[data-cover-cache-open]').trigger('click')
+    await flushPromises()
+    const panel = document.body.querySelector('[data-cover-cache-panel]')?.textContent
+    expect(panel).toContain('dont 30 sans coût mémoire')
+    expect(panel).not.toContain('{count}')
+    expect(panel).not.toContain('{kio}')
   })
 
   it('counts supplied thumbnails on their own line, with their weight', async () => {

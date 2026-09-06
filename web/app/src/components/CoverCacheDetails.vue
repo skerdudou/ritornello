@@ -126,8 +126,12 @@ function kio(bytes: number): number {
           <dt class="text-muted-foreground">{{ t('cover_cache_entries') }}</dt>
           <dd class="font-medium">
             {{ snapshot.entries }}
+            <!-- The count goes **into** the phrase, not in front of it. Glued
+                 to a label it read "30 of which cost no memory", which in
+                 French came out as no sentence at all: the number belongs
+                 after "dont", and only the translation can know that. -->
             <span class="font-normal text-muted-foreground">
-              ({{ snapshot.entries_free }} {{ t('cover_cache_entries_free') }})
+              ({{ t('cover_cache_entries_free', { count: snapshot.entries_free }) }})
             </span>
           </dd>
 
@@ -141,11 +145,8 @@ function kio(bytes: number): number {
             <dd class="font-medium" data-cover-cache-average>{{ averageKio(snapshot) }}</dd>
           </template>
 
-          <dt class="text-muted-foreground">{{ t('cover_cache_stale') }}</dt>
-          <dd class="font-medium">{{ snapshot.renditions_stale }}</dd>
-
           <!-- Covers riding on a thumbnail their contributor supplied. They
-               appear on none of the three lines above, by construction: the
+               appear on neither of the two lines above, by construction: the
                route serves them without ever reaching the encoder. This is
                the only place the pair's effect is visible, and the effect is
                a re-encoding that did not happen. -->
@@ -153,7 +154,7 @@ function kio(bytes: number): number {
           <dd class="font-medium" data-cover-cache-supplied>
             {{ snapshot.pairs }}
             <span v-if="snapshot.pairs > 0" class="font-normal text-muted-foreground">
-              ({{ kio(snapshot.pairs_bytes) }} {{ t('cover_cache_supplied_weight') }})
+              ({{ t('cover_cache_supplied_weight', { kio: kio(snapshot.pairs_bytes) }) }})
             </span>
           </dd>
 
