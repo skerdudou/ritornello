@@ -155,6 +155,8 @@ impl Runtime {
             // for a display that doesn't want any, nor the reverse.
             covers: self.halves.iter().any(|m| m.covers),
             ui_version: self.ui_version.clone(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
         };
         let mut stream = UnixStream::connect(&self.register)
             .await

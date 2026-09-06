@@ -2399,6 +2399,8 @@ mod toggle_tests {
                 admin: true,
                 covers: false,
                 ui_version: None,
+                protocol: ritornello_proto::PROTOCOL_VERSION,
+                version: None,
             },
         );
 

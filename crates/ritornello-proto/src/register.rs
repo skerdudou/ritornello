@@ -72,11 +72,42 @@ pub struct Announcement {
     /// shell then builds an unstamped URL and the old revalidation applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_version: Option<String>,
+    /// Protocol this binary was compiled against, compared by the core against
+    /// its own `PROTOCOL_VERSION`.
+    ///
+    /// Derived, never asked: the SDK writes it from the constant, so a plugin
+    /// author cannot get it wrong and cannot lie about it — the invariant of
+    /// this whole handshake.
+    ///
+    /// Absent = `1`, and that is not a fallback but a definition: the field
+    /// was introduced while the protocol was at 1, so an announcement written
+    /// before it existed describes protocol 1 exactly. The core therefore
+    /// always compares a number, never an `Option`.
+    #[serde(default = "default_protocol")]
+    pub protocol: u32,
+    /// Version of the plugin binary itself.
+    ///
+    /// Relayed to the configuration page so the operator can see **what is
+    /// actually installed**: nothing forbids replacing a single plugin, and in
+    /// that case the versions on the device legitimately differ.
+    ///
+    /// `None` = a binary predating this field — same idiom as `ui_version`,
+    /// and for the same reason: "unknown" is a real state, which an empty
+    /// string would silently turn into a claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// Serde needs a function, not a literal, for a non-zero default.
+fn default_protocol() -> u32 {
+    1
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::PROTOCOL_VERSION;
 
     #[test]
     fn kinds_serialize_in_lowercase() {
@@ -86,11 +117,13 @@ mod tests {
             admin: true,
             covers: true,
             ui_version: None,
+            protocol: PROTOCOL_VERSION,
+            version: Some("0.2.0".into()),
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(
             line,
-            r#"{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true}"#
+            r#"{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":1,"version":"0.2.0"}"#
         );
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
     }
@@ -117,6 +150,49 @@ mod tests {
     }
 
     #[test]
+    fn an_absent_protocol_means_one() {
+        // The same idiom as `absent_covers_means_false`, and it is what lets a
+        // binary built before this field ever existed keep being read. One is
+        // not a guess: it names the protocol as it stood when the field was
+        // introduced, so silence and "1" mean exactly the same thing forever.
+        let a: Announcement =
+            serde_json::from_str(r#"{"name":"cd","kinds":["source"]}"#).unwrap();
+        assert_eq!(a.protocol, 1, "silence must read back as the original protocol");
+    }
+
+    #[test]
+    fn an_absent_version_stays_unknown() {
+        // `None` and not a string: a plugin predating the field says nothing
+        // about its version, and inventing one here would be the announcement
+        // lying — the very thing this protocol forbids.
+        let a: Announcement =
+            serde_json::from_str(r#"{"name":"cd","kinds":["source"]}"#).unwrap();
+        assert_eq!(a.version, None);
+    }
+
+    #[test]
+    fn the_protocol_travels_and_the_version_is_omitted_when_unknown() {
+        // Two opposite conventions on purpose, each matching a neighbouring
+        // field: `protocol` is always written (like `admin`), because a reader
+        // must never have to guess it; `version` is omitted when absent (like
+        // `ui_version`), because "unknown" is a real state that an empty
+        // string would erase.
+        let a = Announcement {
+            name: "radio".into(),
+            kinds: vec![PluginKind::Source],
+            admin: true,
+            covers: false,
+            ui_version: None,
+            protocol: PROTOCOL_VERSION,
+            version: None,
+        };
+        let line = serde_json::to_string(&a).unwrap();
+        assert!(line.contains(r#""protocol":1"#), "the protocol must always travel: {line}");
+        assert!(!line.contains("version\":null"), "an unknown version is omitted, not null: {line}");
+        assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
+    }
+
+    #[test]
     fn an_unknown_kind_is_an_error_not_a_silence() {
         // A typo in a plugin binary must be reported, not absorbed into a
         // default kind.
@@ -131,6 +207,8 @@ mod tests {
             admin: false,
             covers: false,
             ui_version: None,
+            protocol: PROTOCOL_VERSION,
+            version: None,
         };
         let back: Announcement =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
@@ -155,6 +233,8 @@ mod tests {
             admin: true,
             covers: false,
             ui_version: Some("deadbeef".into()),
+            protocol: PROTOCOL_VERSION,
+            version: None,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);

@@ -819,6 +819,8 @@ mod tests {
                     admin: false,
                     covers: false,
                     ui_version: None,
+                    protocol: ritornello_proto::PROTOCOL_VERSION,
+                    version: None,
                 },
             );
         }
@@ -830,6 +832,8 @@ mod tests {
                 admin: true,
                 covers: false,
                 ui_version: None,
+                protocol: ritornello_proto::PROTOCOL_VERSION,
+                version: None,
             },
         );
         let g = Gathered { announcements, ..Default::default() };
