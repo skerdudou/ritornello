@@ -187,19 +187,69 @@ fn decide(
     // 7. A temporary in the **same** directory, then a rename: atomic, so no
     //    listener ever sees a half-written cover, and no rename across a
     //    filesystem (the staged file lives in tmpfs, the target on the share).
-    //    The leading dot keeps it out of sight, and the `.tmp` extension keeps
-    //    a leftover from a crash out of `cover::search`'s image list.
-    let temporary = dir.join(format!(".{NAME}.{extension}.tmp"));
+    //    The name is unique to the attempt — see `attempt_name`, which is where
+    //    that requirement is argued and where the three properties it has to
+    //    keep are written down. The clock it needs is read here and passed in,
+    //    rather than read inside it: it is the only part of that name a test
+    //    cannot hold still, and holding it still is what proves the counter —
+    //    and not the clock — is what keeps two attempts apart. Same injection,
+    //    and the same reason, as `album_of` above.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let temporary = dir.join(attempt_name(extension, stamp));
     let target = dir.join(format!("{NAME}.{extension}"));
+    // The half-written file must not survive the failure that produced it, and
+    // this branch is the one that actually half-writes: a share that goes away
+    // mid-copy, a disk that fills. Leaving it would litter the owner's folder
+    // with a dotfile per failure, one that nothing ever comes back to collect.
     if let Err(e) = std::fs::write(&temporary, &bytes) {
+        let _ = std::fs::remove_file(&temporary);
         return Outcome::Failed(format!("cannot write into {}: {e}", dir.display()));
     }
     if let Err(e) = std::fs::rename(&temporary, &target) {
-        // The half-written file must not survive the failure that produced it.
         let _ = std::fs::remove_file(&temporary);
         return Outcome::Failed(format!("cannot name {}: {e}", target.display()));
     }
     Outcome::Written(target)
+}
+
+/// Name of the temporary this attempt writes before renaming it into place.
+///
+/// **Unique to the attempt, and it has to be.** Two `store` calls on the same
+/// folder can overlap: one still blocked on a share that stopped answering, a
+/// second arriving when the owner comes back to that album. Both pass the "an
+/// image is already there" check, and under a fixed temporary name both would
+/// write into the same file and both would rename it — what would land as
+/// `cover.jpg` is then neither image, permanently and silently, and it wins over
+/// the network for ever after. The core does hold a single slot per cover key,
+/// but it is a slot in another process that re-arms when the owner leaves an
+/// album and returns; the integrity of a file in someone's music library must
+/// not rest on another process's invariant.
+///
+/// Three properties this name must keep, and a test pins each of them:
+///
+/// - **it is a bare file name**, so the caller's `dir.join` puts it in the
+///   destination directory and nowhere else: the rename then stays inside one
+///   filesystem, which is what makes it atomic;
+/// - **the leading dot and the `.tmp` extension survive** however long the
+///   middle grows, so a leftover from a crash stays invisible to both
+///   `cover::search` and `is_target_image` — each judges on the extension, and
+///   `is_target_image` also on a stem that no longer reads as `cover`;
+/// - **two attempts of the same process cannot collide.** That is the counter's
+///   doing and not the clock's: a nanosecond stamp is only as fine as the
+///   platform's clock, and the pid only separates processes. `nanos` is passed
+///   in rather than read here for exactly that reason — a test that freezes it
+///   is the only one that can tell the counter's work from the clock's, and
+///   without that freeze a clock-only name passes on any machine whose clock
+///   happens to be fine-grained. Measured: it does pass, on this one.
+fn attempt_name(extension: &str, nanos: u128) -> String {
+    static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // The stamp separates this run from a leftover of an earlier one that
+    // happened to be handed the same pid; the counter separates two attempts of
+    // this run. A clock that refuses to answer costs neither.
+    format!(".{NAME}.{extension}.{}-{nanos}-{seq}.tmp", std::process::id())
 }
 
 /// Is this an image already occupying the name we would write? Case-insensitive
@@ -706,6 +756,90 @@ mod tests {
             other => panic!("expected a write: {other:?}"),
         }
         assert!(!other.join("cover.jpg").exists(), "the other folder is untouched");
+    }
+
+    #[test]
+    fn two_attempts_in_one_folder_cannot_pick_the_same_temporary() {
+        // The stamp is **frozen**, and that is the whole point: with the clock
+        // held still, anything that keeps these names apart is the counter.
+        // Measured, and worth recording — with the clock live, this test passes
+        // even with the counter removed, because WSL's clock is fine-grained
+        // enough that two thousand tight iterations never repeat a nanosecond.
+        // It would not have caught a clock-only name; frozen, it does.
+        //
+        // No sleeping anywhere either: the property must hold for attempts
+        // issued as fast as the machine can issue them, which is the shape a
+        // share stuck for a second and a listener coming back actually produce.
+        const FROZEN: u128 = 1_757_000_000_000_000_000;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1_000 {
+            let name = attempt_name("jpg", FROZEN);
+            // A bare file name: `dir.join` must land it in the destination
+            // directory and nowhere else, or the rename would cross a
+            // filesystem and stop being atomic.
+            assert_eq!(
+                Path::new(&name).components().count(),
+                1,
+                "{name} must be a bare file name"
+            );
+            // Whatever the middle grows into, the two things that hide a
+            // leftover must survive.
+            assert!(name.starts_with(".cover."), "{name} must stay a dotfile");
+            assert_eq!(Path::new(&name).extension().unwrap(), "tmp", "{name}");
+            assert!(seen.insert(name), "a temporary name repeated itself");
+        }
+        // Two threads, because the two racing attempts really are on two
+        // threads: `Health::bounded` runs each `store` on its own
+        // `spawn_blocking`, and the abandoned one keeps running.
+        let names: Vec<String> = std::thread::scope(|s| {
+            let a = s.spawn(|| (0..500).map(|_| attempt_name("jpg", FROZEN)).collect::<Vec<_>>());
+            let b = s.spawn(|| (0..500).map(|_| attempt_name("jpg", FROZEN)).collect::<Vec<_>>());
+            let mut v = a.join().unwrap();
+            v.extend(b.join().unwrap());
+            v
+        });
+        let unique: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "two threads collided on a temporary name");
+    }
+
+    #[test]
+    fn a_leftover_temporary_is_invisible_to_the_search_and_to_the_overwrite_check() {
+        // What a crash between the write and the rename leaves in the folder.
+        // It must not be taken for a cover by the next listen, and it must not
+        // make the archiver believe the folder is already answered — the name
+        // grew a pid, a stamp and a counter since it was last checked, so the
+        // two rules that hide it are re-proved against the shape it has now.
+        let (dir, table, albums) = local_root_with(&["01.flac"], "Album");
+        let leftover = dir.join(attempt_name("jpg", 1_757_000_000_000_000_000));
+        std::fs::write(&leftover, JPEG).unwrap();
+        let played = dir.join("01.flac");
+        assert!(
+            crate::cover::search(&played).is_none(),
+            "a leftover temporary must not be served as the cover"
+        );
+        let staged = staged_jpeg();
+        match store(&table, &identity(&played), staged.path(), &albums) {
+            Outcome::Written(p) => assert_eq!(p.file_name().unwrap(), "cover.jpg"),
+            other => panic!("a leftover temporary must not block the write: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_successful_write_leaves_nothing_but_the_cover_behind() {
+        // The rename consumes the temporary; nothing of the attempt survives it.
+        let (dir, table, albums) = local_root_with(&["01.flac"], "Album");
+        let staged = staged_jpeg();
+        assert!(matches!(
+            store(&table, &identity(&dir.join("01.flac")), staged.path(), &albums),
+            Outcome::Written(_)
+        ));
+        let mut left: Vec<String> = std::fs::read_dir(dir.as_path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, vec!["01.flac".to_string(), "cover.jpg".to_string()]);
     }
 
     #[test]
