@@ -155,7 +155,16 @@ impl MetadataPlugin for RadioFranceMetas {
                     year: meta.year,
                     links: meta.links,
                     duration_s: meta.duration_s,
+                    // **Both halves, from the one uuid.** The square gets the
+                    // 400 px thumbnail and the core holds only that; the
+                    // 1000 px original stays a reference until a reader
+                    // enlarges the cover. See `live::cover_url`'s neighbours
+                    // for the measurements behind the two presets.
                     cover: meta.cover.as_deref().map(|u| CoverRef::Url { url: live::cover_url(u) }),
+                    cover_thumb: meta
+                        .cover
+                        .as_deref()
+                        .map(|u| CoverRef::Url { url: live::cover_thumb_url(u) }),
                     // This plugin reads the station's official feed: it knows
                     // better than ICY, by construction. It overwrites, so
                     // `fill_only` stays false.
@@ -274,8 +283,18 @@ mod tests {
             .await
             .unwrap();
         let e = p.next_enrichment().await;
+        // **The pair, and the assertion is on both halves.** The thumbnail is
+        // what the core keeps in memory, the full size what an enlargement
+        // downloads; announcing only one of the two would send the whole
+        // mechanism back to a single image doing both jobs badly.
         assert_eq!(
             e.cover,
+            Some(CoverRef::Url {
+                url: "https://api.radiofrance.fr/v1/services/embed/image/uuid-test?preset=1000x1000".into()
+            })
+        );
+        assert_eq!(
+            e.cover_thumb,
             Some(CoverRef::Url {
                 url: "https://api.radiofrance.fr/v1/services/embed/image/uuid-test?preset=400x400".into()
             })

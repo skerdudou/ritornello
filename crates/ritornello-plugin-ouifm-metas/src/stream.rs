@@ -20,6 +20,48 @@ use tokio::sync::mpsc;
 /// a literal IP.
 const IMAGE_HOST: &str = "www.lesindesradios.fr";
 
+/// The two sizes a composed cover is announced at: the thumbnail the player's
+/// square shows, and the full-size image an enlargement asks for. Announced
+/// **together**, so the core holds the small one and keeps the large one as a
+/// reference it downloads only if somebody enlarges — see `CoverPayload::Pair`.
+///
+/// **`600` is the original, and that is a measurement, not a preference.**
+/// Asked without any `width`, the host answers 600x600 — on both covers
+/// measured, one from the test frame below and one taken live from the stream.
+/// `width=1000`, `1500` and `2000` all answer, but they answer with an
+/// *upscale* of that same 600 px original: more bytes, not more detail.
+/// Beyond 2000 the host returns a JSON error under a 200. So 600 is the
+/// ceiling worth asking for.
+///
+/// Measured 2026-09-06 on those two covers, bytes at each width:
+///
+/// | width | Rolling Stones | Architects |
+/// |-------|----------------|------------|
+/// | 200   | 26,274         | —          |
+/// | 400   | 93,387         | 51,828     |
+/// | 600   | 177,110        | 114,025    |
+/// | none  | 476,300        | 214,586    |
+///
+/// The `none` row is the same 600x600 image at a far lighter compression —
+/// two to four times the weight for pixels we already have. Hence `width=600`
+/// rather than no parameter at all: same resolution, a third of the bytes.
+const THUMB_WIDTH: u32 = 400;
+const FULL_WIDTH: u32 = 600;
+
+/// **The thumbnail must stay the smaller of the two, and this refuses to
+/// compile otherwise.** A runtime assertion would have been the obvious
+/// place, but clippy is right that comparing two constants is not a test —
+/// so it is stated where it can actually be enforced. The production change
+/// this kills: aligning both widths on one value, which would pass every
+/// other test here while quietly restoring the defect the pair exists to
+/// remove — a full-weight image held in memory to fill a 400 px square.
+const _: () = assert!(THUMB_WIDTH < FULL_WIDTH);
+
+/// A cover URL composed the way OUI FM's own player composes it.
+fn image_url(id: &str, width: u32) -> String {
+    format!("https://{IMAGE_HOST}/servicesimb/images?version=6&iid={id}&width={width}")
+}
+
 /// What a frame tells us about the track.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Meta {
@@ -30,6 +72,14 @@ pub struct Meta {
     /// from the known host, otherwise `coverId` recomposed following the
     /// pattern of OUI FM's own player.
     pub cover: Option<String>,
+    /// The thumbnail that goes with it, when there is one to compose.
+    ///
+    /// **`None` whenever the frame supplied a ready-made `coverUrl`**, and
+    /// that asymmetry is the shape of the data, not an oversight: a URL
+    /// written by the station carries no size knob we may turn, so there is
+    /// no second size to announce. Only the `coverId` branch composes the URL
+    /// itself, and only it can therefore compose two.
+    pub cover_thumb: Option<String>,
     /// The listening platforms, composed from the frame's identifiers. See
     /// [`links`].
     pub links: Vec<Link>,
@@ -158,17 +208,20 @@ pub fn parse_data_line(line: &str) -> Option<Meta> {
     });
     // OUI FM's player does exactly this: `coverUrl` if it is there, otherwise
     // a composed `coverId`. Both cases are real on the stream.
-    let cover = text(&v, "coverUrl")
-        .filter(|u| {
-            // Authority comparison, not a string prefix (see IMAGE_HOST):
-            // otherwise "https://www.lesindesradios.fr.evil.example/x" would
-            // be accepted, the real domain being just a prefix of the fake.
-            u.strip_prefix("https://").and_then(|rest| rest.split(['/', '?', '#']).next()) == Some(IMAGE_HOST)
-        })
-        .or_else(|| {
-            text(&v, "coverId")
-                .map(|id| format!("https://{IMAGE_HOST}/servicesimb/images?version=6&iid={id}&width=400"))
-        });
+    let ready_made = text(&v, "coverUrl").filter(|u| {
+        // Authority comparison, not a string prefix (see IMAGE_HOST):
+        // otherwise "https://www.lesindesradios.fr.evil.example/x" would
+        // be accepted, the real domain being just a prefix of the fake.
+        u.strip_prefix("https://").and_then(|rest| rest.split(['/', '?', '#']).next()) == Some(IMAGE_HOST)
+    });
+    let (cover, cover_thumb) = match ready_made {
+        // Nothing to compose, hence no pair: see `Meta::cover_thumb`.
+        Some(url) => (Some(url), None),
+        None => match text(&v, "coverId") {
+            Some(id) => (Some(image_url(&id, FULL_WIDTH)), Some(image_url(&id, THUMB_WIDTH))),
+            None => (None, None),
+        },
+    };
     let meta = Meta {
         artist: text(&v, "artist"),
         title: text(&v, "title"),
@@ -176,6 +229,7 @@ pub fn parse_data_line(line: &str) -> Option<Meta> {
         // a third party.
         duration_s: duration.filter(|d| *d > 0 && *d <= 24 * 3600).map(|d| d as u32),
         cover,
+        cover_thumb,
         links: links(&v),
     };
     // A duration alone is not displayable: it is not an answer.
@@ -301,13 +355,40 @@ mod tests {
     #[test]
     fn the_cover_id_is_composed_following_the_players_pattern() {
         // Pattern taken from the `_app` bundle of ouifm.fr/player, in the
-        // code that reads this very SSE stream. Measurement of 2026-08-24:
-        // 35,613-byte JPEG.
+        // code that reads this very SSE stream. Measured 2026-09-06 on this
+        // very cover: 93,387 bytes at width=400, 177,110 at width=600.
+        //
+        // **Both halves asserted.** A composed cover announces a pair, and a
+        // change that dropped the thumbnail would leave the core holding the
+        // 600 px image to fill a 400 px square — silently, since the display
+        // would look identical.
         let m = parse_data_line(FRAME).unwrap();
+        let iid = "3134161803443976427/t/th/therollingstones/shesarainbow/214198016_1702973462000";
         assert_eq!(
             m.cover.as_deref(),
-            Some("https://www.lesindesradios.fr/servicesimb/images?version=6&iid=3134161803443976427/t/th/therollingstones/shesarainbow/214198016_1702973462000&width=400")
+            Some(
+                format!("https://www.lesindesradios.fr/servicesimb/images?version=6&iid={iid}&width=600")
+                    .as_str()
+            )
         );
+        assert_eq!(
+            m.cover_thumb.as_deref(),
+            Some(
+                format!("https://www.lesindesradios.fr/servicesimb/images?version=6&iid={iid}&width=400")
+                    .as_str()
+            )
+        );
+    }
+
+    /// A ready-made `coverUrl` carries no size knob, so it announces no pair.
+    /// Composing a thumbnail for it would mean inventing a URL the host never
+    /// promised to answer, and a thumbnail that 404s is a cover that vanishes.
+    #[test]
+    fn a_ready_made_url_announces_no_thumbnail() {
+        let known = r#"data: {"title":"t","coverUrl":"https://www.lesindesradios.fr/x.jpg"}"#;
+        let m = parse_data_line(known).unwrap();
+        assert_eq!(m.cover.as_deref(), Some("https://www.lesindesradios.fr/x.jpg"));
+        assert_eq!(m.cover_thumb, None);
     }
 
     #[test]
