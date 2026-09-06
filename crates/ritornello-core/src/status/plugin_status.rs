@@ -67,6 +67,28 @@ pub struct PluginStatus {
     /// builds the plain URL and the old revalidation applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_version: Option<String>,
+    /// Version of the plugin binary, as its announcement gave it.
+    ///
+    /// Relayed and never recomputed, for the same reason as `ui_version`: the
+    /// binary is the only thing that knows. Shown on the configuration page
+    /// because nothing forbids replacing one plugin alone, and the versions on
+    /// a device legitimately differ once that has been done.
+    ///
+    /// Additive: absent from the JSON when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Protocol this binary announced, present **only** when it differs from
+    /// the core's.
+    ///
+    /// Its presence is the refusal — one field rather than a boolean beside a
+    /// number, so the two can never contradict each other. The screen turns it
+    /// into a sentence with the core's own protocol, which travels once in the
+    /// system metadata rather than on every line.
+    ///
+    /// Deliberately **not** `disabled`: that one writes `enabled = false` into
+    /// the manifest and would survive the fix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incompatible: Option<u32>,
 }
 
 impl PluginStatus {
@@ -86,6 +108,8 @@ impl PluginStatus {
             disabled: false,
             busy: false,
             ui_version: None,
+            version: None,
+            incompatible: None,
         }
     }
 
@@ -105,6 +129,8 @@ impl PluginStatus {
             disabled: false,
             busy: false,
             ui_version: None,
+            version: None,
+            incompatible: None,
         }
     }
 
@@ -124,6 +150,8 @@ impl PluginStatus {
             disabled: false,
             busy: false,
             ui_version: None,
+            version: None,
+            incompatible: None,
         }
     }
 
@@ -140,6 +168,29 @@ impl PluginStatus {
             disabled: true,
             busy: false,
             ui_version: None,
+            version: None,
+            incompatible: None,
+        }
+    }
+
+    /// Line of a plugin refused for speaking another protocol.
+    ///
+    /// Neither kind nor admin page: nothing of it was wired. It is not
+    /// `stalled` (it spoke, on time) and not `disabled` (nobody switched it
+    /// off) — hence a line of its own.
+    pub fn incompatible_line(name: &str, found: u32) -> Self {
+        Self {
+            name: name.to_string(),
+            kind: "unknown".into(),
+            connected: false,
+            admin: false,
+            stalled: false,
+            starting: false,
+            disabled: false,
+            busy: false,
+            ui_version: None,
+            version: None,
+            incompatible: Some(found),
         }
     }
 }
@@ -706,5 +757,26 @@ mod tests {
         )
         .unwrap();
         assert!(!old.stalled);
+    }
+
+    #[test]
+    fn an_incompatible_line_carries_the_number_and_nothing_else_claims_it() {
+        // One field, not a boolean plus a number: its presence *is* the
+        // refusal, so the two can never disagree.
+        let l = PluginStatus::incompatible_line("radio", 2);
+        assert_eq!(l.incompatible, Some(2));
+        assert!(!l.connected);
+        assert!(!l.disabled, "a refusal is not the operator's switch");
+        assert!(!l.stalled, "the plugin spoke; accusing it of silence would be false");
+    }
+
+    #[test]
+    fn a_compatible_line_omits_the_field_entirely() {
+        // Additive idiom, already used six times in this file: absent from the
+        // JSON when empty, so no existing frame changes shape.
+        let l = PluginStatus::kind("radio", "source", true, false);
+        let j = serde_json::to_string(&l).unwrap();
+        assert!(!j.contains("incompatible"), "{j}");
+        assert!(!j.contains("version"), "{j}");
     }
 }

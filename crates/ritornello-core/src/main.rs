@@ -492,6 +492,18 @@ async fn hotplug<P: player::Player>(
         gathered.dead.retain(|n| n != &name);
         gathered.incompatible.insert(name.clone(), announcement.protocol);
         core.set_metadata_order(register::metadata_order(&children.manifest_order, gathered));
+        // The screen, too, must stop describing the previous incarnation. The
+        // startup assembly builds these lines once; a refusal arriving hot has
+        // to correct them itself, or the page keeps showing "connected" for a
+        // binary that cannot work. Same gesture as `hot_unplug`'s.
+        let mut statuses = children.status_state.write().await;
+        status::replace_plugin_lines(
+            &mut statuses,
+            &name,
+            vec![PluginStatus::incompatible_line(&name, announcement.protocol)],
+            false,
+        );
+        drop(statuses);
         // Nothing is persisted: this is a refusal to run, not the `disabled`
         // switch. `enabled = false` written here would keep the plugin off
         // even after a matching binary was installed, and the fix would look
@@ -653,6 +665,7 @@ async fn hotplug<P: player::Player>(
                         });
                         lines.push(PluginStatus {
                             ui_version: announcement.ui_version.clone(),
+                            version: announcement.version.clone(),
                             ..PluginStatus::kind(&name, "source", true, announcement.admin)
                         });
                     }
@@ -660,6 +673,7 @@ async fn hotplug<P: player::Player>(
                         tracing::warn!("plugin {name} source unavailable: {e}");
                         lines.push(PluginStatus {
                             ui_version: announcement.ui_version.clone(),
+                            version: announcement.version.clone(),
                             ..PluginStatus::kind(&name, "source", false, announcement.admin)
                         });
                     }
@@ -681,6 +695,7 @@ async fn hotplug<P: player::Player>(
                     );
                     lines.push(PluginStatus {
                         ui_version: announcement.ui_version.clone(),
+                        version: announcement.version.clone(),
                         ..PluginStatus::kind(&name, "display", true, announcement.admin)
                     });
                 }
@@ -688,6 +703,7 @@ async fn hotplug<P: player::Player>(
                     tracing::warn!("display plugin {name} unavailable: {e}");
                     lines.push(PluginStatus {
                         ui_version: announcement.ui_version.clone(),
+                        version: announcement.version.clone(),
                         ..PluginStatus::kind(&name, "display", false, announcement.admin)
                     });
                 }
@@ -709,6 +725,7 @@ async fn hotplug<P: player::Player>(
                 });
                 lines.push(PluginStatus {
                     ui_version: announcement.ui_version.clone(),
+                    version: announcement.version.clone(),
                     ..PluginStatus::kind(&name, "input", true, announcement.admin)
                 });
             }
@@ -728,6 +745,7 @@ async fn hotplug<P: player::Player>(
                 });
                 lines.push(PluginStatus {
                     ui_version: announcement.ui_version.clone(),
+                    version: announcement.version.clone(),
                     ..PluginStatus::kind(&name, "metadata", true, announcement.admin)
                 });
             }
@@ -1285,6 +1303,15 @@ async fn main() -> Result<()> {
         plugin_statuses.push(PluginStatus::unknown_kind(name, stalled));
     }
 
+    // Third source of lines, after the stalled and the dead: a plugin refused
+    // for speaking another protocol. It belongs to neither list — it spoke,
+    // on time, and what it said was that it cannot be understood — so without
+    // this loop it would have no line at all and would simply vanish from the
+    // page. Disappearing is the one thing a broken plugin must never do.
+    for (name, found) in &gathered.incompatible {
+        plugin_statuses.push(PluginStatus::incompatible_line(name, *found));
+    }
+
     // `metadata` plugins announced, **in manifest order**: this order is the
     // arbitration priority, and it is a configuration property, not a
     // runtime one. The list is therefore rebuilt from the manifest and never
@@ -1351,6 +1378,7 @@ async fn main() -> Result<()> {
                             sources.insert(name.clone(), client);
                             plugin_statuses.push(PluginStatus {
                                 ui_version: announcement.ui_version.clone(),
+                                version: announcement.version.clone(),
                                 ..PluginStatus::kind(name, "source", true, announcement.admin)
                             });
                         }
@@ -1358,6 +1386,7 @@ async fn main() -> Result<()> {
                             tracing::warn!("plugin {name} source unavailable: {e}");
                             plugin_statuses.push(PluginStatus {
                                 ui_version: announcement.ui_version.clone(),
+                                version: announcement.version.clone(),
                                 ..PluginStatus::kind(name, "source", false, announcement.admin)
                             });
                         }
@@ -1368,6 +1397,7 @@ async fn main() -> Result<()> {
                         display_clients.push((name.clone(), client, announcement.covers));
                         plugin_statuses.push(PluginStatus {
                             ui_version: announcement.ui_version.clone(),
+                            version: announcement.version.clone(),
                             ..PluginStatus::kind(name, "display", true, announcement.admin)
                         });
                     }
@@ -1375,6 +1405,7 @@ async fn main() -> Result<()> {
                         tracing::warn!("display plugin {name} unavailable: {e}");
                         plugin_statuses.push(PluginStatus {
                             ui_version: announcement.ui_version.clone(),
+                            version: announcement.version.clone(),
                             ..PluginStatus::kind(name, "display", false, announcement.admin)
                         });
                     }
@@ -1398,6 +1429,7 @@ async fn main() -> Result<()> {
                     });
                     plugin_statuses.push(PluginStatus {
                         ui_version: announcement.ui_version.clone(),
+                        version: announcement.version.clone(),
                         ..PluginStatus::kind(name, "input", true, announcement.admin)
                     });
                 }
@@ -1420,6 +1452,7 @@ async fn main() -> Result<()> {
                     });
                     plugin_statuses.push(PluginStatus {
                         ui_version: announcement.ui_version.clone(),
+                        version: announcement.version.clone(),
                         ..PluginStatus::kind(name, "metadata", true, announcement.admin)
                     });
                 }
@@ -2715,6 +2748,60 @@ mod toggle_tests {
             b.gathered.announcements.contains_key("mpd"),
             "the matching announcement must be wired"
         );
+    }
+
+    #[tokio::test]
+    async fn a_hot_refusal_corrects_what_the_page_shows() {
+        // Without this, the page would go on showing the previous incarnation
+        // as connected while the installed binary cannot work — a lie that
+        // survives until the next restart.
+        let mut b = bench();
+        let foreign = ritornello_proto::PROTOCOL_VERSION + 1;
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: foreign,
+            version: Some("0.2.0".into()),
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        let statuses = b.children.status_state.read().await;
+        let lines: Vec<_> = statuses.plugins.iter().filter(|l| l.name == "mpd").collect();
+        assert_eq!(lines.len(), 1, "one line, not the old connected ones");
+        assert_eq!(lines[0].incompatible, Some(foreign));
+        assert!(!lines[0].connected, "a refused plugin must not read as connected");
+    }
+
+    #[tokio::test]
+    async fn the_status_page_says_why_a_plugin_was_refused() {
+        // From the announcement to the JSON the page reads: proving the
+        // constructor works would prove nothing about anything calling it.
+        let mut b = bench();
+        let foreign = ritornello_proto::PROTOCOL_VERSION + 1;
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: foreign,
+            version: Some("0.2.0".into()),
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        let statuses = b.children.status_state.read().await;
+        let line = statuses.plugins.iter().find(|l| l.name == "mpd").unwrap();
+        assert_eq!(line.incompatible, Some(foreign));
+        assert!(!line.stalled, "the plugin spoke, on time: accusing it of silence would be false");
+
+        let json = serde_json::to_string(line).unwrap();
+        assert!(json.contains(&format!("\"incompatible\":{foreign}")), "{json}");
+        assert!(!json.contains("stalled"), "{json}");
     }
 }
 
