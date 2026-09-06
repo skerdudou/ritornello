@@ -171,9 +171,10 @@ impl Roots {
 
     /// The root that owns `path`, by **longest** matching `base_dir()`.
     ///
-    /// Longest and not first: two roots may legitimately aim at nested
-    /// subpaths of the same share (only the exact duplicate is refused at
-    /// declaration), and the table's order carries no meaning. Containment is
+    /// Longest and not first: nesting arises between **local** roots, whose
+    /// `base_dir()` is the declared path and which `validate` does not forbid
+    /// from nesting; two SMB roots cannot nest, their mount point being derived
+    /// from a unique name. The table's order carries no meaning. Containment is
     /// judged by `Path::starts_with`, which compares **components** — a string
     /// prefix would accept `/mnt/ritornello/nas-old` as being inside
     /// `/mnt/ritornello/nas`.
@@ -580,19 +581,63 @@ path = "/media/usb"
 
     #[test]
     fn a_path_resolves_to_the_root_with_the_longest_matching_base() {
-        // Longest and not first: two roots may legitimately aim at nested
-        // subpaths of the same share, and the table's order says nothing.
+        // Longest and not first: local roots can legitimately nest — one at
+        // /media/usb and one at /media/usb/Albums. The table's order says
+        // nothing.
         let table = Roots {
             root: vec![
-                Root { name: "nas".into(), subpath: None, ..smb("musique") },
-                Root { name: "nas".into(), subpath: Some("Jazz".into()), ..smb("musique") },
+                Root {
+                    name: "usb".into(),
+                    kind: RootKind::Local,
+                    path: Some("/media/usb".into()),
+                    host: String::new(),
+                    share: String::new(),
+                    subpath: None,
+                    user: String::new(),
+                    domain: String::new(),
+                    writable: false,
+                    archive_covers: false,
+                },
+                Root {
+                    name: "albums".into(),
+                    kind: RootKind::Local,
+                    path: Some("/media/usb/Albums".into()),
+                    host: String::new(),
+                    share: String::new(),
+                    subpath: None,
+                    user: String::new(),
+                    domain: String::new(),
+                    writable: false,
+                    archive_covers: false,
+                },
             ],
         };
-        let inside = std::path::Path::new("/mnt/ritornello/nas/Jazz/Kind of Blue/01.flac");
-        assert_eq!(table.root_of(inside).map(|r| r.subpath.as_deref()), Some(Some("Jazz")));
+        let inside = std::path::Path::new("/media/usb/Albums/Kind of Blue/01.flac");
+        assert_eq!(table.root_of(inside).map(|r| r.name.as_str()), Some("albums"));
 
-        let elsewhere = std::path::Path::new("/mnt/ritornello/nas/Rock/01.flac");
-        assert_eq!(table.root_of(elsewhere).map(|r| r.subpath.as_deref()), Some(None));
+        let elsewhere = std::path::Path::new("/media/usb/Rock/01.flac");
+        assert_eq!(table.root_of(elsewhere).map(|r| r.name.as_str()), Some("usb"));
+    }
+
+    #[test]
+    fn two_smb_roots_on_the_same_share_with_different_names_are_siblings_never_nested() {
+        // Two SMB roots on the same physical share cannot nest: the mount
+        // point derives from a unique name, so distinct names give distinct
+        // `/mnt/ritornello/<name>` prefixes. A path under one resolves to
+        // that one; the other does not match.
+        let table = Roots {
+            root: vec![
+                Root { name: "music".into(), subpath: None, ..smb("musique") },
+                Root { name: "jazz".into(), subpath: Some("Jazz".into()), ..smb("musique") },
+            ],
+        };
+        // Under the "music" root's mount point, but not under the "jazz" root's.
+        let under_music = std::path::Path::new("/mnt/ritornello/music/Jazz/Kind of Blue/01.flac");
+        assert_eq!(table.root_of(under_music).map(|r| r.name.as_str()), Some("music"));
+
+        // Under the "jazz" root's mount point.
+        let under_jazz = std::path::Path::new("/mnt/ritornello/jazz/Jazz/Kind of Blue/01.flac");
+        assert_eq!(table.root_of(under_jazz).map(|r| r.name.as_str()), Some("jazz"));
     }
 
     #[test]
