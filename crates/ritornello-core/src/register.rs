@@ -33,6 +33,14 @@ pub struct Gathered {
     /// before speaking, or dead during the gathering after having spoken (their
     /// announcement is then withdrawn, see the deaths branch).
     pub dead: Vec<String>,
+    /// Announced a protocol this core does not speak: refused, and the number
+    /// it claimed is kept so the page can say **why** rather than showing yet
+    /// another unexplained "unavailable".
+    ///
+    /// A fourth state next to `stalled` and `dead`, and not a variant of
+    /// either: this plugin is neither silent nor gone — it spoke, correctly,
+    /// and what it said was that it cannot be understood.
+    pub incompatible: std::collections::HashMap<String, u32>,
 }
 
 /// Time given to a connection to write its announcement line.
@@ -116,6 +124,7 @@ where
     // report, exactly the diagnosis this gathering exists to name.
     let mut remaining: Vec<String> = expected.to_vec();
     let mut announcements: HashMap<String, Announcement> = HashMap::new();
+    let mut incompatible: HashMap<String, u32> = HashMap::new();
     // The **observed** deaths. This is what separates a living silent plugin
     // from a dead one: without this trace, the deadline could only deduce, and
     // a merely slow plugin would be reported as a lost one.
@@ -159,6 +168,23 @@ where
                     }
                     continue;
                 }
+                // The protocol is checked before anything is wired: an
+                // announcement is well-formed and still describes a binary
+                // this core cannot talk to. Strict equality, because the nine
+                // plugins are built together — a range would only earn its
+                // keep for a third-party binary that cannot be rebuilt.
+                if announcement.protocol != ritornello_proto::PROTOCOL_VERSION {
+                    tracing::error!(
+                        "{} speaks protocol {} and this core speaks {}: refused",
+                        announcement.name,
+                        announcement.protocol,
+                        ritornello_proto::PROTOCOL_VERSION
+                    );
+                    remaining.retain(|n| n != &announcement.name);
+                    incompatible.insert(announcement.name.clone(), announcement.protocol);
+                    continue;
+                }
+
                 remaining.retain(|n| n != &announcement.name);
                 tracing::info!("{} announced {:?} (admin: {})", announcement.name, announcement.kinds, announcement.admin);
                 announcements.insert(announcement.name.clone(), announcement);
@@ -215,11 +241,11 @@ where
     // stalled, hence still hot-wirable.
     let (dead, stalled): (Vec<String>, Vec<String>) = expected
         .iter()
-        .filter(|name| !announcements.contains_key(*name))
+        .filter(|name| !announcements.contains_key(*name) && !incompatible.contains_key(*name))
         .cloned()
         .partition(|name| deaths_seen.contains(name));
 
-    Gathered { announcements, stalled, dead }
+    Gathered { announcements, stalled, dead, incompatible }
 }
 
 /// Keeps accepting on the register socket **for the whole life of the
@@ -496,6 +522,82 @@ mod tests {
         assert_eq!(g.announcements.len(), 1);
         assert!(g.announcements.contains_key("radio"));
         assert!(!g.announcements.contains_key("intruder"));
+    }
+
+    #[tokio::test]
+    async fn a_plugin_announcing_another_protocol_is_refused_and_named() {
+        // Driven from the announcement as it arrives on the socket, never by
+        // calling the comparison directly: a test that called the predicate
+        // would prove the predicate works, not that anything calls it.
+        let dir = tempfile::tempdir().unwrap();
+        let register = dir.path().join("register.sock");
+        let listener = UnixListener::bind(&register).unwrap();
+        let r = register.clone();
+        let foreign = ritornello_proto::PROTOCOL_VERSION + 1;
+        tokio::spawn(async move {
+            announcement(
+                &r,
+                &format!(r#"{{"name":"radio","kinds":["source"],"protocol":{foreign}}}"#),
+            )
+            .await;
+        });
+
+        let (tx, mut rx) = channel();
+        let g = gather(
+            &listener,
+            &["radio".to_string()],
+            no_deaths(),
+            // An hour, like the neighbouring tests: the deadline must be out
+            // of reach so that returning proves the announcement was handled,
+            // not that the clock ran out. A short deadline would make this
+            // test arbitrate on machine load instead of on behaviour.
+            Duration::from_secs(3600),
+            &tx,
+            &mut rx,
+        )
+        .await;
+
+        assert!(
+            !g.announcements.contains_key("radio"),
+            "a plugin speaking another protocol must not be wired"
+        );
+        assert_eq!(
+            g.incompatible.get("radio"),
+            Some(&foreign),
+            "the refusal must carry the number, otherwise the screen cannot say why"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_plugin_is_not_also_reported_stalled() {
+        // Two accusations for one fact would put the same name on two lines of
+        // the page, and "stalled" would be a lie: the plugin spoke, on time.
+        // Same rig as the test above.
+        let dir = tempfile::tempdir().unwrap();
+        let register = dir.path().join("register.sock");
+        let listener = UnixListener::bind(&register).unwrap();
+        let r = register.clone();
+        let foreign = ritornello_proto::PROTOCOL_VERSION + 1;
+        tokio::spawn(async move {
+            announcement(
+                &r,
+                &format!(r#"{{"name":"radio","kinds":["source"],"protocol":{foreign}}}"#),
+            )
+            .await;
+        });
+
+        let (tx, mut rx) = channel();
+        let g = gather(
+            &listener,
+            &["radio".to_string()],
+            no_deaths(),
+            Duration::from_secs(3600),
+            &tx,
+            &mut rx,
+        )
+        .await;
+
+        assert!(!g.stalled.contains(&"radio".to_string()));
     }
 
     #[tokio::test]
