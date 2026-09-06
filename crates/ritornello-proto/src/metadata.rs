@@ -747,15 +747,19 @@ pub struct PlayerState {
     /// Random play is on: the active list is drawn without a repeat, then
     /// playback stops.
     ///
-    /// **A persisted setting of the device, like `volume`** — not a
-    /// capability of the active source, and not masked by one: it keeps
-    /// whatever value it was last set to across a source change or standby,
-    /// exactly like the volume does. A client that means to grey out its
-    /// random/repeat-all keys on a source for which neither mode has a
-    /// meaning must read `has_finite_list` for that, not infer it from this
-    /// field being `false` — the two are independent, and this one can
-    /// legitimately be `true` while `has_finite_list` is `false` (random was
-    /// armed on `files`, the active source is now the radio).
+    /// **What the device is doing, not what it remembers.** The setting
+    /// behind it is persisted like `volume` and survives a source change, a
+    /// standby and a restart; what travels in the frame is that setting
+    /// *masked by* `has_finite_list`, because a mode the active source
+    /// cannot honour is a mode the device is not in. The core refuses the
+    /// mode commands in that state, so the rule holds from both ends and a
+    /// client may lean on it: **never `true` while `has_finite_list` is
+    /// `false`.**
+    ///
+    /// A client greying its random/repeat-all keys still reads
+    /// `has_finite_list` to decide, not this field: the key is greyed
+    /// because the source has no list to shuffle, not because shuffle
+    /// happens to be off.
     ///
     /// Additive, in the idiom of `seekable` and `can_eject`: absent from the
     /// JSON at its default value, so no existing frame changes shape.
@@ -763,8 +767,9 @@ pub struct PlayerState {
     pub random: bool,
     /// Repeat-all is on: the active list starts over once exhausted, instead
     /// of stopping. Same convention as `random`, just above: a persisted
-    /// setting, independent of `has_finite_list`, which is what a client
-    /// must read to grey out the key instead.
+    /// setting, published masked by `has_finite_list` and therefore never
+    /// `true` while that one is `false`, and `has_finite_list` remains what
+    /// a client must read to grey out the key.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub repeat_all: bool,
     /// How this device writes a time and a date, as its owner set it.

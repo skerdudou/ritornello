@@ -425,6 +425,29 @@ impl<P: Player> Core<P> {
             // volume: a setting, not a session state, and every wired
             // source must learn the new value at once, whether or not it is
             // the active one (see `push_play_mode`, in `sources.rs`).
+            //
+            // **Both modes are inert on a source with no finite list, and
+            // the refusal belongs here rather than in each client.** The
+            // core is the only party that knows `has_finite_list` — the
+            // active source declares it, frame by frame — and there are four
+            // ways in: web remote, physical key, MPD client, display. The
+            // web greys its two keys on that same capability; without this
+            // arm the three other surfaces could still arm a mode the radio
+            // will never honour, which is precisely what an MPD client was
+            // found doing.
+            //
+            // Silently, like `SeekForward` on non-seekable content just
+            // above: the key behaves as an unbound one, and a message would
+            // teach nothing to whoever pressed it.
+            //
+            // It refuses rather than quietly remembering, and that is the
+            // point. Storing the value would let a key the user can only
+            // read as inert arm shuffle for their next files session, and
+            // would leave the web remote — which cannot send here at all —
+            // disagreeing with the physical remote about what the device
+            // remembers.
+            Command::ToggleRandom | Command::ToggleRepeatAll | Command::SetRandom(_) | Command::SetRepeatAll(_)
+                if !self.has_finite_list => {}
             Command::ToggleRandom => {
                 self.random = !self.random;
                 self.persist();
@@ -1013,6 +1036,9 @@ mod tests {
     #[tokio::test]
     async fn the_two_modes_travel_in_the_published_state() {
         let (mut core, _pc, _sc, state_rx, _d) = setup();
+        // Without this the four commands below are refused: the modes only
+        // exist on a source that declares a finite list.
+        declare_finite_list(&mut core, "radio");
         assert!(!state_rx.borrow().random);
         core.handle_command(Command::SetRandom(true)).await.unwrap();
         assert!(state_rx.borrow().random);
@@ -1030,11 +1056,18 @@ mod tests {
     async fn the_modes_survive_a_restart() {
         // Same treatment as the volume: a setting, not a session state.
         let (mut core, _pc, _sc, _rx, dir) = setup();
+        declare_finite_list(&mut core, "radio");
         core.handle_command(Command::SetRandom(true)).await.unwrap();
         core.handle_command(Command::SetRepeatAll(true)).await.unwrap();
 
         let persisted = crate::state::load(&dir.path().join("state.json"));
-        let (reloaded, _pc2, _sc2, _rx2, _d2) = setup_persisted(persisted);
+        let (mut reloaded, _pc2, _sc2, _rx2, _d2) = setup_persisted(persisted);
+        // The reloaded core has heard from no source yet, so it publishes
+        // both modes masked — which is correct and is not what this test is
+        // about. The source speaking is what makes the remembered setting
+        // observable again, and that round trip is the real proof it
+        // survived.
+        declare_finite_list(&mut reloaded, "radio");
         assert!(reloaded.player_state().random, "random must survive a restart");
         assert!(reloaded.player_state().repeat_all, "repeat_all must survive a restart");
     }
@@ -1045,9 +1078,114 @@ mod tests {
         // asleep: an MPD `random 1` is acknowledged without effect, and that
         // is consistent with every other command in standby.
         let (mut core, _pc, _sc, state_rx, _d) = setup();
+        declare_finite_list(&mut core, "radio");
         core.handle_command(Command::Power).await.unwrap();
         core.handle_command(Command::SetRandom(true)).await.unwrap();
         assert!(!state_rx.borrow().random, "standby swallows the command like every other one");
+    }
+
+    #[tokio::test]
+    async fn a_source_with_no_finite_list_refuses_both_modes() {
+        // The radio: nothing to shuffle, nothing to stop repeating. All four
+        // commands must leave the setting where it was rather than arm a
+        // mode the source will never honour.
+        //
+        // This arm is the **only** guard the physical key and the MPD
+        // clients pass through — the web greys its own two keys on the same
+        // capability, which is why the defect showed up on MPD first.
+        //
+        // **The published state cannot answer this on its own**, and a first
+        // version of this test proved nothing because of it: publication is
+        // masked by the very same capability, so a command that was honoured
+        // and a command that was refused look identical from there. Removing
+        // the guard left it green. What tells them apart is asking the source
+        // to declare its list again, which unmasks whatever the command left
+        // behind — then taking it away for the next one.
+        let (mut core, _pc, _sc, state_rx, _d) = setup();
+        for cmd in [
+            Command::SetRandom(true),
+            Command::ToggleRandom,
+            Command::SetRepeatAll(true),
+            Command::ToggleRepeatAll,
+        ] {
+            let label = format!("{cmd:?}");
+            core.handle_command(cmd).await.unwrap();
+            assert!(!state_rx.borrow().random, "{label}: nothing may show through on a mute source");
+            assert!(!state_rx.borrow().repeat_all, "{label}: same for repeat-all");
+
+            declare_finite_list(&mut core, "radio");
+            assert!(!state_rx.borrow().random, "{label} armed random on a source with no list");
+            assert!(!state_rx.borrow().repeat_all, "{label} armed repeat-all on a source with no list");
+            core.handle_source_update("radio", update_with_capabilities(None, Some(false)));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_mode_command_leaves_the_remembered_setting_alone() {
+        // Refusing is not forgetting. The setting is persisted like the
+        // volume, so a spell on the radio — during which every mode command
+        // is refused — must give it back untouched, not silently off.
+        //
+        // The refused `SetRandom(false)` in the middle is the point of the
+        // test: an arm that wrote the value before deciding whether to
+        // honour it would pass every assertion but this one.
+        let (mut core, _pc, _sc, state_rx, _d) = setup();
+        declare_finite_list(&mut core, "radio");
+        core.handle_command(Command::SetRandom(true)).await.unwrap();
+        assert!(state_rx.borrow().random);
+
+        // The same source now says it has no finite list, the shape a real
+        // frame takes when what plays becomes a stream.
+        core.handle_source_update("radio", update_with_capabilities(None, Some(false)));
+        assert!(!state_rx.borrow().random, "masked while the source cannot honour it");
+        core.handle_command(Command::SetRandom(false)).await.unwrap();
+
+        declare_finite_list(&mut core, "radio");
+        assert!(state_rx.borrow().random, "the setting was masked, never erased nor overwritten");
+    }
+
+    #[tokio::test]
+    async fn the_published_modes_never_outlive_the_finite_list() {
+        // The invariant every client leans on: `random`/`repeat_all` are
+        // never true while `has_finite_list` is false. The owner reported
+        // the shuffle icon lit on the radio, next to a key that refused to
+        // be pressed, because this mask did not exist.
+        //
+        // Standby asserted in the same test, and deliberately so: it is the
+        // second way to reach a state where the commands are refused, and
+        // the rule that made the radio lie would have made the sleeping
+        // device lie in exactly the same way.
+        let (mut core, _pc, _sc, state_rx, _d) = setup();
+        declare_finite_list(&mut core, "radio");
+        core.handle_command(Command::SetRandom(true)).await.unwrap();
+        core.handle_command(Command::SetRepeatAll(true)).await.unwrap();
+        assert!(state_rx.borrow().random);
+        assert!(state_rx.borrow().repeat_all);
+
+        core.handle_source_update("radio", update_with_capabilities(None, Some(false)));
+        {
+            let s = state_rx.borrow();
+            assert!(!s.has_finite_list);
+            assert!(!s.random, "a mode the source cannot honour is not a mode the device is in");
+            assert!(!s.repeat_all, "and the same for repeat-all");
+        }
+
+        declare_finite_list(&mut core, "radio");
+        core.handle_command(Command::Power).await.unwrap(); // standby
+        {
+            let s = state_rx.borrow();
+            assert!(!s.random, "standby masks the modes as it already masked has_finite_list");
+            assert!(!s.repeat_all, "and the same for repeat-all");
+        }
+        core.handle_command(Command::Power).await.unwrap(); // wake
+        // Still masked right after the wake, and that is not this rule's
+        // doing: standby clears the capability itself alongside `can_eject`
+        // (see the `Power` arm), and the active source redeclares it on its
+        // next frame. The two modes therefore have exactly the window the
+        // Eject key already had.
+        assert!(!state_rx.borrow().random, "the capability is unknown again until the source speaks");
+        declare_finite_list(&mut core, "radio");
+        assert!(state_rx.borrow().random, "and the setting itself was never touched by any of it");
     }
 
     #[tokio::test]

@@ -312,14 +312,19 @@ Both keys are greyed, never hidden, on a source with no finite list to
 apply them to (the radio): the user asked to still see that the function
 exists, even where this particular source cannot honour it — read from
 `has_finite_list`, the capability a source declares for itself (see
-[plugins.md](plugins.md)). That greying is this page's own doing: the core
-accepts and persists both modes regardless of the active source, so
-neither the physical remote's toggle keys nor the MPD server's `random`/
-`repeat` commands are refused or guarded on a source that cannot honour
-them — a source with no finite list is simply told a mode it will never
-read. The two modes are persisted settings of the **device**, not of what
-is loaded: they survive a source change and a stop, and are read back
-after a restart.
+[plugins.md](plugins.md)). **And a greyed key never claims to be on**: the
+core refuses both mode commands while the active source has no finite
+list, and publishes the two modes masked by that same capability, so
+`random` and `repeat_all` are never `true` in a frame where
+`has_finite_list` is `false`. The rule lives in the core rather than on
+this page because the core is the only party that knows the capability,
+and this page is only one of four ways in — the physical remote's toggle
+keys and the MPD server's `random`/`repeat` commands meet the same
+refusal, where they used to walk straight past it. Refusing is not
+forgetting, though: the two modes are persisted settings of the
+**device**, not of what is loaded, so the value comes back untouched on a
+source that can honour it, survives a source change and a stop, and is
+read back after a restart.
 
 **Buttons the appliance would ignore are disabled or hidden**, never
 offered as if they worked:

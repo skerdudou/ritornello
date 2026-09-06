@@ -117,9 +117,12 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [
  * The two mode keys have a second rule: they need a list with an end, a
  * capability the active source declares for itself (`has_finite_list`,
  * exactly like `can_eject`) — never the modes' own value, `random`/
- * `repeat_all`, which are persisted settings independent of it (see their
- * doc in `types.ts`). Greyed and not hidden, unlike eject: the user asked to
- * still see that the function exists on a source that cannot honour it.
+ * `repeat_all`, which say whether a mode is on rather than whether it can be
+ * (see their doc in `types.ts`). Greyed and not hidden, unlike eject: the
+ * user asked to still see that the function exists on a source that cannot
+ * honour it. The core refuses both commands on such a source and publishes
+ * the two modes as off there, so the greyed key reads as unpressed too
+ * instead of contradicting itself.
  *
  * A state not yet received (`null`) greys nothing: the remote opens usable,
  * and the frame corrects at once.

@@ -617,12 +617,16 @@ Whether either mode has anything to apply to is a capability of its own,
 `can_eject` (see the cd section, above): **false** unless overridden, which
 is what leaves the radio — the one other `SourcePlugin` implementor —
 compiling unchanged, correctly declaring it has nothing for either mode to
-apply to. The web remote is the one consumer that reads it to grey its two
-mode buttons (see [interface.md](interface.md)); neither the physical
-remote's toggle keys nor the MPD server's `random`/`repeat` commands guard
-against it at all, so pressing one on a source with no finite list is
-accepted and simply changes a setting that source will never read. `files`
-and the cd player (above) are the two sources that override it to true.
+apply to. The web remote reads it to grey its two mode buttons (see
+[interface.md](interface.md)), and the **core** reads it twice over: it
+refuses a mode command outright while the active source declares no finite
+list, and it publishes both modes masked by the capability, so no client —
+web remote, MPD client or display — is ever shown a mode as on where
+nothing can apply it. Note where the mask is *not*: a source is still
+handed the raw setting through `SetPlayMode`, whether or not it can act on
+it, which is what lets the value be waiting, untouched, on the source that
+can. `files` and the cd player (above) are the two sources that override
+`has_finite_list` to true.
 
 `random` here is **not a dice roll at every track**: `set_play_mode` draws
 a permutation of the list's entries only on the actual transition that
