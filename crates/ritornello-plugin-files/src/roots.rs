@@ -168,6 +168,25 @@ impl Roots {
     pub fn by_name(&self, name: &str) -> Option<&Root> {
         self.root.iter().find(|r| r.name == name)
     }
+
+    /// The root that owns `path`, by **longest** matching `base_dir()`.
+    ///
+    /// Longest and not first: two roots may legitimately aim at nested
+    /// subpaths of the same share (only the exact duplicate is refused at
+    /// declaration), and the table's order carries no meaning. Containment is
+    /// judged by `Path::starts_with`, which compares **components** — a string
+    /// prefix would accept `/mnt/ritornello/nas-old` as being inside
+    /// `/mnt/ritornello/nas`.
+    ///
+    /// No `canonicalize` here: this answers about the path a Source is
+    /// playing, which it built from a `base_dir()` itself, and touching the
+    /// filesystem would make a table lookup wait on a sleeping share.
+    pub fn root_of(&self, path: &Path) -> Option<&Root> {
+        self.root
+            .iter()
+            .filter(|r| path.starts_with(r.base_dir()))
+            .max_by_key(|r| r.base_dir().components().count())
+    }
 }
 
 impl Root {
@@ -513,6 +532,21 @@ mod tests {
         assert!(!host_message.contains("{host}"), "placeholder left as is: {host_message:?}");
     }
 
+    fn smb(share: &str) -> Root {
+        Root {
+            name: "nas".into(),
+            kind: RootKind::Smb,
+            path: None,
+            host: "h".into(),
+            share: share.into(),
+            subpath: None,
+            user: "u".into(),
+            domain: String::new(),
+            writable: false,
+            archive_covers: false,
+        }
+    }
+
     #[test]
     fn a_table_reads_back_from_toml() {
         let dir = tempfile::tempdir().unwrap();
@@ -542,5 +576,39 @@ path = "/media/usb"
         // The `writable` default matters: a share is not writable unless asked
         // for.
         assert!(!roots.by_name("nas").unwrap().writable);
+    }
+
+    #[test]
+    fn a_path_resolves_to_the_root_with_the_longest_matching_base() {
+        // Longest and not first: two roots may legitimately aim at nested
+        // subpaths of the same share, and the table's order says nothing.
+        let table = Roots {
+            root: vec![
+                Root { name: "nas".into(), subpath: None, ..smb("musique") },
+                Root { name: "nas".into(), subpath: Some("Jazz".into()), ..smb("musique") },
+            ],
+        };
+        let inside = std::path::Path::new("/mnt/ritornello/nas/Jazz/Kind of Blue/01.flac");
+        assert_eq!(table.root_of(inside).map(|r| r.subpath.as_deref()), Some(Some("Jazz")));
+
+        let elsewhere = std::path::Path::new("/mnt/ritornello/nas/Rock/01.flac");
+        assert_eq!(table.root_of(elsewhere).map(|r| r.subpath.as_deref()), Some(None));
+    }
+
+    #[test]
+    fn a_path_outside_every_root_resolves_to_nothing() {
+        // The guard that keeps an archive from landing anywhere at all: a
+        // path the table does not own is not a place to write.
+        let table = Roots { root: vec![Root { name: "nas".into(), ..smb("musique") }] };
+        assert!(table.root_of(std::path::Path::new("/etc/passwd")).is_none());
+        assert!(table.root_of(std::path::Path::new("/mnt/ritornello/autre/01.flac")).is_none());
+    }
+
+    #[test]
+    fn a_sibling_directory_sharing_a_name_prefix_is_not_inside() {
+        // `starts_with` on strings would accept `/mnt/ritornello/nas-old`,
+        // which is a different root. Component-wise containment is the rule.
+        let table = Roots { root: vec![Root { name: "nas".into(), ..smb("musique") }] };
+        assert!(table.root_of(std::path::Path::new("/mnt/ritornello/nas-old/01.flac")).is_none());
     }
 }
