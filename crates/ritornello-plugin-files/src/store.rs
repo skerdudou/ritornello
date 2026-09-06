@@ -249,6 +249,7 @@ mod tests {
                 user: String::new(),
                 domain: String::new(),
                 writable,
+                archive_covers: false,
             }],
         };
         (dir, roots)

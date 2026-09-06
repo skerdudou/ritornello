@@ -37,6 +37,15 @@ pub struct Root {
     /// playlist onto the share is an explicit choice, not a given.
     #[serde(default)]
     pub writable: bool,
+    /// Keep on this root the full-size cover a network contributor found for a
+    /// track that has none. False by default: writing into someone's music
+    /// library is an explicit choice, like `writable` above.
+    ///
+    /// **Not a mount option.** Unlike `writable`, changing it remounts
+    /// nothing; on an SMB root it is inert until `writable` is set too, and
+    /// the write path says so rather than letting an `EROFS` bubble up.
+    #[serde(default)]
+    pub archive_covers: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +335,7 @@ mod tests {
             user: "steven".into(),
             domain: String::new(),
             writable: false,
+            archive_covers: false,
         }
     }
 
@@ -340,6 +350,7 @@ mod tests {
             user: String::new(),
             domain: String::new(),
             writable: false,
+            archive_covers: false,
         }
     }
 
