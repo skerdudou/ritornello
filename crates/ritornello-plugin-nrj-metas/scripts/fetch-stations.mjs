@@ -162,7 +162,16 @@ for (const s of stations) {
 }
 
 const text = render(stations)
-const current = readFileSync(out, 'utf8')
+// Absent on a first generation (the plan's own step 3, run before this file
+// exists): fall back to an empty string rather than letting ENOENT abort
+// before either branch below runs. `asOnDisk(text, '')` then writes plain LF,
+// which is correct for a brand-new file.
+let current = ''
+try {
+  current = readFileSync(out, 'utf8')
+} catch (e) {
+  if (e.code !== 'ENOENT') throw e
+}
 
 if (process.argv.includes('--verifier')) {
   // The header carries the generation date, which changes on every run: the
