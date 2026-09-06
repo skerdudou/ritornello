@@ -111,9 +111,9 @@ mod tests {
 
     #[test]
     fn a_plugin_without_locales_is_normal() {
-        // Three plugins have no catalog of their own. Asserting it here stops
+        // Four plugins have no catalog of their own. Asserting it here stops
         // a future guard from "fixing" their absence into an error.
-        for name in ["ouifm-metas", "radiofrance-metas", "console"] {
+        for name in ["ouifm-metas", "radiofrance-metas", "nrj-metas", "console"] {
             assert!(
                 !deploy_dir().join("locales").join(name).exists(),
                 "{name} grew a locale directory: the packaging rule must now carry it"

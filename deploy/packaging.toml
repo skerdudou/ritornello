@@ -47,6 +47,13 @@ examples = ["deploy/ouifm-metas.example.toml"]
 [plugins.radiofrance-metas]
 examples = ["deploy/radiofrance-metas.example.toml"]
 
+# Declared here, between the other two station-specific tables and
+# musicbrainz, to mirror plugins.example.toml — where that position is a
+# requirement rather than a convention, since `metadata` plugins are
+# arbitrated by declaration order.
+[plugins.nrj-metas]
+examples = ["deploy/nrj-metas.example.toml"]
+
 [plugins.musicbrainz]
 
 [plugins.generic-input]

@@ -248,7 +248,7 @@ async fn main() -> Result<()> {
         table.stations.len(),
         table_path.display()
     );
-    Runtime::from_args()?.metadata(NrjMetas::new(table))?.run().await
+    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.metadata(NrjMetas::new(table))?.run().await
 }
 
 #[cfg(test)]
