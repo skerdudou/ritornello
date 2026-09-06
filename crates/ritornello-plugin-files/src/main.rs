@@ -10,6 +10,7 @@
 //! playlist. A failure of the page must never cut the audio.
 
 mod admin;
+mod archive;
 mod cover;
 mod state;
 
@@ -18,7 +19,7 @@ use rand::seq::SliceRandom;
 use ritornello_i18n::Catalog;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
-use ritornello_plugin_files::roots::Roots;
+use ritornello_plugin_files::roots::{RootKind, Roots};
 use ritornello_plugin_files::FILES_EN;
 use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
 use ritornello_proto::{Preset, SourceAction};
@@ -81,6 +82,42 @@ impl Order {
                 order
             }
         }
+    }
+}
+
+/// What `arm_cover`'s per-directory memo says about a folder.
+///
+/// **Three named states and not two nested `Option`s.** `NotProbed` is the one
+/// that matters: a share that timed out stores nothing, and reading "unknown"
+/// as "no image" would archive over a cover nobody has looked for. Written
+/// `Option<Option<CoverRef>>`, that distinction is one missing `.flatten()`
+/// away from disappearing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FolderState {
+    NotProbed,
+    NoImage,
+    Image,
+}
+
+/// Should this Source offer to keep a network cover for `file`?
+///
+/// A free function, and not a method: it is a decision over three values, so
+/// it is provable without a `FilesSource`, without a channel and without a
+/// clock.
+fn offers_archive(roots: &Roots, file: &Path, probed: FolderState) -> bool {
+    if probed != FolderState::NoImage {
+        return false;
+    }
+    let Some(root) = roots.root_of(file) else { return false };
+    if !root.archive_covers {
+        return false;
+    }
+    // `writable` gates the cifs mount options, so it only means something for
+    // a share. A local root is writable or not according to its filesystem,
+    // which answers at write time (and is refused with a line in the journal).
+    match root.kind {
+        RootKind::Smb => root.writable,
+        RootKind::Local => true,
     }
 }
 
@@ -224,6 +261,22 @@ struct FilesSource {
     /// indefinitely (see `health`): without this bound, a sleeping NAS would
     /// freeze the probe task above indefinitely.
     health: Arc<ritornello_plugin_files::health::Health>,
+    /// The roots table, shared with the Admin half, which is the only writer.
+    ///
+    /// Consulted by `poll_notification` alone, through `offers_archive`, to
+    /// learn whether the root that owns the current file welcomes a network
+    /// cover (`archive_covers`, and for a share, `writable`). Nothing here
+    /// ever touches a filesystem: `offers_archive` reads this table and the
+    /// `cover_by_dir` memo, never a directory.
+    roots: Arc<AsyncRwLock<Roots>>,
+    /// The file whose identity was last declared, set at the top of
+    /// `arm_cover` regardless of which of its three branches is taken.
+    ///
+    /// `poll_notification` needs it once the probe answers, to resolve which
+    /// root — hence which `archive_covers` — the offer would be about: the
+    /// `path` local of the probe itself lives only inside the spawned task,
+    /// and is gone by the time its result reaches us.
+    current_file: Option<PathBuf>,
 }
 
 impl FilesSource {
@@ -326,6 +379,10 @@ impl FilesSource {
     /// terminal for the SDK — an `Err` from the receiver as well as an
     /// `Ok(None)` both fall through to the rest of the function.
     fn arm_cover(&mut self, file: &Path) {
+        // Set unconditionally, ahead of the three branches below: whichever
+        // one answers, `poll_notification` must find here the file this
+        // very call was about (see the field's doc).
+        self.current_file = Some(file.to_path_buf());
         // A fresh receiver replaces the one of a probe still in flight: this is
         // what discards the cover of a track already left (see the doc of
         // `cover_in_flight`).
@@ -778,6 +835,91 @@ impl SourcePlugin for FilesSource {
         self.mode_changed = true;
     }
 
+    /// The core got the full-size original of a cover for a track whose folder
+    /// has none, and left it at `file`. See `SourceReq::ArchiveCover` for why
+    /// `identity` **designates** a folder rather than gating a comparison, and
+    /// `archive::store` for every reason this hand-over may end in a refusal.
+    ///
+    /// **Returns at once, and works detached.** The reply is what unties a
+    /// correlation the core gives up on after five seconds, while a copy onto a
+    /// sleeping share takes longer than that; a Source that copied before
+    /// answering would routinely be told it failed when it did not. Nothing
+    /// below is awaited by the core.
+    async fn archive_cover(&mut self, identity: serde_json::Value, file: String) {
+        let roots = self.roots.clone();
+        let health = self.health.clone();
+        tokio::spawn(async move {
+            let staged = PathBuf::from(&file);
+            let table = roots.read().await.clone();
+            // The circuit breaker is keyed on the mount point owning the path
+            // it is handed, and what this work touches is the **album folder**
+            // — not the staged file, which sits in the appliance's own tmpfs
+            // and would charge a sleeping NAS's timeout to the wrong mount.
+            // An echo we cannot read names no folder; the staged path then
+            // makes an honest key for a call that will refuse without ever
+            // touching a share.
+            let guarded = archive::echoed_file(&identity).unwrap_or_else(|| staged.clone());
+            // **One** `Health::bounded` for the whole folder: listing it,
+            // reading the neighbours' albums and writing the image are one trip
+            // to one share, and a sleeping NAS must give up once, not once per
+            // neighbour.
+            let target = staged.clone();
+            // **Read before `bounded`, and that order is the whole point.**
+            // `bounded` answers `None` for two situations that call for
+            // opposite treatments here, and only this reading tells them
+            // apart: a mount *already* known silent means the closure never
+            // ran, while an elapsed bound means it is still running and owns
+            // both the staged file and the duty to report. Read afterwards,
+            // the flag would be true in both cases — the timeout marks the
+            // mount on its way out — and the wrong branch would be taken for
+            // the one case that must not be touched. A mount that falls
+            // silent *between* these two lines leaves one staged file in the
+            // appliance's tmpfs; that is a leak, where the reverse order
+            // risks truncating a cover being written into a music library.
+            let already_silent = health.unreachable(&guarded);
+            // **The outcome is logged from inside the closure**, not from the
+            // result of `bounded`. An elapsed bound hands the `JoinHandle` to
+            // the recovery watcher, which discards what the closure returned:
+            // reporting from out here would leave every slow attempt — the
+            // successes included — with no line at all, which is precisely
+            // the silence this feature is not allowed to produce.
+            let work = move || {
+                match archive::store(&table, &identity, &target, &archive::album_from_tags) {
+                    archive::Outcome::Written(p) => {
+                        tracing::info!("cover archived at {}", p.display())
+                    }
+                    archive::Outcome::Refused(why) => {
+                        tracing::info!("cover not archived: {why}")
+                    }
+                    archive::Outcome::Failed(e) => tracing::warn!("cover not archived: {e}"),
+                }
+            };
+            if health.bounded(&guarded, work).await.is_none() {
+                if already_silent {
+                    // Nothing ran, so nothing said anything and nothing reaped
+                    // the staged file. Both are owed here: the file is ours
+                    // from the moment the path arrived, the core never comes
+                    // back for it.
+                    tracing::warn!(
+                        "cover not archived: {} is not answering",
+                        guarded.display()
+                    );
+                    let _ = std::fs::remove_file(&staged);
+                } else {
+                    // The bound elapsed — the share has not said no, it has
+                    // not said anything *yet*. The abandoned thread still
+                    // holds the staged file and will report for itself, so
+                    // this must neither claim an outcome nor unlink under it.
+                    tracing::warn!(
+                        "cover not archived yet: {} did not answer within the bound; \
+                         the attempt continues in the background and will report itself",
+                        guarded.display()
+                    );
+                }
+            }
+        });
+    }
+
     /// mpv went idle at the end of the finite list `has_finite_list`
     /// declares — as opposed to a live stream cutting out, which has no
     /// equivalent here.
@@ -829,23 +971,77 @@ impl SourcePlugin for FilesSource {
         // cancel-safe, and the receiver lives in `self` — not in a local
         // variable of this future — so nothing is lost if this round is
         // interrupted: the next one resumes waiting on the same task.
+        //
+        // **And nothing suspends between that answer and the `return` below**,
+        // which is the other half of the same guarantee. The SDK cancels this
+        // future the instant a core request arrives; once `cover_in_flight`
+        // has been cleared, the received cover exists only in this future's
+        // locals, so a single `.await` in the lines that follow would drop it
+        // with nothing left to resume — the cover would never be announced for
+        // that track, and nothing would say so. That is why the offer below is
+        // computed with `try_read` and not `read().await`.
         if let Some(rx) = &mut self.cover_in_flight {
             let result = rx.await;
             // Cleared only after the probe has answered — this is what makes
             // the guarantee above true: as long as no answer has arrived, the
             // field stays in place for the next round.
             self.cover_in_flight = None;
-            // Two distinct failures meet here without any difference: `Err`
-            // (the task vanished without answering, for instance if it
-            // panicked) and an `Ok(None)` (the circuit breaker said "we don't
-            // know", or the lookup itself said "nothing certain"). In every
-            // case, there is nothing to announce — above all not an empty
-            // notification, and above all not `None`, which is terminal for
-            // the SDK (see the comment on `preset_count_rx` just below). We
-            // simply fall through to the rest of the function, which waits for
-            // the next event.
-            if let Ok(Some(cover)) = result {
-                return Some(Notification::new().cover(cover));
+            // `Err` (the task vanished without answering) and `Ok(None)` (the
+            // circuit breaker said "we don't know", or the lookup itself said
+            // "nothing certain") both mean "no cover to announce", but they no
+            // longer mean "nothing at all to say": a folder the memo confirms
+            // was probed and holds no image may still be worth an offer to
+            // archive one. The channel cannot tell that case apart from a
+            // share that timed out — both send `None` — so this reads the
+            // `cover_by_dir` memo instead, which is where `arm_cover` records
+            // the difference (see `FolderState`'s doc).
+            //
+            // `self.cover_by_dir.lock()` and `self.current_file` are both read
+            // here, in their own statement: the `std::sync::MutexGuard` this
+            // produces is not `Send`, and this function suspends again further
+            // down (`rx.changed().await`) when there is nothing to announce.
+            // Computing `probed` first lets the guard drop at the end of this
+            // statement, before any of that.
+            let probed = match &result {
+                Ok(Some(_)) => FolderState::Image,
+                _ => match (&self.current_file, &*self.cover_by_dir.lock().unwrap()) {
+                    (Some(file), Some((dir, None))) if file.parent() == Some(dir.as_path()) => {
+                        FolderState::NoImage
+                    }
+                    _ => FolderState::NotProbed,
+                },
+            };
+            let mut n = Notification::new();
+            if let Ok(Some(cover)) = &result {
+                n = n.cover(cover.clone());
+            }
+            // `try_read` and **never** `read().await`: see the cancel-safety
+            // note at the top of this function. The lock is only ever held for
+            // writing while the Admin half saves a table, so the failure is
+            // rare — and losing an offer costs nothing that does not come
+            // back, since the next track probes its folder and offers again,
+            // where losing the cover received two statements above would be
+            // silent and permanent.
+            let offer = match &self.current_file {
+                Some(file) => self
+                    .roots
+                    .try_read()
+                    .map(|table| offers_archive(&table, file, probed))
+                    .unwrap_or(false),
+                None => false,
+            };
+            if offer {
+                n = n.cover_archivable(true);
+            }
+            // A frame carrying neither a cover nor an offer says nothing, and
+            // the SDK's "interesting frame" predicate would drop it anyway:
+            // returning it would only cost a wake-up. Above all not `None`
+            // here either way — that is terminal for the SDK (see the comment
+            // on `preset_count_rx` just below) — so a frame with nothing to
+            // say simply falls through to the rest of the function, which
+            // waits for the next event.
+            if matches!(result, Ok(Some(_))) || offer {
+                return Some(n);
             }
         }
         let Some(rx) = &mut self.preset_count_rx else {
@@ -1041,6 +1237,10 @@ async fn main() -> Result<()> {
         cover_in_flight: None,
         cover_by_dir: Arc::new(Mutex::new(None)),
         health: health.clone(),
+        // Cloned, not moved: `admin` below takes the table itself, and the
+        // Source only ever reads it (see the field's doc).
+        roots: roots.clone(),
+        current_file: None,
     };
 
     // Probed at startup rather than on use: the page must be able to grey out
@@ -1089,7 +1289,96 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ritornello_plugin_files::roots::Root;
     use ritornello_proto::IdentityUpdate;
+
+    /// An SMB root on `share`, with every field a `Root` must carry filled in
+    /// with an otherwise-inert value — callers override only what their test
+    /// cares about with `..smb_root(share)`.
+    ///
+    /// **Deliberately no `subpath`**: the sibling helper in `roots.rs` sets one
+    /// ("Albums"), which is exactly wrong here — these tests build a file path
+    /// under the root's plain mount point (`/mnt/ritornello/<name>/…`), and a
+    /// subpath would make `base_dir()` a component longer than that, so
+    /// `root_of` would no longer see the file as owned by this root.
+    fn smb_root(share: &str) -> Root {
+        Root {
+            name: "nas".into(),
+            kind: RootKind::Smb,
+            path: None,
+            host: "192.168.1.20".into(),
+            share: share.into(),
+            subpath: None,
+            user: "steven".into(),
+            domain: String::new(),
+            writable: false,
+            archive_covers: false,
+        }
+    }
+
+    #[test]
+    fn an_offer_is_made_only_for_a_probed_folder_without_an_image() {
+        let dir = std::path::Path::new("/mnt/ritornello/nas/Album");
+        let file = dir.join("01.flac");
+        let table = Roots {
+            root: vec![Root {
+                name: "nas".into(),
+                archive_covers: true,
+                writable: true,
+                ..smb_root("musique")
+            }],
+        };
+
+        // Probed, nothing found: the one case that deserves an offer.
+        assert!(offers_archive(&table, &file, FolderState::NoImage));
+
+        // A cover was found: there is nothing to archive.
+        assert!(!offers_archive(&table, &file, FolderState::Image));
+
+        // **Not probed at all** — a share that did not answer in time stores
+        // nothing. "Unknown" must never read as "no cover": offering here
+        // would archive over an image nobody has looked for. Three named
+        // states rather than two nested `Option`s, precisely because this is
+        // the distinction this whole feature turns on.
+        assert!(!offers_archive(&table, &file, FolderState::NotProbed));
+    }
+
+    #[test]
+    fn an_offer_needs_the_flag_and_a_writable_share() {
+        let file = std::path::Path::new("/mnt/ritornello/nas/Album/01.flac");
+        let base = Root { name: "nas".into(), ..smb_root("musique") };
+
+        // The flag off: no offer, whatever the mount says.
+        let off = Roots { root: vec![Root { writable: true, ..base.clone() }] };
+        assert!(!offers_archive(&off, file, FolderState::NoImage));
+
+        // The flag on but the share read-only: no offer. The control is
+        // greyed in the page, but a table edited by hand must not slip past.
+        let ro = Roots { root: vec![Root { archive_covers: true, ..base.clone() }] };
+        assert!(!offers_archive(&ro, file, FolderState::NoImage));
+
+        // A **local** root has no read-only mount to speak of: the flag alone
+        // decides, and the filesystem has the last word at write time.
+        let local = Roots {
+            root: vec![Root {
+                name: "usb".into(),
+                kind: RootKind::Local,
+                path: Some("/media/usb".into()),
+                archive_covers: true,
+                writable: false,
+                ..base
+            }],
+        };
+        let on_usb = std::path::Path::new("/media/usb/Album/01.flac");
+        assert!(offers_archive(&local, on_usb, FolderState::NoImage));
+    }
+
+    #[test]
+    fn a_path_owned_by_no_root_is_never_offered() {
+        let table = Roots { root: vec![] };
+        let file = std::path::Path::new("/tmp/x/01.flac");
+        assert!(!offers_archive(&table, file, FolderState::NoImage));
+    }
 
     /// Builds a test `Metadata` for a (target, level) pair.
     ///
@@ -1171,6 +1460,8 @@ mod tests {
             cover_in_flight: None,
             cover_by_dir: Arc::new(Mutex::new(None)),
             health: Arc::new(ritornello_plugin_files::health::Health::new()),
+            roots: Arc::new(AsyncRwLock::new(Roots::default())),
+            current_file: None,
         }
     }
 
@@ -1899,5 +2190,43 @@ mod tests {
     #[test]
     fn embedded_en_files_is_not_empty() {
         assert!(!ritornello_i18n::try_parse(FILES_EN).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_mount_already_silent_is_reaped_rather_than_left_for_the_watcher() {
+        // `already_silent` and an elapsed bound both make `bounded` answer
+        // `None`, and only one of the two owns the staged file: on this
+        // branch nothing ran, so nothing will ever come back for it. Built
+        // with `Health::for_test`'s `silent` list rather than an actual
+        // sleeping mount, so this reaches the branch deterministically and
+        // without a three-second wait.
+        let mut s = test_source(playlist_of(1));
+        let dir = tempfile::tempdir().unwrap();
+        let track = dir.path().join("01.flac");
+        s.health = Arc::new(ritornello_plugin_files::health::Health::for_test(
+            std::time::Duration::from_millis(50),
+            String::new(),
+            vec![track.clone()],
+        ));
+        let staged = dir.path().join("staged.jpg");
+        std::fs::write(&staged, b"not a real image").unwrap();
+        let identity = serde_json::json!({"kind": "file", "path": track.to_string_lossy()});
+
+        s.archive_cover(identity, staged.to_string_lossy().into_owned()).await;
+
+        // `archive_cover` detaches its work: poll rather than assume it has
+        // run by the time this line is reached. The already-silent branch
+        // never spawns anything blocking, so this settles almost at once.
+        for _ in 0..50 {
+            if !staged.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !staged.exists(),
+            "a mount already known silent must have its staged file reaped, \
+             since nothing else ever will"
+        );
     }
 }

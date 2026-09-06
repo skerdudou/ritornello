@@ -12,7 +12,14 @@ use std::path::{Path, PathBuf};
 const PREFERENCES: [&str; 5] = ["cover", "folder", "front", "albumart", "album"];
 
 /// Recognized extensions.
-const EXTENSIONS: [&str; 4] = ["jpg", "jpeg", "png", "webp"];
+///
+/// `pub(crate)` because `archive` reads **this** list and not a copy of it: what
+/// this module accepts as the image of a folder is exactly what the archiver
+/// must refuse to write over. Two lists that drifted would let the appliance
+/// drop a `cover.jpg` beside a `cover.webp` the owner scanned himself — two
+/// front faces in one folder, and the winner settled by the alphabetical sort
+/// in `images_of` rather than by him.
+pub(crate) const EXTENSIONS: [&str; 4] = ["jpg", "jpeg", "png", "webp"];
 
 /// Artwork subdirectories visited, on **one single** level.
 const SUBDIRECTORIES: [&str; 4] = ["artwork", "scans", "covers", "art"];

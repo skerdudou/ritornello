@@ -23,6 +23,15 @@ describe('root normalization', () => {
     expect(r.mounted).toBe(false)
   })
 
+  it('defaults archive_covers to false, never to undefined', () => {
+    // `archive_covers` carries no `skip_serializing_if`: the plugin always
+    // serializes it. `normalizeRoot` is a defensive parser of `unknown`
+    // regardless — this fixture omits the field the way a stale response or
+    // a hand-built object would — and an omission must read as false, never
+    // as undefined: the checkbox would then be neither on nor off.
+    expect(normalizeRoot({ name: 'x' }).archive_covers).toBe(false)
+  })
+
   it('treats any unknown kind as a share', () => {
     expect(normalizeRoot({ kind: 'local' }).kind).toBe('local')
     expect(normalizeRoot({}).kind).toBe('smb')

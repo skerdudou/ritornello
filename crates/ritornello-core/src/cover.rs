@@ -1361,7 +1361,13 @@ impl CoverCache {
     ///   that the network means the internet: the share is local, re-readable
     ///   at the cost of a read, and memoising it would charge the budget for
     ///   megabytes the appliance has no reason to hold.
-    async fn full_size(
+    ///
+    /// `pub(crate)`: `Core::start_cover_archive` obtains the original through
+    /// this very door, on purpose. The rendezvous and the memo are what make
+    /// archiving *iso* to an enlargement from the page — archive first and the
+    /// enlargement is free, enlarge first and the archive costs no network.
+    /// A second download path would have neither.
+    pub(crate) async fn full_size(
         &self,
         key: &str,
         full: &CoverRef,

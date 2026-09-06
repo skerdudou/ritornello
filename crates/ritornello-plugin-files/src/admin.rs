@@ -160,6 +160,10 @@ pub enum Op {
         name: String,
         writable: bool,
     },
+    SetArchiveCovers {
+        name: String,
+        archive: bool,
+    },
     ExploreOpen {
         kind: ritornello_plugin_files::explore::Kind,
     },
@@ -706,6 +710,7 @@ impl AdminPlugin for FilesAdmin {
                     user: user.clone(),
                     domain: domain.clone(),
                     writable,
+                    archive_covers: false,
                 };
                 table.root.push(root);
                 // Validate **before** writing anything: a credentials file
@@ -811,6 +816,21 @@ impl AdminPlugin for FilesAdmin {
                 // allowing writes would change nothing until the next
                 // reboot.
                 self.reconcile_roots(&table, false).await;
+                *self.roots.write().await = table;
+                Ok(())
+            }
+
+            Op::SetArchiveCovers { name, archive } => {
+                let mut table = self.roots.read().await.clone();
+                let Some(r) = table.root.iter_mut().find(|r| r.name == name) else {
+                    return Err(self.phrase("unknown_source").replace("{name}", &name));
+                };
+                r.archive_covers = archive;
+                self.write_table(&table)?;
+                // **No `reconcile_roots` here, and that is the difference with
+                // `SetWritable`.** This flag is not a mount option: it is read
+                // at every write. Remounting would restart a unit and could
+                // raise a polkit prompt for nothing.
                 *self.roots.write().await = table;
                 Ok(())
             }
@@ -1536,6 +1556,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archiving_is_a_flag_of_its_own_and_remounts_nothing() {
+        // Separate from `writable` on purpose: it is not a mount option, so
+        // toggling it must not restart a unit nor raise a polkit prompt. And
+        // it is kept when the root goes back to read-only, so the owner's
+        // intention survives — the write path refuses it meanwhile.
+        let (mut admin, root_dir) = test_admin();
+        let _guard = divert_proc_mounts(
+            &root_dir,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
+        admin.set_data(add_share("p")).await.unwrap();
+        admin
+            .set_data(serde_json::json!({
+                "op": "set_archive_covers", "name": "musique", "archive": true
+            }))
+            .await
+            .unwrap();
+        assert!(admin.roots.read().await.by_name("musique").unwrap().archive_covers);
+
+        // Re-read from disk, not only from memory: the flag is worthless if it
+        // does not survive a restart.
+        let reread = Roots::load(&admin.roots_path).unwrap();
+        assert!(reread.by_name("musique").unwrap().archive_covers);
+    }
+
+    #[tokio::test]
+    async fn archiving_an_unknown_source_is_refused_by_a_sentence() {
+        let (mut admin, _root_dir) = test_admin();
+        let err = admin
+            .set_data(serde_json::json!({
+                "op": "set_archive_covers", "name": "absente", "archive": true
+            }))
+            .await
+            .unwrap_err();
+        // A key reaching the screen is a defect: the refusal must be resolved
+        // prose, not `unknown_source`.
+        assert!(err.contains("absente"), "{err}");
+        assert!(!err.contains("unknown_source"), "{err}");
+    }
+
+    #[tokio::test]
     async fn get_data_never_returns_the_password() {
         // It has no reason to travel to the browser, and the page does not
         // need it to display a share's state. The guarantee is carried by
@@ -1906,6 +1967,7 @@ mod tests {
                 user: String::new(),
                 domain: String::new(),
                 writable: false,
+                archive_covers: false,
             }],
         };
         (admin, root_dir)
@@ -2018,6 +2080,7 @@ mod tests {
                 user: String::new(),
                 domain: String::new(),
                 writable: false,
+                archive_covers: false,
             }],
         };
         let err = admin
@@ -2047,6 +2110,7 @@ mod tests {
                 user: String::new(),
                 domain: String::new(),
                 writable: false,
+                archive_covers: false,
             }],
         };
         admin

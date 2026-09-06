@@ -106,6 +106,11 @@ impl<P: Player> Core<P> {
         // Same reasoning for the finite-list capability: describes the
         // Source that is leaving, not the one arriving.
         self.has_finite_list = false;
+        // And the same again for the offer to keep a cover's original: it
+        // describes the folder the departing Source was playing out of. Kept,
+        // it would let the core hand an original to a source that never
+        // offered to receive one.
+        self.source_cover_archivable = false;
         self.retry_count = 0;
         // Persist **before** `Activate`: if the new source does not answer
         // (the SDK's 5 s timeout), the in-memory state, the on-disk state and
@@ -192,6 +197,10 @@ impl<P: Player> Core<P> {
             self.preset_count = None;
             self.can_eject = false;
             self.has_finite_list = false;
+            // The plugin that made the offer is gone: there is nobody left to
+            // hand an original to, and a successor wired under the same name
+            // will make its own offer or none.
+            self.source_cover_archivable = false;
         }
         self.publish_catalog();
         // Publish the state too: `can_eject`, `has_finite_list` and
@@ -485,7 +494,7 @@ mod tests {
         // chronology — the user would press the same key and not get the same
         // source from one day to the next.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
-        let new_source = Arc::new(FakeSource { name: "files", calls: source_calls });
+        let new_source = Arc::new(FakeSource { name: "files", calls: source_calls, ..Default::default() });
         assert!(!core.add_source("files".into(), new_source), "this is not a replacement");
         assert_eq!(core.source_order, vec!["cd".to_string(), "files".into(), "radio".into()]);
         assert_eq!(
@@ -500,7 +509,7 @@ mod tests {
         // Re-announcement of a plugin already wired: the client is replaced,
         // the cycle does not gain a duplicate entry.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
-        let replacement = Arc::new(FakeSource { name: "radio", calls: source_calls });
+        let replacement = Arc::new(FakeSource { name: "radio", calls: source_calls, ..Default::default() });
         assert!(core.add_source("radio".into(), replacement));
         assert_eq!(core.source_order, vec!["cd".to_string(), "radio".into()]);
         assert_eq!(core.active_source(), "radio");
@@ -513,10 +522,10 @@ mod tests {
         let (mut core, _rx, dir) = setup_without_source();
         assert_eq!(core.active_source(), "");
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        core.add_source("radio".into(), Arc::new(FakeSource { name: "radio", calls: calls.clone() }));
+        core.add_source("radio".into(), Arc::new(FakeSource { name: "radio", calls: calls.clone(), ..Default::default() }));
         assert_eq!(core.active_source(), "radio");
         // The second does not touch it, even if its name sorts first in the order.
-        core.add_source("cd".into(), Arc::new(FakeSource { name: "cd", calls }));
+        core.add_source("cd".into(), Arc::new(FakeSource { name: "cd", calls, ..Default::default() }));
         assert_eq!(core.active_source(), "radio");
         assert_eq!(core.source_order, vec!["cd".to_string(), "radio".into()]);
         drop(dir);
@@ -709,7 +718,7 @@ mod tests {
         // useful. A `position().unwrap_or(0)` followed by a `+ 1` skipped the
         // first source, which became unreachable from the keyboard.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
-        let files = Arc::new(FakeSource { name: "files", calls: source_calls });
+        let files = Arc::new(FakeSource { name: "files", calls: source_calls, ..Default::default() });
         core.add_source("files".into(), files);
         assert_eq!(core.source_order, vec!["cd".to_string(), "files".into(), "radio".into()]);
         assert!(core.forget_dead_source("radio"));
@@ -864,7 +873,7 @@ mod tests {
         // plugin being switched off must never stay half-wired, with a
         // `SourceCycle` that could land on an already killed process.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
-        core.add_source("casse".into(), Arc::new(FakeSource { name: "casse", calls: source_calls }));
+        core.add_source("casse".into(), Arc::new(FakeSource { name: "casse", calls: source_calls, ..Default::default() }));
         assert_eq!(core.source_order, vec!["casse".to_string(), "cd".into(), "radio".into()]);
         assert_eq!(core.active_source(), "radio");
 
@@ -898,7 +907,7 @@ mod tests {
         let late_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         core.hotplug_source(
             "files".into(),
-            Arc::new(FakeSource { name: "files", calls: late_calls.clone() }),
+            Arc::new(FakeSource { name: "files", calls: late_calls.clone(), ..Default::default() }),
         )
         .await
         .unwrap();
@@ -934,7 +943,7 @@ mod tests {
         let late_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         core.hotplug_source(
             "files".into(),
-            Arc::new(FakeSource { name: "files", calls: late_calls.clone() }),
+            Arc::new(FakeSource { name: "files", calls: late_calls.clone(), ..Default::default() }),
         )
         .await
         .unwrap();
@@ -1007,7 +1016,7 @@ mod tests {
         let late_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         core.hotplug_source(
             "files".into(),
-            Arc::new(FakeSource { name: "files", calls: late_calls.clone() }),
+            Arc::new(FakeSource { name: "files", calls: late_calls.clone(), ..Default::default() }),
         )
         .await
         .unwrap();
@@ -1030,7 +1039,7 @@ mod tests {
             !core
                 .hotplug_source(
                     "radio".into(),
-                    Arc::new(FakeSource { name: "radio", calls: seen.clone() })
+                    Arc::new(FakeSource { name: "radio", calls: seen.clone(), ..Default::default() })
                 )
                 .await
                 .unwrap(),
@@ -1064,7 +1073,7 @@ mod tests {
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         core.hotplug_source(
             "radio".into(),
-            Arc::new(FakeSource { name: "radio", calls: seen.clone() }),
+            Arc::new(FakeSource { name: "radio", calls: seen.clone(), ..Default::default() }),
         )
         .await
         .unwrap();
@@ -1166,7 +1175,7 @@ mod tests {
         let player = FakePlayer::default();
         let player_calls = player.calls.clone();
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
         sources.insert("cd".into(), Arc::new(EmptySource));
         let (state_tx, state_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
@@ -1198,7 +1207,7 @@ mod tests {
         let player = FakePlayer::default();
         let player_calls = player.calls.clone();
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
         sources.insert("cd".into(), Arc::new(FailingSource));
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
@@ -1221,7 +1230,7 @@ mod tests {
         let mut cat_rx = core.sources_catalog_tx.subscribe();
         assert!(core.sources_catalog().sources.is_empty(), "no source at startup");
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        core.hotplug_source("radio".into(), Arc::new(FakeSource { name: "radio", calls }))
+        core.hotplug_source("radio".into(), Arc::new(FakeSource { name: "radio", calls, ..Default::default() }))
             .await
             .unwrap();
         assert!(cat_rx.has_changed().unwrap(), "the displays must learn about it");
@@ -1242,10 +1251,10 @@ mod tests {
         // replace the empty list instead of being deduplicated.
         let (mut core, _rx, dir) = setup_without_source();
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        core.hotplug_source("cd".into(), Arc::new(FakeSource { name: "cd", calls: calls.clone() }))
+        core.hotplug_source("cd".into(), Arc::new(FakeSource { name: "cd", calls: calls.clone(), ..Default::default() }))
             .await
             .unwrap();
-        core.hotplug_source("radio".into(), Arc::new(FakeSource { name: "radio", calls }))
+        core.hotplug_source("radio".into(), Arc::new(FakeSource { name: "radio", calls, ..Default::default() }))
             .await
             .unwrap();
         assert_eq!(core.active_source(), "cd", "the first wired stays the active one");

@@ -1202,6 +1202,9 @@ impl CdSource {
             // either — the pair is never split.
             cover: None,
             cover_thumb: None,
+            // Nor does it offer to keep one: there is nothing on a disc to
+            // write a cover file next to (see `SourceMessage::cover_archivable`).
+            cover_archivable: None,
         }
     }
 }

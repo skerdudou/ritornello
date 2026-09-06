@@ -1,7 +1,7 @@
 use crate::metadata::IdentityUpdate;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "req", content = "arg")]
 pub enum SourceReq {
     Activate,
@@ -74,6 +74,34 @@ pub enum SourceReq {
     /// SDK-side default: `set_play_mode` does nothing, for a source with no
     /// finite list to shuffle or repeat.
     SetPlayMode { random: bool, repeat_all: bool },
+    /// The core obtained the full-size original of the cover retained for
+    /// `identity`, and left it at `file`. The Source may keep it.
+    ///
+    /// **`identity` designates, it does not compare.** Fetching the original
+    /// takes seconds, during which playback happily moves to the next track of
+    /// the same album; a Source that compared this echo with what it plays now
+    /// would refuse a perfectly correct write. It is the folder of *this*
+    /// identity that must receive the image.
+    ///
+    /// `file` is a **local** path, not bytes: this channel stays textual and
+    /// eye-readable in a `journalctl`. The Source owns the file once handed
+    /// over, deletion included.
+    ///
+    /// **Ownership passes with the path, not with a successful reply.** The
+    /// core never removes the staged file after sending this request — not
+    /// even when the request comes back an error, because a request that
+    /// failed is not a request that was refused: the correlation gives up
+    /// after five seconds while the receiving plugin may still be reading, and
+    /// unlinking then would truncate the very image it is copying. Deleting it
+    /// is therefore the Source's job on **every** exit path, its own refusals
+    /// included.
+    ///
+    /// The other side of that rule: a Source must take ownership — rename it,
+    /// or copy it — **before** any slow work, and reply. The reply is what
+    /// unties a correlation that does not wait longer than five seconds, and a
+    /// Source that copies onto a share before answering will routinely be told
+    /// it failed when it did not.
+    ArchiveCover { identity: serde_json::Value, file: String },
 }
 
 /// A named preset. `index` is **1-based**, the one `Command::Select` expects,
@@ -373,6 +401,18 @@ pub struct SourceMessage {
     /// the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_thumb: Option<crate::CoverRef>,
+    /// This Source would accept the **full-size original** of a cover found on
+    /// the network, to keep it next to the files it is playing.
+    ///
+    /// A boolean, never a path: the Source knows its own folder, and letting a
+    /// directory travel here would invite the core to believe it may write
+    /// into it. The core answers by `SourceReq::ArchiveCover`, and the Source
+    /// alone decides where the bytes land.
+    ///
+    /// Absent = "this frame says nothing about it, keep the previous answer",
+    /// the convention of `preset` and `cover` — not that of `status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_archivable: Option<bool>,
 }
 
 #[cfg(test)]
@@ -403,6 +443,7 @@ mod tests {
             presets: None,
             cover: None,
             cover_thumb: None,
+            cover_archivable: None,
         }
     }
 
@@ -798,6 +839,40 @@ mod tests {
         let json = serde_json::to_string(&a).unwrap();
         assert_eq!(json, r#"{"action":"PlayerChapter","data":4}"#);
         assert_eq!(serde_json::from_str::<SourceAction>(&json).unwrap(), a);
+    }
+
+    #[test]
+    fn the_archive_offer_round_trips_and_stays_absent_by_default() {
+        // Absent means "this frame says nothing about it, keep the previous
+        // answer" — the convention of `preset` and `cover`, not that of
+        // `status`.
+        let json = serde_json::to_string(&empty_message()).unwrap();
+        assert!(!json.contains("cover_archivable"), "{json}");
+
+        let m = SourceMessage { cover_archivable: Some(true), ..empty_message() };
+        let back: SourceMessage = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.cover_archivable, Some(true));
+    }
+
+    #[test]
+    fn a_frame_from_an_earlier_plugin_reads_back_as_no_offer() {
+        // Deployability plugin by plugin: a binary that predates the field
+        // must keep working, and its silence must not read as an offer.
+        let m: SourceMessage = serde_json::from_str(r#"{"id":1,"action":null}"#).unwrap();
+        assert_eq!(m.cover_archivable, None);
+    }
+
+    #[test]
+    fn archive_cover_carries_the_echo_and_the_path() {
+        // The echo is what designates the folder to write into; the path is
+        // where the core left the bytes. Both textual: no image travels here.
+        let req = SourceReq::ArchiveCover {
+            identity: serde_json::json!({ "kind": "file", "path": "/mnt/nas/Album/01.flac" }),
+            file: "/tmp/ritornello-cover-1a2b.jpg".into(),
+        };
+        let wire = serde_json::to_string(&req).unwrap();
+        assert_eq!(serde_json::from_str::<SourceReq>(&wire).unwrap(), req);
+        assert!(wire.contains(r#""req":"ArchiveCover""#), "{wire}");
     }
 
     #[test]

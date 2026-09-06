@@ -50,6 +50,10 @@ function toggle(name: string, writable: boolean): void {
   void props.send({ op: 'set_writable', name, writable })
 }
 
+function toggleArchive(name: string, archive: boolean): void {
+  void props.send({ op: 'set_archive_covers', name, archive })
+}
+
 function goUp(): void {
   void props.send({ op: 'mount' })
 }
@@ -106,6 +110,22 @@ function goUp(): void {
           @change="toggle(r.name, ($event.target as HTMLInputElement).checked)"
         />
         {{ t('writable_label') }}
+      </label>
+
+      <!-- Offered for both kinds of root, and deliberately not gated on
+           `kind === 'smb'`: unlike `writable`, which only drives the cifs
+           mount options, a local root has no read-only mount to speak of,
+           and gating this on `writable` would grey it for ever there. Only
+           an SMB share that is not writable greys it. -->
+      <label class="flex items-center gap-1 text-sm">
+        <input
+          type="checkbox"
+          data-archive-covers
+          :checked="r.archive_covers"
+          :disabled="frozen || (r.kind === 'smb' && !r.writable)"
+          @change="toggleArchive(r.name, ($event.target as HTMLInputElement).checked)"
+        />
+        {{ t('archive_covers_label') }}
       </label>
 
       <Button

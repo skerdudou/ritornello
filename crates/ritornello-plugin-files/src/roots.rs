@@ -37,6 +37,15 @@ pub struct Root {
     /// playlist onto the share is an explicit choice, not a given.
     #[serde(default)]
     pub writable: bool,
+    /// Keep on this root the full-size cover a network contributor found for a
+    /// track that has none. False by default: writing into someone's music
+    /// library is an explicit choice, like `writable` above.
+    ///
+    /// **Not a mount option.** Unlike `writable`, changing it remounts
+    /// nothing; on an SMB root it is inert until `writable` is set too, and
+    /// the write path says so rather than letting an `EROFS` bubble up.
+    #[serde(default)]
+    pub archive_covers: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +167,39 @@ impl Roots {
 
     pub fn by_name(&self, name: &str) -> Option<&Root> {
         self.root.iter().find(|r| r.name == name)
+    }
+
+    /// The root that owns `path`, by **longest** matching `base_dir()`.
+    ///
+    /// Longest and not first: nesting arises between **local** roots, whose
+    /// `base_dir()` is the declared path and which `validate` does not forbid
+    /// from nesting; two SMB roots cannot nest, their mount point being derived
+    /// from a unique name. The table's order carries no meaning **for
+    /// nesting** — but it is not entirely inert either: `max_by_key` returns
+    /// the *last* of equal maxima, and `validate` dedupes roots by **name**,
+    /// not by path, so two differently-named local roots may declare the very
+    /// same `path`. Between two such roots this method picks whichever sits
+    /// later in the table, arbitrarily. Containment is judged by
+    /// `Path::starts_with`, which compares **components** — a string prefix
+    /// would accept `/mnt/ritornello/nas-old` as being inside
+    /// `/mnt/ritornello/nas`.
+    ///
+    /// No `canonicalize` here: this answers about the path a Source is
+    /// playing, which it built from a `base_dir()` itself, and touching the
+    /// filesystem would make a table lookup wait on a sleeping share.
+    ///
+    /// **This is also why a symlink is never resolved.** A subdirectory inside
+    /// a declared root that happens to be a symlink pointing outside it is
+    /// still reported as owned by this root — `starts_with` only compares the
+    /// path's own components, never what the filesystem makes of them. Low
+    /// risk in practice (it takes a symlink planted inside a share the owner
+    /// already trusted enough to declare), but a real one for a caller that
+    /// writes at the path this returns, such as `archive::store`.
+    pub fn root_of(&self, path: &Path) -> Option<&Root> {
+        self.root
+            .iter()
+            .filter(|r| path.starts_with(r.base_dir()))
+            .max_by_key(|r| r.base_dir().components().count())
     }
 }
 
@@ -326,6 +368,7 @@ mod tests {
             user: "steven".into(),
             domain: String::new(),
             writable: false,
+            archive_covers: false,
         }
     }
 
@@ -340,6 +383,7 @@ mod tests {
             user: String::new(),
             domain: String::new(),
             writable: false,
+            archive_covers: false,
         }
     }
 
@@ -502,6 +546,21 @@ mod tests {
         assert!(!host_message.contains("{host}"), "placeholder left as is: {host_message:?}");
     }
 
+    fn smb(share: &str) -> Root {
+        Root {
+            name: "nas".into(),
+            kind: RootKind::Smb,
+            path: None,
+            host: "h".into(),
+            share: share.into(),
+            subpath: None,
+            user: "u".into(),
+            domain: String::new(),
+            writable: false,
+            archive_covers: false,
+        }
+    }
+
     #[test]
     fn a_table_reads_back_from_toml() {
         let dir = tempfile::tempdir().unwrap();
@@ -531,5 +590,61 @@ path = "/media/usb"
         // The `writable` default matters: a share is not writable unless asked
         // for.
         assert!(!roots.by_name("nas").unwrap().writable);
+    }
+
+    #[test]
+    fn a_path_resolves_to_the_root_with_the_longest_matching_base() {
+        // Longest and not first: local roots can legitimately nest — one at
+        // /media/usb and one at /media/usb/Albums. The table's order says
+        // nothing.
+        let table = Roots {
+            root: vec![
+                local_root(),
+                Root { name: "albums".into(), path: Some("/media/usb/Albums".into()), ..local_root() },
+            ],
+        };
+        let inside = std::path::Path::new("/media/usb/Albums/Kind of Blue/01.flac");
+        assert_eq!(table.root_of(inside).map(|r| r.name.as_str()), Some("albums"));
+
+        let elsewhere = std::path::Path::new("/media/usb/Rock/01.flac");
+        assert_eq!(table.root_of(elsewhere).map(|r| r.name.as_str()), Some("usb"));
+    }
+
+    #[test]
+    fn two_smb_roots_on_the_same_share_with_different_names_are_siblings_never_nested() {
+        // Two SMB roots on the same physical share cannot nest: the mount
+        // point derives from a unique name, so distinct names give distinct
+        // `/mnt/ritornello/<name>` prefixes. A path under one resolves to
+        // that one; the other does not match.
+        let table = Roots {
+            root: vec![
+                Root { name: "music".into(), subpath: None, ..smb("musique") },
+                Root { name: "jazz".into(), subpath: Some("Jazz".into()), ..smb("musique") },
+            ],
+        };
+        // Under the "music" root's mount point, but not under the "jazz" root's.
+        let under_music = std::path::Path::new("/mnt/ritornello/music/Jazz/Kind of Blue/01.flac");
+        assert_eq!(table.root_of(under_music).map(|r| r.name.as_str()), Some("music"));
+
+        // Under the "jazz" root's mount point.
+        let under_jazz = std::path::Path::new("/mnt/ritornello/jazz/Jazz/Kind of Blue/01.flac");
+        assert_eq!(table.root_of(under_jazz).map(|r| r.name.as_str()), Some("jazz"));
+    }
+
+    #[test]
+    fn a_path_outside_every_root_resolves_to_nothing() {
+        // The guard that keeps an archive from landing anywhere at all: a
+        // path the table does not own is not a place to write.
+        let table = Roots { root: vec![Root { name: "nas".into(), ..smb("musique") }] };
+        assert!(table.root_of(std::path::Path::new("/etc/passwd")).is_none());
+        assert!(table.root_of(std::path::Path::new("/mnt/ritornello/autre/01.flac")).is_none());
+    }
+
+    #[test]
+    fn a_sibling_directory_sharing_a_name_prefix_is_not_inside() {
+        // `starts_with` on strings would accept `/mnt/ritornello/nas-old`,
+        // which is a different root. Component-wise containment is the rule.
+        let table = Roots { root: vec![Root { name: "nas".into(), ..smb("musique") }] };
+        assert!(table.root_of(std::path::Path::new("/mnt/ritornello/nas-old/01.flac")).is_none());
     }
 }
