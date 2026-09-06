@@ -63,7 +63,31 @@ stage_plugin() {
 
 pack() { # <staging dir> <archive base name>
   local archive="$OUT/$2-$VERSION-$ARCH.tar.gz"
-  tar -C "$1" -czf "$archive" .
+  # `--owner=root --group=root --numeric-owner`, and this is a security
+  # property rather than tidiness: tar records the uid/gid of every entry,
+  # and GNU tar **restores** them when the extraction runs as the superuser
+  # (`--same-owner` is root's default). These archives are built by an
+  # unprivileged CI user, so without this the documented `sudo tar -C /`
+  # would land /usr/local/bin/ritornello-core, the plugin binaries, the
+  # root-run ritornello-media-mount helper, the systemd units and — worst —
+  # /etc/polkit-1/rules.d/*.rules owned by the builder's uid. Those rules
+  # files are JavaScript that polkitd evaluates as root: a file root executes
+  # and a non-root uid can rewrite is a local privilege escalation.
+  # `deploy.sh` installs everything `-o root -g root` for exactly this
+  # reason; the release path must not be the lax one.
+  tar -C "$1" --owner=root --group=root --numeric-owner -czf "$archive" .
+  # Asserted and not merely flagged: a guard nobody has seen fail is a guard
+  # nobody should trust, and a flag silently dropped by a future edit would
+  # leave no trace at all. `--numeric-owner` on the listing too, so the
+  # column holds uid/gid instead of whatever names happen to resolve on the
+  # machine that reads the archive.
+  local foreign
+  foreign=$(tar -tvzf "$archive" --numeric-owner | awk '$2 != "0/0"')
+  if [ -n "$foreign" ]; then
+    echo "$archive holds entries not owned by root — sudo tar -C / would install them under a foreign uid:" >&2
+    echo "$foreign" >&2
+    exit 1
+  fi
   # The property that makes `sudo tar -C /` safe, asserted rather than
   # promised: the tree an archive extracts must never contain a file the
   # operator writes. A staging mistake would otherwise ship an archive that

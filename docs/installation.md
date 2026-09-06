@@ -65,10 +65,21 @@ The common case — the core and every plugin, from a fresh download — is the
 recipe each release's own notes repeat with its actual version filled in:
 
     sha256sum -c SHA256SUMS --ignore-missing
-    sudo tar -C / -xzf ritornello-core-<version>-<arch>.tar.gz
-    sudo tar -C / -xzf ritornello-plugins-<version>-<arch>.tar.gz
+    sudo tar --no-same-owner -C / -xzf ritornello-core-<version>-<arch>.tar.gz
+    sudo tar --no-same-owner -C / -xzf ritornello-plugins-<version>-<arch>.tar.gz
     sudo chown -R ritornello: /etc/ritornello
     sudo systemctl daemon-reload && sudo systemctl restart ritornello
+
+`--no-same-owner` is belt and braces rather than a workaround. The archives
+are produced with every entry owned by `root` and `scripts/package-release.sh`
+refuses to emit one that is not — but extracting as root restores whatever
+ownership an archive happens to carry, so the flag also protects an operator
+handed an older archive. What it protects: `/etc/polkit-1/rules.d/*.rules`
+are JavaScript that `polkitd` evaluates as root, and a rules file writable by
+a non-root uid is a local privilege escalation. The same reasoning covers
+`/usr/local/bin/ritornello-core`, the plugin binaries, the root-run
+`ritornello-media-mount` helper and the systemd units — which is why
+`deploy.sh` installs every one of them `-o root -g root`.
 
 Replacing a single plugin (an upgrade, or a fix confined to one binary) is
 the same two commands with that plugin's own archive in place of the bundle.

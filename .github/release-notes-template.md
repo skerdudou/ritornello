@@ -10,11 +10,18 @@ Common case — the core and every plugin:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing
-sudo tar -C / -xzf ritornello-core-<version>-<arch>.tar.gz
-sudo tar -C / -xzf ritornello-plugins-<version>-<arch>.tar.gz
+sudo tar --no-same-owner -C / -xzf ritornello-core-<version>-<arch>.tar.gz
+sudo tar --no-same-owner -C / -xzf ritornello-plugins-<version>-<arch>.tar.gz
 sudo chown -R ritornello: /etc/ritornello
 sudo systemctl daemon-reload && sudo systemctl restart ritornello
 ```
+
+`--no-same-owner` is belt and braces, not a workaround: the archives are
+built with every entry owned by `root`, and the packaging script refuses to
+produce one that is not. But extracting as root restores whatever ownership
+an archive carries, so the flag makes the recipe safe even for an archive
+built before that rule existed — a polkit rules file (JavaScript `polkitd`
+runs as root) owned by a non-root uid is a local privilege escalation.
 
 Each archive holds the tree as it will exist on the device, and holds no
 configuration you may have edited: `stations.toml`, `input-bindings.toml` and
