@@ -1,0 +1,61 @@
+# What each release archive carries, beyond what can be derived.
+#
+# Derived elsewhere, and deliberately absent from this file:
+#   - the set of plugins comes from plugins.example.toml (same source as
+#     deploy.sh, so the two cannot diverge);
+#   - a plugin's locale directory is deploy/locales/<name>/, when it exists.
+#     Three plugins have none (ouifm-metas, radiofrance-metas, console); that
+#     is normal, not an omission.
+#
+# `tree` entries land in the archive under the path they will have on the
+# device, so installing is one `tar -C /`. `examples` entries land beside the
+# tree and are copied by hand: they must never overwrite what the operator
+# wrote.
+
+[core]
+tree = [
+  { from = "deploy/ritornello.service", to = "etc/systemd/system/ritornello.service" },
+  { from = "deploy/50-ritornello-power.rules", to = "etc/polkit-1/rules.d/50-ritornello-power.rules" },
+  { from = "deploy/locales/core", to = "etc/ritornello/locales/core" },
+  # `common` travels with the core: the core is always installed, so this is
+  # the one archive that can be relied on to carry the shared catalog.
+  { from = "deploy/locales/common", to = "etc/ritornello/locales/common" },
+]
+
+[plugins.radio]
+examples = ["deploy/stations.example.toml"]
+
+[plugins.cd]
+
+[plugins.files]
+# The second [[bin]] of the files crate. It is installed OUTSIDE the plugins
+# directory on purpose: the core launches everything it finds there, and this
+# one is launched by systemd, as root. A split by `ritornello-plugin-*` would
+# drop it and ship a source that cannot mount anything.
+extra_binaries = [
+  { name = "ritornello-media-mount", to = "usr/local/lib/ritornello/ritornello-media-mount" },
+]
+tree = [
+  { from = "deploy/ritornello-media-mount.service", to = "etc/systemd/system/ritornello-media-mount.service" },
+  { from = "deploy/51-ritornello-media.rules", to = "etc/polkit-1/rules.d/51-ritornello-media.rules" },
+]
+examples = ["deploy/media-roots.example.toml"]
+
+[plugins.ouifm-metas]
+examples = ["deploy/ouifm-metas.example.toml"]
+
+[plugins.radiofrance-metas]
+examples = ["deploy/radiofrance-metas.example.toml"]
+
+[plugins.musicbrainz]
+
+[plugins.generic-input]
+tree = [
+  { from = "deploy/input-presets", to = "etc/ritornello/input-presets" },
+]
+examples = ["deploy/input-bindings.example.toml"]
+
+[plugins.console]
+
+[plugins.mpd]
+examples = ["deploy/mpd.example.toml"]

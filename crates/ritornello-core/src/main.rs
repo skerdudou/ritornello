@@ -4,6 +4,7 @@ mod core;
 mod cover;
 mod i18n;
 mod metadata;
+mod packaging_manifest;
 mod placeholder;
 mod player;
 mod plugins;
