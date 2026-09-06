@@ -23,6 +23,12 @@ describe('root normalization', () => {
     expect(r.mounted).toBe(false)
   })
 
+  it('defaults archive_covers to false, never to undefined', () => {
+    // Absent on the wire (`skip_serializing_if`) must read as false, never
+    // as undefined: the checkbox would then be neither on nor off.
+    expect(normalizeRoot({ name: 'x' }).archive_covers).toBe(false)
+  })
+
   it('treats any unknown kind as a share', () => {
     expect(normalizeRoot({ kind: 'local' }).kind).toBe('local')
     expect(normalizeRoot({}).kind).toBe('smb')

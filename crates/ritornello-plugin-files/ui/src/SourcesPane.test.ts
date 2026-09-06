@@ -83,6 +83,37 @@ describe('sources pane', () => {
     expect(w.find('[data-source-mounted]').exists()).toBe(false)
   })
 
+  it('offers archiving on a share and greys it while the share is read-only', async () => {
+    // Two switches, each its own job: the mount must allow writing before
+    // dropping a cover on it means anything. Greyed rather than refused
+    // silently, and the stored value is kept — turning writability back on
+    // restores the intention.
+    const { w } = await mountAdmin({ roots: [NAS] })
+    expect(w.find('[data-archive-covers]').attributes('disabled')).toBeDefined()
+
+    const { w: w2 } = await mountAdmin({ roots: [{ ...NAS, writable: true }] })
+    expect(w2.find('[data-archive-covers]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('offers archiving on a local folder without asking about writability', async () => {
+    // A device folder has no read-only mount to speak of: `writable` is not
+    // even shown for it, so gating on it would grey the control for ever.
+    const { w } = await mountAdmin({ roots: [USB] })
+    expect(w.find('[data-writable]').exists()).toBe(false)
+    expect(w.find('[data-archive-covers]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('sends the archiving flag as an operation of its own', async () => {
+    const { w, s } = await mountAdmin({ roots: [{ ...NAS, writable: true }] })
+    await w.find('[data-archive-covers]').setValue(true)
+    await flushPromises()
+    expect(s.putsOf('set_archive_covers')[0]).toEqual({
+      op: 'set_archive_covers',
+      name: 'musique',
+      archive: true,
+    })
+  })
+
   it('shows a mount failure and allows retrying it', async () => {
     // Mounting follows the declaration: without this report, a source
     // would stay "not mounted" with nothing saying why.

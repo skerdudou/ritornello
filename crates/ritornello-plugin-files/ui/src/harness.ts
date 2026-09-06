@@ -40,6 +40,7 @@ export const CATALOG: Record<string, string> = {
   mounted_yes: 'mounted',
   mounted_no: 'not mounted',
   writable_label: 'allow writes',
+  archive_covers_label: 'keep found covers here',
   btn_add_share: 'Declare a share',
 
   sources_title: 'Sources',

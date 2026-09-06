@@ -25,6 +25,15 @@ export interface Root {
   writable: boolean
   /** Observed state of the mount, rendered by the plugin; never entered by the page. */
   mounted: boolean
+  /**
+   * Keep, on this root, the cover art the appliance found on the internet for
+   * a track that had none.
+   *
+   * Offered for both kinds of root: unlike `writable`, which only drives the
+   * cifs mount options, a local root has no read-only mount to speak of, and
+   * gating this on `writable` would grey it for ever there.
+   */
+  archive_covers: boolean
 }
 
 export interface Track {
@@ -258,6 +267,7 @@ export function normalizeRoot(raw: unknown): Root {
     domain: string_(o.domain),
     writable: o.writable === true,
     mounted: o.mounted === true,
+    archive_covers: o.archive_covers === true,
   }
 }
 
