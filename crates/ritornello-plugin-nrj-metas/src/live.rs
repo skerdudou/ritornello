@@ -11,6 +11,7 @@
 use anyhow::{bail, Result};
 use serde_json::Value;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 /// What one response tells us about a station.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -34,11 +35,40 @@ pub struct Meta {
 }
 
 /// Initial wait before retrying after a failure, then doubled.
-pub const BACKOFF_BASE: Duration = Duration::from_secs(2);
+const BACKOFF_BASE: Duration = Duration::from_secs(2);
 
 /// Backoff cap. A device that runs unattended for months must not hammer a
 /// third party's server.
-pub const BACKOFF_MAX: Duration = Duration::from_secs(60);
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// Wait after a poke before querying — a filter, not a politeness.
+///
+/// Measured: a four-second jingle aired between two tracks on NRJ. A poke
+/// restarts this wait, so anything shorter than the delay never causes a
+/// request. It has to clear a jingle (4 s) without approaching the server's
+/// own lag (30 to 70 s), which dominates the total anyway — so the wait costs
+/// nothing in perceived reactivity.
+const DEBOUNCE: Duration = Duration::from_secs(6);
+
+/// Spacing of the retries when the server has not caught up yet.
+///
+/// Measured twice: the JSON followed the ICY within 33 seconds, and it was 40
+/// to 70 seconds past its own `end_timestamp`. Three retries cover the
+/// measured window; beyond that we stop rather than keep asking.
+const RETRIES: [Duration; 3] =
+    [Duration::from_secs(10), Duration::from_secs(20), Duration::from_secs(40)];
+
+/// Margin added to the announced deadline before the safety net fires.
+///
+/// Measured, the server is late on its own `end_timestamp`; a net that fired
+/// on the dot would query for the previous item. Wide on purpose: this path
+/// exists for a station whose cart code does not move, not for the common
+/// case.
+const NET_MARGIN: Duration = Duration::from_secs(90);
+
+/// Ceiling for the safety net, so an absurd deadline cannot park the station
+/// for hours.
+const NET_MAX: Duration = Duration::from_secs(900);
 
 /// Metadata URL of one station.
 ///
@@ -189,6 +219,128 @@ pub async fn query(client: &reqwest::Client, brand: &str, id: u32) -> Result<Met
 /// Next backoff after a failure, given the current backoff.
 pub fn next_backoff(backoff: Duration) -> Duration {
     (backoff * 2).min(BACKOFF_MAX)
+}
+
+/// Copy of `meta` with `ends_at` cleared, for the "is this the same item as
+/// last time" comparison.
+///
+/// `Meta` derives a plain, total `PartialEq` that includes `ends_at`,
+/// deliberately so elsewhere. But `end_timestamp` drifts by a fraction of a
+/// second between two queries for the very same item — measured, it is
+/// otherwise stable per item — so comparing whole `Meta`s here would read
+/// every safety-net wake-up as a new item and re-emit the same track forever,
+/// one display write and one SSE frame per station, silently.
+fn without_ends_at(meta: &Meta) -> Meta {
+    Meta { ends_at: None, ..meta.clone() }
+}
+
+/// How long to sleep before the safety net fires, given the announced
+/// deadline. Pure, so the clamping is testable without a clock.
+fn net_delay_from(remaining: Option<Duration>) -> Duration {
+    remaining.map(|r| (r + NET_MARGIN).min(NET_MAX)).unwrap_or(NET_MAX)
+}
+
+fn net_delay(ends_at: Option<f64>) -> Duration {
+    let remaining = ends_at.and_then(|end| {
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
+        (end > now).then(|| Duration::from_secs_f64(end - now))
+    });
+    net_delay_from(remaining)
+}
+
+/// Follows a station until the task is aborted.
+///
+/// Never returns. The caller stops this task (`abort`) when the station
+/// changes — hence the tagging of each reading with the `id`: a reading
+/// already queued at the moment of the stop must be discardable.
+///
+/// **Only changes are emitted.** The first reading always goes out: this task
+/// is born with the station, so its "last seen" is empty, and the display
+/// fills in from the first response rather than at the next item.
+///
+/// **Poked, not polled.** Unlike Radio France, which tells us when to call
+/// back, this endpoint's own deadline is measurably late (see `NET_MARGIN`).
+/// The rhythm therefore comes from `poke`, fed by the core's ICY cart code
+/// (see `main`'s `now_playing`), with the announced deadline kept only as a
+/// safety net for a station whose cart code stops moving.
+pub async fn follows(
+    brand: String,
+    id: u32,
+    mut poke: mpsc::Receiver<()>,
+    tx: mpsc::Sender<(u32, Meta)>,
+) {
+    let client = match reqwest::Client::builder()
+        // Measured: cheriefm.fr answers 403 without a full browser
+        // User-Agent. This is a condition of access, not a courtesy.
+        .user_agent(
+            "Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) \
+             Chrome/128.0 Safari/537.36 ritornello",
+        )
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("HTTP client unavailable, station {id} will stay silent: {e}");
+            return;
+        }
+    };
+    let mut backoff = BACKOFF_BASE;
+    let mut last_seen: Option<Meta> = None;
+    // The first pass queries at once, with no debounce: measured, the first
+    // cart code arrives 61 s after connecting, and waiting for a *change*
+    // would leave the screen empty for a minute right after a station change.
+    let mut wait = Duration::ZERO;
+    loop {
+        // Coalesce pokes: any poke arriving during the wait restarts it, so a
+        // jingle shorter than DEBOUNCE never causes a request.
+        loop {
+            match tokio::time::timeout(wait, poke.recv()).await {
+                Ok(Some(())) => wait = DEBOUNCE,
+                // The plugin dropped its sender: the station changed.
+                Ok(None) => return,
+                Err(_) => break,
+            }
+        }
+        let mut attempt = 0usize;
+        let ends_at = loop {
+            match query(&client, &brand, id).await {
+                Ok(meta) => {
+                    backoff = BACKOFF_BASE;
+                    let ends_at = meta.ends_at;
+                    if last_seen.as_ref().map(without_ends_at) == Some(without_ends_at(&meta)) {
+                        // The server has not caught up yet: measured, it can
+                        // be a full minute behind the stream.
+                        if let Some(delay) = RETRIES.get(attempt) {
+                            attempt += 1;
+                            tokio::time::sleep(*delay).await;
+                            continue;
+                        }
+                        break ends_at;
+                    }
+                    last_seen = Some(meta.clone());
+                    if tx.send((id, meta)).await.is_err() {
+                        return;
+                    }
+                    break ends_at;
+                }
+                Err(e) => {
+                    // Every failure is logged: without that, a station that
+                    // stops answering would leave no trace in `/api/logs` and
+                    // nobody would ever see anything.
+                    tracing::info!("metadata query failed for station {id} ({brand}): {e}");
+                    tokio::time::sleep(backoff).await;
+                    backoff = next_backoff(backoff);
+                    break None;
+                }
+            }
+        };
+        // The safety net: without a poke, wake up past the announced deadline.
+        // On a station whose cart code moves, a poke always comes first.
+        wait = net_delay(ends_at);
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +509,29 @@ mod tests {
         // an empty object. Reading "the first entry" would one day display the
         // wrong station.
         assert!(parse_station(RIRE, 158).is_none());
+    }
+
+    #[test]
+    fn the_net_waits_past_the_announced_deadline() {
+        // Measured: the server updates 40 to 70 seconds after its own
+        // end_timestamp. A net firing on the dot would query for the item
+        // that just ended.
+        assert_eq!(net_delay_from(Some(Duration::from_secs(30))), Duration::from_secs(120));
+        // A deadline already past, or absurd, must not park the station.
+        assert_eq!(net_delay_from(None), NET_MAX);
+        assert_eq!(net_delay_from(Some(Duration::from_secs(9999))), NET_MAX);
+    }
+
+    #[test]
+    fn the_ends_at_comparison_ignores_the_deadline() {
+        // Decision: the "same item" comparison used by `follows` must ignore
+        // `ends_at`, since it drifts by a fraction of a second between two
+        // queries for the very same item. `Meta`'s own `PartialEq` stays
+        // total (it does include `ends_at`) for everyone else.
+        let a = Meta { title: Some("X".into()), ends_at: Some(100.0), ..Default::default() };
+        let b = Meta { title: Some("X".into()), ends_at: Some(100.735), ..Default::default() };
+        assert_ne!(a, b, "whole-Meta equality still sees the drift");
+        assert_eq!(without_ends_at(&a), without_ends_at(&b), "but the filtered form does not");
     }
 
     #[test]
