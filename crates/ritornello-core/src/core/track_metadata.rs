@@ -609,16 +609,34 @@ impl<P: Player> Core<P> {
             let file = std::env::temp_dir().join(format!("ritornello-cover-{key}.{extension}"));
             if let Err(e) = tokio::fs::write(&file, &bytes[..]).await {
                 tracing::warn!("cover {key}: cannot stage the original at {}: {e}", file.display());
+                // Removed **here**, and only here: nothing has been handed
+                // over yet, so whatever partial file the failed write left is
+                // ours to clean up. A cap reached mid-write or a full `/tmp`
+                // would otherwise leave a truncated image behind, and the next
+                // attempt at this same key would write over it anyway — but
+                // any attempt that never came would leave it for the life of
+                // the appliance.
+                let _ = tokio::fs::remove_file(&file).await;
                 return;
             }
-            // The Source owns the file from here, deletion included.
+            // The Source owns the file from here, deletion included — see
+            // `SourceReq::ArchiveCover`.
             let req = ritornello_proto::SourceReq::ArchiveCover {
                 identity,
                 file: file.to_string_lossy().into_owned(),
             };
             if let Err(e) = source.request(req).await {
-                tracing::warn!("cover {key}: the source refused the hand-over: {e}");
-                let _ = tokio::fs::remove_file(&file).await;
+                // **Nothing is unlinked, and that is the whole point of this
+                // branch.** A failed request is not a refusal: `SourceClient`
+                // gives up after five seconds while the SDK is still awaiting
+                // `archive_cover` inline, so a copy onto a slow SMB share that
+                // crosses that deadline reports an error *while the plugin is
+                // reading the file*. Removing it would truncate the cover
+                // being written into the user's music library — the worst
+                // thing this feature could do. An orphan in `/tmp` costs RAM
+                // until reboot (it is a tmpfs on the appliance) and is
+                // reversible; a corrupt file on the NAS is not.
+                tracing::warn!("cover {key}: the hand-over to the source failed: {e}");
             }
         });
         // Detached in service — nothing joins it, which is the whole point.
@@ -1751,6 +1769,54 @@ mod tests {
         core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
         core.declare_network_cover("https://coverartarchive.org/release/c/front").await;
         assert_eq!(core.archive_requests().len(), 1, "an absence is retried");
+    }
+
+    #[tokio::test]
+    async fn an_identity_and_the_offer_on_one_frame_keep_the_offer() {
+        // `set_identity` clears the offer, and it runs from the **bottom** of
+        // `handle_source_update`: a frame carrying both must therefore apply
+        // the offer after that clearing, or archiving stops with nothing in
+        // the logs. No plugin sends such a frame today — `plugin-files` puts
+        // the offer on a notification of its own — but `can_eject` and
+        // `has_finite_list` are stamped on **every** frame by the same server
+        // loop, and the next field to follow that pattern would be lost in
+        // silence, in the one function whose long comment exists because of a
+        // previous silent loss.
+        let mut core = archiving_core().await;
+        core.handle_source_update(
+            ARCHIVING_SOURCE,
+            SourceUpdate {
+                identity: Some(IdentityUpdate::Playing(
+                    serde_json::json!({"kind": "file", "path": "/mnt/ritornello/nas/Album/01.flac"}),
+                )),
+                ..offers_archive()
+            },
+        );
+        core.declare_network_cover("https://coverartarchive.org/release/e/front").await;
+        assert_eq!(
+            core.archive_requests().len(),
+            1,
+            "the offer must survive an identity travelling on its own frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hand_over_whose_reply_never_comes_leaves_the_staged_file_alone() {
+        // `SourceClient::request` gives up after five seconds, and the SDK
+        // awaits `archive_cover` **inline** before writing its reply: a copy
+        // onto a slow SMB share that crosses that deadline reports an error
+        // while the plugin is still reading the file. Unlinking here would
+        // truncate the cover being written into the user's library — the worst
+        // outcome this feature can produce. The Source owns the file from the
+        // moment it holds the path.
+        let mut core = archiving_core_whose_source_never_replies().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.declare_network_cover("https://coverartarchive.org/release/f/front").await;
+        let (_, file) = core.archive_requests().pop().unwrap();
+        assert!(
+            std::path::Path::new(&file).exists(),
+            "a failed reply is not a refusal: the staged original must survive it"
+        );
     }
 
     #[tokio::test]

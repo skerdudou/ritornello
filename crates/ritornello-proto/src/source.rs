@@ -86,6 +86,21 @@ pub enum SourceReq {
     /// `file` is a **local** path, not bytes: this channel stays textual and
     /// eye-readable in a `journalctl`. The Source owns the file once handed
     /// over, deletion included.
+    ///
+    /// **Ownership passes with the path, not with a successful reply.** The
+    /// core never removes the staged file after sending this request — not
+    /// even when the request comes back an error, because a request that
+    /// failed is not a request that was refused: the correlation gives up
+    /// after five seconds while the receiving plugin may still be reading, and
+    /// unlinking then would truncate the very image it is copying. Deleting it
+    /// is therefore the Source's job on **every** exit path, its own refusals
+    /// included.
+    ///
+    /// The other side of that rule: a Source must take ownership — rename it,
+    /// or copy it — **before** any slow work, and reply. The reply is what
+    /// unties a correlation that does not wait longer than five seconds, and a
+    /// Source that copies onto a share before answering will routinely be told
+    /// it failed when it did not.
     ArchiveCover { identity: serde_json::Value, file: String },
 }
 

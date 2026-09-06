@@ -612,15 +612,15 @@ impl<P: Player> Core<P> {
         if let Some(f) = has_finite_list {
             self.has_finite_list = f;
         }
-        // Applied **here**, above the early return, for exactly the reason
-        // written above about `preset_count`: the offer arrives on a
-        // spontaneous notification of its own (`plugin-files` stamps it on the
-        // frame that reports its folder probe, never on a reply), so it always
-        // takes that early return. Written at the bottom of this function it
-        // would never be applied at all.
-        if let Some(a) = cover_archivable {
-            self.source_cover_archivable = a;
-        }
+        // `cover_archivable` is **not** applied here beside them, and the
+        // difference is the whole reason: the sentence above ends with
+        // "`set_identity` does not touch them", and `set_identity` **does**
+        // clear the offer, from the bottom of this very function. Applied here,
+        // a frame carrying an identity *and* the offer would set it and then
+        // watch it erased, and archiving would stop with nothing in the logs.
+        // It travels through `apply_declared_facts` instead, like `cover`, for
+        // exactly the reason written there.
+
         // **The two paths, and which of the two actually carries the
         // safety.**
         //
@@ -698,7 +698,7 @@ impl<P: Player> Core<P> {
             // depending on someone remembering to copy it — that is
             // exactly the oversight that made every Source cover get lost
             // silently.
-            self.apply_declared_facts(preset, preset_name, cover, cover_thumb, name);
+            self.apply_declared_facts(preset, preset_name, cover, cover_thumb, cover_archivable, name);
             // Publish anyway: count, drawer and selection are part of the
             // broadcast state, and the channel dedupes if nothing changed.
             self.publish_state();
@@ -754,7 +754,7 @@ impl<P: Player> Core<P> {
         // alongside `preset_count`; the early-return path, meanwhile,
         // cannot carry an identity by construction, so calling it there is
         // safe.
-        self.apply_declared_facts(preset, preset_name, cover, cover_thumb, name);
+        self.apply_declared_facts(preset, preset_name, cover, cover_thumb, cover_archivable, name);
         // `preset_count` and `can_eject` are applied **at the top** of this
         // function, before the early return, for the same reason.
         //
@@ -796,6 +796,7 @@ impl<P: Player> Core<P> {
         preset_name: Option<String>,
         cover: Option<ritornello_proto::CoverRef>,
         cover_thumb: Option<ritornello_proto::CoverRef>,
+        cover_archivable: Option<bool>,
         name: &str,
     ) {
         self.apply_selection(preset, preset_name);
@@ -804,6 +805,21 @@ impl<P: Player> Core<P> {
         // routed through here rather than written at the bottom of
         // `handle_source_update`.
         self.apply_source_cover(cover, cover_thumb, name);
+        // **Here and not beside `preset_count`, and the placement is the
+        // safeguard.** `set_identity` clears the offer (see
+        // `source_cover_archivable`), and it runs between this function's two
+        // call sites: applied above the early return, a frame carrying an
+        // identity and the offer together would set the offer and then have it
+        // erased, silently, and the appliance would simply stop archiving. No
+        // plugin emits that frame today — `plugin-files` declares the offer on
+        // a notification that carries no identity — but `can_eject` and
+        // `has_finite_list` are stamped on **every** frame by the same server
+        // loop, and this field is one `Notification::new()` away from joining
+        // them. Routed here it lands after the clearing on both exits, by
+        // construction rather than by comment.
+        if let Some(a) = cover_archivable {
+            self.source_cover_archivable = a;
+        }
     }
 
 }

@@ -93,6 +93,13 @@ pub(super) struct FakeSource {
     /// `path` field, and the **bytes** at that file — which a formatted string
     /// could only be matched against by substring.
     pub(super) archives: Arc<Mutex<Vec<(serde_json::Value, String)>>>,
+    /// This Source takes the file but its reply never comes back in time.
+    ///
+    /// Models the one failure mode that matters for the hand-over:
+    /// `SourceClient::request` gives up after five seconds while the SDK is
+    /// still awaiting `archive_cover` inline, so the core sees an error for a
+    /// plugin that is at that very moment copying the file onto a share.
+    pub(super) refuses_archive: bool,
 }
 
 #[async_trait::async_trait]
@@ -142,6 +149,9 @@ impl Source for FakeSource {
             // to the `_` below and leave nothing a test could read.
             (_, SourceReq::ArchiveCover { identity, file }) => {
                 self.archives.lock().unwrap().push((identity, file));
+                if self.refuses_archive {
+                    anyhow::bail!("no reply within the correlation deadline");
+                }
                 SourceAction::Noop
             }
             _ => SourceAction::Noop,
@@ -775,29 +785,40 @@ impl ArchivingRig {
 /// A core whose Source offers to keep originals, and whose network answers
 /// with `original()`.
 pub(super) async fn archiving_core() -> ArchivingRig {
-    archiving_rig(true, true)
+    archiving_rig(true, true, false)
 }
 
 /// The same, with a Source that never makes the offer — radio, in effect,
 /// which wins a network cover on every track and has nowhere to put it.
 pub(super) async fn core_without_offer() -> ArchivingRig {
-    archiving_rig(false, true)
+    archiving_rig(false, true, false)
 }
 
 /// The same as `archiving_core`, with the cache seam left unarmed: every
 /// attempt at the original yields nothing, exactly as a 404 or a cut Wi-Fi
 /// would.
 pub(super) async fn archiving_core_without_network() -> ArchivingRig {
-    archiving_rig(true, false)
+    archiving_rig(true, false, false)
 }
 
-fn archiving_rig(offers: bool, network: bool) -> ArchivingRig {
+/// The same as `archiving_core`, with a Source whose reply never arrives — the
+/// slow copy onto an SMB share that outlives the five-second correlation.
+pub(super) async fn archiving_core_whose_source_never_replies() -> ArchivingRig {
+    archiving_rig(true, true, true)
+}
+
+fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> ArchivingRig {
     let dir = tempfile::tempdir().unwrap();
     let archives: Arc<Mutex<Vec<(serde_json::Value, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
     sources.insert(
         ARCHIVING_SOURCE.into(),
-        Arc::new(FakeSource { name: ARCHIVING_SOURCE, archives: archives.clone(), ..Default::default() }),
+        Arc::new(FakeSource {
+            name: ARCHIVING_SOURCE,
+            archives: archives.clone(),
+            refuses_archive,
+            ..Default::default()
+        }),
     );
     let root = dir.path().to_path_buf();
     let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
