@@ -107,6 +107,13 @@ impl<P: Player> Core<P> {
         if !self.metadata.set_identity(identity) {
             return;
         }
+        // The offer to keep an original describes the **folder** the Source is
+        // playing out of, not the session: another track may well sit
+        // elsewhere, under a root the Source will not write into. It is
+        // re-declared on the Source's next probe notification, exactly as it
+        // was for this one — the same "absent = keep, until what it described
+        // is gone" reading `preset_count` gets on a source change.
+        self.source_cover_archivable = false;
         // The track changed: the previous track's anchor must not keep
         // advancing under the next one's title. The last published position
         // must disappear with it, otherwise the frame emitted right away
@@ -539,8 +546,90 @@ impl<P: Player> Core<P> {
         // says *when* the image finally arrived, where the owner could only
         // observe "much later".
         tracing::info!("cover {key} published");
-        self.metadata.set_cover_href(Some(key));
+        self.metadata.set_cover_href(Some(key.clone()));
         self.publish_state();
+        self.start_cover_archive(&key);
+    }
+
+    /// Hands the full-size original of the retained cover to the active
+    /// Source, if it offered to keep it.
+    ///
+    /// Called last, after the screen has been served: archiving is a
+    /// convenience, and it must never delay the image the listener is waiting
+    /// for.
+    fn start_cover_archive(&mut self, key: &str) {
+        if !self.source_cover_archivable {
+            return;
+        }
+        // The slot, and the only bound: see `cover_archive_attempted`.
+        if self.cover_archive_attempted.lock().unwrap().as_deref() == Some(key) {
+            return;
+        }
+        // Only a **network** cover is worth bringing back to the share. A
+        // `Path` already lives there and an `Embedded` one lives in the file.
+        let Some((crate::cover::CoverSource::Ref(full @ ritornello_proto::CoverRef::Url { .. }), _, _)) =
+            self.metadata.selected_cover()
+        else {
+            return;
+        };
+        // The echo designates the folder to write into, so it is read **now**,
+        // beside the key it belongs to — not inside the task, where playback
+        // would have moved on.
+        let Some(identity) = self.metadata.identity().cloned() else { return };
+        let Some(source) = self.sources.get(&self.active_source).cloned() else { return };
+        *self.cover_archive_attempted.lock().unwrap() = Some(key.to_string());
+        let attempted = self.cover_archive_attempted.clone();
+        let covers = self.covers.clone();
+        let key = key.to_string();
+        let task = tokio::spawn(async move {
+            let cap = covers.settings().source_max;
+            let Some((mime, bytes)) = covers.full_size(&key, &full, cap).await else {
+                // An **absence**, not a refusal: nothing is recorded anywhere,
+                // and `report_unfetchable` has already said it once. The slot
+                // is the one thing that *would* have recorded it, so it is
+                // given back — under the comparison its doc describes, so a
+                // newer album's claim is never the one released.
+                //
+                // The two failures below keep the slot on purpose: they say
+                // something about this appliance (a disk that will not take
+                // the file) or about the Source (a plugin that refused the
+                // hand-over), not about a target that may answer next time.
+                // Repeating either on all twelve tracks of the album would
+                // only repeat the same local failure twelve times.
+                {
+                    let mut slot = attempted.lock().unwrap();
+                    if slot.as_deref() == Some(key.as_str()) {
+                        *slot = None;
+                    }
+                }
+                tracing::info!("cover {key}: no original to archive");
+                return;
+            };
+            let extension = if mime == "image/png" { "png" } else { "jpg" };
+            let file = std::env::temp_dir().join(format!("ritornello-cover-{key}.{extension}"));
+            if let Err(e) = tokio::fs::write(&file, &bytes[..]).await {
+                tracing::warn!("cover {key}: cannot stage the original at {}: {e}", file.display());
+                return;
+            }
+            // The Source owns the file from here, deletion included.
+            let req = ritornello_proto::SourceReq::ArchiveCover {
+                identity,
+                file: file.to_string_lossy().into_owned(),
+            };
+            if let Err(e) = source.request(req).await {
+                tracing::warn!("cover {key}: the source refused the hand-over: {e}");
+                let _ = tokio::fs::remove_file(&file).await;
+            }
+        });
+        // Detached in service — nothing joins it, which is the whole point.
+        // Under test the handle is parked so `settle_cover_archive` can await
+        // it: see the `cover_archive_task` field.
+        #[cfg(test)]
+        {
+            self.cover_archive_task = Some(task);
+        }
+        #[cfg(not(test))]
+        drop(task);
     }
 
     /// The cache the detached task of `start_cover_fetch` fills — **the
@@ -550,6 +639,16 @@ impl<P: Player> Core<P> {
     #[cfg(test)]
     pub(crate) fn app_covers(&self) -> &Arc<crate::cover::CoverCache> {
         &self.covers
+    }
+
+    /// Waits for the archive task `start_cover_archive` detached, if it
+    /// detached one. Test-only: see the `cover_archive_task` field for why a
+    /// test may not simply read the Source's record and hope.
+    #[cfg(test)]
+    pub(crate) async fn settle_cover_archive(&mut self) {
+        if let Some(task) = self.cover_archive_task.take() {
+            task.await.expect("the archive task must not panic");
+        }
     }
 }
 
@@ -1575,5 +1674,92 @@ mod tests {
             crate::cover::content_key(&old_picture),
             "K must keep serving the picture it was computed from — track7's — never track1's new one"
         );
+    }
+
+    // --- The core obtains the original and hands it over -------------------
+    //
+    // **Each of these tests uses a URL of its own**, and that is not
+    // decoration: the staged original is named after the cache key inside the
+    // `temp_dir()` that every test of this binary shares (see the note on
+    // `test_mp3_with_cover`), and two tests archiving the same URL would race
+    // on one path — one truncating the file the other is reading back.
+
+    #[tokio::test]
+    async fn twelve_tracks_of_one_album_attempt_the_archive_once() {
+        // The album's cover carries one URL, hence one cache key, for all its
+        // tracks. A single slot is therefore enough to bound the attempts —
+        // and it must be **re-armed** by a different key, or a second album
+        // would never be archived.
+        let mut core = archiving_core().await;
+        for track in 1..=12 {
+            core.play_file(&format!("/mnt/ritornello/nas/Album/{track:02}.flac")).await;
+            core.declare_network_cover("https://coverartarchive.org/release/a/front").await;
+        }
+        assert_eq!(core.archive_requests().len(), 1, "one album, one attempt");
+
+        // Twelve tracks again, and that is what makes the second half of the
+        // proof bite. A slot that let the new album through but never took its
+        // key would still archive it — once per track. Asserting on a single
+        // track of the second album would call that correct.
+        for track in 1..=12 {
+            core.play_file(&format!("/mnt/ritornello/nas/Autre/{track:02}.flac")).await;
+            core.declare_network_cover("https://coverartarchive.org/release/b/front").await;
+        }
+        assert_eq!(core.archive_requests().len(), 2, "a new album re-arms the slot");
+    }
+
+    #[tokio::test]
+    async fn a_local_cover_is_never_archived() {
+        // The winner came from the share itself: there is nothing to bring
+        // back to it. Same for an image embedded in the file.
+        let mut core = archiving_core().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.declare_local_cover("/mnt/ritornello/nas/Album/cover.jpg").await;
+        assert!(core.archive_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_source_that_made_no_offer_is_never_asked() {
+        // Radio wins a network cover on every track. Downloading a 2.7 MiB
+        // original for each would be the whole cost of this feature paid for
+        // nothing.
+        let mut core = core_without_offer().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.declare_network_cover("https://coverartarchive.org/release/a/front").await;
+        assert!(core.archive_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unfetchable_original_leaves_the_next_listen_free_to_retry() {
+        // The distinction that matters: a refusal of policy settles, an
+        // absence does not. Nothing may remember this failure — no registry,
+        // no blacklist — so a Wi-Fi cut of thirty seconds must not forbid the
+        // album until reboot.
+        let mut core = archiving_core_without_network().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.declare_network_cover("https://coverartarchive.org/release/c/front").await;
+        assert!(core.archive_requests().is_empty(), "nothing to hand over");
+
+        // What re-armed the slot is the **absence itself**: the task that
+        // found no original gave the key back (see `cover_archive_attempted`).
+        // Leaving the album for a track with no cover of its own and coming
+        // back changes nothing on its own — no other key was ever attempted —
+        // which is exactly why the release matters. The original answers this
+        // time.
+        core.app_covers().answer_full_downloads_with(original(), "image/jpeg");
+        core.play_file("/mnt/ritornello/nas/Ailleurs/01.flac").await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.declare_network_cover("https://coverartarchive.org/release/c/front").await;
+        assert_eq!(core.archive_requests().len(), 1, "an absence is retried");
+    }
+
+    #[tokio::test]
+    async fn the_handed_over_file_holds_the_original_bytes_and_echoes_the_identity() {
+        let mut core = archiving_core().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.declare_network_cover("https://coverartarchive.org/release/d/front").await;
+        let (identity, file) = core.archive_requests().pop().unwrap();
+        assert_eq!(identity["path"], "/mnt/ritornello/nas/Album/01.flac");
+        assert_eq!(std::fs::read(&file).unwrap(), original());
     }
 }

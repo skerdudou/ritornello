@@ -276,7 +276,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let player = FakePlayer::default();
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: Arc::new(Mutex::new(Vec::new())) }));
+        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
         let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
@@ -390,7 +390,7 @@ mod tests {
         let player_calls = player.calls.clone();
         let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone() }));
+        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone(), ..Default::default() }));
         let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));

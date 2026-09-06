@@ -259,7 +259,7 @@ mod tests {
         // `source_order`: comparing the catalog to the field it is built
         // from would prove nothing.
         let (mut core, _pc, source_calls, _rx, _d) = setup();
-        core.add_source("files".into(), Arc::new(FakeSource { name: "files", calls: source_calls }));
+        core.add_source("files".into(), Arc::new(FakeSource { name: "files", calls: source_calls, ..Default::default() }));
         let expected = names(&core.sources_catalog());
         assert_eq!(expected.len(), 3);
 

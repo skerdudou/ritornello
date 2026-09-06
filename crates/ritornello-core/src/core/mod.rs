@@ -339,6 +339,42 @@ pub struct Core<P: Player> {
     /// potentially on a network share: see `health.rs` and the comment on
     /// `handle_path`.
     health: Arc<crate::health::Health>,
+    /// The active Source declared it would keep a network cover (see
+    /// `SourceMessage::cover_archivable`). Forgotten on identity change and
+    /// on source change: an offer describes a folder, not a session.
+    source_cover_archivable: bool,
+    /// The cover key whose archive was last **attempted**.
+    ///
+    /// **A single slot, and that is the whole bound.** An album's cover
+    /// carries one URL for all its tracks, hence one key: overwriting this
+    /// slot with the next key is what makes twelve tracks cost one attempt and
+    /// a new album re-arm. Deliberately *not* a set of settled keys — that
+    /// would accumulate, and would remember a passing outage as final.
+    ///
+    /// **Shared with the detached task, which gives it back when there was no
+    /// original to be had**, and that is the half a plain field could not
+    /// express. A slot claimed before the download and never released *is* a
+    /// memory of a failure: a thirty-second Wi-Fi cut would then forbid this
+    /// album until some other album with a cover had been played and this one
+    /// played again. A success keeps the slot — that is the bound; an absence
+    /// gives it back — that is "a refusal settles, an absence does not". The
+    /// task compares before releasing: another album may have claimed the slot
+    /// meanwhile, and clearing it would cost that one its own bound.
+    ///
+    /// A `std::sync::Mutex`: every holder does one comparison and one write,
+    /// with no `await` in between, so nothing here may be held across a
+    /// suspension point.
+    cover_archive_attempted: Arc<std::sync::Mutex<Option<String>>>,
+    /// Handle of the last archive task, **kept only under test**.
+    ///
+    /// The hand-over is detached on purpose (see `start_cover_archive`) and
+    /// nothing in service ever joins it. A test, though, has to assert on what
+    /// the Source received, and a detached task nobody awaits is a race rather
+    /// than a background job — so under test the handle is parked here and
+    /// `settle_cover_archive` awaits it. One slot is enough: at most one task
+    /// is spawned per `cover_arrived`, and the rig settles between two.
+    #[cfg(test)]
+    cover_archive_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Resolves the standby label from a sources_catalog already in hand.
@@ -441,6 +477,10 @@ impl<P: Player> Core<P> {
             extraction_in_flight: None,
             extraction_tx,
             health: Arc::new(crate::health::Health::new()),
+            source_cover_archivable: false,
+            cover_archive_attempted: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            cover_archive_task: None,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank
@@ -539,14 +579,7 @@ impl<P: Player> Core<P> {
             presets,
             cover,
             cover_thumb,
-            // Not yet used here: reading its value into the wake-the-core
-            // decision (`carries_a_fact` below) and applying it are one
-            // decision, assigned to a later task together with the state
-            // field it will feed and the tests that cover it. Bound with a
-            // leading underscore so this destructuring stays purely
-            // mechanical — forced by the field existing on `SourceUpdate` —
-            // rather than smuggling in a behavioural change.
-            cover_archivable: _cover_archivable,
+            cover_archivable,
         } = update;
         // Read **before** the guard below, and this is intentional: the
         // sources_catalog describes every source, not the one that is
@@ -578,6 +611,15 @@ impl<P: Player> Core<P> {
         }
         if let Some(f) = has_finite_list {
             self.has_finite_list = f;
+        }
+        // Applied **here**, above the early return, for exactly the reason
+        // written above about `preset_count`: the offer arrives on a
+        // spontaneous notification of its own (`plugin-files` stamps it on the
+        // frame that reports its folder probe, never on a reply), so it always
+        // takes that early return. Written at the bottom of this function it
+        // would never be applied at all.
+        if let Some(a) = cover_archivable {
+            self.source_cover_archivable = a;
         }
         // **The two paths, and which of the two actually carries the
         // safety.**
@@ -621,10 +663,10 @@ impl<P: Player> Core<P> {
         // and `transient` joins them because a transient word is a
         // statement about what is playing (it must keep its overlay and
         // disarm a `+NN` in flight). `preset`, `preset_name`,
-        // `preset_count`, `can_eject`, `has_finite_list`, `presets`, `cover`
-        // and `cover_thumb` attest nothing: all of them follow the
-        // "absent = keep" convention, so none can prove the frame describes
-        // the whole view.
+        // `preset_count`, `can_eject`, `has_finite_list`, `presets`, `cover`,
+        // `cover_thumb` and `cover_archivable` attest nothing: all of them
+        // follow the "absent = keep" convention, so none can prove the frame
+        // describes the whole view.
         let recomposes_the_view = transient || identity.is_some() || status.is_some();
         // **`cover_thumb` is in this disjunction, and leaving it out would
         // repeat the defect recorded above word for word.** A frame carrying
@@ -641,7 +683,12 @@ impl<P: Player> Core<P> {
             || preset.is_some()
             || preset_name.is_some()
             || cover.is_some()
-            || cover_thumb.is_some();
+            || cover_thumb.is_some()
+            // The offer travels alone on `plugin-files`' probe notification.
+            // Left out of this disjunction it would reach neither exit and be
+            // dropped in silence — the very defect `cover` and `cover_thumb`
+            // are guarded against just above.
+            || cover_archivable.is_some();
         if carries_a_fact && !recomposes_the_view {
             // A **single** call, and that is the point: the "absent =
             // keep" fields that must be applied after identity all live in

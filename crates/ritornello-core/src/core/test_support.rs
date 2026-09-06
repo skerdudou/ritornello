@@ -81,9 +81,18 @@ impl crate::player::Player for FakePlayer {
     }
 }
 
+#[derive(Default)]
 pub(super) struct FakeSource {
     pub(super) name: &'static str,
     pub(super) calls: Arc<Mutex<Vec<String>>>,
+    /// Every `SourceReq::ArchiveCover` this source received: the identity the
+    /// core echoed back, and the path of the staged original.
+    ///
+    /// Recorded apart from `calls` rather than folded into its `{:?}` line
+    /// because the archive tests assert on the two halves — an identity's
+    /// `path` field, and the **bytes** at that file — which a formatted string
+    /// could only be matched against by substring.
+    pub(super) archives: Arc<Mutex<Vec<(serde_json::Value, String)>>>,
 }
 
 #[async_trait::async_trait]
@@ -127,6 +136,14 @@ impl Source for FakeSource {
             // this arm this fake falls through to `Noop`, and a test could
             // not tell an applied answer from one silently dropped.
             ("radio", SourceReq::EndOfContent) => SourceAction::play("/tmp/list.m3u").playlist().finite(),
+            // The hand-over of an original. Recorded rather than merely
+            // tolerated: `Noop` is the honest answer of a source that keeps
+            // the file, and without this arm the request would fall through
+            // to the `_` below and leave nothing a test could read.
+            (_, SourceReq::ArchiveCover { identity, file }) => {
+                self.archives.lock().unwrap().push((identity, file));
+                SourceAction::Noop
+            }
             _ => SourceAction::Noop,
         })
     }
@@ -201,8 +218,8 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
     let player_calls = player.calls.clone();
     let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
-    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone() }));
+    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone(), ..Default::default() }));
+    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone(), ..Default::default() }));
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let root = dir.path().to_path_buf();
     let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
@@ -240,8 +257,8 @@ pub(super) fn setup_metadata(
     let dir = tempfile::tempdir().unwrap();
     let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
-    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls }));
+    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone(), ..Default::default() }));
+    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls, ..Default::default() }));
     let (np_tx, np_rx) = watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let root = dir.path().to_path_buf();
@@ -295,8 +312,8 @@ pub(super) fn test_core_with_extraction() -> (
     let dir = tempfile::tempdir().unwrap();
     let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
-    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls }));
+    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone(), ..Default::default() }));
+    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls, ..Default::default() }));
     let (np_tx, _np_rx) =
         watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
@@ -571,8 +588,8 @@ pub(super) fn test_core_with_cover_channel() -> (
     let dir = tempfile::tempdir().unwrap();
     let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone() }));
-    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls }));
+    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone(), ..Default::default() }));
+    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls, ..Default::default() }));
     let (np_tx, _np_rx) =
         watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
@@ -607,4 +624,210 @@ pub(super) fn test_core_with_cover_channel() -> (
 pub(super) fn fr_pack() -> String {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales/core/fr.toml");
     std::fs::read_to_string(p).expect("shipped fr pack")
+}
+
+/// Name of the rig's only Source, and it is `files` on purpose: the offer to
+/// keep an original is that plugin's, and this whole path exists for it.
+pub(super) const ARCHIVING_SOURCE: &str = "files";
+
+/// Name of the rig's only `metadata` contributor — the one that finds covers
+/// on the internet, which is the only kind worth bringing back to the share.
+pub(super) const ARCHIVING_CONTRIBUTOR: &str = "musicbrainz";
+
+/// The **full-size original** the network answers with, and the very bytes a
+/// test then expects to find in the staged file.
+///
+/// One value named once: armed into the cache seam by `archiving_core` and
+/// read back by the assertion, so the test cannot pass by comparing two
+/// different things that happen to agree.
+pub(super) fn original() -> Vec<u8> {
+    crate::cover::fixtures::jpeg_decodable(1500, 1500)
+}
+
+/// The thumbnail a finished fetch would have deposited in the cache. Small
+/// and real: `cover_arrived` refuses to publish a key the cache does not
+/// hold, so something has to be there, and a decodable image keeps the entry
+/// honest.
+fn deposited_thumbnail() -> Vec<u8> {
+    crate::cover::fixtures::jpeg_decodable(300, 300)
+}
+
+/// The spontaneous notification by which a Source declares it would keep a
+/// network cover, in the shape the SDK really writes (see `sdk_frame`: both
+/// capabilities are stamped on **every** frame).
+pub(super) fn offers_archive() -> SourceUpdate {
+    SourceUpdate { cover_archivable: Some(true), ..sdk_frame() }
+}
+
+/// Rig of the cover-archiving tests: one `files`-shaped Source playing off a
+/// share, one contributor finding covers on the internet, and a record of
+/// every hand-over the Source received.
+///
+/// **A wrapper rather than a bare `Core`, for two reasons.** The `TempDir`
+/// has to outlive the core — dropped, it takes `state.json`'s directory with
+/// it — and the tests read what the fake Source recorded, which no field of
+/// `Core` carries. `Deref`/`DerefMut` keep every core method (`app_covers`,
+/// `handle_source_update`, …) reachable as though the rig were the core.
+pub(super) struct ArchivingRig {
+    core: Core<FakePlayer>,
+    /// Every hand-over received, in order.
+    archives: Arc<Mutex<Vec<(serde_json::Value, String)>>>,
+    /// Whether this Source makes the offer at all. Read by `play_file`, which
+    /// re-declares it after every identity — as `plugin-files` does, and as
+    /// the core requires: the offer is forgotten on identity change, because
+    /// it describes a folder and not a session.
+    offers: bool,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for ArchivingRig {
+    type Target = Core<FakePlayer>;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl std::ops::DerefMut for ArchivingRig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
+}
+
+impl Drop for ArchivingRig {
+    /// A Source owns a staged original the moment it is handed over, deletion
+    /// included (see `SourceReq::ArchiveCover`). This fake keeps it instead,
+    /// so that a test can read the bytes back — so the rig deletes it here,
+    /// rather than leaving a megabyte per run in the `temp_dir()` every test
+    /// of this binary shares.
+    fn drop(&mut self) {
+        for (_, file) in self.archives.lock().unwrap().iter() {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+}
+
+impl ArchivingRig {
+    /// The frames a `files`-shaped Source sends when it opens `path`: the
+    /// identity of what is playing, then — if this Source makes the offer —
+    /// the spontaneous notification carrying it.
+    ///
+    /// **That order is production's, and it is also the order the core
+    /// requires.** `plugin-files` declares the offer on its folder-probe
+    /// notification, never on the reply that announces the track; and
+    /// `set_identity` forgets the offer, so a rig that declared it once at
+    /// construction would watch the first track erase it.
+    pub(super) async fn play_file(&mut self, path: &str) {
+        self.core.handle_source_update(
+            ARCHIVING_SOURCE,
+            plays(serde_json::json!({"kind": "file", "path": path})),
+        );
+        if self.offers {
+            self.core.handle_source_update(ARCHIVING_SOURCE, offers_archive());
+        }
+    }
+
+    /// A contributor announces a cover it found **on the internet**, and the
+    /// fetch of its thumbnail completes.
+    pub(super) async fn declare_network_cover(&mut self, url: &str) {
+        let identity = self.core.metadata.identity().cloned().expect("something must be playing");
+        let cover = ritornello_proto::CoverRef::Url { url: url.to_string() };
+        self.core.handle_enrichment(
+            ARCHIVING_CONTRIBUTOR,
+            Enrichment { identity, cover: Some(cover.clone()), ..Default::default() },
+        );
+        self.finish_the_fetch(crate::cover::CoverSource::Ref(cover)).await;
+    }
+
+    /// The Source declares the `folder.jpg` sitting beside the track — the
+    /// image that is already on the share, and the tier that outranks every
+    /// contributor.
+    pub(super) async fn declare_local_cover(&mut self, path: &str) {
+        let cover = ritornello_proto::CoverRef::Path { path: path.to_string() };
+        self.core.set_source_cover(Some(cover.clone()), None, ARCHIVING_SOURCE);
+        self.finish_the_fetch(crate::cover::CoverSource::Ref(cover)).await;
+    }
+
+    /// Replays the end of a fetch exactly as `main`'s loop does: the
+    /// thumbnail the detached task would have deposited, then `cover_arrived`
+    /// — which is where archiving is decided.
+    ///
+    /// Then **awaits** whatever archive task that decision detached. A
+    /// detached task nobody awaits is a race, not a background job: without
+    /// this the assertions below would read a record the task had not written
+    /// yet, and would pass or fail on the scheduler's mood.
+    async fn finish_the_fetch(&mut self, s: crate::cover::CoverSource) {
+        let key = crate::cover::key(&s);
+        self.core
+            .covers
+            .insert(key.clone(), crate::cover::CoverPayload::Bytes(deposited_thumbnail(), "image/jpeg"))
+            .await;
+        self.core.cover_arrived(key, true).await;
+        self.core.settle_cover_archive().await;
+    }
+
+    /// Every hand-over the Source received: the echoed identity, and the path
+    /// of the staged original.
+    pub(super) fn archive_requests(&self) -> Vec<(serde_json::Value, String)> {
+        self.archives.lock().unwrap().clone()
+    }
+}
+
+/// A core whose Source offers to keep originals, and whose network answers
+/// with `original()`.
+pub(super) async fn archiving_core() -> ArchivingRig {
+    archiving_rig(true, true)
+}
+
+/// The same, with a Source that never makes the offer — radio, in effect,
+/// which wins a network cover on every track and has nowhere to put it.
+pub(super) async fn core_without_offer() -> ArchivingRig {
+    archiving_rig(false, true)
+}
+
+/// The same as `archiving_core`, with the cache seam left unarmed: every
+/// attempt at the original yields nothing, exactly as a 404 or a cut Wi-Fi
+/// would.
+pub(super) async fn archiving_core_without_network() -> ArchivingRig {
+    archiving_rig(true, false)
+}
+
+fn archiving_rig(offers: bool, network: bool) -> ArchivingRig {
+    let dir = tempfile::tempdir().unwrap();
+    let archives: Arc<Mutex<Vec<(serde_json::Value, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+    sources.insert(
+        ARCHIVING_SOURCE.into(),
+        Arc::new(FakeSource { name: ARCHIVING_SOURCE, archives: archives.clone(), ..Default::default() }),
+    );
+    let root = dir.path().to_path_buf();
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+        "core",
+        "en",
+        &root,
+        crate::i18n::EN,
+    )));
+    let (covers, cover_tx) = test_covers();
+    if network {
+        covers.answer_full_downloads_with(original(), "image/jpeg");
+    }
+    let core = Core::new(
+        FakePlayer::default(),
+        Wiring {
+            sources,
+            persisted: PersistedState::default(),
+            state_path: dir.path().join("state.json"),
+            catalog,
+            locales_root: root,
+            sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            metadata: MetadataWiring {
+                plugins: vec![ARCHIVING_CONTRIBUTOR.to_string()],
+                now_playing: watch::channel(NowPlaying::default()).0,
+                state: watch::channel(PlayerState::default()).0,
+            },
+        },
+        covers,
+        cover_tx,
+        mpsc::channel(4).0,
+    );
+    ArchivingRig { core, archives, offers, _dir: dir }
 }

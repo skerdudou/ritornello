@@ -88,7 +88,7 @@ mod tests {
         let player = FakePlayer::default();
         let player_calls = player.calls.clone();
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
         let persisted = PersistedState {
             active_source: "radio".into(),
             volume: 60,
@@ -149,7 +149,7 @@ mod tests {
         std::fs::write(dir.path().join("core/fr.toml"), "standby = \"VEILLE\"\n").unwrap();
         let player = FakePlayer::default();
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
         let (state_tx, mut state_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "fr", &root, crate::i18n::EN)));
@@ -177,7 +177,7 @@ mod tests {
         std::fs::write(dir.path().join("core/fr.toml"), "standby = \"VEILLE\"\n").unwrap();
         let player = FakePlayer::default();
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())) }));
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
         let (state_tx, mut state_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
         // Built in English: "STANDBY", the embedded value of the key.
