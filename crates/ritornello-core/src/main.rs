@@ -439,6 +439,35 @@ fn unwired_plugin_lines(gathered: &register::Gathered) -> Vec<PluginStatus> {
     lines
 }
 
+/// Stops a plugin refused at the startup rendezvous for speaking another
+/// protocol — the rendezvous-side half of what `hotplug` already does when
+/// the same refusal arrives hot.
+///
+/// `gather` cannot do this itself: it only reads the announcements channel
+/// and never sees a child process. Without this cleanup, a plugin refused
+/// here was correctly left unwired — nothing would ever talk to it — but its
+/// process kept running regardless, holding the sockets it bound and its
+/// share of a small machine's memory, forever: an asymmetry with the hot
+/// path, which does stop it, that this closes.
+///
+/// No `liveness`/`OutOfReach` case to weigh, unlike `hotplug`'s: every name
+/// `gather` can report here was launched by this very core moments earlier —
+/// `non_supervised` is still empty at this point in startup — so it
+/// necessarily still has an entry in `kill_triggers`, unless it already died
+/// on its own, in which case the send below simply finds nobody listening.
+fn kill_incompatible_plugins(
+    gathered: &register::Gathered,
+    kill_triggers: &mut HashMap<String, tokio::sync::oneshot::Sender<()>>,
+) {
+    for name in gathered.incompatible.keys() {
+        if let Some(tx) = kill_triggers.remove(name) {
+            // A send error means the supervision future already finished, so
+            // the process is already gone — nothing to catch up on.
+            let _ = tx.send(());
+        }
+    }
+}
+
 struct HotPlugChildren {
     sockets_dir: PathBuf,
     /// Manifest names in file order: the authority on accepted names, and
@@ -1317,6 +1346,12 @@ async fn main() -> Result<()> {
     for name in &gathered.dead {
         kill_triggers.remove(name);
     }
+
+    // Symmetry with the hot path: a plugin refused here for its protocol is
+    // not wired, so nothing would ever talk to it — but left alone it stays
+    // alive, holding the sockets it bound and its share of a small machine's
+    // memory. See `kill_incompatible_plugins`.
+    kill_incompatible_plugins(&gathered, &mut kill_triggers);
 
     // `gather` took the listener by **reference**: the core therefore keeps
     // ownership of it, and the registration socket does not close with the
@@ -2908,6 +2943,66 @@ mod toggle_tests {
     #[test]
     fn an_empty_gathering_yields_no_lines() {
         assert!(unwired_plugin_lines(&register::Gathered::default()).is_empty());
+    }
+
+    #[test]
+    fn kill_incompatible_plugins_stops_a_plugin_refused_at_the_rendezvous() {
+        // The gap this closes: `gather` records "radio" in `incompatible` but
+        // never sees its process, so nothing used to stop it — a plugin
+        // refused at boot ran forever, holding its sockets and its share of a
+        // small machine's memory. The observable consequence of the fix is
+        // exactly what `supervise` (and the hot path's own refusal branch)
+        // rely on: the entry leaves `kill_triggers`, and its receiver
+        // actually gets the kill signal, rather than merely being dropped.
+        let g = register::Gathered {
+            incompatible: HashMap::from([("radio".to_string(), 99u32)]),
+            ..Default::default()
+        };
+        let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut kill_triggers = HashMap::from([("radio".to_string(), kill_tx)]);
+
+        kill_incompatible_plugins(&g, &mut kill_triggers);
+
+        assert!(
+            !kill_triggers.contains_key("radio"),
+            "the entry must be removed: a later turn-on must not find a stale trigger"
+        );
+        assert!(
+            kill_rx.try_recv().is_ok(),
+            "the kill signal must actually be sent, not merely forgotten"
+        );
+    }
+
+    #[test]
+    fn kill_incompatible_plugins_leaves_every_other_entry_untouched() {
+        let g = register::Gathered {
+            incompatible: HashMap::from([("radio".to_string(), 99u32)]),
+            ..Default::default()
+        };
+        let (radio_tx, _radio_rx) = tokio::sync::oneshot::channel::<()>();
+        let (cd_tx, mut cd_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut kill_triggers =
+            HashMap::from([("radio".to_string(), radio_tx), ("cd".to_string(), cd_tx)]);
+
+        kill_incompatible_plugins(&g, &mut kill_triggers);
+
+        assert!(kill_triggers.contains_key("cd"), "a plugin not reported incompatible must not be touched");
+        assert!(cd_rx.try_recv().is_err(), "and it must not receive a kill signal either");
+    }
+
+    #[test]
+    fn kill_incompatible_plugins_does_not_panic_when_the_process_is_already_gone() {
+        // No entry for "radio" at all, as if the process had died on its own
+        // and been purged by another site already. Mirrors the hot path's own
+        // comment: a send error (here, no sender to find) means the process
+        // is already gone, nothing to catch up on.
+        let g = register::Gathered {
+            incompatible: HashMap::from([("radio".to_string(), 99u32)]),
+            ..Default::default()
+        };
+        let mut kill_triggers: HashMap<String, tokio::sync::oneshot::Sender<()>> = HashMap::new();
+        kill_incompatible_plugins(&g, &mut kill_triggers);
+        assert!(kill_triggers.is_empty(), "nothing to remove, nothing added either");
     }
 }
 
