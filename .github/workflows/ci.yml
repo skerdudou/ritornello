@@ -101,10 +101,19 @@ jobs:
             web/app/test-results
 
   release:
-    name: armv7 binaries (cross)
+    name: Release archives (${{ matrix.arch }})
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [rust, e2e]
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: armv7-unknown-linux-gnueabihf
+            arch: armv7
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -112,15 +121,50 @@ jobs:
           name: dist-web
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cross --locked
-      - run: cross build --release --workspace --target armv7-unknown-linux-gnueabihf
-      - name: Gather what deploy.sh expects
+      - name: Refuse a tag that does not match the workspace version
+        # Without this, v0.3.0 pushed on a workspace still at 0.2.0 would
+        # produce 33 archives named after a version nothing carries — and the
+        # mistake would only surface on a device.
         run: |
-          mkdir -p release-bundle
-          cp target/armv7-unknown-linux-gnueabihf/release/ritornello-core release-bundle/
-          cp target/armv7-unknown-linux-gnueabihf/release/ritornello-plugin-* release-bundle/
-          ls -l release-bundle
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$v" = "${{ github.ref_name }}" ] \
+            || { echo "tag ${{ github.ref_name }} != workspace version $v" >&2; exit 1; }
+      - run: cargo install cross --locked
+      - run: cross build --release --workspace --target ${{ matrix.target }}
+      - run: ./scripts/package-release.sh ${{ matrix.target }} ${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
         with:
-          name: ritornello-armv7-${{ github.ref_name }}
-          path: release-bundle
+          name: release-${{ matrix.arch }}
+          if-no-files-found: error
+          path: release/${{ matrix.arch }}
+
+  publish:
+    name: Draft the GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      # The only privilege this workflow asks for, and only here.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: assets
+      - name: One checksum file for every asset
+        run: cd assets && sha256sum *.tar.gz > SHA256SUMS && ls -l
+      - name: Create the draft release
+        # A draft, not a publication: the notes must be read before anyone
+        # installs from them — that is where "Nothing to do" or "Action
+        # required" is decided. `gh` ships on the runner, so no third-party
+        # action is involved in the one step that holds write permission.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --draft \
+            --title "${{ github.ref_name }}" \
+            --notes-file .github/release-notes-template.md \
+            assets/*
