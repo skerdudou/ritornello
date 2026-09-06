@@ -10,6 +10,7 @@
 //! playlist. A failure of the page must never cut the audio.
 
 mod admin;
+mod archive;
 mod cover;
 mod state;
 
@@ -832,6 +833,56 @@ impl SourcePlugin for FilesSource {
         // places a playlist edit's own reload is read from, matching the
         // design's promise of a reload "at the next track change".
         self.mode_changed = true;
+    }
+
+    /// The core got the full-size original of a cover for a track whose folder
+    /// has none, and left it at `file`. See `SourceReq::ArchiveCover` for why
+    /// `identity` **designates** a folder rather than gating a comparison, and
+    /// `archive::store` for every reason this hand-over may end in a refusal.
+    ///
+    /// **Returns at once, and works detached.** The reply is what unties a
+    /// correlation the core gives up on after five seconds, while a copy onto a
+    /// sleeping share takes longer than that; a Source that copied before
+    /// answering would routinely be told it failed when it did not. Nothing
+    /// below is awaited by the core.
+    async fn archive_cover(&mut self, identity: serde_json::Value, file: String) {
+        let roots = self.roots.clone();
+        let health = self.health.clone();
+        tokio::spawn(async move {
+            let staged = PathBuf::from(&file);
+            let table = roots.read().await.clone();
+            // The circuit breaker is keyed on the mount point owning the path
+            // it is handed, and what this work touches is the **album folder**
+            // — not the staged file, which sits in the appliance's own tmpfs
+            // and would charge a sleeping NAS's timeout to the wrong mount.
+            // An echo we cannot read names no folder; the staged path then
+            // makes an honest key for a call that will refuse without ever
+            // touching a share.
+            let guarded = archive::echoed_file(&identity).unwrap_or_else(|| staged.clone());
+            // **One** `Health::bounded` for the whole folder: listing it,
+            // reading the neighbours' albums and writing the image are one trip
+            // to one share, and a sleeping NAS must give up once, not once per
+            // neighbour.
+            let target = staged.clone();
+            let work =
+                move || archive::store(&table, &identity, &target, &archive::album_from_tags);
+            match health.bounded(&guarded, work).await {
+                Some(archive::Outcome::Written(p)) => {
+                    tracing::info!("cover archived at {}", p.display())
+                }
+                Some(archive::Outcome::Refused(why)) => {
+                    tracing::info!("cover not archived: {why}")
+                }
+                Some(archive::Outcome::Failed(e)) => tracing::warn!("cover not archived: {e}"),
+                None => tracing::warn!("cover not archived: the share did not answer in time"),
+            }
+            // `store` reaps the staged file on every path it takes, but
+            // `bounded` has two of its own that never run it at all: a mount
+            // already known to be silent, and a timeout. The file is ours from
+            // the moment the path arrived — the core never comes back for it —
+            // so the last word on it belongs here.
+            let _ = std::fs::remove_file(&staged);
+        });
     }
 
     /// mpv went idle at the end of the finite list `has_finite_list`
