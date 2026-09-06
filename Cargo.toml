@@ -17,6 +17,12 @@ members = [
 ]
 
 [workspace.package]
+# One number for the whole repository, inherited by every crate — the same
+# mechanism already used for edition, license and repository just below.
+# It answers "what changed", and moves on every release. It is NOT the
+# compatibility contract between a core and a plugin: that one is
+# ritornello_proto::PROTOCOL_VERSION, which moves only on a wire break.
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/skerdudou/ritornello"
