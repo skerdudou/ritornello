@@ -40,9 +40,9 @@
 #     profile (checked on France Inter, franceinfo and France Culture). Its
 #     name is incidental: it is a server profile, not a Mouv' endpoint.
 #
-# Measured on 2026-08-14. 74 stations.
+# Measured on 2026-09-06. 74 stations.
 
-# --- The six national brands --------------------------------------------------
+# --- The six national brands -----------------------------------------------------
 
 [[station]]
 label = "France Inter"
@@ -227,7 +227,7 @@ mounts = ["francemusiqueclassiquelove"]
 id = 411
 rules = "webrf_fip_player"
 
-# --- The 45 "ici" locals (formerly France Bleu) -----------------------------------------
+# --- The 45 "ici" locals (formerly France Bleu) ----------------------------------
 
 [[station]]
 label = "France Bleu RCFM"

@@ -1,126 +1,71 @@
-# `ritornello-plugin-radiofrance-metas`
+# Radio France — what's playing
 
-A `metadata` plugin (see [docs/plugins.md](../../docs/plugins.md)) that shows
-what is playing on Radio France's stations.
+Shows the artist, the title and the album for Radio France's stations: **France
+Inter, franceinfo, France Musique, France Culture, Mouv' and FIP**, their
+webradios, and the 45 local *ici* stations.
 
-**Why it exists.** Radio France's streams carry *no ICY metadata at all* — no
-`icy-metaint` header, not even the filler text OUI FM emits. Without this
-plugin, a Radio France station on the device shows nothing but its name. The
-station's *live* endpoint, on the other hand, answers without authentication,
-states itself when to be called again, and — on the music stations — gives
-title and artist already separated.
+It is a `metadata` plugin for [Ritornello](../../README.md); see
+[docs/plugins.md](../../docs/plugins.md) for what that means.
 
-**Nothing to configure.** The table of the 74 stations is embedded in the
-binary (`src/stations.toml`). The optional
-`/etc/ritornello/radiofrance-metas.toml` (variable
-`RITORNELLO_RADIOFRANCE_METAS`, example in `deploy/`) is only there to fix an
-entry gone stale or add one without recompiling; its entries are read *before*
-the embedded table.
+## Why you want it
 
-## How a station is recognized
+Radio France's streams carry **no track information at all** — not even the
+placeholder text some stations emit. Without this plugin, a Radio France
+station on the device shows nothing but its own name, whatever is playing.
 
-By the **mount** of its stream, matched as a *token* of the configured URL —
-bordered on both sides by a non-alphanumeric character, never as a raw
-substring. `fip` is a prefix of `fipgroove` and `francemusique` of
-`francemusiquebaroque`: a plain substring search would have let the first entry
-capture the others and display the wrong station's titles, with no sign of
-error.
+Each station does publish what is on air on its own live feed, though, with the
+artist and the title already separated. That is what this plugin reads, adding
+the album where it can find it.
 
-One entry therefore covers every form the same station is served under:
+## Installing it
+
+**There is nothing to configure.** The station list is built into the binary.
+Deploy as usual and any Radio France station already set up on the device
+starts showing titles.
+
+An optional `/etc/ritornello/radiofrance-metas.toml` (see
+[the example](../../deploy/radiofrance-metas.example.toml)) lets you correct a
+station or add one without rebuilding, should Radio France ever change a stream
+address.
+
+## How it works, in short
+
+The plugin asks the station's live feed what is playing, and the feed itself
+says when to ask again — so a three-minute song costs one question, and an
+hour-long programme costs one too. Nothing is polled on a fixed timer.
+
+The album is a second, separate question, asked **once per track**: it is not
+in the live feed but in the station's schedule, matched to the current song by
+its identifier. That request is best-effort — if the album is not there, the
+title goes out without it rather than waiting.
+
+## What it does not cover
+
+- **The album is often missing**, and that is the source's doing rather than a
+  fault: the schedule it comes from usually runs one track behind. Expect it to
+  come and go on the same station. After five tracks in a row without one, the
+  plugin stops asking that station's schedule until you tune back in — no point
+  making a third party answer a question that keeps coming back empty.
+- **Three webradios are absent**: France Inter *La Musique Inter*, France Bleu
+  *Chanson française* and France Bleu *Année 80*. Their streams exist, but
+  Radio France publishes no live-feed identifier for them, so there is nothing
+  to ask.
+- **The national *ICI* feed** is in the same position: its identifier is known,
+  but no stream address was found to recognize it by.
+- **Outside music**, you get the programme name and its detail rather than a
+  blank line — there is nothing else to fall back on.
+
+## Stations covered
+
+Search this list for the mount in your stream URL — for example `fipgroove` in
+`https://icecast.radiofrance.fr/fipgroove-midfi.mp3`. One entry covers every
+form the same station is served under, whichever quality or address you have
+configured:
 
     https://icecast.radiofrance.fr/fipgroove-midfi.mp3
     https://icecast.radiofrance.fr/fipgroove-hifi.aac
     https://direct.fipradio.fr/live/fipgroove-midfi.mp3      (historical name)
     https://stream.radiofrance.fr/fipgroove/fipgroove.m3u8   (HLS)
-
-## The two rendering profiles
-
-The last segment of the live URL is not the station but a **rendering
-profile**, and it changes what comes back — the wrong one makes the plugin
-silent. Measured on Mouv' at one instant: `webrf_fip_player` answered
-`Le direct / Mouv'` (the station's baseline) while `webrf_mouv_player` answered
-`La Playlist / SOOLKING - Bye Bye (feat. TAYC)`, which was what actually aired.
-Each station therefore carries its profile in the table.
-
-| Profile | Shape of the answer | Stations |
-|---|---|---|
-| `webrf_fip_player` | the **song** object: title and artist already separated, and the time window is the song's, so its duration is reported | FIP, its 12 webradios, France Musique's 11 |
-| `webrf_mouv_player` | the **programme** object: the programme name, plus what is playing inside it as a single `ARTIST - Title` string. The window is the programme's, so no duration is reported | the 5 other national brands, the 45 local stations |
-
-The second profile's name is incidental — it is a server-side profile, not a
-Mouv' endpoint. It is used wherever it is the only one that surfaces the
-current song (Mouv', France Musique, the local stations); on purely spoken
-stations it returns the same programme/detail pair as the brand's own profile
-(checked on France Inter, franceinfo and France Culture).
-
-## The album, and why it is a second request
-
-Neither profile carries an album. It lives in a different endpoint — the
-station's *schedule* (`livemeta/pull/<id>`), where every past and present item
-is listed with its `titreAlbum`. The current song is found there by its
-identifier: the live answer's `songUuid` matches a schedule entry's `songId`
-(**not** its `uuid`, which identifies the schedule entry rather than the song —
-confusing the two would silently find nothing).
-
-The schedule is queried **once per track**, not once per poll: over the life of
-one song the answer would not change. So the extra cost is one request per
-track, never per refresh.
-
-It is best-effort by nature. The schedule is frequently **one track behind** —
-measured, its last entry ends exactly when the current song starts — and on
-some stations it never catches up within a track. When the song is not there,
-the enrichment simply goes out without an album; nothing else is held back or
-delayed. To avoid doubling the requests made to a third party for an answer
-that does not come, the plugin **stops asking a station's schedule after five
-consecutive tracks without an album**, until that station is selected again.
-
-## Known limitations
-
-- **The live endpoint is private and undocumented.** Only the *list* of
-  stations is published. It may change, start requiring authentication, or
-  disappear without notice. Its failure is silent on screen and never delays
-  playback, and reconnection backs off progressively.
-- **The album is often absent**, and that is the endpoint's doing, not a bug:
-  the schedule it is read from usually lags one track behind. Observed on a
-  single sweep: present on FIP and most of its webradios, on France Musique's,
-  on Mouv' and on France Inter; absent on the local stations. Expect it to come
-  and go on the same station.
-- **Three webradios are not covered**, although their streams exist:
-  `franceinter_la_musique_inter` (mount `franceinterlamusiqueinter`),
-  `francebleu_chanson_francaise` (mount `fbchansonfrancaise`) and
-  `francebleu_annee_80` (no Icecast mount found). They answer on the site's
-  GraphQL path but have **no live-endpoint identifier**: 1 095 identifiers were
-  scanned without a single hit. Adding them would mean a second, far more
-  fragile data path, so they are left out rather than guessed.
-- **The national `ICI` feed (identifier 56) is not covered either**: its
-  identifier is known, but no Icecast mount was found for it, so there is
-  nothing to recognize a URL by.
-- **One pairing rests on elimination**: identifier 407 ("Films") with the mount
-  `francemusiquelabo` — read as *la B.O.*, film scores. Every other France
-  Musique webradio was paired first, leaving exactly one mount and exactly one
-  station. It is the first entry to suspect if a wrong title ever shows up.
-- **Local stations are labelled "France Bleu"**, not "ici", because that is how
-  Radio France's own documentation still names them. The label only ever
-  appears in the logs.
-- **Mouv' has no sub-webradios.** Not an omission: no `mouv*` mount answers, no
-  `mouv_*` brand slug is accepted, and the site declares `webradios = ["mouv"]`.
-- Outside music, the programme name and its detail are displayed rather than
-  nothing — there is no ICY to fall back on, so the alternative is a blank
-  line.
-
-## Regenerating the table
-
-    node crates/ritornello-plugin-radiofrance-metas/scripts/fetch-stations.mjs
-
-It rewrites `src/stations.toml` **and the table below** from Radio France's own
-published sources: the Open API documentation, whose example responses pair
-each station's `liveStream` (hence its mount) with its `playerUrl` (which
-carries `id_station=<n>`), and — for the 13 stations that documentation does
-not list — the site's own webradio cards, each of whose mounts is re-checked
-against the Icecast server on every run. With `--verifier` it writes nothing
-and exits nonzero if the committed files have drifted from those sources.
-
-## Stations covered
 
 <!-- stations:auto:start — generated by scripts/fetch-stations.mjs, do not edit by hand -->
 | Station | Mount | Id | Profile |
@@ -204,3 +149,31 @@ and exits nonzero if the committed files have drifted from those sources.
 | France Bleu Occitanie | `fbtoulouse` | 92 | `webrf_mouv_player` |
 | France Bleu Saint-Étienne Loire | `fbstetienne` | 93 | `webrf_mouv_player` |
 <!-- stations:auto:end -->
+
+## Maintaining it
+
+Regenerate the table and the list above from Radio France's own published
+sources:
+
+    node crates/ritornello-plugin-radiofrance-metas/scripts/fetch-stations.mjs
+
+Both files are written from the same run, so they cannot disagree. With
+`--verifier` the script writes nothing and exits nonzero if either has drifted.
+The sources are the Open API documentation, whose example responses pair each
+station's stream with its identifier, and — for the thirteen stations that
+documentation omits — the site's own webradio cards, each mount re-checked
+against the Icecast server on every run.
+
+The reasoning behind each rule — how a station is recognized, why the live URL
+carries a rendering profile that changes what comes back, why the album is
+matched on one identifier and not the other — lives in the comments of
+`src/live.rs` and `src/table.rs`, next to the code it explains.
+
+Two things worth knowing that have no other home. The live endpoint is
+**private and undocumented**: only the station list is published, so it may
+change or disappear without notice — its failure is silent on screen and never
+delays playback. And one station pairing rests on elimination rather than on a
+published pair: identifier 407, "Films", with the mount `francemusiquelabo`
+read as *la B.O.* Every other France Musique webradio was paired first, leaving
+exactly one of each. It is the first entry to suspect if a wrong title ever
+shows up.
