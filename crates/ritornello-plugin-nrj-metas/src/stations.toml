@@ -1,0 +1,2205 @@
+# NRJ group webradios: stream token -> brand and station identifier.
+#
+# MEASURED, NOT GUESSED. Source: the /onair.json of each of the four brand
+# sites, where every station carries its three stream URLs and its
+# identifier in the same object. `scripts/fetch-stations.mjs` regenerates
+# this file from those same sources.
+#
+# `brand` is not decoration: a host only serves its own stations, so it is
+# what tells the plugin which host to query.
+#
+# Each `tokens` entry is the last segment of a stream URL, looked up as a
+# whole token of the URL configured on the device — which usually carries a
+# query string (`?origine=fluxradios`) but always the token.
+#
+# Measured on 2026-09-06. 365 stations.
+
+[[station]]
+label = "NRJ"
+tokens = ["oumvmk8fnozc", "oufdfatx4thg", "ouj3jtnxeb5p"]
+brand = "nrj"
+id = 158
+
+[[station]]
+label = "NRJ HITS"
+tokens = ["ouuk8j5n3nje", "ou7xugf3s5gi", "oudnxp2h9r57"]
+brand = "nrj"
+id = 1
+
+[[station]]
+label = "NRJ FAN POWER"
+tokens = ["ou87u4gk7oiu", "ouagnew2dqao"]
+brand = "nrj"
+id = 2213
+
+[[station]]
+label = "NRJ NEW HITS FRIDAY"
+tokens = ["ousgaom4z85f", "ou8vstgk7oiu"]
+brand = "nrj"
+id = 1087
+
+[[station]]
+label = "NRJ NEW DANCE FRIDAY"
+tokens = ["ou4w4ahtd2ko", "ouhshsapu6pb"]
+brand = "nrj"
+id = 1675
+
+[[station]]
+label = "NRJ HITS DU MOMENT"
+tokens = ["ouqiikyoeo8p", "ouh88gapu6pb"]
+brand = "nrj"
+id = 307
+
+[[station]]
+label = "NRJ HITS LATINO DU MOMENT"
+tokens = ["ouniyvqn5eyc", "ougtvirb92oc"]
+brand = "nrj"
+id = 2348
+
+[[station]]
+label = "NRJ NOUVEAUX HITS DE LA RENTREE"
+tokens = ["ou3e5kuizv6i", "oudqpj2h9r57"]
+brand = "nrj"
+id = 2339
+
+[[station]]
+label = "NRJ HITS FRANCAIS DE LA RENTREE"
+tokens = ["oufp6atx4thg", "ouars3w2dqao"]
+brand = "nrj"
+id = 2349
+
+[[station]]
+label = "NRJ HITS DE L'ETE 2026"
+tokens = ["oua8h7w2dqao", "ouo6vj7nfibk"]
+brand = "nrj"
+id = 2027
+
+[[station]]
+label = "NRJ HITS RAP DE L'ETE"
+tokens = ["ouv6huoarp52", "oumoej8fnozc"]
+brand = "nrj"
+id = 1900
+
+[[station]]
+label = "NRJ HITS AFRO DE L'ETE"
+tokens = ["ouag4vw2dqao", "ou87sfgk7oiu"]
+brand = "nrj"
+id = 2312
+
+[[station]]
+label = "NRJ SUMMER FESTIVAL"
+tokens = ["ougfanrb92oc", "ouwrzdsk6j4d"]
+brand = "nrj"
+id = 2026
+
+[[station]]
+label = "NRJ SUNSET"
+tokens = ["ousv9cm4z85f", "ourtwzvukkaq"]
+brand = "nrj"
+id = 1539
+
+[[station]]
+label = "NRJ CALANQUES"
+tokens = ["ougfa2rb92oc", "ou7d8jf3s5gi"]
+brand = "nrj"
+id = 2300
+
+[[station]]
+label = "NRJ QUE CALOR"
+tokens = ["oumo9q8fnozc", "ouf28ctx4thg"]
+brand = "nrj"
+id = 2292
+
+[[station]]
+label = "NRJ HITS DE LA RENTREE 26"
+tokens = ["ou87opgk7oiu", "ou87o2gk7oiu"]
+brand = "nrj"
+id = 2335
+
+[[station]]
+label = "NRJ HITS RAP DE LA RENTREE"
+tokens = ["ouykug36zcw2", "ougtvyrb92oc"]
+brand = "nrj"
+id = 2346
+
+[[station]]
+label = "NRJ HITS DANCE DE LA RENTREE"
+tokens = ["ouvx7hoarp52", "oum7gk8fnozc"]
+brand = "nrj"
+id = 2350
+
+[[station]]
+label = "NRJ BACK TO SCHOOL"
+tokens = ["ouaga7w2dqao", "ou8786gk7oiu"]
+brand = "nrj"
+id = 1620
+
+[[station]]
+label = "NRJ HITS AFRO DE LA RENTREE"
+tokens = ["ou72t5f3s5gi", "ouuzi85n3nje"]
+brand = "nrj"
+id = 2345
+
+[[station]]
+label = "NRJ HITS MOTIVATION"
+tokens = ["oujujfnxeb5p", "ouv6v4oarp52"]
+brand = "nrj"
+id = 2337
+
+[[station]]
+label = "NRJ PLUS DE 30 MIN DE HITS NON STOP"
+tokens = ["ouycsj36zcw2", "ougfnwrb92oc"]
+brand = "nrj"
+id = 2163
+
+[[station]]
+label = "NRJ HITS 2026"
+tokens = ["ou5za9irv93h", "ousvtvm4z85f"]
+brand = "nrj"
+id = 2095
+
+[[station]]
+label = "NRJ TROPICAL HITS"
+tokens = ["ou87zmgk7oiu", "ousvkam4z85f"]
+brand = "nrj"
+id = 2281
+
+[[station]]
+label = "NRJ HOT HITS"
+tokens = ["ourt4cvukkaq", "ou6b84xp336f"]
+brand = "nrj"
+id = 1207
+
+[[station]]
+label = "NRJ LES PROCHAINS HITS"
+tokens = ["oujuainxeb5p", "ouv63xoarp52"]
+brand = "nrj"
+id = 1840
+
+[[station]]
+label = "NRJ NOS HITS PREFERES"
+tokens = ["ouju8znxeb5p", "ouh8jtapu6pb"]
+brand = "nrj"
+id = 2241
+
+[[station]]
+label = "NRJ SUMMER MOOD"
+tokens = ["oun5t4qn5eyc", "ougf9prb92oc"]
+brand = "nrj"
+id = 2276
+
+[[station]]
+label = "NRJ BEACH CLUB"
+tokens = ["outp7q6ubafg", "ouoxrp7nfibk"]
+brand = "nrj"
+id = 2313
+
+[[station]]
+label = "NRJ BEACH PARTY"
+tokens = ["ousvi4m4z85f", "oupyrtbgddr9"]
+brand = "nrj"
+id = 1211
+
+[[station]]
+label = "NRJ PLAYA"
+tokens = ["ouf2s5tx4thg", "ouagixw2dqao"]
+brand = "nrj"
+id = 1540
+
+[[station]]
+label = "NRJ FULL MOON PARTY"
+tokens = ["ou5zuqirv93h", "ousvw9m4z85f"]
+brand = "nrj"
+id = 2331
+
+[[station]]
+label = "NRJ SPRING BREAK"
+tokens = ["ouh82papu6pb", "ou4mddhtd2ko"]
+brand = "nrj"
+id = 2009
+
+[[station]]
+label = "NRJ BOOST MATINAL"
+tokens = ["ouv6ipoarp52", "oujumenxeb5p"]
+brand = "nrj"
+id = 2053
+
+[[station]]
+label = "NRJ NEW"
+tokens = ["ou87s7gk7oiu", "ousvarm4z85f"]
+brand = "nrj"
+id = 2311
+
+[[station]]
+label = "NRJ GOAT HITS"
+tokens = ["oupyoxbgddr9", "ou3kdjuizv6i"]
+brand = "nrj"
+id = 2280
+
+[[station]]
+label = "NRJ FRESH HITS"
+tokens = ["oumo368fnozc", "ouv6cboarp52"]
+brand = "nrj"
+id = 2210
+
+[[station]]
+label = "NRJ LES HITS A CONNAITRE"
+tokens = ["ousvs4m4z85f", "ourtrwvukkaq"]
+brand = "nrj"
+id = 2340
+
+[[station]]
+label = "NRJ MUST HAVE"
+tokens = ["ouox4o7nfibk", "ouaguhw2dqao"]
+brand = "nrj"
+id = 2268
+
+[[station]]
+label = "NRJ HITS 2025"
+tokens = ["ouuc385n3nje", "ou76o5f3s5gi"]
+brand = "nrj"
+id = 1974
+
+[[station]]
+label = "NRJ HITS FRANCAIS 2025"
+tokens = ["out2i86ubafg", "ou2nz7pw5hs7"]
+brand = "nrj"
+id = 1990
+
+[[station]]
+label = "NRJ HITS SON ULTRA HD"
+tokens = ["ouy5hb36zcw2", "ouw864sk6j4d"]
+brand = "nrj"
+id = 1895
+
+[[station]]
+label = "NRJ DANCE SON ULTRA HD"
+tokens = ["ou2nwdpw5hs7", "ouuk7u5n3nje"]
+brand = "nrj"
+id = 1960
+
+[[station]]
+label = "NRJ COLLECTOR"
+tokens = ["oun5rcqn5eyc", "ouagqow2dqao"]
+brand = "nrj"
+id = 2211
+
+[[station]]
+label = "NRJ 20 ANS DE SUPER HITS"
+tokens = ["oupy2qbgddr9", "ou3kyiuizv6i"]
+brand = "nrj"
+id = 2318
+
+[[station]]
+label = "NRJ TOP 100 DE LA DECENNIE"
+tokens = ["ou87fbgk7oiu", "ousvodm4z85f"]
+brand = "nrj"
+id = 1441
+
+[[station]]
+label = "NRJ SUMMER HITS 2026"
+tokens = ["ougfztrb92oc", "ou7dadf3s5gi"]
+brand = "nrj"
+id = 2269
+
+[[station]]
+label = "NRJ POOL PARTY"
+tokens = ["ou87emgk7oiu", "ou87esgk7oiu"]
+brand = "nrj"
+id = 1249
+
+[[station]]
+label = "NRJ HITS FRANCAIS DE L'ETE"
+tokens = ["ou5z9kirv93h", "ousvo8m4z85f"]
+brand = "nrj"
+id = 1651
+
+[[station]]
+label = "NRJ DETENTE"
+tokens = ["ou87qegk7oiu", "ou87qkgk7oiu"]
+brand = "nrj"
+id = 2186
+
+[[station]]
+label = "NRJ ROAD TRIP"
+tokens = ["oudn762h9r57", "ouqi2byoeo8p"]
+brand = "nrj"
+id = 2307
+
+[[station]]
+label = "NRJ GRANDES VACANCES"
+tokens = ["ouh845apu6pb", "oujub7nxeb5p"]
+brand = "nrj"
+id = 1541
+
+[[station]]
+label = "NRJ SUMMER CLASSICS"
+tokens = ["ougf5frb92oc", "oun5giqn5eyc"]
+brand = "nrj"
+id = 2244
+
+[[station]]
+label = "NRJ LATIN TRAP"
+tokens = ["oupytpbgddr9", "ou3kbyuizv6i"]
+brand = "nrj"
+id = 2308
+
+[[station]]
+label = "NRJ SUNNY HITS"
+tokens = ["ouwrjmsk6j4d", "ouwrbwsk6j4d"]
+brand = "nrj"
+id = 1443
+
+[[station]]
+label = "NRJ SUMMER CHILL"
+tokens = ["ouotrj7nfibk", "outd736ubafg"]
+brand = "nrj"
+id = 1749
+
+[[station]]
+label = "NRJ TIKTOK"
+tokens = ["oun54jqn5eyc", "ougfbmrb92oc"]
+brand = "nrj"
+id = 1546
+
+[[station]]
+label = "NRJ NOUVEAUX HITS 2026"
+tokens = ["ouucqs5n3nje", "ou76r3f3s5gi"]
+brand = "nrj"
+id = 1989
+
+[[station]]
+label = "NRJ FUTURS HITS 2026"
+tokens = ["ougfxerb92oc", "ou7db4f3s5gi"]
+brand = "nrj"
+id = 2091
+
+[[station]]
+label = "NRJ RAP 2026"
+tokens = ["ouycap36zcw2", "ougfbhrb92oc"]
+brand = "nrj"
+id = 2139
+
+[[station]]
+label = "NRJ BEST HITS 2020-2026"
+tokens = ["ouue4t5n3nje", "ou2quspw5hs7"]
+brand = "nrj"
+id = 2090
+
+[[station]]
+label = "NRJ BEST OF FRANÇAIS 2026"
+tokens = ["ouwroisk6j4d", "ouycet36zcw2"]
+brand = "nrj"
+id = 2074
+
+[[station]]
+label = "NRJ BEST OF RAP FRANCAIS 2025"
+tokens = ["oujuibnxeb5p", "ouv6dgoarp52"]
+brand = "nrj"
+id = 2081
+
+[[station]]
+label = "NRJ REGGAETON FEVER"
+tokens = ["ou5ztoirv93h", "oub38sj25zuw"]
+brand = "nrj"
+id = 2218
+
+[[station]]
+label = "NRJ LES QUEENS FRANCAISES"
+tokens = ["oumosw8fnozc", "oub3pdj25zuw"]
+brand = "nrj"
+id = 2332
+
+[[station]]
+label = "NRJ FUEGO LATINO"
+tokens = ["oug75trb92oc", "ounugcqn5eyc"]
+brand = "nrj"
+id = 1882
+
+[[station]]
+label = "NRJ K-POP"
+tokens = ["ouhs4wapu6pb", "ouqunuyoeo8p"]
+brand = "nrj"
+id = 1772
+
+[[station]]
+label = "NRJ HITS MIXES"
+tokens = ["ouwri7sk6j4d", "ouyc6e36zcw2"]
+brand = "nrj"
+id = 1791
+
+[[station]]
+label = "NRJ LES HITS N1"
+tokens = ["ougosurb92oc", "oun3pgqn5eyc"]
+brand = "nrj"
+id = 1809
+
+[[station]]
+label = "NRJ FLASHBACK"
+tokens = ["ouuko35n3nje", "ou7xk7f3s5gi"]
+brand = "nrj"
+id = 1852
+
+[[station]]
+label = "NRJ 10 ANS DE HITS"
+tokens = ["ou7xztf3s5gi", "oug7iorb92oc"]
+brand = "nrj"
+id = 1838
+
+[[station]]
+label = "NRJ NOUVEAUTES DU MOMENT"
+tokens = ["ou4m55htd2ko", "oumoze8fnozc"]
+brand = "nrj"
+id = 1680
+
+[[station]]
+label = "NRJ NOUVEAUTES"
+tokens = ["ou7x5rf3s5gi", "oug7qmrb92oc"]
+brand = "nrj"
+id = 27
+
+[[station]]
+label = "NRJ DJ BENS"
+tokens = ["ouhs78apu6pb", "ou623jxp336f"]
+brand = "nrj"
+id = 1700
+
+[[station]]
+label = "NRJ 10 000 HITS"
+tokens = ["oumvnn8fnozc", "ou4sd2htd2ko"]
+brand = "nrj"
+id = 1729
+
+[[station]]
+label = "NRJ 500 HITS DANCE"
+tokens = ["ou5kmsirv93h", "oubqzzj25zuw"]
+brand = "nrj"
+id = 1779
+
+[[station]]
+label = "NRJ 500 HITS DE L'ETE"
+tokens = ["ouvtiboarp52", "ouj3mznxeb5p"]
+brand = "nrj"
+id = 1754
+
+[[station]]
+label = "NRJ DANCE"
+tokens = ["ouou7nfibkyn", "ouadw2dqaoei", "ouyc4d36zcw2"]
+brand = "nrj"
+id = 4
+
+[[station]]
+label = "NRJ LATINO"
+tokens = ["oumvyy8fnozc", "ou4spbhtd2ko"]
+brand = "nrj"
+id = 67
+
+[[station]]
+label = "NRJ LATINO 2026"
+tokens = ["oubqppj25zuw", "oumrsm8fnozc"]
+brand = "nrj"
+id = 1986
+
+[[station]]
+label = "NRJ LATINO CLASSICS"
+tokens = ["oudb5z2h9r57", "ou3ihguizv6i"]
+brand = "nrj"
+id = 1705
+
+[[station]]
+label = "NRJ HITLIST"
+tokens = ["ouw8f9sk6j4d", "ougodsrb92oc"]
+brand = "nrj"
+id = 1655
+
+[[station]]
+label = "NRJ ELECTRO CHILL"
+tokens = ["ousrncm4z85f", "ou8oyzgk7oiu"]
+brand = "nrj"
+id = 1665
+
+[[station]]
+label = "NRJ FIESTA"
+tokens = ["ousgwhm4z85f", "ou5ku3irv93h"]
+brand = "nrj"
+id = 350
+
+[[station]]
+label = "NRJ AFRO HITS"
+tokens = ["oug737rb92oc", "ounum5qn5eyc", "ou6bf8xp336f"]
+brand = "nrj"
+id = 1552
+
+[[station]]
+label = "NRJ AFROBEATS"
+tokens = ["ouju93nxeb5p", "ouv6nfoarp52"]
+brand = "nrj"
+id = 2122
+
+[[station]]
+label = "NRJ MADE IN FRANCE"
+tokens = ["ouhsrapu6pbr", "ouqueyoeo8pn"]
+brand = "nrj"
+id = 331
+
+[[station]]
+label = "NRJ DANCE 2026"
+tokens = ["oumo2g8fnozc", "ouf2yftx4thg"]
+brand = "nrj"
+id = 2128
+
+[[station]]
+label = "NRJ IBIZA"
+tokens = ["outdfu6ubafg", "ou2jdepw5hs7"]
+brand = "nrj"
+id = 53
+
+[[station]]
+label = "NRJ EUROHOT 30"
+tokens = ["ou62tvxp336f", "our7gsvukkaq"]
+brand = "nrj"
+id = 524
+
+[[station]]
+label = "NRJ CLASSIC HITS"
+tokens = ["oufdcptx4thg", "oumvnf8fnozc"]
+brand = "nrj"
+id = 1778
+
+[[station]]
+label = "NRJ HITS 80'"
+tokens = ["oujybtnxeb5p", "ouhs4capu6pb", "oudnfx2h9r57"]
+brand = "nrj"
+id = 1294
+
+[[station]]
+label = "NRJ HITS 90"
+tokens = ["ou627gxp336f", "our7mavukkaq"]
+brand = "nrj"
+id = 848
+
+[[station]]
+label = "NRJ SUPERSTARS 2000"
+tokens = ["ourtndvukkaq", "ou6binxp336f"]
+brand = "nrj"
+id = 2145
+
+[[station]]
+label = "NRJ HITS 2000'"
+tokens = ["ouotn47nfibk", "outd3s6ubafg", "oumoxm8fnozc"]
+brand = "nrj"
+id = 849
+
+[[station]]
+label = "NRJ HITS 2010'"
+tokens = ["ouamh3w2dqao", "oufx7atx4thg"]
+brand = "nrj"
+id = 891
+
+[[station]]
+label = "NRJ HAPPY HITS"
+tokens = ["ousgsfm4z85f", "ou8v8xgk7oiu"]
+brand = "nrj"
+id = 755
+
+[[station]]
+label = "NRJ PARTY HITS"
+tokens = ["oumvqt8fnozc", "ouvt5poarp52"]
+brand = "nrj"
+id = 168
+
+[[station]]
+label = "NRJ DISNEY HITS"
+tokens = ["oudbxj2h9r57", "ou3iykuizv6i"]
+brand = "nrj"
+id = 1362
+
+[[station]]
+label = "NRJ CHILL"
+tokens = ["oumrsk8fnozc", "ouvfrhoarp52"]
+brand = "nrj"
+id = 1083
+
+[[station]]
+label = "NRJ HITS CARIBEENS"
+tokens = ["ou6b6rxp336f", "ouh8hiapu6pb"]
+brand = "nrj"
+id = 2338
+
+[[station]]
+label = "NRJ REGGAETON"
+tokens = ["ou8vs6gk7oiu", "ouam47w2dqao", "outpyh6ubafg"]
+brand = "nrj"
+id = 170
+
+[[station]]
+label = "NRJ REGGAE"
+tokens = ["ou5e7virv93h", "oubyswj25zuw", "ouh8eyapu6pb"]
+brand = "nrj"
+id = 66
+
+[[station]]
+label = "NRJ RAP US"
+tokens = ["ouw84bsk6j4d", "ouw84jsk6j4d"]
+brand = "nrj"
+id = 60
+
+[[station]]
+label = "NRJ NOUVEAUTES RAP FRANCAIS"
+tokens = ["ouvfg4oarp52", "oujypfnxeb5p"]
+brand = "nrj"
+id = 962
+
+[[station]]
+label = "NRJ AFRO RAP"
+tokens = ["ouwvmqsk6j4d", "ouwvmnsk6j4d"]
+brand = "nrj"
+id = 2347
+
+[[station]]
+label = "NRJ RAP FRANCAIS"
+tokens = ["ounu8iqn5eyc", "oua8jvw2dqao"]
+brand = "nrj"
+id = 61
+
+[[station]]
+label = "NRJ URBAN HITS"
+tokens = ["ouhse4apu6pb", "ouqupqyoeo8p"]
+brand = "nrj"
+id = 109
+
+[[station]]
+label = "NRJ C'EST MARSEILLE BEBE"
+tokens = ["oupqwvbgddr9", "ousrqkm4z85f"]
+brand = "nrj"
+id = 1550
+
+[[station]]
+label = "NRJ GANGSTA RAP"
+tokens = ["oufxohtx4thg", "oumrwc8fnozc", "oub3xtj25zuw"]
+brand = "nrj"
+id = 225
+
+[[station]]
+label = "NRJ RAP"
+tokens = ["oumrha8fnozc", "ou4wkzhtd2ko"]
+brand = "nrj"
+id = 1269
+
+[[station]]
+label = "NRJ RAP 2000"
+tokens = ["ou8oy9gk7oiu", "oua8bkw2dqao", "ougfwqrb92oc"]
+brand = "nrj"
+id = 1495
+
+[[station]]
+label = "NRJ HIP HOP RNB HITS"
+tokens = ["ouw8ansk6j4d", "ouw8aqsk6j4d"]
+brand = "nrj"
+id = 730
+
+[[station]]
+label = "NRJ CLASSIC RAP US"
+tokens = ["oupn23bgddr9", "ousgw7m4z85f"]
+brand = "nrj"
+id = 247
+
+[[station]]
+label = "NRJ CLASSIC RAP FR"
+tokens = ["ouw86hsk6j4d", "ougop8rb92oc"]
+brand = "nrj"
+id = 814
+
+[[station]]
+label = "NRJ CLUB HITS RNB"
+tokens = ["ouoxk87nfibk", "outp9o6ubafg"]
+brand = "nrj"
+id = 2214
+
+[[station]]
+label = "NRJ CLASSIC RNB"
+tokens = ["ouam9ow2dqao", "ouotgb7nfibk"]
+brand = "nrj"
+id = 248
+
+[[station]]
+label = "NRJ RNB OLD SCHOOL"
+tokens = ["ou5z8wirv93h", "ousv2tm4z85f"]
+brand = "nrj"
+id = 2146
+
+[[station]]
+label = "NRJ RNB"
+tokens = ["ouamhfw2dqao", "ouotvn7nfibk"]
+brand = "nrj"
+id = 227
+
+[[station]]
+label = "NRJ RNB FR"
+tokens = ["ouquj3yoeo8p", "oudb6b2h9r57"]
+brand = "nrj"
+id = 136
+
+[[station]]
+label = "NRJ LA PLAYLIST 100% HITS FRANCAIS"
+tokens = ["oupnxqbgddr9", "ousghvm4z85f"]
+brand = "nrj"
+id = 1267
+
+[[station]]
+label = "NRJ NOUVEAUTES FRANCAISES"
+tokens = ["ou76qmf3s5gi", "ougoparb92oc"]
+brand = "nrj"
+id = 960
+
+[[station]]
+label = "NRJ NOUVEAUX HITS DANCE"
+tokens = ["oun39nqn5eyc", "ouam6sw2dqao"]
+brand = "nrj"
+id = 2003
+
+[[station]]
+label = "NRJ FRENCH HITS"
+tokens = ["ou2n9fpw5hs7", "ouukgn5n3nje"]
+brand = "nrj"
+id = 26
+
+[[station]]
+label = "NRJ ACOUSTIC HITS"
+tokens = ["ou3iqcuizv6i", "oupndybgddr9"]
+brand = "nrj"
+id = 139
+
+[[station]]
+label = "NRJ HITS REMIX"
+tokens = ["ou4we9htd2ko", "ouhszhapu6pb"]
+brand = "nrj"
+id = 163
+
+[[station]]
+label = "NRJ CLUB HITS"
+tokens = ["ou8vm6gk7oiu", "ou8vmxgk7oiu"]
+brand = "nrj"
+id = 221
+
+[[station]]
+label = "NRJ BEST HITS EVER"
+tokens = ["oumrai8fnozc", "ouvf89oarp52"]
+brand = "nrj"
+id = 349
+
+[[station]]
+label = "NRJ NO REPEAT"
+tokens = ["ouyioi36zcw2", "ouwgyrsk6j4d"]
+brand = "nrj"
+id = 92
+
+[[station]]
+label = "NRJ EXTRAVADANCE SUMMER 2026"
+tokens = ["ouf274tx4thg", "ouaghqw2dqao"]
+brand = "nrj"
+id = 2326
+
+[[station]]
+label = "NRJ LA PLAYLIST EXTRAVADANCE"
+tokens = ["ou8v2igk7oiu", "ouamt3w2dqao"]
+brand = "nrj"
+id = 1604
+
+[[station]]
+label = "NRJ EDM"
+tokens = ["oumr2p8fnozc", "ou4wf6htd2ko"]
+brand = "nrj"
+id = 534
+
+[[station]]
+label = "NRJ HOUSE "
+tokens = ["oub3b2j25zuw", "ou5z5yirv93h"]
+brand = "nrj"
+id = 1833
+
+[[station]]
+label = "NRJ DEEP"
+tokens = ["ouhseuapu6pb", "ou62o8xp336f"]
+brand = "nrj"
+id = 558
+
+[[station]]
+label = "NRJ DANCE 90"
+tokens = ["ouwgqgsk6j4d", "ouwgqrsk6j4d"]
+brand = "nrj"
+id = 250
+
+[[station]]
+label = "NRJ DANCE 2000'"
+tokens = ["ou5kwairv93h", "oubqkkj25zuw"]
+brand = "nrj"
+id = 1699
+
+[[station]]
+label = "NRJ CLASSIC DANCE"
+tokens = ["outpzv6ubafg", "ou2qa6pw5hs7"]
+brand = "nrj"
+id = 1568
+
+[[station]]
+label = "NRJ ELECTRO"
+tokens = ["our78wvukkaq", "ousga4m4z85f"]
+brand = "nrj"
+id = 1268
+
+[[station]]
+label = "NRJ CLUBBIN"
+tokens = ["ou8onegk7oiu", "oua82iw2dqao"]
+brand = "nrj"
+id = 24
+
+[[station]]
+label = "NRJ HYPERPOP"
+tokens = ["ouhgwcapu6pb", "ouj5qtnxeb5p"]
+brand = "nrj"
+id = 2351
+
+[[station]]
+label = "NRJ HARDSTYLE"
+tokens = ["oug75vrb92oc", "ouyiv536zcw2"]
+brand = "nrj"
+id = 1272
+
+[[station]]
+label = "NRJ EXTRAVADANCE"
+tokens = ["ousrnpm4z85f", "ou5eorirv93h"]
+brand = "nrj"
+id = 49
+
+[[station]]
+label = "NRJ TECHNO STORY"
+tokens = ["ouvfmzoarp52", "oujydonxeb5p"]
+brand = "nrj"
+id = 1191
+
+[[station]]
+label = "NRJ DANCE HITS"
+tokens = ["ouw8hnsk6j4d", "ougom5rb92oc"]
+brand = "nrj"
+id = 278
+
+[[station]]
+label = "NRJ LATINO HITS"
+tokens = ["ou3i3euizv6i", "oupnpubgddr9"]
+brand = "nrj"
+id = 526
+
+[[station]]
+label = "NRJ FIESTA LATINA"
+tokens = ["ourf5qvukkaq", "ousrqbm4z85f"]
+brand = "nrj"
+id = 826
+
+[[station]]
+label = "NRJ AFRO HOUSE"
+tokens = ["our6osvukkaq", "ou6jdvxp336f"]
+brand = "nrj"
+id = 2352
+
+[[station]]
+label = "NRJ KIZOMBA"
+tokens = ["ou8v8dgk7oiu", "ouamatw2dqao"]
+brand = "nrj"
+id = 699
+
+[[station]]
+label = "NRJ ZOUK"
+tokens = ["ousryem4z85f", "ou8ou4gk7oiu"]
+brand = "nrj"
+id = 87
+
+[[station]]
+label = "NRJ RAI"
+tokens = ["ou8vwfgk7oiu", "ou8vwtgk7oiu"]
+brand = "nrj"
+id = 112
+
+[[station]]
+label = "NRJ ORIENTAL"
+tokens = ["ouhs9iapu6pb", "ou62frxp336f"]
+brand = "nrj"
+id = 224
+
+[[station]]
+label = "NRJ FUNKY"
+tokens = ["oubqddj25zuw", "oumraw8fnozc"]
+brand = "nrj"
+id = 171
+
+[[station]]
+label = "NRJ ROCK"
+tokens = ["oug7qvrb92oc", "ounuw3qn5eyc"]
+brand = "nrj"
+id = 5
+
+[[station]]
+label = "NRJ COUNTRY"
+tokens = ["oumomc8fnozc", "ouf2fhtx4thg"]
+brand = "nrj"
+id = 1498
+
+[[station]]
+label = "NRJ POP ROCK"
+tokens = ["ou76jwf3s5gi", "ougod4rb92oc"]
+brand = "nrj"
+id = 1280
+
+[[station]]
+label = "NRJ POP 2026"
+tokens = ["ouagthw2dqao", "oun59bqn5eyc"]
+brand = "nrj"
+id = 2130
+
+[[station]]
+label = "NRJ LA FRENCH POP"
+tokens = ["ouv6kjoarp52", "oujug9nxeb5p"]
+brand = "nrj"
+id = 2235
+
+[[station]]
+label = "NRJ POP"
+tokens = ["ouwg2ask6j4d", "ouwg2wsk6j4d"]
+brand = "nrj"
+id = 3
+
+[[station]]
+label = "NRJ CLASSIC ROCK"
+tokens = ["ouhm2bapu6pb", "ouq5mryoeo8p"]
+brand = "nrj"
+id = 249
+
+[[station]]
+label = "NRJ METAL"
+tokens = ["ouhmbnapu6pb", "ouq5goyoeo8p"]
+brand = "nrj"
+id = 68
+
+[[station]]
+label = "NRJ ELECTRO FITNESS"
+tokens = ["oujy27nxeb5p", "ouhsz5apu6pb"]
+brand = "nrj"
+id = 1322
+
+[[station]]
+label = "NRJ HITS POUR LE SPORT"
+tokens = ["ourtgavukkaq", "ou6btgxp336f"]
+brand = "nrj"
+id = 2330
+
+[[station]]
+label = "NRJ SPORT MOTIVATION"
+tokens = ["ousgxym4z85f", "ou8v25gk7oiu"]
+brand = "nrj"
+id = 1583
+
+[[station]]
+label = "NRJ POUR LE SPORT"
+tokens = ["ouy59236zcw2", "ouw8fzsk6j4d"]
+brand = "nrj"
+id = 1297
+
+[[station]]
+label = "NRJ BEACH RUNNING"
+tokens = ["outpfy6ubafg", "ouoxvb7nfibk"]
+brand = "nrj"
+id = 2321
+
+[[station]]
+label = "NRJ HITS FOR RUNNING"
+tokens = ["ou6pz5xp336f", "ourfunvukkaq"]
+brand = "nrj"
+id = 1298
+
+[[station]]
+label = "NRJ LOUNGE"
+tokens = ["oua828w2dqao", "oufdi2tx4thg"]
+brand = "nrj"
+id = 6
+
+[[station]]
+label = "NRJ SUR LA ROUTE"
+tokens = ["ougfugrb92oc", "ouycvu36zcw2"]
+brand = "nrj"
+id = 2246
+
+[[station]]
+label = "NRJ AT WORK"
+tokens = ["ou7xcof3s5gi", "oug73grb92oc"]
+brand = "nrj"
+id = 58
+
+[[station]]
+label = "NRJ RELAX"
+tokens = ["ougo8irb92oc", "oun3jvqn5eyc"]
+brand = "nrj"
+id = 296
+
+[[station]]
+label = "NRJ LOVE"
+tokens = ["oudjhm2h9r57", "ou3cv6uizv6i"]
+brand = "nrj"
+id = 69
+
+[[station]]
+label = "NRJ MANU SUR NRJ"
+tokens = ["our7shvukkaq", "ousg4zm4z85f"]
+brand = "nrj"
+id = 94
+
+[[station]]
+label = "NRJ MICHAEL JACKSON"
+tokens = ["ouju7wnxeb5p", "ouv643oarp52"]
+brand = "nrj"
+id = 29
+
+[[station]]
+label = "NRJ LINKIN PARK"
+tokens = ["ouvfbfoarp52", "oujye3nxeb5p"]
+brand = "nrj"
+id = 1957
+
+[[station]]
+label = "NRJ STROMAE"
+tokens = ["ou4m44htd2ko", "oumoms8fnozc"]
+brand = "nrj"
+id = 443
+
+[[station]]
+label = "NRJ DAVID GUETTA"
+tokens = ["outdax6ubafg", "ou2j8jpw5hs7"]
+brand = "nrj"
+id = 188
+
+[[station]]
+label = "NRJ GIMS"
+tokens = ["ouuc6k5n3nje", "ou764df3s5gi"]
+brand = "nrj"
+id = 383
+
+[[station]]
+label = "NRJ JUL"
+tokens = ["ougoktrb92oc", "ouy5fe36zcw2"]
+brand = "nrj"
+id = 642
+
+[[station]]
+label = "NRJ MAUVAIS DJO"
+tokens = ["ouagayw2dqao", "oun5nrqn5eyc"]
+brand = "nrj"
+id = 2336
+
+[[station]]
+label = "NRJ HUGEL"
+tokens = ["ou6braxp336f", "ouh8cnapu6pb"]
+brand = "nrj"
+id = 2293
+
+[[station]]
+label = "NRJ DRAKE"
+tokens = ["ou3kxbuizv6i", "oudngo2h9r57"]
+brand = "nrj"
+id = 1034
+
+[[station]]
+label = "NRJ RIHANNA"
+tokens = ["ouh8nqapu6pb", "ouqiv7yoeo8p"]
+brand = "nrj"
+id = 51
+
+[[station]]
+label = "NRJ BRUNO MARS"
+tokens = ["ouwrd4sk6j4d", "ouycwb36zcw2"]
+brand = "nrj"
+id = 2154
+
+[[station]]
+label = "NRJ KATSEYE"
+tokens = ["ouqc3uyoeo8p", "ouhgwwapu6pb"]
+brand = "nrj"
+id = 2341
+
+[[station]]
+label = "NRJ SHAKIRA"
+tokens = ["ou8754gk7oiu", "ou875hgk7oiu"]
+brand = "nrj"
+id = 975
+
+[[station]]
+label = "NRJ BAD BUNNY"
+tokens = ["oujuh5nxeb5p", "ouv6y6oarp52"]
+brand = "nrj"
+id = 2155
+
+[[station]]
+label = "NRJ BTS"
+tokens = ["oudbsv2h9r57", "ou3ifpuizv6i"]
+brand = "nrj"
+id = 1156
+
+[[station]]
+label = "NRJ TAYLOR SWIFT"
+tokens = ["ouhsomapu6pb", "ou62ybxp336f"]
+brand = "nrj"
+id = 1109
+
+[[station]]
+label = "NRJ LADY GAGA"
+tokens = ["ougfc6rb92oc", "oun5vkqn5eyc"]
+brand = "nrj"
+id = 1906
+
+[[station]]
+label = "NRJ SUMMER PARTY"
+tokens = ["oub3foj25zuw", "ou5zbdirv93h"]
+brand = "nrj"
+id = 1377
+
+[[station]]
+label = "NOSTALGIE"
+tokens = ["oug7girb92oc", "ouwgwqsk6j4d", "oua8a3w2dqao"]
+brand = "nostalgie"
+id = 197
+
+[[station]]
+label = "NOSTALGIE 80"
+tokens = ["ou8ovpgk7oiu", "oua8mxw2dqao", "ou87d3gk7oiu"]
+brand = "nostalgie"
+id = 9
+
+[[station]]
+label = "NOSTALGIE 60 70"
+tokens = ["ougfkxrb92oc", "oun5oeqn5eyc", "ou7do3f3s5gi"]
+brand = "nostalgie"
+id = 2252
+
+[[station]]
+label = "NOSTALGIE 80 90"
+tokens = ["ou62iyxp336f", "our7npvukkaq", "ou6b7mxp336f"]
+brand = "nostalgie"
+id = 1565
+
+[[station]]
+label = "NOSTALGIE 70 80 90"
+tokens = ["oumrpo8fnozc", "ouvfqxoarp52"]
+brand = "nostalgie"
+id = 1996
+
+[[station]]
+label = "NOSTALGIE 60"
+tokens = ["ousrg6m4z85f", "ou8ov2gk7oiu"]
+brand = "nostalgie"
+id = 15
+
+[[station]]
+label = "NOSTALGIE 70"
+tokens = ["ouvtu2oarp52", "ouj3wknxeb5p"]
+brand = "nostalgie"
+id = 32
+
+[[station]]
+label = "NOSTALGIE 90"
+tokens = ["ousg2xm4z85f", "ou5k8mirv93h"]
+brand = "nostalgie"
+id = 824
+
+[[station]]
+label = "NOSTALGIE CELINE DION"
+tokens = ["ou2q4fpw5hs7", "outpkg6ubafg"]
+brand = "nostalgie"
+id = 2187
+
+[[station]]
+label = "NOSTALGIE LES 80 PLUS GRANDS TUBES 80"
+tokens = ["ouwg8usk6j4d", "oug7oerb92oc"]
+brand = "nostalgie"
+id = 1640
+
+[[station]]
+label = "NOSTALGIE 100% FRANCAIS 80"
+tokens = ["ouo6kg7nfibk", "out2976ubafg", "ouh8z3apu6pb"]
+brand = "nostalgie"
+id = 1081
+
+[[station]]
+label = "NOSTALGIE BRITISH 80"
+tokens = ["ou3kmvuizv6i", "oudne42h9r57"]
+brand = "nostalgie"
+id = 2158
+
+[[station]]
+label = "NOSTALGIE USA 80"
+tokens = ["ounusuqn5eyc", "oua8pgw2dqao"]
+brand = "nostalgie"
+id = 1230
+
+[[station]]
+label = "NOSTALGIE SUMMER 80"
+tokens = ["ouqitxyoeo8p", "ouh8u5apu6pb"]
+brand = "nostalgie"
+id = 435
+
+[[station]]
+label = "NOSTALGIE FRENCH PARTY 80"
+tokens = ["ouamxmw2dqao", "oufxudtx4thg"]
+brand = "nostalgie"
+id = 1464
+
+[[station]]
+label = "NOSTALGIE SLOWS 80"
+tokens = ["oufdxmtx4thg", "oumvr98fnozc"]
+brand = "nostalgie"
+id = 1599
+
+[[station]]
+label = "NOSTALGIE GENERATION 80"
+tokens = ["ounu3fqn5eyc", "oua8miw2dqao", "ougfsbrb92oc"]
+brand = "nostalgie"
+id = 886
+
+[[station]]
+label = "NOSTALGIE MIX 80"
+tokens = ["ouagk2w2dqao", "oun5xaqn5eyc"]
+brand = "nostalgie"
+id = 2291
+
+[[station]]
+label = "NOSTALGIE AUTEURS INTERPRETES"
+tokens = ["oun5jgqn5eyc", "ougf8urb92oc"]
+brand = "nostalgie"
+id = 2325
+
+[[station]]
+label = "NOSTALGIE BIG BEN"
+tokens = ["ouwrajsk6j4d", "ouwrabsk6j4d"]
+brand = "nostalgie"
+id = 2324
+
+[[station]]
+label = "NOSTALGIE CULTURE FRANCAISE"
+tokens = ["oujuxgnxeb5p", "ouv6scoarp52"]
+brand = "nostalgie"
+id = 2303
+
+[[station]]
+label = "NOSTALGIE ACOUSTIQUE"
+tokens = ["ou59c3irv93h", "ouso8hm4z85f"]
+brand = "nostalgie"
+id = 2353
+
+[[station]]
+label = "NOSTALGIE AU TRAVAIL"
+tokens = ["ou8fr6gk7oiu", "ouso87m4z85f"]
+brand = "nostalgie"
+id = 2343
+
+[[station]]
+label = "NOSTALGIE SUR LA ROUTE"
+tokens = ["ouycqm36zcw2", "ougf8nrb92oc"]
+brand = "nostalgie"
+id = 2323
+
+[[station]]
+label = "NOSTALGIE SUMMER NIGHTS"
+tokens = ["ou6bvwxp336f", "ouh8kqapu6pb"]
+brand = "nostalgie"
+id = 2304
+
+[[station]]
+label = "NOSTALGIE 80 CHIC"
+tokens = ["oupyf2bgddr9", "ou3kpquizv6i"]
+brand = "nostalgie"
+id = 2295
+
+[[station]]
+label = "NOSTALGIE EUROPOP"
+tokens = ["oudnot2h9r57", "ouqidpyoeo8p"]
+brand = "nostalgie"
+id = 2294
+
+[[station]]
+label = "NOSTALGIE LES TUBES REVISITES"
+tokens = ["oum7gm8fnozc", "oubunpj25zuw"]
+brand = "nostalgie"
+id = 2354
+
+[[station]]
+label = "NOSTALGIE APERO"
+tokens = ["ou87hrgk7oiu", "ousvzsm4z85f"]
+brand = "nostalgie"
+id = 1757
+
+[[station]]
+label = "NOSTALGIE FANS DES ANNEES 80"
+tokens = ["ouj3qxnxeb5p", "ouhmweapu6pb"]
+brand = "nostalgie"
+id = 1162
+
+[[station]]
+label = "NOSTALGIE VOS PEPITES 80"
+tokens = ["oumov98fnozc", "ouf2dmtx4thg"]
+brand = "nostalgie"
+id = 2045
+
+[[station]]
+label = "NOSTALGIE LES TUBES 80 N1"
+tokens = ["ouo6im7nfibk", "out2ev6ubafg"]
+brand = "nostalgie"
+id = 1283
+
+[[station]]
+label = "NOSTALGIE TOUS LES TUBES 80"
+tokens = ["ougfjarb92oc", "ou7d3mf3s5gi"]
+brand = "nostalgie"
+id = 2152
+
+[[station]]
+label = "NOSTALGIE 500 TUBES 80"
+tokens = ["ousvgwm4z85f", "ourt78vukkaq"]
+brand = "nostalgie"
+id = 1771
+
+[[station]]
+label = "NOSTALGIE LES TUBES DE 1980"
+tokens = ["ou4mqqhtd2ko", "ouh8y3apu6pb"]
+brand = "nostalgie"
+id = 2219
+
+[[station]]
+label = "NOSTALGIE LES TUBES DE 1981"
+tokens = ["ouqi7tyoeo8p", "oudnmr2h9r57"]
+brand = "nostalgie"
+id = 2220
+
+[[station]]
+label = "NOSTALGIE LES TUBES DE 1982"
+tokens = ["oudn8v2h9r57", "ou3k6puizv6i"]
+brand = "nostalgie"
+id = 2142
+
+[[station]]
+label = " NOSTALGIE LES TUBES DE 1983"
+tokens = ["ou3kt2uizv6i", "oupygfbgddr9"]
+brand = "nostalgie"
+id = 2221
+
+[[station]]
+label = "NOSTALGIE LES TUBES DE 1984"
+tokens = ["ousv59m4z85f", "ou87cagk7oiu"]
+brand = "nostalgie"
+id = 2222
+
+[[station]]
+label = "NOSTALGIE LES TUBES DE 1985"
+tokens = ["ou87cwgk7oiu", "ouag34w2dqao"]
+brand = "nostalgie"
+id = 2223
+
+[[station]]
+label = "NOSTALGIE LES TUBES DE 1986"
+tokens = ["oumoci8fnozc", "ou4myyhtd2ko"]
+brand = "nostalgie"
+id = 2120
+
+[[station]]
+label = "NOSTALGIE LES TUBES DE 1987"
+tokens = ["ouox9v7nfibk", "outpat6ubafg"]
+brand = "nostalgie"
+id = 2224
+
+[[station]]
+label = " NOSTALGIE LES TUBES DE 1988"
+tokens = ["ou2qgbpw5hs7", "ouuexc5n3nje"]
+brand = "nostalgie"
+id = 2225
+
+[[station]]
+label = "NOSTALGIE LES TUBES DE 1989"
+tokens = ["ou7dhxf3s5gi", "ougfefrb92oc"]
+brand = "nostalgie"
+id = 2266
+
+[[station]]
+label = "NOSTALGIE ROCK"
+tokens = ["ouwrpwsk6j4d", "ouwrpask6j4d"]
+brand = "nostalgie"
+id = 2179
+
+[[station]]
+label = "NOSTALGIE POP ROCK"
+tokens = ["ousr8wm4z85f", "ou5ec5irv93h", "ougfsyrb92oc"]
+brand = "nostalgie"
+id = 10
+
+[[station]]
+label = "NOSTALGIE ROCK 70"
+tokens = ["oug7nsrb92oc", "ouyisn36zcw2"]
+brand = "nostalgie"
+id = 1623
+
+[[station]]
+label = "NOSTALGIE ROCK 80"
+tokens = ["ouw8xhsk6j4d", "ouw8xask6j4d"]
+brand = "nostalgie"
+id = 1282
+
+[[station]]
+label = "NOSTALGIE ROCK 90"
+tokens = ["ou6pd7xp336f", "ourfo8vukkaq"]
+brand = "nostalgie"
+id = 1489
+
+[[station]]
+label = "NOSTALGIE QUEEN"
+tokens = ["oun57zqn5eyc", "ouagutw2dqao"]
+brand = "nostalgie"
+id = 1275
+
+[[station]]
+label = "NOSTALGIE MICHAEL JACKSON"
+tokens = ["ou87iagk7oiu", "ou87ihgk7oiu"]
+brand = "nostalgie"
+id = 840
+
+[[station]]
+label = "NOSTALGIE JEAN JACQUES GOLDMAN"
+tokens = ["ouh83uapu6pb", "ouqif6yoeo8p"]
+brand = "nostalgie"
+id = 1572
+
+[[station]]
+label = "NOSTALGIE JOHNNY HALLYDAY"
+tokens = ["oupn8tbgddr9", "ousgu4m4z85f"]
+brand = "nostalgie"
+id = 404
+
+[[station]]
+label = "NOSTALGIE MICHEL SARDOU"
+tokens = ["ouw8u7sk6j4d", "ouw8ufsk6j4d"]
+brand = "nostalgie"
+id = 993
+
+[[station]]
+label = "NOSTALGIE PROLONGE LES VACANCES"
+tokens = ["ouwrktsk6j4d", "ouycd936zcw2"]
+brand = "nostalgie"
+id = 1370
+
+[[station]]
+label = "NOSTALGIE ROOFTOP"
+tokens = ["ouh85iapu6pb", "ou4muuhtd2ko"]
+brand = "nostalgie"
+id = 2279
+
+[[station]]
+label = "NOSTALGIE BEACH PARTY"
+tokens = ["ousvc3m4z85f", "ourt9ivukkaq"]
+brand = "nostalgie"
+id = 1469
+
+[[station]]
+label = "NOSTALGIE SOLEIL"
+tokens = ["oub3h9j25zuw", "ou5zrmirv93h"]
+brand = "nostalgie"
+id = 1535
+
+[[station]]
+label = "NOSTALGIE PEPITES MAXI 45 TOURS"
+tokens = ["ougf6krb92oc", "ou7dp9f3s5gi"]
+brand = "nostalgie"
+id = 2071
+
+[[station]]
+label = "NOSTALGIE POUR L'ETE"
+tokens = ["ousvp3m4z85f", "oupy9sbgddr9"]
+brand = "nostalgie"
+id = 2159
+
+[[station]]
+label = "NOSTALGIE A LA COOL"
+tokens = ["ou4mxxhtd2ko", "oumojb8fnozc"]
+brand = "nostalgie"
+id = 1925
+
+[[station]]
+label = "NOSTALGIE FUNK"
+tokens = ["ouhm27apu6pb", "ou6peuxp336f", "ou3khmuizv6i"]
+brand = "nostalgie"
+id = 33
+
+[[station]]
+label = "NOSTALGIE FUNKY PARTY"
+tokens = ["ou8o39gk7oiu", "ou8o34gk7oiu"]
+brand = "nostalgie"
+id = 2006
+
+[[station]]
+label = "NOSTALGIE FUNKY COLLECTOR"
+tokens = ["ou7x6kf3s5gi", "oug7o5rb92oc"]
+brand = "nostalgie"
+id = 1607
+
+[[station]]
+label = "NOSTALGIE DISCO FEVER"
+tokens = ["ou4swshtd2ko", "ouhms8apu6pb", "ouycjw36zcw2"]
+brand = "nostalgie"
+id = 216
+
+[[station]]
+label = "NOSTALGIE ITALO DISCO"
+tokens = ["oumvj78fnozc", "ouvt3doarp52"]
+brand = "nostalgie"
+id = 1662
+
+[[station]]
+label = "NOSTALGIE PARTY"
+tokens = ["ouqis8yoeo8p", "ouh8d2apu6pb"]
+brand = "nostalgie"
+id = 2170
+
+[[station]]
+label = "NOSTALGIE GENERATION 90"
+tokens = ["oumokb8fnozc", "ouf2wutx4thg"]
+brand = "nostalgie"
+id = 2270
+
+[[station]]
+label = "NOSTALGIE EURODANCE"
+tokens = ["ouucsb5n3nje", "ou76y8f3s5gi"]
+brand = "nostalgie"
+id = 1911
+
+[[station]]
+label = "NOSTALGIE DANCE COLLECTOR"
+tokens = ["oumvgg8fnozc", "ou4sawhtd2ko"]
+brand = "nostalgie"
+id = 1478
+
+[[station]]
+label = "NOSTALGIE DANCE PARTY 90"
+tokens = ["ougobwrb92oc", "ouy5aj36zcw2"]
+brand = "nostalgie"
+id = 825
+
+[[station]]
+label = "NOSTALGIE SATURDAY NIGHT"
+tokens = ["ou5evgirv93h", "oubyahj25zuw"]
+brand = "nostalgie"
+id = 713
+
+[[station]]
+label = "NOSTALGIE LES TUBES MIXES"
+tokens = ["oua8s5w2dqao", "oufd6stx4thg"]
+brand = "nostalgie"
+id = 1687
+
+[[station]]
+label = "NOSTALGIE MINI MIX"
+tokens = ["ou4wtxhtd2ko", "ouhs62apu6pb"]
+brand = "nostalgie"
+id = 1397
+
+[[station]]
+label = "NOSTALGIE HEAVY ROCK"
+tokens = ["ou5e3qirv93h", "ouby2dj25zuw"]
+brand = "nostalgie"
+id = 2022
+
+[[station]]
+label = "NOSTALGIE NEW WAVE"
+tokens = ["oudj9w2h9r57", "ou3cgfuizv6i", "ou4meehtd2ko"]
+brand = "nostalgie"
+id = 343
+
+[[station]]
+label = "NOSTALGIE LES PLUS GRANDS SLOWS"
+tokens = ["ouq5ucyoeo8p", "oudjby2h9r57"]
+brand = "nostalgie"
+id = 217
+
+[[station]]
+label = "NOSTALGIE TUBE MACHINE"
+tokens = ["ouo6t37nfibk", "out2dc6ubafg"]
+brand = "nostalgie"
+id = 1971
+
+[[station]]
+label = "NOSTALGIE CHANSONS FRANCAISES"
+tokens = ["ou3ci9uizv6i", "oupqnibgddr9", "ousv6jm4z85f"]
+brand = "nostalgie"
+id = 14
+
+[[station]]
+label = "NOSTALGIE 100% FRANCAIS 90"
+tokens = ["oumvgz8fnozc", "ouvt7woarp52"]
+brand = "nostalgie"
+id = 1954
+
+[[station]]
+label = "NOSTALGIE LES PLUS GRANDS TUBES FRANCAIS"
+tokens = ["out2xi6ubafg", "ou2nb9pw5hs7", "ouf2vztx4thg"]
+brand = "nostalgie"
+id = 342
+
+[[station]]
+label = "NOSTALGIE MEGATUBES"
+tokens = ["ouh889apu6pb", "oujuu2nxeb5p"]
+brand = "nostalgie"
+id = 2058
+
+[[station]]
+label = "NOSTALGIE LES PLUS GRANDS TUBES"
+tokens = ["ourf3jvukkaq", "ousrj2m4z85f"]
+brand = "nostalgie"
+id = 34
+
+[[station]]
+label = "NOSTALGIE TOUS LES TUBES, TOUS LES STYLES"
+tokens = ["oupqj5bgddr9", "ousr8tm4z85f"]
+brand = "nostalgie"
+id = 298
+
+[[station]]
+label = "NOSTALGIE ROUTE 66"
+tokens = ["oug7vkrb92oc", "ounuy7qn5eyc"]
+brand = "nostalgie"
+id = 1067
+
+[[station]]
+label = "NOSTALGIE DISCO FUNK"
+tokens = ["ougf4brb92oc", "ouwrk6sk6j4d"]
+brand = "nostalgie"
+id = 2284
+
+[[station]]
+label = "NOSTALGIE ITALIA"
+tokens = ["oubyqnj25zuw", "oumvrr8fnozc", "ouv68eoarp52"]
+brand = "nostalgie"
+id = 156
+
+[[station]]
+label = "NOSTALGIE SOUL"
+tokens = ["oudjpq2h9r57", "ou3c5zuizv6i"]
+brand = "nostalgie"
+id = 1393
+
+[[station]]
+label = "NOSTALGIE JAZZ"
+tokens = ["ouo6uw7nfibk", "out2cg6ubafg"]
+brand = "nostalgie"
+id = 1276
+
+[[station]]
+label = "NOSTALGIE BLUES"
+tokens = ["ou8ordgk7oiu", "ou8or2gk7oiu", "ou5zyjirv93h"]
+brand = "nostalgie"
+id = 106
+
+[[station]]
+label = "NOSTALGIE POETES"
+tokens = ["oua8s6w2dqao", "ouo6fy7nfibk"]
+brand = "nostalgie"
+id = 35
+
+[[station]]
+label = "NOSTALGIE LEGENDES"
+tokens = ["ou8ouhgk7oiu", "oua8nzw2dqao", "ousvhem4z85f"]
+brand = "nostalgie"
+id = 821
+
+[[station]]
+label = "CHERIE FM"
+tokens = ["ouuku85n3nje", "ou2n2epw5hs7", "oug7gyrb92oc"]
+brand = "cheriefm"
+id = 190
+
+[[station]]
+label = "CHERIE 2000"
+tokens = ["ouf2ebtx4thg", "oumoyt8fnozc"]
+brand = "cheriefm"
+id = 2208
+
+[[station]]
+label = "CHERIE BEST OF 2000"
+tokens = ["oupnesbgddr9", "ousgd3m4z85f"]
+brand = "cheriefm"
+id = 1988
+
+[[station]]
+label = "CHERIE RENTREE FEEL GOOD"
+tokens = ["outpt36ubafg", "ouoxoj7nfibk"]
+brand = "cheriefm"
+id = 1258
+
+[[station]]
+label = "CHERIE C'EST REPARTI"
+tokens = ["ouueum5n3nje", "ou2q2kpw5hs7"]
+brand = "cheriefm"
+id = 2334
+
+[[station]]
+label = "CHERIE AU SOLEIL"
+tokens = ["ou2j2zpw5hs7", "ouucug5n3nje"]
+brand = "cheriefm"
+id = 1224
+
+[[station]]
+label = "CHERIE PLAYA"
+tokens = ["ou87ksgk7oiu", "ou87kwgk7oiu"]
+brand = "cheriefm"
+id = 1758
+
+[[station]]
+label = "CHERIE SUMMER PARTY"
+tokens = ["oudntd2h9r57", "ouqibnyoeo8p"]
+brand = "cheriefm"
+id = 2309
+
+[[station]]
+label = "CHERIE AFTERWORK"
+tokens = ["ouoxzr7nfibk", "ouagy9w2dqao"]
+brand = "cheriefm"
+id = 2018
+
+[[station]]
+label = "CHERIE SUMMER CHILL"
+tokens = ["ou2qm2pw5hs7", "outphf6ubafg"]
+brand = "cheriefm"
+id = 2243
+
+[[station]]
+label = "CHERIE ETE"
+tokens = ["ouotoq7nfibk", "outdt56ubafg"]
+brand = "cheriefm"
+id = 1854
+
+[[station]]
+label = "CHERIE SUR LA ROUTE"
+tokens = ["ouuedk5n3nje", "ou2qrjpw5hs7"]
+brand = "cheriefm"
+id = 1746
+
+[[station]]
+label = "CHERIE COCKTAIL"
+tokens = ["ouv6r9oarp52", "oumosi8fnozc"]
+brand = "cheriefm"
+id = 2329
+
+[[station]]
+label = "CHERIE HAPPY HOUR"
+tokens = ["ouh89uapu6pb", "oujuponxeb5p"]
+brand = "cheriefm"
+id = 2316
+
+[[station]]
+label = "CHERIE CLASSICS 2000"
+tokens = ["ouarsfw2dqao", "ou8frxgk7oiu"]
+brand = "cheriefm"
+id = 2344
+
+[[station]]
+label = "CHERIE CULTE ETES 2000"
+tokens = ["ouwre6sk6j4d", "ouyc2436zcw2"]
+brand = "cheriefm"
+id = 2289
+
+[[station]]
+label = "CHERIE GENERATION 2000"
+tokens = ["out2zo6ubafg", "ou2naxpw5hs7"]
+brand = "cheriefm"
+id = 2013
+
+[[station]]
+label = "CHERIE 2000 CULTE"
+tokens = ["ouue9f5n3nje", "ou2q3wpw5hs7"]
+brand = "cheriefm"
+id = 2072
+
+[[station]]
+label = "CHERIE CLUB 2000"
+tokens = ["oumo4y8fnozc", "ouf2gktx4thg"]
+brand = "cheriefm"
+id = 2301
+
+[[station]]
+label = "CHERIE LA PLAYLIST DE 2000"
+tokens = ["ou6bzuxp336f", "ourtujvukkaq"]
+brand = "cheriefm"
+id = 2195
+
+[[station]]
+label = "CHERIE LA PLAYLIST DE 2001"
+tokens = ["ousvn2m4z85f", "ou5zogirv93h"]
+brand = "cheriefm"
+id = 2197
+
+[[station]]
+label = "CHERIE LA PLAYLIST DE 2002"
+tokens = ["oub3whj25zuw", "oumoqn8fnozc"]
+brand = "cheriefm"
+id = 2198
+
+[[station]]
+label = "CHERIE LA PLAYLIST DE 2003"
+tokens = ["ou4m22htd2ko", "ouh8pbapu6pb"]
+brand = "cheriefm"
+id = 2199
+
+[[station]]
+label = "CHERIE LA PLAYLIST DE 2004"
+tokens = ["ouqi8ryoeo8p", "oudn4w2h9r57"]
+brand = "cheriefm"
+id = 2200
+
+[[station]]
+label = "CHERIE LA PLAYLIST DE 2005"
+tokens = ["ou3krfuizv6i", "oupyagbgddr9"]
+brand = "cheriefm"
+id = 2201
+
+[[station]]
+label = "CHERIE LA PLAYLIST DE 2006"
+tokens = ["ousvnim4z85f", "ou87yegk7oiu"]
+brand = "cheriefm"
+id = 2202
+
+[[station]]
+label = "CHERIE LA PLAYLIST DE 2007"
+tokens = ["ou87yzgk7oiu", "ouagbcw2dqao"]
+brand = "cheriefm"
+id = 2203
+
+[[station]]
+label = "CHERIE LA PLAYLIST DE 2008"
+tokens = ["ouoxis7nfibk", "outper6ubafg"]
+brand = "cheriefm"
+id = 2204
+
+[[station]]
+label = "CHERIE LA PLAYLIST DE 2009"
+tokens = ["ou2qhtpw5hs7", "ouuevq5n3nje"]
+brand = "cheriefm"
+id = 2205
+
+[[station]]
+label = "CHERIE LA PLAYLIST 2000's"
+tokens = ["ouhmbtapu6pb", "ou6p9ixp336f"]
+brand = "cheriefm"
+id = 868
+
+[[station]]
+label = "CHERIE 90"
+tokens = ["ou6p4cxp336f", "ourfiyvukkaq"]
+brand = "cheriefm"
+id = 81
+
+[[station]]
+label = "CHERIE RNB 2000"
+tokens = ["oupqhgbgddr9", "ousrjim4z85f"]
+brand = "cheriefm"
+id = 1818
+
+[[station]]
+label = "CHERIE FRANCAIS 2000"
+tokens = ["ouq58vyoeo8p", "oudj4s2h9r57"]
+brand = "cheriefm"
+id = 1997
+
+[[station]]
+label = "CHERIE SOUL/RNB 2000"
+tokens = ["outprb6ubafg", "ouoxmx7nfibk"]
+brand = "cheriefm"
+id = 2297
+
+[[station]]
+label = "CHERIE POP"
+tokens = ["oua8jew2dqao", "ouo6c87nfibk"]
+brand = "cheriefm"
+id = 75
+
+[[station]]
+label = "CHERIE RNB"
+tokens = ["ou3c87uizv6i", "oupq48bgddr9"]
+brand = "cheriefm"
+id = 121
+
+[[station]]
+label = "CHERIE RAP 2000"
+tokens = ["ouv6enoarp52", "oumo5d8fnozc"]
+brand = "cheriefm"
+id = 2217
+
+[[station]]
+label = "CHERIE LOVE SONGS"
+tokens = ["ouq5sgyoeo8p", "oudjza2h9r57"]
+brand = "cheriefm"
+id = 21
+
+[[station]]
+label = "CHERIE CRAZY IN LOVE"
+tokens = ["ou767if3s5gi", "ougog3rb92oc"]
+brand = "cheriefm"
+id = 193
+
+[[station]]
+label = "CHERIE SOFT ROCK"
+tokens = ["our7rmvukkaq", "ousgsam4z85f"]
+brand = "cheriefm"
+id = 117
+
+[[station]]
+label = "CHERIE NOUVEAUTES"
+tokens = ["oubyh4j25zuw", "oumvjj8fnozc"]
+brand = "cheriefm"
+id = 19
+
+[[station]]
+label = "CHERIE JAZZY"
+tokens = ["ousryjm4z85f", "ou5efoirv93h"]
+brand = "cheriefm"
+id = 82
+
+[[station]]
+label = "CHERIE ITALIE"
+tokens = ["ou8vpigk7oiu", "ou8vpcgk7oiu"]
+brand = "cheriefm"
+id = 1197
+
+[[station]]
+label = "CHERIE FRENCHY"
+tokens = ["ou6pk3xp336f", "ourfybvukkaq"]
+brand = "cheriefm"
+id = 17
+
+[[station]]
+label = "CHERIE CLASSICS"
+tokens = ["ouj389nxeb5p", "ouhmj6apu6pb"]
+brand = "cheriefm"
+id = 80
+
+[[station]]
+label = "CHERIE LATINO"
+tokens = ["ouq5r7yoeo8p", "oudja82h9r57"]
+brand = "cheriefm"
+id = 85
+
+[[station]]
+label = "CHERIE AU TRAVAIL"
+tokens = ["ou4sxdhtd2ko", "ouhmdpapu6pb"]
+brand = "cheriefm"
+id = 20
+
+[[station]]
+label = "CHERIE GOOD MORNING"
+tokens = ["oudbc42h9r57", "ou3iwvuizv6i"]
+brand = "cheriefm"
+id = 1777
+
+[[station]]
+label = "CHERIE SUN & SPORT"
+tokens = ["ouwrn8sk6j4d", "ougfu7rb92oc"]
+brand = "cheriefm"
+id = 2207
+
+[[station]]
+label = "CHERIE FEEL GOOD MUSIC"
+tokens = ["ouhshkapu6pb", "ou626oxp336f"]
+brand = "cheriefm"
+id = 1096
+
+[[station]]
+label = "CHERIE GENERATION CELINE"
+tokens = ["ou87b5gk7oiu", "ousv2ym4z85f"]
+brand = "cheriefm"
+id = 2149
+
+[[station]]
+label = "CHERIE NO REPEAT"
+tokens = ["ouy5yr36zcw2", "ouw8wqsk6j4d"]
+brand = "cheriefm"
+id = 196
+
+[[station]]
+label = "CHERIE SWEET HOME"
+tokens = ["ou4sbjhtd2ko", "ouhmjqapu6pb"]
+brand = "cheriefm"
+id = 152
+
+[[station]]
+label = "CHERIE ACOUSTIC"
+tokens = ["ouw8wysk6j4d", "ougogcrb92oc"]
+brand = "cheriefm"
+id = 120
+
+[[station]]
+label = "CHERIE CHILL"
+tokens = ["ousrbdm4z85f", "ou5er8irv93h"]
+brand = "cheriefm"
+id = 208
+
+[[station]]
+label = "CHERIE ZEN"
+tokens = ["ouj3acnxeb5p", "ouhmdoapu6pb", "ou2q65pw5hs7"]
+brand = "cheriefm"
+id = 16
+
+[[station]]
+label = "CHERIE POUR LES MILLENNIALS"
+tokens = ["outbxu6ubafg", "ouodfn7nfibk"]
+brand = "cheriefm"
+id = 2342
+
+[[station]]
+label = "RIRE & CHANSONS"
+tokens = ["ou8o8xgk7oiu", "oua8afw2dqao", "out2tu6ubafg"]
+brand = "rireetchansons"
+id = 200
+
+[[station]]
+label = "RIRE ET CHANSONS SKETCHES"
+tokens = ["ou8oqegk7oiu", "ou8oqzgk7oiu", "ou5zw4irv93h"]
+brand = "rireetchansons"
+id = 38
+
+[[station]]
+label = "RIRE ET CHANSONS NOUVELLE GENERATION"
+tokens = ["out2kr6ubafg", "ou2n4tpw5hs7", "oumox68fnozc"]
+brand = "rireetchansons"
+id = 40
+
+[[station]]
+label = "RIRE ET CHANSONS COMEDY CLUB"
+tokens = ["ouhmszapu6pb", "ou6p2fxp336f", "ousvhgm4z85f"]
+brand = "rireetchansons"
+id = 651
+
+[[station]]
+label = "RIRE ET CHANSONS CANULARS"
+tokens = ["ouwgjmsk6j4d", "ouwgj8sk6j4d", "ouh87fapu6pb"]
+brand = "rireetchansons"
+id = 43
+
+[[station]]
+label = "RIRE ET CHANSONS BLAGUES"
+tokens = ["oug7y8rb92oc", "ouyi8y36zcw2"]
+brand = "rireetchansons"
+id = 42
+
+[[station]]
+label = "RIRE ET CHANSONS COLLECTORS"
+tokens = ["ouukrq5n3nje", "ou7xivf3s5gi"]
+brand = "rireetchansons"
+id = 41
+
+[[station]]
+label = "RIRE ET CHANSONS HUMOUR 90'S"
+tokens = ["ousvunm4z85f", "ourtk3vukkaq"]
+brand = "rireetchansons"
+id = 2190
+
+[[station]]
+label = "RIRE ET CHANSONS HUMOUR 2000'S"
+tokens = ["oub3gmj25zuw", "ou5z67irv93h"]
+brand = "rireetchansons"
+id = 2192
+
+[[station]]
+label = "RIRE ET CHANSONS HUMOUR 2010'S"
+tokens = ["ou4mnnhtd2ko", "oumo5u8fnozc"]
+brand = "rireetchansons"
+id = 2193
+
+[[station]]
+label = "RIRE ET CHANSONS ALL STARS"
+tokens = ["ou3kk4uizv6i", "oudnn32h9r57"]
+brand = "rireetchansons"
+id = 2049
+
+[[station]]
+label = "RIRE ET CHANSONS FUTURS TALENTS"
+tokens = ["ousvdfm4z85f", "ourtjxvukkaq"]
+brand = "rireetchansons"
+id = 2131
+
+[[station]]
+label = "RIRE ET CHANSONS RIRE EN SEPTEMBRE 2026"
+tokens = ["oua8now2dqao", "oufdzntx4thg"]
+brand = "rireetchansons"
+id = 2010
+
+[[station]]
+label = "RIRE ET CHANSONS HUMOUR IMPERTINENT"
+tokens = ["ouv6gzoarp52", "oumow58fnozc"]
+brand = "rireetchansons"
+id = 2315
+
+[[station]]
+label = "RIRE ET CHANSONS DUOS"
+tokens = ["ourf7gvukkaq", "ousrgsm4z85f"]
+brand = "rireetchansons"
+id = 925
+
+[[station]]
+label = "RIRE ET CHANSONS STAND UP"
+tokens = ["oua8brw2dqao", "oufdkbtx4thg", "ou87w7gk7oiu"]
+brand = "rireetchansons"
+id = 45
+
+[[station]]
+label = "RIRE ET CHANSONS HUMOUR BELGE"
+tokens = ["oumodx8fnozc", "oub3ecj25zuw"]
+brand = "rireetchansons"
+id = 2114
+
+[[station]]
+label = "RIRE ET CHANSONS LES INTERDITS"
+tokens = ["ou5eecirv93h", "oubyyqj25zuw", "ouoxg27nfibk"]
+brand = "rireetchansons"
+id = 1928
+
+[[station]]
+label = "RIRE ET CHANSONS NOUVEAUTES"
+tokens = ["ou3isouizv6i", "oupnzmbgddr9", "oudn5k2h9r57"]
+brand = "rireetchansons"
+id = 991
+
+[[station]]
+label = "RIRE ET CHANSONS ONE WOMAN SHOW"
+tokens = ["ouwgyvsk6j4d", "oug7i6rb92oc"]
+brand = "rireetchansons"
+id = 907
+
+[[station]]
+label = "RIRE ET CHANSONS 3 ANS DE RIRE"
+tokens = ["ouvtfsoarp52", "ouj3ydnxeb5p"]
+brand = "rireetchansons"
+id = 2007
+
+[[station]]
+label = "RIRE ET CHANSONS ELIE SEMOUN"
+tokens = ["ou8viwgk7oiu", "ou8visgk7oiu"]
+brand = "rireetchansons"
+id = 211
+
+[[station]]
+label = "RIRE ET CHANSONS FLORENCE FORESTI"
+tokens = ["oumof78fnozc", "oub353j25zuw"]
+brand = "rireetchansons"
+id = 212
+
+[[station]]
+label = "RIRE ET CHANSONS GAD ELMALEH"
+tokens = ["ou5zshirv93h", "ousvx7m4z85f"]
+brand = "rireetchansons"
+id = 275
+
+[[station]]
+label = "RIRE ET CHANSONS PUTAING CON"
+tokens = ["ouqua8yoeo8p", "oudbkh2h9r57"]
+brand = "rireetchansons"
+id = 881

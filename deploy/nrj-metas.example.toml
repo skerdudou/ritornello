@@ -1,0 +1,25 @@
+# NRJ group webradio -> brand and station identifier.
+#
+# OPTIONAL FILE. The table of the NRJ group's stations is embedded in the
+# plugin's binary; this file exists only to correct an entry gone stale or to
+# add a station the shipped table does not know.
+#
+# Entries declared here are consulted BEFORE the embedded ones, so declaring
+# the same token overrides the shipped entry.
+#
+# `tokens` are the last segment of the stream URL — the device's URL usually
+# carries a query string, but always the token. List every quality you might
+# configure.
+#
+# `brand` says which site answers for this station: nrj, nostalgie, cheriefm
+# or rireetchansons. A site only serves its own stations, so a wrong brand
+# means silence.
+#
+# `id` is the identifier that site's metadata endpoint expects. Both are
+# visible in https://www.<brand>.fr/onair.json
+
+# [[station]]
+# label = "Example webradio"
+# tokens = ["ou8o8xgk7oiu"]
+# brand = "rireetchansons"
+# id = 200
