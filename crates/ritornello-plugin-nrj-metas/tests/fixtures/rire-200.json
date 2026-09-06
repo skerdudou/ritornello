@@ -1,0 +1,26 @@
+{
+  "200": {
+    "id": "200",
+    "name": "RIRE & CHANSONS",
+    "logo": "https://players.nrjaudio.fm/live-metadata/player/img/player-files/rire/logos/173x173/logo.png",
+    "url_128k_mp3": "https://streaming.nrjaudio.fm/ou8o8xgk7oiu",
+    "playlist": [
+      {
+        "song": {
+          "id": 0,
+          "title": "On se juge",
+          "artist": "TOM VILLA",
+          "img_url": "https://players.nrjaudio.fm/live-metadata/player/img/600x/C203-ID_RIRE-NGV4-14.JPG"
+        },
+        "end_timestamp": 1788704410.735
+      }
+    ],
+    "logos": {
+      "80": "https://players.nrjaudio.fm/live-metadata/player/img/player-files/rire/logos/80x80/logo.png",
+      "100": "https://players.nrjaudio.fm/live-metadata/player/img/player-files/rire/logos/100x100/logo.png",
+      "173": "https://players.nrjaudio.fm/live-metadata/player/img/player-files/rire/logos/173x173/logo.png",
+      "640": "https://players.nrjaudio.fm/live-metadata/player/img/player-files/rire/logos/640x640/logo.png"
+    },
+    "slug": "rire-chansons"
+  }
+}

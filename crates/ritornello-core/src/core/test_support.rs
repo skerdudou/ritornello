@@ -429,6 +429,19 @@ pub(super) fn update_with_capabilities(can_eject: Option<bool>, has_finite_list:
     }
 }
 
+/// Declares a finite list on `source` — the capability the two play modes
+/// need to be honoured at all (see `handle_command`'s guard arm).
+///
+/// `setup()` starts with the capability unknown, hence false by the
+/// convention of `SourceMessage::has_finite_list`, so **a test that arms
+/// `random` or `repeat_all` for a reason of its own must say this first** or
+/// the command is refused and the test proves nothing about what it meant to
+/// prove. `can_eject` deliberately left alone: the two capabilities share a
+/// wire idiom, not a value.
+pub(super) fn declare_finite_list<P: crate::player::Player>(core: &mut Core<P>, source: &str) {
+    core.handle_source_update(source, update_with_capabilities(None, Some(true)));
+}
+
 /// Frame in the shape `serve_source` really produces: `can_eject` and
 /// `has_finite_list` stamped, because the SDK stamps both on **every** frame
 /// it writes (see the doc of `SourceMessage::can_eject`).

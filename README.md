@@ -85,6 +85,7 @@ flowchart LR
         core <--> mb["musicbrainz plugin"]
         core <--> ouifm["ouifm-metas plugin"]
         core <--> rf["radiofrance-metas plugin"]
+        core <--> nrj["nrj-metas plugin"]
         input["generic-input plugin<br/>(evdev)"] --> core
         core --> console["console plugin<br/>(HDMI screen)"]
         mpd["mpd plugin"] <--> core
@@ -111,6 +112,7 @@ executable.
 | `musicbrainz` | metadata | Album, year, cover art and platform links for discs and streams |
 | `ouifm-metas` | metadata | OUI FM's now-playing feed (21 webradios) |
 | `radiofrance-metas` | metadata | Radio France's live endpoint (74 stations without ICY) |
+| `nrj-metas` | metadata | NRJ group's on-air endpoint (NRJ, Nostalgie, Chérie FM, Rire & Chansons — 365 stations) |
 | `mpd` | server | Exposes the device as an MPD server for existing clients — a protocol subset: no tag database, no queue editing |
 
 A Rust SDK ([`ritornello-plugin-sdk`](crates/ritornello-plugin-sdk)) provides

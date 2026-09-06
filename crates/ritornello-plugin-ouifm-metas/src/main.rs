@@ -159,7 +159,17 @@ impl MetadataPlugin for OuiFmMetas {
                     // This plugin does not know where playback stands: it
                     // answers about a track's identity, not its progress.
                     position_s: None,
+                    // **Both halves when the frame let us compose them.** The
+                    // square gets the 400 px thumbnail and the core holds only
+                    // that; the 600 px original — which is the true original,
+                    // see `stream::FULL_WIDTH` — stays a reference until a
+                    // reader enlarges the cover. A ready-made `coverUrl`
+                    // announces no thumbnail, and that is deliberate.
                     cover: meta.cover.as_deref().map(|u| CoverRef::Url { url: u.to_string() }),
+                    cover_thumb: meta
+                        .cover_thumb
+                        .as_deref()
+                        .map(|u| CoverRef::Url { url: u.to_string() }),
                     // This plugin reads the station's official feed: it knows
                     // better than ICY, by construction. It overwrites, so
                     // `fill_only` stays false.
@@ -234,6 +244,7 @@ mod tests {
                     title: Some("Wanna Get Free".into()),
                     duration_s: Some(214),
                     cover: None,
+                    cover_thumb: None,
                     // Non-default value: this test checks that the links
                     // composed from the frame travel all the way to the
                     // enrichment.

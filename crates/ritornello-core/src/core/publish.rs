@@ -94,6 +94,9 @@ impl<P: Player> Core<P> {
     /// Complete state of the player: what is volatile, hence what the SPA
     /// receives as a pushed stream.
     pub fn player_state(&self) -> PlayerState {
+        // Computed once and reused: it gates three published fields which
+        // must never be able to drift apart (see `random`, below).
+        let has_finite_list = self.has_finite_list && !self.standby;
         PlayerState {
             source: self.active_source.clone(),
             volume: self.volume,
@@ -138,15 +141,33 @@ impl<P: Player> Core<P> {
             can_eject: self.can_eject && !self.standby,
             // Same reasoning as `can_eject`, just above: nothing to do with
             // what plays, and standby is the only state that cancels it.
-            has_finite_list: self.has_finite_list && !self.standby,
+            has_finite_list,
             // Unlike `can_eject`/`has_finite_list`, these two are a setting
             // persisted like the volume, not a capability described by the
-            // active source: they are not reset on standby or source
-            // change, and standby does not mask them either — a client that
-            // reads the state while the device sleeps still sees what it
-            // will do on wake.
-            random: self.random,
-            repeat_all: self.repeat_all,
+            // active source: `self.random` and `self.repeat_all` survive a
+            // source change, a standby and a restart untouched.
+            //
+            // **What travels here is not that setting, it is what the device
+            // actually does** — hence the mask. The core refuses a mode
+            // command whenever the active source has no finite list (see
+            // `handle_command`), so publishing a remembered `true` lit the
+            // shuffle icon on the radio, right beside a key that refuses to
+            // be pressed. That is what the owner reported, on the web remote
+            // and through an MPD client alike.
+            //
+            // The invariant it buys is worth stating plainly, because every
+            // client now leans on it: **`random` and `repeat_all` are never
+            // `true` while `has_finite_list` is `false`.** It holds in
+            // standby too. The rule used to let the modes through there, so
+            // that a sleeping device still showed what it would do on wake;
+            // that is the same lie in a quieter place, since standby refuses
+            // those commands as well.
+            //
+            // Nothing is lost by masking: `persist()` writes `self.random`,
+            // and returning to a source with a finite list publishes the
+            // remembered value again, unchanged.
+            random: self.random && has_finite_list,
+            repeat_all: self.repeat_all && has_finite_list,
             // A rendering preference, pushed with the rest: a display never
             // fetches anything on the side, and the clock it draws in
             // standby is something it shows. It only moves on a user

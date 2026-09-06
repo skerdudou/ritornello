@@ -348,6 +348,40 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
     }, { timeout: 10_000 })
     .toBe(true)
 
+  // --- The play modes follow the source, not the remembered setting -----------
+  //
+  // Still on `files`, which declares a finite list, so both keys are live
+  // here. This is the only place the whole chain is exercised at once — a
+  // real click, the core's rule, the SSE frame, and the pressed state drawn
+  // from it — and it covers precisely what the owner reported: shuffle stayed
+  // lit on the radio, on a key that refused to be pressed.
+  const random = page.locator('[data-remote-command="SetRandom"]')
+  const repeatAll = page.locator('[data-remote-command="SetRepeatAll"]')
+  await expect(random).toBeEnabled()
+  await expect(random).toHaveAttribute('aria-pressed', 'false')
+  await random.click()
+  await expect(random).toHaveAttribute('aria-pressed', 'true')
+
+  // Back on the radio, which has no finite list: both keys go grey **and
+  // unpressed**. The core publishes the two modes masked by the capability,
+  // so a greyed key can no longer claim to be on.
+  await source.click()
+  await expect(page.locator('[data-source]')).toHaveText('radio')
+  await expect(random).toBeDisabled()
+  await expect(random).toHaveAttribute('aria-pressed', 'false')
+  await expect(repeatAll).toBeDisabled()
+  await expect(repeatAll).toHaveAttribute('aria-pressed', 'false')
+
+  // Masking is not erasing, and the difference is worth a round trip: the
+  // setting comes back untouched on the source that can honour it. Turned off
+  // again right away, because the journeys share one core and one
+  // `state.json`.
+  await source.click()
+  await expect(page.locator('[data-source]')).toHaveText('files')
+  await expect(random).toHaveAttribute('aria-pressed', 'true')
+  await random.click()
+  await expect(random).toHaveAttribute('aria-pressed', 'false')
+
   // Put the harness back in the state we found it: the journeys share a single
   // core and `files.spec.ts` runs **before** `journey.spec.ts`, which requires
   // the radio to be active. The restoration is verified, not hoped for.

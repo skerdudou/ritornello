@@ -123,13 +123,41 @@ fn schedule_url(id: u32) -> String {
     format!("https://api.radiofrance.fr/livemeta/pull/{id}")
 }
 
-/// Cover URL of a track.
+/// The thumbnail the player's square shows, and the full-size image an
+/// enlargement asks for. Announced **together**, and that pairing is the
+/// point: the core then holds the small one in memory and keeps the large one
+/// as a reference it downloads only if somebody enlarges the cover — see
+/// `CoverPayload::Pair`. Announcing a single URL, as this plugin used to, made
+/// the station's cover cost its full weight for a square 400 px wide.
 ///
 /// `preset` is not optional: without it, the API returns a 400. With it, it
-/// returns a 301 to the CDN, which the core follows. `400x400` is a measured
-/// compromise — 31,887 bytes, versus an original of unbounded size.
+/// returns a 301 to the CDN, which the core follows.
+///
+/// **Measured on 2026-09-06**, one cover, every value the API accepts:
+/// 200x200 → 9,729 bytes, 400x400 → 31,887, 600x600 → 61,004,
+/// 800x800 → 96,076, 1000x1000 → 136,736. `1200x1200` and beyond are refused
+/// with a 400, so `1000x1000` is the largest the API will serve.
+///
+/// **`preset=raw` exists and is deliberately not used.** It returns the true
+/// original — measured at 3000x3000 and 2,378,259 bytes — which is above
+/// `cover_download_max_mio`'s 2 MiB default: the core would refuse the
+/// download, and the enlargement would show nothing at all. A cover nobody
+/// can display is worse than one displayed at 1000 px.
+const THUMB_PRESET: &str = "400x400";
+const FULL_PRESET: &str = "1000x1000";
+
+/// Thumbnail URL of a track's cover. See [`FULL_PRESET`]'s neighbours above.
+pub fn cover_thumb_url(uuid: &str) -> String {
+    image_url(uuid, THUMB_PRESET)
+}
+
+/// Full-size URL of a track's cover.
 pub fn cover_url(uuid: &str) -> String {
-    format!("https://api.radiofrance.fr/v1/services/embed/image/{uuid}?preset=400x400")
+    image_url(uuid, FULL_PRESET)
+}
+
+fn image_url(uuid: &str, preset: &str) -> String {
+    format!("https://api.radiofrance.fr/v1/services/embed/image/{uuid}?preset={preset}")
 }
 
 /// Non-empty text of a field, `None` otherwise.
@@ -640,12 +668,29 @@ mod tests {
 
     #[test]
     fn the_cover_url_follows_the_measured_pattern() {
-        // Measurement of 2026-08-24: this pattern returns a 301 to the CDN,
-        // then a 31,887-byte JPEG. `preset` is mandatory — without it, 400.
+        // Measurement of 2026-08-24, re-measured 2026-09-06: this pattern
+        // returns a 301 to the CDN, then a JPEG — 31,887 bytes at 400x400,
+        // 136,736 at 1000x1000. `preset` is mandatory — without it, 400.
         assert_eq!(
-            cover_url("24abdb92-7220-45c6-8434-a325278efa2b"),
+            cover_thumb_url("24abdb92-7220-45c6-8434-a325278efa2b"),
             "https://api.radiofrance.fr/v1/services/embed/image/24abdb92-7220-45c6-8434-a325278efa2b?preset=400x400"
         );
+        assert_eq!(
+            cover_url("24abdb92-7220-45c6-8434-a325278efa2b"),
+            "https://api.radiofrance.fr/v1/services/embed/image/24abdb92-7220-45c6-8434-a325278efa2b?preset=1000x1000"
+        );
+    }
+
+    /// **The two sizes must differ, and the full one must be the larger.**
+    /// The production change this kills: pointing both at one preset, which
+    /// compiles, passes every other test, and quietly restores the very
+    /// defect the pair exists to remove — a full-weight image held in memory
+    /// to fill a 400 px square.
+    #[test]
+    fn the_thumbnail_is_the_smaller_of_the_two() {
+        assert_ne!(THUMB_PRESET, FULL_PRESET);
+        let edge = |p: &str| p.split('x').next().unwrap().parse::<u32>().unwrap();
+        assert!(edge(THUMB_PRESET) < edge(FULL_PRESET));
     }
 
     #[test]

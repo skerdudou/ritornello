@@ -44,6 +44,10 @@ a Pi and without installing anything under `/etc`.
     exec = "target/debug/ritornello-plugin-radiofrance-metas"
 
     [[plugin]]
+    name = "nrj-metas"
+    exec = "target/debug/ritornello-plugin-nrj-metas"
+
+    [[plugin]]
     name = "musicbrainz"
     exec = "target/debug/ritornello-plugin-musicbrainz"
 
@@ -98,10 +102,11 @@ the single `cargo run` line, whichever binary ends up reading it.
     RITORNELLO_INPUT_BINDINGS=/tmp/rp/input-bindings.toml RITORNELLO_INPUT_PRESETS=deploy/input-presets \
     RITORNELLO_OUIFM_METAS=/tmp/rp/ouifm-metas.toml \
     RITORNELLO_RADIOFRANCE_METAS=/tmp/rp/radiofrance-metas.toml \
+    RITORNELLO_NRJ_METAS=/tmp/rp/nrj-metas.toml \
     cargo run -p ritornello-core
 
 Then <http://127.0.0.1:8080>. The `musicbrainz` plugin needs no variable at
-all, and the two `*_METAS` lines are optional: those tables are embedded in
+all, and the three `*_METAS` lines are optional: those tables are embedded in
 their binaries, the file only ever overrides an entry gone stale. Every
 other line has the same job — pointing a default that lives under `/etc` or
 `/var/lib` at `/tmp/rp`, so that a checkout writes nowhere it has no right
@@ -130,7 +135,7 @@ is exactly why they have to be overridden in a checkout:
 | `RITORNELLO_FILES_ROOTS`, `_CREDENTIALS`, `_STATE`, `_MPV_PLAYLIST`, `_PLAYLISTS` | `files` | `/etc/ritornello/…`, `/var/lib/ritornello/…` |
 | `RITORNELLO_FILES_PROC_MOUNTS` | `files` | `/proc/mounts` (overridden by its tests only) |
 | `RITORNELLO_USER` | `files` (owner of the mounts) | `ritornello` |
-| `RITORNELLO_OUIFM_METAS`, `RITORNELLO_RADIOFRANCE_METAS` | the two metadata plugins | `/etc/ritornello/…` — optional file, the tables are embedded |
+| `RITORNELLO_OUIFM_METAS`, `RITORNELLO_RADIOFRANCE_METAS`, `RITORNELLO_NRJ_METAS` | the three station metadata plugins | `/etc/ritornello/…` — optional file, the tables are embedded |
 
 ### 3. What a machine without the hardware will not do
 
@@ -313,6 +318,10 @@ documented at the top of `serve.mjs`.
   (re-reads the Open API documentation and the site's webradio cards, and
   re-checks every mount not covered by the documentation; `--verifier`
   reports a drift without writing anything).
+- **NRJ group station table** (365 stations across four brand sites):
+  `node crates/ritornello-plugin-nrj-metas/scripts/fetch-stations.mjs`
+  (re-reads each brand's own `/onair.json`; `--verifier` reports a drift
+  without writing anything).
 - **Screenshots** (`docs/captures/*.png`): with a core running (`node
   e2e/serve.mjs` from `web/app`), `node scripts/captures.mjs` from `web/app`;
   then stop the core with the e2e teardown. As with the e2e journeys

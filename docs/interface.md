@@ -312,14 +312,19 @@ Both keys are greyed, never hidden, on a source with no finite list to
 apply them to (the radio): the user asked to still see that the function
 exists, even where this particular source cannot honour it — read from
 `has_finite_list`, the capability a source declares for itself (see
-[plugins.md](plugins.md)). That greying is this page's own doing: the core
-accepts and persists both modes regardless of the active source, so
-neither the physical remote's toggle keys nor the MPD server's `random`/
-`repeat` commands are refused or guarded on a source that cannot honour
-them — a source with no finite list is simply told a mode it will never
-read. The two modes are persisted settings of the **device**, not of what
-is loaded: they survive a source change and a stop, and are read back
-after a restart.
+[plugins.md](plugins.md)). **And a greyed key never claims to be on**: the
+core refuses both mode commands while the active source has no finite
+list, and publishes the two modes masked by that same capability, so
+`random` and `repeat_all` are never `true` in a frame where
+`has_finite_list` is `false`. The rule lives in the core rather than on
+this page because the core is the only party that knows the capability,
+and this page is only one of four ways in — the physical remote's toggle
+keys and the MPD server's `random`/`repeat` commands meet the same
+refusal, where they used to walk straight past it. Refusing is not
+forgetting, though: the two modes are persisted settings of the
+**device**, not of what is loaded, so the value comes back untouched on a
+source that can honour it, survives a source change and a stop, and is
+read back after a restart.
 
 **Buttons the appliance would ignore are disabled or hidden**, never
 offered as if they worked:
@@ -695,37 +700,60 @@ else; but the sentence must not promise that every cover fits either, because
 past it cover 257 evicts cover 1 and the browser meets a `404` on a key the
 core itself published.
 
-A small **`(?)`** next to the estimate opens the cache's **real** state —
+A small **`(?)`** on the card's own title opens the cache's **real** state —
 `GET /api/cover-cache`, read-only, loaded when the panel opens and again only
 on the reload button, never on a timer — for what the estimate, being a
-prediction, cannot show: how many entries and thumbnails are actually held
-right now, and the entry-count belt itself, shown here as what it is and
-nowhere else. Its most telling figure is the **real average weight** of a
-retained thumbnail, meant to be read against the predicted weight the
-settings card announces — the ground truth behind a figure the settings card
-can only ever guess at, since the prediction is a model measured on one
-library and the cache in front of the reader is another.
+prediction, cannot show: what is actually held right now. It sits on the title
+and not beside the estimate at the foot of the card, where it read as a
+footnote on that one sentence: what it opens is the state of the cache the
+whole card configures. Same shape as the Memory card on the System tab, and
+the same `HelpButton` at its ordinary `inline` size.
 
-**Re-encoded and supplied thumbnails are counted on separate lines, and that
-separation is the panel's one non-obvious property.** A thumbnail a source
-supplied never reaches the encoder — the route serves it and answers, without
-producing anything — so it enters no rendition table and appears on none of
-the rendition lines. Counted together they could not be told apart, and
-worse, the average weight would stop meaning anything: it exists to be read
-against a *prediction about what the encoder produces*, and cannot be checked
-against images the encoder never saw. Counted apart, the supplied line becomes
-the only measure of whether the pair earns its keep — every entry on it is a
-re-encoding that did not happen. The panel reports it as a count with a total
-weight, alongside how many of those pairs have had their **full size
-downloaded**: one enlargement memoises a full-size original, which is by a
-wide margin the heaviest thing this cache can hold.
+**It answers one question — where does the memory go — and its shape is that
+answer.** Four lines, read top-down as a summary and then its breakdown: how
+many times the encoder has run since boot, the occupied total against the
+budget, then full-size images held with their weight and thumbnails held with
+theirs. Those last two **add up to** the total above them, and that closure is
+the panel's one load-bearing property: every byte the cache holds belongs to
+exactly one of them. The re-encoding count opens the list rather than joining
+them because it is the only line that is not memory at all.
 
-The consequence to keep in mind when reading the panel is that on a device fed
-by MusicBrainz the *ordinary* state is a cache full of supplied thumbnails and
-few or no re-encoded ones. A rendition count of zero is therefore not an idle
-cache, and emptiness is judged on entries — the panel said "the cache is
-empty" under a line announcing forty entries for exactly as long as it judged
-emptiness on renditions.
+That property is what an earlier version of this panel did not have. It
+reported *mechanisms* instead — thumbnails re-encoded, thumbnails supplied,
+full sizes downloaded — and the owner found the hole by opening it while
+playing a radio: all three lines read zero while the memory climbed. A cover
+that a station announces as a single URL is none of the three. It is
+downloaded whole, held whole, charged to the budget in full, and, being under
+the re-encoding threshold, produces no rendition to count either. Whatever
+each line said about its own mechanism, a panel where a held byte belongs to
+no line cannot be read.
+
+**Where a cover came from is therefore not a line.** A thumbnail a
+contributor supplied and one the encoder produced occupy exactly the same
+memory, so they share a line; a network cover held whole and a full size
+downloaded on an enlargement share the other. What distinguishes them is
+*work*, not memory, and work is what the **re-encodings** count reports — a
+cumulative count of encoder runs since boot, which is why it opens the panel
+rather than sitting among the lines that account for bytes. A pass-through is
+not counted: a station whose covers already satisfy the rule costs the
+appliance no encoder time, and the honest answer there is zero.
+
+Weights are stated in the unit that fits the value — kibibytes below a
+mebibyte, mebibytes above — while the budget is always in mebibytes, since
+that is what the user typed on the card just above and the two must stay
+comparable. Fixed at mebibytes, the occupied line printed "0" beside a cache
+holding several hundred kibibytes of radio covers, which is the ordinary
+state of this device.
+
+Two things the panel deliberately does **not** show. Local covers: a file
+beside the track or a picture inside it costs a path and no bytes, so it
+appears on neither line — the panel accounts for memory, and they spend none.
+And the entry-count belt (`cover.rs::MAX_ENTRIES`, 256), which still evicts
+and is still the only thing that ever evicts a library of free paths, but
+measures a count rather than bytes and had no place among four lines that
+measure bytes. "Nothing held in memory" is judged on the occupied total, and
+says exactly that rather than claiming an empty cache: a NAS library reads
+zero on every line here while holding hundreds of covers.
 
 **`cover_download_max_mio`** (2 MiB by default, bounded **1-20**) is the
 largest cover the appliance will download from the internet **automatically**

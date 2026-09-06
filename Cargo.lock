@@ -1299,6 +1299,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ritornello-plugin-nrj-metas"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "reqwest",
+ "ritornello-plugin-sdk",
+ "ritornello-proto",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ritornello-plugin-ouifm-metas"
 version = "0.2.0"
 dependencies = [

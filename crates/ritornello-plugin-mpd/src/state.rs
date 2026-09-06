@@ -681,23 +681,44 @@ impl SharedState {
                         mark(&mut moved, Subsystem::Mixer);
                     }
                     // Same shape as `SetVolume`, and for the same reason: the
-                    // core honours the absolute value unconditionally (see
+                    // core honours the absolute value (see
                     // `Core::handle_command`'s `SetRandom`/`SetRepeatAll`
                     // arms), so without the increment done here the confirming
                     // frame would be identical to the previous one and nobody
                     // would be woken. Comparison and not blind assignment: an
                     // MPD client resending its current mode must not wake
                     // every other client for nothing.
+                    //
+                    // **`has_finite_list` gates it, exactly as the core gates
+                    // the command itself.** On a source with no finite list
+                    // the core refuses `SetRandom` outright, so an
+                    // acknowledgement here would announce a mode the device is
+                    // not in — and nothing would ever contradict it, since a
+                    // refused command changes no state and produces no
+                    // confirming frame. That is how an MPD client came to turn
+                    // shuffle on over the radio and see it stick.
+                    //
+                    // The refusal still wakes `Options`, though nothing moved:
+                    // a client that just asked for a mode holds a view of the
+                    // options this server has decided not to honour, and the
+                    // wake is what sends it back to read `status` and find the
+                    // value unchanged. The "do not wake for nothing" rule
+                    // above does not cover this — something was asked, and
+                    // denied.
                     Command::SetRandom(v) => {
                         let v = *v;
-                        if inst.state.random != v {
+                        if !inst.state.has_finite_list {
+                            mark(&mut moved, Subsystem::Options);
+                        } else if inst.state.random != v {
                             inst.state.random = v;
                             mark(&mut moved, Subsystem::Options);
                         }
                     }
                     Command::SetRepeatAll(v) => {
                         let v = *v;
-                        if inst.state.repeat_all != v {
+                        if !inst.state.has_finite_list {
+                            mark(&mut moved, Subsystem::Options);
+                        } else if inst.state.repeat_all != v {
                             inst.state.repeat_all = v;
                             mark(&mut moved, Subsystem::Options);
                         }
@@ -1492,7 +1513,11 @@ mod tests {
         // `random` would be all that catches a regression here, and nothing
         // would be left to catch one on the mirror field. See the sibling
         // test just below for that half.
+        //
+        // `has_finite_list` first: the acknowledgement is gated on it, since
+        // the core refuses the command without it (see the arm).
         let e = SharedState::default();
+        e.apply_state(PlayerState { has_finite_list: true, ..Default::default() }).await;
         let before = e.versions().await;
 
         e.acknowledge_optimistic(&[Command::SetRandom(true)]).await;
@@ -1508,6 +1533,7 @@ mod tests {
         // reason: a batched acknowledgement would let a broken `SetRepeatAll`
         // arm hide behind `SetRandom`'s own marking and assignment.
         let e = SharedState::default();
+        e.apply_state(PlayerState { has_finite_list: true, ..Default::default() }).await;
         let before = e.versions().await;
 
         e.acknowledge_optimistic(&[Command::SetRepeatAll(true)]).await;
@@ -1520,12 +1546,39 @@ mod tests {
     #[tokio::test]
     async fn acknowledging_the_play_mode_already_in_place_wakes_nobody() {
         let e = SharedState::default();
-        e.apply_state(PlayerState { random: true, ..Default::default() }).await;
+        e.apply_state(PlayerState { random: true, has_finite_list: true, ..Default::default() }).await;
         let before = e.versions().await;
 
         e.acknowledge_optimistic(&[Command::SetRandom(true)]).await;
 
         assert_eq!(before, e.versions().await);
+    }
+
+    #[tokio::test]
+    async fn a_play_mode_is_not_acknowledged_without_a_finite_list() {
+        // How an MPD client came to turn shuffle on over the radio, and make
+        // it stick: the core refuses the command, so **no confirming frame
+        // ever came** to undo the acknowledgement made here — a refused
+        // command changes nothing, hence pushes nothing — and `status` went
+        // on answering `random: 1` for good.
+        //
+        // The two commands are batched here, unlike in the two tests above,
+        // and it costs nothing: both assertions are negative, so a guard
+        // dropped from either arm turns its own field true and is caught on
+        // its own line.
+        let e = SharedState::default();
+        let before = e.versions().await;
+
+        e.acknowledge_optimistic(&[Command::SetRandom(true), Command::SetRepeatAll(true)]).await;
+
+        let inst = e.read().await;
+        assert!(!inst.state.random, "the core refuses it, so we must not publish it either");
+        assert!(!inst.state.repeat_all, "and the same for repeat-all");
+        assert_ne!(
+            before[Subsystem::Options as usize],
+            e.versions().await[Subsystem::Options as usize],
+            "the client that asked must still be sent back to read the refusal"
+        );
     }
 
     #[tokio::test]

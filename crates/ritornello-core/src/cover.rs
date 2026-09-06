@@ -546,52 +546,56 @@ impl From<&crate::state::Settings> for CoverSettings {
 ///
 /// Bytes and counts only, no keys and no paths: the panel is a diagnostic, not
 /// a listing, and the keys name what someone is listening to.
+///
+/// **It answers one question — where does my memory go — and the shape says
+/// so: everything held is either a thumbnail or a full-size image, and the
+/// two weights add up to `used_bytes`.** That closure is the panel's whole
+/// value, and it is what an earlier shape did not have. It reported three
+/// *mechanisms* (renditions produced, supplied thumbnails, full sizes
+/// downloaded), and on a device playing radio all three read zero while the
+/// memory climbed: a network cover that arrives as one URL is none of the
+/// three. The owner found it by looking, which is the proof the shape was
+/// wrong — a panel where a held byte belongs to no line cannot be read.
+///
+/// **Where a cover *came from* is deliberately not a line here.** Supplied
+/// versus re-encoded, network versus share: those distinguish mechanisms, and
+/// mechanisms are not what a byte budget is spent on. A supplied thumbnail
+/// and a produced one occupy exactly the same memory, so they belong on the
+/// same line; that they got there differently is what `renditions_built`
+/// below tells, in one number, without splitting the accounting in two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct CacheSnapshot {
-    /// Bytes charged against the budget: costly sources plus every retained
-    /// rendition. The same arithmetic `evict_to_budget` uses.
+    /// Thumbnails held, and what they weigh together: the ones a contributor
+    /// **supplied** (`CoverPayload::Pair`'s `thumb`) and the ones the encoder
+    /// **produced** and the cache retained, counted as one because they cost
+    /// the same and are shown as one.
+    pub thumbnails: usize,
+    pub thumbnails_bytes: usize,
+    /// Full-size images held, and what they weigh: a cover downloaded whole
+    /// from the network (`CoverPayload::Bytes`), plus every pair whose full
+    /// size somebody actually enlarged (`Pair`'s `fetched`). By far the
+    /// heaviest thing this cache can hold.
+    ///
+    /// A local cover appears on neither line, and that is not an omission: a
+    /// `File` or an `Embedded` holds a path and no bytes (see `payload_cost`),
+    /// so it spends none of the budget this panel accounts for.
+    pub full_sizes: usize,
+    pub full_sizes_bytes: usize,
+    /// How many times the encoder has actually run since boot.
+    ///
+    /// **A count of work done, not of things held**, and that is what makes
+    /// it worth a line beside `thumbnails` rather than a second spelling of
+    /// it. A retained thumbnail says the memory is spent; this says whether
+    /// the appliance is spending CPU re-encoding, which is the question a
+    /// pass-through and a supplied thumbnail both exist to answer "no" to.
+    /// Cumulative and never reset: a rate is what a reader wants, and a
+    /// number that went back to zero on eviction could not give one.
+    pub renditions_built: usize,
+    /// Bytes charged against the budget — always `thumbnails_bytes` plus
+    /// `full_sizes_bytes`. The same arithmetic `evict_to_budget` uses.
     pub used_bytes: usize,
     /// The budget those bytes are measured against.
     pub budget_bytes: usize,
-    /// Entries held, whatever they cost.
-    pub entries: usize,
-    /// Of those, how many cost nothing but a path — a local file or a picture
-    /// embedded in the audio file (see `payload_cost`). This is the line that
-    /// makes `MAX_ENTRIES` legible: it exists because these cost zero.
-    pub entries_free: usize,
-    /// Thumbnails the encoder **produced**, and what they weigh together. The
-    /// page divides one by the other to show the real average, which is the
-    /// ground truth behind the weight it predicts.
-    ///
-    /// **Not a count of the thumbnails the cache holds**, and the distinction
-    /// is the reason `pairs` below exists: a supplied thumbnail served under
-    /// `cover_get`'s `Pair` arm never enters this table, because that arm
-    /// answers before reaching `rendition_for`. Folding the two together would
-    /// be worse than leaving them apart — the average is what confronts the
-    /// page's *prediction*, and a prediction about what the encoder produces
-    /// cannot be checked against images the encoder never saw.
-    pub renditions: usize,
-    pub renditions_bytes: usize,
-    /// Entries carrying a **supplied** thumbnail — a `CoverPayload::Pair` —
-    /// and what those thumbnails weigh.
-    ///
-    /// This is the measure of whether the pair earns its keep, and nothing
-    /// else on this panel can stand in for it. Every one of these is a
-    /// re-encoding that did not happen: the source announced a thumbnail that
-    /// already satisfies the threshold, so the core kept it as it is. Without
-    /// this line the effect is invisible — worse than invisible, since the
-    /// thumbnail line above goes *down* as the mechanism works better.
-    pub pairs: usize,
-    pub pairs_bytes: usize,
-    /// Of those pairs, how many have had their full size actually downloaded
-    /// (`Pair`'s `fetched`). Each one is a reader who enlarged a cover, and
-    /// megabytes the budget is now carrying — by far the heaviest thing this
-    /// cache can hold, and the only line that says so.
-    pub pairs_full_fetched: usize,
-    /// The belt on the entry count, `MAX_ENTRIES`. Shown **here** and nowhere
-    /// else: this is the one place it can be presented as what it is, a bound
-    /// on a count, without being mistaken for a memory bound.
-    pub max_entries: usize,
 }
 
 impl CoverCache {
@@ -601,38 +605,40 @@ impl CoverCache {
         let settings = self.settings();
         let entries = self.entries.read().await;
         let renditions = self.renditions.read().await;
-        let costly: usize = entries.iter().map(|(_, p)| payload_cost(p)).sum();
-        let renditions_bytes: usize = renditions.iter().map(|r| r.bytes.len()).sum();
+
+        let supplied_thumbs = entries.iter().filter_map(|(_, p)| match p {
+            CoverPayload::Pair { thumb, .. } => Some(thumb.len()),
+            _ => None,
+        });
+        let (supplied, supplied_bytes) =
+            supplied_thumbs.fold((0, 0), |(n, b), len| (n + 1, b + len));
+        let thumbnails = supplied + renditions.len();
+        let thumbnails_bytes =
+            supplied_bytes + renditions.iter().map(|r| r.bytes.len()).sum::<usize>();
+
+        // A `Bytes` payload **is** a full size — the whole image, resident —
+        // and a pair's `fetched` is one too, downloaded on an enlargement.
+        // Both, and not one or the other: counting only the pairs was the
+        // hole the owner walked into, since a station that announces a single
+        // URL produces exactly the first kind and never the second.
+        let (full_sizes, full_sizes_bytes) = entries.iter().fold((0, 0), |(n, b), (_, p)| match p {
+            CoverPayload::Bytes(v, _) => (n + 1, b + v.len()),
+            CoverPayload::Pair { fetched: Some((v, _)), .. } => (n + 1, b + v.len()),
+            _ => (n, b),
+        });
+
         CacheSnapshot {
-            used_bytes: costly + renditions_bytes,
+            thumbnails,
+            thumbnails_bytes,
+            full_sizes,
+            full_sizes_bytes,
+            renditions_built: self.renditions_built(),
+            // Derived from the two lines above rather than recomputed from
+            // `payload_cost`, and deliberately so: the panel's one promise is
+            // that its two weights add up to this, and a second arithmetic
+            // could drift from the first without a test noticing.
+            used_bytes: thumbnails_bytes + full_sizes_bytes,
             budget_bytes: settings.budget,
-            entries: entries.len(),
-            entries_free: entries.iter().filter(|(_, p)| payload_cost(p) == 0).count(),
-            renditions: renditions.len(),
-            renditions_bytes,
-            pairs: entries
-                .iter()
-                .filter(|(_, p)| matches!(p, CoverPayload::Pair { .. }))
-                .count(),
-            pairs_bytes: entries
-                .iter()
-                .filter_map(|(_, p)| match p {
-                    CoverPayload::Pair { thumb, .. } => Some(thumb.len()),
-                    _ => None,
-                })
-                .sum(),
-            // **The acceptance verdict is deliberately not computed here.**
-            // Whether a supplied thumbnail satisfies the current rule is a
-            // per-request question that needs the image header, and this walk
-            // must stay a walk. The panel does not need it either: a pair
-            // whose thumbnail is refused produces a rendition, so it shows up
-            // on the line above — the two lines already tell the two outcomes
-            // apart.
-            pairs_full_fetched: entries
-                .iter()
-                .filter(|(_, p)| matches!(p, CoverPayload::Pair { fetched: Some(_), .. }))
-                .count(),
-            max_entries: MAX_ENTRIES,
         }
     }
 }
@@ -715,16 +721,21 @@ pub struct CoverCache {
     renditions_in_flight: tokio::sync::Mutex<HashMap<String, RenditionInFlight>>,
     /// How many renditions were **actually** run, whichever consumer asked.
     ///
-    /// Under `cfg(test)`, the same trade-off as `builds` just above and for
-    /// the same reason: the only proof that a cache saves work is a count of
-    /// executions. Comparing two responses says nothing — two successive
-    /// builds return the same bytes.
+    /// The only proof that a cache saves work is a count of executions:
+    /// comparing two responses says nothing, since two successive builds
+    /// return the same bytes.
+    ///
+    /// **Compiled in production, unlike `builds` just above**, and the reason
+    /// is that it is no longer only an assertion tool — `CacheSnapshot`
+    /// reports it, so a reader can see whether the appliance is spending CPU
+    /// re-encoding covers or serving them untouched. That is a question the
+    /// owner asks about a running device, not one a test asks about a
+    /// fixture, and it cannot be answered by anything the cache *holds*.
     ///
     /// **Counting per consumer would prove nothing**, and a counter that once
     /// watched the route alone taught us so: it stayed at one however many
     /// times the display path re-encoded, because the display path never
     /// touched it. An assertion that cannot fail is not an assertion.
-    #[cfg(test)]
     renditions_built: std::sync::atomic::AtomicUsize,
     /// Full-size embedded extractions in progress, one entry per cache key.
     ///
@@ -890,6 +901,13 @@ struct Rendered {
 /// trigger on a collection whose every member costs zero. This is the belt
 /// for exactly that case — nothing more, nothing tuned to any particular
 /// amount of memory.
+///
+/// **No longer shown anywhere, and that is a decision, not an oversight.**
+/// `CacheSnapshot` used to carry it so the detail panel could print it; that
+/// panel now accounts for bytes only, four lines of which two add up to the
+/// third, and a bound on a *count* had no honest place among them. It still
+/// evicts, and for a library of local covers it remains the only thing that
+/// ever does.
 const MAX_ENTRIES: usize = 256;
 
 impl CoverCache {
@@ -1136,9 +1154,21 @@ impl CoverCache {
                 if let Some((mime, bytes)) = self.cached_rendition(&identity).await {
                     return Some((mime, bytes, stamp));
                 }
-                #[cfg(test)]
-                self.renditions_built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let Renditioned { mime, bytes, untouched } = rendition(mime, bytes, rules).await?;
+                // **Counted after the call, and only when the encoder truly
+                // ran.** It used to be counted before it, which made the
+                // number say "times `rendition` was entered" — and
+                // `rendition` is entered for a pass-through too, where it
+                // hands back the source's own bytes without encoding
+                // anything. Harmless while this was a test-only assertion on
+                // fixtures chosen to be re-encoded; a lie the moment the
+                // config panel prints it as *re-encodings*, and a lie in
+                // precisely the case that panel exists to show — a station
+                // whose covers already satisfy the rule, where the honest
+                // answer is zero.
+                if !untouched {
+                    self.renditions_built.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
                 let bytes = Arc::new(bytes);
                 // **A pass-through of a source already in memory is not
                 // memoized, and that is the whole of this rule.** The
@@ -1572,9 +1602,22 @@ impl CoverCache {
         self.builds.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// How many renditions the table is **holding**, right now.
+    ///
+    /// **Test-only, and it must stay that way.** `CacheSnapshot` folds these
+    /// into `thumbnails` alongside the supplied ones, because a reader of the
+    /// config panel is spending one budget and does not care which half of it
+    /// came from the encoder. A test does care: several here pin that a
+    /// pass-through of a resident source is *not* memoized, and that claim is
+    /// about this table alone — read through the panel's total it would be
+    /// indistinguishable from a supplied thumbnail sitting in the entry.
+    #[cfg(test)]
+    pub(crate) async fn retained_renditions(&self) -> usize {
+        self.renditions.read().await.len()
+    }
+
     /// How many renditions were run since the cache was created, both
     /// consumers taken together. See the `renditions_built` field.
-    #[cfg(test)]
     pub(crate) fn renditions_built(&self) -> usize {
         self.renditions_built.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -3441,19 +3484,81 @@ mod tests {
         cache.insert("tags".into(), CoverPayload::Embedded("/music/a/01.flac".into())).await;
 
         let s = cache.snapshot().await;
-        assert_eq!(s.entries, 3);
-        assert_eq!(s.entries_free, 2, "a File and an Embedded cost a path, not bytes");
+        // **The network cover lands on the full-size line, and this is the
+        // assertion the owner's report turned into a test.** Under the
+        // previous shape it landed on no line at all: it is not a supplied
+        // thumbnail and not a retained rendition, so a panel built from those
+        // two showed zeroes while this very entry spent 7,777 bytes.
+        assert_eq!(s.full_sizes, 1);
+        assert_eq!(s.full_sizes_bytes, 7_777);
+        assert_eq!(s.thumbnails, 0);
+        assert_eq!(s.thumbnails_bytes, 0);
         assert_eq!(s.used_bytes, 7_777, "only the network payload weighs anything");
-        assert_eq!(s.renditions, 0);
-        assert_eq!(s.renditions_bytes, 0);
-        assert_eq!(s.max_entries, MAX_ENTRIES);
+        assert_eq!(s.renditions_built, 0, "nothing was ever asked of the encoder");
         assert_eq!(s.budget_bytes, cache.settings().budget);
     }
 
-    /// The panel's most important line: the real average weight of a
-    /// thumbnail, to be set against the predicted weight the page announces.
-    /// The division is done by the page — the core renders the total and the
-    /// count — so it is their accuracy that this test checks.
+    /// **The panel's one promise: the two weights add up to the total.**
+    ///
+    /// Asserted on a cache holding one of every payload at once, which is the
+    /// only arrangement where a mistake has somewhere to hide — a line
+    /// forgotten in one of the two sums, or a payload counted on both. The
+    /// sizes are distinct and non-round so no wrong sum can land right.
+    ///
+    /// The production change this kills: dropping any arm of either fold.
+    /// Each one leaves the other tests passing and breaks only this equality.
+    #[tokio::test]
+    async fn every_byte_held_belongs_to_exactly_one_line() {
+        let cache = CoverCache::new();
+        cache.insert("net".into(), CoverPayload::Bytes(vec![0u8; 7_777], "image/jpeg")).await;
+        cache.insert("file".into(), CoverPayload::File("/music/a/cover.jpg".into())).await;
+        cache.insert("tags".into(), CoverPayload::Embedded("/music/a/01.flac".into())).await;
+        cache
+            .insert(
+                "pair".into(),
+                CoverPayload::Pair {
+                    thumb: vec![0u8; 3_331],
+                    thumb_mime: "image/jpeg",
+                    full: CoverRef::Url { url: "https://example.org/full.jpg".into() },
+                    fetched: Some((Arc::new(vec![0u8; 900_007]), "image/jpeg")),
+                },
+            )
+            .await;
+        cache
+            .insert(
+                "bare-pair".into(),
+                CoverPayload::Pair {
+                    thumb: vec![0u8; 1_113],
+                    thumb_mime: "image/jpeg",
+                    full: CoverRef::Url { url: "https://example.org/other.jpg".into() },
+                    fetched: None,
+                },
+            )
+            .await;
+        let rules = cache.settings().rendition.expect("the product default re-encodes");
+        cache
+            .remember_rendition(
+                rendition_identity("file", &SourceStamp::Frozen, &rules),
+                "image/jpeg",
+                Arc::new(vec![0u8; 5_557]),
+            )
+            .await;
+
+        let s = cache.snapshot().await;
+        assert_eq!(s.thumbnails, 3, "two supplied thumbnails and one retained rendition");
+        assert_eq!(s.thumbnails_bytes, 3_331 + 1_113 + 5_557);
+        assert_eq!(s.full_sizes, 2, "the network cover, and the one pair that was enlarged");
+        assert_eq!(s.full_sizes_bytes, 7_777 + 900_007);
+        assert_eq!(
+            s.used_bytes,
+            s.thumbnails_bytes + s.full_sizes_bytes,
+            "the panel's whole promise: nothing held falls outside the two lines"
+        );
+    }
+
+    /// A retained rendition is a thumbnail held, on the same line and in the
+    /// same weight as one a contributor supplied: they cost the same memory,
+    /// which is the only thing this panel accounts for.
     #[tokio::test]
     async fn the_snapshot_reports_the_real_weight_of_retained_thumbnails() {
         let cache = CoverCache::new();
@@ -3467,8 +3572,8 @@ mod tests {
         }
 
         let s = cache.snapshot().await;
-        assert_eq!(s.renditions, 3);
-        assert_eq!(s.renditions_bytes, 210_000);
+        assert_eq!(s.thumbnails, 3);
+        assert_eq!(s.thumbnails_bytes, 210_000);
         assert_eq!(s.used_bytes, 210_000, "renditions are charged to the budget too");
     }
 
@@ -3505,7 +3610,44 @@ mod tests {
             resident,
             "serving it must not have made the cache hold a second copy"
         );
-        assert_eq!(cache.snapshot().await.renditions, 0);
+        assert_eq!(cache.retained_renditions().await, 0);
+    }
+
+    /// **A pass-through is not a re-encoding, and the counter must say so.**
+    ///
+    /// This is the number the config panel prints under "re-encodings", and
+    /// the case that line exists to describe: a station whose covers already
+    /// satisfy the rule costs the appliance no encoder time at all. The
+    /// counter used to be incremented on *entry* to `rendition`, which made
+    /// it claim work for exactly these covers — invisible while it was a
+    /// test-only tool, a wrong figure on screen the moment it was published.
+    ///
+    /// **Both directions asserted**, because a counter stuck at zero would
+    /// pass the first half on its own: a cover the rule refuses to leave
+    /// alone must still count.
+    ///
+    /// The production changes this kills: counting before the call again, or
+    /// dropping the `untouched` guard around the increment.
+    #[tokio::test]
+    async fn a_pass_through_is_not_counted_as_a_re_encoding() {
+        let cache = Arc::new(CoverCache::new());
+        // 500 px, under the 640 px edge and under the 150 KiB threshold.
+        let small = fixtures::jpeg_decodable(500, 500);
+        cache.insert("small".into(), CoverPayload::Bytes(small.clone(), "image/jpeg")).await;
+        let (status, body) = served_body(&cache, "small", "?size=thumbnail").await;
+        assert_eq!(status, 200);
+        // Asserted, not assumed: only a pass-through gives back the source's
+        // own bytes, so this is what pins which branch actually ran.
+        assert_eq!(body, small, "this really is the pass-through branch");
+        assert_eq!(cache.renditions_built(), 0, "nothing was encoded, so nothing may be counted");
+
+        // 1200 px, past the edge: the rule refuses to leave it alone.
+        let big = fixtures::jpeg_decodable(1200, 1200);
+        cache.insert("big".into(), CoverPayload::Bytes(big.clone(), "image/jpeg")).await;
+        let (status, body) = served_body(&cache, "big", "?size=thumbnail").await;
+        assert_eq!(status, 200);
+        assert_ne!(body, big, "and this one really did go through the encoder");
+        assert_eq!(cache.renditions_built(), 1);
     }
 
     /// **The same defect on the path that actually produces it**, and the one
@@ -3538,7 +3680,7 @@ mod tests {
             resident,
             "pushing it to a display must not have made the cache hold it twice"
         );
-        assert_eq!(cache.snapshot().await.renditions, 0);
+        assert_eq!(cache.retained_renditions().await, 0);
     }
 
     /// **The other half of the same rule, and the reason it is not simply
@@ -3571,7 +3713,7 @@ mod tests {
         // not about.
         assert_eq!(body, on_the_share, "the file's own bytes, so nothing was produced");
         assert_eq!(
-            cache.snapshot().await.renditions,
+            cache.retained_renditions().await,
             1,
             "a read is work, and the memo is what spares it a second time"
         );
@@ -3596,11 +3738,10 @@ mod tests {
     /// MusicBrainz this is the *ordinary* case, so the panel used to report
     /// zero thumbnails while holding a cacheful of them.
     ///
-    /// The production changes this kills: counting pairs on the rendition
-    /// line (the two would become indistinguishable, and the average weight
-    /// would silently stop describing the encoder), charging a pair's
-    /// full-size *reference* as though it were held, and counting a pair
-    /// that nobody has enlarged among those that have been.
+    /// The production changes this kills: leaving supplied thumbnails off the
+    /// thumbnail line, charging a pair's full-size *reference* as though it
+    /// were held (it is a URL until somebody enlarges the cover), and
+    /// counting a pair nobody has enlarged among the full sizes.
     #[tokio::test]
     async fn the_snapshot_counts_supplied_thumbnails_apart_from_produced_ones() {
         let cache = CoverCache::new();
@@ -3624,15 +3765,21 @@ mod tests {
             .await;
 
         let s = cache.snapshot().await;
-        assert_eq!(s.pairs, 3, "the Bytes entry is not a pair");
-        assert_eq!(s.pairs_bytes, 91_111 + 73_333 + 55_555, "thumbnails only, never the full size");
-        assert_eq!(s.pairs_full_fetched, 1, "two of the three were never enlarged");
+        assert_eq!(s.thumbnails, 3, "the three supplied thumbnails; the Bytes entry is not one");
         assert_eq!(
-            s.renditions, 0,
+            s.thumbnails_bytes,
+            91_111 + 73_333 + 55_555,
+            "the thumbnails only, never the full size beside them"
+        );
+        assert_eq!(
+            s.full_sizes, 2,
+            "the network cover, and the one pair somebody enlarged — the other two hold a URL"
+        );
+        assert_eq!(s.full_sizes_bytes, 7_777 + 2_222_222);
+        assert_eq!(
+            s.renditions_built, 0,
             "not one of them went through the encoder — that is the whole point of the pair"
         );
-        assert_eq!(s.entries, 4);
-        assert_eq!(s.entries_free, 0, "a pair holds its thumbnail, so none of these is free");
         assert_eq!(
             s.used_bytes,
             7_777 + 91_111 + 73_333 + 55_555 + 2_222_222,
@@ -3665,16 +3812,18 @@ mod tests {
         let (status, body) = served_cache_json(&cache).await;
         assert_eq!(status, 200);
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["entries"], 1);
+        assert_eq!(v["full_sizes"], 1);
         assert_eq!(v["used_bytes"], 4_096);
         // The field names are a contract with the page: renaming one without
         // touching `CachePayload` on the web side would break the panel
-        // silently, since TypeScript sees nothing of a JSON body.
+        // silently, since TypeScript sees nothing of a JSON body. **All six**
+        // are listed, not a sample: the one left out is the one a rename
+        // would slip through.
+        assert!(v["thumbnails"].is_number());
+        assert!(v["thumbnails_bytes"].is_number());
+        assert!(v["full_sizes_bytes"].is_number());
+        assert!(v["renditions_built"].is_number());
         assert!(v["budget_bytes"].is_number());
-        assert!(v["max_entries"].is_number());
-        assert!(v["pairs"].is_number());
-        assert!(v["pairs_bytes"].is_number());
-        assert!(v["pairs_full_fetched"].is_number());
     }
 
     /// The same request as `served_body`, plus the validator the route puts on
@@ -5655,8 +5804,14 @@ mod tests {
         use tower::ServiceExt;
 
         let dir = tempfile::tempdir().unwrap();
+        // **800 px and not 32, and the size is load-bearing.** `renditions_built`
+        // counts encoder runs, not calls into `rendition`: a 32 px picture is
+        // under the 640 px edge, so it passes through untouched and the
+        // counter — correctly — stays at zero. The assertions below are about
+        // a thumbnail that really was built, so the fixture has to be one the
+        // rule refuses to leave alone.
         let Some(track) =
-            crate::player::mpv::tests::mp3_with_cover_from(dir.path(), "color=c=teal:s=32x32:d=1")
+            crate::player::mpv::tests::mp3_with_cover_from(dir.path(), "color=c=teal:s=800x800:d=1")
         else {
             eprintln!("ffmpeg missing: skipping test");
             return;

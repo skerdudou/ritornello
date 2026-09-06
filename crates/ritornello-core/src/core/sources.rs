@@ -928,6 +928,7 @@ mod tests {
         // window would otherwise play in order while the SPA shows
         // "shuffle".
         let (mut core, _pc, _sc, _rx, _d) = setup();
+        declare_finite_list(&mut core, "radio");
         core.handle_command(Command::SetRandom(true)).await.unwrap();
 
         let late_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -950,6 +951,7 @@ mod tests {
     #[tokio::test]
     async fn switching_source_hands_the_mode_to_the_new_one() {
         let (mut core, _pc, source_calls, _rx, _d) = setup();
+        declare_finite_list(&mut core, "radio");
         core.handle_command(Command::SetRandom(true)).await.unwrap();
         // Cleared so what follows is attributable to the switch alone, not
         // to the broadcast the `SetRandom` command already did to every
@@ -971,6 +973,7 @@ mod tests {
     async fn waking_up_restates_the_mode_to_every_source() {
         let (mut core, _pc, source_calls, _rx, _d) = setup();
         core.resume().await.unwrap();
+        declare_finite_list(&mut core, "radio");
         core.handle_command(Command::SetRandom(true)).await.unwrap();
         core.handle_command(Command::Power).await.unwrap(); // standby
         source_calls.lock().unwrap().clear();

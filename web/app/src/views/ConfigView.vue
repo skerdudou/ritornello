@@ -769,7 +769,21 @@ function goTo(id: string) {
            switch finds what had been set. -->
       <section id="covers" class="scroll-mt-6">
         <Card>
-          <CardHeader><CardTitle>{{ t('cover_card_title') }}</CardTitle></CardHeader>
+          <CardHeader>
+            <!-- Same shape as the Memory card on the System tab: a title
+                 holding a second, lighter element beside it. `items-center`
+                 and not `items-baseline` — a flex container ignores the
+                 `align-middle` `HelpButton` carries for inline use, so a
+                 24 px box only reads level if centred from here.
+                 **The `(?)` belongs to the card, not to the estimate.** It
+                 used to sit at the foot of the card beside the estimate,
+                 which read as a footnote on that one sentence; what it opens
+                 is the state of the whole cache this card configures. -->
+            <CardTitle class="flex items-center gap-1.5">
+              {{ t('cover_card_title') }}
+              <CoverCacheDetails />
+            </CardTitle>
+          </CardHeader>
           <CardContent class="space-y-4">
             <label class="grid gap-1 text-sm">
               {{ t('cover_cache_budget_label') }}
@@ -862,11 +876,10 @@ function goTo(id: string) {
                  download ceiling, edge, quality, threshold, and the switch
                  itself), and it must read whether re-encoding is on or off —
                  hence not greyed. -->
-            <div class="flex items-start gap-1 border-t border-border pt-4">
+            <div class="border-t border-border pt-4">
               <p class="max-w-md text-xs text-muted-foreground" data-cover-cache-estimate>
                 {{ coverCacheEstimateText }}
               </p>
-              <CoverCacheDetails />
             </div>
 
             <Button data-cover-change @click="saveSettings">{{ t('change') }}</Button>
