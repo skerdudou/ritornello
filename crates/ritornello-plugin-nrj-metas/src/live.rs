@@ -92,6 +92,18 @@ const INITIAL_WAIT: Duration = Duration::from_secs(2);
 /// query the poke triggered, plus all three retries before giving up. Filler
 /// is not the exception on some stations either — a 30-sample poll of
 /// Nostalgie's main station found it filler on 24 of 30.
+///
+/// **A safety-net wake-up walks the same ladder, and there its premise does
+/// not hold.** `attempt` restarts at zero on every pass of `follows`'s outer
+/// loop, so nothing distinguishes a wake-up caused by a cart code that moved
+/// from one caused by an elapsed deadline. In the second case nothing moved,
+/// so an identical reading means "unchanged", not "the server is behind" —
+/// yet all three retries are still spent. On a station stuck on filler whose
+/// deadline stays in the past, that is four queries per `NET_MARGIN` instead
+/// of one. Left as it is on purpose: skipping the ladder for net wake-ups
+/// would cut that, but nobody has measured whether such a station reports an
+/// elapsed deadline or keeps announcing a fresh one, and the second case
+/// never reaches this path at all.
 const RETRIES: [Duration; 3] =
     [Duration::from_secs(10), Duration::from_secs(20), Duration::from_secs(40)];
 
@@ -267,6 +279,28 @@ fn next_backoff(backoff: Duration) -> Duration {
     (backoff * 2).min(BACKOFF_MAX)
 }
 
+/// How much longer to wait before the next query may be sent, given the
+/// current backoff and how long ago the last query actually went out.
+///
+/// `None` means no query has gone out yet: nothing to space this one from, so
+/// nothing to add. `INITIAL_WAIT` alone governs the first query.
+///
+/// Extracted so the query-rate floor is provable without a clock. It is the
+/// last of `follows`'s rhythm decisions to get a test, and the reason it needs
+/// one is that the debounce loop above it deliberately shortens the wait to
+/// `DEBOUNCE` on every poke, throwing away a longer failure backoff on the
+/// way. Without the `max` below, a station whose cart code keeps changing
+/// while the host is failing every time would be queried at the stream's own
+/// rate forever -- the defect this floor was written to fix.
+fn floor_wait(backoff: Duration, since_last_query: Option<Duration>) -> Duration {
+    let Some(elapsed) = since_last_query else {
+        return Duration::ZERO;
+    };
+    // Saturating: `elapsed` routinely exceeds the floor on the happy path,
+    // where a `Duration` subtraction would panic rather than return zero.
+    DEBOUNCE.max(backoff).saturating_sub(elapsed)
+}
+
 /// Copy of `meta` with `ends_at` cleared, for the "is this the same item as
 /// last time" comparison.
 ///
@@ -397,7 +431,7 @@ fn net_delay(ends_at: Option<f64>) -> Duration {
 /// below `DEBOUNCE` — below the *backoff*, which is the stronger guarantee
 /// and the one that matters. The debounce loop below does restart on every
 /// poke with `wait = DEBOUNCE`, discarding whatever longer wait a prior
-/// failure had set; the hard floor right after it then holds
+/// failure had set; the hard floor right after it (`floor_wait`) then holds
 /// `max(DEBOUNCE, backoff)`, measured from the last query actually sent. That
 /// is what stops a station whose cart code changes faster than the backoff
 /// from sustaining a steady query rate against a host that is failing every
@@ -450,22 +484,15 @@ pub async fn follows(
                 Err(_) => break,
             }
         }
-        // Hard floor: the coalescing above can only ever shrink `wait` down
-        // to `DEBOUNCE`, discarding a longer failure backoff on the way (see
-        // `follows`'s own doc comment). Measured from the last query actually
-        // *sent*, not from the last poke, so a cart code that keeps changing
-        // cannot repeatedly reset the clock and hold the spacing at bare
-        // `DEBOUNCE` forever — the very thing that let a permanently failing
-        // host be queried at the stream's own rate. The happy path is
-        // untouched: `backoff` sits at `BACKOFF_BASE` after every success, so
-        // the floor there is `DEBOUNCE`, exactly what the debounce loop above
-        // already guaranteed.
-        let floor = DEBOUNCE.max(backoff);
-        if let Some(last) = last_query {
-            let elapsed = last.elapsed();
-            if elapsed < floor {
-                tokio::time::sleep(floor - elapsed).await;
-            }
+        // Hard floor on the query rate. The arithmetic, and why the floor
+        // has to exist at all, live on `floor_wait`. What belongs here is
+        // the measurement point: `last_query` is stamped just below, when a
+        // query actually goes out, and never on a poke — so a cart code that
+        // keeps changing cannot repeatedly reset the clock and hold the
+        // spacing at bare `DEBOUNCE`.
+        let extra = floor_wait(backoff, last_query.map(|last| last.elapsed()));
+        if !extra.is_zero() {
+            tokio::time::sleep(extra).await;
         }
         last_query = Some(tokio::time::Instant::now());
         let mut attempt = 0usize;
@@ -798,5 +825,41 @@ mod tests {
             BACKOFF_MAX,
             "the cap does not creep upward under its own repeated input"
         );
+    }
+
+    #[test]
+    fn floor_wait_spaces_queries_by_the_backoff_not_just_the_debounce() {
+        // The floor exists because the debounce loop in `follows` shortens
+        // the wait to `DEBOUNCE` on every poke, discarding a longer failure
+        // backoff. This is the case that proves it: the state the debounce
+        // loop leaves behind on a failing host, one `DEBOUNCE` after the last
+        // query. Deleting `.max(backoff)` from `floor_wait` -- or writing
+        // `.min` -- yields zero here and fails only this assertion.
+        assert_eq!(
+            floor_wait(BACKOFF_MAX, Some(DEBOUNCE)),
+            BACKOFF_MAX - DEBOUNCE,
+            "a poke must not pull the next query in ahead of the backoff"
+        );
+        // An intermediate backoff: the floor is the backoff itself, not
+        // `DEBOUNCE` and not a fixed constant.
+        assert_eq!(floor_wait(Duration::from_secs(8), Some(Duration::from_secs(3))), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn floor_wait_leaves_the_happy_path_and_the_first_query_alone() {
+        // No query sent yet: nothing to space this one from. Reading an
+        // absent instant as "elapsed = 0" would instead delay the very first
+        // query by a whole backoff, on a station that has done nothing wrong.
+        assert_eq!(floor_wait(BACKOFF_MAX, None), Duration::ZERO);
+        // After a success `backoff` is back at `BACKOFF_BASE`, so the floor
+        // is `DEBOUNCE` -- exactly what the debounce loop already guaranteed.
+        // The floor adds nothing to the ordinary rhythm.
+        assert_eq!(floor_wait(BACKOFF_BASE, Some(DEBOUNCE)), Duration::ZERO);
+        // Below `DEBOUNCE`, the other half of the `max`.
+        assert_eq!(floor_wait(BACKOFF_BASE, Some(Duration::from_secs(1))), Duration::from_secs(5));
+        // Already spaced out further than the floor asks. `Duration`
+        // subtraction panics on underflow, so this pins the saturation
+        // rather than merely the value.
+        assert_eq!(floor_wait(BACKOFF_MAX, Some(BACKOFF_MAX + Duration::from_secs(1))), Duration::ZERO);
     }
 }
