@@ -63,6 +63,24 @@ stage_plugin() {
 
 pack() { # <staging dir> <archive base name>
   local archive="$OUT/$2-$VERSION-$ARCH.tar.gz"
+  # `mktemp -d` creates its directory 0700, and `tar -C "$dir" … .` records
+  # that mode on the archive's own `./` entry. GNU tar then applies directory
+  # metadata to directories that ALREADY EXIST at the extraction target, so
+  # the documented `sudo tar -C /` would chmod `/` to 0700 — locking every
+  # non-root user, the `ritornello` service account included, out of the whole
+  # filesystem. `--no-same-owner` does not save it: that governs ownership,
+  # not mode. Measured, not reasoned about: a 755 directory became 700.
+  #
+  # Not just the top-level `$1`: `scripts/packaging.py` stages `tree` entries
+  # with `shutil.copytree`/`copy2`, which preserve the SOURCE directory's own
+  # mode rather than applying the process umask — unlike the plain `cp` calls
+  # elsewhere in this script. A source directory that is not 0755 on the
+  # machine that builds the archive (a stray checkout mode, a permissive
+  # mount) would otherwise carry that mode all the way into the archive, and
+  # by the same tar behaviour as above, onto an existing directory on the
+  # device. `find … -exec chmod` normalizes every directory the archive will
+  # contain, not only the one `mktemp -d` created.
+  find "$1" -type d -exec chmod 755 {} +
   # `--owner=root --group=root --numeric-owner`, and this is a security
   # property rather than tidiness: tar records the uid/gid of every entry,
   # and GNU tar **restores** them when the extraction runs as the superuser
@@ -86,6 +104,18 @@ pack() { # <staging dir> <archive base name>
   if [ -n "$foreign" ]; then
     echo "$archive holds entries not owned by root — sudo tar -C / would install them under a foreign uid:" >&2
     echo "$foreign" >&2
+    exit 1
+  fi
+  # Every directory entry must be world-traversable, and the archive's own
+  # `./` entry most of all — see the chmod above. Asserted rather than
+  # promised, because a future staging step could create a directory 0700 and
+  # nothing else would notice until an operator's root filesystem changed
+  # mode under them.
+  local tight
+  tight=$(tar -tvzf "$archive" --numeric-owner | awk '$1 ~ /^d/ && $1 != "drwxr-xr-x"')
+  if [ -n "$tight" ]; then
+    echo "$archive holds a directory entry that is not 0755 — sudo tar -C / would tighten the mode of an existing directory on the device:" >&2
+    echo "$tight" >&2
     exit 1
   fi
   # The property that makes `sudo tar -C /` safe, asserted rather than
