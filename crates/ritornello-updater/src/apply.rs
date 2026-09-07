@@ -134,7 +134,7 @@ pub fn apply(prefix: &Path, staging: &Path, request: &Request) -> Result<Applied
         // every backup made so far, and none that isn't there yet. Rollback
         // reading it mid-failure restores bytes that are still correct.
         let text = serde_json::to_string(&manifest).expect("a Vec<BackedUp> serializes");
-        io(&manifest_path, std::fs::write(&manifest_path, text))?;
+        io(&manifest_path, write_atomic(&manifest_path, text.as_bytes()))?;
 
         match (action, staged) {
             (Action::PlaceCore { .. }, Some(staged)) => {
@@ -190,6 +190,31 @@ fn place(staged: &Path, target: &Path) -> Result<(), ApplyError> {
         // reporting: a failed cleanup must not mask it.
         let _ = std::fs::remove_file(&tmp);
         return Err(ApplyError::Io(target.to_path_buf(), e));
+    }
+    Ok(())
+}
+
+/// Writes through a temporary beside the target, then `rename`.
+///
+/// The same idiom, and the same reason, as `plugins::write_atomic` in the
+/// core: this is a device one unplugs, and every file this crate writes is
+/// read by something that must not be misled by half of it. A truncated
+/// backup manifest would make a rollback restore nothing while the binaries
+/// are already replaced; a truncated marker would disarm the rollback and the
+/// state-preserving restart together.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(
+        ".{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+    ));
+    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        // The rename error is the one worth reporting; a cleanup that fails
+        // in turn must not mask it.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
     Ok(())
 }
@@ -400,5 +425,22 @@ mod tests {
         assert!(manifest.contains("\"existed\":true"), "{manifest}");
         // And nothing about the action that never got backed up.
         assert!(!manifest.contains("ritornello-plugin-cd"), "{manifest}");
+    }
+
+    #[test]
+    fn write_atomic_leaves_no_tmp_file_behind_on_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("thing.json");
+        write_atomic(&path, b"hello").expect("write succeeds");
+
+        assert_eq!(fs::read(&path).unwrap(), b"hello");
+        // The cheap way to prove the rename actually happened rather than a
+        // plain copy: nothing named after the temporary survives it.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }
