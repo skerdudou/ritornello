@@ -5,6 +5,7 @@ members = [
     "crates/ritornello-i18n",
     "crates/ritornello-plugin-sdk",
     "crates/ritornello-core",
+    "crates/ritornello-updater",
     "crates/ritornello-plugin-radio",
     "crates/ritornello-plugin-cd",
     "crates/ritornello-plugin-musicbrainz",

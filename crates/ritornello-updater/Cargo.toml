@@ -1,0 +1,22 @@
+[package]
+name = "ritornello-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ritornello-update"
+path = "src/bin/ritornello-update.rs"
+
+[dependencies]
+# Deliberately three dependencies and no more. This crate's binary runs as
+# root: every crate linked into it is code that root executes. There is no
+# archive reader here and no TLS stack — the core extracts and downloads
+# unprivileged, and hands this binary a plain file to place.
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
