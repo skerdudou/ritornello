@@ -1,0 +1,33 @@
+[Unit]
+Description=ritornello: install a staged update
+# No After= and no WantedBy=: this unit is never part of a target. It is
+# started on demand by the core, through polkit, and it exits.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/ritornello/ritornello-update apply
+
+# Root, deliberately, and this is the only unit of the product that is. It
+# exists because /usr/local is read-only to the `ritornello` service user and
+# NoNewPrivileges=true closes every other route. What follows is the list of
+# everything it is NOT allowed to do.
+#
+# PrivateNetwork=true is the one worth naming: this binary has no business on
+# the network, and the unit is where that is enforced rather than promised.
+# The core downloads and verifies, unprivileged; root receives a plain file
+# already on disk. So there is no TLS stack and no archive reader in this
+# process, and no route from a hostile server to a root-owned socket.
+PrivateNetwork=true
+ProtectSystem=strict
+# The two locations the installer can write, and they are the two locations
+# `target.rs` can form. /etc stays read-only: the core writes its own
+# configuration, so root never needs to.
+ReadWritePaths=/usr/local/bin /usr/local/lib/ritornello
+# /var/lib/ritornello-update, created root-owned and world-readable: root
+# writes the backup, the marker and the rollback report there, and the service
+# must be able to read them without being able to fabricate them.
+StateDirectory=ritornello-update
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true
+RestrictSUIDSGID=true

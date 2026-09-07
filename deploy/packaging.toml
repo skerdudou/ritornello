@@ -13,9 +13,23 @@
 # wrote.
 
 [core]
+# The updater's privileged binary. Installed OUTSIDE the plugins directory,
+# for the same reason as the files plugin's mount helper: the core launches
+# what plugins.toml declares, and this one is launched by systemd, as root.
+#
+# It is also, deliberately, NOT something an update can replace: `target.rs`
+# cannot form this path. So the updater only ever changes by hand — which is
+# what makes it trustworthy, and what puts a change to it in the release
+# notes' "Action required".
+extra_binaries = [
+  { name = "ritornello-update", to = "usr/local/lib/ritornello/ritornello-update" },
+]
 tree = [
   { from = "deploy/ritornello.service", to = "etc/systemd/system/ritornello.service" },
+  { from = "deploy/ritornello-update.service", to = "etc/systemd/system/ritornello-update.service" },
+  { from = "deploy/ritornello-rollback.service", to = "etc/systemd/system/ritornello-rollback.service" },
   { from = "deploy/50-ritornello-power.rules", to = "etc/polkit-1/rules.d/50-ritornello-power.rules" },
+  { from = "deploy/52-ritornello-update.rules", to = "etc/polkit-1/rules.d/52-ritornello-update.rules" },
   { from = "deploy/locales/core", to = "etc/ritornello/locales/core" },
   # `common` travels with the core: the core is always installed, so this is
   # the one archive that can be relied on to carry the shared catalog.

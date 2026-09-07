@@ -2,6 +2,24 @@
 Description=ritornello (radio internet + CD)
 After=network-online.target sound.target getty@tty1.service
 Wants=network-online.target
+# The safety net of the updater, and the reason it can be automatic at all.
+#
+# `Restart=always` below means a core that cannot start loops for ever: the
+# web page disappears and nothing short of SSH shows why. With a start limit,
+# systemd stops retrying after five attempts in two minutes — roughly ten
+# seconds of looping, given RestartSec=2 — declares the unit failed, and fires
+# OnFailure=.
+#
+# The rollback unit then puts back what the last install replaced, but ONLY if
+# the update marker is still fresh (ten minutes). So an unrelated crash loop
+# months later finds a stale marker and changes nothing, and systemd is left
+# to give up as it does today.
+#
+# What this does NOT catch, and it is worth knowing: a core that starts and
+# then misbehaves. The start limit only ever sees "it will not start".
+StartLimitIntervalSec=120
+StartLimitBurst=5
+OnFailure=ritornello-rollback.service
 Conflicts=getty@tty1.service
 
 [Service]

@@ -1,0 +1,23 @@
+[Unit]
+Description=ritornello: put back the update that would not start
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/ritornello/ritornello-update rollback
+
+# Reached ONLY by OnFailure= on ritornello.service, which systemd fires once
+# that unit has exhausted its start limit. It receives no polkit grant and
+# must never be given one: the core has no business asking for a rollback, and
+# a second unit name in 52-ritornello-update.rules would hand whoever reaches
+# the web UI the right to trigger one.
+#
+# It restarts ritornello.service itself, as root, so it needs no grant for
+# that either — see the binary, which does it only when something was actually
+# restored.
+ProtectSystem=strict
+ReadWritePaths=/usr/local/bin /usr/local/lib/ritornello
+StateDirectory=ritornello-update
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true
+RestrictSUIDSGID=true

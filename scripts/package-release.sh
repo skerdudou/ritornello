@@ -105,7 +105,7 @@ mkdir -p "$CORE/usr/local/bin"
 cp "$BIN/ritornello-core" "$CORE/usr/local/bin/"
 # Everything else the core carries — its unit, its polkit rule, its own and
 # the shared locale packs — is named by the manifest, not repeated here.
-python3 scripts/packaging.py stage-core "$CORE"
+python3 scripts/packaging.py stage-core "$CORE" "$BIN"
 pack "$CORE" "ritornello-core"
 
 # --- one archive per plugin ----------------------------------------------

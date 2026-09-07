@@ -1,0 +1,31 @@
+// The configuration page can install an update, and the core runs as the
+// unprivileged `ritornello` user with NoNewPrivileges=true: starting a unit
+// through polkit is the mechanism, and this file is the authorisation. Third
+// client of the pattern, after the power actions and the media mount.
+//
+// Scoped to ONE unit via action.lookup("unit"), like its neighbour
+// 51-ritornello-media.rules. What that scoping buys here is worth stating,
+// because it is not tidiness: `manage-units` without the check would hand the
+// web UI — which has no authentication on the local network — the right to
+// start, stop and restart sshd and the firewall.
+//
+// ritornello-rollback.service is deliberately NOT named here. It is reached
+// only by OnFailure= on ritornello.service, so systemd is its only caller.
+// Adding it "for symmetry" would let whoever reaches the page trigger a
+// rollback, which is a downgrade of the running software on demand.
+//
+// What the unit behind this grant can do is bounded by the binary and not by
+// this file: it forms exactly two paths, /usr/local/bin/ritornello-core and
+// the plugins directory joined with a validated bare name. It reads no
+// archive and has PrivateNetwork=true. So even a fully compromised core buys
+// no root code execution through this grant — the polkit rules, the systemd
+// units and the root-run mount helper are not expressible as targets.
+polkit.addRule(function (action, subject) {
+  if (
+    subject.user === "ritornello" &&
+    action.id === "org.freedesktop.systemd1.manage-units" &&
+    action.lookup("unit") === "ritornello-update.service"
+  ) {
+    return polkit.Result.YES;
+  }
+});

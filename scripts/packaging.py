@@ -40,7 +40,10 @@ def stage(section: dict, out: Path, bindir: Path) -> None:
 def main() -> int:
     cmd = sys.argv[1]
     if cmd == "stage-core":
-        stage(MANIFEST["core"], Path(sys.argv[2]), Path())
+        # The bindir is no longer optional: the core carries an extra binary
+        # since the updater exists. Passing Path() here used to be harmless
+        # only because `extra_binaries` was empty for this component.
+        stage(MANIFEST["core"], Path(sys.argv[2]), Path(sys.argv[3]))
     elif cmd == "stage":
         name, out, bindir = sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4])
         stage(MANIFEST["plugins"].get(name, {}), out, bindir)
