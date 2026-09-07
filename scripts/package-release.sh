@@ -63,24 +63,6 @@ stage_plugin() {
 
 pack() { # <staging dir> <archive base name>
   local archive="$OUT/$2-$VERSION-$ARCH.tar.gz"
-  # `mktemp -d` creates its directory 0700, and `tar -C "$dir" … .` records
-  # that mode on the archive's own `./` entry. GNU tar then applies directory
-  # metadata to directories that ALREADY EXIST at the extraction target, so
-  # the documented `sudo tar -C /` would chmod `/` to 0700 — locking every
-  # non-root user, the `ritornello` service account included, out of the whole
-  # filesystem. `--no-same-owner` does not save it: that governs ownership,
-  # not mode. Measured, not reasoned about: a 755 directory became 700.
-  #
-  # Not just the top-level `$1`: `scripts/packaging.py` stages `tree` entries
-  # with `shutil.copytree`/`copy2`, which preserve the SOURCE directory's own
-  # mode rather than applying the process umask — unlike the plain `cp` calls
-  # elsewhere in this script. A source directory that is not 0755 on the
-  # machine that builds the archive (a stray checkout mode, a permissive
-  # mount) would otherwise carry that mode all the way into the archive, and
-  # by the same tar behaviour as above, onto an existing directory on the
-  # device. `find … -exec chmod` normalizes every directory the archive will
-  # contain, not only the one `mktemp -d` created.
-  find "$1" -type d -exec chmod 755 {} +
   # `--owner=root --group=root --numeric-owner`, and this is a security
   # property rather than tidiness: tar records the uid/gid of every entry,
   # and GNU tar **restores** them when the extraction runs as the superuser
@@ -93,7 +75,28 @@ pack() { # <staging dir> <archive base name>
   # and a non-root uid can rewrite is a local privilege escalation.
   # `deploy.sh` installs everything `-o root -g root` for exactly this
   # reason; the release path must not be the lax one.
-  tar -C "$1" --owner=root --group=root --numeric-owner -czf "$archive" .
+  #
+  # `--mode` for the same reason as `--owner`/`--group` beside it: the
+  # builder's metadata must not reach the device. This worktree sits on a
+  # 9p/drvfs mount that reports every source file as 777, and
+  # packaging.py's copytree carries that through — so archives built here
+  # shipped world-writable locale directories, and would have shipped a
+  # world-writable polkit rule: JavaScript polkitd runs as root that any
+  # local user could rewrite. `mktemp -d` supplies the opposite failure,
+  # 0700 on the archive's own `./` entry, which GNU tar then applies to `/`
+  # itself.
+  #
+  # `u+rwX,go=rX` is chmod's symbolic form, `X` meaning "execute only where
+  # it already applies": a directory or a file that already carries an
+  # execute bit anywhere lands at 755, and a file with no execute bit at
+  # all lands at 644. Measured on this machine rather than assumed — 0700
+  # and 0777 both become 755, and because every source file here already
+  # carries an execute bit (the same 9p/drvfs quirk noted above), every
+  # entry from this machine lands at 755, unit files and locale catalogs
+  # included; a checkout where git's own mode bit says 644 would keep
+  # those at 644 instead. Either way, nothing group- or world-writable
+  # reaches the archive.
+  tar -C "$1" --owner=root --group=root --numeric-owner --mode='u+rwX,go=rX' -czf "$archive" .
   # Asserted and not merely flagged: a guard nobody has seen fail is a guard
   # nobody should trust, and a flag silently dropped by a future edit would
   # leave no trace at all. `--numeric-owner` on the listing too, so the
@@ -106,16 +109,18 @@ pack() { # <staging dir> <archive base name>
     echo "$foreign" >&2
     exit 1
   fi
-  # Every directory entry must be world-traversable, and the archive's own
-  # `./` entry most of all — see the chmod above. Asserted rather than
-  # promised, because a future staging step could create a directory 0700 and
-  # nothing else would notice until an operator's root filesystem changed
-  # mode under them.
-  local tight
-  tight=$(tar -tvzf "$archive" --numeric-owner | awk '$1 ~ /^d/ && $1 != "drwxr-xr-x"')
-  if [ -n "$tight" ]; then
-    echo "$archive holds a directory entry that is not 0755 — sudo tar -C / would tighten the mode of an existing directory on the device:" >&2
-    echo "$tight" >&2
+  # Every directory 0755, and nothing group- or world-writable anywhere.
+  # Asserted rather than promised, for the reason the guard above gives:
+  # a future staging step, or a different developer's filesystem, would
+  # otherwise change what lands on the device with nothing to notice.
+  local badmode
+  badmode=$(tar -tvzf "$archive" --numeric-owner | awk '
+    ($1 ~ /^d/ && $1 != "drwxr-xr-x") ||
+    substr($1, 6, 1) == "w" ||
+    substr($1, 9, 1) == "w"')
+  if [ -n "$badmode" ]; then
+    echo "$archive holds entries whose mode is not safe to extract as root — a directory that is not 0755, or something group- or world-writable:" >&2
+    echo "$badmode" >&2
     exit 1
   fi
   # The property that makes `sudo tar -C /` safe, asserted rather than
