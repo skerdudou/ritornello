@@ -104,6 +104,16 @@ pub fn apply(prefix: &Path, staging: &Path, request: &Request) -> Result<Applied
     // Pass two: keep aside, then move.
     let backups = backup_dir(prefix);
     io(&backups, std::fs::create_dir_all(&backups))?;
+    let manifest_path = backups.join(BACKUP_MANIFEST);
+    // A manifest from an earlier run must never be readable as this run's: if
+    // this pass fails partway through, rollback must find either nothing, or
+    // a manifest that names exactly the backups made so far — never a stale
+    // one naming a different, no-longer-matching set of backups.
+    match std::fs::remove_file(&manifest_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(ApplyError::Io(manifest_path, e)),
+    }
     let mut manifest: Vec<BackedUp> = Vec::new();
     let mut applied = Applied::default();
 
@@ -118,6 +128,13 @@ pub fn apply(prefix: &Path, staging: &Path, request: &Request) -> Result<Applied
             io(&kept, std::fs::copy(&target, &kept).map(|_| ()))?;
         }
         manifest.push(BackedUp { key, target: target.clone(), existed });
+
+        // Rewritten now, before the target itself is touched: if placing or
+        // removing fails right below, the manifest on disk already names
+        // every backup made so far, and none that isn't there yet. Rollback
+        // reading it mid-failure restores bytes that are still correct.
+        let text = serde_json::to_string(&manifest).expect("a Vec<BackedUp> serializes");
+        io(&manifest_path, std::fs::write(&manifest_path, text))?;
 
         match (action, staged) {
             (Action::PlaceCore { .. }, Some(staged)) => {
@@ -142,9 +159,6 @@ pub fn apply(prefix: &Path, staging: &Path, request: &Request) -> Result<Applied
         }
     }
 
-    let path = backups.join(BACKUP_MANIFEST);
-    let text = serde_json::to_string(&manifest).expect("a Vec<BackedUp> serializes");
-    io(&path, std::fs::write(&path, text))?;
     Ok(applied)
 }
 
@@ -344,5 +358,47 @@ mod tests {
         assert!(!target.exists());
         assert_eq!(applied.removed, vec!["ritornello-plugin-mpd".to_string()]);
         assert_eq!(fs::read(backup_dir(&prefix).join("plugin-ritornello-plugin-mpd")).unwrap(), b"doomed");
+    }
+
+    #[test]
+    fn a_failure_on_a_later_action_still_leaves_the_earlier_one_recorded() {
+        let (_d, prefix, staging) = fake_root();
+        let radio_target = prefix.join("usr/local/lib/ritornello/plugins/ritornello-plugin-radio");
+        fs::write(&radio_target, b"old binary").unwrap();
+        stage(&staging, "staged-radio", b"new binary");
+
+        // The second action's target is a directory, not a file:
+        // `target.exists()` is true, so `apply` tries to back it up, and
+        // `fs::copy` fails reading a directory as a source — a genuine I/O
+        // error with no reliance on permissions or on running as root.
+        let cd_target = prefix.join("usr/local/lib/ritornello/plugins/ritornello-plugin-cd");
+        fs::create_dir_all(&cd_target).unwrap();
+        stage(&staging, "staged-cd", b"new binary");
+
+        let req = Request {
+            format: REQUEST_FORMAT,
+            actions: vec![
+                Action::PlacePlugin {
+                    file: "ritornello-plugin-radio".to_string(),
+                    staged: "staged-radio".to_string(),
+                },
+                Action::PlacePlugin {
+                    file: "ritornello-plugin-cd".to_string(),
+                    staged: "staged-cd".to_string(),
+                },
+            ],
+        };
+        let err = apply(&prefix, &staging, &req);
+        assert!(err.is_err(), "backing up a directory must fail");
+
+        // What the first action already did must still be described on disk:
+        // a manifest that goes missing here is a backup rollback can no
+        // longer find, exactly the half-applied state this module exists to
+        // rule out.
+        let manifest = fs::read_to_string(backup_dir(&prefix).join(BACKUP_MANIFEST)).unwrap();
+        assert!(manifest.contains("\"key\":\"plugin-ritornello-plugin-radio\""), "{manifest}");
+        assert!(manifest.contains("\"existed\":true"), "{manifest}");
+        // And nothing about the action that never got backed up.
+        assert!(!manifest.contains("ritornello-plugin-cd"), "{manifest}");
     }
 }
