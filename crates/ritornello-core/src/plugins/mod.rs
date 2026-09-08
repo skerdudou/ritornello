@@ -1,3 +1,10 @@
+// No caller yet: `append_block`, `remove_entry` and `move_entry` get their
+// first caller in a later task. Until then only this module's own tests
+// reach its public items, and a binary crate (unlike a library) does not
+// treat `pub` as "reachable from outside" on its own.
+#[allow(dead_code)]
+pub mod edit;
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -99,7 +106,7 @@ pub fn set_enabled(path: &Path, name: &str, enabled: bool) -> Result<()> {
 ///
 /// A `plugins.toml` truncated by a power cut — a device one unplugs — would
 /// let nothing launch at the next startup.
-fn write_atomic(path: &Path, content: &str) -> Result<()> {
+pub(super) fn write_atomic(path: &Path, content: &str) -> Result<()> {
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, path) {
