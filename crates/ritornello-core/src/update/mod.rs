@@ -1434,12 +1434,25 @@ mod tests {
         (worker, dir)
     }
 
-    fn silent_line() -> Arc<RwLock<StatusState>> {
+    fn one_line(line: PluginStatus) -> Arc<RwLock<StatusState>> {
         Arc::new(RwLock::new(StatusState {
-            plugins: vec![PluginStatus::startup("radio")],
+            plugins: vec![line],
             active_source: "radio".to_string(),
             protocol: ritornello_proto::PROTOCOL_VERSION,
         }))
+    }
+
+    /// Launched, not yet heard from, still inside its deadline. What the core
+    /// writes for a plugin it has just relaunched.
+    fn starting_line() -> Arc<RwLock<StatusState>> {
+        one_line(PluginStatus::startup("radio"))
+    }
+
+    /// Alive, silent, past its deadline — and still able to speak, because the
+    /// registration socket stays open for it. What the startup rendezvous
+    /// leaves for a plugin that was too slow for its ten seconds.
+    fn stalled_line() -> Arc<RwLock<StatusState>> {
+        one_line(PluginStatus::unknown_kind("radio", true))
     }
 
     /// Replaces the silent line with the one an announcement produces, after
@@ -1455,18 +1468,27 @@ mod tests {
         });
     }
 
-    /// **The boot-time catch-up case**, driven from the event rather than
-    /// from the helper: the run starts while the plugin is still silent, and
-    /// must nonetheless read the version the plugin is about to announce.
+    /// **The two shapes `lines_settled` calls unsettled, one test each, and
+    /// neither can stand in for the other.**
     ///
-    /// Without the wait, `installed` reads a `startup` line — `version: None`
-    /// — `differs(None, offered)` is true against every release, the row
-    /// reads "not installed / update available" until the next check a day
-    /// later, and the automatic policy skips the plugin for want of a known
-    /// version. That is the very run catch-up exists for.
+    /// A line that has not settled carries `version: None`, which
+    /// `differs(None, offered)` reads as "out of step with every release":
+    /// the row goes to "not installed / update available" until the next
+    /// check a day later, and the automatic policy skips the plugin for want
+    /// of a known version. That is the run catch-up exists for.
+    ///
+    /// This one covers `starting` — launched, inside its deadline — which is
+    /// what a plugin the core has just relaunched reads as. Its twin below
+    /// covers `stalled`, and **that is the shape that happens at boot**: the
+    /// rendezvous is awaited before the main loop starts and fills the lines
+    /// of everything that announced in time (`main.rs:1564-1600`), so the
+    /// plugin the scheduler's first tick can still catch out is the one that
+    /// missed the ten-second deadline — and its line says `stalled`, never
+    /// `starting`. Dropping either half of the predicate leaves one of these
+    /// two green and the other red; that is the point of writing both.
     #[tokio::test]
     async fn a_run_that_starts_before_a_plugin_has_spoken_still_reads_its_version() {
-        let status = silent_line();
+        let status = starting_line();
         let (worker, _dir) = worker_rig(status.clone());
         announces_shortly(status, "0.3.0");
         let installed = worker.installed_when_settled().await;
@@ -1474,9 +1496,32 @@ mod tests {
         assert_eq!(
             radio.version.as_deref(),
             Some("0.3.0"),
-            "the run read the line before the plugin had finished starting"
+            "the run read the line while the plugin was still starting"
         );
         assert!(radio.binary_present);
+    }
+
+    /// The twin, and the one that describes the real production window: a
+    /// plugin too slow for the startup rendezvous is written off as `stalled`
+    /// and hot-wired afterwards, so its line gains a version *after* the
+    /// scheduler's first tick has already fired.
+    ///
+    /// A `stalled` plugin is not a dead one — the registration socket stays
+    /// open for it and `hotplug` will take its late announcement — which is
+    /// exactly why this shape must count as "may still gain a version" and
+    /// not as "nothing more to learn".
+    #[tokio::test]
+    async fn a_run_that_starts_while_a_slow_plugin_is_written_off_still_reads_its_version() {
+        let status = stalled_line();
+        let (worker, _dir) = worker_rig(status.clone());
+        announces_shortly(status, "0.3.0");
+        let installed = worker.installed_when_settled().await;
+        let radio = installed.iter().find(|i| i.name == "radio").expect("the declared plugin");
+        assert_eq!(
+            radio.version.as_deref(),
+            Some("0.3.0"),
+            "the run read the line while the plugin was still reported stalled"
+        );
     }
 
     fn radio_published(version: &str) -> Vec<Published> {
@@ -1505,7 +1550,7 @@ mod tests {
     /// stale one.
     #[tokio::test]
     async fn a_replaced_plugin_stops_being_offered_the_update_it_has_just_had() {
-        let status = silent_line();
+        let status = starting_line();
         let (worker, _dir) = worker_rig(status.clone());
         announces_shortly(status, "0.3.0");
         worker
@@ -1534,7 +1579,7 @@ mod tests {
     /// `SETTLE_TIMEOUT`. The deadline below is far under it.
     #[tokio::test]
     async fn a_pass_that_placed_nothing_reports_the_refusal_without_waiting() {
-        let status = silent_line();
+        let status = starting_line();
         let (worker, _dir) = worker_rig(status);
         let before = worker.state.read().await.components.clone();
         tokio::time::timeout(
