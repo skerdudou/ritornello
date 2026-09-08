@@ -454,7 +454,7 @@ mod tests {
             plugins: Arc::new(crate::status::PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
-                plugins_dir: std::path::PathBuf::from("/nonexistent"),
+                root: std::path::PathBuf::from("/nonexistent"),
             }),
             update: Arc::new(tokio::sync::RwLock::new(
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),

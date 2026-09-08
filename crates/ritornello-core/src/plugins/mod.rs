@@ -158,12 +158,18 @@ fn duplicate_names(plugins: &[PluginConfig]) -> Vec<String> {
 /// the same question about the same directory rather than risking two
 /// answers.
 ///
-/// Compares **paths**, not bare file names: a declared `exec` is already a
-/// full path (`plugins.toml`'s own convention), and `std::fs::read_dir`'s
-/// entries carry `plugins_dir` joined onto their name already — so building
-/// the same join for the comparison is what keeps this immune to a plugin
-/// declared through a relative `exec` or a symlinked plugins directory
-/// disagreeing with itself.
+/// Compares **paths**, not bare file names, which carries a precondition
+/// this function does not itself check: a declared `exec` must be an
+/// absolute path, matching `plugins_dir` joined onto the entry's own file
+/// name — `plugins.toml`'s existing convention, never enforced here or at
+/// load time. **A relative `exec` is not immune under this scheme; it is the
+/// opposite.** `PathBuf::from("radio")` can never equal
+/// `plugins_dir.join("radio")` (`std::fs::read_dir`'s entries are always
+/// absolute), so a plugin declared with a relative `exec` would have its own
+/// present binary misreported as `Undeclared`. Harmless today because
+/// nothing ships or hand-edits a relative `exec` — comparing bare file names
+/// instead would have been robust to that case, at the cost of conflating
+/// two different plugins that happened to share a binary's file name.
 ///
 /// A `plugins_dir` that cannot be read (not created yet — a device with no
 /// plugin installed at all, though `plugins.toml` itself always ships one) is

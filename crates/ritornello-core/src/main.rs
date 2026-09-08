@@ -2035,20 +2035,26 @@ async fn main() -> Result<()> {
             core.not_installed_files = Some(entries);
         }
     }
-    tokio::spawn(update::run_worker(
-        update::Worker {
-            state: update_state.clone(),
-            catalog: catalog.clone(),
-            status: status_state.clone(),
-            manifest: plugins_path.clone(),
-            plugins_tx: plugin_order_tx.clone(),
-            staging: staging_dir,
-            root: PathBuf::from("/"),
-            core_version: env!("CARGO_PKG_VERSION"),
-            restart: restart_hook.clone(),
-        },
-        update_rx,
-    ));
+    let worker = update::Worker {
+        state: update_state.clone(),
+        catalog: catalog.clone(),
+        status: status_state.clone(),
+        manifest: plugins_path.clone(),
+        plugins_tx: plugin_order_tx.clone(),
+        staging: staging_dir,
+        root: PathBuf::from("/"),
+        core_version: env!("CARGO_PKG_VERSION"),
+        restart: restart_hook.clone(),
+    };
+    // Read off the `Worker` actually built, not a second `PathBuf::from("/")`
+    // literal: `status::PluginsControl.root` (below) must be the exact same
+    // value, since RULING 63's invariant — the two payloads can never
+    // disagree about which binary is undeclared — only holds if the two
+    // scans they each derive their directory from cannot drift apart. One
+    // literal, read twice, is what makes that true by construction rather
+    // than by a comment asking two edits to stay in step.
+    let plugins_root = worker.root.clone();
+    tokio::spawn(update::run_worker(worker, update_rx));
     // The scheduler's end of the same channel. The ticker lives in the main
     // loop, not in a task of its own, because that is where the two things it
     // needs are: the current settings, and the `Core` that owns — and
@@ -2126,10 +2132,9 @@ async fn main() -> Result<()> {
             plugins: Arc::new(status::PluginsControl {
                 manifest: plugins_path.clone(),
                 tx: plugin_order_tx,
-                // Same root as the `Worker` built above (`PathBuf::from("/")`
-                // in service): both must scan the one real plugins directory,
-                // never two paths that could disagree.
-                plugins_dir: ritornello_updater::target::plugins_dir(&PathBuf::from("/")),
+                // `worker.root`'s own value (see above), not a second
+                // literal.
+                root: plugins_root,
             }),
             update: update_state.clone(),
             update_tx,

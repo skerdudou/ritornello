@@ -212,7 +212,8 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
         );
         crate::plugins::PluginManifest::default()
     });
-    for name in crate::plugins::undeclared_binaries(&state.plugins.plugins_dir, &manifest) {
+    let plugins_dir = ritornello_updater::target::plugins_dir(&state.plugins.root);
+    for name in crate::plugins::undeclared_binaries(&plugins_dir, &manifest) {
         match status.plugins.iter_mut().find(|p| p.name == name) {
             // Alive and out of the core's control (the `OutOfReach` case
             // `declare_plugin`'s doc names): it already has a real line from
@@ -453,7 +454,7 @@ pub(crate) mod tests_support {
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
-                plugins_dir: std::path::PathBuf::from("/nonexistent"),
+                root: std::path::PathBuf::from("/nonexistent"),
             }),
             update: Arc::new(tokio::sync::RwLock::new(
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
@@ -496,7 +497,7 @@ pub(crate) mod tests_support {
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
-                plugins_dir: std::path::PathBuf::from("/nonexistent"),
+                root: std::path::PathBuf::from("/nonexistent"),
             }),
             update: Arc::new(tokio::sync::RwLock::new(
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
@@ -541,7 +542,7 @@ pub(crate) mod tests_support {
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
-                plugins_dir: std::path::PathBuf::from("/nonexistent"),
+                root: std::path::PathBuf::from("/nonexistent"),
             }),
             update: Arc::new(tokio::sync::RwLock::new(
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
@@ -594,7 +595,7 @@ pub(crate) mod tests_support {
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
-                plugins_dir: std::path::PathBuf::from("/nonexistent"),
+                root: std::path::PathBuf::from("/nonexistent"),
             }),
             update: Arc::new(tokio::sync::RwLock::new(
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
@@ -976,14 +977,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("plugins.toml");
         std::fs::write(&manifest, "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n").unwrap();
-        let plugins_dir = dir.path().join("plugins");
+        // The real formula, not a bespoke test directory: `root` is what
+        // `PluginsControl` actually stores, and `status_json` derives the
+        // scanned directory from it the same way `update::Worker` derives
+        // its own from `Worker.root` — the two must share the formula, not
+        // merely agree on a directory chosen by the test.
+        let plugins_dir = ritornello_updater::target::plugins_dir(dir.path());
         std::fs::create_dir_all(&plugins_dir).unwrap();
         std::fs::write(plugins_dir.join("ritornello-plugin-orphan"), b"").unwrap();
         let state = AppState {
             plugins: Arc::new(PluginsControl {
                 manifest,
                 tx: tokio::sync::mpsc::channel(1).0,
-                plugins_dir,
+                root: dir.path().to_path_buf(),
             }),
             ..app_state()
         };
@@ -1007,7 +1013,7 @@ mod tests {
     #[tokio::test]
     async fn a_declared_binary_is_never_flagged_as_undeclared() {
         let dir = tempfile::tempdir().unwrap();
-        let plugins_dir = dir.path().join("plugins");
+        let plugins_dir = ritornello_updater::target::plugins_dir(dir.path());
         std::fs::create_dir_all(&plugins_dir).unwrap();
         let exec = plugins_dir.join("radio-bin");
         std::fs::write(&exec, b"").unwrap();
@@ -1021,7 +1027,7 @@ mod tests {
             plugins: Arc::new(PluginsControl {
                 manifest,
                 tx: tokio::sync::mpsc::channel(1).0,
-                plugins_dir,
+                root: dir.path().to_path_buf(),
             }),
             ..app_state()
         };

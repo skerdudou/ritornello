@@ -325,13 +325,20 @@ pub struct PluginsControl {
     /// the choice is written.
     pub manifest: std::path::PathBuf,
     pub tx: mpsc::Sender<PluginOrder>,
-    /// `<prefix>/usr/local/lib/ritornello/plugins`: where binaries live.
-    /// Scanned by `status_json` for a binary the manifest does not declare
-    /// (see `plugins::undeclared_binaries`) — the same directory
-    /// `update::Worker` scans for the same fact on `/api/update`, both
-    /// derived from `ritornello_updater::target::plugins_dir` so the two
-    /// payloads read the same path.
-    pub plugins_dir: std::path::PathBuf,
+    /// Filesystem root — `/` in service, same field name and same value as
+    /// `update::Worker.root` (see where both are built in `main`, off one
+    /// shared binding, not two independent literals).
+    ///
+    /// `status_json` derives `ritornello_updater::target::plugins_dir` from
+    /// this at request time and scans it for a binary the manifest does not
+    /// declare (`plugins::undeclared_binaries`) — the exact formula
+    /// `update::Worker::installed` applies to its **own** `root` field for
+    /// the same fact on `/api/update`. Storing the root and applying the
+    /// formula at each read site, rather than storing one precomputed
+    /// `plugins_dir`, is what RULING 63 asks for one level up: the two
+    /// payloads cannot answer this question differently as long as they
+    /// share the root and call the one function that turns it into a path.
+    pub root: std::path::PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -490,8 +497,15 @@ pub(super) async fn plugin_delete(
         Some(file) => {
             let job = crate::update::Job::RemovePlugin { name: name.clone(), file: file.to_string() };
             if state.update_tx.try_send(job).is_err() {
+                // Nothing retries this on its own: no scheduled check, no
+                // restart, no future task re-derives a `Job::RemovePlugin`
+                // for a dropped one. The binary sits there until an operator
+                // acts — which is visible and honest, not silent, since the
+                // same fact is what `Availability::Undeclared` and
+                // `PluginStatus::undeclared_binary` report on every poll of
+                // either payload in the meantime.
                 tracing::warn!(
-                    "update: could not queue the binary removal for {name}; it stays on disk until the next check or a restart"
+                    "update: could not queue the binary removal for {name}; it stays on disk until an operator acts (it is reported as undeclared meanwhile)"
                 );
             }
         }
@@ -616,9 +630,9 @@ mod tests {
         )
         .unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
-        let plugins_dir = dir.path().join("plugins");
+        let root = dir.path().to_path_buf();
         let state = AppState {
-            plugins: Arc::new(PluginsControl { manifest: path, tx, plugins_dir }),
+            plugins: Arc::new(PluginsControl { manifest: path, tx, root }),
             ..app_state()
         };
         (state, dir, rx)
@@ -635,7 +649,7 @@ mod tests {
             plugins: Arc::new(PluginsControl {
                 manifest: manifest.to_path_buf(),
                 tx,
-                plugins_dir: std::path::PathBuf::from("/nonexistent"),
+                root: std::path::PathBuf::from("/nonexistent"),
             }),
             ..app_state()
         };
@@ -743,7 +757,7 @@ mod tests {
             plugins: Arc::new(PluginsControl {
                 manifest: path,
                 tx,
-                plugins_dir: std::path::PathBuf::from("/nonexistent"),
+                root: std::path::PathBuf::from("/nonexistent"),
             }),
             ..app_state()
         };
