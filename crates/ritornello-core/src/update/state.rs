@@ -70,6 +70,14 @@ pub struct ComponentOffer {
     pub installable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub third_party_repo: Option<String>,
+    /// The core's own row only: what its last-installed archive carried
+    /// outside what `install_one` ever places (the privileged installer, the
+    /// systemd units, the polkit rules — see `archive::core_not_installed`).
+    /// Absent until a core install has actually happened; `None` is never
+    /// "nothing was left out" — the core's archive always carries something
+    /// here, by design (see `installable_from_ui`'s own doc comment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_installed_files: Option<Vec<String>>,
 }
 
 /// Declared plugins first, **in file order** — that order is the priority, for
@@ -118,6 +126,9 @@ pub fn component_offers(
         },
         installable: None,
         third_party_repo: None,
+        // Only ever filled in by `Worker::install_one`, once a core install
+        // has actually read an archive — `component_offers` never sees one.
+        not_installed_files: None,
     });
 
     for plugin in installed {
@@ -146,6 +157,9 @@ pub fn component_offers(
             availability,
             installable: None,
             third_party_repo: plugin.third_party_repo.clone(),
+            // A plugin's own row, never the core's: this field is a fact
+            // about the core's archive alone.
+            not_installed_files: None,
         });
     }
 
@@ -163,6 +177,7 @@ pub fn component_offers(
             availability: Availability::NotInstalled,
             installable: None,
             third_party_repo: None,
+            not_installed_files: None,
         });
     }
     out
@@ -347,6 +362,9 @@ mod tests {
         // No release means nothing to say about alignment. `Aligned` would be
         // a claim, and `UpdateAvailable` would be a lie.
         assert_eq!(core.availability, Availability::Unknown);
+        // Only `Worker::install_one` ever learns this, from an archive it
+        // just read; this pure function never sees one.
+        assert_eq!(core.not_installed_files, None);
     }
 
     #[test]

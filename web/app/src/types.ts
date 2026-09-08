@@ -26,6 +26,8 @@ export interface PluginStatus {
    * this core's own (see `StatusPayload.protocol`). Its presence is the
    * refusal itself. */
   incompatible?: number
+  /** Declared, and its binary is not on disk. Optional: absent when false. */
+  missing_binary?: boolean
 }
 export interface StatusPayload {
   plugins: PluginStatus[]
@@ -50,6 +52,80 @@ export interface StatusPayload {
    */
   locale: string
 }
+/**
+ * Where one component stands against the release, mirroring
+ * `update::state::Availability` field for field.
+ */
+export type Availability =
+  | 'aligned'
+  | 'update_available'
+  | 'binary_missing'
+  | 'not_installed'
+  | 'undeclared'
+  | 'unknown'
+
+/**
+ * One row of `UpdatePayload.components`, mirroring `update::state::ComponentOffer`.
+ *
+ * `installed`, `offered`: `Option<T>` **without** `skip_serializing_if` on the
+ * Rust side, so they serialize as `null` and are typed `T | null` here.
+ * `installable`, `third_party_repo`, `not_installed_files` **do** carry that
+ * attribute, so they are typed `T?` (absent, not `null`) — a different
+ * statement: "unknown yet" versus "known to be nothing".
+ */
+export interface ComponentOffer {
+  name: string
+  kind: 'core' | 'plugin' | 'third_party'
+  declared: boolean
+  binary_present: boolean
+  installed: string | null
+  offered: string | null
+  availability: Availability
+  /** Absent until an archive has been read. `false` is the files plugin. */
+  installable?: boolean
+  third_party_repo?: string
+  /**
+   * The core's own row only: what its last-installed archive carried outside
+   * what the core ever places itself (the privileged installer, the systemd
+   * units, the polkit rules). Absent until a core install has actually
+   * happened — never an empty array, since the core's archive always carries
+   * something here by design.
+   */
+  not_installed_files?: string[]
+}
+
+/** Left by the rollback unit, mirroring `ritornello_updater::rollback::Report`. */
+export interface RollbackSummary {
+  at_unix_s: number
+  restored: string[]
+  failed: string[]
+  core_restored: boolean
+}
+
+/** The payload of `GET /api/update`, mirroring `update::state::UpdateState`. */
+export interface UpdatePayload {
+  /**
+   * Tagged like the Rust enum: `{ kind, detail? }`. `installed` is the
+   * transient report of a just-finished install (Ruling 55: added after this
+   * type's first draft, adjacently tagged like `failed`) — it does not
+   * replace the row flipping to "up to date", which is the durable signal.
+   */
+  outcome:
+    | { kind: 'never_checked' }
+    | { kind: 'no_release' }
+    | { kind: 'ok' }
+    | { kind: 'installed'; detail: string }
+    | { kind: 'failed'; detail: string }
+  release_version: string | null
+  release_url: string | null
+  last_check_unix_s: number | null
+  components: ComponentOffer[]
+  /** What is happening right now, as a catalog message, or `null` when idle. */
+  busy: string | null
+  /** Left by the rollback unit. `null` when nothing has ever rolled back. */
+  last_rollback: RollbackSummary | null
+}
+
 export interface AudioDevice { name: string; description: string }
 export interface AudioPayload { devices: AudioDevice[]; current: string | null }
 export interface LocalePayload { locales: string[]; current: string | null }
@@ -63,6 +139,19 @@ export type StartupPower = 'on' | 'standby' | 'previous'
  * and not a free pattern: a faulty pattern would yield an empty display.
  */
 export type DateFormat = 'day_month_year' | 'year_month_day' | 'month_day_year'
+
+/** `off`, `check`, or `check_and_install`, mirroring `update::schedule::UpdatePolicy`. */
+export type UpdatePolicy = 'off' | 'check' | 'check_and_install'
+/** Mirrors `update::schedule::Weekday`. */
+export type Weekday =
+  | 'sunday' | 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday'
+/**
+ * Mirrors `update::schedule::UpdateCadence`, adjacently tagged
+ * (`#[serde(tag = "kind", content = "day")]`): daily carries no day, weekly
+ * names one.
+ */
+export type UpdateCadence = { kind: 'daily' } | { kind: 'weekly'; day: Weekday }
+
 /** Behavior settings, as served by `GET /api/settings`. */
 /**
  * Where each piece of what is displayed comes from: the contributor retained
@@ -151,6 +240,12 @@ export interface SettingsPayload {
   cover_max_pixels_mpx: number
   /** Step of the "forward" / "rewind" keys, in seconds. */
   seek_step_s: number
+  /** Nothing, check only, or check and install. See `UpdatePolicy`. */
+  update_policy: UpdatePolicy
+  /** Local hour (0-23) an automatic run may fire at. */
+  update_hour: number
+  /** How often an automatic run is due. */
+  update_cadence: UpdateCadence
 }
 /**
  * State of the player, as pushed by `/api/player`: everything that is volatile.

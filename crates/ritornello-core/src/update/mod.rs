@@ -21,7 +21,7 @@ pub mod routes;
 
 use crate::plugins::PluginManifest;
 use crate::status::{PluginAction, PluginOrder, StatusState};
-use crate::update::archive::{installable_from_ui, DECOMPRESSED_MAX};
+use crate::update::archive::{core_not_installed, installable_from_ui, DECOMPRESSED_MAX};
 use crate::update::download::{
     client, digest_hex, enough_room, fetch_capped, fetch_text, DownloadError, COMPRESSED_MAX,
 };
@@ -176,6 +176,25 @@ fn carry_installable(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) 
             .iter()
             .find(|p| p.name == row.name && p.offered == row.offered)
             .and_then(|p| p.installable);
+    }
+}
+
+/// Carries the core's own archive note across a check.
+///
+/// Unlike `installable`, this describes the **installed** core — the archive
+/// that put the currently running binary there — and not the offered one, so
+/// it must survive even a check that changes what is offered: only another
+/// core install ever produces a fresh value, never a check on its own. Keyed
+/// on `ComponentKind::Core` alone rather than name-plus-offered, because
+/// there is exactly one core row and its identity does not depend on what a
+/// release happens to offer next.
+fn carry_core_notes(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) {
+    let note = previous
+        .iter()
+        .find(|p| p.kind == ComponentKind::Core)
+        .and_then(|p| p.not_installed_files.clone());
+    if let Some(core) = fresh.iter_mut().find(|c| c.kind == ComponentKind::Core) {
+        core.not_installed_files = note;
     }
 }
 
@@ -374,6 +393,15 @@ const SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// not gain a dependant. A fourth copy would be the sign that this belongs in
 /// a crate of its own — this one names the file rather than its extension, so
 /// it works for a locale catalog and an input preset alike.
+/// Where the core's own archive note lives: beside the staging area, which
+/// this same unprivileged service already owns and creates before a download
+/// starts. Public so `main` can read it back at boot with the same path —
+/// see `read_core_archive_notes` there, the counterpart of
+/// `read_rollback_report`.
+pub fn core_notes_path(staging: &Path) -> PathBuf {
+    staging.join("core-archive-notes.json")
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("/"));
     let tmp = dir.join(format!(
@@ -647,12 +675,14 @@ impl Worker {
                 // "0.3.0 available" from a previous check would be a claim
                 // about a release that is no longer there.
                 let installed = self.installed_when_settled().await;
+                let mut components = component_offers(self.core_version, &[], &installed);
                 let mut state = self.state.write().await;
+                carry_core_notes(&state.components, &mut components);
                 state.outcome = CheckOutcome::NoRelease;
                 state.release_version = None;
                 state.release_url = None;
                 state.last_check_unix_s = Some(now_unix_s());
-                state.components = component_offers(self.core_version, &[], &installed);
+                state.components = components;
                 return None;
             }
             Err(ReleasesError::Unreadable) => {
@@ -670,6 +700,7 @@ impl Worker {
         let core = published.iter().find(|p| p.offer == Offer::Core);
         let mut state = self.state.write().await;
         carry_installable(&state.components, &mut components);
+        carry_core_notes(&state.components, &mut components);
         state.outcome = CheckOutcome::Ok;
         state.release_version = core.map(|p| p.version.clone());
         state.release_url = core.map(|p| release_page(&p.release_tag));
@@ -762,6 +793,7 @@ impl Worker {
             let mut components = component_offers(self.core_version, published, &installed);
             let mut state = self.state.write().await;
             carry_installable(&state.components, &mut components);
+            carry_core_notes(&state.components, &mut components);
             state.components = components;
         }
         let report = {
@@ -843,6 +875,11 @@ impl Worker {
 
         std::fs::create_dir_all(&self.staging)
             .map_err(|e| Refusal::Prepare(format!("creating {}: {e}", self.staging.display())))?;
+        // Read now, while `contents` still has its `entries`: a successful
+        // core placement ends with this process exiting a few lines below, so
+        // by the time anyone could read the note back from `self.state` the
+        // process that computed it is gone. See `write_core_archive_notes`.
+        let core_notes = is_core.then(|| core_not_installed(&contents.entries));
         let action = if is_core {
             let binary = contents.core_binary.ok_or_else(|| {
                 Refusal::Prepare(format!("the archive of {name} carries no core binary"))
@@ -881,6 +918,11 @@ impl Worker {
             // diagnosis.
             return Err(Refusal::Privileged(detail));
         }
+        // Written only once the placement actually succeeded: a refusal
+        // above must not claim a note about a core that was never placed.
+        if let Some(entries) = &core_notes {
+            self.write_core_archive_notes(entries);
+        }
         // The installer **copies** what it places (it renames a copy made
         // inside the target's own directory, since a rename across mounts is
         // not atomic), so the staged binary survives its own installation.
@@ -899,6 +941,26 @@ impl Worker {
         let path = self.staging.join(staged);
         std::fs::write(&path, bytes)
             .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", path.display())))
+    }
+
+    /// Records what this core's own archive did not install, so the row can
+    /// still say so after the restart that follows a successful placement.
+    ///
+    /// Best-effort and never a `Refusal`: a release note the page fails to
+    /// show is a much smaller loss than an install refused over writing it,
+    /// and by the time this runs the binary is already placed.
+    fn write_core_archive_notes(&self, entries: &[String]) {
+        let path = core_notes_path(&self.staging);
+        let text = match serde_json::to_string(entries) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("update: encoding the core's archive note: {e}");
+                return;
+            }
+        };
+        if let Err(e) = write_atomic(&path, text.as_bytes()) {
+            tracing::warn!("update: writing {}: {e}", path.display());
+        }
     }
 
     /// The locale catalogs and input presets a release owns.
@@ -1235,6 +1297,7 @@ mod tests {
             availability,
             installable: None,
             third_party_repo: None,
+            not_installed_files: None,
         }
     }
 
@@ -1277,6 +1340,39 @@ mod tests {
         let mut fresh = vec![row("files", ComponentKind::Plugin, Availability::UpdateAvailable)];
         carry_installable(&[previous], &mut fresh);
         assert_eq!(fresh[0].installable, Some(false));
+    }
+
+    /// The counterpart of `a_check_remembers_that_a_component_needs_a_manual_step`
+    /// for the core's own note: a plain check must not erase it, because only
+    /// another core install ever produces a fresh one.
+    #[test]
+    fn a_check_remembers_the_core_archive_note() {
+        let mut previous = row("core", ComponentKind::Core, Availability::Aligned);
+        previous.not_installed_files = Some(vec!["etc/systemd/system/ritornello.service".to_string()]);
+        let mut fresh = vec![row("core", ComponentKind::Core, Availability::UpdateAvailable)];
+        carry_core_notes(&[previous], &mut fresh);
+        assert_eq!(
+            fresh[0].not_installed_files,
+            Some(vec!["etc/systemd/system/ritornello.service".to_string()])
+        );
+    }
+
+    /// The note is a fact about the **installed** core, not about what a
+    /// release offers next: unlike `installable`, a change of `offered` must
+    /// not reset it — the test that would catch a wrongly-keyed
+    /// implementation copying `carry_installable`'s pairing verbatim.
+    #[test]
+    fn the_core_note_survives_a_new_offered_version_unlike_installable() {
+        let mut previous = row("core", ComponentKind::Core, Availability::UpdateAvailable);
+        previous.offered = Some("0.3.0".to_string());
+        previous.not_installed_files = Some(vec!["usr/local/lib/ritornello/ritornello-update".to_string()]);
+        let mut fresh = vec![row("core", ComponentKind::Core, Availability::UpdateAvailable)];
+        fresh[0].offered = Some("0.4.0".to_string());
+        carry_core_notes(&[previous], &mut fresh);
+        assert_eq!(
+            fresh[0].not_installed_files,
+            Some(vec!["usr/local/lib/ritornello/ritornello-update".to_string()])
+        );
     }
 
     /// A new version is a new archive, and nothing is known about it yet.

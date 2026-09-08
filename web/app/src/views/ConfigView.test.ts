@@ -64,6 +64,27 @@ const CATALOGUE = {
   cover_max_pixels_label: 'Plafond de décodage (Mpx)',
   cover_max_pixels_help: 'Lu dans l’en-tête.',
   toc_label: 'sections',
+  update_title: 'Mises à jour',
+  update_check: 'Vérifier',
+  update_install: 'Installer',
+  update_no_release: 'Aucune version publiée',
+  update_never_checked: 'Jamais vérifié',
+  update_aligned: 'À jour',
+  update_unknown: 'Inconnu',
+  update_rolled_back: 'Retour en arrière effectué',
+  update_archive_notes: '{count} fichiers non installés',
+  update_partial_failure_note: 'Seule la première cause est montrée',
+  update_release_notes: 'Notes de version',
+  update_policy_title: 'Vérifications automatiques',
+  update_policy_label: 'Politique',
+  update_policy_off: 'Désactivées',
+  update_policy_check: 'Vérifier seulement',
+  update_policy_check_and_install: 'Vérifier et installer',
+  update_hour_label: 'Heure',
+  update_cadence_label: 'Cadence',
+  update_cadence_daily: 'Quotidienne',
+  update_cadence_weekly: 'Hebdomadaire',
+  update_cadence_day_label: 'Jour',
 }
 
 /** Payloads served by the fake `fetch`, overridable per test. */
@@ -91,6 +112,16 @@ function payloads() {
       cover_cache_budget_mio: 50, cover_download_max_mio: 2,
       cover_source_max_mio: 20, cover_rendition: true, cover_max_edge_px: 640,
       cover_jpeg_quality: 85, cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16,
+      update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
+    } as unknown,
+    '/api/update': {
+      outcome: { kind: 'never_checked' },
+      release_version: null,
+      release_url: null,
+      last_check_unix_s: null,
+      components: [],
+      busy: null,
+      last_rollback: null,
     } as unknown,
     '/api/i18n': CATALOGUE as unknown,
   }
@@ -449,7 +480,7 @@ describe('ConfigView — language', () => {
     const before = spy.mock.calls.filter((c) => c[0] === '/api/i18n').length
     expect(before).toBeGreaterThan(0) // loaded at mount
 
-    await w.findAllComponents(Select)[1]!.vm.$emit('update:modelValue', 'en')
+    await w.findAllComponents(Select)[3]!.vm.$emit('update:modelValue', 'en')
     await w.find('[data-lang-change]').trigger('click')
     await flushPromises()
 
@@ -485,7 +516,7 @@ describe('ConfigView — language', () => {
       clock_date_dmy: '31/12/2026 (en)',
       audio_default_device: 'System default',
     }
-    await w.findAllComponents(Select)[1]!.vm.$emit('update:modelValue', 'en')
+    await w.findAllComponents(Select)[3]!.vm.$emit('update:modelValue', 'en')
     await w.find('[data-lang-change]').trigger('click')
     await flushPromises()
 
@@ -539,7 +570,7 @@ describe('ConfigView — audio output', () => {
 
   it('sends the PUT of the chosen device, unchanged', async () => {
     const { w, puts } = await mountView()
-    expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('hw:CARD=HDMI')
+    expect(w.findAllComponents(Select)[2]!.props('modelValue')).toBe('hw:CARD=HDMI')
     await w.find('[data-audio-change]').trigger('click')
     await flushPromises()
     expect(puts).toEqual([{ url: '/api/audio-output', body: { device: 'hw:CARD=HDMI' } }])
@@ -555,7 +586,7 @@ describe('ConfigView — audio output', () => {
         current: null,
       },
     })
-    expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('__system_default__')
+    expect(w.findAllComponents(Select)[2]!.props('modelValue')).toBe('__system_default__')
     await w.find('[data-audio-change]').trigger('click')
     await flushPromises()
     expect(puts).toEqual([{ url: '/api/audio-output', body: { device: null } }])
@@ -563,7 +594,10 @@ describe('ConfigView — audio output', () => {
 
   it('the default entry is the first of the list', async () => {
     const { w } = await mountView()
-    const first = w.findAllComponents(SelectItem)[0]!
+    // The audio `Select` itself, not literally the page's first `Select` any
+    // more: the update policy and cadence selects now precede it.
+    const audioSelect = w.findAllComponents(Select)[2]!
+    const first = audioSelect.findAllComponents(SelectItem)[0]!
     expect(first.attributes('data-audio-default')).toBeDefined()
     expect(first.text()).toBe('Par défaut (système)')
   })
@@ -587,14 +621,14 @@ describe('ConfigView — audio output', () => {
         current: 'hw:CARD=USB',
       },
     })
-    expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('hw:CARD=USB')
+    expect(w.findAllComponents(Select)[2]!.props('modelValue')).toBe('hw:CARD=USB')
     const values = w.findAllComponents(SelectItem).map((i) => i.props('value'))
     expect(values).toContain('hw:CARD=USB')
   })
 
   it('no device listed: the default entry remains usable', async () => {
     const { w, puts } = await mountView({ '/api/audio-output': { devices: [], current: null } })
-    expect(w.findAllComponents(Select)[0]!.props('modelValue')).toBe('__system_default__')
+    expect(w.findAllComponents(Select)[2]!.props('modelValue')).toBe('__system_default__')
     await w.find('[data-audio-change]').trigger('click')
     await flushPromises()
     expect(puts).toEqual([{ url: '/api/audio-output', body: { device: null } }])
@@ -652,6 +686,7 @@ describe('ConfigView — settings', () => {
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
+          update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
         },
       },
     ])
@@ -672,6 +707,7 @@ describe('ConfigView — settings', () => {
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
+          update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
         },
       },
     ])
@@ -693,6 +729,7 @@ describe('ConfigView — settings', () => {
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
+          update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
         },
       },
     ])
@@ -743,6 +780,7 @@ describe('ConfigView — overlays', () => {
           cover_cache_budget_mio: 50, cover_download_max_mio: 2,
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
+          update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
         },
       },
     ])
@@ -1046,7 +1084,7 @@ describe('ConfigView — table of contents', () => {
     // No more "Dernières erreurs": the card moved to the System tab, and the
     // table of contents must not keep an entry pointing at nothing.
     expect(links.map((l) => l.text())).toEqual([
-      'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Date et heure', 'Volume maintenu',
+      'Mises à jour', 'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Date et heure', 'Volume maintenu',
       'Incrustations', 'Déplacement', "Pochettes d'album",
     ])
     // Hidden on small screens: the column follows the shell width, there is no
@@ -1060,9 +1098,11 @@ describe('ConfigView — table of contents', () => {
     const target = w.find('#audio')
     expect(target.exists()).toBe(true)
     target.element.scrollIntoView = scrollIntoView
-    await w.findAll('[data-toc-link]')[1]!.trigger('click')
+    // "Sortie audio" is now the third link: "Mises à jour" and "Plugins"
+    // both precede it.
+    await w.findAll('[data-toc-link]')[2]!.trigger('click')
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' })
-    expect(w.findAll('[data-toc-link]')[1]!.attributes('aria-current')).toBe('true')
+    expect(w.findAll('[data-toc-link]')[2]!.attributes('aria-current')).toBe('true')
   })
 
   it('scrolling updates the active section (scrollspy)', async () => {

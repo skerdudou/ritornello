@@ -182,6 +182,31 @@ pub fn installable_from_ui(entries: &[String]) -> bool {
     binaries == 1
 }
 
+/// What a **core** archive carries that `install_one` never places anywhere:
+/// everything outside the core binary and the two `etc/ritornello`
+/// subdirectories a release owns. In practice this is the privileged
+/// installer, the systemd units and the polkit rules — root could in
+/// principle place some of these, but nothing on this unprivileged side ever
+/// does, so this is exactly what a core update did not touch.
+///
+/// `PLUGINS_PREFIX` is excluded too, even though a core archive has never
+/// carried one: the rule this function states is "everything `install_one`
+/// places", and that prefix is one of the places it looks, whichever archive
+/// is asked about.
+///
+/// Directory entries are dropped: they describe no content, and the page has
+/// nothing to say about a directory a release "carries".
+pub fn core_not_installed(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| !e.ends_with('/'))
+        .filter(|e| e.as_str() != CORE_BINARY)
+        .filter(|e| !e.starts_with(PLUGINS_PREFIX))
+        .filter(|e| !ETC_PREFIXES.iter().any(|p| e.starts_with(p)))
+        .cloned()
+        .collect()
+}
+
 /// Rejects an absolute path or any component that could climb out.
 ///
 /// Nothing downstream extracts to a path taken from the archive, so this is
@@ -1052,5 +1077,85 @@ mod tests {
         let tar = builder.into_inner().unwrap();
         let err = read(&gzip(tar), DECOMPRESSED_MAX).expect_err("an absolute path is refused");
         assert!(matches!(err, ArchiveError::UnsafeEntry(_)), "{err:?}");
+    }
+
+    /// The real entry list of the core archive `installable_from_ui`'s own
+    /// test pins (`the_core_archive_could_never_pass_the_rule_that_governs_a_plugin`
+    /// in `update::mod`), so a change to either list is caught by both tests
+    /// at once. What must come out: the privileged installer, the three
+    /// systemd units and the two polkit rules — the core binary and the two
+    /// locale files are excluded because `install_one` does place them.
+    #[test]
+    fn a_core_archive_names_the_installer_the_units_and_the_rules_as_not_installed() {
+        let entries: Vec<String> = [
+            "etc/",
+            "etc/polkit-1/",
+            "etc/polkit-1/rules.d/",
+            "etc/polkit-1/rules.d/52-ritornello-update.rules",
+            "etc/polkit-1/rules.d/50-ritornello-power.rules",
+            "etc/ritornello/",
+            "etc/ritornello/locales/",
+            "etc/ritornello/locales/common/",
+            "etc/ritornello/locales/common/fr.toml",
+            "etc/ritornello/locales/core/",
+            "etc/ritornello/locales/core/fr.toml",
+            "etc/systemd/",
+            "etc/systemd/system/",
+            "etc/systemd/system/ritornello.service",
+            "etc/systemd/system/ritornello-update.service",
+            "etc/systemd/system/ritornello-rollback.service",
+            "usr/",
+            "usr/local/",
+            "usr/local/lib/",
+            "usr/local/lib/ritornello/",
+            "usr/local/lib/ritornello/ritornello-update",
+            "usr/local/bin/",
+            "usr/local/bin/ritornello-core",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut not_installed = core_not_installed(&entries);
+        not_installed.sort();
+        let mut expected: Vec<String> = [
+            "etc/polkit-1/rules.d/52-ritornello-update.rules",
+            "etc/polkit-1/rules.d/50-ritornello-power.rules",
+            "etc/systemd/system/ritornello.service",
+            "etc/systemd/system/ritornello-update.service",
+            "etc/systemd/system/ritornello-rollback.service",
+            "usr/local/lib/ritornello/ritornello-update",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        expected.sort();
+        assert_eq!(not_installed, expected);
+    }
+
+    /// A plugin archive carries nothing outside its own prefix (the fixture
+    /// in `installable_from_ui`'s own test), so every entry that is not a
+    /// directory comes back — proving the function names what is left
+    /// **outside** the placed prefixes rather than an empty set by accident.
+    #[test]
+    fn a_plugin_archive_has_nothing_a_core_rule_would_exempt() {
+        let entries: Vec<String> = [
+            "etc/",
+            "etc/ritornello/",
+            "etc/ritornello/locales/",
+            "etc/ritornello/locales/radio/",
+            "etc/ritornello/locales/radio/fr.toml",
+            "usr/",
+            "usr/local/",
+            "usr/local/lib/",
+            "usr/local/lib/ritornello/",
+            "usr/local/lib/ritornello/plugins/",
+            "usr/local/lib/ritornello/plugins/ritornello-plugin-radio",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        // Everything here is under an installed prefix (`ETC_PREFIXES` or
+        // `PLUGINS_PREFIX`) or is a directory, so nothing is left over.
+        assert!(core_not_installed(&entries).is_empty());
     }
 }

@@ -431,6 +431,22 @@ fn read_rollback_report(prefix: &Path) -> Option<ritornello_updater::rollback::R
     }
 }
 
+/// What `Worker::write_core_archive_notes` left behind for the core's own
+/// row, if anything. `None` for an absent or corrupt file, same convention as
+/// `read_rollback_report` just above — an unreadable note says less than no
+/// note at all, and is not a reason to refuse booting.
+fn read_core_archive_notes(staging: &Path) -> Option<Vec<String>> {
+    let path = update::core_notes_path(staging);
+    let text = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str(&text) {
+        Ok(entries) => Some(entries),
+        Err(e) => {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            None
+        }
+    }
+}
+
 /// The acknowledgment for a `PluginAction` with no wiring behind it yet.
 ///
 /// `false` uniformly across the three that remain — `Declare`, `Undeclare`
@@ -1782,6 +1798,24 @@ async fn main() -> Result<()> {
     // it is the only trace of a nocturnal rollback, and the next rollback
     // overwrites it, which is enough. An absent file is the ordinary case.
     update_state.write().await.last_rollback = read_rollback_report(Path::new("/"));
+    // `state.json`'s own directory: the staging area is state, not
+    // configuration, and the privileged binary reads it from exactly this
+    // path.
+    let staging_dir = update::download::staging_dir(
+        state_path.parent().unwrap_or(Path::new("/var/lib/ritornello")),
+    );
+    // The core's own archive note, read the same way and for the same reason
+    // as the rollback report just above: `install_one` computed it in the
+    // process that is about to exit and hand off to this one, so there is no
+    // other door through which it could reach the row it belongs on.
+    if let Some(entries) = read_core_archive_notes(&staging_dir) {
+        let mut state = update_state.write().await;
+        if let Some(core) =
+            state.components.iter_mut().find(|c| c.kind == update::state::ComponentKind::Core)
+        {
+            core.not_installed_files = Some(entries);
+        }
+    }
     tokio::spawn(update::run_worker(
         update::Worker {
             state: update_state.clone(),
@@ -1789,12 +1823,7 @@ async fn main() -> Result<()> {
             status: status_state.clone(),
             manifest: plugins_path.clone(),
             plugins_tx: plugin_order_tx.clone(),
-            // `state.json`'s own directory: the staging area is state, not
-            // configuration, and the privileged binary reads it from exactly
-            // this path.
-            staging: update::download::staging_dir(
-                state_path.parent().unwrap_or(Path::new("/var/lib/ritornello")),
-            ),
+            staging: staging_dir,
             root: PathBuf::from("/"),
             core_version: env!("CARGO_PKG_VERSION"),
             restart: restart_hook.clone(),

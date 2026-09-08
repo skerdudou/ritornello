@@ -52,6 +52,9 @@ const settings = ref<SettingsPayload>({
   cover_passthrough_max_ko: 150,
   cover_max_pixels_mpx: 16,
   seek_step_s: 10,
+  update_policy: 'off',
+  update_hour: 3,
+  update_cadence: { kind: 'daily' },
 })
 onMounted(async () => {
   settings.value = await api.get<SettingsPayload>('/api/settings').catch(() => settings.value)

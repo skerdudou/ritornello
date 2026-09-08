@@ -26,6 +26,22 @@ test('navigation between the home page, the config and the plugin pages', async 
   // caught.
   await expect(page.getByRole('cell', { name: 'radio', exact: true })).toBeVisible()
 
+  // The update card, and its two buttons. Counted rather than merely found:
+  // a button removed by a refactor must turn this red.
+  await expect(page.locator('[data-update-card]')).toBeVisible()
+  await expect(page.locator('[data-update-card] button')).toHaveCount(2)
+  await expect(page.locator('[data-update-summary]')).not.toHaveText('')
+  // The policy selector, with its hour and its cadence. The harness has no
+  // access to GitHub, so this journey never presses "Check" and never
+  // depends on a release existing — see the state assertion further down.
+  await expect(page.locator('[data-update-policy]')).toBeVisible()
+  await expect(page.locator('[data-update-hour]')).toBeVisible()
+  await expect(page.locator('[data-update-cadence]')).toBeVisible()
+  // What a device with no network sees: `never_checked`, not a fault. If the
+  // harness ever grew a real `/api/update` release, this line is exactly what
+  // would catch a summary that quietly started depending on it.
+  await expect(page.locator('[data-update-summary]')).toHaveText('Never checked')
+
   // The plugins table's columns, against a real core. Nothing here counted
   // them before, so the Version column could have been added — or dropped
   // again — without a single test noticing, while the design assumed this
