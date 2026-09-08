@@ -29,10 +29,13 @@ pub enum EditError {
     NotDeclared(String),
     AlreadyDeclared(String),
     /// The fragment from the archive declares a name other than the one we
-    /// asked to install — or declares more than one plugin at all, which is
-    /// just as much a refusal to trust it: the caller asked to install
-    /// exactly one.
+    /// asked to install.
     FragmentMismatch { expected: String, found: Option<String> },
+    /// The fragment declares more than one plugin. Its own variant rather than
+    /// `FragmentMismatch { found: None }`, which would report "declares None"
+    /// about a block that declared two — sending the reader after a malformed
+    /// fragment instead of an over-full one.
+    FragmentDeclaresSeveral { expected: String },
     OutOfRange,
 }
 
@@ -47,6 +50,10 @@ impl std::fmt::Display for EditError {
                 f,
                 "the archive's plugins.toml block declares {found:?}, not {expected:?}"
             ),
+            Self::FragmentDeclaresSeveral { expected } => write!(
+                f,
+                "the archive's plugins.toml block declares more than one plugin, not just {expected:?}"
+            ),
             Self::OutOfRange => write!(f, "that plugin is already at the end it was asked to move towards"),
         }
     }
@@ -56,13 +63,20 @@ impl std::error::Error for EditError {}
 
 /// Normalises `\r\n` to `\n` before anything else touches the text.
 ///
-/// `split_header` searches and slices by byte offset; searching a
-/// CRLF-normalised copy while slicing the original drifts that offset by one
-/// byte per `\r\n` line before the cut, which can land mid-character on a
-/// multibyte comment and panic. Normalising once, at the entry point of every
-/// public function, means every search and every slice downstream agree on
-/// the same bytes — and it is lossless in practice, since `toml_edit` emits
-/// `\n` regardless of what it read.
+/// States an invariant, not just a fix for one function's arithmetic: every
+/// byte index computed anywhere in this module refers to `\n`-only text. The
+/// defect this exists to prevent was exactly an index computed against one
+/// representation of a string and then applied to a different one — so the
+/// invariant is worth holding here, at the one entry point every public
+/// function shares, independently of whether any single downstream function
+/// still needs it. It is lossless in practice, since `toml_edit` emits `\n`
+/// regardless of what it read.
+///
+/// `split_header` (below) no longer mixes representations either, which on
+/// its own would already prevent the original panic. **Neither guard is
+/// pinned by a test on its own** — reverting either alone leaves the other
+/// holding, and only removing both together reproduces it (see that test's
+/// doc comment). This is deliberate, not an oversight: keep both.
 fn normalize(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
@@ -98,6 +112,17 @@ pub fn names_in_order(text: &str) -> Result<Vec<String>, EditError> {
 /// Assumes `prefix` is already `\n`-only (every caller normalises at its own
 /// entry point, see `normalize`): searching and slicing the same string is
 /// what keeps the byte offset honest.
+///
+/// This is a local correctness fix, not a duplicate of `normalize`'s
+/// invariant: it no longer needs both representations to agree, because it
+/// stops mixing them (the old version searched a normalised copy but sliced
+/// the original). `normalize` is still worth keeping independently — it holds
+/// the invariant for the whole module, not just this one function's
+/// arithmetic. **Neither guard is pinned by a test on its own**: reverting
+/// either alone leaves the other holding, and only removing both together
+/// reproduces the original panic (see
+/// `crlf_with_a_blank_line_in_the_header_and_a_non_ascii_character_does_not_panic`).
+/// Deliberate, not an oversight — keep both.
 fn split_header(prefix: &str) -> (String, String) {
     match prefix.rfind("\n\n") {
         Some(at) => {
@@ -184,9 +209,9 @@ fn set_prefix(table: &mut toml_edit::Table, prefix: &str) {
 /// `expected` is checked against the block's own `name`: the fragment comes
 /// from inside a downloaded archive, and trusting it to declare the plugin we
 /// asked for would let an archive declare something else entirely. A fragment
-/// carrying more than one entry is refused the same way: taking only the
-/// first and silently dropping the rest would hide that the archive did not
-/// cleanly declare the one plugin asked for.
+/// carrying more than one entry is refused too (`FragmentDeclaresSeveral`):
+/// taking only the first and silently dropping the rest would hide that the
+/// archive did not cleanly declare the one plugin asked for.
 ///
 /// A file with no `[[plugin]]` entry at all is not refused: it covers both a
 /// genuinely fresh installation and a file that just had its last plugin
@@ -201,7 +226,7 @@ pub fn append_block(text: &str, fragment: &str, expected: &str) -> Result<String
         fragment_doc.get("plugin").and_then(Item::as_array_of_tables).ok_or(EditError::NoPluginTable)?.iter();
     let incoming = fragment_blocks.next().ok_or(EditError::NoPluginTable)?.clone();
     if fragment_blocks.next().is_some() {
-        return Err(EditError::FragmentMismatch { expected: expected.to_string(), found: None });
+        return Err(EditError::FragmentDeclaresSeveral { expected: expected.to_string() });
     }
     let found = name_of(&incoming);
     if found.as_deref() != Some(expected) {
@@ -454,7 +479,7 @@ exec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-radiofrance-metas\"
 ";
         assert!(matches!(
             append_block(&realistic(), fragment, "nrj-metas"),
-            Err(EditError::FragmentMismatch { .. })
+            Err(EditError::FragmentDeclaresSeveral { .. })
         ));
     }
 
