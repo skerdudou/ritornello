@@ -16,6 +16,7 @@ mod status;
 mod system;
 mod theme;
 mod types;
+mod update;
 mod web;
 
 use crate::core::MetadataWiring;

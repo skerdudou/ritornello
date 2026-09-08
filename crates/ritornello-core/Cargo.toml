@@ -52,6 +52,11 @@ lofty = "0.25.1"
 # NAS, and each is code that compiles and parses input coming from the network
 # — attack surface as much as compile time.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# SHA-256 of a downloaded archive, checked against the release's SHA256SUMS.
+# Honest about what this buys: that file travels in the same release, so it
+# catches a corrupted download, not a malicious release. Authenticity comes
+# from HTTPS to GitHub with the repository fixed at compile time.
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
