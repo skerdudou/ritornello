@@ -20,7 +20,7 @@
 //! Every function here is pure text in, text out: no path, no I/O. That is
 //! what lets the CRLF case be a test rather than a hope.
 
-use toml_edit::{DocumentMut, Item};
+use toml_edit::{ArrayOfTables, DocumentMut, Item};
 
 #[derive(Debug)]
 pub enum EditError {
@@ -29,7 +29,9 @@ pub enum EditError {
     NotDeclared(String),
     AlreadyDeclared(String),
     /// The fragment from the archive declares a name other than the one we
-    /// asked to install.
+    /// asked to install — or declares more than one plugin at all, which is
+    /// just as much a refusal to trust it: the caller asked to install
+    /// exactly one.
     FragmentMismatch { expected: String, found: Option<String> },
     OutOfRange,
 }
@@ -52,6 +54,19 @@ impl std::fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
+/// Normalises `\r\n` to `\n` before anything else touches the text.
+///
+/// `split_header` searches and slices by byte offset; searching a
+/// CRLF-normalised copy while slicing the original drifts that offset by one
+/// byte per `\r\n` line before the cut, which can land mid-character on a
+/// multibyte comment and panic. Normalising once, at the entry point of every
+/// public function, means every search and every slice downstream agree on
+/// the same bytes — and it is lossless in practice, since `toml_edit` emits
+/// `\n` regardless of what it read.
+fn normalize(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
 fn parse(text: &str) -> Result<DocumentMut, EditError> {
     text.parse::<DocumentMut>().map_err(|e| EditError::Parse(e.to_string()))
 }
@@ -63,7 +78,8 @@ fn name_of(table: &toml_edit::Table) -> Option<String> {
 /// The declared names, in file order — which **is** the priority, both for the
 /// source cycle and for metadata arbitration.
 pub fn names_in_order(text: &str) -> Result<Vec<String>, EditError> {
-    let doc = parse(text)?;
+    let text = normalize(text);
+    let doc = parse(&text)?;
     let blocks = doc
         .get("plugin")
         .and_then(Item::as_array_of_tables)
@@ -78,14 +94,67 @@ pub fn names_in_order(text: &str) -> Result<Vec<String>, EditError> {
 /// describes the file, everything after describes the plugin. With no blank
 /// line the whole block is the header — which is the real file's case, and the
 /// reason `radio` owns no comment of its own there.
+///
+/// Assumes `prefix` is already `\n`-only (every caller normalises at its own
+/// entry point, see `normalize`): searching and slicing the same string is
+/// what keeps the byte offset honest.
 fn split_header(prefix: &str) -> (String, String) {
-    let normalized = prefix.replace("\r\n", "\n");
-    match normalized.rfind("\n\n") {
+    match prefix.rfind("\n\n") {
         Some(at) => {
             let cut = at + 2;
-            (prefix[..cut.min(prefix.len())].to_string(), prefix[cut.min(prefix.len())..].to_string())
+            (prefix[..cut].to_string(), prefix[cut..].to_string())
         }
         None => (prefix.to_string(), String::new()),
+    }
+}
+
+/// Joins a lifted file header with the comment of whoever becomes first, with
+/// exactly one blank line between them when both are non-empty — the same
+/// shape `split_header` cuts on.
+///
+/// This is what keeps the header and a plugin's own comment distinguishable
+/// across any number of operations. Without a separator, a header handed to a
+/// table that already carries its own comment glues onto it seamlessly; the
+/// next operation's `split_header` then finds no blank line, reads the WHOLE
+/// combined block as pure header, and carries it entirely along with whatever
+/// moves next. Nothing is deleted when this happens — a plugin's comment
+/// simply migrates onto its neighbour, silently, one operation at a time.
+///
+/// When the table taking the header has no comment of its own, the header is
+/// attached with no trailing blank line, never growing one on repeated
+/// extraction/reattachment (see `trim_trailing_blank_line`): a table with an
+/// empty comment must render exactly as a bare header directly above
+/// `[[plugin]]`, matching the shape of the real file's own `radio` entry.
+fn glue_header(header: &str, comment: &str) -> String {
+    let comment = comment.trim_start_matches('\n');
+    if comment.is_empty() {
+        return trim_trailing_blank_line(header);
+    }
+    if header.is_empty() {
+        return comment.to_string();
+    }
+    if header.ends_with("\n\n") {
+        format!("{header}{comment}")
+    } else if header.ends_with('\n') {
+        format!("{header}\n{comment}")
+    } else {
+        format!("{header}\n\n{comment}")
+    }
+}
+
+/// Collapses a trailing blank line (`"\n\n"`) down to a single trailing
+/// newline, leaving anything else untouched.
+///
+/// `split_header` always returns a `header` that either ends with a blank
+/// line (one was found) or ends with a single newline (none was — the header
+/// is the whole prefix). Reattaching it to a table with no comment of its own
+/// must reproduce the second shape either way, or an extraction followed by a
+/// reattachment with nothing to separate would grow the header by one blank
+/// line every round trip.
+fn trim_trailing_blank_line(s: &str) -> String {
+    match s.strip_suffix("\n\n") {
+        Some(stripped) => format!("{stripped}\n"),
+        None => s.to_string(),
     }
 }
 
@@ -98,6 +167,13 @@ fn prefix_of(table: &toml_edit::Table) -> String {
         .to_string()
 }
 
+/// `prefix_of`, stripped of any leading blank line — a table's own comment
+/// and nothing else, regardless of whether it currently sits first (no
+/// leading blank line) or not (one leading blank line, by convention).
+fn bare_comment(table: &toml_edit::Table) -> String {
+    prefix_of(table).trim_start_matches('\n').to_string()
+}
+
 fn set_prefix(table: &mut toml_edit::Table, prefix: &str) {
     let suffix = table.decor().suffix().and_then(|s| s.as_str()).unwrap_or("").to_string();
     *table.decor_mut() = toml_edit::Decor::new(prefix, suffix);
@@ -107,27 +183,32 @@ fn set_prefix(table: &mut toml_edit::Table, prefix: &str) {
 ///
 /// `expected` is checked against the block's own `name`: the fragment comes
 /// from inside a downloaded archive, and trusting it to declare the plugin we
-/// asked for would let an archive declare something else entirely.
+/// asked for would let an archive declare something else entirely. A fragment
+/// carrying more than one entry is refused the same way: taking only the
+/// first and silently dropping the rest would hide that the archive did not
+/// cleanly declare the one plugin asked for.
+///
+/// A file with no `[[plugin]]` entry at all is not refused: it covers both a
+/// genuinely fresh installation and a file that just had its last plugin
+/// removed, header preserved in the document's trailing slot by
+/// `remove_entry` — this is the only way back from that state.
 pub fn append_block(text: &str, fragment: &str, expected: &str) -> Result<String, EditError> {
-    let fragment_doc = parse(fragment)?;
-    let incoming = fragment_doc
-        .get("plugin")
-        .and_then(Item::as_array_of_tables)
-        .and_then(|a| a.get(0).cloned())
-        .ok_or(EditError::NoPluginTable)?;
+    let fragment = normalize(fragment);
+    let text = normalize(text);
+
+    let fragment_doc = parse(&fragment)?;
+    let mut fragment_blocks =
+        fragment_doc.get("plugin").and_then(Item::as_array_of_tables).ok_or(EditError::NoPluginTable)?.iter();
+    let incoming = fragment_blocks.next().ok_or(EditError::NoPluginTable)?.clone();
+    if fragment_blocks.next().is_some() {
+        return Err(EditError::FragmentMismatch { expected: expected.to_string(), found: None });
+    }
     let found = name_of(&incoming);
     if found.as_deref() != Some(expected) {
         return Err(EditError::FragmentMismatch { expected: expected.to_string(), found });
     }
 
-    let mut doc = parse(text)?;
-    let blocks = doc
-        .get_mut("plugin")
-        .and_then(Item::as_array_of_tables_mut)
-        .ok_or(EditError::NoPluginTable)?;
-    if blocks.iter().any(|t| name_of(t).as_deref() == Some(expected)) {
-        return Err(EditError::AlreadyDeclared(expected.to_string()));
-    }
+    let mut doc = parse(&text)?;
     let mut incoming = incoming;
     // `toml_edit` renders array-of-tables entries by their own `doc_position`
     // (falling back to the previous entry's when unset), NOT by their index in
@@ -135,19 +216,52 @@ pub fn append_block(text: &str, fragment: &str, expected: &str) -> Result<String
     // position, and would render there instead of at the end. Clearing it
     // makes this entry inherit whatever comes right before it once pushed.
     incoming.set_position(None);
-    // One blank line before the block, whatever the fragment's own leading
-    // decoration was: the separator belongs to this file's layout, not to the
-    // archive's. Unlike `move_entry`'s use of `split_header`, the fragment is
-    // a single entry — there is no larger "file" for its own leading comment
-    // to be a header OF, so the whole prefix is that plugin's own comment.
-    let own = prefix_of(&incoming);
-    set_prefix(&mut incoming, &format!("\n{}", own.trim_start_matches('\n')));
-    blocks.push(incoming);
+
+    match doc.get_mut("plugin").and_then(Item::as_array_of_tables_mut) {
+        Some(blocks) => {
+            if blocks.iter().any(|t| name_of(t).as_deref() == Some(expected)) {
+                return Err(EditError::AlreadyDeclared(expected.to_string()));
+            }
+            // One blank line before the block, whatever the fragment's own
+            // leading decoration was: the separator belongs to this file's
+            // layout, not to the archive's. Unlike `move_entry`'s use of
+            // `split_header`, the fragment is a single entry — there is no
+            // larger "file" for its own leading comment to be a header OF, so
+            // the whole prefix is that plugin's own comment.
+            let own = bare_comment(&incoming);
+            set_prefix(&mut incoming, &format!("\n{own}"));
+            blocks.push(incoming);
+        }
+        None => {
+            // No plugin table at all. Any header preserved by `remove_entry`
+            // when the last plugin was removed lives in the document's
+            // trailing slot — the same slot a comment-only document round
+            // trips through. A document that never had one leaves it empty,
+            // and `glue_header` treats an empty header as "attach the
+            // fragment's own comment with no separator", which is exactly
+            // right for the very first entry of a file.
+            let header = doc.trailing().as_str().unwrap_or("").to_string();
+            let own = bare_comment(&incoming);
+            set_prefix(&mut incoming, &glue_header(&header, &own));
+            let mut fresh = ArrayOfTables::new();
+            fresh.push(incoming);
+            doc.insert("plugin", Item::ArrayOfTables(fresh));
+            doc.set_trailing("");
+        }
+    }
     Ok(doc.to_string())
 }
 
+/// Removes the entry named `name`.
+///
+/// Removing every plugin does not lose the file's header: with nobody left to
+/// carry it, it is stashed in the document's own trailing slot (the same slot
+/// a comment-only document round-trips through) so `append_block` can find it
+/// again — otherwise uninstalling the last plugin would be a one-way door,
+/// since `append_block` requires a `[[plugin]]` table to attach to.
 pub fn remove_entry(text: &str, name: &str) -> Result<String, EditError> {
-    let mut doc = parse(text)?;
+    let text = normalize(text);
+    let mut doc = parse(&text)?;
     let blocks = doc
         .get_mut("plugin")
         .and_then(Item::as_array_of_tables_mut)
@@ -157,22 +271,29 @@ pub fn remove_entry(text: &str, name: &str) -> Result<String, EditError> {
         .position(|t| name_of(t).as_deref() == Some(name))
         .ok_or_else(|| EditError::NotDeclared(name.to_string()))?;
     // Removing the first entry would take the file header with it, exactly as
-    // moving it would. Hand the header to whoever becomes first.
+    // moving it would. Hand the header to whoever becomes first — or, if
+    // nobody does, to the document's trailing slot.
     let header = if at == 0 {
-        let (header, _) = split_header(&prefix_of(blocks.get(0).expect("index 0 exists")));
-        Some(header)
+        Some(split_header(&prefix_of(blocks.get(0).expect("index 0 exists"))).0)
     } else {
         None
     };
     blocks.remove(at);
-    if let (Some(header), Some(first)) = (header, blocks.get_mut(0)) {
-        // The new first entry's prefix is already, in full, its own comment —
-        // never a header candidate — so `split_header` must not be applied to
-        // it a second time: with no blank line of its own (as in the real
-        // file, e.g. `cd`'s comment), it would read as "all header, no
-        // comment" and drop it, the same trap `move_entry` hit.
-        let comment = prefix_of(first);
-        set_prefix(first, &format!("{header}{}", comment.trim_start_matches('\n')));
+    match (header, blocks.get_mut(0)) {
+        (Some(header), Some(first)) => {
+            // `glue_header`, not a direct concatenation: gluing the header
+            // straight onto the new first entry's own comment with no
+            // separator is exactly the defect a round trip (move down, move
+            // back up) exposed — the next `split_header` cannot tell the two
+            // apart any more and carries both away together.
+            let comment = bare_comment(first);
+            set_prefix(first, &glue_header(&header, &comment));
+        }
+        (Some(header), None) => {
+            doc.remove("plugin");
+            doc.set_trailing(header);
+        }
+        (None, _) => {}
     }
     Ok(doc.to_string())
 }
@@ -183,7 +304,8 @@ pub fn remove_entry(text: &str, name: &str) -> Result<String, EditError> {
 /// there, so a request that arrives anyway is a bug or a stale page, and
 /// answering "done" to it would be a lie.
 pub fn move_entry(text: &str, name: &str, delta: i32) -> Result<String, EditError> {
-    let mut doc = parse(text)?;
+    let text = normalize(text);
+    let mut doc = parse(&text)?;
     let blocks = doc
         .get_mut("plugin")
         .and_then(Item::as_array_of_tables_mut)
@@ -193,17 +315,19 @@ pub fn move_entry(text: &str, name: &str, delta: i32) -> Result<String, EditErro
         .position(|t| name_of(t).as_deref() == Some(name))
         .ok_or_else(|| EditError::NotDeclared(name.to_string()))?;
     let to = i64::try_from(from).expect("a plugin count fits in i64") + i64::from(delta);
+    // Not just a nicer error than a library panic: `ArrayOfTables::insert`
+    // below panics if given an index past the end, so this guard is the only
+    // thing standing between a caller's bad index and a panic inside
+    // `toml_edit` rather than the `OutOfRange` a caller can actually handle.
     if to < 0 || to as usize >= blocks.len() {
         return Err(EditError::OutOfRange);
     }
     let to = to as usize;
 
-    // Lift the file header off whoever is first, before anything moves.
-    let (header, first_comment) = split_header(&prefix_of(blocks.get(0).expect("non-empty")));
-    {
-        let first = blocks.get_mut(0).expect("non-empty");
-        set_prefix(first, &first_comment);
-    }
+    // Lift the file header off whoever is CURRENTLY first — only that table
+    // can carry one.
+    let (header, first_own) = split_header(&prefix_of(blocks.get(0).expect("non-empty")));
+    set_prefix(blocks.get_mut(0).expect("non-empty"), &first_own);
 
     let mut taken = blocks.get(from).expect("found above").clone();
     // `toml_edit` renders array-of-tables entries by their own `doc_position`
@@ -212,25 +336,31 @@ pub fn move_entry(text: &str, name: &str, delta: i32) -> Result<String, EditErro
     // moved table would keep rendering at its OLD spot regardless of where it
     // now sits in the array.
     taken.set_position(None);
-    // A moved block keeps its own comment and gets this file's separator.
-    // `split_header` is not needed here even when `from == 0`: the header-lift
-    // above already removed the file's header from whichever table was first,
-    // so what remains on `taken`'s prefix — first or not — is only ever its
-    // own comment, never a header candidate.
-    let own = prefix_of(&taken);
-    set_prefix(&mut taken, &format!("\n{}", own.trim_start_matches('\n')));
     blocks.remove(from);
     // `insert` shifts the rest right, which is what both directions want once
     // the source has been removed.
     blocks.insert(to, taken);
 
-    // Give the header back to whoever is first now. Its current prefix is
-    // already exactly its own comment and nothing else — `split_header` would
-    // wrongly read a comment with no blank line of its own as "all header,
-    // no comment" and drop it, the same trap as above.
-    let first = blocks.get_mut(0).expect("non-empty");
-    let comment = prefix_of(first);
-    set_prefix(first, &format!("{header}{}", comment.trim_start_matches('\n')));
+    // Decide every entry's separator from scratch, based only on where it
+    // ends up — never on where it used to be. Whoever is first now gets the
+    // header (glued with exactly one blank line before its own comment, or
+    // none if it has none); everyone else gets exactly one leading blank
+    // line before their own comment, full stop.
+    //
+    // This uniform pass is what fixes the table displaced FROM first place:
+    // treating index 0 as a special case only going IN (lifting the header)
+    // and not coming OUT left whichever table took over from the old first
+    // one keeping its bare, no-leading-blank-line prefix even after sliding
+    // down to a non-first position — glued directly onto the entry above it.
+    // It is also what makes an operation followed by its own undo restore
+    // the file byte for byte: nothing here depends on history, only on the
+    // final arrangement.
+    for i in 0..blocks.len() {
+        let table = blocks.get_mut(i).expect("index in range");
+        let comment = bare_comment(table);
+        let prefix = if i == 0 { glue_header(&header, &comment) } else { format!("\n{comment}") };
+        set_prefix(table, &prefix);
+    }
     Ok(doc.to_string())
 }
 
@@ -307,6 +437,27 @@ exec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-nrj-metas\"
         ));
     }
 
+    /// Only the first entry would be taken and the second silently dropped
+    /// otherwise. Silence is the problem: the caller asked to install exactly
+    /// one plugin, and a fragment declaring more than one no longer says
+    /// clearly which.
+    #[test]
+    fn a_fragment_carrying_more_than_one_entry_is_refused() {
+        let fragment = "\
+[[plugin]]
+name = \"nrj-metas\"
+exec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-nrj-metas\"
+
+[[plugin]]
+name = \"radiofrance-metas\"
+exec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-radiofrance-metas\"
+";
+        assert!(matches!(
+            append_block(&realistic(), fragment, "nrj-metas"),
+            Err(EditError::FragmentMismatch { .. })
+        ));
+    }
+
     #[test]
     fn an_entry_is_removed_and_the_others_keep_their_comments() {
         let out = remove_entry(&realistic(), "cd").unwrap();
@@ -338,6 +489,66 @@ exec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-nrj-metas\"
         );
     }
 
+    /// Uninstalling the last plugin must not be a one-way door: the file
+    /// header has nobody left to attach to, so it is stashed in the
+    /// document's own trailing slot — the same slot a comment-only document
+    /// round-trips through — and `append_block` must be able to find it
+    /// again and hand it to the first plugin installed afterwards.
+    #[test]
+    fn removing_every_plugin_preserves_the_header_for_the_next_append() {
+        let doc = "\
+# Each entry only needs `name` and `exec`.
+[[plugin]]
+name = \"radio\"
+exec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-radio\"
+";
+        let after_remove = remove_entry(doc, "radio").unwrap();
+        assert!(
+            matches!(names_in_order(&after_remove), Err(EditError::NoPluginTable)),
+            "no plugin should remain declared: {after_remove:?}"
+        );
+        assert!(
+            after_remove.contains("Each entry only needs"),
+            "the header must survive with no plugin left:\n{after_remove}"
+        );
+
+        let fragment = "# A freshly installed plugin.\n[[plugin]]\nname = \"mpd\"\nexec = \"/y\"\n";
+        let restored = append_block(&after_remove, fragment, "mpd").unwrap();
+        assert_eq!(names_in_order(&restored).unwrap(), vec!["mpd"]);
+        assert!(
+            restored.trim_start().starts_with("# Each entry only needs"),
+            "the header did not reach the newly installed plugin:\n{restored}"
+        );
+        assert!(restored.contains("A freshly installed plugin"), "{restored}");
+    }
+
+    /// `append_block` must also work directly on a document that never had a
+    /// `[[plugin]]` table at all — not only one that had its header rescued
+    /// by `remove_entry`.
+    #[test]
+    fn appending_to_a_file_with_no_plugin_table_creates_one() {
+        let fragment = "# The web tuner.\n[[plugin]]\nname = \"radio\"\nexec = \"/x\"\n";
+        let out = append_block("", fragment, "radio").unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), vec!["radio"]);
+        assert!(out.contains("The web tuner"), "{out}");
+        assert!(out.trim_start().starts_with("# The web tuner."), "no stray separator on a fresh file:\n{out:?}");
+    }
+
+    /// And on a document that is nothing but a comment — the shape a
+    /// comment-only `plugins.toml` round-trips through in `toml_edit`.
+    #[test]
+    fn appending_to_a_comment_only_file_keeps_the_comment_as_header() {
+        let doc = "# Nothing installed yet.\n";
+        let fragment = "# The web tuner.\n[[plugin]]\nname = \"radio\"\nexec = \"/x\"\n";
+        let out = append_block(doc, fragment, "radio").unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), vec!["radio"]);
+        assert!(
+            out.trim_start().starts_with("# Nothing installed yet."),
+            "the pre-existing comment must stay first:\n{out}"
+        );
+        assert!(out.contains("The web tuner"), "{out}");
+    }
+
     /// The trap, stated as the test that proves it fixed: moving the first
     /// plugin must not take the file's own header along with it.
     #[test]
@@ -362,6 +573,89 @@ exec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-nrj-metas\"
         let comment_at = out.find("arriving at this source").unwrap();
         let cd_at = out.find("name = \"cd\"").unwrap();
         assert!(comment_at < cd_at, "cd's own comment did not travel with it:\n{out}");
+    }
+
+    /// Move a plugin down, then back up: the most natural undo there is. The
+    /// mechanism this pins is a header handed to a table that already has its
+    /// own comment with no separator between them — the next `split_header`
+    /// then reads the whole glued block as pure header, so the comment stays
+    /// behind (glued to the header) while its plugin moves away. Nothing is
+    /// deleted, so `contains(...)` cannot see it: only a byte-for-byte
+    /// comparison of the round trip can.
+    #[test]
+    fn moving_a_plugin_down_then_back_up_restores_the_file_byte_for_byte() {
+        let doc = realistic();
+        let down = move_entry(&doc, "radio", 1).unwrap();
+        let back = move_entry(&down, "radio", -1).unwrap();
+        assert_eq!(back, doc, "the round trip did not restore the original file");
+    }
+
+    /// The same property, on the actual deployed file rather than a fixture
+    /// that only mirrors its shape: this is where the defect was first
+    /// measured (`cd`'s description ending up above `radio`).
+    ///
+    /// The file on disk is CRLF (this checkout has `core.autocrlf=true`), but
+    /// every transformation normalises to `\n` on entry and `toml_edit` emits
+    /// `\n` regardless of what it read — so the round trip is compared
+    /// against the file's own LF-normalised content, not its raw bytes; a
+    /// changed line ending is not the defect this test is watching for.
+    #[test]
+    fn the_real_example_file_survives_a_move_down_then_back_up() {
+        let doc = include_str!("../../../../deploy/plugins.example.toml").replace("\r\n", "\n");
+        let down = move_entry(&doc, "radio", 1).unwrap();
+        let back = move_entry(&down, "radio", -1).unwrap();
+        assert_eq!(back, doc, "the round trip did not restore deploy/plugins.example.toml");
+    }
+
+    /// Same file, the other reported scenario: remove `radio`, then move `cd`
+    /// down. `cd`'s own three-line description must stay immediately above
+    /// `cd`, not drift onto `files` (which takes `cd`'s old spot) or onto
+    /// whoever `cd` displaces.
+    #[test]
+    fn the_real_example_file_keeps_comments_with_their_plugin_after_remove_then_move() {
+        let doc = include_str!("../../../../deploy/plugins.example.toml");
+        let after_remove = remove_entry(doc, "radio").unwrap();
+        let out = move_entry(&after_remove, "cd", 1).unwrap();
+        let comment_at = out.find("Its page carries one setting").unwrap();
+        let cd_at = out.find("name = \"cd\"").unwrap();
+        assert!(
+            comment_at < cd_at && cd_at - comment_at < 400,
+            "cd's own comment drifted away from cd:\n{out}"
+        );
+        // And the file header — four lines describing the file itself — must
+        // still lead the file, not have been swallowed into `files`'s own
+        // comment or lost.
+        assert!(
+            out.trim_start().starts_with("# Each entry only needs"),
+            "the file header must still lead the file:\n{out}"
+        );
+    }
+
+    /// The same defect, reached from `remove_entry` instead: remove the first
+    /// plugin (handing its header to the new first one), then move that new
+    /// first entry away. Each remaining plugin's own description must still
+    /// sit immediately above its own `[[plugin]]` — not have picked up, or
+    /// left behind, a piece of the file header.
+    #[test]
+    fn removing_the_first_then_moving_the_new_first_keeps_each_comment_with_its_own_plugin() {
+        let after_remove = remove_entry(&realistic(), "radio").unwrap();
+        let out = move_entry(&after_remove, "cd", 1).unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), vec!["musicbrainz", "cd"]);
+        assert!(
+            out.trim_start().starts_with("# Each entry only needs"),
+            "the file header must still lead the file:\n{out}"
+        );
+        // musicbrainz has no comment of its own in this file: nothing but the
+        // header may sit above it.
+        let header_end = out.find("means active.").unwrap();
+        let musicbrainz_at = out.find("name = \"musicbrainz\"").unwrap();
+        let between = out[header_end..musicbrainz_at].matches('#').count();
+        assert_eq!(between, 0, "musicbrainz picked up a comment that is not its own:\n{out}");
+        // cd's own comment must sit immediately above cd, not stranded above
+        // musicbrainz instead.
+        let comment_at = out.find("arriving at this source").unwrap();
+        let cd_at = out.find("name = \"cd\"").unwrap();
+        assert!(comment_at < cd_at && cd_at - comment_at < 120, "cd's comment drifted away from cd:\n{out}");
     }
 
     /// The shape `deploy.sh` actually produces: the file header is itself two
@@ -403,6 +697,24 @@ exec = \"/y\"
         assert!(comment_at < radio_at, "radio's own comment must travel with it:\n{out}");
     }
 
+    /// Format only, but the file's own header promises the core preserves the
+    /// operator's layout: a table displaced FROM first place by another
+    /// table taking its spot must not end up glued directly onto the
+    /// previous entry's `exec` line — exactly one blank line must separate
+    /// them, pinned by exact text rather than by mere presence or order.
+    #[test]
+    fn a_displaced_first_plugin_gets_a_blank_line_before_its_own_table() {
+        let out = move_entry(&realistic(), "radio", 1).unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), vec!["cd", "radio", "musicbrainz"]);
+        let cd_exec_end = out.find("ritornello-plugin-cd\"").unwrap() + "ritornello-plugin-cd\"".len();
+        let radio_table_at = out.find("[[plugin]]\nname = \"radio\"").unwrap();
+        let between = &out[cd_exec_end..radio_table_at];
+        assert_eq!(
+            between, "\n\n",
+            "radio's table must be preceded by exactly one blank line, not glued to cd's exec line above it:\n{out:?}"
+        );
+    }
+
     #[test]
     fn moving_past_either_end_is_refused_rather_than_clamped() {
         // Refused and not silently clamped: the page disables the arrow at the
@@ -430,6 +742,61 @@ exec = \"/y\"
         let fragment = "[[plugin]]\r\nname = \"mpd\"\r\nexec = \"/x\"\r\n";
         let appended = append_block(&crlf, fragment, "mpd").unwrap();
         assert_eq!(names_in_order(&appended).unwrap(), vec!["radio", "cd", "musicbrainz", "mpd"]);
+    }
+
+    /// `split_header` used to search a `\n`-normalised copy of the prefix but
+    /// slice the ORIGINAL, un-normalised one: on CRLF text that offset drifts
+    /// by one byte per `\r\n` line before the cut, and a multibyte character
+    /// positioned so the drift lands inside it panics with "byte index is not
+    /// a char boundary" rather than merely misreading the split.
+    ///
+    /// This exact fixture was chosen by computing the drift by hand: three
+    /// plain `\r\n`-terminated header lines, then a fourth ending in `café`
+    /// (a 2-byte UTF-8 character) immediately before its own `\r\n`, then the
+    /// blank line, then `radio`'s own comment. Fewer or more preceding CRLF
+    /// lines shift the drift by one byte and land back on a valid boundary —
+    /// this is not "any CRLF plus any accent", it is this specific alignment,
+    /// verified against the fixed `split_header` to land mid-character in the
+    /// unfixed one.
+    ///
+    /// Reachable in practice: the real example file is CRLF on this
+    /// checkout's disk, `deploy.sh` copies it as-is, and another script in
+    /// this repository already strips `\r` from it for exactly this reason.
+    #[test]
+    fn crlf_with_a_blank_line_in_the_header_and_a_non_ascii_character_does_not_panic() {
+        // Built from explicit `\r\n` escapes rather than a physical
+        // multi-line literal: this file's own line endings must not decide
+        // what bytes this test actually exercises.
+        let doc = "# En-tête, ligne un.\r\n\
+                   # En-tête, ligne deux.\r\n\
+                   # En-tête, ligne trois.\r\n\
+                   # En-tête, dernière ligne, se terminant par café\r\n\
+                   \r\n\
+                   # Commentaire propre à radio.\r\n\
+                   [[plugin]]\r\n\
+                   name = \"radio\"\r\n\
+                   exec = \"/x\"\r\n\
+                   \r\n\
+                   [[plugin]]\r\n\
+                   name = \"cd\"\r\n\
+                   exec = \"/y\"\r\n";
+        let out = move_entry(doc, "radio", 1).unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), vec!["cd", "radio"]);
+        assert!(
+            out.trim_start().starts_with("# En-tête, ligne un."),
+            "the header did not stay at the top:\n{out}"
+        );
+        assert!(out.contains("café"), "the accented header line did not survive:\n{out}");
+        let header_end_at = out.find("café").unwrap();
+        let cd_at = out.find("name = \"cd\"").unwrap();
+        assert!(header_end_at < cd_at, "the header must stay at the top, not travel with radio:\n{out}");
+        let comment_at = out.find("Commentaire propre").unwrap();
+        let radio_at = out.find("name = \"radio\"").unwrap();
+        assert!(
+            comment_at < radio_at && radio_at - comment_at < 80,
+            "radio's own comment must travel with it, immediately above it:\n{out}"
+        );
+        assert!(!out.contains('\r'), "output must be normalised to LF, not CRLF:\n{out:?}");
     }
 
     #[test]

@@ -106,7 +106,7 @@ pub fn set_enabled(path: &Path, name: &str, enabled: bool) -> Result<()> {
 ///
 /// A `plugins.toml` truncated by a power cut — a device one unplugs — would
 /// let nothing launch at the next startup.
-pub(super) fn write_atomic(path: &Path, content: &str) -> Result<()> {
+fn write_atomic(path: &Path, content: &str) -> Result<()> {
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, path) {
