@@ -19,11 +19,19 @@ members = [
 ]
 
 [workspace.package]
-# One number for the whole repository, inherited by every crate — the same
-# mechanism already used for edition, license and repository just below.
-# It answers "what changed", and moves on every release. It is NOT the
-# compatibility contract between a core and a plugin: that one is
-# ritornello_proto::PROTOCOL_VERSION, which moves only on a wire break.
+# The PRODUCT number: it names the release and the git tag, and moves on every
+# delivery. It carries the generation — 0.2.7 is the seventh delivery of the
+# 0.2 generation — and is inherited only by the internal library crates, the
+# ones no archive is named after.
+#
+# The shipped components (the core and the ten plugins) declare their OWN
+# version instead, so a fix in one plugin does not renumber the product and
+# does not make the device replace eleven components for one line. Major and
+# minor stay identical to this number everywhere; only the third digit is
+# free, component by component. `version_coherence.rs` asserts it.
+#
+# It is NOT the compatibility contract between a core and a plugin: that one
+# is ritornello_proto::PROTOCOL_VERSION, which moves only on a wire break.
 version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"

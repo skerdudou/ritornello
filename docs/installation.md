@@ -54,12 +54,22 @@ archives, one per architecture and per component:
 `ritornello-core-<version>-<arch>.tar.gz`, `ritornello-plugins-<version>-<arch>.tar.gz`
 (every bundled plugin together) and one
 `ritornello-plugin-<name>-<version>-<arch>.tar.gz` per plugin, for installing
-or upgrading a single one. A single `SHA256SUMS` covers every archive of the
-release, whatever the architecture. This is an alternative to
+or upgrading a single one. `<version>` is not one number shared by the whole
+release: the core's archive and each plugin's own archive carry **that
+component's own** version, which moves only when that component changes,
+while the all-plugins bundle carries the release's own number. There is
+nowhere else to look it up — read it where it already sits, in the name of
+the file attached to the release page. A single `SHA256SUMS` covers every
+archive of the release, whatever the architecture. This is an alternative to
 `deploy.sh`, not a replacement for it: `deploy.sh` still builds from source
 over SSH and remains the development path (see [Deploying](#deploying)
 below); a release archive is for putting a specific tagged version onto a
 device with no build toolchain at all.
+
+A published release must never be deleted, nor its attached files removed.
+The archive of a component that has not changed in a long time lives in the
+release where it last changed, and that is where the device installs or
+repairs it from.
 
 **This is an upgrade path, not a fresh install.** The archives carry
 binaries, units, polkit rules and language packs — nothing else. They do not

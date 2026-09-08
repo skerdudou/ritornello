@@ -5,6 +5,7 @@ mod cover;
 mod i18n;
 mod metadata;
 mod packaging_manifest;
+mod version_coherence;
 mod placeholder;
 mod player;
 mod plugins;

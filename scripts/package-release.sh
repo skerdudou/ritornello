@@ -21,8 +21,27 @@ cd "$(dirname "$0")/.."
 # script CRLF-terminated TOML. `tr -d '\r'` keeps every value extracted below
 # free of a trailing carriage return regardless of the checkout that produced
 # the working tree.
+# The PRODUCT number: the name of the delivery, used only for the bundled
+# archive of all plugins. Each shipped component's own archive is named after
+# that component's own version instead — see crate_version() below.
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | tr -d '\r' | head -1)
 [ -n "$VERSION" ] || { echo "no version in [workspace.package]" >&2; exit 1; }
+
+# The version a shipped component declares for itself. Not the product number:
+# see the comment on [workspace.package] version. A component that inherits
+# would land here as the literal `version.workspace = true`, which no `sed`
+# below matches, so the guard fires rather than naming an archive `-true-`.
+crate_version() { # <crate directory name>
+  local v
+  v=$(sed -n 's/^version = "\(.*\)"/\1/p' "crates/$1/Cargo.toml" | tr -d '\r' | head -1)
+  [ -n "$v" ] || { echo "crates/$1 declares no version of its own" >&2; exit 1; }
+  # Major and minor must stay on the product generation. Asserted here as well
+  # as in version_coherence.rs, because this script runs without cargo and a
+  # release must not be buildable with a component off its generation.
+  [ "${v%.*}" = "${VERSION%.*}" ] \
+    || { echo "crates/$1 is $v, off the product generation ${VERSION%.*}" >&2; exit 1; }
+  echo "$v"
+}
 
 BIN="target/$TARGET/release"
 OUT="release/$ARCH"
@@ -61,8 +80,8 @@ stage_plugin() {
   [ -s "$dir/plugins.toml.fragment" ] || { echo "no plugins.toml block for $name" >&2; exit 1; }
 }
 
-pack() { # <staging dir> <archive base name>
-  local archive="$OUT/$2-$VERSION-$ARCH.tar.gz"
+pack() { # <staging dir> <archive base name> <version>
+  local archive="$OUT/$2-$3-$ARCH.tar.gz"
   # `--owner=root --group=root --numeric-owner`, and this is a security
   # property rather than tidiness: tar records the uid/gid of every entry,
   # and GNU tar **restores** them when the extraction runs as the superuser
@@ -141,13 +160,13 @@ cp "$BIN/ritornello-core" "$CORE/usr/local/bin/"
 # Everything else the core carries — its unit, its polkit rule, its own and
 # the shared locale packs — is named by the manifest, not repeated here.
 python3 scripts/packaging.py stage-core "$CORE" "$BIN"
-pack "$CORE" "ritornello-core"
+pack "$CORE" "ritornello-core" "$(crate_version ritornello-core)"
 
 # --- one archive per plugin ----------------------------------------------
 for p in "${PLUGINS[@]}"; do
   D=$(mktemp -d)
   stage_plugin "$p" "$D"
-  pack "$D" "ritornello-plugin-$p"
+  pack "$D" "ritornello-plugin-$p" "$(crate_version "ritornello-plugin-$p")"
 done
 
 # --- the bundle of all plugins -------------------------------------------
@@ -156,7 +175,9 @@ for p in "${PLUGINS[@]}"; do stage_plugin "$p" "$ALL"; done
 rm -f "$ALL/plugins.toml.fragment"
 mkdir -p "$ALL/examples"
 cp deploy/plugins.example.toml "$ALL/examples/"
-pack "$ALL" "ritornello-plugins"
+# The PRODUCT number, not any single plugin's: this bundle is nobody's own
+# component, it exists for a first installation, and the updater ignores it.
+pack "$ALL" "ritornello-plugins" "$VERSION"
 
 ls -l "$OUT"
 echo "OK — $(ls "$OUT" | wc -l) archives for $ARCH"
