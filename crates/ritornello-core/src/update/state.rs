@@ -362,6 +362,42 @@ mod tests {
         assert_eq!(it.availability, Availability::Unknown);
     }
 
+    /// A third-party plugin's name is free-form, chosen by its own author —
+    /// the core keeps no registry that would refuse a name already used by an
+    /// official plugin. The collision only needs the official plugin to be
+    /// one this device does not currently have installed, which is exactly
+    /// what `published` looks like here: an entry for "someones-plugin" that
+    /// nothing in `installed` claims as official.
+    ///
+    /// Without the `third_party` guard on `offered`, this plugin would be
+    /// shown `UpdateAvailable` toward the OFFICIAL version, and accepting
+    /// that "update" would overwrite a third-party binary with the official
+    /// one under the same name — silently swapping what the operator
+    /// installed for something else.
+    ///
+    /// Deliberately a **new** test rather than widening
+    /// `a_third_party_plugin_is_listed_with_its_repository_and_never_as_official`:
+    /// that one publishes nothing at all, so it cannot tell a correct guard
+    /// from an absent one that merely finds no matching entry either way. A
+    /// fixture failing for two reasons proves neither.
+    #[test]
+    fn a_third_party_plugin_does_not_inherit_a_colliding_official_version() {
+        let offers = component_offers(
+            "0.2.0",
+            &[published(Offer::Plugin("someones-plugin".to_string()), "9.9.9")],
+            &[Installed {
+                name: "someones-plugin".to_string(),
+                declared: true,
+                binary_present: true,
+                version: Some("1.4.0".to_string()),
+                third_party_repo: Some("someone/their-plugin".to_string()),
+            }],
+        );
+        let it = offers.iter().find(|o| o.name == "someones-plugin").unwrap();
+        assert_eq!(it.offered, None);
+        assert_eq!(it.availability, Availability::Unknown);
+    }
+
     #[test]
     fn a_declared_plugin_the_release_does_not_offer_is_not_shown_as_removable_by_accident() {
         // A plugin dropped from a later release, or one built by hand. Nothing
