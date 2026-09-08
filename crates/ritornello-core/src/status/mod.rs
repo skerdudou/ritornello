@@ -114,6 +114,13 @@ pub struct AppState {
     /// the core side, and the list only changes when a source announces
     /// itself or leaves.
     pub sources_catalog: tokio::sync::watch::Receiver<ritornello_proto::SourcesCatalog>,
+    /// What the configuration page is told about updating. Behind a lock: a
+    /// check runs in a background task and this is read by an HTTP handler.
+    pub update: Arc<RwLock<crate::update::state::UpdateState>>,
+    /// Jobs for the update worker. A channel and not a mutex-held function,
+    /// for the reason `/api/command` already gives: a route must never wait on
+    /// work whose duration it does not control.
+    pub update_tx: mpsc::Sender<crate::update::Job>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -133,6 +140,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/command", axum::routing::post(command_post))
         .route("/api/cover/{key}", get(crate::cover::cover_get))
         .route("/api/cover-cache", get(crate::cover::cache_json))
+        .route("/api/update", get(crate::update::routes::update_json))
+        .route("/api/update/check", axum::routing::post(crate::update::routes::update_check_post))
         .route(
             "/plugins/{name}/api/data",
             get(crate::admin::admin_get_data).put(crate::admin::admin_put_data),
@@ -419,6 +428,10 @@ pub(crate) mod tests_support {
                 names: Vec::new(),
                 tx: tokio::sync::mpsc::channel(1).0,
             }),
+            update: Arc::new(tokio::sync::RwLock::new(
+                crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
+            )),
+            update_tx: tokio::sync::mpsc::channel(1).0,
         }
     }
 
@@ -458,6 +471,10 @@ pub(crate) mod tests_support {
                 names: Vec::new(),
                 tx: tokio::sync::mpsc::channel(1).0,
             }),
+            update: Arc::new(tokio::sync::RwLock::new(
+                crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
+            )),
+            update_tx: tokio::sync::mpsc::channel(1).0,
         };
         (state, audio_rx)
     }
@@ -499,6 +516,10 @@ pub(crate) mod tests_support {
                 names: Vec::new(),
                 tx: tokio::sync::mpsc::channel(1).0,
             }),
+            update: Arc::new(tokio::sync::RwLock::new(
+                crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
+            )),
+            update_tx: tokio::sync::mpsc::channel(1).0,
         };
         (state, cmd_rx)
     }
@@ -548,6 +569,10 @@ pub(crate) mod tests_support {
                 names: Vec::new(),
                 tx: tokio::sync::mpsc::channel(1).0,
             }),
+            update: Arc::new(tokio::sync::RwLock::new(
+                crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
+            )),
+            update_tx: tokio::sync::mpsc::channel(1).0,
         };
         (state, locale_rx, dir)
     }

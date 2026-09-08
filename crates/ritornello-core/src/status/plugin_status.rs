@@ -50,6 +50,22 @@ pub struct PluginStatus {
     /// frame changes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    /// Declared in `plugins.toml`, and its `exec` is not on disk.
+    ///
+    /// Distinct from every neighbour, and the distinction is the point: a
+    /// plugin whose binary is absent used to show as **dead**, which accused a
+    /// faulty plugin when the truth is that nobody installed it. The release
+    /// archives are what made this state ordinary — they let the core and a
+    /// subset of plugins be installed, while the shipped `plugins.toml`
+    /// declares them all.
+    ///
+    /// Deliberately **not** `disabled`: that one writes `enabled = false` and
+    /// would survive an installation.
+    ///
+    /// Additive like `stalled` and `disabled`: absent from the JSON when
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing_binary: bool,
     /// Reachable plugin whose admin page does not answer the `Ping`: a long
     /// `set_data` holds its lock (most often a network share). Computed at
     /// `/api/status` time, never stored: it is a state that changes by the
@@ -106,6 +122,7 @@ impl PluginStatus {
             stalled: false,
             starting: false,
             disabled: false,
+            missing_binary: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -127,11 +144,22 @@ impl PluginStatus {
             stalled,
             starting: false,
             disabled: false,
+            missing_binary: false,
             busy: false,
             ui_version: None,
             version: None,
             incompatible: None,
         }
+    }
+
+    /// Declared, and its binary is not there. See the field's documentation.
+    ///
+    /// No caller yet: wiring this at plugin registration time (checking
+    /// `exec` against the filesystem before launching) is a later task's
+    /// job, same story as the rest of `update`'s public items.
+    #[allow(dead_code)]
+    pub fn binary_missing(name: &str) -> Self {
+        Self { missing_binary: true, ..Self::unknown_kind(name, false) }
     }
 
     /// Line of a plugin that was just launched: it has not spoken, and that is
@@ -148,6 +176,7 @@ impl PluginStatus {
             stalled: false,
             starting: true,
             disabled: false,
+            missing_binary: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -166,6 +195,7 @@ impl PluginStatus {
             stalled: false,
             starting: false,
             disabled: true,
+            missing_binary: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -187,6 +217,7 @@ impl PluginStatus {
             stalled: false,
             starting: false,
             disabled: false,
+            missing_binary: false,
             busy: false,
             ui_version: None,
             version: None,

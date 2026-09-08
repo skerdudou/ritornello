@@ -1225,6 +1225,7 @@ dependencies = [
  "ritornello-i18n",
  "ritornello-plugin-sdk",
  "ritornello-proto",
+ "ritornello-updater",
  "rust-embed",
  "serde",
  "serde_json",

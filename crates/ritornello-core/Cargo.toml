@@ -30,6 +30,10 @@ async-trait = "0.1"
 ritornello-proto = { path = "../ritornello-proto" }
 ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
 ritornello-i18n = { path = "../ritornello-i18n" }
+# The marker and the rollback report the privileged side writes, and the
+# shared grammar of the update request. The core links the library and never
+# the binary.
+ritornello-updater = { path = "../ritornello-updater" }
 rust-embed = { version = "8", features = ["debug-embed"] }
 # statvfs, for the root filesystem usage shown on the System tab. Already
 # in Cargo.lock (tokio depends on it), so this adds no compilation.

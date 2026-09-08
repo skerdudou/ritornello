@@ -456,6 +456,10 @@ mod tests {
                 names: Vec::new(),
                 tx: tokio::sync::mpsc::channel(1).0,
             }),
+            update: Arc::new(tokio::sync::RwLock::new(
+                crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
+            )),
+            update_tx: tokio::sync::mpsc::channel(1).0,
         }
     }
 

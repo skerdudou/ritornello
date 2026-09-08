@@ -1653,6 +1653,21 @@ async fn main() -> Result<()> {
     let (extraction_tx, mut extraction_rx) =
         mpsc::channel::<(String, Option<cover::CoverSource>)>(4);
 
+    // Jobs for the update worker, see `AppState::update_tx`.
+    let (update_tx, mut update_rx) = mpsc::channel::<update::Job>(4);
+    let update_state = Arc::new(RwLock::new(update::state::UpdateState::initial(
+        env!("CARGO_PKG_VERSION"),
+        &[],
+    )));
+    // Placeholder consumer until Task 12 wires the gestures. It exists so the
+    // route can be exercised end to end now: without a receiver, `send` fails
+    // and the route answers 500, which would look like a bug in the route.
+    tokio::spawn(async move {
+        while let Some(job) = update_rx.recv().await {
+            tracing::debug!("update worker: {job:?} received, not yet implemented (Task 12)");
+        }
+    });
+
     // After wiring: ask each source for its sources catalog, **without
     // waiting**.
     //
@@ -1749,6 +1764,8 @@ async fn main() -> Result<()> {
                 names: manifest_order.clone(),
                 tx: plugin_order_tx,
             }),
+            update: update_state.clone(),
+            update_tx,
         };
         let (app_state, core_engine) = assemble_covers_and_core(
             mpv_player,
