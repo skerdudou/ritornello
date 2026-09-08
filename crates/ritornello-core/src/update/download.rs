@@ -2,10 +2,16 @@
 //!
 //! Two guards, and they answer different questions. `enough_room` asks whether
 //! the device can afford this at all — a Pi whose root filesystem fills up
-//! does not boot, and no update is worth that. `COMPRESSED_MAX` asks whether
-//! one response is claiming to be something it should not be, applied **while
-//! reading chunk by chunk**: checking an announced `Content-Length` protects
-//! from nothing, it is declarative. Same idiom as the cover fetch.
+//! does not boot, and no update is worth that. `COMPRESSED_MAX` (and
+//! `TEXT_MAX` for the smaller bodies) asks whether one response is claiming
+//! to be something it should not be, applied **while reading chunk by
+//! chunk**: checking an announced `Content-Length` protects from nothing, it
+//! is declarative. Same idiom as the cover fetch.
+//!
+//! `SHA256SUMS` travels in the same release over the same channel, so
+//! `digest_hex` detects a corrupted or mis-served download and not a hostile
+//! release; authenticity rests on HTTPS to a repository fixed at compile
+//! time, not on this hash.
 
 use crate::system::Usage;
 use crate::update::release::USER_AGENT;
@@ -16,6 +22,11 @@ use std::path::{Path, PathBuf};
 /// repository publishes and is well under it; a response that exceeds it is
 /// not one of ours.
 pub const COMPRESSED_MAX: usize = 64 * 1024 * 1024;
+
+/// A response body read as text has the same hostile position as an archive,
+/// so it gets the same treatment. Four mebibytes is far above a hundred-release
+/// listing or any SHA256SUMS, and far below what would trouble the device.
+pub const TEXT_MAX: usize = 4 * 1024 * 1024;
 
 /// 256 MB of root filesystem the updater will not touch, whatever it is asked.
 pub const ROOM_MARGIN_KB: u64 = 256 * 1024;
@@ -70,10 +81,17 @@ pub fn digest_hex(bytes: &[u8]) -> String {
 /// Room for the archive, for what it decompresses to, for the copy kept aside
 /// — and a margin.
 ///
-/// Three times the download rather than one: the archive lands in staging, its
-/// contents are extracted, and the privileged side keeps the previous binaries
-/// aside before replacing them. Sizing this on the download alone is how a
-/// device runs out of space halfway through an update.
+/// Three times the **compressed** download — though that undercounts the
+/// real cost, and it is the margin, not this factor, that closes the gap.
+/// The archive itself never touches disk: it is fetched into memory and read
+/// entry by entry, and only the one uncompressed binary it extracts is
+/// written into staging; root then keeps the previous uncompressed binary
+/// aside before the swap. So the true cost is closer to twice the
+/// *uncompressed* size — typically five to six times this *compressed*
+/// figure, not three. The 256 MB margin absorbs that undercount with an
+/// order of magnitude to spare; raising the factor instead would refuse
+/// legitimate installs on a tight disk for no measured benefit, so it stays
+/// at three.
 pub fn enough_room(disk: Option<Usage>, needed_bytes: usize) -> bool {
     let Some(disk) = disk else {
         // An x86 box in a container, or a filesystem statvfs cannot read. The
@@ -91,43 +109,37 @@ pub fn enough_room(disk: Option<Usage>, needed_bytes: usize) -> bool {
 pub fn client() -> Result<reqwest::Client, DownloadError> {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        // A check must not hang: the page polls for its outcome, and a request
-        // with no deadline is how "checking…" becomes permanent.
-        .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // A read timeout and NOT a total one, and the distinction is the whole
+        // point: `timeout` runs from the first connect until the body is
+        // finished, so any total deadline is really a minimum bandwidth
+        // requirement. Sixty seconds for a 64 MiB cap demands 1 MiB/s, and the
+        // plugin bundle at ~15 MB demands 250 kB/s sustained — a congested
+        // Wi-Fi or ADSL link would then fail every night forever, reporting a
+        // transport error rather than "too slow". `read_timeout` resets on
+        // every successful read, so it bounds a server that stalls without
+        // requiring the link to be fast.
+        .read_timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| DownloadError::Http(e.to_string()))
 }
 
-/// For the release JSON and for `SHA256SUMS`: small bodies, read whole.
-pub async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<(u16, String), DownloadError> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| DownloadError::Http(e.to_string()))?;
-    let status = response.status().as_u16();
-    // The status travels back rather than being turned into an error: 404 on
-    // the latest-release endpoint means "no release published yet", which the
-    // page must show as a statement and not as a fault.
-    let body = response.text().await.map_err(|e| DownloadError::Http(e.to_string()))?;
-    Ok((status, body))
-}
-
-/// An archive, capped while streaming.
-pub async fn fetch_capped(
-    client: &reqwest::Client,
-    url: &str,
-    cap: usize,
-) -> Result<Vec<u8>, DownloadError> {
-    let mut response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| DownloadError::Http(e.to_string()))?;
-    if !response.status().is_success() {
-        return Err(DownloadError::Http(format!("{} for {url}", response.status())));
-    }
-    let mut bytes = Vec::new();
+/// Reads a body chunk by chunk, refusing the moment the running total would
+/// exceed `cap` — whatever `Content-Length` claims. Shared by `fetch_capped`
+/// and `fetch_text`: a release listing or a `SHA256SUMS` file sits in exactly
+/// the same hostile position as an archive, just behind a smaller cap.
+///
+/// `Content-Length`, when present, only seeds the buffer's initial capacity —
+/// bounded by `cap` — as a hint, never as a bound: a body bigger than
+/// declared costs a reallocation or two, never a way past the check below,
+/// and a body that lies about being small buys nothing either, since every
+/// chunk is still counted as it arrives.
+async fn read_capped(mut response: reqwest::Response, cap: usize) -> Result<Vec<u8>, DownloadError> {
+    let hint = response
+        .content_length()
+        .map(|len| (len as usize).min(cap))
+        .unwrap_or(0);
+    let mut bytes = Vec::with_capacity(hint);
     while let Some(chunk) = response
         .chunk()
         .await
@@ -139,6 +151,47 @@ pub async fn fetch_capped(
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+/// For the release listing and for `SHA256SUMS`: small bodies, read whole and
+/// capped at `TEXT_MAX` (see `read_capped`).
+pub async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<(u16, String), DownloadError> {
+    let response = client
+        .get(url)
+        // A deadline belongs on this request and not on the client: a
+        // listing or a checksum file is at most a few hundred kilobytes and
+        // has no excuse to take a minute, unlike an archive on a slow link,
+        // which is why the client itself carries no total timeout.
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| DownloadError::Http(e.to_string()))?;
+    let status = response.status().as_u16();
+    // The status travels back rather than becoming an error: the release
+    // list answers `200 []` for a repository with no releases yet, and "no
+    // release published" is what parsing that body says, not a status code
+    // to special-case here.
+    let bytes = read_capped(response, TEXT_MAX).await?;
+    let body = String::from_utf8(bytes)
+        .map_err(|e| DownloadError::Http(format!("body is not UTF-8: {e}")))?;
+    Ok((status, body))
+}
+
+/// An archive, capped while streaming (see `read_capped`).
+pub async fn fetch_capped(
+    client: &reqwest::Client,
+    url: &str,
+    cap: usize,
+) -> Result<Vec<u8>, DownloadError> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| DownloadError::Http(e.to_string()))?;
+    if !response.status().is_success() {
+        return Err(DownloadError::Http(format!("{} for {url}", response.status())));
+    }
+    read_capped(response, cap).await
 }
 
 #[cfg(test)]
@@ -162,11 +215,18 @@ mod tests {
 
     #[test]
     fn room_is_judged_on_the_archive_plus_what_it_will_become_plus_a_margin() {
-        let disk = Usage { total_kb: 8_000_000, available_kb: 700_000 };
-        // 100 MiB of archives on 700 MB free: fine.
-        assert!(enough_room(Some(disk), 100 * 1024 * 1024));
-        // 400 MiB: not fine, because the archive is downloaded AND extracted
-        // AND the previous binaries are kept aside. Three copies, not one.
+        // 1 200 000 kB free, chosen so the pair below pins the factor of
+        // three from both sides: `* 4` would refuse the first row (needs
+        // 1 490 944 kB) and `* 2` would accept the second (needs
+        // 1 081 344 kB). A single figure that only tests one direction is not
+        // enough — the controller's original 500 000/700 000 figures each
+        // let at least one wrong factor through.
+        let disk = Usage { total_kb: 8_000_000, available_kb: 1_200_000 };
+        // 300 MiB needs (307200 * 3) + 262144 = 1 183 744 kB: fine.
+        assert!(enough_room(Some(disk), 300 * 1024 * 1024));
+        // 400 MiB needs (409600 * 3) + 262144 = 1 490 944 kB: not fine,
+        // because the archive is downloaded AND extracted AND the previous
+        // binaries are kept aside. Three copies, not one.
         assert!(!enough_room(Some(disk), 400 * 1024 * 1024));
     }
 
@@ -187,5 +247,198 @@ mod tests {
     #[test]
     fn an_unknown_disk_does_not_block_the_update() {
         assert!(enough_room(None, 100 * 1024 * 1024));
+    }
+
+    // -- fetch_capped / fetch_text: the cap enforced against a real server --
+    //
+    // No `allowed_target`-style SSRF filter guards these functions the way
+    // `cover::fetch` guards `cover::download`: their caller only ever hands
+    // them a URL read out of a GitHub release the core itself fetched, so
+    // `127.0.0.1` is not a special case to route around here.
+
+    /// Serializes a body as `Transfer-Encoding: chunked`.
+    fn chunked_body(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for c in chunks {
+            out.extend_from_slice(format!("{:x}\r\n", c.len()).as_bytes());
+            out.extend_from_slice(c);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    fn http_response(status_line: &str, headers: &str, body: Vec<u8>) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("{status_line}\r\n{headers}\r\n").as_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// Serves `response` to the first connection received on `127.0.0.1`, on
+    /// a port chosen by the OS, then closes.
+    async fn serve(response: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut ignored = [0u8; 4096];
+                let _ = socket.read(&mut ignored).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://127.0.0.1:{port}/asset")
+    }
+
+    /// Serves `response` then hangs without closing: if the caller reads the
+    /// body regardless of what it was told, it stays blocked until the
+    /// test's own timeout catches it.
+    async fn serve_then_hang(response: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut ignored = [0u8; 4096];
+                let _ = socket.read(&mut ignored).await;
+                let _ = socket.write_all(&response).await;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+        format!("http://127.0.0.1:{port}/asset")
+    }
+
+    /// Serves a `Transfer-Encoding: chunked` body that never sends the
+    /// terminating `0\r\n\r\n`: fresh chunks keep coming until the reader
+    /// gives up or the write side breaks. A body that truly never ends is
+    /// the only way to prove the cap is enforced **while streaming**, not
+    /// merely once a body has finished arriving.
+    async fn serve_endless_chunked(chunk_size: usize) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut ignored = [0u8; 4096];
+                let _ = socket.read(&mut ignored).await;
+                let headers =
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+                if socket.write_all(headers).await.is_err() {
+                    return;
+                }
+                let chunk = vec![0u8; chunk_size];
+                let mut frame = format!("{:x}\r\n", chunk.len()).into_bytes();
+                frame.extend_from_slice(&chunk);
+                frame.extend_from_slice(b"\r\n");
+                loop {
+                    if socket.write_all(&frame).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        format!("http://127.0.0.1:{port}/asset")
+    }
+
+    #[tokio::test]
+    async fn the_cap_cuts_an_endless_chunked_stream_before_the_end_and_fast() {
+        let cap = 10_000;
+        let url = serve_endless_chunked(4_096).await;
+        // Bounded well above what a healthy cut takes (milliseconds) but far
+        // below the endless stream's actual duration: only a cap enforced
+        // chunk by chunk returns inside this window.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fetch_capped(&client().unwrap(), &url, cap),
+        )
+        .await;
+        match outcome {
+            Ok(Err(DownloadError::TooLarge(c))) => assert_eq!(c, cap),
+            other => panic!("expected a prompt TooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lying_content_length_does_not_exempt_the_body_from_the_cap() {
+        // `Content-Length: 5` while `Transfer-Encoding: chunked` carries
+        // 20 000 bytes. RFC 7230 §3.3.3 says chunked framing overrides
+        // Content-Length; if `fetch_capped` ever trusted the header instead
+        // of the bytes it actually reads, this body would sail through under
+        // a cap the header claims to already respect.
+        let cap = 10_000;
+        let chunks: Vec<Vec<u8>> = (0..5).map(|_| vec![0u8; 4_000]).collect();
+        let body = chunked_body(&chunks);
+        let response = http_response(
+            "HTTP/1.1 200 OK",
+            "Content-Type: application/octet-stream\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n",
+            body,
+        );
+        let url = serve(response).await;
+        match fetch_capped(&client().unwrap(), &url, cap).await {
+            Err(DownloadError::TooLarge(c)) => assert_eq!(c, cap),
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn exactly_the_cap_is_ok_and_one_byte_more_is_too_large() {
+        let cap = 1_000;
+        let body = vec![0u8; cap];
+        let response = http_response(
+            "HTTP/1.1 200 OK",
+            &format!("Content-Type: application/octet-stream\r\nContent-Length: {}\r\n", body.len()),
+            body,
+        );
+        let url = serve(response).await;
+        let bytes = fetch_capped(&client().unwrap(), &url, cap).await.unwrap();
+        assert_eq!(bytes.len(), cap);
+
+        let over = vec![0u8; cap + 1];
+        let response = http_response(
+            "HTTP/1.1 200 OK",
+            &format!("Content-Type: application/octet-stream\r\nContent-Length: {}\r\n", over.len()),
+            over,
+        );
+        let url = serve(response).await;
+        match fetch_capped(&client().unwrap(), &url, cap).await {
+            Err(DownloadError::TooLarge(c)) => assert_eq!(c, cap),
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_2xx_status_is_refused_before_the_body_is_read() {
+        let response = http_response(
+            "HTTP/1.1 500 Internal Server Error",
+            "Content-Type: text/plain\r\nContent-Length: 1000000\r\n",
+            Vec::new(),
+        );
+        let url = serve_then_hang(response).await;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fetch_capped(&client().unwrap(), &url, COMPRESSED_MAX),
+        )
+        .await
+        {
+            Ok(Err(DownloadError::Http(_))) => {}
+            other => panic!("expected a prompt Http error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_text_refuses_a_body_over_text_max() {
+        let body = vec![b'a'; TEXT_MAX + 1];
+        let response = http_response(
+            "HTTP/1.1 200 OK",
+            &format!("Content-Type: text/plain\r\nContent-Length: {}\r\n", body.len()),
+            body,
+        );
+        let url = serve(response).await;
+        match fetch_text(&client().unwrap(), &url).await {
+            Err(DownloadError::TooLarge(c)) => assert_eq!(c, TEXT_MAX),
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
     }
 }
