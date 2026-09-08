@@ -27,6 +27,12 @@ pub mod download;
 #[allow(dead_code)]
 pub mod state;
 
+// Same story: `due` and `local_now` get their first caller outside this
+// module's own tests in Task 12 (the ticker that calls `due` against the
+// real clock and the real worker).
+#[allow(dead_code)]
+pub mod schedule;
+
 pub mod routes;
 
 /// What the update worker is asked to do. One enum rather than one channel per

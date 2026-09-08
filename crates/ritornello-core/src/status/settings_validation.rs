@@ -96,6 +96,7 @@ pub enum SettingsError {
     CoverMaxPixels { min: u32, max: u32 },
     CoverCacheBudget { min: u32, max: u32 },
     CoverDownloadMax { min: u32, max: u32 },
+    UpdateHour { value: u32 },
 }
 
 impl SettingsError {
@@ -149,6 +150,9 @@ impl SettingsError {
                 .get("settings_cover_max_pixels_out_of_range")
                 .replace("{min}", &min.to_string())
                 .replace("{max}", &max.to_string()),
+            SettingsError::UpdateHour { value } => {
+                catalog.get("settings_update_hour_range").replace("{value}", &value.to_string())
+            }
         }
     }
 }
@@ -191,6 +195,9 @@ impl std::fmt::Display for SettingsError {
             }
             SettingsError::CoverDownloadMax { min, max } => {
                 write!(f, "cover download ceiling out of range ({min}-{max} MiB)")
+            }
+            SettingsError::UpdateHour { value } => {
+                write!(f, "update hour out of range (0-23), got {value}")
             }
         }
     }
@@ -276,6 +283,11 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError
             min: *COVER_MAX_PIXELS_MPX.start(),
             max: *COVER_MAX_PIXELS_MPX.end(),
         });
+    }
+    // 0-23. A settings file edited by hand can say 24, and an hour that never
+    // matches is a policy that silently never runs.
+    if s.update_hour > 23 {
+        return Err(SettingsError::UpdateHour { value: s.update_hour });
     }
     Ok(())
 }

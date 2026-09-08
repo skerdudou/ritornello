@@ -240,6 +240,7 @@ settings_cover_passthrough_max_out_of_range = "seuil de non-réencodage hors bor
 settings_cover_max_pixels_out_of_range = "plafond de décodage hors bornes ({min}-{max} Mpx)"
 settings_cover_cache_budget_out_of_range = "budget mémoire du cache de pochettes hors bornes ({min}-{max} Mio)"
 settings_cover_download_max_out_of_range = "plafond de téléchargement de la pochette hors bornes ({min}-{max} Mio)"
+settings_update_hour_range = "L'heure de mise à jour doit être comprise entre 0 et 23, pas {value}"
 theme_unknown_mode = "mode inconnu: {mode}"
 theme_name_invalid_length = "nom de theme de longueur invalide"
 theme_name_invalid_chars = "nom de theme hors [a-z0-9-]"

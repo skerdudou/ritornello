@@ -219,6 +219,18 @@ pub struct Settings {
     /// useful value is not the number of megapixels but the mebibytes they
     /// cost: 16 Mpx is 64 MiB of buffer.
     pub cover_max_pixels_mpx: u32,
+
+    // ---- Automatic updates: when, not whether or how -----------------------
+    //
+    // The check and install gestures themselves live in `update`; this is
+    // only the schedule that decides when they happen on their own. See
+    // `crate::update::schedule::due`, the pure function these three feed.
+    /// Nothing, check only, or check and install. See `UpdatePolicy`.
+    pub update_policy: crate::update::schedule::UpdatePolicy,
+    /// Local hour of the automatic run, 0-23.
+    pub update_hour: u32,
+    /// Every day, or one chosen weekday.
+    pub update_cadence: crate::update::schedule::UpdateCadence,
 }
 
 impl Default for Settings {
@@ -269,6 +281,11 @@ impl Default for Settings {
             // 16 Mpx = 64 MiB of decoded buffer. Covers a cover scanned at
             // 4000 × 4000 with margin, and refuses the bomb.
             cover_max_pixels_mpx: 16,
+            // Off: a device that starts phoning home because it was updated
+            // is not a behaviour to inherit silently.
+            update_policy: crate::update::schedule::UpdatePolicy::Off,
+            update_hour: 3,
+            update_cadence: crate::update::schedule::UpdateCadence::Daily,
         }
     }
 }
@@ -304,6 +321,10 @@ pub struct PersistedState {
     /// Repeat-all: same reasoning and same persistence as `random`.
     #[serde(default)]
     pub repeat_all: bool,
+    /// Identity of the last local day an automatic run happened on. See
+    /// `schedule::day_key`: an identity, never compared for order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_last_run_day: Option<i64>,
 }
 
 impl Default for PersistedState {
@@ -319,6 +340,7 @@ impl Default for PersistedState {
             settings: Settings::default(),
             random: false,
             repeat_all: false,
+            update_last_run_day: None,
         }
     }
 }
@@ -369,6 +391,7 @@ mod tests {
             settings: Settings::default(),
             random: false,
             repeat_all: false,
+            update_last_run_day: None,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -398,6 +421,7 @@ mod tests {
             settings: Settings::default(),
             random: false,
             repeat_all: false,
+            update_last_run_day: None,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -420,6 +444,7 @@ mod tests {
             settings: Settings::default(),
             random: false,
             repeat_all: false,
+            update_last_run_day: None,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -505,6 +530,13 @@ mod tests {
                 cover_jpeg_quality: 70,
                 cover_passthrough_max_ko: 256,
                 cover_max_pixels_mpx: 24,
+                // Same reason as every field above: the defaults are `Off`,
+                // `3` and `Daily`.
+                update_policy: crate::update::schedule::UpdatePolicy::CheckAndInstall,
+                update_hour: 4,
+                update_cadence: crate::update::schedule::UpdateCadence::Weekly(
+                    crate::update::schedule::Weekday::Monday,
+                ),
             },
             ..Default::default()
         };

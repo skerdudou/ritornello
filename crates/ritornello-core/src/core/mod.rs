@@ -249,6 +249,14 @@ pub struct Core<P: Player> {
     random: bool,
     /// Repeat-all, same persistence and same push as `random`.
     repeat_all: bool,
+    /// Identity of the last local day an automatic update run happened on.
+    /// Round-tripped exactly like `random` and `repeat_all` — read from
+    /// `PersistedState` at construction, written back unchanged by every
+    /// `persist()` — even though nothing in this task yet sets it to
+    /// anything but what was last on disk. The scheduler that actually
+    /// updates it is a later task; losing this quietly on the next
+    /// unrelated settings change would be the wrong kind of "not yet".
+    update_last_run_day: Option<i64>,
     /// The named presets **of each source**, indexed by source name, as each
     /// declared them (`SourceMessage::presets`).
     ///
@@ -453,6 +461,7 @@ impl<P: Player> Core<P> {
             has_finite_list: false,
             random: persisted.random,
             repeat_all: persisted.repeat_all,
+            update_last_run_day: persisted.update_last_run_day,
             presets_par_source: HashMap::new(),
             pending_tens: 0,
             state_path,
