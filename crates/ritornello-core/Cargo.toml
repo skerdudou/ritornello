@@ -60,6 +60,15 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # catches a corrupted download, not a malicious release. Authenticity comes
 # from HTTPS to GitHub with the repository fixed at compile time.
 sha2 = "0.10"
+# Reading a release archive entry by entry. The `tar` crate rather than
+# shelling out to tar(1), and that is a security choice: entry-by-entry
+# control is the whole mechanism — the core takes the one binary, the
+# /etc/ritornello files, and nothing else, whatever the archive happens to
+# carry. `tar -x` would take everything and then need undoing.
+tar = "0.4"
+# gzip, for the same archives. `default-features = false` plus `rust_backend`:
+# no C miniz, nothing to cross-compile for armv7 beyond Rust itself.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 tempfile = "3"

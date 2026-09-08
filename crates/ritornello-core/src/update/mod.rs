@@ -11,3 +11,8 @@
 // a library) does not treat `pub` as "reachable from outside" on its own.
 #[allow(dead_code)]
 pub mod release;
+
+// Same story: `read` and `installable_from_ui` get their first caller in a
+// later task.
+#[allow(dead_code)]
+pub mod archive;
