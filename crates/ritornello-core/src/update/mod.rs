@@ -393,15 +393,6 @@ const SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// not gain a dependant. A fourth copy would be the sign that this belongs in
 /// a crate of its own — this one names the file rather than its extension, so
 /// it works for a locale catalog and an input preset alike.
-/// Where the core's own archive note lives: beside the staging area, which
-/// this same unprivileged service already owns and creates before a download
-/// starts. Public so `main` can read it back at boot with the same path —
-/// see `read_core_archive_notes` there, the counterpart of
-/// `read_rollback_report`.
-pub fn core_notes_path(staging: &Path) -> PathBuf {
-    staging.join("core-archive-notes.json")
-}
-
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("/"));
     let tmp = dir.join(format!(
@@ -416,6 +407,15 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         return Err(e);
     }
     Ok(())
+}
+
+/// Where the core's own archive note lives: beside the staging area, which
+/// this same unprivileged service already owns and creates before a download
+/// starts. Public so `main` can read it back at boot with the same path —
+/// see `read_core_archive_notes` there, the counterpart of
+/// `read_rollback_report`.
+pub fn core_notes_path(staging: &Path) -> PathBuf {
+    staging.join("core-archive-notes.json")
 }
 
 /// What the page is told once an install pass is over, or `None` when the

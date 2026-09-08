@@ -9,7 +9,7 @@ const cssVariable = (page: import('@playwright/test').Page, name: string) =>
     name,
   )
 
-test('navigation between the home page, the config and the plugin pages', async ({ page }) => {
+test('navigation between the home page, the config and the plugin pages', async ({ page, request }) => {
   await page.goto('/')
   await expect(page.locator('[data-preset-button="1"]')).toBeVisible()
   // The harness declares a single station (stations.toml): the grid only
@@ -30,17 +30,22 @@ test('navigation between the home page, the config and the plugin pages', async 
   // a button removed by a refactor must turn this red.
   await expect(page.locator('[data-update-card]')).toBeVisible()
   await expect(page.locator('[data-update-card] button')).toHaveCount(2)
-  await expect(page.locator('[data-update-summary]')).not.toHaveText('')
-  // The policy selector, with its hour and its cadence. The harness has no
-  // access to GitHub, so this journey never presses "Check" and never
-  // depends on a release existing — see the state assertion further down.
+  // Against the real `/api/update` this harness serves, not only the page:
+  // `not.toHaveText('')` and a `toHaveText` pinned to the client's own
+  // pre-fetch default would both stay green against a broken or 404
+  // endpoint — the SPA renders that default either way. The harness has no
+  // access to GitHub and never presses "Check" in this journey, so the
+  // server's own answer is deterministically `never_checked`.
+  const updateState = await (await request.get('/api/update')).json()
+  expect(updateState.outcome).toEqual({ kind: 'never_checked' })
+  await expect(page.locator('[data-update-summary]')).toHaveText('Never checked')
+  // The policy selector, with its hour, its cadence, and the button that
+  // saves them — every added control on this card, not only the two that
+  // happened to be listed first.
   await expect(page.locator('[data-update-policy]')).toBeVisible()
   await expect(page.locator('[data-update-hour]')).toBeVisible()
   await expect(page.locator('[data-update-cadence]')).toBeVisible()
-  // What a device with no network sees: `never_checked`, not a fault. If the
-  // harness ever grew a real `/api/update` release, this line is exactly what
-  // would catch a summary that quietly started depending on it.
-  await expect(page.locator('[data-update-summary]')).toHaveText('Never checked')
+  await expect(page.locator('[data-update-policy-change]')).toHaveCount(1)
 
   // The plugins table's columns, against a real core. Nothing here counted
   // them before, so the Version column could have been added — or dropped

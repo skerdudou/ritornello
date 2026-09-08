@@ -145,9 +145,14 @@ class FakeIO {
  * by the SFC: it needs a real router, which additionally lets us observe the
  * `href` actually resolved) and a spied `fetch`.
  */
-async function mountView(overrides: Partial<Payloads> = {}, putError?: string) {
+async function mountView(overrides: Partial<Payloads> = {}, putError?: string, postError?: string) {
   const table = { ...payloads(), ...overrides }
   const puts: Array<{ url: string; body: unknown }> = []
+  // `api.post`'s body is `JSON.stringify(undefined)`, which **is** `undefined`
+  // (not the string `"undefined"`) — the check gesture's own shape (Ruling
+  // 43), so `undefined` is recorded as such rather than forced through
+  // `JSON.parse`, which would throw on it.
+  const posts: Array<{ url: string; body: unknown }> = []
   const spy = vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'PUT') {
       puts.push({ url, body: JSON.parse(String(init.body)) })
@@ -155,6 +160,15 @@ async function mountView(overrides: Partial<Payloads> = {}, putError?: string) {
         return new Response(JSON.stringify({ error: putError }), { status: 422 })
       }
       return new Response(null, { status: 204 })
+    }
+    if (init?.method === 'POST') {
+      posts.push({ url, body: init.body === undefined ? undefined : JSON.parse(String(init.body)) })
+      if (postError) {
+        return new Response(JSON.stringify({ error: postError }), { status: 422 })
+      }
+      // The real route answers 202 on enqueue only: `busy` is set later, by
+      // the worker task (see the polling tests below).
+      return new Response(null, { status: 202 })
     }
     const data = (table as Record<string, unknown>)[url]
     if (data === undefined) return new Response('unknown', { status: 404 })
@@ -183,7 +197,7 @@ async function mountView(overrides: Partial<Payloads> = {}, putError?: string) {
   document.body.innerHTML = ''
   const w = mount(ConfigView, { global: { plugins: [router] }, attachTo: document.body })
   await flushPromises()
-  return { w, spy, puts, table }
+  return { w, spy, puts, posts, table }
 }
 
 /**
@@ -1072,6 +1086,187 @@ describe('ConfigView — covers', () => {
     await w.find('[data-cover-passthrough-max]').setValue('2048')
     await flushPromises()
     expect(w.find('[data-cover-cache-estimate]').text()).toContain('au moins 1 pochettes')
+  })
+})
+
+// Fix round 1 (F2 of the review): the unplanned card and the whole update
+// wiring — the POSTs, the polling, the unmount cleanup, and the
+// policy/hour/cadence controls — arrived with zero behavioural coverage.
+// `/api/update` GETs are read from `table`, exactly like `/api/i18n` is
+// swapped mid-test elsewhere in this file, so the worker's asynchronous
+// `busy` can be simulated without a real core.
+describe('ConfigView — update', () => {
+  beforeEach(resetMocks)
+
+  function updatePayload(busy: string | null, components: unknown[] = []) {
+    return {
+      outcome: { kind: 'ok' },
+      release_version: null,
+      release_url: null,
+      last_check_unix_s: null,
+      components,
+      busy,
+      last_rollback: null,
+    }
+  }
+
+  it('sends a check with no body', async () => {
+    const { w, posts } = await mountView()
+    await w.find('[data-update-check]').trigger('click')
+    await flushPromises()
+    expect(posts).toEqual([{ url: '/api/update/check', body: undefined }])
+  })
+
+  // F1: the route answers 202 on enqueue only; `busy` is set afterwards by
+  // the worker. This is the fixture for exactly that race — the first GET
+  // after the POST still shows the pre-gesture, idle state — and it fails
+  // against the version of `onUpdateCheck` this fix round replaces (that
+  // version never armed the poll at all when this happened).
+  it('keeps polling even when the read right after the POST still shows idle', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, table } = await mountView()
+      // `table['/api/update']` stays at its idle default through the click:
+      // this is the race, made deterministic instead of hoped for.
+      await w.find('[data-update-check]').trigger('click')
+      await flushPromises()
+      expect(w.find('[data-update-busy]').exists()).toBe(false)
+
+      // The worker catches up one tick later; the poll must still be armed
+      // to notice, even though the snapshot right after the POST saw nothing.
+      ;(table as Record<string, unknown>)['/api/update'] = updatePayload('Checking…')
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.get('[data-update-busy]').text()).toBe('Checking…')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('polls every two seconds while busy, and stops on its own once busy clears', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, spy, table } = await mountView()
+      ;(table as Record<string, unknown>)['/api/update'] = updatePayload('Checking…')
+      await w.find('[data-update-check]').trigger('click')
+      await flushPromises()
+      expect(w.get('[data-update-busy]').text()).toBe('Checking…')
+
+      ;(table as Record<string, unknown>)['/api/update'] = updatePayload(null)
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.find('[data-update-busy]').exists()).toBe(false)
+      const callsAfterStop = spy.mock.calls.filter((c) => c[0] === '/api/update').length
+
+      // Proof the poll actually stopped rather than merely reading `null`
+      // once: no further `/api/update` GET after two more intervals.
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(spy.mock.calls.filter((c) => c[0] === '/api/update').length).toBe(callsAfterStop)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops polling when the view unmounts', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, spy, table } = await mountView()
+      ;(table as Record<string, unknown>)['/api/update'] = updatePayload('Checking…')
+      await w.find('[data-update-check]').trigger('click')
+      await flushPromises()
+      w.unmount()
+      const before = spy.mock.calls.filter((c) => c[0] === '/api/update').length
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(spy.mock.calls.filter((c) => c[0] === '/api/update').length).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a refused check is reported by a toast', async () => {
+    const { w } = await mountView({}, undefined, 'already busy')
+    await w.find('[data-update-check]').trigger('click')
+    await flushPromises()
+    expect(toast.error).toHaveBeenCalledWith('already busy')
+  })
+
+  it('confirms an install through the dialog with exactly the checked components', async () => {
+    const { w, posts } = await mountView({
+      '/api/update': updatePayload(null, [
+        {
+          name: 'core', kind: 'core', declared: true, binary_present: true,
+          installed: '0.2.0', offered: '0.3.0', availability: 'update_available',
+        },
+      ]),
+    })
+    await w.find('[data-update-install]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLButtonElement>('[data-update-confirm]')!.click()
+    await flushPromises()
+    expect(posts).toEqual([{ url: '/api/update/install', body: { components: ['core'] } }])
+  })
+
+  it('the policy select writes into the whole-block settings PUT', async () => {
+    const { w, puts } = await mountView()
+    const policySelect = w.findAllComponents(Select)[0]!
+    await policySelect.vm.$emit('update:modelValue', 'check')
+    await w.find('[data-update-policy-change]').trigger('click')
+    await flushPromises()
+    expect(puts).toHaveLength(1)
+    expect((puts[0]!.body as Record<string, unknown>).update_policy).toBe('check')
+  })
+
+  it('casts the update hour to a number before sending it', async () => {
+    const { w, puts } = await mountView()
+    await w.find('[data-update-hour]').setValue('7')
+    await w.find('[data-update-policy-change]').trigger('click')
+    await flushPromises()
+    expect((puts[0]!.body as Record<string, unknown>).update_hour).toBe(7)
+  })
+
+  it('the day select appears only for a weekly cadence, and switching back to daily drops the day', async () => {
+    const { w, puts } = await mountView()
+    expect(w.find('[data-update-cadence-day]').exists()).toBe(false)
+
+    const cadenceSelect = w.findAllComponents(Select)[1]!
+    await cadenceSelect.vm.$emit('update:modelValue', 'weekly')
+    await flushPromises()
+    expect(w.find('[data-update-cadence-day]').exists()).toBe(true)
+
+    const daySelect = w.findAllComponents(Select)[2]!
+    await daySelect.vm.$emit('update:modelValue', 'wednesday')
+    await w.find('[data-update-policy-change]').trigger('click')
+    await flushPromises()
+    expect((puts[0]!.body as Record<string, unknown>).update_cadence).toEqual({
+      kind: 'weekly', day: 'wednesday',
+    })
+
+    // Switching back to daily: the day is dropped, not carried as dead weight.
+    await cadenceSelect.vm.$emit('update:modelValue', 'daily')
+    await flushPromises()
+    expect(w.find('[data-update-cadence-day]').exists()).toBe(false)
+    await w.find('[data-update-policy-change]').trigger('click')
+    await flushPromises()
+    expect((puts[1]!.body as Record<string, unknown>).update_cadence).toEqual({ kind: 'daily' })
+  })
+
+  it('the policy and cadence triggers follow a language change, like every other dropdown', async () => {
+    // Same regression class as `e01400b`: `SelectItemText` reads an option's
+    // text once at mount and never again, so a trigger label must come from
+    // a `computed` re-read live, not from the option that mounted first.
+    const { w, table } = await mountView()
+    expect(w.get('[data-update-policy]').text()).toContain('Désactivées')
+    expect(w.get('[data-update-cadence]').text()).toContain('Quotidienne')
+
+    ;(table as Record<string, unknown>)['/api/i18n'] = {
+      ...CATALOGUE,
+      update_policy_off: 'off (en)',
+      update_cadence_daily: 'daily (en)',
+    }
+    await w.findAllComponents(Select)[3]!.vm.$emit('update:modelValue', 'en')
+    await w.find('[data-lang-change]').trigger('click')
+    await flushPromises()
+
+    expect(w.get('[data-update-policy]').text()).toContain('off (en)')
+    expect(w.get('[data-update-cadence]').text()).toContain('daily (en)')
   })
 })
 

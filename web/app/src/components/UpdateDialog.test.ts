@@ -99,8 +99,15 @@ describe('UpdateDialog', () => {
         declared: true,
         binary_present: true,
         installed: '1.4.0',
-        offered: null,
-        availability: 'unknown',
+        // `update_available`, not `unknown`: a real third-party row never
+        // carries this (its own repository decides), but the guard under
+        // test here is `kind !== 'third_party'` specifically, and the
+        // sibling `availability === 'update_available'` filter must not be
+        // what is doing the excluding — an `unknown` row is excluded by
+        // *that* filter regardless of kind, which would let the kind guard
+        // be deleted with every test in this file still green.
+        offered: '2.0.0',
+        availability: 'update_available',
         third_party_repo: 'someone/their-plugin',
       },
     ])
@@ -151,6 +158,35 @@ describe('UpdateDialog', () => {
     expect(row('radio')?.querySelector('[data-update-row-warning]')?.textContent).toBe(
       'radio will move while the core stays behind — this may make them incompatible.',
     )
+  })
+
+  it('does not warn about an unchecked plugin, even while the core is left behind', async () => {
+    // The operand the "warns when a plugin is checked" test title promises
+    // but, on its own, does not pin: `mpd` here is never checked (it is
+    // `not_installed`, excluded by the same default as in the first test),
+    // yet the core ends up left behind exactly as in the warning test above.
+    // Without the `checked.value.has(c.name)` guard, every plugin row would
+    // warn whenever the core is left behind, checked or not.
+    mountDialog([
+      core(),
+      {
+        name: 'mpd',
+        kind: 'plugin',
+        declared: false,
+        binary_present: false,
+        installed: null,
+        offered: '0.3.0',
+        availability: 'not_installed',
+      },
+    ])
+    await flushPromises()
+    expect(isChecked('mpd')).toBe('false')
+
+    await row('core')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
+    await flushPromises()
+    expect(isChecked('core')).toBe('false')
+    expect(isChecked('mpd')).toBe('false')
+    expect(row('mpd')?.querySelector('[data-update-row-warning]')).toBeNull()
   })
 
   it('does not warn about a checked plugin when the core has nothing to update', async () => {

@@ -507,6 +507,14 @@ async function saveSettings() {
  * reload right after would very often still read the pre-gesture state —
  * see `pollUpdateWhileBusy`, which watches `busy` rather than a delay. The
  * repo has already paid for a `watch` that observed the wrong thing once.
+ *
+ * The route answers **202 on enqueue only** — `busy` is set afterwards, by
+ * the worker task, not by this request. So the poll is armed
+ * unconditionally on a successful 202, never gated on one immediate
+ * snapshot: that snapshot can race the worker and read `busy: null` before
+ * it has taken the write lock, which used to leave the card stale with its
+ * buttons enabled until the operator pressed F5 — silently, exactly the
+ * failure mode this product has already been bitten by once.
  */
 let updatePoll: ReturnType<typeof setInterval> | null = null
 
@@ -537,8 +545,8 @@ async function onUpdateCheck() {
     toast.error(err)
     return
   }
+  pollUpdateWhileBusy()
   await refreshUpdate()
-  if (update.value.busy) pollUpdateWhileBusy()
 }
 
 const showInstallDialog = ref(false)
@@ -550,8 +558,8 @@ async function onConfirmInstall(names: string[]) {
     toast.error(err)
     return
   }
+  pollUpdateWhileBusy()
   await refreshUpdate()
-  if (update.value.busy) pollUpdateWhileBusy()
 }
 
 // Changing the language reloads the catalogs instead of reloading the whole
