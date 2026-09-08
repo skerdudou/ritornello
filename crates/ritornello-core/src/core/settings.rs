@@ -64,19 +64,24 @@ impl<P: Player> Core<P> {
         self.update_last_run_day
     }
 
-    /// Records that today has had its automatic run, and writes it down at
-    /// once.
+    /// Records — or un-records — the local day of the last automatic run, and
+    /// writes it down at once.
     ///
-    /// **Written before the run rather than after it**, and that is the point:
+    /// **Noted before the run rather than after it**, and that is the point:
     /// the ticker asks every minute, so a day noted only on success would fire
     /// again sixty seconds after a failed check — and, under
     /// `CheckAndInstall`, keep re-downloading all night. Once a day means once
-    /// a day, whatever the outcome.
+    /// a day, whatever the outcome of the run.
+    ///
+    /// Which is why it takes an `Option` rather than a day: a run that never
+    /// *left* — the worker's queue was full — has not had its turn, and the
+    /// caller puts the previous value back so the next minute tries again.
+    /// The distinction is "did it happen", not "did it succeed".
     ///
     /// It goes through `persist` like every other piece of state, which is
     /// what keeps it from being lost by the next unrelated settings write.
-    pub fn note_update_run(&mut self, day: i64) {
-        self.update_last_run_day = Some(day);
+    pub fn set_update_last_run_day(&mut self, day: Option<i64>) {
+        self.update_last_run_day = day;
         self.persist();
     }
 

@@ -11,6 +11,15 @@ use crate::marker;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// **Written by a binary that is never updated, read by one that is** — the
+/// same asymmetry as `marker::Marker`, and the same rule follows from it:
+/// every field added here must carry `#[serde(default)]`.
+///
+/// The core deserializes this file at startup and puts it straight into
+/// `UpdateState.last_rollback`, so its field names are also the wire contract
+/// of `GET /api/update`. A field added without a default makes an old
+/// installer's report unreadable, and the page then shows nothing at all where
+/// a nocturnal rollback happened — the one trace it leaves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Report {
     pub at_unix_s: u64,

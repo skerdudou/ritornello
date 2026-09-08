@@ -2354,6 +2354,16 @@ async fn main() -> Result<()> {
                     // restart did not happen rather than claiming a new
                     // binary is running when the old process still holds the
                     // sockets.
+                    //
+                    // **What this arm does NOT check, and every sender must:
+                    // whether the plugin is switched on.** `hot_unplug`
+                    // refuses only `Liveness::OutOfReach`; for a plugin that
+                    // is simply not running — which is what a disabled one
+                    // is — it succeeds with nothing to kill, and `relaunch`
+                    // below then starts a process the operator switched off.
+                    // The update worker reads `plugins.toml` before sending
+                    // (see `update::Worker::restart_plugin`); a future sender
+                    // that forgets will turn a disabled plugin on.
                     PluginAction::Restart => {
                         let stopped = hot_unplug(
                             &order.name,
@@ -2437,7 +2447,8 @@ async fn main() -> Result<()> {
                         // asks again in sixty seconds, and a day noted only
                         // on success would make a failed check retry all
                         // night — installing included.
-                        core.note_update_run(now.day_key);
+                        let previous_run_day = core.update_last_run_day();
+                        core.set_update_last_run_day(Some(now.day_key));
                         let install = settings.update_policy
                             == update::schedule::UpdatePolicy::CheckAndInstall;
                         tracing::info!("scheduled update run (install: {install})");
@@ -2446,7 +2457,15 @@ async fn main() -> Result<()> {
                         // work twice. `try_send` rather than `send` for that,
                         // and because this arm must never hold the core loop.
                         if let Err(e) = scheduler_tx.try_send(update::Job::Scheduled { install }) {
+                            // The day is put back, and that is not a
+                            // contradiction of the "note it before" rule
+                            // above: that rule says a run which *happened*
+                            // counts whatever it found. This one never left
+                            // the loop, so today has not had its turn, and
+                            // leaving the note would skip the day for a
+                            // queue that will be empty a minute from now.
                             tracing::warn!("scheduled update run not enqueued: {e}");
+                            core.set_update_last_run_day(previous_run_day);
                         }
                     }
                 }

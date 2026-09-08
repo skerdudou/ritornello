@@ -168,7 +168,13 @@ pub fn component_offers(
     out
 }
 
-/// How the last check went.
+/// How the last **attempt** went — a check, or an install.
+///
+/// Not "the last check", though it started that way: an install refused for
+/// want of space, of a digest or of the privileged unit has nowhere else to
+/// say so, and §9 of the design asks the card for "le compte rendu de la
+/// dernière tentative". One field for both because the page shows one
+/// sentence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "detail")]
 pub enum CheckOutcome {

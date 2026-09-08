@@ -231,6 +231,165 @@ fn verify_digest(name: &str, published: Option<&str>, got: &str) -> Result<(), D
     Ok(())
 }
 
+/// Why one component could not be installed.
+///
+/// An enum and not a ready-made sentence, and that is the point: the sentence
+/// belongs to the catalog, and building it needs a lock this code path cannot
+/// take inside a `map_err`. So the refusal travels as a reason plus its
+/// technical detail, and `refusal_message` turns it into what the page reads —
+/// once, in one place, which is also what makes "every refusal is translated"
+/// something a test can check rather than a habit.
+#[derive(Debug)]
+enum Refusal {
+    NoRoom,
+    /// The release publishes no digest for this archive: no checksum file at
+    /// all, or no line for this file in it.
+    NoDigest,
+    DigestMismatch,
+    NeedsManualStep,
+    /// The archive, or its checksum file, could not be fetched.
+    Download(String),
+    /// Everything between having the bytes and having asked systemd: reading
+    /// the archive, writing the staged binary, the `/etc/ritornello` files,
+    /// the request.
+    Prepare(String),
+    /// The privileged unit refused or could not be started. Carries
+    /// systemctl's own words.
+    Privileged(String),
+}
+
+impl std::fmt::Display for Refusal {
+    /// The **untruncated** technical text, for the log. The page gets
+    /// `refusal_message` instead.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoRoom => write!(f, "not enough free space"),
+            Self::NoDigest => write!(f, "no published digest for this archive"),
+            Self::DigestMismatch => write!(f, "the download does not match its published digest"),
+            Self::NeedsManualStep => {
+                write!(f, "the archive carries something the core may not install")
+            }
+            Self::Download(d) | Self::Prepare(d) | Self::Privileged(d) => write!(f, "{d}"),
+        }
+    }
+}
+
+/// The sentence the page shows for one refusal.
+///
+/// Pure over the catalog, so a test can walk every variant and prove that each
+/// one resolves to a real entry with its parameters filled in — the global
+/// constraint (user-facing text through the catalog, named parameters, both
+/// languages) applies to this path as much as to any other, and a `format!`
+/// here would reach a French screen in English.
+fn refusal_message(catalog: &Catalog, component: &str, why: &Refusal) -> String {
+    let (key, detail) = match why {
+        Refusal::NoRoom => ("update_no_room", None),
+        Refusal::NoDigest => ("update_no_digest", None),
+        Refusal::DigestMismatch => ("update_digest_mismatch", None),
+        Refusal::NeedsManualStep => ("update_needs_manual_step", None),
+        Refusal::Download(d) => ("update_download_failed", Some(d)),
+        Refusal::Prepare(d) => ("update_install_failed", Some(d)),
+        Refusal::Privileged(d) => ("update_privileged_failed", Some(d)),
+    };
+    let text = catalog.get(key).replace("{component}", component);
+    match detail {
+        Some(d) => text.replace("{detail}", d),
+        None => text,
+    }
+}
+
+/// Is every one of these lines describing a plugin that has finished having
+/// its say?
+///
+/// `starting` means launched and not yet heard from; `stalled` means alive,
+/// silent, and past its deadline but still able to speak — the registration
+/// socket stays open for it. Both are lines that carry **no version yet and
+/// may still gain one**, and reading a version off them is reading a `None`
+/// that means "wait", not "unknown".
+///
+/// Every other shape is settled and stays settled without anything else
+/// happening: announced (its version is there), disconnected, switched off,
+/// binary absent.
+fn lines_settled(status: &StatusState, only: Option<&str>) -> bool {
+    status
+        .plugins
+        .iter()
+        .filter(|line| only.is_none_or(|name| line.name == name))
+        .all(|line| !line.starting && !line.stalled)
+}
+
+/// Waits until the status lines have settled, or gives up.
+///
+/// **Polling, and there is no channel to wait on instead**: the status lines
+/// are an `RwLock` that a dozen sites in `main` update in place, and giving
+/// them a notification channel to serve one reader would be a new invariant
+/// for every one of those sites to remember.
+///
+/// Answers whether it settled, so the caller can say in the log that it read
+/// a device that had not finished starting. Bounded, because a plugin that is
+/// alive and silent for ever is a state this product explicitly has a word
+/// for, and waiting on it is not an option.
+async fn await_settled(
+    status: &RwLock<StatusState>,
+    only: Option<&str>,
+    within: std::time::Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        if lines_settled(&*status.read().await, only) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(SETTLE_POLL).await;
+    }
+}
+
+/// How long the worker gives the plugins to finish speaking before it reads a
+/// version off their lines.
+///
+/// The two moments that need it are the same moment seen twice: a check that
+/// runs seconds after boot, and a check that runs seconds after a plugin was
+/// relaunched with a new binary. In both, a line that has not settled says
+/// `version: None`, which `differs` reads as "out of step with every release"
+/// — so without this wait the boot-time catch-up run would judge every
+/// still-silent plugin unknown, skip it, and burn the day.
+///
+/// Fifteen seconds, one notch above `STARTUP_TIMEOUT` in `main`: past that
+/// deadline the core itself has given up on a silent plugin and written
+/// `stalled` on its line, so waiting longer would only be waiting on a state
+/// nothing is going to change.
+const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Coarse on purpose: this runs at most twice a day, and what it is waiting
+/// for takes seconds.
+const SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Writes through a temporary beside the target, then `rename`.
+///
+/// The third copy of a three-line rule in this repository, and it is written
+/// out rather than shared because neither of the other two fits: `plugins.rs`'s
+/// takes a `&str` and derives its temporary name from a `.toml` extension it
+/// assumes, and the privileged crate's is `pub(crate)` to a crate that must
+/// not gain a dependant. A fourth copy would be the sign that this belongs in
+/// a crate of its own — this one names the file rather than its extension, so
+/// it works for a locale catalog and an input preset alike.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    let tmp = dir.join(format!(
+        ".{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+    ));
+    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        // The rename error is the one worth reporting; a cleanup that fails in
+        // turn must not mask it.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// How long the core waits for the privileged unit. It is a `oneshot` that
 /// copies a few tens of megabytes at worst; two minutes is generous on an SD
 /// card and still finite.
@@ -350,11 +509,38 @@ impl Worker {
         state.outcome = CheckOutcome::Failed(message);
     }
 
+    /// The same list, but only once the plugins have finished speaking.
+    ///
+    /// **This is the whole of the boot-time catch-up repair.** The scheduler's
+    /// first tick fires as the main loop starts, which can be moments before a
+    /// slow plugin has been hot-wired; its line then carries no version,
+    /// `differs(None, offered)` is true against every release, and the run
+    /// would leave that plugin's row reading "not installed / update
+    /// available" until the next check — a day later, since the day has
+    /// already been noted. Waiting is what makes the catch-up run see the
+    /// device it is judging.
+    ///
+    /// Every caller that reads a version goes through here rather than through
+    /// `installed` directly, so a manual check clicked three seconds after
+    /// boot gets the same answer as one clicked an hour later.
+    async fn installed_when_settled(&self) -> Vec<Installed> {
+        if !await_settled(&self.status, None, SETTLE_TIMEOUT).await {
+            tracing::warn!(
+                "update: some plugins were still silent after {} s; their rows will say what is known so far",
+                SETTLE_TIMEOUT.as_secs()
+            );
+        }
+        self.installed().await
+    }
+
     /// What the core knows about its plugins, before the release is consulted.
     ///
     /// Two sources, and neither alone is enough: `plugins.toml` says what is
     /// declared and where its binary should be, and the status lines say what
     /// each plugin announced about itself.
+    ///
+    /// Read through `installed_when_settled`, never directly: a line that has
+    /// not settled carries a `None` version that means "wait", not "unknown".
     async fn installed(&self) -> Vec<Installed> {
         let manifest = match PluginManifest::load(&self.manifest) {
             Ok(m) => m,
@@ -430,7 +616,7 @@ impl Worker {
                 // component — which is the truth, where a leftover
                 // "0.3.0 available" from a previous check would be a claim
                 // about a release that is no longer there.
-                let installed = self.installed().await;
+                let installed = self.installed_when_settled().await;
                 let mut state = self.state.write().await;
                 state.outcome = CheckOutcome::NoRelease;
                 state.release_version = None;
@@ -449,7 +635,7 @@ impl Worker {
             }
         };
         let published = fold(&releases, ARCH);
-        let installed = self.installed().await;
+        let installed = self.installed_when_settled().await;
         let mut components = component_offers(self.core_version, &published, &installed);
         let core = published.iter().find(|p| p.offer == Offer::Core);
         let mut state = self.state.write().await;
@@ -470,6 +656,7 @@ impl Worker {
     /// page, which is the honest limit of a payload with one message field.
     async fn install(&self, client: &reqwest::Client, published: &[Published], names: &[String]) {
         let mut first_failure: Option<String> = None;
+        let mut placed_a_plugin = false;
         for name in install_order(names) {
             let Some(offered) = published.iter().find(|p| carries(p, &name)) else {
                 // A name this release does not carry: a third-party plugin, or
@@ -482,7 +669,10 @@ impl Worker {
             self.set_busy(Some(self.message_for("update_installing", &name).await))
                 .await;
             match self.install_one(client, &name, offered).await {
-                Ok(Placed::Plugin) => self.restart_plugin(&name).await,
+                Ok(Placed::Plugin) => {
+                    self.restart_plugin(&name).await;
+                    placed_a_plugin = true;
+                }
                 Ok(Placed::Core) => {
                     // The end of the gesture, and of this process: the new
                     // binary is on disk, and `Restart=always` is what runs it.
@@ -492,47 +682,80 @@ impl Worker {
                     (self.restart)();
                     return;
                 }
-                Err(message) => {
-                    tracing::warn!("update: installing {name}: {message}");
+                Err(why) => {
+                    // The untruncated technical text to the log, the catalog
+                    // sentence to the page: they are different audiences, and
+                    // only one of them reads French.
+                    tracing::warn!("update: installing {name}: {why}");
+                    let catalog = self.catalog.read().await;
+                    let message = refusal_message(&catalog, &name, &why);
+                    drop(catalog);
                     first_failure.get_or_insert(message);
                 }
             }
+        }
+        if placed_a_plugin {
+            self.refresh_rows(published).await;
         }
         if let Some(message) = first_failure {
             self.publish_failure(message).await;
         }
     }
 
+    /// Rebuilds the rows once a plugin has been replaced and restarted.
+    ///
+    /// **Without this, a successful install is indistinguishable from nothing
+    /// having happened.** `busy` clears, `outcome` is still the `Ok` the check
+    /// left, and the row still reads "0.2.0 → 0.3.0 available" — which reads
+    /// as a failure to whoever just clicked Install.
+    ///
+    /// From the **same** `published` the check returned, so there is no second
+    /// GitHub round trip and no window between what was seen and what was
+    /// installed; and through `installed_when_settled`, because the restarted
+    /// plugin re-announces asynchronously and a row rebuilt an instant too
+    /// early would say `installed: null` — briefly *more* wrong than the stale
+    /// one. `carry_installable` runs here for the same reason it runs after a
+    /// check: a component refused for a manual step must not forget it.
+    async fn refresh_rows(&self, published: &[Published]) {
+        let installed = self.installed_when_settled().await;
+        let mut components = component_offers(self.core_version, published, &installed);
+        let mut state = self.state.write().await;
+        carry_installable(&state.components, &mut components);
+        state.components = components;
+    }
+
     /// One component: room, bytes, digest, archive, staging, and the
     /// privileged unit.
     ///
-    /// Every refusal is a catalog message naming the component, because that
-    /// string is what the page shows — there is no second place to look.
+    /// Refuses with a `Refusal` and never with a sentence: the sentence comes
+    /// from the catalog, and this function is not where the catalog lock
+    /// belongs. `install` builds it, once, for whatever comes back.
     async fn install_one(
         &self,
         client: &reqwest::Client,
         name: &str,
         offered: &Published,
-    ) -> Result<Placed, String> {
+    ) -> Result<Placed, Refusal> {
         let is_core = offered.offer == Offer::Core;
         let root = self.root.to_string_lossy().to_string();
         if !enough_room(crate::system::disk_usage(&root), offered.size as usize) {
-            return Err(self.message_for("update_no_room", name).await);
+            return Err(Refusal::NoRoom);
         }
         // The digest comes from the release that carries the archive, not from
         // one release-wide file: two components installed in one gesture may
         // legitimately read two different `SHA256SUMS`.
         let Some(checksums_url) = &offered.checksums_url else {
-            return Err(self.message_for("update_no_digest", name).await);
+            return Err(Refusal::NoDigest);
         };
         let bytes = fetch_capped(client, &offered.url, COMPRESSED_MAX)
             .await
-            .map_err(|e| format!("downloading {name}: {e}"))?;
+            .map_err(|e| Refusal::Download(format!("the archive of {name}: {e}")))?;
         let (status, sums_body) = fetch_text(client, checksums_url)
             .await
-            .map_err(|e| format!("downloading the checksums of {name}: {e}"))?;
+            .map_err(|e| Refusal::Download(format!("the checksums of {name}: {e}")))?;
         if status != 200 {
-            return Err(self.message_for("update_no_digest", name).await);
+            tracing::warn!("update: {checksums_url} answered HTTP {status}");
+            return Err(Refusal::NoDigest);
         }
         let sums = parse_checksums(&sums_body);
         let file = asset_name(&offered.url);
@@ -542,15 +765,13 @@ impl Worker {
             // that names the component, which is what its reader can act on.
             tracing::warn!("update: {name}: {e}");
             return Err(match e {
-                DownloadError::Digest { .. } => {
-                    self.message_for("update_digest_mismatch", name).await
-                }
-                _ => self.message_for("update_no_digest", name).await,
+                DownloadError::Digest { .. } => Refusal::DigestMismatch,
+                _ => Refusal::NoDigest,
             });
         }
 
         let contents = archive::read(&bytes, DECOMPRESSED_MAX)
-            .map_err(|e| format!("reading the archive of {name}: {e}"))?;
+            .map_err(|e| Refusal::Prepare(format!("reading the archive of {name}: {e}")))?;
         // **The core is not judged by this rule, and that is not an
         // oversight.** `installable_from_ui` asks whether an archive holds
         // anything root would have to place outside the plugins directory —
@@ -562,46 +783,51 @@ impl Worker {
         // its notes, which is the mechanism the design gives that case.
         if !is_core && !installable_from_ui(&contents.entries) {
             self.remember_manual_step(name).await;
-            return Err(self.message_for("update_needs_manual_step", name).await);
+            return Err(Refusal::NeedsManualStep);
         }
         let Some(staged) = download_name(&offered.offer) else {
-            return Err(format!("no staged name for {name}"));
+            return Err(Refusal::Prepare(format!("no staged name for {name}")));
         };
 
         std::fs::create_dir_all(&self.staging)
-            .map_err(|e| format!("creating {}: {e}", self.staging.display()))?;
+            .map_err(|e| Refusal::Prepare(format!("creating {}: {e}", self.staging.display())))?;
         let action = if is_core {
-            let binary = contents
-                .core_binary
-                .ok_or_else(|| format!("the archive of {name} carries no core binary"))?;
+            let binary = contents.core_binary.ok_or_else(|| {
+                Refusal::Prepare(format!("the archive of {name} carries no core binary"))
+            })?;
             self.write_staged(&staged, &binary)?;
             Action::PlaceCore { staged: staged.clone() }
         } else {
-            let (file, binary) = contents
-                .binary
-                .ok_or_else(|| format!("the archive of {name} carries no plugin binary"))?;
+            let (file, binary) = contents.binary.ok_or_else(|| {
+                Refusal::Prepare(format!("the archive of {name} carries no plugin binary"))
+            })?;
             self.write_staged(&staged, &binary)?;
             Action::PlacePlugin { file, staged: staged.clone() }
         };
         // Written by the core, unprivileged, because the service already owns
         // `/etc/ritornello`: root has no business touching it, which is what
         // keeps its list of paths down to two.
+        //
+        // Written **before** the unit runs, so a unit that then fails leaves
+        // the new locale catalogs beside the old binary. Harmless as things
+        // stand — `Catalog::get` falls back to the embedded English and, past
+        // that, to the key itself — and the alternative (placing them after)
+        // would leave the new binary beside the old catalogs, which is the
+        // same mismatch the other way round with no fallback at all.
         self.write_etc_files(&contents.etc_files)?;
 
         let request = Request { format: REQUEST_FORMAT, actions: vec![action] };
         let request_path = self.staging.join("request.json");
-        let text = serde_json::to_string(&request).map_err(|e| format!("the request: {e}"))?;
+        let text = serde_json::to_string(&request)
+            .map_err(|e| Refusal::Prepare(format!("the request: {e}")))?;
         std::fs::write(&request_path, text)
-            .map_err(|e| format!("writing {}: {e}", request_path.display()))?;
+            .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", request_path.display())))?;
 
         if let Err(detail) = run_privileged_unit().await {
             // systemctl's own words travel verbatim to the page: when the
             // polkit rule is missing it names the file, which is the whole
             // diagnosis.
-            return Err(self
-                .message("update_privileged_failed")
-                .await
-                .replace("{detail}", &detail));
+            return Err(Refusal::Privileged(detail));
         }
         // The installer **copies** what it places (it renames a copy made
         // inside the target's own directory, since a rename across mounts is
@@ -617,9 +843,10 @@ impl Worker {
         Ok(if is_core { Placed::Core } else { Placed::Plugin })
     }
 
-    fn write_staged(&self, staged: &str, bytes: &[u8]) -> Result<(), String> {
+    fn write_staged(&self, staged: &str, bytes: &[u8]) -> Result<(), Refusal> {
         let path = self.staging.join(staged);
-        std::fs::write(&path, bytes).map_err(|e| format!("writing {}: {e}", path.display()))
+        std::fs::write(&path, bytes)
+            .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", path.display())))
     }
 
     /// The locale catalogs and input presets a release owns.
@@ -627,15 +854,21 @@ impl Worker {
     /// Written unconditionally, which is why `ETC_PREFIXES` is two named
     /// subdirectories and not `etc/ritornello/` at large: the operator's own
     /// files live in that directory too.
-    fn write_etc_files(&self, files: &[(String, Vec<u8>)]) -> Result<(), String> {
+    ///
+    /// Through a temporary and a `rename`, like every other file this product
+    /// writes: this is a device one unplugs, and a `fr.toml` cut in half by a
+    /// power cut is a catalog that no longer parses — every message in it
+    /// falls back to its key, on screen.
+    fn write_etc_files(&self, files: &[(String, Vec<u8>)]) -> Result<(), Refusal> {
         for (path, bytes) in files {
             let target = self.root.join(path);
             if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    Refusal::Prepare(format!("creating {}: {e}", parent.display()))
+                })?;
             }
-            std::fs::write(&target, bytes)
-                .map_err(|e| format!("writing {}: {e}", target.display()))?;
+            write_atomic(&target, bytes)
+                .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", target.display())))?;
         }
         Ok(())
     }
@@ -700,9 +933,15 @@ impl Worker {
         }
         match tokio::time::timeout(RESTART_ACK_TIMEOUT, ack_rx).await {
             Ok(Ok(true)) => tracing::info!("update: {name} replaced and restarted"),
-            // `relaunch` answering `false` is already in the log with its
-            // cause, which the UI shows. The new binary is on disk either way.
-            Ok(Ok(false)) => tracing::warn!("update: {name} was replaced but would not start again"),
+            // `false` means the core loop refused to *stop* it: `hot_unplug`
+            // answers `false` only for a plugin whose process the core does
+            // not own, and nothing was tried to start. So the old process is
+            // still running the old binary, and the new one sits on disk
+            // waiting for someone to kill it. The loop's own log names the
+            // remedy.
+            Ok(Ok(false)) => tracing::warn!(
+                "update: {name} was replaced on disk, but the core does not own its process and could not stop it — the old one is still running"
+            ),
             Ok(Err(_)) => tracing::warn!("update: no acknowledgment for the restart of {name}"),
             Err(_) => tracing::warn!(
                 "update: the core loop did not acknowledge the restart of {name} within {} s",
@@ -775,6 +1014,7 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::PluginStatus;
     use ritornello_updater::marker::Marker;
 
     fn marker(at: u64) -> Marker {
@@ -861,6 +1101,12 @@ mod tests {
     /// `scripts/package-release.sh x86_64-unknown-linux-gnu x86_64`, read off
     /// the archives it produced, with the leading `./` stripped and
     /// directories left as `archive::read` normalises them.
+    ///
+    /// **What this does not prove**, and it should be read for exactly what it
+    /// is: it pins the *rule's* answer, not the *branch* in `install_one`.
+    /// Dropping the `!is_core &&` there would leave every test in this module
+    /// green. That is the worker-is-untested doctrine, and it is why the
+    /// reason lives in a comment at the call site as well as here.
     #[test]
     fn the_core_archive_could_never_pass_the_rule_that_governs_a_plugin() {
         let core = names(&[
@@ -1021,5 +1267,192 @@ mod tests {
             asset_name("https://github.com/x/y/releases/download/v0.3.0/ritornello-plugin-radio-0.2.4-armv7.tar.gz"),
             "ritornello-plugin-radio-0.2.4-armv7.tar.gz"
         );
+    }
+
+    /// A release's locale catalog lands whole or not at all.
+    ///
+    /// The cheap proof that the write went through a `rename` rather than
+    /// straight onto the target — the same shape the privileged crate uses
+    /// for its own manifest: nothing named after the temporary survives, and
+    /// the temporary is not the target. A truncated `fr.toml` is a catalog
+    /// that no longer parses, and every message in it falls back to its key,
+    /// on screen.
+    #[test]
+    fn a_locale_catalog_is_written_through_a_temporary_and_a_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("fr.toml");
+        write_atomic(&target, b"hello = \"bonjour\"\n").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"hello = \"bonjour\"\n");
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "fr.toml")
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// The French pack this repository ships, loaded as a real catalog rather
+    /// than parsed as a table: what the test needs to know is what a French
+    /// screen would actually receive.
+    fn french() -> Catalog {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        Catalog::load("core", "fr", &root, crate::i18n::EN)
+    }
+
+    /// **Every refusal reaches the page as a translated sentence.** A
+    /// `format!` on this path is a French screen reading English, which is
+    /// the constraint this repository states first and has already paid for
+    /// once.
+    ///
+    /// The list is written out, one entry per variant, rather than derived:
+    /// that is what makes a new variant have to appear here before it can
+    /// reach a screen. Both catalogs, because a French string that dropped
+    /// `{component}` would say "could not be downloaded" about nothing in
+    /// particular, and the parity test only compares key *sets*.
+    #[test]
+    fn every_refusal_is_a_translated_sentence_with_its_parameters_filled_in() {
+        let english = Catalog::load(
+            "core",
+            "en",
+            std::path::Path::new("/nonexistent"),
+            crate::i18n::EN,
+        );
+        let all = [
+            Refusal::NoRoom,
+            Refusal::NoDigest,
+            Refusal::DigestMismatch,
+            Refusal::NeedsManualStep,
+            Refusal::Download("connection reset by peer".to_string()),
+            Refusal::Prepare("no space left on device".to_string()),
+            Refusal::Privileged("Job for ritornello-update.service failed".to_string()),
+        ];
+        for catalog in [&english, &french()] {
+            for why in &all {
+                let message = refusal_message(catalog, "radio", why);
+                // `Catalog::get` answers the key itself when it knows none,
+                // so a key missing from either pack shows up here.
+                assert!(
+                    !message.starts_with("update_"),
+                    "{why:?} fell through to its own key: {message}"
+                );
+                assert!(
+                    !message.contains('{'),
+                    "{why:?} left a parameter unfilled: {message}"
+                );
+            }
+        }
+    }
+
+    // ---- The worker, against a temporary root ---------------------------
+    //
+    // Not a test of the worker as a whole: it fetches from GitHub and starts
+    // a systemd unit, neither of which exists here. What these two drive is
+    // the one thing it does that is not I/O — reading the device's own state
+    // at the right *moment*.
+
+    /// A worker whose manifest declares one plugin whose binary exists, and
+    /// whose status lines the test owns.
+    fn worker_rig(status: Arc<RwLock<StatusState>>) -> (Worker, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let exec = dir.path().join("ritornello-plugin-radio");
+        std::fs::write(&exec, b"not a real binary, only its presence is read\n").unwrap();
+        let manifest = dir.path().join("plugins.toml");
+        std::fs::write(
+            &manifest,
+            format!("[[plugin]]\nname = \"radio\"\nexec = {:?}\n", exec.to_string_lossy()),
+        )
+        .unwrap();
+        let worker = Worker {
+            state: Arc::new(RwLock::new(UpdateState::initial("0.2.0", &[]))),
+            catalog: Arc::new(RwLock::new(Catalog::load(
+                "core",
+                "en",
+                dir.path(),
+                crate::i18n::EN,
+            ))),
+            status,
+            manifest,
+            plugins_tx: mpsc::channel(1).0,
+            staging: dir.path().join("staging"),
+            root: dir.path().to_path_buf(),
+            core_version: "0.2.0",
+            restart: Arc::new(|| {}),
+        };
+        (worker, dir)
+    }
+
+    fn silent_line() -> Arc<RwLock<StatusState>> {
+        Arc::new(RwLock::new(StatusState {
+            plugins: vec![PluginStatus::startup("radio")],
+            active_source: "radio".to_string(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+        }))
+    }
+
+    /// Replaces the silent line with the one an announcement produces, after
+    /// a moment — the shape of a plugin binding its sockets on an SD card.
+    fn announces_shortly(status: Arc<RwLock<StatusState>>, version: &str) {
+        let version = version.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            status.write().await.plugins = vec![PluginStatus {
+                version: Some(version),
+                ..PluginStatus::kind("radio", "source", true, false)
+            }];
+        });
+    }
+
+    /// **The boot-time catch-up case**, driven from the event rather than
+    /// from the helper: the run starts while the plugin is still silent, and
+    /// must nonetheless read the version the plugin is about to announce.
+    ///
+    /// Without the wait, `installed` reads a `startup` line — `version: None`
+    /// — `differs(None, offered)` is true against every release, the row
+    /// reads "not installed / update available" until the next check a day
+    /// later, and the automatic policy skips the plugin for want of a known
+    /// version. That is the very run catch-up exists for.
+    #[tokio::test]
+    async fn a_run_that_starts_before_a_plugin_has_spoken_still_reads_its_version() {
+        let status = silent_line();
+        let (worker, _dir) = worker_rig(status.clone());
+        announces_shortly(status, "0.3.0");
+        let installed = worker.installed_when_settled().await;
+        let radio = installed.iter().find(|i| i.name == "radio").expect("the declared plugin");
+        assert_eq!(
+            radio.version.as_deref(),
+            Some("0.3.0"),
+            "the run read the line before the plugin had finished starting"
+        );
+        assert!(radio.binary_present);
+    }
+
+    /// **A successful install must stop looking like nothing happened.**
+    /// After the binary is replaced and the plugin restarted, the row still
+    /// said "0.2.0 → 0.3.0 available" until the next check — which reads as a
+    /// failure to whoever just clicked Install.
+    ///
+    /// Same event shape as the test above, and deliberately so: the restarted
+    /// plugin re-announces asynchronously, so a row rebuilt an instant too
+    /// early would say `installed: null` — briefly *more* wrong than the
+    /// stale one.
+    #[tokio::test]
+    async fn a_replaced_plugin_stops_being_offered_the_update_it_has_just_had() {
+        let status = silent_line();
+        let (worker, _dir) = worker_rig(status.clone());
+        let published = vec![Published {
+            offer: Offer::Plugin("radio".to_string()),
+            version: "0.3.0".to_string(),
+            url: "https://x/ritornello-plugin-radio-0.3.0-x86_64.tar.gz".to_string(),
+            size: 0,
+            release_tag: "v0.3.0".to_string(),
+            checksums_url: None,
+        }];
+        announces_shortly(status, "0.3.0");
+        worker.refresh_rows(&published).await;
+        let rows = worker.state.read().await.components.clone();
+        let radio = rows.iter().find(|c| c.name == "radio").expect("the declared plugin");
+        assert_eq!(radio.installed.as_deref(), Some("0.3.0"));
+        assert_eq!(radio.availability, Availability::Aligned);
     }
 }

@@ -125,9 +125,17 @@ pub struct Contents {
 /// without root writing anywhere but the plugins directory.
 ///
 /// Derived from the artefact, not from a list this repository would have to
-/// keep in step with itself. Today exactly one archive fails it — the files
-/// plugin, which ships a root-run mount helper, a unit and a polkit rule — and
-/// that is a fact about the archive rather than a name in a table.
+/// keep in step with itself. Today exactly one **plugin** archive fails it —
+/// the files plugin, which ships a root-run mount helper, a unit and a polkit
+/// rule — and that is a fact about the archive rather than a name in a table.
+///
+/// **A plugin rule, and only a plugin rule.** The core's own archive fails it
+/// too, and always will: it carries the core binary itself, the privileged
+/// installer, three systemd units and two polkit rules. Root can form the core
+/// binary's path, so the core is deliberately exempted from this check — see
+/// the comment at the call site in `update::Worker::install_one`, and the test
+/// `the_core_archive_could_never_pass_the_rule_that_governs_a_plugin` that
+/// pins the real entry lists of both.
 pub fn installable_from_ui(entries: &[String]) -> bool {
     let mut binaries = 0;
     for entry in entries {

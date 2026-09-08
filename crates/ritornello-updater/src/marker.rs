@@ -25,6 +25,26 @@ use std::path::{Path, PathBuf};
 /// exactly as it does today.
 pub const MARKER_WINDOW_S: u64 = 600;
 
+/// **The writer of this file is older than its reader, always.**
+///
+/// This struct is written by `ritornello-update`, which an update deliberately
+/// cannot replace — `target.rs` cannot form its path, so it only ever changes
+/// by hand — and it is read by the core, which updates itself. So a device
+/// routinely runs a new core against a marker written by an installer from
+/// months ago.
+///
+/// The consequence is a rule, and it binds whoever adds the first field here:
+/// **every field added to this struct must carry `#[serde(default)]`.**
+/// Without it, `serde_json::from_str` fails on a marker the old installer
+/// wrote, `marker::read` answers `None` — its documented behaviour for a
+/// corrupt file — and the two things this marker exists for both quietly stop
+/// happening: the restart after an install wakes the player at 3 a.m., and the
+/// rollback declines to act. Nothing would fail loudly.
+///
+/// `REQUEST_FORMAT` guards the other direction only (a new core writing a
+/// request an old installer must not misread); there is no such number here,
+/// on purpose — a marker that refuses to be read is worse than one read
+/// partially.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Marker {
     pub at_unix_s: u64,
