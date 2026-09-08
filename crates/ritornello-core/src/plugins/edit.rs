@@ -14,8 +14,38 @@
 //! The rule: **what precedes the first plugin in the incoming document is the
 //! header, and it stays first.** If that block contains a blank line, the cut
 //! is at the last one — everything before it is the header, everything after
-//! travels with the plugin. That covers the file `deploy.sh` produces, whose
-//! first entry has both.
+//! travels with the plugin. This covers a header written with an internal
+//! paragraph break — not something `deploy.sh` itself produces (it only ever
+//! copies the example file verbatim or appends whole blocks, neither of
+//! which puts a blank line inside the header), but a shape a hand-edited
+//! file can still have, and this module must still handle it correctly.
+//!
+//! **The residual ambiguity, stated rather than hidden.** With no blank line
+//! at all, "a file header glued to the first plugin" and "the first plugin's
+//! own comment, no header" are the same bytes — the shipped file's own
+//! `radio` entry is exactly this shape. The code always guesses "header",
+//! which is right for the shipped file and is the safer of the two wrong
+//! guesses: a header wrongly read as a comment travels away from the top the
+//! first time that plugin moves, where a comment wrongly read as a header
+//! merely stays put. `append_block` disambiguates the one case it fully
+//! controls — a hand-written fragment's own comment, installed with no
+//! header to attach to — by giving it a real blank-line boundary instead of
+//! emitting it bare (see the `None` branch there); it cannot and does not
+//! attempt to disambiguate pre-existing files it did not write.
+//!
+//! **What cannot be fixed at all:** a plugin's own comment that itself
+//! contains a blank line, once that plugin is first, is indistinguishable
+//! from "part header, part comment" — the "cut at the last blank line" rule
+//! has no way to know the blank line is a paragraph break inside one
+//! person's prose rather than a boundary between two different things.
+//! Normalising an operator's blank line into a `#` line to sidestep this
+//! would be a bigger liberty than the defect deserves, so it is left alone
+//! and pinned as today's behaviour instead (see
+//! `a_first_plugins_own_multi_paragraph_comment_is_partly_read_as_header`).
+//! The shipped file avoids it by separating every multi-paragraph comment
+//! with `#` lines rather than blank ones (see `musicbrainz`'s and `files`'
+//! comments in `deploy/plugins.example.toml`), which is why nothing is
+//! affected today.
 //!
 //! Every function here is pure text in, text out: no path, no I/O. That is
 //! what lets the CRLF case be a test rather than a hope.
@@ -153,9 +183,23 @@ fn split_header(prefix: &str) -> (String, String) {
 fn glue_header(header: &str, comment: &str) -> String {
     let comment = comment.trim_start_matches('\n');
     if comment.is_empty() {
-        return trim_trailing_blank_line(header);
+        // A header that already has an internal blank line (more than one
+        // paragraph) must not have its trailing one trimmed: doing so would
+        // leave that internal blank line as the ONLY one left, and the next
+        // `split_header` would then cut there, reading the header's own
+        // second paragraph as this table's comment.
+        return if header.trim_end_matches('\n').contains("\n\n") {
+            header.to_string()
+        } else {
+            trim_trailing_blank_line(header)
+        };
     }
-    if header.is_empty() {
+    // A header made only of newline characters — the marker `append_block`
+    // writes in place of a genuinely absent header (see there) — carries no
+    // real content: treat it exactly like an empty header rather than
+    // perpetuating it as a stray blank line every time something new becomes
+    // first.
+    if header.chars().all(|c| c == '\n') {
         return comment.to_string();
     }
     if header.ends_with("\n\n") {
@@ -261,13 +305,40 @@ pub fn append_block(text: &str, fragment: &str, expected: &str) -> Result<String
             // No plugin table at all. Any header preserved by `remove_entry`
             // when the last plugin was removed lives in the document's
             // trailing slot — the same slot a comment-only document round
-            // trips through. A document that never had one leaves it empty,
-            // and `glue_header` treats an empty header as "attach the
-            // fragment's own comment with no separator", which is exactly
-            // right for the very first entry of a file.
+            // trips through.
             let header = doc.trailing().as_str().unwrap_or("").to_string();
             let own = bare_comment(&incoming);
-            set_prefix(&mut incoming, &glue_header(&header, &own));
+            let prefix = if header.is_empty() {
+                if own.is_empty() {
+                    String::new()
+                } else {
+                    // There is no parked header to attach this comment to
+                    // (archive fragments never carry one — see the module
+                    // doc — so `own` non-empty here only ever comes from a
+                    // hand-written fragment). Emitting it bare, with no
+                    // leading blank line, would be structurally IDENTICAL to
+                    // "a file header glued to the first plugin": exactly the
+                    // shape a later `split_header` reads as a header, which
+                    // would carry this plugin's own description away to
+                    // whoever displaces it, permanently, rather than staying
+                    // with the plugin it describes.
+                    //
+                    // A leading blank line of two newlines gives
+                    // `split_header` an actual boundary to cut at, so it
+                    // recovers this text as the plugin's own comment on any
+                    // later read. `glue_header` treats a header made only of
+                    // newlines as no header at all (see there), so this
+                    // marker does not linger once some other plugin becomes
+                    // first — it is consumed the moment that happens.
+                    format!("\n\n{own}")
+                }
+            } else {
+                // A parked header IS attached with a blank line before the
+                // incoming comment, via `glue_header` — the same shape it
+                // produces everywhere else a header meets a comment.
+                glue_header(&header, &own)
+            };
+            set_prefix(&mut incoming, &prefix);
             let mut fresh = ArrayOfTables::new();
             fresh.push(incoming);
             doc.insert("plugin", Item::ArrayOfTables(fresh));
@@ -316,7 +387,13 @@ pub fn remove_entry(text: &str, name: &str) -> Result<String, EditError> {
         }
         (Some(header), None) => {
             doc.remove("plugin");
-            doc.set_trailing(header);
+            // Append, don't replace: the document may already carry
+            // something in its trailing slot — an end-of-file comment, say
+            // — and the header belongs BEFORE it, in the same top-to-bottom
+            // order it had when the plugin that carried it still stood
+            // between the two.
+            let existing = doc.trailing().as_str().unwrap_or("").to_string();
+            doc.set_trailing(format!("{header}{existing}"));
         }
         (None, _) => {}
     }
@@ -837,5 +914,281 @@ exec = \"/y\"
     #[test]
     fn a_document_without_any_plugin_is_refused_clearly() {
         assert!(matches!(names_in_order("# empty\n"), Err(EditError::NoPluginTable)));
+    }
+
+    /// Regression: `trim_trailing_blank_line`, called when a comment-less
+    /// table takes the header, collapsed `"P1\n\nP2\n\n"` to `"P1\n\nP2\n"` —
+    /// removing ONE trailing blank line, as intended for a single-paragraph
+    /// header, but for a multi-paragraph one this leaves the header's own
+    /// internal blank line as the only one left. The next `split_header` then
+    /// cuts there, reading the header's own second paragraph as the comment
+    /// of whoever holds the header next.
+    ///
+    /// Not reachable on the untouched real file: its own header is a single
+    /// paragraph. Reachable the moment a hand-edited file's header has two
+    /// paragraphs (a real blank line inside it, unlike the shipped file's `#`
+    /// separators — see the module doc) and passes through a comment-less
+    /// plugin at least once. Here: `radio` (no comment of its own) holds the
+    /// two-paragraph header; moving it away hands the header to `cd`
+    /// (comment-less too); moving `z` (also comment-less) up in turn takes it
+    /// from `cd` — the second hand-off is where the buggy
+    /// `trim_trailing_blank_line` call fires.
+    #[test]
+    fn a_multi_paragraph_file_header_survives_two_comment_less_hand_offs() {
+        // radio's OWN comment ("radio's own comment.") is what lets
+        // `split_header` correctly recover paragraphs one AND two together
+        // as the file's header on the very first split: without a real own
+        // comment for radio to peel off, the last blank line would instead
+        // be read as separating radio's own comment from the header — the
+        // ambiguity `a_first_plugins_own_multi_paragraph_comment_is_partly_read_as_header`
+        // documents — and this test would be pinning that, not the
+        // regression.
+        let doc = "\
+# File header, paragraph one.
+
+# File header, paragraph two.
+
+# radio's own comment.
+[[plugin]]
+name = \"radio\"
+exec = \"/x\"
+
+[[plugin]]
+name = \"cd\"
+exec = \"/y\"
+
+[[plugin]]
+name = \"z\"
+exec = \"/w\"
+";
+        // radio moves away: cd (comment-less) inherits the two-paragraph
+        // header, first hand-off. radio's own comment correctly travels
+        // with radio, not with the header.
+        let after_radio = move_entry(doc, "radio", 1).unwrap();
+        assert_eq!(names_in_order(&after_radio).unwrap(), vec!["cd", "radio", "z"]);
+        assert!(after_radio.trim_start().starts_with("# File header, paragraph one."), "{after_radio}");
+        assert!(after_radio.contains("File header, paragraph two."), "{after_radio}");
+        assert!(after_radio.contains("radio's own comment"), "{after_radio}");
+
+        // z (also comment-less) displaces cd, which currently holds nothing
+        // but the two-paragraph header — second hand-off, where the
+        // regression fires: the header must arrive at z with BOTH
+        // paragraphs, not just the first one.
+        let after_z = move_entry(&after_radio, "z", -2).unwrap();
+        assert_eq!(names_in_order(&after_z).unwrap(), vec!["z", "cd", "radio"]);
+        assert!(
+            after_z.trim_start().starts_with("# File header, paragraph one."),
+            "the header's first paragraph did not reach z:\n{after_z}"
+        );
+        assert!(
+            after_z.contains("File header, paragraph two."),
+            "the header's second paragraph was lost on the second comment-less hand-off — the trim_trailing_blank_line regression:\n{after_z}"
+        );
+        let para2_at = after_z.find("File header, paragraph two.").unwrap();
+        let z_at = after_z.find("name = \"z\"").unwrap();
+        assert!(para2_at < z_at, "paragraph two must stay at the top with z, not travel elsewhere:\n{after_z}");
+        // cd, holding nothing but the header at the point z displaced it,
+        // must end up with nothing of its own — not paragraph two
+        // masquerading as "cd's own comment".
+        let cd_at = after_z.find("name = \"cd\"").unwrap();
+        let between = &after_z[z_at..cd_at];
+        assert!(
+            !between.contains("File header"),
+            "the header must not be split between z and cd:\n{after_z}"
+        );
+    }
+
+    /// Reachable via a hand-written fragment (archive fragments never carry
+    /// a comment of their own — `scripts/package-release.sh`'s `awk` resets
+    /// its block on every `[[plugin]]` line — so this path is only ever
+    /// exercised by a hand-edited install): `glue_header("", comment)` used
+    /// to yield the comment bare, indistinguishable from a real file header.
+    /// The next `split_header` read the whole thing as a header, so once a
+    /// second, comment-less plugin displaced this one, the first plugin's
+    /// own description stayed behind at the top of the file, permanently
+    /// describing a plugin it has nothing to do with.
+    #[test]
+    fn an_own_comment_with_no_parked_header_stays_with_its_plugin_once_displaced() {
+        // A genuinely empty document: `newcomer` becomes the first (and
+        // only) entry directly through `append_block`'s no-plugin-table
+        // branch — the exact write this fix targets — rather than through
+        // an ordinary move onto an already-existing first entry.
+        let fragment = "# newcomer's own comment.\n[[plugin]]\nname = \"newcomer\"\nexec = \"/b\"\n";
+        let with_newcomer = append_block("", fragment, "newcomer").unwrap();
+        assert_eq!(names_in_order(&with_newcomer).unwrap(), vec!["newcomer"]);
+
+        // A second, comment-less plugin — the shape an archive fragment
+        // actually produces — is installed, then moves up to displace
+        // newcomer directly.
+        let with_third =
+            append_block(&with_newcomer, "[[plugin]]\nname = \"third\"\nexec = \"/c\"\n", "third").unwrap();
+        assert_eq!(names_in_order(&with_third).unwrap(), vec!["newcomer", "third"]);
+        let up = move_entry(&with_third, "third", -1).unwrap();
+        assert_eq!(names_in_order(&up).unwrap(), vec!["third", "newcomer"]);
+
+        // The property: newcomer's own comment must still be immediately
+        // above newcomer, not stranded at the top of the file above third.
+        assert!(
+            !up.trim_start().starts_with("# newcomer's own comment."),
+            "newcomer's comment must not have become a permanent file header:\n{up}"
+        );
+        let comment_at = up.find("newcomer's own comment").unwrap();
+        let newcomer_at = up.find("name = \"newcomer\"").unwrap();
+        assert!(
+            comment_at < newcomer_at && newcomer_at - comment_at < 60,
+            "newcomer's own comment must stay with newcomer:\n{up}"
+        );
+    }
+
+    /// What `split_header`'s "cut at the last blank line" rule cannot do,
+    /// and is not asked to: tell a genuine header boundary apart from a
+    /// paragraph break INSIDE a single plugin's own comment, once that
+    /// plugin is first. This is inherent to the encoding — a plugin's own
+    /// comment and the file's header occupy the same textual space once a
+    /// plugin is first, and the cut always favours "more of this is header"
+    /// — not a bug in this module, and not something worth fixing by
+    /// normalising an operator's blank line into a `#` line, which would be
+    /// a bigger liberty than the defect deserves. The shipped file avoids it
+    /// by separating every plugin's own multi-paragraph comment with `#`
+    /// lines rather than blank ones (see `musicbrainz`'s and `files`'
+    /// comments in `deploy/plugins.example.toml`), which is why nothing is
+    /// affected today. This test pins TODAY's behaviour precisely so a
+    /// future change to `split_header` or `glue_header` does not alter it
+    /// silently.
+    #[test]
+    fn a_first_plugins_own_multi_paragraph_comment_is_partly_read_as_header() {
+        let doc = "\
+# File header, one paragraph, no blank line of its own.
+[[plugin]]
+name = \"solo\"
+exec = \"/a\"
+";
+        let fragment = "\
+# Paragraph one of newcomer's own comment.
+
+# Paragraph two of newcomer's own comment.
+[[plugin]]
+name = \"newcomer\"
+exec = \"/b\"
+";
+        let with_newcomer = append_block(doc, fragment, "newcomer").unwrap();
+        let with_third =
+            append_block(&with_newcomer, "[[plugin]]\nname = \"third\"\nexec = \"/c\"\n", "third").unwrap();
+        assert_eq!(names_in_order(&with_third).unwrap(), vec!["solo", "newcomer", "third"]);
+
+        // newcomer moves up, becoming first: its own two-paragraph comment
+        // now occupies the same textual space as the file's header.
+        let up = move_entry(&with_third, "newcomer", -1).unwrap();
+        assert_eq!(names_in_order(&up).unwrap(), vec!["newcomer", "solo", "third"]);
+
+        // third (comment-less) displaces newcomer. TODAY's behaviour: only
+        // the LAST paragraph of newcomer's own comment is recognised as
+        // "its own" and travels with it — the first paragraph is read as
+        // part of the file header and stays behind with third.
+        let displaced = move_entry(&up, "third", -2).unwrap();
+        assert_eq!(names_in_order(&displaced).unwrap(), vec!["third", "newcomer", "solo"]);
+
+        let para1_at = displaced.find("Paragraph one").unwrap();
+        let para2_at = displaced.find("Paragraph two").unwrap();
+        let third_at = displaced.find("name = \"third\"").unwrap();
+        let newcomer_at = displaced.find("name = \"newcomer\"").unwrap();
+        assert!(
+            para1_at < third_at,
+            "today's behaviour: paragraph one is read as file header and stays at the top, above third:\n{displaced}"
+        );
+        assert!(
+            third_at < para2_at && para2_at < newcomer_at,
+            "today's behaviour: only paragraph two is recognised as newcomer's own and travels with it:\n{displaced}"
+        );
+    }
+
+    /// `remove_entry` must hand only the SPLIT-OFF header to the new first
+    /// entry, not the first plugin's WHOLE, un-split prefix: the removed
+    /// plugin's own comment must not leak into what the next plugin inherits
+    /// as "the file header".
+    #[test]
+    fn removing_a_first_plugin_with_its_own_comment_hands_only_the_header_not_its_comment() {
+        let doc = "\
+# File header line one.
+# File header line two.
+
+# radio's own comment, not the file's.
+[[plugin]]
+name = \"radio\"
+exec = \"/x\"
+
+[[plugin]]
+name = \"cd\"
+exec = \"/y\"
+";
+        let out = remove_entry(doc, "radio").unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), vec!["cd"]);
+        assert!(out.trim_start().starts_with("# File header line one."), "{out}");
+        assert!(
+            !out.contains("radio's own comment"),
+            "radio's own comment must not survive attached to cd as if it were the file header:\n{out}"
+        );
+    }
+
+    /// `append_block` must clear the document's trailing slot after reading
+    /// a parked header back — otherwise the header remains there AND gets
+    /// attached to the newly installed plugin, so it appears twice: once
+    /// correctly at the top, and once more trailing at the end of the file
+    /// (the trailing slot is still rendered after the `[[plugin]]` array).
+    #[test]
+    fn appending_after_a_parked_header_clears_the_trailing_slot() {
+        let doc = "# The parked header.\n[[plugin]]\nname = \"radio\"\nexec = \"/x\"\n";
+        let after_remove = remove_entry(doc, "radio").unwrap();
+        let restored = append_block(&after_remove, "[[plugin]]\nname = \"mpd\"\nexec = \"/y\"\n", "mpd").unwrap();
+        let count = restored.matches("The parked header").count();
+        assert_eq!(count, 1, "the header must not be duplicated at the end of the file:\n{restored}");
+    }
+
+    /// Appending to a NON-empty file must separate the new block from the
+    /// previous one with exactly one blank line — not glue it directly onto
+    /// the previous entry's `exec` line.
+    #[test]
+    fn appending_to_a_non_empty_file_separates_the_new_block_with_a_blank_line() {
+        let out = append_block(&realistic(), "[[plugin]]\nname = \"mpd\"\nexec = \"/z\"\n", "mpd").unwrap();
+        let musicbrainz_exec_end =
+            out.find("ritornello-plugin-musicbrainz\"").unwrap() + "ritornello-plugin-musicbrainz\"".len();
+        let mpd_table_at = out.find("[[plugin]]\nname = \"mpd\"").unwrap();
+        assert_eq!(
+            &out[musicbrainz_exec_end..mpd_table_at],
+            "\n\n",
+            "the appended block must be separated by exactly one blank line:\n{out:?}"
+        );
+    }
+
+    /// When a header already ends in a blank line (a two-paragraph header,
+    /// say) and gets reattached to a plugin with its own comment,
+    /// `glue_header` must not add a SECOND blank line on top of the one the
+    /// header already carries.
+    #[test]
+    fn a_header_already_ending_in_a_blank_line_gets_no_extra_one_when_reattached() {
+        let doc = "\
+# Header paragraph one.
+
+# Header paragraph two.
+
+# radio's own comment.
+[[plugin]]
+name = \"radio\"
+exec = \"/x\"
+
+# cd's own comment.
+[[plugin]]
+name = \"cd\"
+exec = \"/y\"
+";
+        let out = move_entry(doc, "radio", 1).unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), vec!["cd", "radio"]);
+        let para2_end = out.find("Header paragraph two.").unwrap() + "Header paragraph two.".len();
+        let cd_comment_at = out.find("# cd's own comment").unwrap();
+        assert_eq!(
+            &out[para2_end..cd_comment_at],
+            "\n\n",
+            "exactly one blank line between the header and cd's own comment, not two:\n{out:?}"
+        );
     }
 }
