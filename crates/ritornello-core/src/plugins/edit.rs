@@ -182,6 +182,19 @@ fn split_header(prefix: &str) -> (String, String) {
 /// `[[plugin]]`, matching the shape of the real file's own `radio` entry.
 fn glue_header(header: &str, comment: &str) -> String {
     let comment = comment.trim_start_matches('\n');
+    // A header made only of newline characters (including the empty string)
+    // — the marker `append_block` writes in place of a genuinely absent
+    // header (see there), or what a previous call to this same function
+    // wrote — carries no real content of its own, but it is NOT
+    // interchangeable with a bare comment: collapsing it to `comment` alone
+    // is byte-identical to a glued header, and the marker this plugin needs
+    // to stay distinguishable from one would be silently consumed the
+    // moment it returns to first place after being displaced even once.
+    // Re-emit the same two-newline marker instead, so the property holds
+    // across any number of hand-offs, not just the first.
+    if header.chars().all(|c| c == '\n') {
+        return if comment.is_empty() { String::new() } else { format!("\n\n{comment}") };
+    }
     if comment.is_empty() {
         // A header that already has an internal blank line (more than one
         // paragraph) must not have its trailing one trimmed: doing so would
@@ -193,14 +206,6 @@ fn glue_header(header: &str, comment: &str) -> String {
         } else {
             trim_trailing_blank_line(header)
         };
-    }
-    // A header made only of newline characters — the marker `append_block`
-    // writes in place of a genuinely absent header (see there) — carries no
-    // real content: treat it exactly like an empty header rather than
-    // perpetuating it as a stray blank line every time something new becomes
-    // first.
-    if header.chars().all(|c| c == '\n') {
-        return comment.to_string();
     }
     if header.ends_with("\n\n") {
         format!("{header}{comment}")
@@ -324,12 +329,14 @@ pub fn append_block(text: &str, fragment: &str, expected: &str) -> Result<String
                     // with the plugin it describes.
                     //
                     // A leading blank line of two newlines gives
-                    // `split_header` an actual boundary to cut at, so it
-                    // recovers this text as the plugin's own comment on any
-                    // later read. `glue_header` treats a header made only of
-                    // newlines as no header at all (see there), so this
-                    // marker does not linger once some other plugin becomes
-                    // first — it is consumed the moment that happens.
+                    // `split_header` an actual boundary to cut at, recovering
+                    // this text as the plugin's own comment the first time it
+                    // is displaced. That alone is not what keeps it safe
+                    // indefinitely: `glue_header`, on every later hand-off,
+                    // re-emits the same two-newline marker rather than
+                    // collapsing it to a bare comment (see there) — the
+                    // protection is the PAIR of them, this write and every
+                    // `glue_header` call afterward, not the marker by itself.
                     format!("\n\n{own}")
                 }
             } else {
@@ -637,6 +644,14 @@ exec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-radio\"
     /// are exactly what let the original Critical (task 8, round 1) through
     /// fourteen passing tests — they cannot see a duplicate, a dropped
     /// separator, or a wrong order, only whether the words are somewhere.
+    ///
+    /// The merged shape this test pins — a two-paragraph header with a
+    /// comment-less plugin first — is also what lets this end-of-file
+    /// reminder later travel with whichever plugin next inherits the header:
+    /// nothing is lost, only misattributed, and it is the same documented,
+    /// not-fixable ambiguity as a plugin's own multi-paragraph comment (see
+    /// the module doc and `a_first_plugins_own_multi_paragraph_comment_is_partly_read_as_header`),
+    /// not a new defect.
     #[test]
     fn a_trailing_end_of_file_comment_survives_a_remove_all_then_append_cycle() {
         let doc = "\
@@ -1076,6 +1091,41 @@ exec = \"/w\"
             comment_at < newcomer_at && newcomer_at - comment_at < 60,
             "newcomer's own comment must stay with newcomer:\n{up}"
         );
+    }
+
+    /// The headerless marker (see `append_block`'s `None` branch) protected
+    /// exactly ONE displacement: `glue_header` re-emitted it correctly the
+    /// first time a comment-less plugin took over from the marked one, but
+    /// once that marked plugin returned to first place, `glue_header`
+    /// collapsed the all-newline header straight down to the bare comment —
+    /// byte-identical to a glued header — silently consuming the very marker
+    /// meant to keep it distinguishable. Reproduced with the fewest possible
+    /// moves: empty document, install `a` (its own comment), install `b`
+    /// (bare, archive-shaped), then `b` up, `a` up, `b` up — three moves,
+    /// the third being where `a`'s description ends up permanently glued
+    /// above `b` as if it were the file's header.
+    #[test]
+    fn the_headerless_marker_survives_more_than_one_displacement() {
+        let with_a = append_block("", "# a's own comment.\n[[plugin]]\nname = \"a\"\nexec = \"/a\"\n", "a").unwrap();
+        let with_b = append_block(&with_a, "[[plugin]]\nname = \"b\"\nexec = \"/b\"\n", "b").unwrap();
+        assert_eq!(names_in_order(&with_b).unwrap(), vec!["a", "b"]);
+
+        let step1 = move_entry(&with_b, "b", -1).unwrap();
+        assert_eq!(names_in_order(&step1).unwrap(), vec!["b", "a"]);
+        let step2 = move_entry(&step1, "a", -1).unwrap();
+        assert_eq!(names_in_order(&step2).unwrap(), vec!["a", "b"]);
+        let step3 = move_entry(&step2, "b", -1).unwrap();
+        assert_eq!(names_in_order(&step3).unwrap(), vec!["b", "a"]);
+
+        // The property: a's own comment must still be immediately above a,
+        // not stranded at the top of the file above b.
+        assert!(
+            !step3.trim_start().starts_with("# a's own comment."),
+            "a's comment must not have become a permanent file header after three moves:\n{step3}"
+        );
+        let comment_at = step3.find("a's own comment").unwrap();
+        let a_at = step3.find("name = \"a\"").unwrap();
+        assert!(comment_at < a_at && a_at - comment_at < 60, "a's own comment must stay with a:\n{step3}");
     }
 
     /// What `split_header`'s "cut at the last blank line" rule cannot do,
