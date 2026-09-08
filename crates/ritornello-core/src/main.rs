@@ -1296,10 +1296,24 @@ async fn declare_plugin<P: player::Player>(
     let enabled = entry.enabled;
 
     execs.insert(name.to_string(), exec.clone());
-    // The manifest names every plugin; each of the three below keeps only
-    // what concerns it. `metadata_order` filters on what announced, and this
-    // plugin has not yet — it takes its place there when it does, through
-    // `hotplug`, which reads the very list being written here.
+    // The file is re-read in full and every order is rebuilt from it, never
+    // patched: what changed is not known here, only what the file now says.
+    //
+    // **For the plugin being declared, the last three lines are inert**, and
+    // the brief's reasoning for them ("otherwise it would have the right place
+    // in the file and the wrong one in the core") is wrong for an appended
+    // block: at this instant the newcomer is in no `sources` map, has
+    // announced nothing, and has no status line — `relaunch` creates its line
+    // below, and `hotplug` gives it its arbitration rank when it speaks. Only
+    // `manifest_order` above matters for it, and it matters absolutely: an
+    // announcement from a name the core does not hold there is refused at the
+    // door.
+    //
+    // What the three do carry is **everyone else's** order, when the file no
+    // longer says what the core last read — an operator who edited
+    // `plugins.toml` by hand and then installed something. The file is the
+    // authority, and this is where the core comes back into step with it; it
+    // is also, unchanged, what `Reorder` will need.
     children.manifest_order = order.clone();
     core.set_source_order(order.clone());
     core.set_metadata_order(register::metadata_order(&order, gathered));
@@ -1312,6 +1326,20 @@ async fn declare_plugin<P: player::Player>(
         tracing::info!(
             "{name} is installed and declared, and its declaration switches it off: not launching it"
         );
+        // The same line startup writes for a plugin declared off, and the same
+        // one `hot_unplug` writes when it is switched off from the page —
+        // because it is the same state. Without it the plugin has no row at
+        // all, so the switch that would turn it on does not exist and the very
+        // gesture this branch leaves open is unreachable until a restart.
+        //
+        // A guard rather than a use case, like `Enable`'s missing-`exec` arm:
+        // no official fragment can carry `enabled = false`, since
+        // `package-release.sh` cuts the block at its `exec` line. What is
+        // ordinary is a `plugins.toml` entry that is switched off; what is not
+        // reachable today is a `Declare` arriving for one. The core reads the
+        // file rather than trusting the sender, so the branch exists.
+        let mut statuses = children.status_state.write().await;
+        status::replace_plugin_lines(&mut statuses, name, vec![PluginStatus::disabled(name)], false);
         return Declared { ok: true, launched: None };
     }
     // The same guard as `Enable`, and for the same reason: a second process
@@ -3315,10 +3343,79 @@ mod toggle_tests {
 
     /// A block that arrives switched off is registered and **not launched**.
     ///
+    /// A Source announced late, through the **real socket path**, with a fake
+    /// plugin answering `Noop` to everything.
+    ///
+    /// What is read back is the catalog the displays and the MPD plugin were
+    /// sent — the order downstream actually received, not the vector the core
+    /// holds. Those are two different things, and telling them apart is the
+    /// whole point of this test: `add_source` publishes the alphabetical order
+    /// it has just sorted, so a re-sequencing that corrects the vector without
+    /// publishing leaves `listplaylists` on the alphabet indefinitely for a
+    /// source that enumerates no preset.
+    ///
+    /// One property, two operands, and it reddens for either: delete
+    /// `set_source_order`'s `publish_catalog()` and the catalog stays
+    /// alphabetical; delete `hotplug`'s `set_source_order` call and the vector
+    /// stays alphabetical for it to publish.
+    #[tokio::test]
+    async fn a_late_source_reaches_the_published_catalog_in_file_order() {
+        let mut b = bench();
+        // `radio` before `cd` is the shape that tells the file from the
+        // alphabet: sorted, `cd` comes first.
+        b.children.manifest_order = vec!["radio".to_string(), "cd".to_string()];
+        b.gathered.announcements.clear();
+        b.core.add_source("radio".to_string(), Arc::new(SilentSource));
+
+        let socket = ritornello_plugin_sdk::socket_kind(
+            &b.children.sockets_dir.join("cd"),
+            PluginKind::Source,
+        );
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+                let reply = ritornello_proto::SourceMessage {
+                    id: Some(req.id),
+                    action: Some(ritornello_proto::SourceAction::Noop),
+                    ..Default::default()
+                };
+                write
+                    .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        hotplug(
+            announcing("cd", PluginKind::Source),
+            &b.children,
+            &mut b.core,
+            &mut b.gathered,
+            &b.kill_triggers,
+            &mut b.non_supervised,
+            1,
+        )
+        .await;
+
+        let published: Vec<String> =
+            b.children.catalog_rx.borrow().sources.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(
+            published,
+            vec!["radio".to_string(), "cd".to_string()],
+            "the catalog the displays and the MPD plugin received after the late announcement"
+        );
+    }
+
     /// The core reads that from the file itself rather than trusting the
     /// sender to filter, and the entry in `execs` is the whole point: without
     /// it, switching the plugin on from the page afterwards would fail for
-    /// want of an `exec` until the core was restarted.
+    /// want of an `exec` until the core was restarted. The page must also be
+    /// able to show it: hence the `disabled` line, asserted below.
     #[tokio::test]
     async fn a_declaration_that_switches_the_plugin_off_registers_it_without_starting_it() {
         let mut b = bench();
@@ -3351,12 +3448,125 @@ mod toggle_tests {
 
         assert!(declared.ok, "the declaration is in force: the file says so, and it is honoured");
         assert!(declared.launched.is_none(), "a plugin declared off must not be started");
+        let line = {
+            let statuses = b.children.status_state.read().await;
+            statuses.plugins.iter().find(|l| l.name == "mpd").cloned()
+        };
+        let line = line.expect("a plugin declared off must still have a row on the page");
+        assert!(line.disabled, "the row is the switch that turns it back on");
+        assert!(!line.connected);
         assert!(
             !b.kill_triggers.contains_key("mpd"),
             "nothing was launched, so the core holds nothing to kill"
         );
         assert_eq!(execs.get("mpd").map(String::as_str), Some("/bin/true"));
         assert_eq!(b.children.manifest_order, vec!["radio".to_string(), "mpd".to_string()]);
+    }
+
+    /// **The file is the authority, and a declaration brings the whole core
+    /// back into step with it** — not just the plugin being declared.
+    ///
+    /// The three recomputations beside `manifest_order` are inert for an
+    /// appended block (the newcomer is in no map and has announced nothing),
+    /// so pinning them needs the case where they are not: an operator who
+    /// reordered `plugins.toml` by hand while the core was running, and then
+    /// installed something. Every announcement in this fixture is one the
+    /// producer really emits — each name is in the order the core held, and
+    /// each kind is one its plugin announces.
+    ///
+    /// Three observables, one per call, and the first is the **published**
+    /// catalog rather than the core's own vector: that is what the displays
+    /// and the MPD plugin read.
+    #[tokio::test]
+    async fn a_declaration_re_sequences_what_the_file_reordered_meanwhile() {
+        let mut b = bench();
+        b.children.manifest_order = vec![
+            "radio".to_string(),
+            "cd".to_string(),
+            "musicbrainz".to_string(),
+            "ouifm-metas".to_string(),
+        ];
+        b.gathered.announcements.clear();
+        for (name, kind) in [
+            ("radio", PluginKind::Source),
+            ("cd", PluginKind::Source),
+            ("musicbrainz", PluginKind::Metadata),
+            ("ouifm-metas", PluginKind::Metadata),
+        ] {
+            b.gathered.announcements.insert(name.to_string(), announcing(name, kind));
+        }
+        b.core.add_source("radio".to_string(), Arc::new(SilentSource));
+        b.core.add_source("cd".to_string(), Arc::new(SilentSource));
+        b.core.set_source_order(b.children.manifest_order.clone());
+        b.core
+            .set_metadata_order(register::metadata_order(&b.children.manifest_order, &b.gathered));
+        *b.children.status_state.write().await = statuses_of(vec![
+            PluginStatus::kind("radio", "source", true, false),
+            PluginStatus::kind("cd", "source", true, false),
+            PluginStatus::kind("musicbrainz", "metadata", true, false),
+            PluginStatus::kind("ouifm-metas", "metadata", true, false),
+        ]);
+
+        // What the operator did by hand — the two sources swapped, the two
+        // metadata plugins swapped — and then the install appended `mpd`.
+        let manifest = b._dir.path().join("plugins.toml");
+        std::fs::write(
+            &manifest,
+            "[[plugin]]\nname = \"cd\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"ouifm-metas\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"musicbrainz\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\n",
+        )
+        .unwrap();
+
+        let declared = declare_plugin(
+            "mpd",
+            &manifest,
+            &mut b.children,
+            &mut b.core,
+            &b.gathered,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut b.kill_triggers,
+            &b.non_supervised,
+            &b._dir.path().join("register.sock"),
+        )
+        .await;
+        assert!(declared.ok);
+
+        let published: Vec<String> =
+            b.children.catalog_rx.borrow().sources.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(
+            published,
+            vec!["cd".to_string(), "radio".to_string()],
+            "the cycle the remote follows must be the file's, and it must have been sent"
+        );
+        assert_eq!(
+            b.core.metadata_order(),
+            ["ouifm-metas".to_string(), "musicbrainz".to_string()],
+            "arbitration priority is the file's order, re-read and not remembered"
+        );
+        let names: Vec<String> = b
+            .children
+            .status_state
+            .read()
+            .await
+            .plugins
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "cd".to_string(),
+                "radio".to_string(),
+                "ouifm-metas".to_string(),
+                "musicbrainz".to_string(),
+                "mpd".to_string(),
+            ],
+            "the page follows the file too, and the newcomer lands last"
+        );
     }
 
     /// The order says the block was written and the file says otherwise: the

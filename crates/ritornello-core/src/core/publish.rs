@@ -67,9 +67,12 @@ impl<P: Player> Core<P> {
     ///
     /// Called where the catalog can change, and only there: at the core's
     /// construction (the startup sources), on the arrival of presets, at
-    /// `add_source` (a hotplugged source appears in the list) and at
-    /// `remove_source` (a plugin that went off disappears from it, otherwise
-    /// an MPD client would keep a stored list to act upon). Never from
+    /// `add_source` (a hotplugged source appears in the list), at
+    /// `remove_source` and `forget_dead_source` (a plugin that went off
+    /// disappears from it, otherwise an MPD client would keep a stored list to
+    /// act upon), and at `set_source_order` (the list is re-sequenced: same
+    /// names, different order, and the order is half of what this payload
+    /// carries). Never from
     /// `publish_state`, and `publish_state` never from here: the two
     /// channels are separated precisely so as not to trigger each other —
     /// otherwise the names of 51 stations would go out again on every frame

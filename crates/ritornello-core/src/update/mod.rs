@@ -976,7 +976,11 @@ impl Worker {
         //
         // Decided here, before a single byte is written: see
         // `declaration_needed` for what an archive with no block costs.
-        let declared = is_core || self.declared(name);
+        // `!is_core &&` so that `declared` means what it says: the core's name
+        // is not in `plugins.toml` and this must not read the file looking for
+        // it. `declaration_needed` makes the core's own decision from `is_core`
+        // alone.
+        let declared = !is_core && self.declared(name);
         let fragment = declaration_needed(is_core, declared, contents.fragment.as_deref())?;
         // One decision, read once: a block to write is what makes this an
         // installation rather than a replacement.
@@ -1220,22 +1224,6 @@ impl Worker {
         }
     }
 
-    /// Its binary has just been replaced: the core loop stops the process and
-    /// launches it again, and the plugin announces itself as it would after
-    /// any manual relaunch.
-    ///
-    /// **A plugin the operator switched off stays switched off.** Its new
-    /// binary is on disk and will be the one that runs when it is switched
-    /// back on — but `hot_unplug` on a stopped plugin succeeds (there is
-    /// nothing to kill), so the restart would go straight on to `relaunch`
-    /// and start a process nobody asked for. `plugins.toml` is the authority
-    /// on that choice, read here rather than remembered, exactly as
-    /// `plugin_enabled_put` reads it.
-    ///
-    /// A plugin that is enabled and simply **dead** is a different case and
-    /// is relaunched: replacing the binary and starting it again is precisely
-    /// the gesture that used to require a restart of the whole core after a
-    /// plugin was refused for its protocol.
     /// Its binary is placed and its block is written: the core loop must take
     /// the declaration into account and launch it.
     ///
@@ -1271,6 +1259,22 @@ impl Worker {
         }
     }
 
+    /// Its binary has just been replaced: the core loop stops the process and
+    /// launches it again, and the plugin announces itself as it would after
+    /// any manual relaunch.
+    ///
+    /// **A plugin the operator switched off stays switched off.** Its new
+    /// binary is on disk and will be the one that runs when it is switched
+    /// back on — but `hot_unplug` on a stopped plugin succeeds (there is
+    /// nothing to kill), so the restart would go straight on to `relaunch`
+    /// and start a process nobody asked for. `plugins.toml` is the authority
+    /// on that choice, read here rather than remembered, exactly as
+    /// `plugin_enabled_put` reads it.
+    ///
+    /// A plugin that is enabled and simply **dead** is a different case and
+    /// is relaunched: replacing the binary and starting it again is precisely
+    /// the gesture that used to require a restart of the whole core after a
+    /// plugin was refused for its protocol.
     async fn restart_plugin(&self, name: &str) {
         if !self.enabled(name) {
             tracing::info!(

@@ -415,7 +415,16 @@ pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
         } else if ETC_PREFIXES.iter().any(|p| path.starts_with(p)) {
             out.etc_files.push((path, bytes));
         } else if let Some(name) = path.strip_prefix(INITIAL_CONFIG_PREFIX) {
-            out.initial_config.push((name.to_string(), bytes));
+            // Bare, as the field's doc says — enforced here rather than only
+            // promised. A nested entry (`initial-config/sub/x.toml`) is a
+            // shape nothing this repository packs produces, and the writer
+            // would have to create a directory an archive named. The writer
+            // refuses it too (`update::initial_config_target`): belt and
+            // braces, which is this module's own stated rule, and the reader
+            // is the half a later consumer of `Contents` will trust.
+            if !name.is_empty() && !name.contains('/') {
+                out.initial_config.push((name.to_string(), bytes));
+            }
         } else {
             out.fragment = Some(String::from_utf8_lossy(&bytes).to_string());
         }
@@ -593,6 +602,29 @@ mod tests {
         // unconditionally, an initial configuration only if absent. Merging
         // the two would overwrite the operator's stations at the next update.
         assert!(c.etc_files.is_empty());
+    }
+
+    /// "(bare name, bytes)" is what the field promises, so it is what the
+    /// reader hands over: a nested entry is listed in `entries` — the page can
+    /// still say the release carries it — and collected nowhere. The writer
+    /// refuses it a second time when it forms the path.
+    #[test]
+    fn a_nested_initial_configuration_entry_is_listed_and_not_collected() {
+        let gz = targz(&[
+            ("./usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
+            ("./initial-config/sub/stations.example.toml", b"# defaults\n"),
+            ("./initial-config/stations.example.toml", b"# defaults\n"),
+        ]);
+        let c = read(&gz, DECOMPRESSED_MAX).expect("reads");
+        assert_eq!(
+            c.initial_config.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["stations.example.toml"],
+            "only the bare one is handed over"
+        );
+        assert!(
+            c.entries.iter().any(|e| e == "initial-config/sub/stations.example.toml"),
+            "still listed: the page says what the release carries, whatever is written"
+        );
     }
 
     #[test]

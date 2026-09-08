@@ -412,8 +412,21 @@ impl<P: Player> Core<P> {
     /// Filtered against the wired sources, for the reason `Core::new` gives:
     /// the order handed in is the manifest's, and the manifest declares
     /// displays and inputs whose names designate no source.
+    ///
+    /// **And it publishes**, like every other writer of `source_order`. That
+    /// vector is not what the outside world reads: `sources_catalog()` is
+    /// built from it, and the displays and the MPD plugin's `listplaylists`
+    /// only ever see what was last sent on that channel. Re-sequencing without
+    /// publishing left them on the order `add_source` had just broadcast —
+    /// alphabetical — until some unrelated preset event happened to
+    /// republish, and for ever for a source that enumerates no preset. The
+    /// list and the switching key would then disagree, which is the one thing
+    /// `sources_catalog`'s own doc says must never happen. Deduplicated by
+    /// equality inside `publish_catalog`, so a re-sequence that changes
+    /// nothing costs nothing.
     pub fn set_source_order(&mut self, order: Vec<String>) {
         self.source_order = order.into_iter().filter(|n| self.sources.contains_key(n)).collect();
+        self.publish_catalog();
     }
 
     pub(super) async fn apply(&mut self, action: SourceAction) -> Result<()> {
