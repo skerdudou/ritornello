@@ -147,7 +147,7 @@ jobs:
         run: |
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           [ "v$v" = "$TAG" ] \
-            || { echo "tag $TAG != workspace version $v" >&2; exit 1; }
+            || { echo "tag $TAG != product number $v" >&2; exit 1; }
       - run: cargo install cross --locked
       - run: cross build --release --workspace --target ${{ matrix.target }}
       - run: ./scripts/package-release.sh ${{ matrix.target }} ${{ matrix.arch }}
@@ -168,8 +168,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # The full history, tags included: the step below asks git what the
-          # previous release was. The default shallow checkout has neither.
+          # The full history, tags included: GitHub names the previous
+          # published release below, but `changed-components.sh` still reads
+          # that release's Cargo.toml files via `git show <tag>:...`, which
+          # needs the tag and the history it points into locally. The default
+          # shallow checkout has neither.
           fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
@@ -184,14 +187,23 @@ jobs:
         # The bundle of all plugins stays in every release: it is nobody's
         # component, it serves the first install in one command, and the
         # updater ignores it.
-        #
-        # `TAG` through the environment rather than spliced by `${{ }}`, for
-        # the same reason as in the `release` job.
         env:
-          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          prev=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
-          echo "previous release: ${prev:-none}"
+          # The previous PUBLISHED release, asked of GitHub and not of git.
+          # `git describe` answers "the previous tag reachable from here",
+          # which is a different question: this workflow creates drafts on
+          # purpose, the device's fold discards drafts, and an abandoned
+          # draft's tag exists in git all the same — so git's answer would
+          # judge a component unchanged whose only publication was a draft
+          # nobody published, and drop its archive from the next release. It
+          # would also count this repository's backup tags as releases.
+          #
+          # This step runs before `gh release create`, so the newest published
+          # release is genuinely the previous one. Empty on a first release,
+          # which publishes everything.
+          prev=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')
+          echo "previous published release: ${prev:-none}"
           ./scripts/changed-components.sh $prev > changed.txt
           cat changed.txt
           mkdir keep

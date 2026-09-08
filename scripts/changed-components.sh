@@ -21,6 +21,29 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PREV="${1:-}"
 
+if [ -n "$PREV" ] && ! git rev-parse --verify -q "$PREV^{commit}" >/dev/null; then
+  echo "$PREV is not a commit — pass a release tag, or no argument for a first release" >&2
+  exit 1
+fi
+
+# Shared crates are linked into every component's binary and inherit the
+# product version, so changing one moves no declared number while rebuilding
+# all eleven. Publishing "what changed" would then leave ten plugins on the
+# device built against the old crate, with version equality claiming
+# everything is up to date. A change to any of them therefore counts as a
+# change to everything — decided by content, not by a number, and failing in
+# the safe direction.
+#
+# Not detected, and assumed: an external dependency bump lives in Cargo.lock,
+# which moves whenever any version moves. Detecting it would republish
+# everything at every delivery and defeat the point. If a dependency bump
+# matters, bumping every component is the gesture.
+SHARED=(crates/ritornello-proto crates/ritornello-i18n crates/ritornello-plugin-sdk)
+if [ -n "$PREV" ] && ! git diff --quiet "$PREV" -- "${SHARED[@]}"; then
+  echo "a shared crate changed since $PREV — every component is published" >&2
+  PREV=""
+fi
+
 # The plugin list comes from plugins.example.toml, the same source
 # package-release.sh and deploy.sh derive it from. Deriving it is what stops
 # the three from diverging. `tr -d '\r'` for the same CRLF reason as there:
