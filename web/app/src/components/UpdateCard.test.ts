@@ -9,7 +9,7 @@ import UpdateCard from './UpdateCard.vue'
 // than an invented one — a drift between the two would not be caught by a
 // fixture that made something up instead.
 const CATALOG = {
-  update_title: 'Automatic updates',
+  update_title: 'Updates',
   update_no_release: 'No release published yet',
   update_never_checked: 'Never checked',
   update_aligned: 'Up to date',
