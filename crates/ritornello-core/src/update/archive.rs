@@ -307,6 +307,68 @@ mod tests {
         assert!(!installable_from_ui(&c.entries));
     }
 
+    /// The three tests below each carry ONE disqualifying entry, because the
+    /// whole-shape files-plugin test above cannot say which entry did it: that
+    /// archive is refused three times over, so whitelisting any single path
+    /// would leave it refused and the mistake would not show.
+    ///
+    /// This one is the root-run helper. It sits beside the plugins directory
+    /// rather than inside it, and root can form no path to it — the two paths
+    /// the privileged side computes are the core binary and one validated
+    /// name under `plugins/`.
+    #[test]
+    fn a_root_run_helper_beside_the_plugins_directory_is_refused() {
+        let gz = targz(&[
+            ("./usr/local/lib/ritornello/plugins/ritornello-plugin-files", b"ELF"),
+            ("./usr/local/lib/ritornello/ritornello-media-mount", b"ELF"),
+        ]);
+        let c = read(&gz, DECOMPRESSED_MAX).expect("reads");
+        assert!(!installable_from_ui(&c.entries));
+    }
+
+    /// A unit is a promise to systemd that only root can make, and installing
+    /// one from the page would mean the core deciding what runs at boot.
+    #[test]
+    fn a_systemd_unit_is_refused() {
+        let gz = targz(&[
+            ("./usr/local/lib/ritornello/plugins/ritornello-plugin-files", b"ELF"),
+            ("./etc/systemd/system/ritornello-media-mount.service", b"[Unit]\n"),
+        ]);
+        let c = read(&gz, DECOMPRESSED_MAX).expect("reads");
+        assert!(!installable_from_ui(&c.entries));
+    }
+
+    /// A polkit rule is JavaScript that polkitd evaluates as root. Installing
+    /// one from an unprivileged process is the privilege escalation this whole
+    /// split exists to prevent.
+    #[test]
+    fn a_polkit_rule_is_refused() {
+        let gz = targz(&[
+            ("./usr/local/lib/ritornello/plugins/ritornello-plugin-files", b"ELF"),
+            ("./etc/polkit-1/rules.d/51-ritornello-media.rules", b"// js\n"),
+        ]);
+        let c = read(&gz, DECOMPRESSED_MAX).expect("reads");
+        assert!(!installable_from_ui(&c.entries));
+    }
+
+    /// The whitelist's positive members, asserted rather than assumed: an
+    /// archive carrying an example, an initial configuration and its fragment
+    /// alongside its binary is installable. Dropping any one of those
+    /// prefixes from `allowed` would otherwise refuse a legitimate archive
+    /// with no test to notice.
+    #[test]
+    fn examples_an_initial_configuration_and_the_fragment_are_all_allowed() {
+        let gz = targz(&[
+            ("./usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
+            ("./etc/ritornello/locales/radio/en.json", b"{}"),
+            ("./examples/stations.example.toml", b"# stations\n"),
+            ("./initial-config/stations.toml", b"# stations\n"),
+            ("./plugins.toml.fragment", b"[[plugin]]\nname = \"radio\"\n"),
+        ]);
+        let c = read(&gz, DECOMPRESSED_MAX).expect("reads");
+        assert!(installable_from_ui(&c.entries), "{:?}", c.entries);
+    }
+
     #[test]
     fn an_archive_with_two_plugin_binaries_is_not_installable_from_the_ui() {
         // Not a shape we ship — the bundle carries all of them — but the rule
@@ -320,6 +382,14 @@ mod tests {
         assert!(!installable_from_ui(&c.entries));
     }
 
+    /// A *parent* directory, not the plugins directory itself: `./usr/local/lib/ritornello/plugins/`
+    /// strips to exactly `PLUGINS_PREFIX`, which the `strip_prefix` branch
+    /// absorbs on its own (empty remainder, no binary counted) whether or not
+    /// the directory guard runs first — a test built on that path would prove
+    /// nothing. `tar` writes a parent directory entry for everything it packs
+    /// (here, `usr/local/lib/ritornello/`), and that parent is on no
+    /// whitelist, so it is the directory guard alone that keeps it from
+    /// refusing an otherwise ordinary archive.
     #[test]
     fn a_directory_entry_does_not_make_an_archive_uninstallable() {
         let mut builder = tar::Builder::new(Vec::new());
@@ -328,7 +398,7 @@ mod tests {
         dir.set_entry_type(tar::EntryType::Directory);
         dir.set_mode(0o755);
         dir.set_cksum();
-        builder.append_data(&mut dir, "./usr/local/lib/ritornello/plugins/", &b""[..]).unwrap();
+        builder.append_data(&mut dir, "./usr/local/lib/ritornello/", &b""[..]).unwrap();
         let mut f = tar::Header::new_gnu();
         f.set_size(3);
         f.set_mode(0o755);
