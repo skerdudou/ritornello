@@ -187,6 +187,16 @@ pub enum CheckOutcome {
     /// is why `parse_releases` and not the HTTP layer is what decides this.
     NoRelease,
     Ok,
+    /// A component was installed. Carries the sentence naming it and its new
+    /// version.
+    ///
+    /// Its own variant rather than `Ok` with a message, because the two are
+    /// different events and the page reacts differently: `Ok` is "the check
+    /// answered", and this is "something changed on this device just now".
+    /// Without it, a successful install was indistinguishable from nothing
+    /// having happened — `busy` cleared, `outcome` still said `Ok`, and only
+    /// the row moved.
+    Installed(String),
     /// Carries a message already taken from the catalog, so the page renders
     /// it without a second lookup.
     Failed(String),

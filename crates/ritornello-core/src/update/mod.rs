@@ -390,6 +390,36 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// What the page is told once an install pass is over, or `None` when the
+/// pass changed nothing and the check's own answer must stand.
+///
+/// **A failure wins over a success**, and that is the decision worth pulling
+/// out here: a gesture asked for on five rows where one refused must not read
+/// as a clean install. Every failure is in the log with its component; the
+/// payload has one message field, so the page gets the one that needs acting
+/// on.
+///
+/// Among successes it is the **last** that is reported, because §9 asks this
+/// field for "le compte rendu de la dernière tentative" — the most recent
+/// thing that happened. With one component installed, which is the ordinary
+/// gesture, there is nothing to choose between.
+fn install_report(
+    catalog: &Catalog,
+    placed: &[(String, String)],
+    failure: Option<String>,
+) -> Option<CheckOutcome> {
+    if let Some(message) = failure {
+        return Some(CheckOutcome::Failed(message));
+    }
+    let (component, version) = placed.last()?;
+    Some(CheckOutcome::Installed(
+        catalog
+            .get("update_installed")
+            .replace("{component}", component)
+            .replace("{version}", version),
+    ))
+}
+
 /// How long the core waits for the privileged unit. It is a `oneshot` that
 /// copies a few tens of megabytes at worst; two minutes is generous on an SD
 /// card and still finite.
@@ -656,7 +686,10 @@ impl Worker {
     /// page, which is the honest limit of a payload with one message field.
     async fn install(&self, client: &reqwest::Client, published: &[Published], names: &[String]) {
         let mut first_failure: Option<String> = None;
-        let mut placed_a_plugin = false;
+        // `(component, version)` per plugin actually placed. The core is never
+        // in here: it exits at the end of its own install and this function
+        // has already returned.
+        let mut placed: Vec<(String, String)> = Vec::new();
         for name in install_order(names) {
             let Some(offered) = published.iter().find(|p| carries(p, &name)) else {
                 // A name this release does not carry: a third-party plugin, or
@@ -671,7 +704,7 @@ impl Worker {
             match self.install_one(client, &name, offered).await {
                 Ok(Placed::Plugin) => {
                     self.restart_plugin(&name).await;
-                    placed_a_plugin = true;
+                    placed.push((name.clone(), offered.version.clone()));
                 }
                 Ok(Placed::Core) => {
                     // The end of the gesture, and of this process: the new
@@ -694,34 +727,53 @@ impl Worker {
                 }
             }
         }
-        if placed_a_plugin {
-            self.refresh_rows(published).await;
-        }
-        if let Some(message) = first_failure {
-            self.publish_failure(message).await;
-        }
+        self.conclude_install(published, &placed, first_failure).await;
     }
 
-    /// Rebuilds the rows once a plugin has been replaced and restarted.
+    /// The end of an install pass: the rows the page reads, and the report of
+    /// what just happened.
     ///
     /// **Without this, a successful install is indistinguishable from nothing
-    /// having happened.** `busy` clears, `outcome` is still the `Ok` the check
-    /// left, and the row still reads "0.2.0 → 0.3.0 available" — which reads
-    /// as a failure to whoever just clicked Install.
+    /// having happened.** `busy` clears, `outcome` still says the `Ok` the
+    /// check left, and the row still reads "0.2.0 → 0.3.0 available" — which
+    /// reads as a failure to whoever just clicked Install. Two observables
+    /// change here, and both matter: the row goes to "up to date", and the
+    /// card gets a sentence naming what was installed.
     ///
-    /// From the **same** `published` the check returned, so there is no second
-    /// GitHub round trip and no window between what was seen and what was
-    /// installed; and through `installed_when_settled`, because the restarted
-    /// plugin re-announces asynchronously and a row rebuilt an instant too
-    /// early would say `installed: null` — briefly *more* wrong than the stale
-    /// one. `carry_installable` runs here for the same reason it runs after a
-    /// check: a component refused for a manual step must not forget it.
-    async fn refresh_rows(&self, published: &[Published]) {
-        let installed = self.installed_when_settled().await;
-        let mut components = component_offers(self.core_version, published, &installed);
-        let mut state = self.state.write().await;
-        carry_installable(&state.components, &mut components);
-        state.components = components;
+    /// The rows are rebuilt only when something was actually placed — a pass
+    /// that refused everything has nothing new to say about the device, and
+    /// waiting on the plugins to settle for it would be waiting for nothing.
+    /// They come from the **same** `published` the check returned, so there is
+    /// no second GitHub round trip and no window between what was seen and
+    /// what was installed; and through `installed_when_settled`, because the
+    /// restarted plugin re-announces asynchronously and a row rebuilt an
+    /// instant too early would say `installed: null` — briefly *more* wrong
+    /// than the stale one. `carry_installable` runs here for the same reason
+    /// it runs after a check: a component refused for a manual step must not
+    /// forget it.
+    async fn conclude_install(
+        &self,
+        published: &[Published],
+        placed: &[(String, String)],
+        failure: Option<String>,
+    ) {
+        if !placed.is_empty() {
+            let installed = self.installed_when_settled().await;
+            let mut components = component_offers(self.core_version, published, &installed);
+            let mut state = self.state.write().await;
+            carry_installable(&state.components, &mut components);
+            state.components = components;
+        }
+        let report = {
+            let catalog = self.catalog.read().await;
+            install_report(&catalog, placed, failure)
+        };
+        let Some(report) = report else { return };
+        match &report {
+            CheckOutcome::Failed(message) => tracing::warn!("update: {message}"),
+            other => tracing::info!("update: {other:?}"),
+        }
+        self.state.write().await.outcome = report;
     }
 
     /// One component: room, bytes, digest, archive, staging, and the
@@ -1427,10 +1479,25 @@ mod tests {
         assert!(radio.binary_present);
     }
 
+    fn radio_published(version: &str) -> Vec<Published> {
+        vec![Published {
+            offer: Offer::Plugin("radio".to_string()),
+            version: version.to_string(),
+            url: format!("https://x/ritornello-plugin-radio-{version}-x86_64.tar.gz"),
+            size: 0,
+            release_tag: format!("v{version}"),
+            checksums_url: None,
+        }]
+    }
+
     /// **A successful install must stop looking like nothing happened.**
     /// After the binary is replaced and the plugin restarted, the row still
-    /// said "0.2.0 → 0.3.0 available" until the next check — which reads as a
-    /// failure to whoever just clicked Install.
+    /// said "0.2.0 → 0.3.0 available" and `outcome` still said `Ok` until the
+    /// next check — which reads as a failure to whoever just clicked Install.
+    ///
+    /// Both observables in one test, because they are one event: the row goes
+    /// to "up to date", and the card gets a sentence naming the component and
+    /// its new version.
     ///
     /// Same event shape as the test above, and deliberately so: the restarted
     /// plugin re-announces asynchronously, so a row rebuilt an instant too
@@ -1440,19 +1507,83 @@ mod tests {
     async fn a_replaced_plugin_stops_being_offered_the_update_it_has_just_had() {
         let status = silent_line();
         let (worker, _dir) = worker_rig(status.clone());
-        let published = vec![Published {
-            offer: Offer::Plugin("radio".to_string()),
-            version: "0.3.0".to_string(),
-            url: "https://x/ritornello-plugin-radio-0.3.0-x86_64.tar.gz".to_string(),
-            size: 0,
-            release_tag: "v0.3.0".to_string(),
-            checksums_url: None,
-        }];
         announces_shortly(status, "0.3.0");
-        worker.refresh_rows(&published).await;
-        let rows = worker.state.read().await.components.clone();
-        let radio = rows.iter().find(|c| c.name == "radio").expect("the declared plugin");
+        worker
+            .conclude_install(
+                &radio_published("0.3.0"),
+                &[("radio".to_string(), "0.3.0".to_string())],
+                None,
+            )
+            .await;
+        let state = worker.state.read().await;
+        let radio = state.components.iter().find(|c| c.name == "radio").expect("the declared plugin");
         assert_eq!(radio.installed.as_deref(), Some("0.3.0"));
         assert_eq!(radio.availability, Availability::Aligned);
+        assert_eq!(
+            state.outcome,
+            CheckOutcome::Installed("radio updated to 0.3.0".to_string())
+        );
+    }
+
+    /// A pass that placed nothing has nothing new to say about the device, so
+    /// it neither waits on the plugins nor rebuilds the rows — and the report
+    /// is the refusal, not a success.
+    ///
+    /// The wait is what this bounds: with a line left `starting` for ever, a
+    /// pass that rebuilt the rows anyway would sit here for
+    /// `SETTLE_TIMEOUT`. The deadline below is far under it.
+    #[tokio::test]
+    async fn a_pass_that_placed_nothing_reports_the_refusal_without_waiting() {
+        let status = silent_line();
+        let (worker, _dir) = worker_rig(status);
+        let before = worker.state.read().await.components.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            worker.conclude_install(&radio_published("0.3.0"), &[], Some("nope".to_string())),
+        )
+        .await
+        .expect("a pass that placed nothing waited on the plugins anyway");
+        let state = worker.state.read().await;
+        assert_eq!(state.outcome, CheckOutcome::Failed("nope".to_string()));
+        assert_eq!(state.components, before, "nothing was placed, so nothing moved");
+    }
+
+    /// The report a pass ends on, in table form: a failure wins over a
+    /// success, the last success is the one named, and a pass that did
+    /// nothing leaves the check's own answer alone.
+    #[test]
+    fn a_failed_component_never_lets_a_pass_read_as_a_clean_install() {
+        let english = Catalog::load(
+            "core",
+            "en",
+            std::path::Path::new("/nonexistent"),
+            crate::i18n::EN,
+        );
+        let two = [
+            ("radio".to_string(), "0.3.0".to_string()),
+            ("mpd".to_string(), "0.3.1".to_string()),
+        ];
+        assert_eq!(
+            install_report(&english, &two, None),
+            Some(CheckOutcome::Installed("mpd updated to 0.3.1".to_string())),
+            "the most recent attempt is the one reported"
+        );
+        // Something refused: the page must not read "mpd updated" and leave
+        // the operator to find the failure in the log.
+        assert_eq!(
+            install_report(&english, &two, Some("no room".to_string())),
+            Some(CheckOutcome::Failed("no room".to_string()))
+        );
+        // Nothing placed and nothing refused — every named component was
+        // skipped for want of a published archive. The check's own answer
+        // stands.
+        assert_eq!(install_report(&english, &[], None), None);
+
+        // And the sentence renders in French too, with both parameters: the
+        // parity test compares key sets, not what is inside them.
+        let french = install_report(&french(), &two, None);
+        let Some(CheckOutcome::Installed(message)) = french else { panic!("{french:?}") };
+        assert!(!message.contains('{'), "{message}");
+        assert!(message.contains("mpd") && message.contains("0.3.1"), "{message}");
     }
 }
