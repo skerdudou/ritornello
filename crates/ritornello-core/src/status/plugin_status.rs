@@ -653,6 +653,39 @@ mod tests {
         assert!(!std::fs::read_to_string(&manifest).unwrap().contains("nope"));
     }
 
+    /// **Not** the same case as a missing file: `PluginManifest::load` treats
+    /// a missing `plugins.toml` as an empty manifest by design (a device with
+    /// no plugins yet is not an error), so a missing file takes the
+    /// `plugin_unknown` / 404 path already covered above. This test needs the
+    /// file to exist and fail to *parse* — invalid TOML — which is the only
+    /// way to reach `PluginManifest::load`'s `Err` branch and this route's
+    /// `plugin_manifest_unreadable` message. Nobody should later "simplify"
+    /// the two into one case: they answer different questions ("nothing is
+    /// declared" vs. "I cannot tell what is declared") and must keep
+    /// different status codes.
+    #[tokio::test]
+    async fn an_unparsable_manifest_is_reported_as_unreadable_not_as_undeclared() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("plugins.toml");
+        std::fs::write(&manifest, "this is not [[valid toml\n").unwrap();
+        let (state, _rx) = test_state_with_manifest(&manifest);
+        let response = plugin_enabled_put(
+            axum::extract::State(state),
+            axum::extract::Path("radio".to_string()),
+            axum::Json(PluginEnabledReq { enabled: true }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Resolved against the embedded catalog, not a hardcoded duplicate of
+        // the string in `en.toml`: a typo in the key written in the code
+        // would make this fail (raw key, or a different message) instead of
+        // silently matching a copy-pasted expectation.
+        let catalog = Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        assert_eq!(v["error"], catalog.get("plugin_manifest_unreadable"));
+    }
+
     /// No refusal key can reach the screen as is.
     ///
     /// The `message()` tests resolve against an **ad hoc** catalog, which

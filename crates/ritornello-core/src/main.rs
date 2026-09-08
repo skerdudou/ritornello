@@ -412,6 +412,49 @@ fn status_for_spawn_failure(name: &str, err: &anyhow::Error) -> PluginStatus {
     }
 }
 
+/// The acknowledgment for a `PluginAction` with no wiring behind it yet.
+///
+/// `false` uniformly across all four: none is implemented, so "an
+/// acknowledgment must describe a true state" — the doctrine the `select!`
+/// arm already holds for `Enable` and `Disable` — applies identically to all
+/// four, and there is no basis to special-case one over another.
+///
+/// Extracted so a test can pin this refusal directly: the `select!` arm that
+/// calls it lives inside `async fn main()`, which nothing outside `main` can
+/// invoke, so without this extraction the refusal could only be exercised by
+/// actually running the core. The arm's catch-all does nothing but call this
+/// function and log — no other decision is made in that branch — so a test of
+/// this function is a test of what the arm actually acknowledges, provided
+/// that delegation stays exactly this thin.
+///
+/// **`Enable` and `Disable` are deliberately absent from this function's
+/// job**: they are wired, and their bodies must stay byte-identical to what
+/// they were before `PluginAction` existed. Panicking here for them is a
+/// canary, not a feature: this function must never be reached for either.
+///
+/// Match written **without a wildcard**, one arm per unwired variant, so that
+/// wiring one of the four is a visible, local edit here — delete its arm
+/// (and the test named for it, right below `should_downgrade`'s tests), not
+/// somewhere the compiler will find for you. **This is not compiler-enforced
+/// beyond that point**: nothing stops a future task from giving its variant
+/// its own arm in the `select!` above while leaving this function and its
+/// test untouched — the two would then keep agreeing on a refusal the core no
+/// longer actually sends, and the test would keep passing on a false premise.
+/// Naming each test after the task that retires it, and keeping this
+/// function tiny and adjacent to the arm it backs, is the mitigation; it is
+/// social, not mechanical.
+fn plugin_action_refusal(action: PluginAction) -> bool {
+    match action {
+        PluginAction::Enable | PluginAction::Disable => {
+            unreachable!("{action:?} is wired: it never reaches the placeholder refusal")
+        }
+        PluginAction::Restart => false,
+        PluginAction::Declare => false,
+        PluginAction::Undeclare => false,
+        PluginAction::Reorder => false,
+    }
+}
+
 /// The startup deadline has passed: should this plugin be downgraded to
 /// "stalled"?
 ///
@@ -2232,7 +2275,7 @@ async fn main() -> Result<()> {
                     | PluginAction::Undeclare
                     | PluginAction::Reorder => {
                         tracing::warn!("plugin action {:?} is not wired yet", order.action);
-                        false
+                        plugin_action_refusal(order.action)
                     }
                 };
                 // The requester is waiting: a lost acknowledgment would leave
@@ -2757,6 +2800,31 @@ mod toggle_tests {
             !should_downgrade(&statuses_of(vec![]), "mpd"),
             "no line left for this name: nothing to downgrade"
         );
+    }
+
+    /// One test per unwired gesture, each named for the task that retires it.
+    ///
+    /// The task that wires its variant must delete both this test and the
+    /// matching arm in `plugin_action_refusal` — see that function's doc for
+    /// why nothing but this naming and its proximity to the arm forces that.
+    #[test]
+    fn restart_refuses_until_task_12_wires_it() {
+        assert!(!plugin_action_refusal(PluginAction::Restart));
+    }
+
+    #[test]
+    fn declare_refuses_until_task_14_wires_it() {
+        assert!(!plugin_action_refusal(PluginAction::Declare));
+    }
+
+    #[test]
+    fn undeclare_refuses_until_task_15_wires_it() {
+        assert!(!plugin_action_refusal(PluginAction::Undeclare));
+    }
+
+    #[test]
+    fn reorder_refuses_until_task_16_wires_it() {
+        assert!(!plugin_action_refusal(PluginAction::Reorder));
     }
 
     /// The positive half of the classification: a spawn that failed because
