@@ -32,7 +32,17 @@ pub enum Weekday {
 }
 
 impl Weekday {
-    /// From `tm_wday`, which is 0 for Sunday.
+    /// Maps `tm_wday` (0 for Sunday, as `localtime_r` gives it) to a
+    /// `Weekday`.
+    ///
+    /// A pure function over `0..=6`, deliberately pulled out of `local_now`:
+    /// it is the one piece of logic in this file's only untested function
+    /// that is not time-zone-dependent, and an off-by-one here would mean a
+    /// weekly cadence silently firing on the wrong day, every week, forever.
+    ///
+    /// `None` outside `0..=6` — `localtime_r` never produces such a value,
+    /// but the signature admits one, and answering `None` rather than
+    /// panicking or guessing keeps that promise honest for any other caller.
     fn from_tm(wday: i32) -> Option<Self> {
         Some(match wday {
             0 => Self::Sunday,
@@ -84,6 +94,17 @@ pub fn day_key(tm_year: i32, tm_yday: i32) -> i64 {
 /// the graph for this. `None` when the conversion fails, which the caller
 /// treats as "do nothing this minute" — a clock that cannot be read is not a
 /// reason to update at an unexpected time.
+///
+/// **Deliberately untested.** Exercising this function for real means
+/// depending on the machine's time zone — the exact trap a threshold
+/// elsewhere in this repository turned out to be measuring instead of the
+/// code it claimed to test — or mocking `localtime_r`, which nothing here
+/// attempts. That risk used to include the `tm_wday` → `Weekday` mapping,
+/// which is exactly the kind of thing an untested function should not be
+/// allowed to hide; it has been pulled out to `Weekday::from_tm` and is
+/// tested directly, by name, for all seven days. What is left in this
+/// function — the FFI call and two numeric conversions `localtime_r` cannot
+/// make fail in practice — is not logic worth a test of its own.
 pub fn local_now(unix_s: i64) -> Option<LocalNow> {
     // SAFETY: `tm` is fully initialised by `localtime_r`, which is given a
     // valid pointer to it and to `unix_s`. The `_r` variant is the reentrant
@@ -139,6 +160,31 @@ mod tests {
 
     fn at(hour: u32, minute: u32, weekday: Weekday, day: i64) -> LocalNow {
         LocalNow { hour, minute, weekday, day_key: day }
+    }
+
+    /// Seven stated pairs, not a loop over `0..7` mapped by the same rule
+    /// the function under test uses: a loop like that would reimplement
+    /// `from_tm` to check itself and could not catch an off-by-one shared by
+    /// both. Each pair here is the one and only place that says what `2`
+    /// means, so a swap — Tuesday and Wednesday trading places, say — has
+    /// somewhere to be caught.
+    #[test]
+    fn from_tm_maps_every_day_of_the_week() {
+        assert_eq!(Weekday::from_tm(0), Some(Weekday::Sunday));
+        assert_eq!(Weekday::from_tm(1), Some(Weekday::Monday));
+        assert_eq!(Weekday::from_tm(2), Some(Weekday::Tuesday));
+        assert_eq!(Weekday::from_tm(3), Some(Weekday::Wednesday));
+        assert_eq!(Weekday::from_tm(4), Some(Weekday::Thursday));
+        assert_eq!(Weekday::from_tm(5), Some(Weekday::Friday));
+        assert_eq!(Weekday::from_tm(6), Some(Weekday::Saturday));
+    }
+
+    /// `localtime_r` never produces these, but the function's signature
+    /// admits any `i32` — `None` here is the documented answer, not silence.
+    #[test]
+    fn from_tm_rejects_what_localtime_r_never_produces() {
+        assert_eq!(Weekday::from_tm(7), None);
+        assert_eq!(Weekday::from_tm(-1), None);
     }
 
     #[test]

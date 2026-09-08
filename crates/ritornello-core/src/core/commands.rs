@@ -920,6 +920,23 @@ mod tests {
         assert_eq!(st.settings.startup_power, StartupPower::Previous);
     }
 
+    /// `update_last_run_day` is threaded through `Core` for exactly this:
+    /// an **unrelated** settings write must not reset it, because
+    /// `set_settings` is the single passage point every settings change
+    /// goes through — the same `persist()` any of them ends in. Regressing
+    /// this would make the scheduler forget it already ran today the next
+    /// time the owner touches any other setting, and under
+    /// `UpdatePolicy::CheckAndInstall` that means firing — and installing —
+    /// a second time the same evening.
+    #[tokio::test]
+    async fn an_unrelated_settings_write_does_not_reset_the_last_run_day() {
+        let (mut core, _pc, _sc, _rx, dir) =
+            setup_persisted(PersistedState { update_last_run_day: Some(126250), ..Default::default() });
+        core.set_settings(crate::state::Settings { seek_step_s: 45, ..Default::default() });
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.update_last_run_day, Some(126250));
+    }
+
     #[tokio::test]
     async fn the_seek_keys_act_on_finite_content() {
         let (mut core, calls, _, _, _dir) = setup();
