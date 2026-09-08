@@ -396,6 +396,13 @@ mod tests {
         .join(","));
         let published = fold(&parse_releases(&text).unwrap(), "armv7");
 
+        // Two components, not three: radio appears in both releases and the
+        // fold must keep only the newest. Asserted here rather than left to
+        // another test, because `.find()` below would return the right entry
+        // even with a stale duplicate sitting behind it — the test would pass
+        // while the property it is named for was broken.
+        assert_eq!(published.len(), 2, "one entry per component, not per asset");
+
         let radio = published
             .iter()
             .find(|p| p.offer == Offer::Plugin("radio".to_string()))
