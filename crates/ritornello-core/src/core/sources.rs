@@ -23,10 +23,14 @@ impl<P: Player> Core<P> {
     /// rendezvous, or that was relaunched by hand. Returns `true` if it is a
     /// replacement (re-announcement of a plugin already wired).
     ///
-    /// `source_order` is **re-sorted**: the source cycle follows alphabetical
-    /// order, and a source that arrived late must take its normal place in it,
-    /// not the tail — otherwise `SourceCycle` changes direction depending on
-    /// the startup chronology.
+    /// `source_order` is **re-sorted** rather than appended to, so that the
+    /// cycle does not change direction depending on the startup chronology.
+    /// Alphabetically, which is **no longer the order the cycle is meant to
+    /// have**: the file order is, and it is `main`'s hotplug that restores it
+    /// with `set_source_order` immediately after this call — this function
+    /// knows nothing of the manifest. The sort is what keeps the placement
+    /// deterministic for a caller that does not (the tests below), never a
+    /// second opinion on the order.
     ///
     /// If no source was active — a startup where *none* had answered — the new
     /// one becomes active: this is the only case where a plugin's arrival
@@ -388,6 +392,30 @@ impl<P: Player> Core<P> {
         self.metadata.set_order(order);
     }
 
+    /// The arbitration order currently in force.
+    ///
+    /// Exists for the loop's own tests: `metadata` is private to this module,
+    /// and a test that drives the core from `main` — which is where a
+    /// declaration is taken into account — has no other way to read back what
+    /// it just set. `cfg(test)` rather than `allow(dead_code)`, so that a
+    /// service build carries no accessor nothing calls.
+    #[cfg(test)]
+    pub fn metadata_order(&self) -> &[String] {
+        self.metadata.order()
+    }
+
+    /// Re-sequences the cycle. The **active source does not change**: only
+    /// what comes after it does. Switching the source under someone who is
+    /// listening, because they moved a row in a table, would be a surprise
+    /// nobody asked for.
+    ///
+    /// Filtered against the wired sources, for the reason `Core::new` gives:
+    /// the order handed in is the manifest's, and the manifest declares
+    /// displays and inputs whose names designate no source.
+    pub fn set_source_order(&mut self, order: Vec<String>) {
+        self.source_order = order.into_iter().filter(|n| self.sources.contains_key(n)).collect();
+    }
+
     pub(super) async fn apply(&mut self, action: SourceAction) -> Result<()> {
         match action {
             SourceAction::Noop => {}
@@ -485,6 +513,98 @@ mod tests {
         let (core, _pc, _sc, _rx, _d) = setup();
         // PersistedState::default().active_source == "radio".
         assert_eq!(core.active_source(), "radio");
+    }
+
+    /// A core built from a manifest that declares `radio` before `cd`, and
+    /// two other names that are not sources.
+    ///
+    /// Written out rather than taken from `setup()`, whose whole job is to
+    /// stand in for a device whose order nobody is testing: what these three
+    /// tests are about is the order itself, so it is named here.
+    fn core_with_declared_order(order: &[&str]) -> (Core<FakePlayer>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: calls.clone(), ..Default::default() }));
+        sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls, ..Default::default() }));
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+        let (covers, cover_tx) = test_covers();
+        let core = Core::new(
+            FakePlayer::default(),
+            Wiring {
+                sources,
+                persisted: PersistedState::default(),
+                state_path: dir.path().join("state.json"),
+                catalog,
+                locales_root: root,
+                manifest_order: order.iter().map(|n| n.to_string()).collect(),
+                metadata: silent_wiring(vec![]),
+                sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            },
+            covers,
+            cover_tx,
+            mpsc::channel(4).0,
+        );
+        (core, dir)
+    }
+
+    /// **The cycle is the file's order, not the alphabet's.** One order
+    /// commands the source key and metadata arbitration alike, so the list the
+    /// page shows is the list the remote follows — which is what makes moving
+    /// a row mean anything.
+    ///
+    /// `radio` before `cd` is the shape that tells the two apart: sorted, `cd`
+    /// would come first.
+    #[test]
+    fn the_source_cycle_follows_the_file_order_and_no_longer_the_alphabet() {
+        let (core, _dir) = core_with_declared_order(&["radio", "cd"]);
+        assert_eq!(core.source_order, vec!["radio".to_string(), "cd".to_string()]);
+    }
+
+    /// A name the manifest declares that designates **no source** — a
+    /// display, an input — is dropped: it would give a source key that lands
+    /// on nothing, and `SourceCycle` would stop on it.
+    #[test]
+    fn a_name_not_among_the_wired_sources_is_dropped_from_the_cycle() {
+        let (core, _dir) = core_with_declared_order(&["console", "radio", "generic-input", "cd"]);
+        assert_eq!(core.source_order, vec!["radio".to_string(), "cd".to_string()]);
+        // The same rule when the order is replaced, not only when it is built:
+        // `Declare` and `Reorder` hand over the whole manifest.
+        let (mut core, _dir) = core_with_declared_order(&["radio", "cd"]);
+        core.set_source_order(vec!["cd".into(), "mpd".into(), "radio".into()]);
+        assert_eq!(core.source_order, vec!["cd".to_string(), "radio".to_string()]);
+    }
+
+    /// **Re-sequencing changes what "next" means, and nothing else.**
+    /// Switching the source under someone who is listening, because a row
+    /// moved in a table, would be a surprise nobody asked for.
+    #[tokio::test]
+    async fn reordering_changes_what_next_means_without_changing_the_active_source() {
+        let (mut core, _dir) = core_with_declared_order(&["radio", "cd"]);
+        core.resume().await.unwrap();
+        assert_eq!(core.active_source(), "radio");
+        // Two sources, so "next" from radio is cd either way: a third name is
+        // what makes the direction observable.
+        core.add_source("files".into(), Arc::new(EmptySource));
+        core.set_source_order(vec!["radio".into(), "cd".into(), "files".into()]);
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert_eq!(core.active_source(), "cd", "the order in force says cd comes after radio");
+
+        // The same cycle, re-sequenced: what follows changes, what plays does
+        // not.
+        core.set_source_order(vec!["radio".into(), "files".into(), "cd".into()]);
+        assert_eq!(
+            core.active_source(),
+            "cd",
+            "the active source must survive a reordering untouched"
+        );
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert_eq!(
+            core.active_source(),
+            "radio",
+            "cd is last now: the next one is the first of the new order"
+        );
     }
 
     #[test]
@@ -1186,7 +1306,8 @@ mod tests {
             state: state_tx,
         };
         let (covers, cover_tx) = test_covers();
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let manifest_order = declared_order(&sources);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::SourceCycle).await.unwrap();
         // It is the core that stopped mpv, without depending on the plugins.
@@ -1212,7 +1333,8 @@ mod tests {
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let manifest_order = declared_order(&sources);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(core.handle_command(Command::SourceCycle).await.is_err());
         // The state is consistent: new source everywhere, and nothing plays.

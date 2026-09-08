@@ -27,6 +27,14 @@ mod tests {
         tree: Vec<TreeEntry>,
         extra_binaries: Vec<ExtraBinary>,
         examples: Vec<String>,
+        /// Files a fresh install starts from, written by the core only when
+        /// the target is absent. The same paths may also be listed in
+        /// `examples`; `packaging.py` then ships one copy, under
+        /// `initial-config/`.
+        ///
+        /// No `#[serde(default)]` of its own: the container above already
+        /// carries one.
+        initial_config: Vec<String>,
     }
 
     #[derive(serde::Deserialize)]
@@ -103,6 +111,9 @@ mod tests {
                 check(&e.from);
             }
             for e in &c.examples {
+                check(e);
+            }
+            for e in &c.initial_config {
                 check(e);
             }
         }

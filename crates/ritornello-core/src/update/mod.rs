@@ -266,6 +266,11 @@ enum Refusal {
     NoDigest,
     DigestMismatch,
     NeedsManualStep,
+    /// A plugin the device does not declare, whose archive carries no
+    /// `[[plugin]]` block. Installing it would place a binary nothing ever
+    /// launches — the silent failure this repository's own documentation
+    /// records making three times.
+    NoFragment,
     /// The archive, or its checksum file, could not be fetched.
     Download(String),
     /// Everything between having the bytes and having asked systemd: reading
@@ -288,6 +293,7 @@ impl std::fmt::Display for Refusal {
             Self::NeedsManualStep => {
                 write!(f, "the archive carries something the core may not install")
             }
+            Self::NoFragment => write!(f, "the archive carries no plugins.toml block"),
             Self::Download(d) | Self::Prepare(d) | Self::Privileged(d) => write!(f, "{d}"),
         }
     }
@@ -306,6 +312,7 @@ fn refusal_message(catalog: &Catalog, component: &str, why: &Refusal) -> String 
         Refusal::NoDigest => ("update_no_digest", None),
         Refusal::DigestMismatch => ("update_digest_mismatch", None),
         Refusal::NeedsManualStep => ("update_needs_manual_step", None),
+        Refusal::NoFragment => ("update_no_fragment", None),
         Refusal::Download(d) => ("update_download_failed", Some(d)),
         Refusal::Prepare(d) => ("update_install_failed", Some(d)),
         Refusal::Privileged(d) => ("update_privileged_failed", Some(d)),
@@ -384,6 +391,65 @@ const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// for takes seconds.
 const SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// Where a plugin's own configuration lives, under the worker's `root`.
+///
+/// Not one of `archive::ETC_PREFIXES`: those two subdirectories belong to the
+/// release and are overwritten on every update, whereas what lands directly in
+/// this directory belongs to the operator and is written once.
+const ETC_DIR: &str = "etc/ritornello";
+
+/// The `[[plugin]]` block this install must write, if any.
+///
+/// Three answers, and the middle one is the whole point: a component the file
+/// does not declare is an **installation**, and installing a plugin whose block
+/// nobody adds means a plugin that ships and never starts, in silence — an
+/// error this repository's own documentation records making three times.
+/// Refusing here, rather than after the binary is on disk, is what keeps that
+/// from becoming a half-installed device.
+///
+/// Pure, and separated from the I/O around it deliberately: the branch it
+/// governs sits between a download and a systemd unit, and neither of those can
+/// be produced by a test.
+fn declaration_needed(
+    is_core: bool,
+    declared: bool,
+    fragment: Option<&str>,
+) -> Result<Option<String>, Refusal> {
+    // The core declares nothing in `plugins.toml`, and a component already
+    // declared keeps whatever the operator wrote about it: the archive's own
+    // block is for a name the file does not carry yet.
+    if is_core || declared {
+        return Ok(None);
+    }
+    match fragment {
+        Some(fragment) => Ok(Some(fragment.to_string())),
+        None => Err(Refusal::NoFragment),
+    }
+}
+
+/// The operating name a shipped initial configuration takes on the device.
+///
+/// `stations.example.toml` becomes `stations.toml`: one file in the archive
+/// serves as both the reference and the starting point (see
+/// `deploy/packaging.toml`), and it is the operating name the plugin reads.
+/// Anything else keeps the name it arrived with.
+///
+/// `None` for a name that is not a bare file name, and this is where that is
+/// decided rather than where the bytes are written: `archive::read` has already
+/// refused `..` and absolute paths, so what is left to refuse is a nested entry
+/// — `/etc/ritornello/<dir>/<file>` is a shape nothing packs and the core has
+/// no reason to create — and a dotted one, which would let an archive name the
+/// very temporary `write_atomic` writes beside its target.
+fn initial_config_target(entry: &str) -> Option<String> {
+    if entry.is_empty() || entry.contains('/') || entry.starts_with('.') {
+        return None;
+    }
+    Some(match entry.strip_suffix(".example.toml") {
+        Some(stem) => format!("{stem}.toml"),
+        None => entry.to_string(),
+    })
+}
+
 /// Writes through a temporary beside the target, then `rename`.
 ///
 /// The third copy of a three-line rule in this repository, and it is written
@@ -433,19 +499,25 @@ pub fn core_notes_path(staging: &Path) -> PathBuf {
 /// gesture, there is nothing to choose between.
 fn install_report(
     catalog: &Catalog,
-    placed: &[(String, String)],
+    placed: &[Placement],
     failure: Option<String>,
 ) -> Option<CheckOutcome> {
     if let Some(message) = failure {
         return Some(CheckOutcome::Failed(message));
     }
-    let (component, version) = placed.last()?;
-    Some(CheckOutcome::Installed(
+    let last = placed.last()?;
+    // A plugin that was not there is not "updated to" anything: the sentence
+    // for a first installation names no version, because there is no version
+    // it moved from. The row beside it already carries the one it now has.
+    let text = if last.fresh {
+        catalog.get("update_installed_new").replace("{component}", &last.component)
+    } else {
         catalog
             .get("update_installed")
-            .replace("{component}", component)
-            .replace("{version}", version),
-    ))
+            .replace("{component}", &last.component)
+            .replace("{version}", &last.version)
+    };
+    Some(CheckOutcome::Installed(text))
 }
 
 /// How long the core waits for the privileged unit. It is a `oneshot` that
@@ -502,6 +574,21 @@ enum Placed {
     /// A plugin binary. Its process is still the old one until the core loop
     /// stops it and launches it again.
     Plugin,
+    /// A plugin the device did not have: its binary is placed, its initial
+    /// configuration is on disk and its `[[plugin]]` block is written. Nothing
+    /// runs it yet — the core loop has never heard of it.
+    NewPlugin,
+}
+
+/// One component actually placed during a pass.
+///
+/// `fresh` is what tells "updated to 0.3.0" from "installed": a plugin that
+/// was not there has no previous version to have been updated from, and
+/// saying so would be a small lie on the one line the card shows.
+struct Placement {
+    component: String,
+    version: String,
+    fresh: bool,
 }
 
 /// Everything the worker needs, and nothing it could read twice.
@@ -720,7 +807,7 @@ impl Worker {
         // `(component, version)` per plugin actually placed. The core is never
         // in here: it exits at the end of its own install and this function
         // has already returned.
-        let mut placed: Vec<(String, String)> = Vec::new();
+        let mut placed: Vec<Placement> = Vec::new();
         for name in install_order(names) {
             let Some(offered) = published.iter().find(|p| carries(p, &name)) else {
                 // A name this release does not carry: a third-party plugin, or
@@ -735,7 +822,19 @@ impl Worker {
             match self.install_one(client, &name, offered).await {
                 Ok(Placed::Plugin) => {
                     self.restart_plugin(&name).await;
-                    placed.push((name.clone(), offered.version.clone()));
+                    placed.push(Placement {
+                        component: name.clone(),
+                        version: offered.version.clone(),
+                        fresh: false,
+                    });
+                }
+                Ok(Placed::NewPlugin) => {
+                    self.start_declared_plugin(&name).await;
+                    placed.push(Placement {
+                        component: name.clone(),
+                        version: offered.version.clone(),
+                        fresh: true,
+                    });
                 }
                 Ok(Placed::Core) => {
                     // The end of the gesture, and of this process: the new
@@ -785,7 +884,7 @@ impl Worker {
     async fn conclude_install(
         &self,
         published: &[Published],
-        placed: &[(String, String)],
+        placed: &[Placement],
         failure: Option<String>,
     ) {
         if !placed.is_empty() {
@@ -869,6 +968,19 @@ impl Worker {
             self.remember_manual_step(name).await;
             return Err(Refusal::NeedsManualStep);
         }
+        // A component nothing declares is an **installation**, not a
+        // replacement: it needs a declaration, an initial configuration, and a
+        // launch of a plugin the core has never heard of. Read from
+        // `plugins.toml` rather than from the row the page showed: the file is
+        // the authority, and the row was computed at the last check.
+        //
+        // Decided here, before a single byte is written: see
+        // `declaration_needed` for what an archive with no block costs.
+        let declared = is_core || self.declared(name);
+        let fragment = declaration_needed(is_core, declared, contents.fragment.as_deref())?;
+        // One decision, read once: a block to write is what makes this an
+        // installation rather than a replacement.
+        let fresh = fragment.is_some();
         let Some(staged) = download_name(&offered.offer) else {
             return Err(Refusal::Prepare(format!("no staged name for {name}")));
         };
@@ -904,6 +1016,13 @@ impl Worker {
         // would leave the new binary beside the old catalogs, which is the
         // same mismatch the other way round with no fallback at all.
         self.write_etc_files(&contents.etc_files)?;
+        // Only for a plugin that was not there. On an update, the operator's
+        // station list is already in place and `write_initial_config` would
+        // leave it alone anyway — but not asking the question at all is what
+        // makes that guarantee independent of a `exists()` call.
+        if fresh {
+            self.write_initial_config(&contents.initial_config)?;
+        }
 
         let request = Request { format: REQUEST_FORMAT, actions: vec![action] };
         let request_path = self.staging.join("request.json");
@@ -933,6 +1052,18 @@ impl Worker {
         // the installer rather than silently re-applied.
         if let Err(e) = std::fs::remove_file(self.staging.join(&staged)) {
             tracing::debug!("update: leaving {staged} in staging: {e}");
+        }
+        // The order matters, and it is not the intuitive one: **the binary is
+        // placed before the declaration is written.**
+        //
+        // A declaration pointing at a file that is not there is exactly the
+        // state this chantier repairs elsewhere (`Availability::BinaryMissing`),
+        // and creating it on a failure path would be careless. The reverse
+        // leftover — a binary nobody declares — is harmless, visible on the
+        // page as `Undeclared`, and undone by one gesture.
+        if let Some(fragment) = &fragment {
+            self.write_declaration(name, fragment)?;
+            return Ok(Placed::NewPlugin);
         }
         Ok(if is_core { Placed::Core } else { Placed::Plugin })
     }
@@ -987,6 +1118,80 @@ impl Worker {
         Ok(())
     }
 
+    /// The plugin's own configuration, written **only where there is none**.
+    ///
+    /// Unlike `write_etc_files`, which replaces unconditionally: what lands
+    /// here is a station list or a set of key bindings, and those two files
+    /// hold what the operator produced. The archive ships them so a first
+    /// installation is not an empty screen, never so a release can put its own
+    /// back.
+    ///
+    /// A failure is a `Refusal` and not a warning: an operator who installs
+    /// the radio and gets no stations has an install that did not do what it
+    /// said, and saying so beats leaving them to notice.
+    fn write_initial_config(&self, files: &[(String, Vec<u8>)]) -> Result<(), Refusal> {
+        let dir = self.root.join(ETC_DIR);
+        for (entry, bytes) in files {
+            let Some(name) = initial_config_target(entry) else {
+                // Listed on the page as something the archive carries, and
+                // written nowhere — the rule this whole module follows.
+                tracing::warn!(
+                    "update: not writing the initial configuration entry {entry:?}: it is not a bare file name"
+                );
+                continue;
+            };
+            let target = dir.join(&name);
+            if target.exists() {
+                tracing::info!("update: {} already exists, keeping it", target.display());
+                continue;
+            }
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| Refusal::Prepare(format!("creating {}: {e}", dir.display())))?;
+            write_atomic(&target, bytes)
+                .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", target.display())))?;
+            tracing::info!("update: {} written from the archive", target.display());
+        }
+        Ok(())
+    }
+
+    /// Appends the archive's `[[plugin]]` block to `plugins.toml`.
+    ///
+    /// The fragment travels **as the archive wrote it**: nothing here builds
+    /// one, prepends a description to one, or copies the plugin catalogue's
+    /// text into the file. `plugins/edit.rs` is safe against a headerless
+    /// ambiguity as long as no caller synthesises a comment of its own, and
+    /// the release fragments carry none (see that module's doc). An installed
+    /// entry therefore arrives without a description, which is what happens on
+    /// a hand-deployed device too and what the operator can add.
+    fn write_declaration(&self, name: &str, fragment: &str) -> Result<(), Refusal> {
+        let text = std::fs::read_to_string(&self.manifest)
+            .map_err(|e| Refusal::Prepare(format!("reading {}: {e}", self.manifest.display())))?;
+        let updated = crate::plugins::edit::append_block(&text, fragment, name)
+            .map_err(|e| Refusal::Prepare(format!("declaring {name}: {e}")))?;
+        // Through a temporary and a rename, like every other write to this
+        // file: a `plugins.toml` cut in half by a power cut is a device that
+        // launches nothing at all on the next boot.
+        write_atomic(&self.manifest, updated.as_bytes())
+            .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", self.manifest.display())))
+    }
+
+    /// Is this plugin declared in `plugins.toml`?
+    ///
+    /// `false` for a file that cannot be read, for the same reason `enabled`
+    /// answers `false` there: the core has no basis for saying otherwise. The
+    /// install that follows then tries to append to that same file and refuses
+    /// with the read error, which is louder than a silent replacement of a
+    /// binary nothing declares.
+    fn declared(&self, name: &str) -> bool {
+        match PluginManifest::load(&self.manifest) {
+            Ok(manifest) => manifest.plugins.iter().any(|p| p.name == name),
+            Err(e) => {
+                tracing::warn!("update: reading {}: {e:#}", self.manifest.display());
+                false
+            }
+        }
+    }
+
     /// Is this plugin switched on in `plugins.toml`?
     ///
     /// `false` for a name the file does not declare and for a file that
@@ -1031,6 +1236,41 @@ impl Worker {
     /// is relaunched: replacing the binary and starting it again is precisely
     /// the gesture that used to require a restart of the whole core after a
     /// plugin was refused for its protocol.
+    /// Its binary is placed and its block is written: the core loop must take
+    /// the declaration into account and launch it.
+    ///
+    /// **No `enabled` check here, unlike `restart_plugin`, and that is not an
+    /// oversight.** The loop has to read `plugins.toml` anyway — it is where
+    /// the name, the `exec` and the new order come from — so it reads the
+    /// switch at the same time and does not launch a plugin the block declares
+    /// off. Filtering here instead would send nothing at all, and the core
+    /// would keep no `exec` for that name: switching the plugin on from the
+    /// page afterwards would then fail until the next restart of the core.
+    async fn start_declared_plugin(&self, name: &str) {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        let order =
+            PluginOrder { name: name.to_string(), action: PluginAction::Declare, ack: ack_tx };
+        if self.plugins_tx.send(order).await.is_err() {
+            tracing::warn!(
+                "update: the core loop is gone, {name} is declared and will start with the core"
+            );
+            return;
+        }
+        match tokio::time::timeout(RESTART_ACK_TIMEOUT, ack_rx).await {
+            Ok(Ok(true)) => tracing::info!("update: {name} installed and declared"),
+            // The declaration is on disk either way: what failed is the
+            // launch, and the next boot reads the same file.
+            Ok(Ok(false)) => tracing::warn!(
+                "update: {name} is installed and declared, but the core could not start it — its own log names the cause"
+            ),
+            Ok(Err(_)) => tracing::warn!("update: no acknowledgment for the declaration of {name}"),
+            Err(_) => tracing::warn!(
+                "update: the core loop did not acknowledge the declaration of {name} within {} s",
+                RESTART_ACK_TIMEOUT.as_secs()
+            ),
+        }
+    }
+
     async fn restart_plugin(&self, name: &str) {
         if !self.enabled(name) {
             tracing::info!(
@@ -1471,6 +1711,7 @@ mod tests {
             Refusal::NoDigest,
             Refusal::DigestMismatch,
             Refusal::NeedsManualStep,
+            Refusal::NoFragment,
             Refusal::Download("connection reset by peer".to_string()),
             Refusal::Prepare("no space left on device".to_string()),
             Refusal::Privileged("Job for ritornello-update.service failed".to_string()),
@@ -1503,31 +1744,46 @@ mod tests {
     /// whose status lines the test owns.
     fn worker_rig(status: Arc<RwLock<StatusState>>) -> (Worker, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let exec = dir.path().join("ritornello-plugin-radio");
+        let worker = worker_at(dir.path(), status);
+        (worker, dir)
+    }
+
+    /// The same worker, on a root the caller owns — for the tests that write
+    /// files under it and then read them back.
+    fn worker_at(root: &Path, status: Arc<RwLock<StatusState>>) -> Worker {
+        let exec = root.join("ritornello-plugin-radio");
         std::fs::write(&exec, b"not a real binary, only its presence is read\n").unwrap();
-        let manifest = dir.path().join("plugins.toml");
+        let manifest = root.join("plugins.toml");
         std::fs::write(
             &manifest,
             format!("[[plugin]]\nname = \"radio\"\nexec = {:?}\n", exec.to_string_lossy()),
         )
         .unwrap();
-        let worker = Worker {
+        Worker {
             state: Arc::new(RwLock::new(UpdateState::initial("0.2.0", &[]))),
-            catalog: Arc::new(RwLock::new(Catalog::load(
-                "core",
-                "en",
-                dir.path(),
-                crate::i18n::EN,
-            ))),
+            catalog: Arc::new(RwLock::new(Catalog::load("core", "en", root, crate::i18n::EN))),
             status,
             manifest,
             plugins_tx: mpsc::channel(1).0,
-            staging: dir.path().join("staging"),
-            root: dir.path().to_path_buf(),
+            staging: root.join("staging"),
+            root: root.to_path_buf(),
             core_version: "0.2.0",
             restart: Arc::new(|| {}),
-        };
-        (worker, dir)
+        }
+    }
+
+    /// A component that was already on the device and has just been replaced.
+    fn replaced(component: &str, version: &str) -> Placement {
+        Placement {
+            component: component.to_string(),
+            version: version.to_string(),
+            fresh: false,
+        }
+    }
+
+    /// A component the device did not have.
+    fn installed(component: &str, version: &str) -> Placement {
+        Placement { component: component.to_string(), version: version.to_string(), fresh: true }
     }
 
     fn one_line(line: PluginStatus) -> Arc<RwLock<StatusState>> {
@@ -1652,7 +1908,7 @@ mod tests {
         worker
             .conclude_install(
                 &radio_published("0.3.0"),
-                &[("radio".to_string(), "0.3.0".to_string())],
+                &[replaced("radio", "0.3.0")],
                 None,
             )
             .await;
@@ -1700,14 +1956,21 @@ mod tests {
             std::path::Path::new("/nonexistent"),
             crate::i18n::EN,
         );
-        let two = [
-            ("radio".to_string(), "0.3.0".to_string()),
-            ("mpd".to_string(), "0.3.1".to_string()),
-        ];
+        let two = [replaced("radio", "0.3.0"), replaced("mpd", "0.3.1")];
         assert_eq!(
             install_report(&english, &two, None),
             Some(CheckOutcome::Installed("mpd updated to 0.3.1".to_string())),
             "the most recent attempt is the one reported"
+        );
+        // A plugin that was not there has no version it moved from, and the
+        // sentence must not invent one. Same list, same last entry, one field
+        // different: what separates the two sentences is `fresh` and nothing
+        // else.
+        let fresh = [replaced("radio", "0.3.0"), installed("mpd", "0.3.1")];
+        assert_eq!(
+            install_report(&english, &fresh, None),
+            Some(CheckOutcome::Installed("mpd installed".to_string())),
+            "a first installation is not an update to a version it never had"
         );
         // Something refused: the page must not read "mpd updated" and leave
         // the operator to find the failure in the log.
@@ -1722,9 +1985,154 @@ mod tests {
 
         // And the sentence renders in French too, with both parameters: the
         // parity test compares key sets, not what is inside them.
+        // And so does the sentence for a first installation, which is a
+        // second key and therefore a second thing the French pack can be
+        // missing.
+        let fresh_fr = install_report(&french(), &fresh, None);
+        let Some(CheckOutcome::Installed(message)) = fresh_fr else { panic!("{fresh_fr:?}") };
+        assert!(!message.starts_with("update_"), "{message}");
+        assert!(!message.contains('{'), "{message}");
+        assert!(message.contains("mpd"), "{message}");
+
         let french = install_report(&french(), &two, None);
         let Some(CheckOutcome::Installed(message)) = french else { panic!("{french:?}") };
         assert!(!message.contains('{'), "{message}");
         assert!(message.contains("mpd") && message.contains("0.3.1"), "{message}");
+    }
+
+    /// **A plugin the device does not declare, whose archive carries no block,
+    /// is refused.** Installing it would place a binary nothing ever launches,
+    /// and the whole point of refusing here is that it happens before a single
+    /// byte is written.
+    ///
+    /// One case per operand rather than one per outcome: what makes the refusal
+    /// reachable is the conjunction "not declared" **and** "no fragment", and
+    /// each of the first two rows below breaks exactly one of them.
+    #[test]
+    fn a_plugin_nobody_would_declare_is_refused_before_anything_is_written() {
+        let block = "[[plugin]]\nname = \"mpd\"\nexec = \"/opt/mpd\"\n";
+        // Not declared, no block: the silent failure this refusal exists for.
+        assert!(matches!(declaration_needed(false, false, None), Err(Refusal::NoFragment)));
+        // Not declared, a block: installed and declared from it.
+        assert_eq!(
+            declaration_needed(false, false, Some(block)).unwrap().as_deref(),
+            Some(block),
+            "the archive's own block, handed over unchanged"
+        );
+        // Declared already, no block: an ordinary update, and the entry the
+        // operator wrote is left exactly as it is.
+        assert_eq!(declaration_needed(false, true, None).unwrap(), None);
+        // Declared already, and the archive carries its block anyway — which
+        // every plugin archive does. Appending it would be a duplicate entry.
+        assert_eq!(declaration_needed(false, true, Some(block)).unwrap(), None);
+        // The core declares nothing in `plugins.toml`, whatever its archive
+        // carries and whatever `declared` says about a name it does not have.
+        assert_eq!(declaration_needed(true, false, None).unwrap(), None);
+        assert_eq!(declaration_needed(true, false, Some(block)).unwrap(), None);
+    }
+
+    /// The naming a shipped configuration takes on the device, and what is
+    /// refused before a path is ever formed.
+    #[test]
+    fn an_initial_configuration_lands_under_its_operating_name_and_nowhere_else() {
+        assert_eq!(
+            initial_config_target("stations.example.toml").as_deref(),
+            Some("stations.toml"),
+            "the archive ships the reference file; the device wants the operating one"
+        );
+        assert_eq!(
+            initial_config_target("input-bindings.example.toml").as_deref(),
+            Some("input-bindings.toml")
+        );
+        // Not a `.example.toml`: it keeps the name it arrived with rather than
+        // being mangled.
+        assert_eq!(initial_config_target("presets.json").as_deref(), Some("presets.json"));
+        // A nested entry: `/etc/ritornello/<dir>/<file>` is a shape nothing
+        // packs, and the core does not create directories an archive names.
+        assert_eq!(initial_config_target("sub/stations.example.toml"), None);
+        assert_eq!(initial_config_target("sub/"), None);
+        // A dotted name would let an archive designate the very temporary
+        // `write_atomic` writes beside its target.
+        assert_eq!(initial_config_target(".stations.toml.tmp"), None);
+        assert_eq!(initial_config_target(""), None);
+    }
+
+    /// **What is already there is never replaced, and what is missing is
+    /// written.** Both halves in one test because they are one rule, and each
+    /// alone would pass with the other's branch deleted.
+    #[test]
+    fn a_shipped_configuration_only_fills_a_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), one_line(PluginStatus::startup("radio")));
+        let etc = dir.path().join(ETC_DIR);
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::write(etc.join("stations.toml"), b"# what the operator built\n").unwrap();
+
+        worker
+            .write_initial_config(&[
+                ("stations.example.toml".to_string(), b"# the shipped defaults\n".to_vec()),
+                ("input-bindings.example.toml".to_string(), b"# the shipped bindings\n".to_vec()),
+            ])
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(etc.join("stations.toml")).unwrap(),
+            b"# what the operator built\n",
+            "a station list built from the browser must survive an installation"
+        );
+        assert_eq!(
+            std::fs::read(etc.join("input-bindings.toml")).unwrap(),
+            b"# the shipped bindings\n",
+            "there was nothing there: the plugin must not start on an empty file"
+        );
+    }
+
+    /// The declaration is written **from the archive's own fragment**, and
+    /// after the binary. Driven through `write_declaration` rather than
+    /// `append_block` directly: what is asserted is that the worker reads the
+    /// file, hands the fragment over unchanged and writes the result back
+    /// atomically — none of which `append_block` does.
+    #[test]
+    fn declaring_a_plugin_appends_the_archives_own_block_and_leaves_the_rest_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), one_line(PluginStatus::startup("radio")));
+        let before = std::fs::read_to_string(&worker.manifest).unwrap();
+
+        worker
+            .write_declaration("mpd", "[[plugin]]\nname = \"mpd\"\nexec = \"/opt/mpd\"\n")
+            .unwrap();
+
+        let after = std::fs::read_to_string(&worker.manifest).unwrap();
+        assert!(after.starts_with(&before), "the entries already there are untouched:\n{after}");
+        let names = crate::plugins::edit::names_in_order(&after).unwrap();
+        assert_eq!(names, vec!["radio".to_string(), "mpd".to_string()], "the new one lands last");
+        // A second time is refused rather than duplicated: `plugins.toml` with
+        // two blocks of one name is a file the core cannot act on.
+        assert!(worker
+            .write_declaration("mpd", "[[plugin]]\nname = \"mpd\"\nexec = \"/opt/mpd\"\n")
+            .is_err());
+        // And no temporary is left beside it: this is a device one unplugs.
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// A plugin the file does not declare is a fresh install; one it declares
+    /// is a replacement. This is the predicate the whole gesture branches on,
+    /// and it reads the file rather than the row the page last showed.
+    #[test]
+    fn what_the_file_declares_is_what_says_install_from_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), one_line(PluginStatus::startup("radio")));
+        assert!(worker.declared("radio"));
+        assert!(!worker.declared("mpd"));
+        // An unreadable manifest answers "not declared", the same answer
+        // `enabled` gives there, and the append that follows fails loudly.
+        std::fs::remove_file(&worker.manifest).unwrap();
+        assert!(!worker.declared("radio"));
     }
 }

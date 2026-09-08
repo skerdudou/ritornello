@@ -38,6 +38,13 @@ tree = [
 
 [plugins.radio]
 examples = ["deploy/stations.example.toml"]
+# Doubles as the initial configuration: installing the radio and getting an
+# empty station list is a worse first experience than the defaults, and
+# `deploy.sh` already provisions this file when it is absent. Declared here so
+# there is one source of truth instead of two hard-coded names in a shell
+# loop. A file named in BOTH lists is not duplicated in the archive: it lands
+# in `initial-config/` and stays out of `examples/`.
+initial_config = ["deploy/stations.example.toml"]
 
 [plugins.cd]
 
@@ -75,6 +82,8 @@ tree = [
   { from = "deploy/input-presets", to = "etc/ritornello/input-presets" },
 ]
 examples = ["deploy/input-bindings.example.toml"]
+# The same reasoning as radio's station list: see there.
+initial_config = ["deploy/input-bindings.example.toml"]
 
 [plugins.console]
 

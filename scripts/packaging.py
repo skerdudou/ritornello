@@ -31,9 +31,20 @@ def stage(section: dict, out: Path, bindir: Path) -> None:
     # lives outside the plugins directory on purpose.
     for entry in section.get("extra_binaries", []):
         copy(bindir / entry["name"], out / entry["to"])
+    # Initial configuration: the same shape as `examples`, in its own
+    # directory, so the core can tell "write this if the target is absent"
+    # from "this is documentation" without a parser. Outside the tree, like
+    # examples: `tar -C /` must never overwrite what the operator wrote.
+    initial = section.get("initial_config", [])
+    for path in initial:
+        copy(ROOT / path, out / "initial-config" / Path(path).name)
     # Examples stay OUT of the tree: they must never overwrite what the
     # operator wrote, so they cannot be inside what `tar -C /` extracts.
     for example in section.get("examples", []):
+        # Not duplicated: a file declared as initial configuration is already
+        # in the archive, and one copy is enough for both purposes.
+        if example in initial:
+            continue
         copy(ROOT / example, out / "examples" / Path(example).name)
 
 

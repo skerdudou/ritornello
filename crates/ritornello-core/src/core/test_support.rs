@@ -167,6 +167,18 @@ pub(super) type Rig = (Core<FakePlayer>, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<
 /// right away, the core's `send`s fail silently (already the case in
 /// production when no `metadata` plugin is declared). Tests that observe
 /// these channels use `setup_metadata`.
+/// The declared order a test rig stands in for.
+///
+/// Alphabetical, and deliberately so: that is the order these rigs had before
+/// the source cycle started following `plugins.toml`, and the subject of every
+/// one of them is something else. The tests that *are* about the order name it
+/// explicitly instead of coming through here.
+pub(super) fn declared_order(sources: &HashMap<String, Arc<dyn Source>>) -> Vec<String> {
+    let mut names: Vec<String> = sources.keys().cloned().collect();
+    names.sort();
+    names
+}
+
 pub(super) fn silent_wiring(plugins: Vec<String>) -> MetadataWiring {
     MetadataWiring {
         plugins,
@@ -234,6 +246,7 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
     let root = dir.path().to_path_buf();
     let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
     let (covers, cover_tx) = test_covers();
+    let manifest_order = declared_order(&sources);
     let core = Core::new(
         player,
         Wiring {
@@ -242,6 +255,7 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
             state_path: dir.path().join("state.json"),
             catalog,
             locales_root: root,
+            manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring {
                 plugins: vec![],
@@ -274,6 +288,7 @@ pub(super) fn setup_metadata(
     let root = dir.path().to_path_buf();
     let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
     let (covers, cover_tx) = test_covers();
+    let manifest_order = declared_order(&sources);
     let core = Core::new(
         FakePlayer::default(),
         Wiring {
@@ -282,6 +297,7 @@ pub(super) fn setup_metadata(
             state_path: dir.path().join("state.json"),
             catalog,
             locales_root: root,
+            manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring { plugins, now_playing: np_tx, state: state_tx },
         },
@@ -331,6 +347,7 @@ pub(super) fn test_core_with_extraction() -> (
     let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
     let (covers, cover_tx) = test_covers();
     let (extraction_tx, extraction_rx) = mpsc::channel(4);
+    let manifest_order = declared_order(&sources);
     let core = Core::new(
         FakePlayer::default(),
         Wiring {
@@ -339,6 +356,7 @@ pub(super) fn test_core_with_extraction() -> (
             state_path: dir.path().join("state.json"),
             catalog,
             locales_root: root,
+            manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
         },
@@ -382,6 +400,9 @@ pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<Playe
     )));
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let (covers, cover_tx) = test_covers();
+    // Nothing declared, because nothing is wired: this rig is the startup
+    // where no source answered.
+    let manifest_order = vec![];
     let core = Core::new(
         FakePlayer::default(),
         Wiring {
@@ -390,6 +411,7 @@ pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<Playe
             state_path: dir.path().join("state.json"),
             catalog,
             locales_root: root,
+            manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring {
                 plugins: vec![],
@@ -612,6 +634,7 @@ pub(super) fn test_core_with_cover_channel() -> (
     )));
     let covers = Arc::new(crate::cover::CoverCache::new());
     let (cover_tx, cover_rx) = mpsc::channel(4);
+    let manifest_order = declared_order(&sources);
     let core = Core::new(
         FakePlayer::default(),
         Wiring {
@@ -620,6 +643,7 @@ pub(super) fn test_core_with_cover_channel() -> (
             state_path: dir.path().join("state.json"),
             catalog,
             locales_root: root,
+            manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
         },
@@ -865,6 +889,7 @@ fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> Archivin
     if network {
         covers.answer_full_downloads_with(original(), "image/jpeg");
     }
+    let manifest_order = declared_order(&sources);
     let core = Core::new(
         FakePlayer::default(),
         Wiring {
@@ -873,6 +898,7 @@ fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> Archivin
             state_path: dir.path().join("state.json"),
             catalog,
             locales_root: root,
+            manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring {
                 plugins: vec![ARCHIVING_CONTRIBUTOR.to_string()],

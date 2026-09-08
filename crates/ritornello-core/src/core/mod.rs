@@ -84,6 +84,11 @@ pub struct Wiring {
     pub state_path: PathBuf,
     pub catalog: Arc<RwLock<Catalog>>,
     pub locales_root: PathBuf,
+    /// The declared plugin names, **in file order**. Only the names that also
+    /// appear in `sources` end up in the cycle — the manifest declares
+    /// displays and inputs too, and a display's name in the cycle would give
+    /// a source key that lands on nothing.
+    pub manifest_order: Vec<String>,
     pub metadata: MetadataWiring,
     /// The sources_catalog of sources going to the Display plugins, on **its
     /// own** channel. Not in `MetadataWiring`: it goes to neither the SPA nor
@@ -403,10 +408,25 @@ impl<P: Player> Core<P> {
         cover_tx: mpsc::Sender<(String, bool)>,
         extraction_tx: mpsc::Sender<(String, Option<crate::cover::CoverSource>)>,
     ) -> Self {
-        let Wiring { sources, persisted, state_path, catalog, locales_root, metadata, sources_catalog } =
-            wiring;
-        let mut source_order: Vec<String> = sources.keys().cloned().collect();
-        source_order.sort();
+        let Wiring {
+            sources,
+            persisted,
+            state_path,
+            catalog,
+            locales_root,
+            manifest_order,
+            metadata,
+            sources_catalog,
+        } = wiring;
+        // File order, not alphabetical. One order commands both the source key
+        // and metadata arbitration, so the list the page shows is the list the
+        // remote follows — which is what makes reordering mean something.
+        //
+        // Filtered against the wired sources: the manifest declares every
+        // plugin, displays and inputs included, and a display's name in the
+        // cycle would give a source key that lands on nothing.
+        let source_order: Vec<String> =
+            manifest_order.iter().filter(|n| sources.contains_key(*n)).cloned().collect();
         let active_source = if sources.contains_key(&persisted.active_source) {
             persisted.active_source.clone()
         } else {
@@ -1275,6 +1295,7 @@ mod tests {
             state_path: dir.path().join("state.json"),
             catalog,
             locales_root: root,
+            manifest_order: vec![],
             metadata: silent_wiring(vec![]),
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
         };

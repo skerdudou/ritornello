@@ -241,11 +241,13 @@ pub enum PluginAction {
     /// Sent by the update worker, once the privileged unit has placed the new
     /// binary.
     Restart,
-    /// Its binary has just been placed and its declaration written: start it,
-    /// and take the new file order into account.
+    /// Its binary has just been placed and its declaration written: register
+    /// it, take the new file order into account, and start it — unless the
+    /// declaration that was just written switches it off, which the core
+    /// reads for itself rather than trusting the sender.
     ///
-    /// No caller yet: wired in Task 14.
-    #[allow(dead_code)]
+    /// Sent by the update worker, once the privileged unit has placed the
+    /// binary of a plugin the device did not have.
     Declare,
     /// Its declaration has just been removed: stop it and unwire everything it
     /// served. The binary is erased by the privileged side, separately.
@@ -420,6 +422,22 @@ pub fn replace_plugin_lines(
     for (i, line) in lines.into_iter().enumerate() {
         state.plugins.insert(place + i, line);
     }
+}
+
+/// Reorders the published lines to match a new file order.
+///
+/// Lines move **by plugin**: one line is a (name, kind) pair, so a plugin
+/// announcing two kinds has two, and they must stay together. A name the new
+/// order does not mention keeps its lines, at the end: dead, stalled and
+/// refused plugins are not in the manifest order the caller computed, and
+/// dropping them would take a plugin off the page instead of moving it.
+pub fn resequence_plugin_lines(state: &mut StatusState, order: &[String]) {
+    let mut moved: Vec<PluginStatus> = Vec::with_capacity(state.plugins.len());
+    for name in order {
+        moved.extend(state.plugins.iter().filter(|p| &p.name == name).cloned());
+    }
+    moved.extend(state.plugins.iter().filter(|p| !order.iter().any(|n| n == &p.name)).cloned());
+    state.plugins = moved;
 }
 
 #[cfg(test)]
@@ -894,6 +912,51 @@ mod tests {
         // The plugin's place in the list does not jump from one rewiring to
         // the next: `files` was first, it stays first.
         assert_eq!(st.plugins[0].name, "files");
+    }
+
+    /// The page follows the file, and **nothing falls off it on the way**.
+    ///
+    /// Both halves in one test because they are one rule with two sides. A
+    /// plugin announcing two kinds has two lines that must travel together;
+    /// and a name the new order does not mention — a dead, stalled or refused
+    /// plugin is not in the manifest order the caller computed — keeps its
+    /// lines at the end rather than vanishing from the page, which is the one
+    /// thing a broken plugin must never do.
+    #[test]
+    fn resequencing_puts_the_lines_in_the_new_file_order_and_keeps_the_unknown_ones_last() {
+        let mut st = StatusState {
+            plugins: vec![
+                PluginStatus::kind("radio", "source", true, false),
+                PluginStatus::unknown_kind("console", true),
+                PluginStatus::kind("files", "source", true, false),
+                PluginStatus::kind("files", "input", true, false),
+                PluginStatus::kind("cd", "source", true, false),
+            ],
+            active_source: "radio".into(),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+        };
+        // The file now reads cd, files, radio — and says nothing of the
+        // console, which is stalled and therefore absent from the order its
+        // caller built.
+        resequence_plugin_lines(
+            &mut st,
+            &["cd".to_string(), "files".to_string(), "radio".to_string()],
+        );
+
+        let names: Vec<(&str, &str)> =
+            st.plugins.iter().map(|p| (p.name.as_str(), p.kind.as_str())).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("cd", "source"),
+                ("files", "source"),
+                ("files", "input"),
+                ("radio", "source"),
+                ("console", "unknown"),
+            ],
+            "the two lines of `files` stay together and in their own order, and the plugin the \
+             order does not name keeps its line, at the end"
+        );
     }
 
     #[test]

@@ -449,11 +449,11 @@ fn read_core_archive_notes(staging: &Path) -> Option<Vec<String>> {
 
 /// The acknowledgment for a `PluginAction` with no wiring behind it yet.
 ///
-/// `false` uniformly across the three that remain — `Declare`, `Undeclare`
-/// and `Reorder` — because none is implemented, so "an acknowledgment must
-/// describe a true state" — the doctrine the `select!` arm already holds for
-/// `Enable`, `Disable` and now `Restart` — applies identically to all three,
-/// and there is no basis to special-case one over another.
+/// `false` uniformly across the two that remain — `Undeclare` and `Reorder` —
+/// because neither is implemented, so "an acknowledgment must describe a true
+/// state" — the doctrine the `select!` arm already holds for `Enable`,
+/// `Disable`, `Restart` and now `Declare` — applies identically to both, and
+/// there is no basis to special-case one over the other.
 ///
 /// Extracted so a test can pin this refusal directly: the `select!` arm that
 /// calls it lives inside `async fn main()`, which nothing outside `main` can
@@ -463,12 +463,13 @@ fn read_core_archive_notes(staging: &Path) -> Option<Vec<String>> {
 /// this function is a test of what the arm actually acknowledges, provided
 /// that delegation stays exactly this thin.
 ///
-/// **`Enable`, `Disable` and `Restart` are deliberately absent from this
-/// function's job**: they are wired. For the first two, their bodies must
-/// stay byte-identical to what they were before `PluginAction` existed;
-/// `Restart` joined them when the update worker gained a plugin to replace.
-/// Panicking here for them is a canary, not a feature: this function must
-/// never be reached for any of the three.
+/// **`Enable`, `Disable`, `Restart` and `Declare` are deliberately absent
+/// from this function's job**: they are wired. For the first two, their bodies
+/// must stay byte-identical to what they were before `PluginAction` existed;
+/// `Restart` joined them when the update worker gained a plugin to replace,
+/// and `Declare` when it gained a plugin to install. Panicking here for them
+/// is a canary, not a feature: this function must never be reached for any of
+/// the four.
 ///
 /// Match written **without a wildcard**, one arm per unwired variant, so that
 /// wiring one of them is a visible, local edit here — delete its arm
@@ -483,10 +484,12 @@ fn read_core_archive_notes(staging: &Path) -> Option<Vec<String>> {
 /// social, not mechanical.
 fn plugin_action_refusal(action: PluginAction) -> bool {
     match action {
-        PluginAction::Enable | PluginAction::Disable | PluginAction::Restart => {
+        PluginAction::Enable
+        | PluginAction::Disable
+        | PluginAction::Restart
+        | PluginAction::Declare => {
             unreachable!("{action:?} is wired: it never reaches the placeholder refusal")
         }
-        PluginAction::Declare => false,
         PluginAction::Undeclare => false,
         PluginAction::Reorder => false,
     }
@@ -842,6 +845,16 @@ async fn hotplug<P: player::Player>(
                             // path again.
                             Err(e) => tracing::warn!("{name} source wired, but waking it failed: {e:#}"),
                         }
+                        // The cycle follows the **file** order, and
+                        // `add_source` — which knows nothing of the manifest
+                        // — has just re-sorted it alphabetically to place
+                        // this arrival deterministically. Put back here, the
+                        // same gesture and for the same reason as
+                        // `set_metadata_order` above: one order commands the
+                        // source key and the arbitration alike, and without
+                        // this line the first plugin to announce late would
+                        // silently alphabetise the remote's cycle.
+                        core.set_source_order(children.manifest_order.clone());
                         // Its catalog, as at startup and for the same reason:
                         // a detached task, the correlated reply (`Noop`)
                         // teaching nothing — the presets arrive through the
@@ -1218,6 +1231,123 @@ async fn relaunch(
     }
 }
 
+/// What a `Declare` order produced.
+struct Declared {
+    /// What the requester is told. `true` means the declaration is in force:
+    /// the core knows the plugin, the orders it holds match the file, and the
+    /// binary is running — or is deliberately not, the file saying so.
+    ok: bool,
+    /// The supervision future of the process just launched, for the caller to
+    /// push into `plugin_waits`. Returned rather than pushed here: the two
+    /// collections that go with it (`plugin_waits` and `startups`) belong to
+    /// the loop, and threading them in would make this function's signature
+    /// longer than its body.
+    launched: Option<PluginExit>,
+}
+
+/// A plugin has just been installed: take its declaration into account and
+/// start it.
+///
+/// **Two things beyond what `Enable` does, and the second is the one that gets
+/// forgotten.** `execs` is filled at startup from the manifest, so a plugin
+/// installed hot is in no table the loop consults and could never be launched
+/// again after being switched off. And the order is recomputed everywhere it
+/// is held — the hot-plug children, the source cycle, the arbitration of the
+/// `metadata` plugins, the status lines — because without it the plugin would
+/// have the right place in the file and the wrong one in the core.
+///
+/// `plugins.toml` is read **fresh** and is the authority on all four: the
+/// worker has just appended a block to it, and what the core read at startup
+/// predates that. It is also read for the `enabled` flag, which is why the
+/// sender does not filter on it (see `Worker::start_declared_plugin`): a
+/// plugin whose block arrives switched off is registered and not launched.
+///
+/// Extracted from the `select!` arm for the reason `plugin_action_refusal`
+/// gives about its own extraction: nothing outside `main` can call `main`, so
+/// a gesture left inline is a gesture no test can send.
+#[allow(clippy::too_many_arguments)]
+async fn declare_plugin<P: player::Player>(
+    name: &str,
+    manifest: &Path,
+    children: &mut HotPlugChildren,
+    core: &mut core::Core<P>,
+    gathered: &register::Gathered,
+    execs: &mut HashMap<String, String>,
+    generations: &mut HashMap<String, u64>,
+    kill_triggers: &mut HashMap<String, tokio::sync::oneshot::Sender<()>>,
+    non_supervised: &HashSet<String>,
+    register_path: &Path,
+) -> Declared {
+    let declared = match plugins::PluginManifest::load(manifest) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("declaring {name}: reading {}: {e:#}", manifest.display());
+            return Declared { ok: false, launched: None };
+        }
+    };
+    let Some(entry) = declared.plugins.iter().find(|p| p.name == name) else {
+        // The order says the block was written, the file says otherwise:
+        // registering an `exec` this core invented is not an option.
+        tracing::warn!("declaring {name}: {} does not declare it", manifest.display());
+        return Declared { ok: false, launched: None };
+    };
+    let order: Vec<String> = declared.plugins.iter().map(|p| p.name.clone()).collect();
+    let exec = entry.exec.clone();
+    let enabled = entry.enabled;
+
+    execs.insert(name.to_string(), exec.clone());
+    // The manifest names every plugin; each of the three below keeps only
+    // what concerns it. `metadata_order` filters on what announced, and this
+    // plugin has not yet — it takes its place there when it does, through
+    // `hotplug`, which reads the very list being written here.
+    children.manifest_order = order.clone();
+    core.set_source_order(order.clone());
+    core.set_metadata_order(register::metadata_order(&order, gathered));
+    {
+        let mut statuses = children.status_state.write().await;
+        status::resequence_plugin_lines(&mut statuses, &order);
+    }
+
+    if !enabled {
+        tracing::info!(
+            "{name} is installed and declared, and its declaration switches it off: not launching it"
+        );
+        return Declared { ok: true, launched: None };
+    }
+    // The same guard as `Enable`, and for the same reason: a second process
+    // for one name steals the first one's socket prefix. Reachable here for a
+    // plugin whose binary was already on disk and running unsupervised while
+    // nothing declared it — the `Undeclared` row.
+    match liveness(name, kill_triggers, non_supervised) {
+        Liveness::Supervised => {
+            tracing::info!("{name} was already running under the core: nothing to launch");
+            Declared { ok: true, launched: None }
+        }
+        Liveness::OutOfReach => {
+            tracing::warn!(
+                "{name} is declared, but a process for it is already running outside the core's control — kill it yourself, or restart the core to let it take ownership again"
+            );
+            Declared { ok: false, launched: None }
+        }
+        Liveness::Off => {
+            let generation = generations.entry(name.to_string()).or_insert(0);
+            *generation += 1;
+            let generation = *generation;
+            let launched = relaunch(
+                name,
+                &exec,
+                generation,
+                children,
+                register_path,
+                core.current_locale().as_deref(),
+                kill_triggers,
+            )
+            .await;
+            Declared { ok: launched.is_some(), launched }
+        }
+    }
+}
+
 /// True for a frame the core accepts to write to the log.
 ///
 /// **It filters out only one thing: `lofty`'s chatter below error level.**
@@ -1522,7 +1652,9 @@ async fn main() -> Result<()> {
     // The file order arbitrates `metadata` plugins; the `exec`, meanwhile,
     // only served for the initial launch. Relaunching a plugin asks for it
     // again.
-    let execs: HashMap<String, String> =
+    // `mut`: filled at startup from the manifest, and gaining an entry when a
+    // plugin is installed while the core runs.
+    let mut execs: HashMap<String, String> =
         manifest.plugins.iter().map(|p| (p.name.clone(), p.exec.clone())).collect();
 
     // The admin page is **announced** by the binary, then observed through a
@@ -1919,6 +2051,7 @@ async fn main() -> Result<()> {
                 state_path,
                 catalog: catalog.clone(),
                 locales_root: locales_root.clone(),
+                manifest_order: manifest_order.clone(),
                 metadata: MetadataWiring {
                     plugins: metadata_plugins,
                     now_playing: now_playing_tx,
@@ -1998,7 +2131,9 @@ async fn main() -> Result<()> {
 
     // Everything needed to wire a plugin that will speak later: the same
     // children as the startup wiring loop, held beyond it.
-    let hot_children = HotPlugChildren {
+    // `mut`: a `Declare` order rewrites `manifest_order` from the file the
+    // update worker has just appended to.
+    let mut hot_children = HotPlugChildren {
         sockets_dir: sockets_dir.clone(),
         manifest_order,
         source_update_tx: source_update_tx.clone(),
@@ -2440,13 +2575,41 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    // Wired in Tasks 14-16. Refusing until then rather than
+                    // A plugin that has just been installed: its binary is on
+                    // disk and its block is in `plugins.toml`. See
+                    // `declare_plugin` for the two things this does beyond
+                    // `Enable`.
+                    PluginAction::Declare => {
+                        let declared = declare_plugin(
+                            &order.name,
+                            &plugins_path,
+                            &mut hot_children,
+                            &mut core,
+                            &gathered,
+                            &mut execs,
+                            &mut generations,
+                            &mut kill_triggers,
+                            &non_supervised,
+                            &register_path,
+                        )
+                        .await;
+                        if let Some(fut) = declared.launched {
+                            plugin_waits.push(fut);
+                            // The benefit of the doubt starts here, as for
+                            // `Enable`: this is a launch from the UI, not the
+                            // startup rendezvous.
+                            startups.insert(
+                                order.name.clone(),
+                                tokio::time::Instant::now() + STARTUP_TIMEOUT,
+                            );
+                        }
+                        declared.ok
+                    }
+                    // Wired in Tasks 15-16. Refusing until then rather than
                     // silently succeeding: an acknowledgment must describe a
                     // true state, which is the doctrine this arm already
                     // holds.
-                    PluginAction::Declare
-                    | PluginAction::Undeclare
-                    | PluginAction::Reorder => {
+                    PluginAction::Undeclare | PluginAction::Reorder => {
                         tracing::warn!("plugin action {:?} is not wired yet", order.action);
                         plugin_action_refusal(order.action)
                     }
@@ -2879,6 +3042,10 @@ mod toggle_tests {
             crate::i18n::EN,
         )));
 
+        // The one declared name, shared by the core and the hot-plug
+        // children: they must agree, and a test that changes it changes both.
+        let manifest_order = vec!["mpd".to_string()];
+
         let core = core::Core::new(
             MutePlayer,
             Wiring {
@@ -2887,6 +3054,7 @@ mod toggle_tests {
                 state_path: root.join("state.json"),
                 catalog,
                 locales_root: root.clone(),
+                manifest_order: manifest_order.clone(),
                 sources_catalog: sources_catalog_tx,
                 metadata: MetadataWiring {
                     plugins: vec![],
@@ -2901,7 +3069,7 @@ mod toggle_tests {
 
         let children = HotPlugChildren {
             sockets_dir: root.clone(),
-            manifest_order: vec!["mpd".to_string()],
+            manifest_order,
             source_update_tx: mpsc::channel(4).0,
             cmd_tx: mpsc::channel(4).0,
             enrich_tx: mpsc::channel(4).0,
@@ -2950,6 +3118,19 @@ mod toggle_tests {
     async fn line(b: &Bench) -> PluginStatus {
         let statuses = b.children.status_state.read().await;
         statuses.plugins.iter().find(|l| l.name == "mpd").cloned().expect("line mpd")
+    }
+
+    /// What a plugin says of itself on the registration socket.
+    fn announcing(name: &str, kind: PluginKind) -> Announcement {
+        Announcement {
+            name: name.to_string(),
+            kinds: vec![kind],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+        }
     }
 
     async fn turn_off(b: &mut Bench) -> bool {
@@ -3025,11 +3206,6 @@ mod toggle_tests {
     /// matching arm in `plugin_action_refusal` — see that function's doc for
     /// why nothing but this naming and its proximity to the arm forces that.
     #[test]
-    fn declare_refuses_until_task_14_wires_it() {
-        assert!(!plugin_action_refusal(PluginAction::Declare));
-    }
-
-    #[test]
     fn undeclare_refuses_until_task_15_wires_it() {
         assert!(!plugin_action_refusal(PluginAction::Undeclare));
     }
@@ -3037,6 +3213,176 @@ mod toggle_tests {
     #[test]
     fn reorder_refuses_until_task_16_wires_it() {
         assert!(!plugin_action_refusal(PluginAction::Reorder));
+    }
+
+    /// From the event, not from the function: what is asserted is that a
+    /// `Declare` order makes the core able to launch a plugin it did not know
+    /// at startup — which a test calling `relaunch` directly would prove
+    /// nothing about, since `execs` is what would be missing.
+    ///
+    /// The second half drives the plugin's own announcement afterwards,
+    /// because that is where the order it was given actually shows: a name
+    /// the core does not hold in `manifest_order` is refused at the
+    /// announcement door ("late announcement from unknown plugin"), so a
+    /// declaration that forgot to rewrite it would leave the plugin installed,
+    /// running, and never wired to anything.
+    #[tokio::test]
+    async fn a_declared_plugin_becomes_launchable_and_takes_its_place_in_the_order() {
+        let mut b = bench();
+        // The device before the install: `radio` alone, declared, wired as a
+        // source and announced as a `metadata` plugin. Nothing knows `mpd`.
+        b.children.manifest_order = vec!["radio".to_string()];
+        b.gathered.announcements.clear();
+        b.gathered
+            .announcements
+            .insert("radio".to_string(), announcing("radio", PluginKind::Metadata));
+        b.core.add_source("radio".to_string(), Arc::new(SilentSource));
+        b.core
+            .set_metadata_order(register::metadata_order(&b.children.manifest_order, &b.gathered));
+        *b.children.status_state.write().await =
+            statuses_of(vec![PluginStatus::kind("radio", "source", true, false)]);
+
+        // What the update worker has just written: the archive's own block,
+        // appended after the entries already there.
+        let manifest = b._dir.path().join("plugins.toml");
+        std::fs::write(
+            &manifest,
+            "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\n",
+        )
+        .unwrap();
+
+        let mut execs: HashMap<String, String> =
+            HashMap::from([("radio".to_string(), "/bin/true".to_string())]);
+        let mut generations: HashMap<String, u64> = HashMap::new();
+        let register_path = b._dir.path().join("register.sock");
+
+        let declared = declare_plugin(
+            "mpd",
+            &manifest,
+            &mut b.children,
+            &mut b.core,
+            &b.gathered,
+            &mut execs,
+            &mut generations,
+            &mut b.kill_triggers,
+            &b.non_supervised,
+            &register_path,
+        )
+        .await;
+
+        assert!(declared.ok, "the acknowledgment must describe a declaration in force");
+        assert!(declared.launched.is_some(), "and the binary must actually have been launched");
+        assert_eq!(
+            execs.get("mpd").map(String::as_str),
+            Some("/bin/true"),
+            "the table `Enable` consults: without this entry the plugin could never be switched back on"
+        );
+
+        // The status lines carry `mpd`, last — the place its block has in the
+        // file.
+        let names: Vec<String> = b
+            .children
+            .status_state
+            .read()
+            .await
+            .plugins
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert_eq!(names, vec!["radio".to_string(), "mpd".to_string()], "{names:?}");
+
+        // And when it speaks, it arrives at the BOTTOM of the arbitration: a
+        // metadata plugin installed today must not take the stage from what
+        // already works.
+        hotplug(
+            announcing("mpd", PluginKind::Metadata),
+            &b.children,
+            &mut b.core,
+            &mut b.gathered,
+            &b.kill_triggers,
+            &mut b.non_supervised,
+            1,
+        )
+        .await;
+        assert_eq!(
+            b.core.metadata_order(),
+            ["radio".to_string(), "mpd".to_string()],
+            "the newcomer must be last, and it must be there at all: an announcement from a name \
+             the core does not hold in its manifest order is refused outright"
+        );
+    }
+
+    /// A block that arrives switched off is registered and **not launched**.
+    ///
+    /// The core reads that from the file itself rather than trusting the
+    /// sender to filter, and the entry in `execs` is the whole point: without
+    /// it, switching the plugin on from the page afterwards would fail for
+    /// want of an `exec` until the core was restarted.
+    #[tokio::test]
+    async fn a_declaration_that_switches_the_plugin_off_registers_it_without_starting_it() {
+        let mut b = bench();
+        b.children.manifest_order = vec!["radio".to_string()];
+        b.gathered.announcements.clear();
+        let manifest = b._dir.path().join("plugins.toml");
+        std::fs::write(
+            &manifest,
+            "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\nenabled = false\n",
+        )
+        .unwrap();
+
+        let mut execs: HashMap<String, String> = HashMap::new();
+        let mut generations: HashMap<String, u64> = HashMap::new();
+        let register_path = b._dir.path().join("register.sock");
+        let declared = declare_plugin(
+            "mpd",
+            &manifest,
+            &mut b.children,
+            &mut b.core,
+            &b.gathered,
+            &mut execs,
+            &mut generations,
+            &mut b.kill_triggers,
+            &b.non_supervised,
+            &register_path,
+        )
+        .await;
+
+        assert!(declared.ok, "the declaration is in force: the file says so, and it is honoured");
+        assert!(declared.launched.is_none(), "a plugin declared off must not be started");
+        assert!(
+            !b.kill_triggers.contains_key("mpd"),
+            "nothing was launched, so the core holds nothing to kill"
+        );
+        assert_eq!(execs.get("mpd").map(String::as_str), Some("/bin/true"));
+        assert_eq!(b.children.manifest_order, vec!["radio".to_string(), "mpd".to_string()]);
+    }
+
+    /// The order says the block was written and the file says otherwise: the
+    /// core registers no `exec` it invented, and answers what is true.
+    #[tokio::test]
+    async fn declaring_a_name_the_file_does_not_carry_is_refused() {
+        let mut b = bench();
+        let manifest = b._dir.path().join("plugins.toml");
+        std::fs::write(&manifest, "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n").unwrap();
+        let mut execs: HashMap<String, String> = HashMap::new();
+        let declared = declare_plugin(
+            "mpd",
+            &manifest,
+            &mut b.children,
+            &mut b.core,
+            &b.gathered,
+            &mut execs,
+            &mut HashMap::new(),
+            &mut b.kill_triggers,
+            &b.non_supervised,
+            &b._dir.path().join("register.sock"),
+        )
+        .await;
+        assert!(!declared.ok);
+        assert!(declared.launched.is_none());
+        assert!(execs.is_empty(), "no exec for a name the manifest does not declare");
     }
 
     /// The positive half of the classification: a spawn that failed because

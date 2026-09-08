@@ -134,7 +134,8 @@ mod tests {
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
-        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let manifest_order = declared_order(&sources);
+        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"audio_device bluealsa:DEV=XX".to_string()));
     }
@@ -189,7 +190,8 @@ mod tests {
             state: state_tx,
         };
         let (covers, cover_tx) = test_covers();
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let manifest_order = declared_order(&sources);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("VEILLE"));
@@ -218,7 +220,8 @@ mod tests {
             state: state_tx,
         };
         let (covers, cover_tx) = test_covers();
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let manifest_order = declared_order(&sources);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("STANDBY"));

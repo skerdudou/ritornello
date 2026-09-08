@@ -71,14 +71,35 @@ ssh "${SSHOPTS[@]}" "$PI" 'sudo cp -r /tmp/input-presets/. /etc/ritornello/input
 # Default configuration, provisioned from the example files ONLY when the
 # target file is absent: a first installation works without any manual
 # copy, and an existing configuration (stations added from the browser,
-# learned bindings) is never overwritten. These two files hold what the
-# user produced, so nothing here has any business completing them.
-scp "${SSHOPTS[@]}" deploy/stations.example.toml \
-  deploy/input-bindings.example.toml "$PI:/tmp/"
-ssh "${SSHOPTS[@]}" "$PI" 'for f in stations input-bindings; do
-  [ -e "/etc/ritornello/$f.toml" ] || sudo cp "/tmp/$f.example.toml" "/etc/ritornello/$f.toml"
-  rm -f "/tmp/$f.example.toml"
-done'
+# learned bindings) is never overwritten. These files hold what the user
+# produced, so nothing here has any business completing them.
+#
+# The files that double as an initial configuration are read from the
+# packaging manifest instead of being repeated here: the release installer
+# honours the same declaration when it installs a plugin the device does not
+# have yet, and two lists drift.
+mapfile -t INITIAL < <(python3 - <<'PY'
+import tomllib, pathlib
+m = tomllib.loads(pathlib.Path("deploy/packaging.toml").read_text())
+for section in m.get("plugins", {}).values():
+    for p in section.get("initial_config", []):
+        print(p)
+PY
+)
+if [ "${#INITIAL[@]}" -eq 0 ]; then
+  echo "deploy.sh: no initial_config declared in deploy/packaging.toml" >&2
+  exit 1
+fi
+scp "${SSHOPTS[@]}" "${INITIAL[@]}" "$PI:/tmp/"
+# `<name>.example.toml` becomes `<name>.toml`, the same rule the core applies
+# to the `initial-config/` entries of an archive. The names are expanded here,
+# by the local shell; everything escaped below is for the remote one.
+ssh "${SSHOPTS[@]}" "$PI" "set -e
+  for f in ${INITIAL[*]##*/}; do
+    t=/etc/ritornello/\${f%.example.toml}.toml
+    [ -e \"\$t\" ] || sudo cp \"/tmp/\$f\" \"\$t\"
+    rm -f \"/tmp/\$f\"
+  done"
 
 # plugins.toml is the one configuration file the deployment also COMPLETES
 # instead of merely provisioning. It is not user data: it says which of the

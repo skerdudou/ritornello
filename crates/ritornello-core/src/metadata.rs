@@ -148,6 +148,13 @@ impl Metadata {
         self.order = order;
     }
 
+    /// The arbitration order in force, for whoever has just replaced it and
+    /// needs to read it back. See `Core::metadata_order`, its only caller.
+    #[cfg(test)]
+    pub fn order(&self) -> &[String] {
+        &self.order
+    }
+
     pub fn identity(&self) -> Option<&Value> {
         self.identity.as_ref()
     }

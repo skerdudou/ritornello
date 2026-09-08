@@ -26,8 +26,8 @@ use locales::{i18n_json, locale_json, locale_put};
 pub(crate) use locales::{list_locales, valid_locale};
 use plugin_status::plugin_enabled_put;
 pub use plugin_status::{
-    mark_plugin_disconnected, replace_plugin_lines, PluginAction, PluginOrder, PluginStatus,
-    PluginsControl,
+    mark_plugin_disconnected, replace_plugin_lines, resequence_plugin_lines, PluginAction,
+    PluginOrder, PluginStatus, PluginsControl,
 };
 mod settings_validation;
 use logs::{logs_json, player_sse};
