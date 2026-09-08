@@ -25,7 +25,10 @@ use locales::{i18n_json, locale_json, locale_put};
 // both rather than inventing a second grammar.
 pub(crate) use locales::{list_locales, valid_locale};
 use plugin_status::plugin_enabled_put;
-pub use plugin_status::{mark_plugin_disconnected, replace_plugin_lines, PluginsControl, PluginOrder, PluginStatus};
+pub use plugin_status::{
+    mark_plugin_disconnected, replace_plugin_lines, PluginAction, PluginOrder, PluginStatus,
+    PluginsControl,
+};
 mod settings_validation;
 use logs::{logs_json, player_sse};
 pub use logs::{LogBuffer, LogBufferWriter};
@@ -425,7 +428,6 @@ pub(crate) mod tests_support {
             covers: Arc::new(crate::cover::CoverCache::new()),
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
-                names: Vec::new(),
                 tx: tokio::sync::mpsc::channel(1).0,
             }),
             update: Arc::new(tokio::sync::RwLock::new(
@@ -468,7 +470,6 @@ pub(crate) mod tests_support {
             covers: Arc::new(crate::cover::CoverCache::new()),
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
-                names: Vec::new(),
                 tx: tokio::sync::mpsc::channel(1).0,
             }),
             update: Arc::new(tokio::sync::RwLock::new(
@@ -513,7 +514,6 @@ pub(crate) mod tests_support {
             covers: Arc::new(crate::cover::CoverCache::new()),
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
-                names: Vec::new(),
                 tx: tokio::sync::mpsc::channel(1).0,
             }),
             update: Arc::new(tokio::sync::RwLock::new(
@@ -566,7 +566,6 @@ pub(crate) mod tests_support {
             covers: Arc::new(crate::cover::CoverCache::new()),
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
-                names: Vec::new(),
                 tx: tokio::sync::mpsc::channel(1).0,
             }),
             update: Arc::new(tokio::sync::RwLock::new(

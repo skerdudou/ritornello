@@ -23,7 +23,7 @@ mod web;
 use crate::core::MetadataWiring;
 use crate::metadata::PlayerState;
 use crate::plugins::PluginManifest;
-use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginStatus, StatusState};
+use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginAction, PluginStatus, StatusState};
 use crate::types::Event;
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -387,6 +387,30 @@ fn supervise(
 /// Beyond that, "stalled" becomes the right word again: the plugin is
 /// launched, alive, and silent — a diagnosis, not a wait.
 const STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Classifies a plugin's failure to launch, for the status page.
+///
+/// Only `std::io::ErrorKind::NotFound` means "not installed": the manifest
+/// points at an `exec` that simply is not on disk, which the release
+/// archives made ordinary — a subset of plugins can be installed while the
+/// shipped `plugins.toml` declares them all. Any other failure — permission
+/// denied, a truncated binary the loader refuses, and so on — is not an
+/// installation gap: the executable exists and refuses to run, which is a
+/// fault and must keep being reported as one, exactly as before this
+/// classification existed.
+///
+/// `anyhow::Error::downcast_ref` walks the whole causal chain, not only the
+/// top-level error, so this sees through `plugins::spawn`'s `.with_context`.
+fn status_for_spawn_failure(name: &str, err: &anyhow::Error) -> PluginStatus {
+    let not_found = err
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+    if not_found {
+        PluginStatus::binary_missing(name)
+    } else {
+        PluginStatus::unknown_kind(name, false)
+    }
+}
 
 /// The startup deadline has passed: should this plugin be downgraded to
 /// "stalled"?
@@ -1345,8 +1369,10 @@ async fn main() -> Result<()> {
                 tracing::warn!("failed to launch plugin {}: {e:#}", p.name);
                 // A plugin that failed to start never announced a kind, and
                 // the manifest no longer carries it: the status page shows
-                // an unknown kind rather than inventing one.
-                plugin_statuses.push(PluginStatus::unknown_kind(&p.name, false));
+                // an unknown kind rather than inventing one — unless the
+                // binary is simply absent, which is not a fault (see
+                // `status_for_spawn_failure`).
+                plugin_statuses.push(status_for_spawn_failure(&p.name, &e));
             }
         }
     }
@@ -1761,7 +1787,6 @@ async fn main() -> Result<()> {
             covers: Arc::new(cover::CoverCache::default()),
             plugins: Arc::new(status::PluginsControl {
                 manifest: plugins_path.clone(),
-                names: manifest_order.clone(),
                 tx: plugin_order_tx,
             }),
             update: update_state.clone(),
@@ -2116,85 +2141,99 @@ async fn main() -> Result<()> {
                 core.set_settings(s);
             }
             Some(order) = plugin_order_rx.recv() => {
-                let ok = if order.active {
-                    // A redundant turn-on (double click, page left open)
-                    // must be a non-event, not a second process stealing the
-                    // first one's socket prefix: the core cannot rely on the
-                    // caller to never resend an order already in effect.
-                    //
-                    // The predicate used to be `kill_triggers.contains_key`,
-                    // hence false precisely in the case this guard exists to
-                    // cover. See `Liveness`, which writes why the two
-                    // registries had to be crossed.
-                    match liveness(&order.name, &kill_triggers, &non_supervised) {
-                        // Launched by the core: the order is already in
-                        // effect, and the acknowledgment describes a true
-                        // state.
-                        Liveness::Supervised => true,
-                        // A process is running for this name and the core
-                        // has no hold on it. Launching a second one would
-                        // steal its socket prefix — noisy on the MPD plugin,
-                        // which fails to bind its port and dies, but silent
-                        // everywhere else. Refuse, and name the remedy.
-                        Liveness::OutOfReach => {
-                            tracing::warn!(
-                                "refusing to enable {}: a process for it is already running outside the core's control — kill it yourself, or restart the core to let it take ownership again",
-                                order.name
-                            );
-                            false
-                        }
-                        Liveness::Off => {
-                            let generation = generations.entry(order.name.clone()).or_insert(0);
-                            *generation += 1;
-                            let generation = *generation;
-                            match execs.get(&order.name) {
-                                Some(exec) => {
-                                    match relaunch(
-                                        &order.name,
-                                        exec,
-                                        generation,
-                                        &hot_children,
-                                        &register_path,
-                                        core.current_locale().as_deref(),
-                                        &mut kill_triggers,
-                                    )
-                                    .await
-                                    {
-                                        Some(fut) => {
-                                            plugin_waits.push(fut);
-                                            // The benefit of the doubt starts
-                                            // here, not from the service's
-                                            // launch: it is the turn-on from
-                                            // the UI that this delay covers.
-                                            // The startup rendezvous has its
-                                            // own deadline and its own
-                                            // report (`stalled`).
-                                            startups.insert(
-                                                order.name.clone(),
-                                                tokio::time::Instant::now() + STARTUP_TIMEOUT,
-                                            );
-                                            true
+                let ok = match order.action {
+                    PluginAction::Enable => {
+                        // A redundant turn-on (double click, page left open)
+                        // must be a non-event, not a second process stealing the
+                        // first one's socket prefix: the core cannot rely on the
+                        // caller to never resend an order already in effect.
+                        //
+                        // The predicate used to be `kill_triggers.contains_key`,
+                        // hence false precisely in the case this guard exists to
+                        // cover. See `Liveness`, which writes why the two
+                        // registries had to be crossed.
+                        match liveness(&order.name, &kill_triggers, &non_supervised) {
+                            // Launched by the core: the order is already in
+                            // effect, and the acknowledgment describes a true
+                            // state.
+                            Liveness::Supervised => true,
+                            // A process is running for this name and the core
+                            // has no hold on it. Launching a second one would
+                            // steal its socket prefix — noisy on the MPD plugin,
+                            // which fails to bind its port and dies, but silent
+                            // everywhere else. Refuse, and name the remedy.
+                            Liveness::OutOfReach => {
+                                tracing::warn!(
+                                    "refusing to enable {}: a process for it is already running outside the core's control — kill it yourself, or restart the core to let it take ownership again",
+                                    order.name
+                                );
+                                false
+                            }
+                            Liveness::Off => {
+                                let generation = generations.entry(order.name.clone()).or_insert(0);
+                                *generation += 1;
+                                let generation = *generation;
+                                match execs.get(&order.name) {
+                                    Some(exec) => {
+                                        match relaunch(
+                                            &order.name,
+                                            exec,
+                                            generation,
+                                            &hot_children,
+                                            &register_path,
+                                            core.current_locale().as_deref(),
+                                            &mut kill_triggers,
+                                        )
+                                        .await
+                                        {
+                                            Some(fut) => {
+                                                plugin_waits.push(fut);
+                                                // The benefit of the doubt starts
+                                                // here, not from the service's
+                                                // launch: it is the turn-on from
+                                                // the UI that this delay covers.
+                                                // The startup rendezvous has its
+                                                // own deadline and its own
+                                                // report (`stalled`).
+                                                startups.insert(
+                                                    order.name.clone(),
+                                                    tokio::time::Instant::now() + STARTUP_TIMEOUT,
+                                                );
+                                                true
+                                            }
+                                            None => false,
                                         }
-                                        None => false,
                                     }
+                                    // A name refused well before this point by
+                                    // the HTTP layer: this is a guard, not a use
+                                    // case.
+                                    None => false,
                                 }
-                                // A name refused well before this point by
-                                // the HTTP layer: this is a guard, not a use
-                                // case.
-                                None => false,
                             }
                         }
                     }
-                } else {
-                    hot_unplug(
-                        &order.name,
-                        &hot_children,
-                        &mut core,
-                        &mut gathered,
-                        &mut kill_triggers,
-                        &non_supervised,
-                    )
-                    .await
+                    PluginAction::Disable => {
+                        hot_unplug(
+                            &order.name,
+                            &hot_children,
+                            &mut core,
+                            &mut gathered,
+                            &mut kill_triggers,
+                            &non_supervised,
+                        )
+                        .await
+                    }
+                    // Wired in Task 12 (Restart) and Tasks 14-16 (the other
+                    // three). Refusing until then rather than silently
+                    // succeeding: an acknowledgment must describe a true
+                    // state, which is the doctrine this arm already holds.
+                    PluginAction::Restart
+                    | PluginAction::Declare
+                    | PluginAction::Undeclare
+                    | PluginAction::Reorder => {
+                        tracing::warn!("plugin action {:?} is not wired yet", order.action);
+                        false
+                    }
                 };
                 // The requester is waiting: a lost acknowledgment would leave
                 // its HTTP request hanging until its own timeout runs out.
@@ -2717,6 +2756,34 @@ mod toggle_tests {
         assert!(
             !should_downgrade(&statuses_of(vec![]), "mpd"),
             "no line left for this name: nothing to downgrade"
+        );
+    }
+
+    /// The positive half of the classification: a spawn that failed because
+    /// the executable is not on disk is "not installed", not "dead".
+    #[test]
+    fn a_missing_executable_is_reported_as_missing_binary_not_dead() {
+        let err = anyhow::Error::new(std::io::Error::new(std::io::ErrorKind::NotFound, "boom"))
+            .context("executable /opt/ritornello/plugins/mpd");
+        let line = status_for_spawn_failure("mpd", &err);
+        assert!(line.missing_binary, "NotFound must be classified as an absent binary");
+        assert!(!line.stalled, "it never ran: it is not a silent process");
+        assert!(!line.connected);
+    }
+
+    /// The negative half, and the one that matters as much: an executable
+    /// that exists and refuses to run is a fault, and relabelling it "absent"
+    /// would send whoever reads the page after the wrong cause.
+    #[test]
+    fn an_executable_that_refuses_to_run_stays_a_fault() {
+        let err =
+            anyhow::Error::new(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "boom"))
+                .context("executable /opt/ritornello/plugins/mpd");
+        let line = status_for_spawn_failure("mpd", &err);
+        assert!(!line.missing_binary, "the binary is there: it must not be reported absent");
+        assert_eq!(
+            line.kind, "unknown",
+            "today's shape for a failed spawn, unchanged for anything but NotFound"
         );
     }
 

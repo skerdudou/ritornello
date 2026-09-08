@@ -154,10 +154,10 @@ impl PluginStatus {
 
     /// Declared, and its binary is not there. See the field's documentation.
     ///
-    /// No caller yet: wiring this at plugin registration time (checking
-    /// `exec` against the filesystem before launching) is a later task's
-    /// job, same story as the rest of `update`'s public items.
-    #[allow(dead_code)]
+    /// Called from `main`'s startup loop, in the branch that handles a
+    /// failed spawn, through `status_for_spawn_failure`: only when the
+    /// failure is `std::io::ErrorKind::NotFound`, which is precisely "the
+    /// declared executable does not exist".
     pub fn binary_missing(name: &str) -> Self {
         Self { missing_binary: true, ..Self::unknown_kind(name, false) }
     }
@@ -226,7 +226,45 @@ impl PluginStatus {
     }
 }
 
-/// Switch-on or switch-off order, from the HTTP layer to the core loop.
+/// What the core is asked to do about one plugin.
+///
+/// An enum rather than the `active: bool` it grew from: the four gestures
+/// added by the updater are serialised against the two that existed, through
+/// the same channel and the same acknowledgment, because they contend for the
+/// same things — a socket prefix, a supervision future, a line on the page.
+/// A second channel would have had to be ordered against this one anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginAction {
+    Enable,
+    Disable,
+    /// Its binary has just been replaced on disk: stop it and start it again.
+    ///
+    /// No caller yet: wired in Task 12, same story as the rest of `update`'s
+    /// public items — a binary crate does not treat `pub` as "reachable from
+    /// outside" on its own, hence the allowance below.
+    #[allow(dead_code)]
+    Restart,
+    /// Its binary has just been placed and its declaration written: start it,
+    /// and take the new file order into account.
+    ///
+    /// No caller yet: wired in Task 14.
+    #[allow(dead_code)]
+    Declare,
+    /// Its declaration has just been removed: stop it and unwire everything it
+    /// served. The binary is erased by the privileged side, separately.
+    ///
+    /// No caller yet: wired in Task 15.
+    #[allow(dead_code)]
+    Undeclare,
+    /// The file order changed. `name` is the plugin that moved, for the log
+    /// only: the core re-reads the manifest and re-sequences everything.
+    ///
+    /// No caller yet: wired in Task 16.
+    #[allow(dead_code)]
+    Reorder,
+}
+
+/// Order from the HTTP layer to the core loop.
 ///
 /// The acknowledgement is a `oneshot` and not a mere send: the page waits for
 /// a response describing a state that is already true, otherwise it would
@@ -236,20 +274,22 @@ impl PluginStatus {
 /// the catalog.
 pub struct PluginOrder {
     pub name: String,
-    pub active: bool,
+    pub action: PluginAction,
     pub ack: tokio::sync::oneshot::Sender<bool>,
 }
 
-/// What the HTTP layer must know about the plugins to toggle them.
+/// What the HTTP layer must know about the plugins to command them.
 ///
-/// A single `AppState` field rather than three, for the reason already retained
-/// for `system`: every test constructor would otherwise grow by three lines.
+/// **No `names` field.** It used to hold the declared names in file order and
+/// be the authority on what could be toggled — fine while that set was fixed
+/// at startup, impossible once a plugin can be installed while the core runs.
+/// Putting it behind a lock would have been the smaller change and the worse
+/// one: `plugins.toml` is already the authority, it is small, and reading it
+/// per request is always right.
 pub struct PluginsControl {
-    /// Path of `plugins.toml`: that is where the choice is written.
+    /// Path of `plugins.toml`: the authority on what is declared, and where
+    /// the choice is written.
     pub manifest: std::path::PathBuf,
-    /// Declared names, in file order. Authority on what may be toggled: an
-    /// absent name is refused **before** any write.
-    pub names: Vec<String>,
     pub tx: mpsc::Sender<PluginOrder>,
 }
 
@@ -270,7 +310,18 @@ pub(super) async fn plugin_enabled_put(
     axum::extract::Path(name): axum::extract::Path<String>,
     Json(req): Json<PluginEnabledReq>,
 ) -> Response {
-    if !state.plugins.names.iter().any(|n| n == &name) {
+    // Read rather than remembered: a plugin installed while the core was
+    // running must be commandable at once, and the file is the authority.
+    let declared = match crate::plugins::PluginManifest::load(&state.plugins.manifest) {
+        Ok(m) => m.plugins.iter().any(|p| p.name == name),
+        Err(e) => {
+            tracing::warn!("reading {} to check {name}: {e:#}", state.plugins.manifest.display());
+            let msg = state.catalog.read().await.get("plugin_manifest_unreadable").to_string();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response();
+        }
+    };
+    if !declared {
         let msg = state.catalog.read().await.get("plugin_unknown").replace("{name}", &name);
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": msg })))
             .into_response();
@@ -282,7 +333,8 @@ pub(super) async fn plugin_enabled_put(
             .into_response();
     }
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-    let order = PluginOrder { name: name.clone(), active: req.enabled, ack: ack_tx };
+    let action = if req.enabled { PluginAction::Enable } else { PluginAction::Disable };
+    let order = PluginOrder { name: name.clone(), action, ack: ack_tx };
     if state.plugins.tx.send(order).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -397,14 +449,24 @@ mod tests {
         .unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
-            plugins: Arc::new(PluginsControl {
-                manifest: path,
-                names: vec!["radio".into(), "cd".into()],
-                tx,
-            }),
+            plugins: Arc::new(PluginsControl { manifest: path, tx }),
             ..app_state()
         };
         (state, dir, rx)
+    }
+
+    /// Rig built directly on an already-written manifest, with the order
+    /// receiver kept: what a test that needs to observe the core's side of
+    /// the exchange wants, without a second, redundant temporary directory.
+    fn test_state_with_manifest(
+        manifest: &std::path::Path,
+    ) -> (AppState, tokio::sync::mpsc::Receiver<PluginOrder>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            plugins: Arc::new(PluginsControl { manifest: manifest.to_path_buf(), tx }),
+            ..app_state()
+        };
+        (state, rx)
     }
 
     #[tokio::test]
@@ -415,7 +477,7 @@ mod tests {
         let core = tokio::spawn(async move {
             let order = rx.recv().await.unwrap();
             assert_eq!(order.name, "cd");
-            assert!(!order.active);
+            assert_eq!(order.action, PluginAction::Disable);
             let _ = order.ack.send(true);
         });
 
@@ -491,13 +553,23 @@ mod tests {
 
     #[tokio::test]
     async fn an_impossible_persistence_does_not_touch_the_runtime() {
-        let (mut state, dir, mut rx) = app_state_with_plugins();
-        // Manifest not found: the write will fail.
-        state.plugins = Arc::new(PluginsControl {
-            manifest: dir.path().join("absent.toml"),
-            names: vec!["radio".into()],
-            tx: state.plugins.tx.clone(),
-        });
+        // Readable enough for the declaration check — a full TOML document,
+        // serde does not care how the table is spelled — but not a shape
+        // `set_enabled` can edit in place: `plugin` here is a plain array of
+        // inline tables, not the `[[plugin]]` blocks `toml_edit` looks for,
+        // so the persist step fails while the declaration is genuine. That is
+        // what a frozen `names: vec!["radio".into()]` used to fake by
+        // pointing at a manifest that did not exist; reading the manifest at
+        // request time makes a missing file mean "nothing declared" instead,
+        // so the failure has to come from elsewhere now.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins.toml");
+        std::fs::write(&path, "plugin = [{ name = \"radio\", exec = \"/bin/true\" }]\n").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            plugins: Arc::new(PluginsControl { manifest: path, tx }),
+            ..app_state()
+        };
         let app = router(state);
 
         let resp = app
@@ -520,6 +592,65 @@ mod tests {
         // in `plugin_persist_failed` would let the suite stay green with a raw
         // key on screen.
         assert!(v["error"].as_str().unwrap().contains("radio"));
+    }
+
+    /// The property `names` could not have: a plugin declared while the core
+    /// was running is commandable at once, with no restart.
+    ///
+    /// Written from the event and not from the function: the route is called,
+    /// and what is asserted is its answer — which is what the page sees.
+    #[tokio::test]
+    async fn a_plugin_declared_after_startup_can_be_toggled_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("plugins.toml");
+        std::fs::write(
+            &manifest,
+            "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n",
+        )
+        .unwrap();
+        let (state, mut rx) = test_state_with_manifest(&manifest);
+
+        // Someone — the installer, or a hand edit — adds a plugin.
+        std::fs::write(
+            &manifest,
+            "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n[[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\n",
+        )
+        .unwrap();
+
+        let answer = plugin_enabled_put(
+            axum::extract::State(state),
+            axum::extract::Path("mpd".to_string()),
+            axum::Json(PluginEnabledReq { enabled: false }),
+        );
+        // The core's side of the exchange, so the route is not left waiting
+        // on an acknowledgment nobody sends.
+        let served = tokio::spawn(async move {
+            let order = rx.recv().await.expect("an order arrives");
+            assert_eq!(order.name, "mpd");
+            assert_eq!(order.action, PluginAction::Disable);
+            let _ = order.ack.send(true);
+        });
+        let response = answer.await;
+        served.await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn a_name_no_manifest_declares_is_still_refused_before_any_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("plugins.toml");
+        std::fs::write(&manifest, "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n").unwrap();
+        let (state, _rx) = test_state_with_manifest(&manifest);
+        let response = plugin_enabled_put(
+            axum::extract::State(state),
+            axum::extract::Path("nope".to_string()),
+            axum::Json(PluginEnabledReq { enabled: true }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // And the file is untouched: a refused name writes nothing, which is
+        // the doctrine this route already had.
+        assert!(!std::fs::read_to_string(&manifest).unwrap().contains("nope"));
     }
 
     /// No refusal key can reach the screen as is.

@@ -453,7 +453,6 @@ mod tests {
             covers: Arc::new(crate::cover::CoverCache::new()),
             plugins: Arc::new(crate::status::PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
-                names: Vec::new(),
                 tx: tokio::sync::mpsc::channel(1).0,
             }),
             update: Arc::new(tokio::sync::RwLock::new(
