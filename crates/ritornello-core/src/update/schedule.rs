@@ -206,8 +206,16 @@ mod tests {
         assert_eq!(day_key(126, 250), day_key(126, 250));
         assert_ne!(day_key(126, 250), day_key(126, 251));
         assert_ne!(day_key(126, 250), day_key(127, 250));
-        // The trap this shape avoids: a naive year+yday sum collides across
-        // years.
+        // The actual trap this shape avoids: a naive `tm_year + tm_yday` sum
+        // collides here — 126 + 251 == 127 + 250 == 377 — while multiplying
+        // the year keeps them apart. This is the pair that makes a
+        // plain-sum mutation of `day_key` fail this test.
+        assert_ne!(day_key(126, 251), day_key(127, 250));
+        // A year boundary in its own right: the last day of one year against
+        // an early day of the next. It happens not to collide under a plain
+        // sum either (126 + 366 = 492, 127 + 1 = 128), so it proves nothing
+        // about that failure mode — it is kept because the boundary itself
+        // is worth pinning regardless.
         assert_ne!(day_key(126, 366), day_key(127, 1));
     }
 }

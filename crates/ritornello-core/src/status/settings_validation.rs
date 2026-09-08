@@ -380,6 +380,21 @@ mod tests {
         assert!(validate_settings(&s).is_err(), "zero would refuse every download");
     }
 
+    /// `update_hour` has a single bound: `u32` already refuses a value below
+    /// 0, so there is no neighbouring floor to test — only the ceiling at 23.
+    #[test]
+    fn the_update_hour_stays_within_the_day() {
+        use crate::state::Settings;
+        assert!(
+            validate_settings(&Settings { update_hour: 23, ..Default::default() }).is_ok(),
+            "23 is the last valid hour"
+        );
+        assert_eq!(
+            validate_settings(&Settings { update_hour: 24, ..Default::default() }),
+            Err(SettingsError::UpdateHour { value: 24 })
+        );
+    }
+
     #[test]
     fn settings_message_interpolates_the_bounds_against_the_catalog() {
         let dir = tempfile::tempdir().unwrap();
