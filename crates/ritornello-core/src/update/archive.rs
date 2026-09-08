@@ -57,13 +57,18 @@ pub const DECOMPRESSED_MAX: usize = 96 * 1024 * 1024;
 /// unboundedness, not the size of the budget.
 const FRAMING_SLACK: usize = 8 * 1024 * 1024;
 
-/// An entry name longer than this is refused. Checked twice, both before
-/// `read` ever copies the name into a `String`: for a name over the
-/// `Bounded` budget, this is defence in depth (`Bounded` is what stops that
-/// allocation); for a name merely long but under budget — legitimately
-/// yielded, so `Bounded` never fires — this is the only guard there is, and
-/// checking it against the byte length tar already holds is what avoids
-/// copying a name nobody is going to keep.
+/// An entry name longer than this is refused. Checked twice, and the two
+/// checks are not a tidy duplicate of each other: the first, on
+/// `entry.path_bytes()`, measures the name as it arrived, before `read` ever
+/// copies it into a `String` — for a name over the `Bounded` budget this is
+/// defence in depth (`Bounded` is what stops that allocation), and for a name
+/// merely long but under budget it is what avoids copying a name nobody is
+/// going to keep. The second check runs on the name only after it has been
+/// copied AND had a leading `./` stripped, so it measures up to two bytes
+/// fewer than the first did. A name of exactly `NAME_MAX + 2` bytes carrying
+/// that prefix is refused by the first and would sail past the second with
+/// no error at all — the first check is the only guard for that window, not
+/// a redundant one.
 const NAME_MAX: usize = 4096;
 
 #[derive(Debug)]
@@ -267,6 +272,13 @@ pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
         // declaring a 100 MiB name cost +214 MB of RSS this way; checking
         // the byte length tar already holds, before copying it, avoids that
         // entirely.
+        //
+        // This is not just the cheaper of two equivalent checks: it is the
+        // ONLY guard for a name of exactly `NAME_MAX + 2` bytes carrying a
+        // leading `./`. The later check, after the `./` strip, measures up
+        // to two bytes fewer than this one does — such a name passes that
+        // one with room to spare. Removing this check would not merely delay
+        // the refusal, it would remove it.
         if entry.path_bytes().len() > NAME_MAX {
             return Err(ArchiveError::NameTooLong(NAME_MAX));
         }
@@ -899,6 +911,47 @@ mod tests {
         let tar = builder.into_inner().expect("finish");
 
         let err = read(&gzip(tar), DECOMPRESSED_MAX).expect_err("the name is too long");
+        assert!(matches!(err, ArchiveError::NameTooLong(_)), "{err:?}");
+    }
+
+    /// The narrow window where the two name-length guards genuinely differ,
+    /// and the reason the byte-length pre-check is not the tidy duplicate it
+    /// looks like: it measures the name as it arrived, while the check after
+    /// the `./` strip measures a name up to two bytes shorter. A name of
+    /// exactly `NAME_MAX + 2` bytes carrying that prefix is refused by the
+    /// first and would sail past the second — with no error at all, not
+    /// merely a later one.
+    ///
+    /// Built from raw header bytes, GNU long-name entry included by hand:
+    /// `tar::Builder`'s path API drops a leading `./` component at write
+    /// time even for a name long enough to need the GNU extension (tar-0.4.46
+    /// `header.rs:1601`), so no ordinary `append_data` call can produce this
+    /// on-the-wire shape — the same reason the escaping-entry and
+    /// absolute-path fixtures need raw headers too.
+    #[test]
+    fn a_name_two_bytes_over_the_limit_behind_a_dot_slash_is_refused() {
+        // "./" (2 bytes) + NAME_MAX 'a's = NAME_MAX + 2: the true on-the-wire
+        // name before the `./` strip that the second check applies.
+        let long_name = format!("./{}", "a".repeat(NAME_MAX));
+        assert_eq!(long_name.len(), NAME_MAX + 2);
+        let mut payload = long_name.into_bytes();
+        payload.push(0); // GNU long-name entries are NUL-terminated.
+
+        let mut builder = tar::Builder::new(Vec::new());
+
+        let mut long_name_header = tar::Header::new_gnu();
+        long_name_header.set_entry_type(tar::EntryType::GNULongName);
+        long_name_header.as_gnu_mut().unwrap().name[..b"././@LongLink".len()]
+            .copy_from_slice(b"././@LongLink");
+        long_name_header.set_size(payload.len() as u64);
+        long_name_header.set_mode(0o644);
+        long_name_header.set_cksum();
+        builder.append(&long_name_header, &payload[..]).unwrap();
+
+        raw_entry(&mut builder, b"truncated", tar::EntryType::Regular, b"ELF");
+
+        let tar = builder.into_inner().unwrap();
+        let err = read(&gzip(tar), DECOMPRESSED_MAX).expect_err("the name is refused");
         assert!(matches!(err, ArchiveError::NameTooLong(_)), "{err:?}");
     }
 
