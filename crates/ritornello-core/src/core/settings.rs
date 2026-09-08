@@ -57,6 +57,29 @@ impl<P: Player> Core<P> {
         self.persist();
     }
 
+    /// The local day the last automatic update run happened on, as
+    /// `schedule::day_key` identifies it. `None` on a device that has never
+    /// had one.
+    pub fn update_last_run_day(&self) -> Option<i64> {
+        self.update_last_run_day
+    }
+
+    /// Records that today has had its automatic run, and writes it down at
+    /// once.
+    ///
+    /// **Written before the run rather than after it**, and that is the point:
+    /// the ticker asks every minute, so a day noted only on success would fire
+    /// again sixty seconds after a failed check — and, under
+    /// `CheckAndInstall`, keep re-downloading all night. Once a day means once
+    /// a day, whatever the outcome.
+    ///
+    /// It goes through `persist` like every other piece of state, which is
+    /// what keeps it from being lost by the next unrelated settings write.
+    pub fn note_update_run(&mut self, day: i64) {
+        self.update_last_run_day = Some(day);
+        self.persist();
+    }
+
     pub(super) fn persist(&self) {
         let st = PersistedState {
             active_source: self.active_source.clone(),
@@ -221,7 +244,8 @@ mod tests {
         // would resurrect a standby the device left long ago.
         core.start_in_standby().await.unwrap();
         assert!(on_disk());
-        core.startup().await.unwrap(); // default setting: "on"
+        // Default setting: "on", and no install marker to override it.
+        core.startup(crate::update::StartupOverride::AsConfigured).await.unwrap();
         assert!(!on_disk());
     }
 

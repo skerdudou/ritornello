@@ -25,3 +25,27 @@ pub async fn update_check_post(State(state): State<AppState>) -> Response {
     }
     StatusCode::ACCEPTED.into_response()
 }
+
+/// Enqueues an install of the named components.
+///
+/// Answers **202** and validates only the shape: whether a component exists,
+/// is installable, or is worth installing is decided by the worker, which is
+/// the only place that has read the release. A route that pre-validated would
+/// have to hold the same knowledge and could disagree with it.
+pub async fn update_install_post(
+    State(state): State<AppState>,
+    Json(req): Json<InstallReq>,
+) -> Response {
+    if req.components.is_empty() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if state.update_tx.send(crate::update::Job::Install(req.components)).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    StatusCode::ACCEPTED.into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct InstallReq {
+    pub components: Vec<String>,
+}

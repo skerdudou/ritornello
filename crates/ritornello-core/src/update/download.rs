@@ -33,28 +33,21 @@ pub const ROOM_MARGIN_KB: u64 = 256 * 1024;
 
 #[derive(Debug)]
 pub enum DownloadError {
-    NoRoom { available_kb: u64, needed_bytes: usize },
     TooLarge(usize),
     Http(String),
     /// The archive's hash is not the one `SHA256SUMS` gave for it.
     Digest { expected: String, got: String },
     /// `SHA256SUMS` has no line for this archive.
     NoDigest(String),
-    Io(String),
 }
 
 impl std::fmt::Display for DownloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoRoom { available_kb, needed_bytes } => write!(
-                f,
-                "not enough room: {available_kb} kB available, {needed_bytes} bytes to download plus what they become plus a {ROOM_MARGIN_KB} kB margin"
-            ),
             Self::TooLarge(cap) => write!(f, "the response exceeded {cap} bytes"),
             Self::Http(d) => write!(f, "fetching: {d}"),
             Self::Digest { expected, got } => write!(f, "digest mismatch: SHA256SUMS says {expected}, the download hashes to {got}"),
             Self::NoDigest(name) => write!(f, "SHA256SUMS has no line for {name}"),
-            Self::Io(d) => write!(f, "writing: {d}"),
         }
     }
 }

@@ -412,12 +412,32 @@ fn status_for_spawn_failure(name: &str, err: &anyhow::Error) -> PluginStatus {
     }
 }
 
+/// What the rollback unit left behind, if anything.
+///
+/// `None` for an absent, unreadable or corrupt file, exactly as
+/// `marker::read` answers for its own: the page has a correct thing to show
+/// without it — nothing — and a rollback report that cannot be parsed says
+/// less than no report at all. **Never deleted**: it is the only trace of a
+/// nocturnal rollback, and the next rollback overwrites it.
+fn read_rollback_report(prefix: &Path) -> Option<ritornello_updater::rollback::Report> {
+    let path = ritornello_updater::rollback::report_path(prefix);
+    let text = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str(&text) {
+        Ok(report) => Some(report),
+        Err(e) => {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            None
+        }
+    }
+}
+
 /// The acknowledgment for a `PluginAction` with no wiring behind it yet.
 ///
-/// `false` uniformly across all four: none is implemented, so "an
-/// acknowledgment must describe a true state" — the doctrine the `select!`
-/// arm already holds for `Enable` and `Disable` — applies identically to all
-/// four, and there is no basis to special-case one over another.
+/// `false` uniformly across the three that remain — `Declare`, `Undeclare`
+/// and `Reorder` — because none is implemented, so "an acknowledgment must
+/// describe a true state" — the doctrine the `select!` arm already holds for
+/// `Enable`, `Disable` and now `Restart` — applies identically to all three,
+/// and there is no basis to special-case one over another.
 ///
 /// Extracted so a test can pin this refusal directly: the `select!` arm that
 /// calls it lives inside `async fn main()`, which nothing outside `main` can
@@ -427,13 +447,15 @@ fn status_for_spawn_failure(name: &str, err: &anyhow::Error) -> PluginStatus {
 /// this function is a test of what the arm actually acknowledges, provided
 /// that delegation stays exactly this thin.
 ///
-/// **`Enable` and `Disable` are deliberately absent from this function's
-/// job**: they are wired, and their bodies must stay byte-identical to what
-/// they were before `PluginAction` existed. Panicking here for them is a
-/// canary, not a feature: this function must never be reached for either.
+/// **`Enable`, `Disable` and `Restart` are deliberately absent from this
+/// function's job**: they are wired. For the first two, their bodies must
+/// stay byte-identical to what they were before `PluginAction` existed;
+/// `Restart` joined them when the update worker gained a plugin to replace.
+/// Panicking here for them is a canary, not a feature: this function must
+/// never be reached for any of the three.
 ///
 /// Match written **without a wildcard**, one arm per unwired variant, so that
-/// wiring one of the four is a visible, local edit here — delete its arm
+/// wiring one of them is a visible, local edit here — delete its arm
 /// (and the test named for it, right below `should_downgrade`'s tests), not
 /// somewhere the compiler will find for you. **This is not compiler-enforced
 /// beyond that point**: nothing stops a future task from giving its variant
@@ -445,10 +467,9 @@ fn status_for_spawn_failure(name: &str, err: &anyhow::Error) -> PluginStatus {
 /// social, not mechanical.
 fn plugin_action_refusal(action: PluginAction) -> bool {
     match action {
-        PluginAction::Enable | PluginAction::Disable => {
+        PluginAction::Enable | PluginAction::Disable | PluginAction::Restart => {
             unreachable!("{action:?} is wired: it never reaches the placeholder refusal")
         }
-        PluginAction::Restart => false,
         PluginAction::Declare => false,
         PluginAction::Undeclare => false,
         PluginAction::Reorder => false,
@@ -1722,20 +1743,69 @@ async fn main() -> Result<()> {
     let (extraction_tx, mut extraction_rx) =
         mpsc::channel::<(String, Option<cover::CoverSource>)>(4);
 
+    // How this process leaves. Named here rather than built inline in the
+    // `SystemInfo` literal below, because the update worker exits by the very
+    // same door and both must kill mpv on the way out.
+    //
+    // The restart hook kills mpv **before** exiting. Without this, mpv
+    // outlived the core and kept playing: it is launched with
+    // `kill_on_drop(true)`, but `std::process::exit` does not unwind the
+    // stack and therefore runs no `Drop` — the guarantee `kill_on_drop`
+    // advertises was worth nothing on this path.
+    //
+    // The service did not show it: when a unit's main process exits, systemd
+    // kills the rest of the control group before relaunching. It was in
+    // development, with no supervisor, that the orphan stuck around — still
+    // playing, and holding the audio device that the relaunched core wanted
+    // to reclaim.
+    //
+    // mpv's death also makes the main loop exit (see `mpv_child.wait()`
+    // further down): both paths run, but they lead to the same place, and it
+    // is the `exit(0)` here that wins in practice. The signal's detail and
+    // its justification live in `system::terminate_process`, where a test
+    // pins them down on a real process.
+    let restart_hook: system::RestartHook = {
+        let pid = mpv_child.id();
+        Arc::new(move || {
+            system::terminate_process(pid);
+            std::process::exit(0)
+        })
+    };
+
     // Jobs for the update worker, see `AppState::update_tx`.
-    let (update_tx, mut update_rx) = mpsc::channel::<update::Job>(4);
+    let (update_tx, update_rx) = mpsc::channel::<update::Job>(4);
     let update_state = Arc::new(RwLock::new(update::state::UpdateState::initial(
         env!("CARGO_PKG_VERSION"),
         &[],
     )));
-    // Placeholder consumer until Task 12 wires the gestures. It exists so the
-    // route can be exercised end to end now: without a receiver, `send` fails
-    // and the route answers 500, which would look like a bug in the route.
-    tokio::spawn(async move {
-        while let Some(job) = update_rx.recv().await {
-            tracing::debug!("update worker: {job:?} received, not yet implemented (Task 12)");
-        }
-    });
+    // The rollback unit's own report, read once at startup and never erased:
+    // it is the only trace of a nocturnal rollback, and the next rollback
+    // overwrites it, which is enough. An absent file is the ordinary case.
+    update_state.write().await.last_rollback = read_rollback_report(Path::new("/"));
+    tokio::spawn(update::run_worker(
+        update::Worker {
+            state: update_state.clone(),
+            catalog: catalog.clone(),
+            status: status_state.clone(),
+            manifest: plugins_path.clone(),
+            plugins_tx: plugin_order_tx.clone(),
+            // `state.json`'s own directory: the staging area is state, not
+            // configuration, and the privileged binary reads it from exactly
+            // this path.
+            staging: update::download::staging_dir(
+                state_path.parent().unwrap_or(Path::new("/var/lib/ritornello")),
+            ),
+            root: PathBuf::from("/"),
+            core_version: env!("CARGO_PKG_VERSION"),
+            restart: restart_hook.clone(),
+        },
+        update_rx,
+    ));
+    // The scheduler's end of the same channel. The ticker lives in the main
+    // loop, not in a task of its own, because that is where the two things it
+    // needs are: the current settings, and the `Core` that owns — and
+    // persists — the day of the last run.
+    let scheduler_tx = update_tx.clone();
 
     // After wiring: ask each source for its sources catalog, **without
     // waiting**.
@@ -1798,33 +1868,10 @@ async fn main() -> Result<()> {
                 can_power_off: probe.can_power_off,
                 can_reboot: probe.can_reboot,
                 logind_reachable: probe.logind_reachable,
-                // The restart hook kills mpv **before** exiting. Without
-                // this, mpv outlived the core and kept playing: it is
-                // launched with `kill_on_drop(true)`, but `std::process::exit`
-                // does not unwind the stack and therefore runs no `Drop` —
-                // the guarantee `kill_on_drop` advertises was worth nothing
-                // on this path.
-                //
-                // The service did not show it: when a unit's main process
-                // exits, systemd kills the rest of the control group before
-                // relaunching. It was in development, with no supervisor,
-                // that the orphan stuck around — still playing, and holding
-                // the audio device that the relaunched core wanted to
-                // reclaim.
-                //
-                // mpv's death also makes the main loop exit (see
-                // `mpv_child.wait()` further down): both paths run, but they
-                // lead to the same place, and it is the `exit(0)` below that
-                // wins in practice. The signal's detail and its justification
-                // live in `system::terminate_process`, where a test pins them
-                // down on a real process.
-                restart: {
-                    let pid = mpv_child.id();
-                    Arc::new(move || {
-                        system::terminate_process(pid);
-                        std::process::exit(0)
-                    })
-                },
+                // The very hook the update worker uses to leave once the core
+                // binary has been replaced: see where it is built, above, for
+                // why mpv has to die with this process.
+                restart: restart_hook.clone(),
                 ..Default::default()
             }),
             covers: Arc::new(cover::CoverCache::default()),
@@ -1865,11 +1912,23 @@ async fn main() -> Result<()> {
             }
         });
     }
+    // The marker the installer writes, read **once** and never consumed: it
+    // is what makes a restart provoked by an install preserve whatever the
+    // player was doing, and the rollback's own core must still find it
+    // afterwards. Read here rather than inside `core`, which has no business
+    // knowing about `/var/lib/ritornello-update`.
+    let startup_over = update::startup_instruction(Path::new("/"), update::now_unix_s());
+    if startup_over == update::StartupOverride::Previous {
+        tracing::info!(
+            "a fresh install marker is on disk: starting in whatever state the device was left in, ignoring the startup power setting for this start only"
+        );
+    }
     // Best-effort, like the wake via `Power` (see the comment below): startup
     // must never put systemd in a restart loop. `startup` reads
-    // `settings.startup_power`; its standby branch skips the source wake but
-    // still configures mpv, so the first `Power` starts right.
-    if let Err(e) = core.startup().await {
+    // `settings.startup_power` unless the marker overrides it; its standby
+    // branch skips the source wake but still configures mpv, so the first
+    // `Power` starts right.
+    if let Err(e) = core.startup(startup_over).await {
         tracing::warn!("startup wake: {e}");
     }
 
@@ -1931,6 +1990,17 @@ async fn main() -> Result<()> {
     // Deadline of the next position refresh. Absolute, like `retry_at`: see
     // the reason at the arming point, in the loop.
     let mut next_tick: Option<tokio::time::Instant> = None;
+
+    // Every minute, and that is not a poll of anything expensive: `due` is a
+    // comparison of five values, and the alternative — computing the next
+    // instant and sleeping until it — has to be recomputed on every settings
+    // change and gets summer time wrong the first time nobody tests it.
+    //
+    // An `interval`'s first tick completes immediately, which is wanted here
+    // rather than tolerated: a device switched on at nine in the morning,
+    // whose three o'clock passed while it was off, catches up at once instead
+    // of at 09:01.
+    let mut update_ticker = tokio::time::interval(std::time::Duration::from_secs(60));
 
     loop {
         let retry_sleep = async {
@@ -2266,12 +2336,76 @@ async fn main() -> Result<()> {
                         )
                         .await
                     }
-                    // Wired in Task 12 (Restart) and Tasks 14-16 (the other
-                    // three). Refusing until then rather than silently
-                    // succeeding: an acknowledgment must describe a true
-                    // state, which is the doctrine this arm already holds.
-                    PluginAction::Restart
-                    | PluginAction::Declare
+                    // Its binary has just been replaced on disk: stop the old
+                    // process and launch the new one.
+                    //
+                    // The two halves of `Enable`'s and `Disable`'s bodies,
+                    // in that order and nothing else — the same
+                    // `hot_unplug`, the same generation increment, the same
+                    // `relaunch`. **The increment is not optional**: without
+                    // a fresh generation, the death of the process
+                    // `hot_unplug` just killed arrives *after* the new one
+                    // is wired and is taken for the new one's, erasing the
+                    // lines that describe it.
+                    //
+                    // `hot_unplug`'s own refusal is what covers the plugin
+                    // the core does not own: it answers `false` and names
+                    // the remedy in the log, and the acknowledgment says the
+                    // restart did not happen rather than claiming a new
+                    // binary is running when the old process still holds the
+                    // sockets.
+                    PluginAction::Restart => {
+                        let stopped = hot_unplug(
+                            &order.name,
+                            &hot_children,
+                            &mut core,
+                            &mut gathered,
+                            &mut kill_triggers,
+                            &non_supervised,
+                        )
+                        .await;
+                        if !stopped {
+                            false
+                        } else {
+                            let generation = generations.entry(order.name.clone()).or_insert(0);
+                            *generation += 1;
+                            let generation = *generation;
+                            match execs.get(&order.name) {
+                                Some(exec) => {
+                                    match relaunch(
+                                        &order.name,
+                                        exec,
+                                        generation,
+                                        &hot_children,
+                                        &register_path,
+                                        core.current_locale().as_deref(),
+                                        &mut kill_triggers,
+                                    )
+                                    .await
+                                    {
+                                        Some(fut) => {
+                                            plugin_waits.push(fut);
+                                            startups.insert(
+                                                order.name.clone(),
+                                                tokio::time::Instant::now() + STARTUP_TIMEOUT,
+                                            );
+                                            true
+                                        }
+                                        None => false,
+                                    }
+                                }
+                                // A plugin the manifest does not declare: it
+                                // is not something the updater can have
+                                // replaced, and there is no `exec` to launch.
+                                None => false,
+                            }
+                        }
+                    }
+                    // Wired in Tasks 14-16. Refusing until then rather than
+                    // silently succeeding: an acknowledgment must describe a
+                    // true state, which is the doctrine this arm already
+                    // holds.
+                    PluginAction::Declare
                     | PluginAction::Undeclare
                     | PluginAction::Reorder => {
                         tracing::warn!("plugin action {:?} is not wired yet", order.action);
@@ -2281,6 +2415,41 @@ async fn main() -> Result<()> {
                 // The requester is waiting: a lost acknowledgment would leave
                 // its HTTP request hanging until its own timeout runs out.
                 let _ = order.ack.send(ok);
+            }
+            // The automatic run, asked once a minute and answered by a pure
+            // function. Everything hard about it — a missed hour, an hour
+            // that does not exist on a spring-forward day, one that happens
+            // twice in autumn, a weekly cadence — lives in `schedule::due`
+            // and is tested there in table form.
+            _ = update_ticker.tick() => {
+                // A clock that cannot be read is not a reason to update at an
+                // unexpected time: do nothing this minute.
+                if let Some(now) = update::schedule::local_now(update::now_unix_s() as i64) {
+                    let settings = settings_current.read().await.clone();
+                    if update::schedule::due(
+                        &now,
+                        settings.update_policy,
+                        settings.update_hour,
+                        settings.update_cadence,
+                        core.update_last_run_day(),
+                    ) {
+                        // Written **before** the run, not after: the ticker
+                        // asks again in sixty seconds, and a day noted only
+                        // on success would make a failed check retry all
+                        // night — installing included.
+                        core.note_update_run(now.day_key);
+                        let install = settings.update_policy
+                            == update::schedule::UpdatePolicy::CheckAndInstall;
+                        tracing::info!("scheduled update run (install: {install})");
+                        // A full channel means a run is still in flight, and
+                        // queuing a second one behind it would be the same
+                        // work twice. `try_send` rather than `send` for that,
+                        // and because this arm must never hold the core loop.
+                        if let Err(e) = scheduler_tx.try_send(update::Job::Scheduled { install }) {
+                            tracing::warn!("scheduled update run not enqueued: {e}");
+                        }
+                    }
+                }
             }
             _ = startup_sleep => {
                 let now = tokio::time::Instant::now();
@@ -2807,11 +2976,6 @@ mod toggle_tests {
     /// The task that wires its variant must delete both this test and the
     /// matching arm in `plugin_action_refusal` — see that function's doc for
     /// why nothing but this naming and its proximity to the arm forces that.
-    #[test]
-    fn restart_refuses_until_task_12_wires_it() {
-        assert!(!plugin_action_refusal(PluginAction::Restart));
-    }
-
     #[test]
     fn declare_refuses_until_task_14_wires_it() {
         assert!(!plugin_action_refusal(PluginAction::Declare));

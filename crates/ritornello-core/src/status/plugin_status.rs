@@ -238,11 +238,8 @@ pub enum PluginAction {
     Enable,
     Disable,
     /// Its binary has just been replaced on disk: stop it and start it again.
-    ///
-    /// No caller yet: wired in Task 12, same story as the rest of `update`'s
-    /// public items — a binary crate does not treat `pub` as "reachable from
-    /// outside" on its own, hence the allowance below.
-    #[allow(dead_code)]
+    /// Sent by the update worker, once the privileged unit has placed the new
+    /// binary.
     Restart,
     /// Its binary has just been placed and its declaration written: start it,
     /// and take the new file order into account.

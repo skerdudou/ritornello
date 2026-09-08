@@ -173,9 +173,12 @@ pub fn component_offers(
 #[serde(rename_all = "snake_case", tag = "kind", content = "detail")]
 pub enum CheckOutcome {
     NeverChecked,
-    /// The endpoint answered 404: the repository has no published release.
-    /// A statement, not a fault — this is what a device sees until the first
-    /// `git tag`.
+    /// The repository has no published release. A statement, not a fault —
+    /// this is what a device sees until the first one is published.
+    ///
+    /// It arrives as `200` with an empty list, never as a status code: the
+    /// releases endpoint answers `[]` for a repository that has none, which
+    /// is why `parse_releases` and not the HTTP layer is what decides this.
     NoRelease,
     Ok,
     /// Carries a message already taken from the catalog, so the page renders

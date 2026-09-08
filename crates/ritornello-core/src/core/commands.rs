@@ -93,11 +93,22 @@ impl<P: Player> Core<P> {
     /// keep saying "in standby" after a boot that woke everything up — a
     /// later switch to `Previous` would then resurrect a standby the device
     /// left behind long ago.
-    pub async fn startup(&mut self) -> Result<()> {
-        let in_standby = match self.settings.startup_power {
-            StartupPower::On => false,
-            StartupPower::Standby => true,
-            StartupPower::Previous => self.persisted_standby,
+    ///
+    /// `over` is the instruction a restart provoked by an install carries:
+    /// `Previous` then behaves exactly as `StartupPower::Previous` would,
+    /// **without writing the setting**, so the next ordinary boot obeys what
+    /// the operator chose. It arrives as a parameter and is never read from
+    /// disk here: the marker lives in `/var/lib/ritornello-update`, a
+    /// directory this file has no business knowing about — `main` reads it
+    /// once and hands the answer over.
+    pub async fn startup(&mut self, over: crate::update::StartupOverride) -> Result<()> {
+        let in_standby = match over {
+            crate::update::StartupOverride::Previous => self.persisted_standby,
+            crate::update::StartupOverride::AsConfigured => match self.settings.startup_power {
+                StartupPower::On => false,
+                StartupPower::Standby => true,
+                StartupPower::Previous => self.persisted_standby,
+            },
         };
         if in_standby {
             return self.start_in_standby().await;
@@ -1024,30 +1035,76 @@ mod tests {
         assert!(source_calls.lock().unwrap().iter().any(|c| c.contains("Wake")));
     }
 
+    /// Drives a whole startup and answers the only observable criterion: was
+    /// the source woken?
+    ///
+    /// Takes the override too, because that is the real signature of the
+    /// startup path — the two tests below differ only in what they hold
+    /// fixed.
+    async fn wakes_with_override(
+        startup_power: StartupPower,
+        persisted_standby: bool,
+        over: crate::update::StartupOverride,
+    ) -> bool {
+        let persisted = PersistedState {
+            standby: persisted_standby,
+            settings: crate::state::Settings { startup_power, ..Default::default() },
+            ..Default::default()
+        };
+        let (mut core, _pc, source_calls, _rx, _d) = setup_persisted(persisted);
+        core.startup(over).await.unwrap();
+        // The guard is a temporary of the tail expression, so edition
+        // 2024 drops it *before* the block's locals and it cannot
+        // outlive `source_calls`. Up to edition 2021 the reverse held,
+        // and this needed a binding of its own to release the lock.
+        source_calls.lock().unwrap().iter().any(|c| c.contains("Wake"))
+    }
+
     /// The three values of `startup_power`, on the only observable criterion:
     /// is the source woken? `Previous` is tested in both directions,
     /// otherwise a `Previous` treated as `On` would pass half the test.
     #[tokio::test]
     async fn startup_follows_the_power_on_setting() {
         async fn wakes(startup_power: StartupPower, persisted_standby: bool) -> bool {
-            let persisted = PersistedState {
-                standby: persisted_standby,
-                settings: crate::state::Settings { startup_power, ..Default::default() },
-                ..Default::default()
-            };
-            let (mut core, _pc, source_calls, _rx, _d) = setup_persisted(persisted);
-            core.startup().await.unwrap();
-            // The guard is a temporary of the tail expression, so edition
-            // 2024 drops it *before* the block's locals and it cannot
-            // outlive `source_calls`. Up to edition 2021 the reverse held,
-            // and this needed a binding of its own to release the lock.
-            source_calls.lock().unwrap().iter().any(|c| c.contains("Wake"))
+            wakes_with_override(
+                startup_power,
+                persisted_standby,
+                crate::update::StartupOverride::AsConfigured,
+            )
+            .await
         }
 
         assert!(wakes(StartupPower::On, true).await, "\"on\" ignores the standby on disk");
         assert!(!wakes(StartupPower::Standby, false).await, "\"standby\" never wakes");
         assert!(wakes(StartupPower::Previous, false).await, "was on: we relaunch");
         assert!(!wakes(StartupPower::Previous, true).await, "was in standby: we stay there");
+    }
+
+    /// The 3 a.m. case, driven through the startup path rather than through
+    /// the setting: an install-induced restart must not wake a device that was
+    /// in standby, whatever the setting says.
+    #[tokio::test]
+    async fn an_install_induced_restart_does_not_wake_a_device_in_standby() {
+        use crate::update::StartupOverride;
+        // StartupPower::On is the default, and is what would start playing.
+        let woke = wakes_with_override(StartupPower::On, true, StartupOverride::Previous).await;
+        assert!(!woke, "a restart after an install woke a device in standby");
+        // And the same start, outside the marker's window, obeys the setting.
+        let woke = wakes_with_override(StartupPower::On, true, StartupOverride::AsConfigured).await;
+        assert!(woke);
+    }
+
+    /// The other half, and it is what stops the override from being a
+    /// disguised "always stay asleep": a device that was PLAYING when the
+    /// install restarted it starts playing again.
+    #[tokio::test]
+    async fn an_install_induced_restart_resumes_a_device_that_was_playing() {
+        use crate::update::StartupOverride;
+        // The setting says "standby", so obeying it would prove nothing here:
+        // only reading the persisted state can produce a wake.
+        let woke =
+            wakes_with_override(StartupPower::Standby, false, StartupOverride::Previous).await;
+        assert!(woke, "a restart after an install left a playing device asleep");
     }
 
     #[tokio::test]

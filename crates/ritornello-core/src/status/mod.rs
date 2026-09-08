@@ -145,6 +145,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/cover-cache", get(crate::cover::cache_json))
         .route("/api/update", get(crate::update::routes::update_json))
         .route("/api/update/check", axum::routing::post(crate::update::routes::update_check_post))
+        .route("/api/update/install", axum::routing::post(crate::update::routes::update_install_post))
         .route(
             "/plugins/{name}/api/data",
             get(crate::admin::admin_get_data).put(crate::admin::admin_put_data),
