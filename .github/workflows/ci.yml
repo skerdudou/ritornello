@@ -129,10 +129,14 @@ jobs:
           name: dist-web
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Refuse a tag that does not match the workspace version
-        # Without this, v0.3.0 pushed on a workspace still at 0.2.0 would
-        # produce 33 archives named after a version nothing carries — and the
-        # mistake would only surface on a device.
+      - name: Refuse a tag that does not match the product number
+        # This number names the delivery, not any component: each shipped
+        # component carries its own version instead (see [package] in its own
+        # Cargo.toml), and the guard that a component stays on the product's
+        # major.minor lives elsewhere — version_coherence.rs and
+        # package-release.sh. Without this step, v0.3.0 pushed on a workspace
+        # still at 0.2.0 would produce archives named after a version nothing
+        # carries — and the mistake would only surface on a device.
         #
         # The tag travels through the environment rather than being spliced
         # into the script: `${{ }}` is substituted before the shell parses the
@@ -163,12 +167,48 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The full history, tags included: the step below asks git what the
+          # previous release was. The default shallow checkout has neither.
+          fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
           path: assets
+      - name: Keep only the components whose version moved
+        # A release carries what changed, and nothing else — so a fix in one
+        # plugin does not re-publish eleven archives and does not make the
+        # device replace components that are identical to what it already runs.
+        #
+        # The bundle of all plugins stays in every release: it is nobody's
+        # component, it serves the first install in one command, and the
+        # updater ignores it.
+        #
+        # `TAG` through the environment rather than spliced by `${{ }}`, for
+        # the same reason as in the `release` job.
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          prev=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          echo "previous release: ${prev:-none}"
+          ./scripts/changed-components.sh $prev > changed.txt
+          cat changed.txt
+          mkdir keep
+          while read -r c; do
+            mv assets/"$c"-*.tar.gz keep/
+          done < changed.txt
+          # Nobody's component, kept in every release.
+          mv assets/ritornello-plugins-*.tar.gz keep/
+          rm -rf assets
+          mv keep assets
+          ls -l assets
       - name: One checksum file for every asset
+        # This step runs after the filtering above, not before: SHA256SUMS
+        # must describe only what this release carries. The core reads a
+        # component's checksum from the release that carries its archive, and
+        # a checksum file listing archives absent from this release would
+        # describe archives that live elsewhere.
         run: cd assets && sha256sum *.tar.gz > SHA256SUMS && ls -l
       - name: Create the draft release
         # A draft, not a publication: the notes must be read before anyone

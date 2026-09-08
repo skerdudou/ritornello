@@ -41,6 +41,20 @@ Enabled, **not** started: what it is enabled for is machine boot, where it
 reconciles the declared network shares. Skip it and declared shares silently
 stop being mounted after a reboot.
 
+## What this release carries
+
+This release carries only the components whose own version moved since the
+previous one. A component missing from the assets below is unchanged, not
+removed — do not read its absence as a regression.
+
+The version in an attached file's name is that **component's** own version,
+not this release's tag: `ritornello-plugin-radio-0.2.1-<arch>.tar.gz` says
+nothing about the tag it ships under. Only `ritornello-plugins-<version>`,
+the bundle of every plugin, is named after this release's own tag.
+
+**Never delete a published release or its attached files.** The appliance
+goes back to fetch, from there, the components that have not changed since.
+
 ## Architectures
 
 - `armv7` — Raspberry Pi 2 and similar, the reference hardware.
