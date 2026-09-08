@@ -38,7 +38,19 @@ fi
 # which moves whenever any version moves. Detecting it would republish
 # everything at every delivery and defeat the point. If a dependency bump
 # matters, bumping every component is the gesture.
-SHARED=(crates/ritornello-proto crates/ritornello-i18n crates/ritornello-plugin-sdk)
+#
+# This list is the same four crates as INTERNAL_CRATES in
+# version_coherence.rs — not derived from it (there is no manifest either
+# side can read the other from without more machinery than four entries
+# deserve), so a crate added to one belongs in the other too.
+#
+# ritornello-updater is not linked into anything, but its binary ships inside
+# the core's archive (deploy/packaging.toml, extra_binaries), so changing it
+# changes what that archive carries while moving no declared version. Strictly
+# it affects only the core; it is listed here because over-publishing is the
+# safe direction and one mechanism is better than two for a crate that changes
+# rarely.
+SHARED=(crates/ritornello-proto crates/ritornello-i18n crates/ritornello-plugin-sdk crates/ritornello-updater)
 if [ -n "$PREV" ] && ! git diff --quiet "$PREV" -- "${SHARED[@]}"; then
   echo "a shared crate changed since $PREV — every component is published" >&2
   PREV=""
