@@ -624,6 +624,44 @@ exec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-radio\"
         assert!(restored.contains("A freshly installed plugin"), "{restored}");
     }
 
+    /// The shape an operator writes to note why they stopped adding plugins,
+    /// or to leave themselves a reminder: a comment after the LAST plugin,
+    /// living in the document's trailing slot — the same slot `remove_entry`
+    /// parks the file header in when the array empties. Losing operator text
+    /// is worse than a wrong result for this file (see the module doc), so
+    /// the two must combine, not compete: removing the only plugin appends
+    /// the header in FRONT of this comment rather than replacing it, and a
+    /// later append must not duplicate or drop either.
+    ///
+    /// Asserted on the whole document, not `contains(...)`: presence checks
+    /// are exactly what let the original Critical (task 8, round 1) through
+    /// fourteen passing tests — they cannot see a duplicate, a dropped
+    /// separator, or a wrong order, only whether the words are somewhere.
+    #[test]
+    fn a_trailing_end_of_file_comment_survives_a_remove_all_then_append_cycle() {
+        let doc = "\
+# The parked header.
+[[plugin]]
+name = \"radio\"
+exec = \"/x\"
+
+# Stopped adding plugins here for now.
+";
+        let after_remove = remove_entry(doc, "radio").unwrap();
+        assert_eq!(
+            after_remove,
+            "# The parked header.\n\n# Stopped adding plugins here for now.\n",
+            "the header must be appended in front of the trailing comment, not replace it"
+        );
+
+        let restored = append_block(&after_remove, "[[plugin]]\nname = \"mpd\"\nexec = \"/y\"\n", "mpd").unwrap();
+        assert_eq!(
+            restored,
+            "# The parked header.\n\n# Stopped adding plugins here for now.\n[[plugin]]\nname = \"mpd\"\nexec = \"/y\"\n",
+            "the trailing comment must survive exactly once, after the header, before mpd"
+        );
+    }
+
     /// `append_block` must also work directly on a document that never had a
     /// `[[plugin]]` table at all — not only one that had its header rescued
     /// by `remove_entry`.
