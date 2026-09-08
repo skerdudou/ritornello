@@ -57,10 +57,13 @@ pub const DECOMPRESSED_MAX: usize = 96 * 1024 * 1024;
 /// unboundedness, not the size of the budget.
 const FRAMING_SLACK: usize = 8 * 1024 * 1024;
 
-/// An entry name longer than this is refused. Defence in depth rather than
-/// the main guard — the `Bounded` reader below is what stops the allocation —
-/// but it turns a hostile name into a named refusal instead of a component
-/// that merely happens to fit under the cap.
+/// An entry name longer than this is refused. Checked twice, both before
+/// `read` ever copies the name into a `String`: for a name over the
+/// `Bounded` budget, this is defence in depth (`Bounded` is what stops that
+/// allocation); for a name merely long but under budget — legitimately
+/// yielded, so `Bounded` never fires — this is the only guard there is, and
+/// checking it against the byte length tar already holds is what avoids
+/// copying a name nobody is going to keep.
 const NAME_MAX: usize = 4096;
 
 #[derive(Debug)]
@@ -73,6 +76,11 @@ pub enum ArchiveError {
     /// An entry whose name escapes its own prefix, is absolute, or whose type
     /// is neither a plain file nor a directory.
     UnsafeEntry(String),
+    /// An entry name longer than `NAME_MAX`. Its own variant because
+    /// `TooLarge` names the decompressed cap, and reporting a five-kilobyte
+    /// name as "decompresses to more than 96 MiB" sends the reader looking
+    /// for the wrong thing.
+    NameTooLong(usize),
 }
 
 impl std::fmt::Display for ArchiveError {
@@ -81,6 +89,7 @@ impl std::fmt::Display for ArchiveError {
             Self::Unreadable(d) => write!(f, "the archive could not be read: {d}"),
             Self::TooLarge(cap) => write!(f, "the archive decompresses to more than {cap} bytes"),
             Self::UnsafeEntry(name) => write!(f, "the archive holds an unsafe entry name: {name:?}"),
+            Self::NameTooLong(max) => write!(f, "the archive holds an entry name longer than {max} bytes"),
         }
     }
 }
@@ -221,6 +230,19 @@ fn unreadable(e: std::io::Error, tripped: &std::rc::Rc<std::cell::Cell<bool>>, c
     }
 }
 
+/// Reads a `.tar.gz` archive into memory, entry by entry, taking only what
+/// this module recognises.
+///
+/// **Every decompressed byte spends the budget, wanted or not.** `total`
+/// below only ever charges a *wanted* entry's content against `cap`, but
+/// `Bounded` sees every byte tar reads to get there — including the full
+/// content of an entry outside every known prefix, since tar must read
+/// through it (this source is not seekable) to reach the next header. The
+/// effective bound on the whole archive is therefore "the entire decompressed
+/// stream fits in `cap + FRAMING_SLACK`", not merely "the content this module
+/// keeps fits in `cap`" — stricter than the name suggests, and worth knowing
+/// before debugging a refusal on an archive whose *wanted* content alone
+/// looks well under the cap.
 pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
     let decoder = flate2::read::GzDecoder::new(gz);
     let tripped = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -238,6 +260,16 @@ pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
     let mut total = 0usize;
     for entry in entries {
         let mut entry = entry.map_err(|e| unreadable(e, &tripped, cap))?;
+        // Measured before the name is ever copied into a `String`:
+        // `entry.path()` below allocates one, and a legitimately-yielded
+        // name (under the `Bounded` budget, so never caught by it) that is
+        // merely long doubles its own memory for nothing. A 477 KB archive
+        // declaring a 100 MiB name cost +214 MB of RSS this way; checking
+        // the byte length tar already holds, before copying it, avoids that
+        // entirely.
+        if entry.path_bytes().len() > NAME_MAX {
+            return Err(ArchiveError::NameTooLong(NAME_MAX));
+        }
         let raw = entry
             .path()
             .map_err(|e| unreadable(e, &tripped, cap))?
@@ -255,7 +287,10 @@ pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
             continue;
         }
         if name.len() > NAME_MAX {
-            return Err(ArchiveError::TooLarge(cap));
+            // Reached only if the check above was somehow bypassed or wrong:
+            // a second, independent guard on the same constraint rather than
+            // trusting the first one alone.
+            return Err(ArchiveError::NameTooLong(NAME_MAX));
         }
         if !safe(name) {
             return Err(ArchiveError::UnsafeEntry(name.to_string()));
@@ -279,6 +314,16 @@ pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
             // so a symlink under `plugins/` counted as the one binary with
             // empty content, and a `CORE_BINARY` symlink yielded a zero-byte
             // core. A shape we never produce earns a named refusal instead.
+            return Err(ArchiveError::UnsafeEntry(path));
+        }
+        if path.ends_with('/') {
+            // A `Regular`-typed entry whose name ends in `/` is a
+            // type-versus-name-shape mismatch our own archives never
+            // produce. Without this, it would be silently skipped by every
+            // consumer that treats a trailing slash as "this is a
+            // directory" — the whitelist above and `installable_from_ui` —
+            // while still being collected into `etc_files` under an allowed
+            // prefix, since that collection keys off the name, not the type.
             return Err(ArchiveError::UnsafeEntry(path));
         }
         out.entries.push(path.clone());
@@ -426,6 +471,12 @@ mod tests {
     /// fixtures are: there is no `tar::Builder` call that reaches this shape,
     /// so no fixture built the ordinary way could have shown that this exact
     /// byte shape used to make every real archive uninstallable.
+    ///
+    /// GNU tar types the root entry `Directory`, not `Regular`, so an
+    /// unskipped `./` does not become the empty string `read` would drop —
+    /// it comes back out through the directory-normalisation below as `"/"`.
+    /// Only the third clause of the assertion, `e != "/"`, catches that; the
+    /// first two alone let an unskipped `./` straight through.
     #[test]
     fn a_real_dot_slash_root_entry_is_installable_and_never_reaches_entries() {
         let mut builder = tar::Builder::new(Vec::new());
@@ -461,7 +512,7 @@ mod tests {
 
         assert!(installable_from_ui(&c.entries), "{:?}", c.entries);
         assert!(
-            c.entries.iter().all(|e| !e.is_empty() && e != "."),
+            c.entries.iter().all(|e| !e.is_empty() && e != "." && e != "/"),
             "the `./` root or a bare `.` reached entries: {:?}",
             c.entries
         );
@@ -788,6 +839,13 @@ mod tests {
     /// against the content cap. A stream-level bound is what catches this;
     /// the per-entry cap counts only what a "wanted" entry's content adds to
     /// `total`, which stays at zero here.
+    ///
+    /// This is also the one test that pins `Bounded` counting DEcompressed
+    /// bytes rather than compressed ones: 20,000 headers compress to a few
+    /// tens of kilobytes, comfortably under any download cap, so wiring
+    /// `Bounded` on the compressed side instead would let this whole archive
+    /// through. No other test in this file fails if the wrap direction is
+    /// swapped.
     #[test]
     fn many_small_entries_past_the_budget_are_refused() {
         let cap = 1_000;
@@ -796,6 +854,74 @@ mod tests {
         let gz = targz(&entries);
         let err = read(&gz, cap).expect_err("the cap is enforced");
         assert!(matches!(err, ArchiveError::TooLarge(1_000)), "{err:?}");
+    }
+
+    /// Pins the `unreadable(...)` call that guards the CONTENT `read_to_end`
+    /// specifically — as opposed to the one guarding `entries.next()`, already
+    /// pinned by the two tests above. `FRAMING_SLACK` (8 MiB) is exactly
+    /// 16384 header blocks of 512 bytes: 16383 zero-size junk entries plus
+    /// this final wanted one's own header consume exactly `FRAMING_SLACK`
+    /// bytes on the nose, leaving exactly `cap` bytes of `Bounded` budget
+    /// remaining at the moment this entry's content starts being read — so
+    /// the trip happens while `read_to_end` is running, not while advancing
+    /// to reach this entry. Making this specific `map_err` ignore the
+    /// tripped flag reddens no other test in this file.
+    #[test]
+    fn the_budget_can_be_spent_while_reading_a_wanted_entrys_content() {
+        let cap = 100usize;
+        let junk_count = (FRAMING_SLACK / 512) - 1;
+        let names: Vec<String> = (0..junk_count as u32).map(|i| format!("junk{i}")).collect();
+        let mut entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b""[..])).collect();
+        let content = vec![7u8; 1_000];
+        entries.push(("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", &content[..]));
+        let gz = targz(&entries);
+        let err = read(&gz, cap).expect_err("the cap is enforced while reading content");
+        assert!(matches!(err, ArchiveError::TooLarge(100)), "{err:?}");
+    }
+
+    /// The reviewer's minor finding: a legitimately-yielded name that is
+    /// merely long, not budget-busting, used to be copied into a `String`
+    /// before its length was ever checked. This name sits comfortably under
+    /// the `Bounded` budget (a real 96 MiB cap is plenty), so it must be
+    /// `read`'s own `NAME_MAX` check — not the budget — that refuses it, and
+    /// with its own error variant: reporting a five-kilobyte name as
+    /// "decompresses to more than 96 MiB" would send the reader looking for
+    /// the wrong thing.
+    #[test]
+    fn a_name_longer_than_name_max_is_refused_by_its_own_variant() {
+        let long_name = format!("usr/local/lib/ritornello/plugins/{}", "a".repeat(5_000));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(3);
+        header.set_mode(0o755);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append_data(&mut header, &long_name, &b"ELF"[..]).expect("append");
+        let tar = builder.into_inner().expect("finish");
+
+        let err = read(&gzip(tar), DECOMPRESSED_MAX).expect_err("the name is too long");
+        assert!(matches!(err, ArchiveError::NameTooLong(_)), "{err:?}");
+    }
+
+    /// The reviewer's probe: a `Regular`-typed entry whose name ends in `/`
+    /// stayed "installable" and, under an allowed prefix, was collected into
+    /// `etc_files` — the whitelist and `installable_from_ui` both treat a
+    /// trailing slash as "this is a directory" regardless of what the header
+    /// says. Nothing outside the allowed prefixes can be written, so there is
+    /// no escalation, but the type-versus-name-shape mismatch is refused
+    /// outright rather than silently misread as a harmless directory.
+    #[test]
+    fn a_regular_file_whose_name_ends_with_a_slash_is_unsafe() {
+        let mut builder = tar::Builder::new(Vec::new());
+        raw_entry(
+            &mut builder,
+            b"usr/local/lib/ritornello/ritornello-media-mount/",
+            tar::EntryType::Regular,
+            b"ELF",
+        );
+        let tar = builder.into_inner().unwrap();
+        let err = read(&gzip(tar), DECOMPRESSED_MAX)
+            .expect_err("a regular file cannot masquerade as a directory");
+        assert!(matches!(err, ArchiveError::UnsafeEntry(_)), "{err:?}");
     }
 
     #[test]
