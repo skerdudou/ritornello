@@ -441,4 +441,28 @@ mod tests {
             other => panic!("expected TooLarge, got {other:?}"),
         }
     }
+
+    /// A body that is not valid UTF-8 must be refused, not silently
+    /// repaired.
+    ///
+    /// This path parses a release listing and a `SHA256SUMS` file. A body
+    /// patched with replacement characters (`String::from_utf8_lossy`) would
+    /// still look like a string to every caller downstream, and would be
+    /// handed to a JSON or line parser that then reports a malformed
+    /// release — sending whoever reads that error after the wrong cause
+    /// entirely, when the real fault was a body that was never text.
+    #[tokio::test]
+    async fn fetch_text_refuses_a_body_that_is_not_utf8() {
+        let body = vec![0x80u8]; // a lone continuation byte: not valid UTF-8 on its own.
+        let response = http_response(
+            "HTTP/1.1 200 OK",
+            &format!("Content-Type: text/plain\r\nContent-Length: {}\r\n", body.len()),
+            body,
+        );
+        let url = serve(response).await;
+        match fetch_text(&client().unwrap(), &url).await {
+            Err(DownloadError::Http(_)) => {}
+            other => panic!("expected a UTF-8 error, got {other:?}"),
+        }
+    }
 }
