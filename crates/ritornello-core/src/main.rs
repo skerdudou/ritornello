@@ -447,54 +447,6 @@ fn read_core_archive_notes(staging: &Path) -> Option<Vec<String>> {
     }
 }
 
-/// The acknowledgment for a `PluginAction` with no wiring behind it yet.
-///
-/// `false` for the one that remains — `Reorder` — because it is not
-/// implemented, so "an acknowledgment must describe a true state" — the
-/// doctrine the `select!` arm already holds for `Enable`, `Disable`,
-/// `Restart`, `Declare` and now `Undeclare` — applies to it too.
-///
-/// Extracted so a test can pin this refusal directly: the `select!` arm that
-/// calls it lives inside `async fn main()`, which nothing outside `main` can
-/// invoke, so without this extraction the refusal could only be exercised by
-/// actually running the core. The arm's catch-all does nothing but call this
-/// function and log — no other decision is made in that branch — so a test of
-/// this function is a test of what the arm actually acknowledges, provided
-/// that delegation stays exactly this thin.
-///
-/// **`Enable`, `Disable`, `Restart`, `Declare` and `Undeclare` are
-/// deliberately absent from this function's job**: they are wired. For the
-/// first two, their bodies must stay byte-identical to what they were before
-/// `PluginAction` existed; `Restart` joined them when the update worker
-/// gained a plugin to replace, `Declare` when it gained a plugin to install,
-/// and `Undeclare` when it gained a plugin to remove. Panicking here for them
-/// is a canary, not a feature: this function must never be reached for any of
-/// the five.
-///
-/// Match written **without a wildcard**, one arm per unwired variant, so that
-/// wiring one of them is a visible, local edit here — delete its arm
-/// (and the test named for it, right below `should_downgrade`'s tests), not
-/// somewhere the compiler will find for you. **This is not compiler-enforced
-/// beyond that point**: nothing stops a future task from giving its variant
-/// its own arm in the `select!` above while leaving this function and its
-/// test untouched — the two would then keep agreeing on a refusal the core no
-/// longer actually sends, and the test would keep passing on a false premise.
-/// Naming each test after the task that retires it, and keeping this
-/// function tiny and adjacent to the arm it backs, is the mitigation; it is
-/// social, not mechanical.
-fn plugin_action_refusal(action: PluginAction) -> bool {
-    match action {
-        PluginAction::Enable
-        | PluginAction::Disable
-        | PluginAction::Restart
-        | PluginAction::Declare
-        | PluginAction::Undeclare => {
-            unreachable!("{action:?} is wired: it never reaches the placeholder refusal")
-        }
-        PluginAction::Reorder => false,
-    }
-}
-
 /// The startup deadline has passed: should this plugin be downgraded to
 /// "stalled"?
 ///
@@ -1262,9 +1214,9 @@ struct Declared {
 /// sender does not filter on it (see `Worker::start_declared_plugin`): a
 /// plugin whose block arrives switched off is registered and not launched.
 ///
-/// Extracted from the `select!` arm for the reason `plugin_action_refusal`
-/// gives about its own extraction: nothing outside `main` can call `main`, so
-/// a gesture left inline is a gesture no test can send.
+/// Extracted from the `select!` arm for the reason every gesture of that
+/// loop is: nothing outside `main` can call `main`, so a gesture left inline
+/// is a gesture no test can send.
 #[allow(clippy::too_many_arguments)]
 async fn declare_plugin<P: player::Player>(
     name: &str,
@@ -1299,28 +1251,23 @@ async fn declare_plugin<P: player::Player>(
     // The file is re-read in full and every order is rebuilt from it, never
     // patched: what changed is not known here, only what the file now says.
     //
-    // **For the plugin being declared, the last three lines are inert**, and
-    // the brief's reasoning for them ("otherwise it would have the right place
-    // in the file and the wrong one in the core") is wrong for an appended
-    // block: at this instant the newcomer is in no `sources` map, has
-    // announced nothing, and has no status line — `relaunch` creates its line
-    // below, and `hotplug` gives it its arbitration rank when it speaks. Only
-    // `manifest_order` above matters for it, and it matters absolutely: an
-    // announcement from a name the core does not hold there is refused at the
-    // door.
+    // **For the plugin being declared, three of the four registries below are
+    // inert**, and the brief's reasoning for them ("otherwise it would have
+    // the right place in the file and the wrong one in the core") is wrong for
+    // an appended block: at this instant the newcomer is in no `sources` map,
+    // has announced nothing, and has no status line — `relaunch` creates its
+    // line below, and `hotplug` gives it its arbitration rank when it speaks.
+    // Only `children.manifest_order` matters for it, and it matters
+    // absolutely: an announcement from a name the core does not hold there is
+    // refused at the door.
     //
     // What the three do carry is **everyone else's** order, when the file no
     // longer says what the core last read — an operator who edited
     // `plugins.toml` by hand and then installed something. The file is the
     // authority, and this is where the core comes back into step with it; it
-    // is also, unchanged, what `Reorder` will need.
-    children.manifest_order = order.clone();
-    core.set_source_order(order.clone());
-    core.set_metadata_order(register::metadata_order(&order, gathered));
-    {
-        let mut statuses = children.status_state.write().await;
-        status::resequence_plugin_lines(&mut statuses, &order);
-    }
+    // is also, unchanged, what `Reorder` needs, which is why the four now
+    // live in one function the three gestures share.
+    apply_manifest_order(order, children, core, gathered).await;
 
     if !enabled {
         tracing::info!(
@@ -1418,11 +1365,7 @@ async fn undeclare_plugin<P: player::Player>(
 
     if let Ok(m) = plugins::PluginManifest::load(manifest) {
         let order: Vec<String> = m.plugins.iter().map(|p| p.name.clone()).collect();
-        children.manifest_order = order.clone();
-        core.set_source_order(order.clone());
-        core.set_metadata_order(register::metadata_order(&order, gathered));
-        let mut statuses = children.status_state.write().await;
-        status::resequence_plugin_lines(&mut statuses, &order);
+        apply_manifest_order(order, children, core, gathered).await;
     } else {
         tracing::warn!(
             "undeclaring {name}: reading {} to re-sequence the others: keeping the order as it stood",
@@ -1432,6 +1375,74 @@ async fn undeclare_plugin<P: player::Player>(
 
     let mut statuses = children.status_state.write().await;
     statuses.plugins.retain(|p| p.name != name);
+    true
+}
+
+/// Puts the whole core back into step with the order `plugins.toml` now
+/// carries — **four registries, and forgetting one leaves the file and the
+/// core disagreeing about the same order**.
+///
+/// One function rather than the same four lines copied into `declare_plugin`,
+/// `undeclare_plugin` and `reorder_plugins`, because the failure mode of this
+/// gesture is an omission and three copies is three chances to omit.
+///
+/// 1. `children.manifest_order`, the door an announcement has to come
+///    through: a name the core does not hold there is refused outright.
+/// 2. Metadata arbitration, through `register::metadata_order`, the single
+///    place that turns a file order into a priority.
+/// 3. The source key's cycle. `set_source_order` filters against the wired
+///    sources and **publishes** the catalog; the published catalog, not the
+///    core's vector, is what the displays and the MPD plugin read.
+/// 4. The published status lines, so the table shows the new order at once
+///    instead of at the next restart.
+///
+/// The caller loads the manifest itself and keeps its own words for a read
+/// that fails: what "the file could not be re-read" means differs between an
+/// install, an uninstall and a move, and only the caller knows which it is.
+async fn apply_manifest_order<P: player::Player>(
+    order: Vec<String>,
+    children: &mut HotPlugChildren,
+    core: &mut core::Core<P>,
+    gathered: &register::Gathered,
+) {
+    children.manifest_order = order.clone();
+    core.set_source_order(order.clone());
+    core.set_metadata_order(register::metadata_order(&order, gathered));
+    let mut statuses = children.status_state.write().await;
+    status::resequence_plugin_lines(&mut statuses, &order);
+}
+
+/// The file order changed under the core: re-read it and re-sequence
+/// everything derived from it.
+///
+/// Nothing is started, stopped or wired here — the set of plugins is exactly
+/// what it was a moment ago, only their order moved. That is the whole
+/// difference with `declare_plugin` and `undeclare_plugin`, which do this
+/// **and** a life-cycle gesture.
+///
+/// `plugin_move_post` has already written the file, and this reads it back
+/// rather than being told the new order: the route and the core would
+/// otherwise hold two versions of the same list, and the file is the
+/// authority — including for a hand edit the route knows nothing about.
+///
+/// `false` when that read fails, because an acknowledgment must describe a
+/// true state: the block has moved on disk and the core has not followed, and
+/// answering "done" would put that disagreement out of anyone's sight.
+async fn reorder_plugins<P: player::Player>(
+    manifest: &Path,
+    children: &mut HotPlugChildren,
+    core: &mut core::Core<P>,
+    gathered: &register::Gathered,
+) -> bool {
+    let m = match plugins::PluginManifest::load(manifest) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("re-reading {} after a move: {e:#}", manifest.display());
+            return false;
+        }
+    };
+    let order: Vec<String> = m.plugins.iter().map(|p| p.name.clone()).collect();
+    apply_manifest_order(order, children, core, gathered).await;
     true
 }
 
@@ -2718,13 +2729,14 @@ async fn main() -> Result<()> {
                         )
                         .await
                     }
-                    // Wired in Task 16. Refusing until then rather than
-                    // silently succeeding: an acknowledgment must describe a
-                    // true state, which is the doctrine this arm already
-                    // holds.
+                    // A block moved in `plugins.toml`, and nothing else
+                    // changed: no plugin to start, stop or unwire, only the
+                    // order every registry derives from that file. See
+                    // `reorder_plugins`, and `apply_manifest_order` for the
+                    // four registries it puts back into step.
                     PluginAction::Reorder => {
-                        tracing::warn!("plugin action {:?} is not wired yet", order.action);
-                        plugin_action_refusal(order.action)
+                        reorder_plugins(&plugins_path, &mut hot_children, &mut core, &gathered)
+                            .await
                     }
                 };
                 // The requester is waiting: a lost acknowledgment would leave
@@ -3313,16 +3325,6 @@ mod toggle_tests {
         );
     }
 
-    /// One test per unwired gesture, each named for the task that retires it.
-    ///
-    /// The task that wires its variant must delete both this test and the
-    /// matching arm in `plugin_action_refusal` — see that function's doc for
-    /// why nothing but this naming and its proximity to the arm forces that.
-    #[test]
-    fn reorder_refuses_until_task_16_wires_it() {
-        assert!(!plugin_action_refusal(PluginAction::Reorder));
-    }
-
     /// From the event, not from the function: what is asserted is that a
     /// `Declare` order makes the core able to launch a plugin it did not know
     /// at startup — which a test calling `relaunch` directly would prove
@@ -3858,6 +3860,159 @@ mod toggle_tests {
             ],
             "the page follows the file too, and `mpd`'s own line is gone, not merely disabled"
         );
+    }
+
+    /// A move, and the only thing it is allowed to change: **the order**, in
+    /// all four registries that derive one from `plugins.toml`.
+    ///
+    /// One gesture, four observables, and each is what the outside world
+    /// actually reads rather than the field the code just assigned:
+    ///
+    /// - the **published** source catalog, not `Core`'s own vector — the
+    ///   displays and the MPD plugin's `listplaylists` only ever see what was
+    ///   last sent on that channel, and a re-sequencing that corrected the
+    ///   vector without publishing left them on the old order indefinitely;
+    /// - the metadata arbitration order, which decides whose title wins;
+    /// - the status lines, which are the table the operator is looking at
+    ///   while they press the arrow;
+    /// - `children.manifest_order`, the door a late announcement comes
+    ///   through.
+    ///
+    /// The fixture is built so that no two of them can be confused: the file
+    /// order after the move is `cd, radio, ouifm-metas, musicbrainz, mpd`,
+    /// which is neither the alphabet nor what the core held a moment ago, and
+    /// `mpd` is a display — in the manifest order, in no source cycle, and in
+    /// the metadata arbitration of neither.
+    #[tokio::test]
+    async fn a_move_re_sequences_the_published_catalog_the_priority_and_the_page() {
+        let mut b = bench();
+        b.children.manifest_order = vec![
+            "radio".to_string(),
+            "cd".to_string(),
+            "musicbrainz".to_string(),
+            "ouifm-metas".to_string(),
+            "mpd".to_string(),
+        ];
+        b.gathered.announcements.clear();
+        for (name, kind) in [
+            ("radio", PluginKind::Source),
+            ("cd", PluginKind::Source),
+            ("musicbrainz", PluginKind::Metadata),
+            ("ouifm-metas", PluginKind::Metadata),
+            ("mpd", PluginKind::Display),
+        ] {
+            b.gathered.announcements.insert(name.to_string(), announcing(name, kind));
+        }
+        b.core.add_source("radio".to_string(), Arc::new(SilentSource));
+        b.core.add_source("cd".to_string(), Arc::new(SilentSource));
+        b.core.set_source_order(b.children.manifest_order.clone());
+        b.core
+            .set_metadata_order(register::metadata_order(&b.children.manifest_order, &b.gathered));
+        *b.children.status_state.write().await = statuses_of(vec![
+            PluginStatus::kind("radio", "source", true, false),
+            PluginStatus::kind("cd", "source", true, false),
+            PluginStatus::kind("musicbrainz", "metadata", true, false),
+            PluginStatus::kind("ouifm-metas", "metadata", true, false),
+            PluginStatus::kind("mpd", "display", true, true),
+        ]);
+        // What `plugin_move_post` has just written: `cd` moved up, and the
+        // two metadata plugins swapped in an earlier move.
+        let manifest = b._dir.path().join("plugins.toml");
+        std::fs::write(
+            &manifest,
+            "[[plugin]]\nname = \"cd\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"ouifm-metas\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"musicbrainz\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\n",
+        )
+        .unwrap();
+
+        let ok = reorder_plugins(&manifest, &mut b.children, &mut b.core, &b.gathered).await;
+        assert!(ok, "the file is readable and the move is applied: the acknowledgment says so");
+
+        let published: Vec<String> =
+            b.children.catalog_rx.borrow().sources.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(
+            published,
+            vec!["cd".to_string(), "radio".to_string()],
+            "the cycle the remote follows must be the file's, and it must have been sent — the \
+             displays and `listplaylists` read this channel, never the core's vector"
+        );
+        assert_eq!(
+            b.core.metadata_order(),
+            ["ouifm-metas".to_string(), "musicbrainz".to_string()],
+            "arbitration priority is the file's order, re-read and not remembered"
+        );
+        let names: Vec<String> = b
+            .children
+            .status_state
+            .read()
+            .await
+            .plugins
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "cd".to_string(),
+                "radio".to_string(),
+                "ouifm-metas".to_string(),
+                "musicbrainz".to_string(),
+                "mpd".to_string(),
+            ],
+            "the table shows the new order at once, without waiting for a restart"
+        );
+        assert_eq!(
+            b.children.manifest_order,
+            vec![
+                "cd".to_string(),
+                "radio".to_string(),
+                "ouifm-metas".to_string(),
+                "musicbrainz".to_string(),
+                "mpd".to_string(),
+            ],
+            "the door a late announcement comes through: a name the core does not hold here is \
+             refused outright"
+        );
+        // What is **not** asserted here, deliberately: that the active source
+        // survives the move. That property belongs to `set_source_order` and
+        // is pinned there, by
+        // `reordering_changes_what_next_means_without_changing_the_active_source`;
+        // repeating it at this level would need a command drive and would
+        // test the same line twice.
+    }
+
+    /// The acknowledgment must describe a true state: a manifest that cannot
+    /// be re-read means the block moved on disk and the core did not follow,
+    /// and answering "done" would put that disagreement out of sight.
+    ///
+    /// Nothing is touched on the way out either — a half-applied order would
+    /// be worse than none.
+    #[tokio::test]
+    async fn a_move_whose_manifest_cannot_be_re_read_is_refused_and_changes_nothing() {
+        let mut b = bench();
+        b.children.manifest_order = vec!["radio".to_string(), "cd".to_string()];
+        b.gathered.announcements.clear();
+        b.core.add_source("radio".to_string(), Arc::new(SilentSource));
+        b.core.add_source("cd".to_string(), Arc::new(SilentSource));
+        b.core.set_source_order(b.children.manifest_order.clone());
+
+        let manifest = b._dir.path().join("plugins.toml");
+        std::fs::write(&manifest, "this is not [[valid toml\n").unwrap();
+
+        let ok = reorder_plugins(&manifest, &mut b.children, &mut b.core, &b.gathered).await;
+
+        assert!(!ok, "a file the core cannot read is not an order it can apply");
+        let published: Vec<String> =
+            b.children.catalog_rx.borrow().sources.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(
+            published,
+            vec!["radio".to_string(), "cd".to_string()],
+            "the order that was in force must stand: nothing was emptied on the way out"
+        );
+        assert_eq!(b.children.manifest_order, vec!["radio".to_string(), "cd".to_string()]);
     }
 
     /// The positive half of the classification: a spawn that failed because

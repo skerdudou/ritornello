@@ -293,8 +293,10 @@ pub enum PluginAction {
     /// The file order changed. `name` is the plugin that moved, for the log
     /// only: the core re-reads the manifest and re-sequences everything.
     ///
-    /// No caller yet: wired in Task 16.
-    #[allow(dead_code)]
+    /// Sent by `plugin_move_post`, **after** it has written `plugins.toml` —
+    /// the same ordering as `Enable`, and for the same reason: the core is
+    /// only told of a choice already on disk, and it reads that disk itself
+    /// rather than being handed a list.
     Reorder,
 }
 
@@ -514,6 +516,113 @@ pub(super) async fn plugin_delete(
 
     let msg = state.catalog.read().await.get("plugin_uninstalled").replace("{name}", &name);
     (StatusCode::OK, Json(serde_json::json!({ "message": msg }))).into_response()
+}
+
+#[derive(Deserialize)]
+pub(super) struct PluginMoveReq {
+    delta: i32,
+}
+
+/// Moves a plugin one place in `plugins.toml`, **persistence first** — the
+/// same three steps, in the same order, as `plugin_enabled_put`: a refused
+/// name writes nothing, a failed write tells the core nothing, and the core
+/// is only told of an order already on disk. A move the core had applied but
+/// the file had not would come back at the next boot, which is the silent lie
+/// that ordering avoids.
+///
+/// The core is told, not handed the list: `PluginAction::Reorder` carries the
+/// name for the log only, and `reorder_plugins` re-reads the file. Two copies
+/// of one order is what this whole feature exists to stop.
+///
+/// **`delta` is ±1 and nothing else, refused with a bare 400.** The only
+/// gesture the page offers is an arrow, and accepting an arbitrary jump would
+/// be an interface nothing uses — with `move_entry`'s uniform re-spacing pass
+/// to re-validate over a distance no test covers. The refusal carries no
+/// catalog message on purpose: it describes a request the UI cannot make, not
+/// a state an operator can act on.
+///
+/// Out of range is the same 400 rather than a clamp, and that is
+/// `move_entry`'s own choice, inherited here: an arrow at the end of the list
+/// that could be pressed and did nothing would be worse than one that is
+/// disabled, which is what the table does with it.
+pub(super) async fn plugin_move_post(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(req): Json<PluginMoveReq>,
+) -> Response {
+    if req.delta != 1 && req.delta != -1 {
+        tracing::warn!("moving {name}: refusing a delta of {}: the only gesture is one step", req.delta);
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    // Read rather than remembered, exactly as its two neighbours: a plugin
+    // installed while the core was running must be movable at once, and the
+    // file is the authority. Checked here so that an unknown name is a 404
+    // with the catalog's own sentence, rather than `move_entry`'s
+    // `NotDeclared` funnelled into a write failure it is not.
+    let declared = match crate::plugins::PluginManifest::load(&state.plugins.manifest) {
+        Ok(m) => m.plugins.iter().any(|p| p.name == name),
+        Err(e) => {
+            tracing::warn!("reading {} to move {name}: {e:#}", state.plugins.manifest.display());
+            let msg = state.catalog.read().await.get("plugin_manifest_unreadable").to_string();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response();
+        }
+    };
+    if !declared {
+        let msg = state.catalog.read().await.get("plugin_unknown").replace("{name}", &name);
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": msg })))
+            .into_response();
+    }
+
+    // The text, not the parsed manifest: `move_entry` edits the document as
+    // written — comments, spacing and all — and the operator's file must come
+    // back out recognisable.
+    let text = match std::fs::read_to_string(&state.plugins.manifest) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("reading {} to move {name}: {e:#}", state.plugins.manifest.display());
+            let msg = state.catalog.read().await.get("plugin_manifest_unreadable").to_string();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response();
+        }
+    };
+    let updated = match crate::plugins::edit::move_entry(&text, &name, req.delta) {
+        Ok(u) => u,
+        Err(crate::plugins::edit::EditError::OutOfRange) => {
+            tracing::info!("moving {name} by {}: already at that end of the list", req.delta);
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        Err(e) => {
+            tracing::warn!("moving {name} in {}: {e}", state.plugins.manifest.display());
+            let msg = state.catalog.read().await.get("plugin_persist_failed").replace("{name}", &name);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response();
+        }
+    };
+    if let Err(e) = crate::plugins::write_atomic(&state.plugins.manifest, &updated) {
+        tracing::warn!("writing {}: {e:#}", state.plugins.manifest.display());
+        let msg = state.catalog.read().await.get("plugin_persist_failed").replace("{name}", &name);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+            .into_response();
+    }
+
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    let order = PluginOrder { name: name.clone(), action: PluginAction::Reorder, ack: ack_tx };
+    if state.plugins.tx.send(order).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    match ack_rx.await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        // The file has moved and the core has not followed — the only cause
+        // being a manifest it could not re-read a moment after this route
+        // wrote it. Reported rather than swallowed: the page reloads on this,
+        // and the next start puts the two back into step.
+        _ => {
+            let msg = state.catalog.read().await.get("plugin_action_failed").replace("{name}", &name);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response()
+        }
+    }
 }
 
 /// Marks the plugin `name` as disconnected in the status state: a plugin whose
@@ -960,6 +1069,256 @@ mod tests {
             before,
             "a refused stop must not be followed by removing the declaration"
         );
+    }
+
+    /// Read the way the core reads it, rather than by looking for one name
+    /// before another in the text: what a move has to change is the order
+    /// `PluginManifest::load` hands to `apply_manifest_order`.
+    ///
+    /// The fixture is `radio` then `cd`, which is also the **reverse** of the
+    /// alphabet — so a test reading a sorted list instead of the file would
+    /// answer the opposite.
+    fn order_in(dir: &tempfile::TempDir) -> Vec<String> {
+        crate::plugins::PluginManifest::load(&dir.path().join("plugins.toml"))
+            .unwrap()
+            .plugins
+            .iter()
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
+    /// Both halves of the gesture — the file is rewritten, **and** the core is
+    /// told, with the action that makes it re-read — and the **order of the
+    /// two**, which is the half that matters: `reorder_plugins` re-reads
+    /// `plugins.toml` rather than being handed a list, so a route that spoke
+    /// before writing would have the core rebuild the order it just replaced.
+    ///
+    /// Pinning that order needs a rendezvous, and this is what the one-slot
+    /// channel below is. Simply reading the file from the acknowledging task
+    /// does **not** work, and this is measured, not feared: with a channel
+    /// that has room, the route runs uninterrupted from its `send` to its
+    /// `ack_rx.await`, so the write lands before any other task can look —
+    /// swapping the two statements left that version of this test green.
+    ///
+    /// Full from the start, the channel makes `tx.send(...)` wait, and the
+    /// waiting is the observation point: everything the route does before its
+    /// send has happened, everything after has not. No sleep, no thread count
+    /// to depend on.
+    #[tokio::test]
+    async fn moving_a_plugin_writes_the_file_before_asking_the_core_to_re_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugins.toml");
+        std::fs::write(
+            &path,
+            "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"cd\"\nexec = \"/bin/true\"\n",
+        )
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        // The one slot, taken before the route starts. Its content is never
+        // read as an order: it exists to be in the way.
+        let (wedge_ack, _wedge_rx) = tokio::sync::oneshot::channel();
+        tx.send(PluginOrder {
+            name: "wedge".to_string(),
+            action: PluginAction::Restart,
+            ack: wedge_ack,
+        })
+        .await
+        .unwrap();
+        let state = AppState {
+            plugins: Arc::new(PluginsControl {
+                manifest: path,
+                tx,
+                root: dir.path().to_path_buf(),
+            }),
+            ..app_state()
+        };
+
+        let route = tokio::spawn(async move {
+            plugin_move_post(
+                axum::extract::State(state),
+                axum::extract::Path("cd".to_string()),
+                axum::Json(PluginMoveReq { delta: -1 }),
+            )
+            .await
+        });
+
+        // Let the route run up to the wedge. `spawn` only schedules: without
+        // this, `recv()` would return the wedge — already there — **without
+        // ever yielding**, and the route would not have executed a single
+        // line, which is how the first version of this test managed to pass
+        // with the two statements swapped.
+        //
+        // Not a sleep and not a duration: on the current-thread runtime a
+        // yield polls the route, which then runs to its first `Pending` — the
+        // blocked `send`. The extra turns cost nothing and cover a future
+        // `await` added before the write: once the route is parked on a full
+        // channel, no number of yields can move it past.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        // Taking the wedge is what unblocks the route's send, so at this
+        // instant the route is stopped exactly there.
+        let wedge = rx.recv().await.unwrap();
+        assert_eq!(wedge.name, "wedge", "the rendezvous, not the gesture");
+        assert_eq!(
+            order_in(&dir),
+            vec!["cd".to_string(), "radio".to_string()],
+            "the file must already say the new order when the core is told, or the re-sequencing \
+             reads the old one"
+        );
+
+        let order = rx.recv().await.unwrap();
+        assert_eq!(order.name, "cd", "the name travels for the log");
+        assert_eq!(order.action, PluginAction::Reorder);
+        let _ = order.ack.send(true);
+        assert_eq!(route.await.unwrap().status(), StatusCode::NO_CONTENT);
+    }
+
+    /// A `delta` the arrow cannot produce is refused, and refused **by the
+    /// route** — which is a different claim from "the file editor would have
+    /// refused it anyway", and it needs a fixture that can tell the two apart.
+    ///
+    /// Measured rather than assumed: with the two-entry fixture the other
+    /// tests use, every value below is out of range, so `move_entry` refuses
+    /// them all and the guard could be deleted with nothing going red. Hence
+    /// five entries and the **middle** one: `0`, `+2` and `-2` are all moves
+    /// the editor would happily make, so the only thing that can refuse them
+    /// is the guard — and the three fail different halves of it (`delta == 0`
+    /// lets ±2 through, `delta.abs() > 1` lets `0` through).
+    ///
+    /// The drain task is what keeps a surviving mutant a **failure** rather
+    /// than a hang: a delta that got past the guard would send an order and
+    /// then wait for an acknowledgment nobody was there to give.
+    #[tokio::test]
+    async fn a_delta_other_than_one_step_is_refused_without_writing_or_asking_the_core() {
+        for delta in [0, 2, -2] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("plugins.toml");
+            std::fs::write(
+                &path,
+                "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
+                 [[plugin]]\nname = \"cd\"\nexec = \"/bin/true\"\n\n\
+                 [[plugin]]\nname = \"files\"\nexec = \"/bin/true\"\n\n\
+                 [[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\n\n\
+                 [[plugin]]\nname = \"musicbrainz\"\nexec = \"/bin/true\"\n",
+            )
+            .unwrap();
+            let before = std::fs::read_to_string(&path).unwrap();
+            let (state, mut rx) = test_state_with_manifest(&path);
+
+            let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = asked.clone();
+            let drain = tokio::spawn(async move {
+                while let Some(order) = rx.recv().await {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = order.ack.send(false);
+                }
+            });
+
+            let app = router(state);
+            let resp = app
+                .oneshot(
+                    Request::post("/api/plugins/files/move")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"delta":{delta}}}"#)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            drain.await.unwrap();
+
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "delta {delta}");
+            assert!(
+                !asked.load(std::sync::atomic::Ordering::SeqCst),
+                "delta {delta}: the core must not be asked for a move the page cannot make"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                before,
+                "delta {delta}: nothing was written"
+            );
+        }
+    }
+
+    /// The end of the list: `move_entry` refuses rather than clamping, and the
+    /// route passes that refusal on instead of answering "done" to a move that
+    /// did not happen — which is what lets the table disable the arrow
+    /// honestly.
+    #[tokio::test]
+    async fn moving_the_first_plugin_up_is_refused_and_leaves_the_file_byte_for_byte() {
+        let (state, dir, mut rx) = app_state_with_plugins();
+        let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::post("/api/plugins/radio/move")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"delta":-1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(rx.try_recv().is_err(), "nothing moved: the core has nothing to re-sequence");
+        assert_eq!(std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(), before);
+    }
+
+    /// The same doctrine as its two neighbours: a name the file does not
+    /// declare is refused before any write, and the core is never asked.
+    #[tokio::test]
+    async fn moving_an_undeclared_name_is_refused_without_writing_or_asking_the_core() {
+        let (state, dir, mut rx) = app_state_with_plugins();
+        let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::post("/api/plugins/never-seen/move")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"delta":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(), before);
+    }
+
+    /// A core that refuses — the only cause being a manifest it could not
+    /// re-read — is reported, not swallowed. The file keeps the move: it is
+    /// the authority, and the next start puts the two back into step.
+    #[tokio::test]
+    async fn a_core_refusal_after_a_move_is_reported_with_a_catalog_message() {
+        let (state, dir, mut rx) = app_state_with_plugins();
+        let app = router(state);
+        let core = tokio::spawn(async move {
+            let order = rx.recv().await.unwrap();
+            let _ = order.ack.send(false);
+        });
+
+        let resp = app
+            .oneshot(
+                Request::post("/api/plugins/cd/move")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"delta":-1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        core.await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let catalog =
+            Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        assert_eq!(v["error"], catalog.get("plugin_action_failed").replace("{name}", "cd"));
+        assert_eq!(order_in(&dir), vec!["cd".to_string(), "radio".to_string()]);
     }
 
     #[tokio::test]

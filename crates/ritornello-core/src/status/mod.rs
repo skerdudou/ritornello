@@ -24,7 +24,7 @@ use locales::{i18n_json, locale_json, locale_put};
 // here, next to `/api/locale` which they already gate — `admin_i18n` reuses
 // both rather than inventing a second grammar.
 pub(crate) use locales::{list_locales, valid_locale};
-use plugin_status::{plugin_delete, plugin_enabled_put};
+use plugin_status::{plugin_delete, plugin_enabled_put, plugin_move_post};
 pub use plugin_status::{
     mark_plugin_disconnected, replace_plugin_lines, resequence_plugin_lines, PluginAction,
     PluginOrder, PluginStatus, PluginsControl,
@@ -153,6 +153,7 @@ pub fn router(state: AppState) -> Router {
         .route("/plugins/{name}/api/i18n", get(crate::admin::admin_i18n))
         .route("/plugins/{name}/{file}", get(crate::admin::admin_asset))
         .route("/api/plugins/{name}/enabled", axum::routing::put(plugin_enabled_put))
+        .route("/api/plugins/{name}/move", axum::routing::post(plugin_move_post))
         .route("/api/plugins/{name}", axum::routing::delete(plugin_delete))
         .merge(crate::web::routes())
         .fallback(crate::web::shell)
