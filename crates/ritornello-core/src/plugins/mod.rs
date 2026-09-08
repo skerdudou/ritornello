@@ -106,7 +106,11 @@ pub fn set_enabled(path: &Path, name: &str, enabled: bool) -> Result<()> {
 ///
 /// A `plugins.toml` truncated by a power cut — a device one unplugs — would
 /// let nothing launch at the next startup.
-fn write_atomic(path: &Path, content: &str) -> Result<()> {
+///
+/// `pub(crate)`: `status::plugin_status::plugin_delete` reuses it to persist
+/// `edit::remove_entry`'s output, the same way this module's own
+/// `set_enabled` already does.
+pub(crate) fn write_atomic(path: &Path, content: &str) -> Result<()> {
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
     if let Err(e) = std::fs::rename(&tmp, path) {
@@ -137,6 +141,48 @@ fn duplicate_names(plugins: &[PluginConfig]) -> Vec<String> {
         }
     }
     duplicates
+}
+
+/// Entries of `plugins_dir` that `manifest` does not declare — a binary on
+/// disk with nothing declaring it. The twin of `missing_binary` (a
+/// declaration with no binary behind it): this is what a hand-dropped binary
+/// leaves, or what an uninstall leaves between its two halves — the
+/// declaration is already gone from `plugins.toml`, and the privileged unit
+/// has not yet erased the file (see `Availability::Undeclared`'s doc).
+///
+/// **One scan, shared by both readers that need it** — `update::Worker::installed`
+/// (which turns a name here into an `Installed` row so `/api/update` can
+/// report `Availability::Undeclared`) and `status::status_json` (which turns
+/// one into a `PluginStatus` line so `/api/status` can set
+/// `PluginStatus::undeclared_binary`) — precisely so the two payloads answer
+/// the same question about the same directory rather than risking two
+/// answers.
+///
+/// Compares **paths**, not bare file names: a declared `exec` is already a
+/// full path (`plugins.toml`'s own convention), and `std::fs::read_dir`'s
+/// entries carry `plugins_dir` joined onto their name already — so building
+/// the same join for the comparison is what keeps this immune to a plugin
+/// declared through a relative `exec` or a symlinked plugins directory
+/// disagreeing with itself.
+///
+/// A `plugins_dir` that cannot be read (not created yet — a device with no
+/// plugin installed at all, though `plugins.toml` itself always ships one) is
+/// silently empty rather than an error: nothing here is a fault, only a
+/// question with no directory to answer it from.
+pub fn undeclared_binaries(plugins_dir: &Path, manifest: &PluginManifest) -> Vec<String> {
+    let declared: std::collections::HashSet<PathBuf> =
+        manifest.plugins.iter().map(|p| PathBuf::from(&p.exec)).collect();
+    let Ok(entries) = std::fs::read_dir(plugins_dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .filter(|entry| !declared.contains(&entry.path()))
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .collect();
+    out.sort();
+    out
 }
 
 /// Wipes and recreates `{runtime_dir}/sockets`, and returns its path.
@@ -496,6 +542,80 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
         let status = terminate(&mut child, SHUTDOWN_GRACE).await.unwrap();
         // Terminated by signal: no zero exit code.
         assert!(!status.success(), "the process should have been terminated: {status:?}");
+    }
+
+    /// The first of the three cases RULING 63 asks for: a binary the
+    /// manifest does not mention is reported.
+    #[test]
+    fn a_binary_present_and_undeclared_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("radio"), b"").unwrap();
+        std::fs::write(dir.path().join("extra"), b"").unwrap();
+        let manifest = PluginManifest {
+            plugins: vec![PluginConfig {
+                name: "radio".into(),
+                exec: dir.path().join("radio").to_string_lossy().into_owned(),
+                enabled: true,
+            }],
+        };
+        assert_eq!(undeclared_binaries(dir.path(), &manifest), vec!["extra".to_string()]);
+    }
+
+    /// The second case: a binary the manifest **does** declare, by its exact
+    /// `exec` path, must not come back as one of the extras — this is the
+    /// same fixture as above, and it is `radio`'s absence from the result
+    /// (asserted together with `extra`'s presence) that proves it.
+    #[test]
+    fn a_binary_present_and_declared_is_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("radio"), b"").unwrap();
+        let manifest = PluginManifest {
+            plugins: vec![PluginConfig {
+                name: "radio".into(),
+                exec: dir.path().join("radio").to_string_lossy().into_owned(),
+                enabled: true,
+            }],
+        };
+        assert!(undeclared_binaries(dir.path(), &manifest).is_empty());
+    }
+
+    /// The third case, and the one a careless implementation gets wrong: a
+    /// declaration whose binary is **absent** must not be reported here
+    /// either — that is `missing_binary`'s question, not this one, and the
+    /// two must never both fire for the same plugin. `read_dir` never
+    /// produces an entry for a file that does not exist, so a scan of a
+    /// directory that genuinely lacks it answers empty on its own — this
+    /// pins that rather than assuming it.
+    #[test]
+    fn a_declared_plugin_with_no_binary_is_reported_by_neither() {
+        let dir = tempfile::tempdir().unwrap();
+        // The directory exists, but `mpd`'s binary was never placed in it.
+        let manifest = PluginManifest {
+            plugins: vec![PluginConfig {
+                name: "mpd".into(),
+                exec: dir.path().join("mpd").to_string_lossy().into_owned(),
+                enabled: true,
+            }],
+        };
+        assert!(undeclared_binaries(dir.path(), &manifest).is_empty());
+    }
+
+    /// A subdirectory is not a binary: without this filter, a plugin that
+    /// keeps a data directory beside its `exec` (or the `staging` directory
+    /// itself, if it ever lived under the plugins directory) would be
+    /// reported as an orphaned binary.
+    #[test]
+    fn a_subdirectory_is_never_reported_as_an_undeclared_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("some-data-dir")).unwrap();
+        assert!(undeclared_binaries(dir.path(), &PluginManifest::default()).is_empty());
+    }
+
+    #[test]
+    fn a_plugins_directory_that_does_not_exist_yet_is_reported_as_empty_not_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not-there-yet");
+        assert!(undeclared_binaries(&missing, &PluginManifest::default()).is_empty());
     }
 
     #[tokio::test]

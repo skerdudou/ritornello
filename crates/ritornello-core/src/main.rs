@@ -449,11 +449,10 @@ fn read_core_archive_notes(staging: &Path) -> Option<Vec<String>> {
 
 /// The acknowledgment for a `PluginAction` with no wiring behind it yet.
 ///
-/// `false` uniformly across the two that remain — `Undeclare` and `Reorder` —
-/// because neither is implemented, so "an acknowledgment must describe a true
-/// state" — the doctrine the `select!` arm already holds for `Enable`,
-/// `Disable`, `Restart` and now `Declare` — applies identically to both, and
-/// there is no basis to special-case one over the other.
+/// `false` for the one that remains — `Reorder` — because it is not
+/// implemented, so "an acknowledgment must describe a true state" — the
+/// doctrine the `select!` arm already holds for `Enable`, `Disable`,
+/// `Restart`, `Declare` and now `Undeclare` — applies to it too.
 ///
 /// Extracted so a test can pin this refusal directly: the `select!` arm that
 /// calls it lives inside `async fn main()`, which nothing outside `main` can
@@ -463,13 +462,14 @@ fn read_core_archive_notes(staging: &Path) -> Option<Vec<String>> {
 /// this function is a test of what the arm actually acknowledges, provided
 /// that delegation stays exactly this thin.
 ///
-/// **`Enable`, `Disable`, `Restart` and `Declare` are deliberately absent
-/// from this function's job**: they are wired. For the first two, their bodies
-/// must stay byte-identical to what they were before `PluginAction` existed;
-/// `Restart` joined them when the update worker gained a plugin to replace,
-/// and `Declare` when it gained a plugin to install. Panicking here for them
+/// **`Enable`, `Disable`, `Restart`, `Declare` and `Undeclare` are
+/// deliberately absent from this function's job**: they are wired. For the
+/// first two, their bodies must stay byte-identical to what they were before
+/// `PluginAction` existed; `Restart` joined them when the update worker
+/// gained a plugin to replace, `Declare` when it gained a plugin to install,
+/// and `Undeclare` when it gained a plugin to remove. Panicking here for them
 /// is a canary, not a feature: this function must never be reached for any of
-/// the four.
+/// the five.
 ///
 /// Match written **without a wildcard**, one arm per unwired variant, so that
 /// wiring one of them is a visible, local edit here — delete its arm
@@ -487,10 +487,10 @@ fn plugin_action_refusal(action: PluginAction) -> bool {
         PluginAction::Enable
         | PluginAction::Disable
         | PluginAction::Restart
-        | PluginAction::Declare => {
+        | PluginAction::Declare
+        | PluginAction::Undeclare => {
             unreachable!("{action:?} is wired: it never reaches the placeholder refusal")
         }
-        PluginAction::Undeclare => false,
         PluginAction::Reorder => false,
     }
 }
@@ -1376,6 +1376,65 @@ async fn declare_plugin<P: player::Player>(
     }
 }
 
+/// A plugin's declaration has just been removed: the exact mirror of
+/// `declare_plugin`, run in reverse.
+///
+/// Called with `manifest` still naming this plugin: `plugin_delete` sends
+/// this order **before** it edits `plugins.toml` (see that route's doc for
+/// why stopping first is what keeps the status line honest), so the fresh
+/// read below changes nothing for `name` itself and everything for anyone
+/// whose priority drifted from a hand edit since startup — exactly as
+/// `declare_plugin`'s own three recomputations are inert for the plugin they
+/// are about and active for everyone else.
+///
+/// Two things beyond what `hot_unplug` (called first) already does, and the
+/// first is the one `Disable` deliberately leaves undone: `execs` is cleared,
+/// so a stale entry cannot make this plugin relaunchable with no binary
+/// behind it — `relaunch` would otherwise fail with a message accusing the
+/// binary instead of saying there is none — and `generations` with it, for
+/// the same reason nothing should remember a plugin that no longer exists.
+/// Second, the plugin's line is **removed outright**, not left as `disabled`:
+/// `disabled` promises a switch that turns it back on, and this plugin no
+/// longer has one.
+#[allow(clippy::too_many_arguments)]
+async fn undeclare_plugin<P: player::Player>(
+    name: &str,
+    manifest: &Path,
+    children: &mut HotPlugChildren,
+    core: &mut core::Core<P>,
+    gathered: &mut register::Gathered,
+    execs: &mut HashMap<String, String>,
+    generations: &mut HashMap<String, u64>,
+    kill_triggers: &mut HashMap<String, tokio::sync::oneshot::Sender<()>>,
+    non_supervised: &HashSet<String>,
+) -> bool {
+    let stopped =
+        hot_unplug(name, children, core, gathered, kill_triggers, non_supervised).await;
+    if !stopped {
+        return false;
+    }
+    execs.remove(name);
+    generations.remove(name);
+
+    if let Ok(m) = plugins::PluginManifest::load(manifest) {
+        let order: Vec<String> = m.plugins.iter().map(|p| p.name.clone()).collect();
+        children.manifest_order = order.clone();
+        core.set_source_order(order.clone());
+        core.set_metadata_order(register::metadata_order(&order, gathered));
+        let mut statuses = children.status_state.write().await;
+        status::resequence_plugin_lines(&mut statuses, &order);
+    } else {
+        tracing::warn!(
+            "undeclaring {name}: reading {} to re-sequence the others: keeping the order as it stood",
+            manifest.display()
+        );
+    }
+
+    let mut statuses = children.status_state.write().await;
+    statuses.plugins.retain(|p| p.name != name);
+    true
+}
+
 /// True for a frame the core accepts to write to the log.
 ///
 /// **It filters out only one thing: `lofty`'s chatter below error level.**
@@ -2067,6 +2126,10 @@ async fn main() -> Result<()> {
             plugins: Arc::new(status::PluginsControl {
                 manifest: plugins_path.clone(),
                 tx: plugin_order_tx,
+                // Same root as the `Worker` built above (`PathBuf::from("/")`
+                // in service): both must scan the one real plugins directory,
+                // never two paths that could disagree.
+                plugins_dir: ritornello_updater::target::plugins_dir(&PathBuf::from("/")),
             }),
             update: update_state.clone(),
             update_tx,
@@ -2633,11 +2696,28 @@ async fn main() -> Result<()> {
                         }
                         declared.ok
                     }
-                    // Wired in Tasks 15-16. Refusing until then rather than
+                    // Its declaration has just been removed: stop it and
+                    // unwire everything it served. See `undeclare_plugin` for
+                    // the two things this does beyond `Disable`.
+                    PluginAction::Undeclare => {
+                        undeclare_plugin(
+                            &order.name,
+                            &plugins_path,
+                            &mut hot_children,
+                            &mut core,
+                            &mut gathered,
+                            &mut execs,
+                            &mut generations,
+                            &mut kill_triggers,
+                            &non_supervised,
+                        )
+                        .await
+                    }
+                    // Wired in Task 16. Refusing until then rather than
                     // silently succeeding: an acknowledgment must describe a
                     // true state, which is the doctrine this arm already
                     // holds.
-                    PluginAction::Undeclare | PluginAction::Reorder => {
+                    PluginAction::Reorder => {
                         tracing::warn!("plugin action {:?} is not wired yet", order.action);
                         plugin_action_refusal(order.action)
                     }
@@ -3234,11 +3314,6 @@ mod toggle_tests {
     /// matching arm in `plugin_action_refusal` — see that function's doc for
     /// why nothing but this naming and its proximity to the arm forces that.
     #[test]
-    fn undeclare_refuses_until_task_15_wires_it() {
-        assert!(!plugin_action_refusal(PluginAction::Undeclare));
-    }
-
-    #[test]
     fn reorder_refuses_until_task_16_wires_it() {
         assert!(!plugin_action_refusal(PluginAction::Reorder));
     }
@@ -3593,6 +3668,191 @@ mod toggle_tests {
         assert!(!declared.ok);
         assert!(declared.launched.is_none());
         assert!(execs.is_empty(), "no exec for a name the manifest does not declare");
+    }
+
+    /// `undeclare_plugin`'s own correctness, called directly: the two things
+    /// beyond `hot_unplug` that `Disable` deliberately does not do.
+    ///
+    /// Unlike the brief's own named test (in `status::plugin_status`, which
+    /// drives this from the HTTP event and refuses to look at `execs`
+    /// directly), this one is a unit test of the function itself — the same
+    /// shape `declare_plugin`'s own tests already use for `execs`.
+    #[tokio::test]
+    async fn undeclare_plugin_clears_execs_and_generations_and_drops_the_line() {
+        let mut b = bench();
+        // `mpd` is running and supervised — `bench()`'s own setup.
+        let manifest = b._dir.path().join("plugins.toml");
+        std::fs::write(&manifest, "[[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\n").unwrap();
+        let mut execs: HashMap<String, String> =
+            HashMap::from([("mpd".to_string(), "/bin/true".to_string())]);
+        let mut generations: HashMap<String, u64> = HashMap::from([("mpd".to_string(), 3)]);
+        let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel();
+        b.kill_triggers.insert("mpd".to_string(), kill_tx);
+
+        let ok = undeclare_plugin(
+            "mpd",
+            &manifest,
+            &mut b.children,
+            &mut b.core,
+            &mut b.gathered,
+            &mut execs,
+            &mut generations,
+            &mut b.kill_triggers,
+            &b.non_supervised,
+        )
+        .await;
+
+        assert!(ok, "stopping a supervised plugin must succeed");
+        assert!(!execs.contains_key("mpd"), "the cleanup `Disable` does not do");
+        assert!(!generations.contains_key("mpd"), "same cleanup, same reason");
+        let statuses = b.children.status_state.read().await;
+        assert!(
+            !statuses.plugins.iter().any(|p| p.name == "mpd"),
+            "gone, not merely `disabled`: nothing left to switch back on"
+        );
+    }
+
+    /// `hot_unplug`'s own refusal — a process alive outside the core's
+    /// control — must propagate: erasing the declaration of a plugin that
+    /// cannot be stopped would orphan a running process with nothing left
+    /// describing it.
+    #[tokio::test]
+    async fn undeclare_plugin_refuses_when_hot_unplug_does() {
+        let mut b = bench();
+        b.non_supervised.insert("mpd".to_string());
+        let manifest = b._dir.path().join("plugins.toml");
+        std::fs::write(&manifest, "[[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\n").unwrap();
+        let mut execs: HashMap<String, String> =
+            HashMap::from([("mpd".to_string(), "/bin/true".to_string())]);
+
+        let ok = undeclare_plugin(
+            "mpd",
+            &manifest,
+            &mut b.children,
+            &mut b.core,
+            &mut b.gathered,
+            &mut execs,
+            &mut HashMap::new(),
+            &mut b.kill_triggers,
+            &b.non_supervised,
+        )
+        .await;
+
+        assert!(!ok, "a process the core cannot stop must refuse the whole gesture");
+        assert_eq!(
+            execs.get("mpd").map(String::as_str),
+            Some("/bin/true"),
+            "nothing about a refused gesture is cleaned up"
+        );
+        let statuses = b.children.status_state.read().await;
+        assert!(
+            statuses.plugins.iter().any(|p| p.name == "mpd"),
+            "the line must survive a refusal exactly as `hot_unplug`'s own does"
+        );
+    }
+
+    /// The mirror of `a_declaration_re_sequences_what_the_file_reordered_meanwhile`,
+    /// for the opposite gesture: `undeclare_plugin` is called while the file
+    /// still names the plugin leaving (`plugin_delete` sends this order
+    /// *before* removing its block), so this re-sequencing pass is inert for
+    /// `mpd` itself and everything for `radio`/`cd`/`musicbrainz`/`ouifm-metas`,
+    /// whose file order an operator swapped by hand meanwhile.
+    ///
+    /// Three observables, one per call: the **published** source catalog
+    /// (not the core's own vector), the metadata arbitration order, and the
+    /// status page — each pinned against the file's current order rather than
+    /// the one `bench()` set up.
+    #[tokio::test]
+    async fn undeclaring_one_plugin_re_sequences_what_the_file_reordered_meanwhile() {
+        let mut b = bench();
+        b.children.manifest_order = vec![
+            "radio".to_string(),
+            "cd".to_string(),
+            "musicbrainz".to_string(),
+            "ouifm-metas".to_string(),
+            "mpd".to_string(),
+        ];
+        b.gathered.announcements.clear();
+        for (name, kind) in [
+            ("radio", PluginKind::Source),
+            ("cd", PluginKind::Source),
+            ("musicbrainz", PluginKind::Metadata),
+            ("ouifm-metas", PluginKind::Metadata),
+            ("mpd", PluginKind::Display),
+        ] {
+            b.gathered.announcements.insert(name.to_string(), announcing(name, kind));
+        }
+        b.core.add_source("radio".to_string(), Arc::new(SilentSource));
+        b.core.add_source("cd".to_string(), Arc::new(SilentSource));
+        b.core.set_source_order(b.children.manifest_order.clone());
+        b.core
+            .set_metadata_order(register::metadata_order(&b.children.manifest_order, &b.gathered));
+        *b.children.status_state.write().await = statuses_of(vec![
+            PluginStatus::kind("radio", "source", true, false),
+            PluginStatus::kind("cd", "source", true, false),
+            PluginStatus::kind("musicbrainz", "metadata", true, false),
+            PluginStatus::kind("ouifm-metas", "metadata", true, false),
+            PluginStatus::kind("mpd", "display", true, true),
+        ]);
+
+        // The operator swapped both pairs by hand, and is now uninstalling
+        // `mpd` — the file still names it at this instant.
+        let manifest = b._dir.path().join("plugins.toml");
+        std::fs::write(
+            &manifest,
+            "[[plugin]]\nname = \"cd\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"ouifm-metas\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"musicbrainz\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\n",
+        )
+        .unwrap();
+
+        let ok = undeclare_plugin(
+            "mpd",
+            &manifest,
+            &mut b.children,
+            &mut b.core,
+            &mut b.gathered,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut b.kill_triggers,
+            &b.non_supervised,
+        )
+        .await;
+        assert!(ok);
+
+        let published: Vec<String> =
+            b.children.catalog_rx.borrow().sources.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(
+            published,
+            vec!["cd".to_string(), "radio".to_string()],
+            "the source cycle must follow the file's current order"
+        );
+        assert_eq!(
+            b.core.metadata_order(),
+            ["ouifm-metas".to_string(), "musicbrainz".to_string()],
+            "arbitration priority is the file's order, re-read and not remembered"
+        );
+        let names: Vec<String> = b
+            .children
+            .status_state
+            .read()
+            .await
+            .plugins
+            .iter()
+            .map(|l| l.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "cd".to_string(),
+                "radio".to_string(),
+                "ouifm-metas".to_string(),
+                "musicbrainz".to_string(),
+            ],
+            "the page follows the file too, and `mpd`'s own line is gone, not merely disabled"
+        );
     }
 
     /// The positive half of the classification: a spawn that failed because

@@ -35,6 +35,7 @@ use crate::update::state::{
 };
 use ritornello_i18n::Catalog;
 use ritornello_updater::request::{Action, Request, REQUEST_FORMAT};
+use ritornello_updater::target::plugins_dir;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -98,6 +99,24 @@ pub enum Job {
         /// `UpdatePolicy::CheckAndInstall`, decided by the ticker that has the
         /// settings in hand rather than read again here.
         install: bool,
+    },
+    /// The slow half of an uninstall (see `status::plugin_status::plugin_delete`):
+    /// the declaration is already gone from `plugins.toml` and the core has
+    /// already stopped the plugin, and what is left is asking the privileged
+    /// unit to erase `file` from the plugins directory.
+    ///
+    /// Queued rather than run on the request thread for the reason every
+    /// other privileged call already is: `run_privileged_unit` can take up to
+    /// `PRIVILEGED_TIMEOUT`, and going through this same queue is what keeps
+    /// it from racing an install over the staging directory.
+    RemovePlugin {
+        /// For the log only.
+        name: String,
+        /// The bare file name in the plugins directory — not necessarily
+        /// equal to `name`, and the manifest can no longer answer this
+        /// question once the declaration is gone, which is why the caller
+        /// carries it here rather than this job re-reading it.
+        file: String,
     },
 }
 
@@ -680,9 +699,15 @@ impl Worker {
 
     /// What the core knows about its plugins, before the release is consulted.
     ///
-    /// Two sources, and neither alone is enough: `plugins.toml` says what is
-    /// declared and where its binary should be, and the status lines say what
-    /// each plugin announced about itself.
+    /// **Three** sources, and neither of the first two alone is enough:
+    /// `plugins.toml` says what is declared and where its binary should be,
+    /// the status lines say what each plugin announced about itself, and a
+    /// scan of the plugins directory (`plugins::undeclared_binaries`) is what
+    /// makes `Availability::Undeclared` reachable at all — a binary sitting
+    /// there with nothing declaring it appears in neither of the first two.
+    /// The same scan feeds `PluginStatus::undeclared_binary` on `/api/status`
+    /// (see `status::status_json`), so the two payloads read one fact rather
+    /// than risking two (RULING 63).
     ///
     /// Read through `installed_when_settled`, never directly: a line that has
     /// not settled carries a `None` version that means "wait", not "unknown".
@@ -699,7 +724,7 @@ impl Worker {
             }
         };
         let statuses = self.status.read().await;
-        manifest
+        let mut out: Vec<Installed> = manifest
             .plugins
             .iter()
             .map(|p| {
@@ -714,7 +739,18 @@ impl Worker {
                     third_party_repo: None,
                 }
             })
-            .collect()
+            .collect();
+        let dir = plugins_dir(&self.root);
+        for name in crate::plugins::undeclared_binaries(&dir, &manifest) {
+            out.push(Installed {
+                name,
+                declared: false,
+                binary_present: true,
+                version: None,
+                third_party_repo: None,
+            });
+        }
+        out
     }
 
     /// The check. Two small requests — the release list and nothing else — and
@@ -1307,6 +1343,44 @@ impl Worker {
             ),
         }
     }
+
+    /// The slow half of an uninstall (see `Job::RemovePlugin`'s doc): the
+    /// core already stopped `name` and its `plugins.toml` block is already
+    /// gone, so all that is left is asking the privileged unit to erase
+    /// `file` from the plugins directory.
+    ///
+    /// Does not touch `busy`: that field is the update card's, and an
+    /// uninstall is a plugin-management gesture, not an update — the two
+    /// only share this queue because both ultimately reach the same
+    /// privileged unit and the same staging directory, which must not be
+    /// touched by two of them at once.
+    async fn remove_plugin_binary(&self, name: &str, file: &str) {
+        let request =
+            Request { format: REQUEST_FORMAT, actions: vec![Action::RemovePlugin { file: file.to_string() }] };
+        if let Err(e) = std::fs::create_dir_all(&self.staging) {
+            tracing::warn!("update: uninstalling {name}: creating {}: {e}", self.staging.display());
+            return;
+        }
+        let request_path = self.staging.join("request.json");
+        let text = match serde_json::to_string(&request) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("update: uninstalling {name}: encoding the request: {e}");
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(&request_path, text) {
+            tracing::warn!(
+                "update: uninstalling {name}: writing {}: {e}",
+                request_path.display()
+            );
+            return;
+        }
+        match run_privileged_unit().await {
+            Ok(()) => tracing::info!("update: {name}'s binary removed"),
+            Err(detail) => tracing::warn!("update: uninstalling {name}: the privileged unit failed: {detail}"),
+        }
+    }
 }
 
 /// Seconds since the epoch, or zero.
@@ -1363,6 +1437,9 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
                         worker.install(&client, &published, &names).await;
                     }
                 }
+            }
+            Job::RemovePlugin { name, file } => {
+                worker.remove_plugin_binary(&name, &file).await;
             }
         }
         worker.set_busy(None).await;
@@ -1878,6 +1955,31 @@ mod tests {
             Some("0.3.0"),
             "the run read the line while the plugin was still reported stalled"
         );
+    }
+
+    /// RULING 51: `Availability::Undeclared` needs a producer, and this is
+    /// it — a binary sitting in the real plugins directory (the same path
+    /// `ritornello_updater::target::plugins_dir` computes, not the bare root
+    /// `worker_rig`'s declared plugin uses) that nothing declares becomes an
+    /// `Installed` row with `declared: false, binary_present: true`,
+    /// alongside — not instead of — the declared plugin's own row.
+    #[tokio::test]
+    async fn a_binary_with_no_declaration_is_reported_as_installed_but_undeclared() {
+        let status = one_line(PluginStatus::kind("radio", "source", true, false));
+        let (worker, dir) = worker_rig(status);
+        let plugins_dir = ritornello_updater::target::plugins_dir(dir.path());
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(plugins_dir.join("ritornello-plugin-orphan"), b"").unwrap();
+
+        let installed = worker.installed_when_settled().await;
+
+        assert!(installed.iter().any(|i| i.name == "radio"), "the declared plugin must still be there");
+        let orphan = installed
+            .iter()
+            .find(|i| i.name == "ritornello-plugin-orphan")
+            .expect("the undeclared binary must be reported");
+        assert!(!orphan.declared);
+        assert!(orphan.binary_present);
     }
 
     fn radio_published(version: &str) -> Vec<Published> {

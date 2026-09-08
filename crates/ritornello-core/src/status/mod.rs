@@ -24,7 +24,7 @@ use locales::{i18n_json, locale_json, locale_put};
 // here, next to `/api/locale` which they already gate — `admin_i18n` reuses
 // both rather than inventing a second grammar.
 pub(crate) use locales::{list_locales, valid_locale};
-use plugin_status::plugin_enabled_put;
+use plugin_status::{plugin_delete, plugin_enabled_put};
 pub use plugin_status::{
     mark_plugin_disconnected, replace_plugin_lines, resequence_plugin_lines, PluginAction,
     PluginOrder, PluginStatus, PluginsControl,
@@ -153,6 +153,7 @@ pub fn router(state: AppState) -> Router {
         .route("/plugins/{name}/api/i18n", get(crate::admin::admin_i18n))
         .route("/plugins/{name}/{file}", get(crate::admin::admin_asset))
         .route("/api/plugins/{name}/enabled", axum::routing::put(plugin_enabled_put))
+        .route("/api/plugins/{name}", axum::routing::delete(plugin_delete))
         .merge(crate::web::routes())
         .fallback(crate::web::shell)
         .with_state(state)
@@ -198,6 +199,28 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
         futures::future::join_all(probes).await.into_iter().collect();
     for p in status.plugins.iter_mut() {
         p.busy = verdicts.get(&p.name).copied().unwrap_or(false);
+    }
+    // Read fresh, like the manifest itself: a binary dropped in — or an
+    // uninstall's binary erasure, still pending behind the update worker's
+    // queue — must be seen without a restart. The same scan feeds
+    // `Availability::Undeclared` on `/api/update` (`update::Worker::installed`),
+    // so the two payloads can never disagree about this fact (RULING 63).
+    let manifest = crate::plugins::PluginManifest::load(&state.plugins.manifest).unwrap_or_else(|e| {
+        tracing::warn!(
+            "reading {} for the undeclared-binary scan: {e:#}",
+            state.plugins.manifest.display()
+        );
+        crate::plugins::PluginManifest::default()
+    });
+    for name in crate::plugins::undeclared_binaries(&state.plugins.plugins_dir, &manifest) {
+        match status.plugins.iter_mut().find(|p| p.name == name) {
+            // Alive and out of the core's control (the `OutOfReach` case
+            // `declare_plugin`'s doc names): it already has a real line from
+            // its own announcement, which is decorated rather than
+            // duplicated.
+            Some(line) => line.undeclared_binary = true,
+            None => status.plugins.push(PluginStatus::undeclared_binary(&name)),
+        }
     }
     // Clamped to the installed set, falling back to `en`: `locale_current` can
     // carry a language `valid_locale` accepts but `admin_i18n` refuses (a pack
@@ -430,6 +453,7 @@ pub(crate) mod tests_support {
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
+                plugins_dir: std::path::PathBuf::from("/nonexistent"),
             }),
             update: Arc::new(tokio::sync::RwLock::new(
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
@@ -472,6 +496,7 @@ pub(crate) mod tests_support {
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
+                plugins_dir: std::path::PathBuf::from("/nonexistent"),
             }),
             update: Arc::new(tokio::sync::RwLock::new(
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
@@ -516,6 +541,7 @@ pub(crate) mod tests_support {
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
+                plugins_dir: std::path::PathBuf::from("/nonexistent"),
             }),
             update: Arc::new(tokio::sync::RwLock::new(
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
@@ -568,6 +594,7 @@ pub(crate) mod tests_support {
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
+                plugins_dir: std::path::PathBuf::from("/nonexistent"),
             }),
             update: Arc::new(tokio::sync::RwLock::new(
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
@@ -937,6 +964,76 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["plugins"][0]["ui_version"], "cafe");
         assert!(v["plugins"][1].get("ui_version").is_none(), "{}", v["plugins"][1]);
+    }
+
+    /// The first of the three cases RULING 63 asks for, exercised through the
+    /// actual route rather than the pure scan alone (that one is pinned in
+    /// `plugins::undeclared_binaries`'s own tests): a binary on disk that
+    /// nothing declares gets a synthetic line, since a plugin nothing
+    /// launches has no other way onto the page.
+    #[tokio::test]
+    async fn an_undeclared_binary_gets_a_synthetic_line_on_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("plugins.toml");
+        std::fs::write(&manifest, "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n").unwrap();
+        let plugins_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(plugins_dir.join("ritornello-plugin-orphan"), b"").unwrap();
+        let state = AppState {
+            plugins: Arc::new(PluginsControl {
+                manifest,
+                tx: tokio::sync::mpsc::channel(1).0,
+                plugins_dir,
+            }),
+            ..app_state()
+        };
+        let app = router(state);
+        let resp =
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let line = v["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "ritornello-plugin-orphan")
+            .expect("a synthetic line for the undeclared binary");
+        assert_eq!(line["undeclared_binary"], true);
+    }
+
+    /// The second case: a declared plugin's own binary, present at its
+    /// declared `exec`, must never be flagged — only the default sample's own
+    /// two lines are on the page, nothing extra.
+    #[tokio::test]
+    async fn a_declared_binary_is_never_flagged_as_undeclared() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        let exec = plugins_dir.join("radio-bin");
+        std::fs::write(&exec, b"").unwrap();
+        let manifest = dir.path().join("plugins.toml");
+        std::fs::write(
+            &manifest,
+            format!("[[plugin]]\nname = \"radio\"\nexec = {:?}\n", exec.to_string_lossy()),
+        )
+        .unwrap();
+        let state = AppState {
+            plugins: Arc::new(PluginsControl {
+                manifest,
+                tx: tokio::sync::mpsc::channel(1).0,
+                plugins_dir,
+            }),
+            ..app_state()
+        };
+        let app = router(state);
+        let resp =
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["plugins"].as_array().unwrap().len(), 2, "{v}");
+        for line in v["plugins"].as_array().unwrap() {
+            assert!(line.get("undeclared_binary").is_none(), "{line}");
+        }
     }
 
     #[tokio::test]

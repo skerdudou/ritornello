@@ -66,6 +66,22 @@ pub struct PluginStatus {
     /// false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub missing_binary: bool,
+    /// A binary sitting in the plugins directory that `plugins.toml` does not
+    /// declare — the twin of `missing_binary`: that one is a declaration with
+    /// no binary behind it, this is a binary with no declaration behind it.
+    /// What a hand-dropped binary leaves, or what an uninstall leaves between
+    /// its two halves (the declaration removed, the privileged unit not yet
+    /// run to erase the file).
+    ///
+    /// Computed at `/api/status` time from the same scan
+    /// (`plugins::undeclared_binaries`) that feeds `Availability::Undeclared`
+    /// on `/api/update`, so the two payloads cannot disagree about it — never
+    /// stored, for the same reason `busy` is computed fresh on every request
+    /// rather than kept in `StatusState`.
+    ///
+    /// Additive like `missing_binary`: absent from the JSON when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub undeclared_binary: bool,
     /// Reachable plugin whose admin page does not answer the `Ping`: a long
     /// `set_data` holds its lock (most often a network share). Computed at
     /// `/api/status` time, never stored: it is a state that changes by the
@@ -123,6 +139,7 @@ impl PluginStatus {
             starting: false,
             disabled: false,
             missing_binary: false,
+            undeclared_binary: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -145,6 +162,7 @@ impl PluginStatus {
             starting: false,
             disabled: false,
             missing_binary: false,
+            undeclared_binary: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -162,6 +180,17 @@ impl PluginStatus {
         Self { missing_binary: true, ..Self::unknown_kind(name, false) }
     }
 
+    /// Undeclared, and its binary is there. The twin of `binary_missing`; see
+    /// the field's documentation.
+    ///
+    /// Computed at `/api/status` time by `status_json`, from the same scan
+    /// that feeds `Availability::Undeclared` on `/api/update` — never called
+    /// from `main`'s startup loop, since nothing in `plugins.toml` names such
+    /// a plugin for the loop to have an opinion about.
+    pub fn undeclared_binary(name: &str) -> Self {
+        Self { undeclared_binary: true, ..Self::unknown_kind(name, false) }
+    }
+
     /// Line of a plugin that was just launched: it has not spoken, and that is
     /// normal.
     ///
@@ -177,6 +206,7 @@ impl PluginStatus {
             starting: true,
             disabled: false,
             missing_binary: false,
+            undeclared_binary: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -196,6 +226,7 @@ impl PluginStatus {
             starting: false,
             disabled: true,
             missing_binary: false,
+            undeclared_binary: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -218,6 +249,7 @@ impl PluginStatus {
             starting: false,
             disabled: false,
             missing_binary: false,
+            undeclared_binary: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -252,8 +284,11 @@ pub enum PluginAction {
     /// Its declaration has just been removed: stop it and unwire everything it
     /// served. The binary is erased by the privileged side, separately.
     ///
-    /// No caller yet: wired in Task 15.
-    #[allow(dead_code)]
+    /// Sent by `plugin_delete`, **before** it removes the block from
+    /// `plugins.toml` — the exact reverse of `Declare`'s ordering. Erasing the
+    /// binary of a process still running works under Linux but leaves a
+    /// status line that lies until the next restart, which is what stopping
+    /// first avoids.
     Undeclare,
     /// The file order changed. `name` is the plugin that moved, for the log
     /// only: the core re-reads the manifest and re-sequences everything.
@@ -290,6 +325,13 @@ pub struct PluginsControl {
     /// the choice is written.
     pub manifest: std::path::PathBuf,
     pub tx: mpsc::Sender<PluginOrder>,
+    /// `<prefix>/usr/local/lib/ritornello/plugins`: where binaries live.
+    /// Scanned by `status_json` for a binary the manifest does not declare
+    /// (see `plugins::undeclared_binaries`) — the same directory
+    /// `update::Worker` scans for the same fact on `/api/update`, both
+    /// derived from `ritornello_updater::target::plugins_dir` so the two
+    /// payloads read the same path.
+    pub plugins_dir: std::path::PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -347,6 +389,117 @@ pub(super) async fn plugin_enabled_put(
                 .into_response()
         }
     }
+}
+
+/// Uninstalls a plugin: the exact mirror of `plugin_enabled_put`'s doctrine —
+/// read the manifest to check the name is declared, refuse before any write —
+/// but the gesture that follows runs in the **reverse order of an install**.
+///
+/// 1. `PluginOrder { action: Undeclare }`, awaited: stop and unwire first.
+///    Erasing the binary of a process still running works under Linux, but
+///    leaves a status line that lies until the next restart — stopping first
+///    is what this avoids.
+/// 2. `plugins::edit::remove_entry`, then the same atomic write `set_enabled`
+///    already uses.
+/// 3. The binary itself is **not** erased here: `run_privileged_unit` can
+///    take up to two minutes, and no HTTP route in this product blocks (see
+///    `update::routes`, which backgrounds the same call for an install).
+///    Instead a `Job::RemovePlugin` is queued for the update worker, which
+///    already serialises every gesture that touches the staging directory
+///    and the privileged unit against every other one.
+///
+/// **The operator's data is never touched.** `stations.toml`,
+/// `input-bindings.toml`, `media-roots.toml` and the plugin's own
+/// configuration all stay, so reinstalling finds them again. Deleting them
+/// would be the one irreversible gesture in this whole feature, and nothing
+/// asked for it — the success message is the one place the operator learns
+/// it.
+pub(super) async fn plugin_delete(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    // Read rather than remembered, exactly as `plugin_enabled_put`: a plugin
+    // installed while the core was running must be reachable at once, and the
+    // file is the authority. The `exec` is kept, not just the boolean: once
+    // `remove_entry` has run below, this is the only place that still knows
+    // which file in the plugins directory belongs to this name.
+    let exec = match crate::plugins::PluginManifest::load(&state.plugins.manifest) {
+        Ok(m) => match m.plugins.iter().find(|p| p.name == name) {
+            Some(p) => p.exec.clone(),
+            None => {
+                let msg = state.catalog.read().await.get("plugin_unknown").replace("{name}", &name);
+                return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": msg })))
+                    .into_response();
+            }
+        },
+        Err(e) => {
+            tracing::warn!("reading {} to check {name}: {e:#}", state.plugins.manifest.display());
+            let msg = state.catalog.read().await.get("plugin_manifest_unreadable").to_string();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response();
+        }
+    };
+
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    let order = PluginOrder { name: name.clone(), action: PluginAction::Undeclare, ack: ack_tx };
+    if state.plugins.tx.send(order).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    match ack_rx.await {
+        Ok(true) => {}
+        // Most often `hot_unplug`'s own refusal: a process alive outside the
+        // core's control, which erasing the declaration would then orphan
+        // with no line describing it. Nothing was written.
+        _ => {
+            let msg = state.catalog.read().await.get("plugin_action_failed").replace("{name}", &name);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response();
+        }
+    }
+
+    let text = match std::fs::read_to_string(&state.plugins.manifest) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("reading {} to remove {name}: {e:#}", state.plugins.manifest.display());
+            let msg = state.catalog.read().await.get("plugin_manifest_unreadable").to_string();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response();
+        }
+    };
+    let updated = match crate::plugins::edit::remove_entry(&text, &name) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!("removing {name} from {}: {e}", state.plugins.manifest.display());
+            let msg = state.catalog.read().await.get("plugin_persist_failed").replace("{name}", &name);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response();
+        }
+    };
+    if let Err(e) = crate::plugins::write_atomic(&state.plugins.manifest, &updated) {
+        tracing::warn!("writing {}: {e:#}", state.plugins.manifest.display());
+        let msg = state.catalog.read().await.get("plugin_persist_failed").replace("{name}", &name);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+            .into_response();
+    }
+
+    // The slow half: queued rather than awaited here. `file` is the bare name
+    // `Action::RemovePlugin` expects (see `ritornello_updater::request`) — the
+    // last path component of the `exec` this same manifest carried a moment
+    // ago, not the plugin's own `name`, which need not match it.
+    match std::path::Path::new(&exec).file_name().and_then(|f| f.to_str()) {
+        Some(file) => {
+            let job = crate::update::Job::RemovePlugin { name: name.clone(), file: file.to_string() };
+            if state.update_tx.try_send(job).is_err() {
+                tracing::warn!(
+                    "update: could not queue the binary removal for {name}; it stays on disk until the next check or a restart"
+                );
+            }
+        }
+        None => tracing::warn!("update: {name}'s exec {exec:?} has no file name; its binary will not be erased"),
+    }
+
+    let msg = state.catalog.read().await.get("plugin_uninstalled").replace("{name}", &name);
+    (StatusCode::OK, Json(serde_json::json!({ "message": msg }))).into_response()
 }
 
 /// Marks the plugin `name` as disconnected in the status state: a plugin whose
@@ -463,8 +616,9 @@ mod tests {
         )
         .unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let plugins_dir = dir.path().join("plugins");
         let state = AppState {
-            plugins: Arc::new(PluginsControl { manifest: path, tx }),
+            plugins: Arc::new(PluginsControl { manifest: path, tx, plugins_dir }),
             ..app_state()
         };
         (state, dir, rx)
@@ -478,7 +632,11 @@ mod tests {
     ) -> (AppState, tokio::sync::mpsc::Receiver<PluginOrder>) {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
-            plugins: Arc::new(PluginsControl { manifest: manifest.to_path_buf(), tx }),
+            plugins: Arc::new(PluginsControl {
+                manifest: manifest.to_path_buf(),
+                tx,
+                plugins_dir: std::path::PathBuf::from("/nonexistent"),
+            }),
             ..app_state()
         };
         (state, rx)
@@ -582,7 +740,11 @@ mod tests {
         std::fs::write(&path, "plugin = [{ name = \"radio\", exec = \"/bin/true\" }]\n").unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
-            plugins: Arc::new(PluginsControl { manifest: path, tx }),
+            plugins: Arc::new(PluginsControl {
+                manifest: path,
+                tx,
+                plugins_dir: std::path::PathBuf::from("/nonexistent"),
+            }),
             ..app_state()
         };
         let app = router(state);
@@ -648,6 +810,142 @@ mod tests {
         let response = answer.await;
         served.await.unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// The gesture is not the switch, and the difference is what this
+    /// asserts: after Undeclare the name is gone from the manifest and from
+    /// `execs`, so nothing can relaunch it — whereas Disable leaves both in
+    /// place precisely so it can be switched back on.
+    ///
+    /// Assert on the status lines and on a subsequent Enable order being
+    /// refused, not on `execs` directly: the registry is private, and the
+    /// observable consequence is what the page and the remote see. The mock
+    /// core stands in for `undeclare_plugin`'s own status-line removal —
+    /// pinned directly, with `execs`, by `main`'s own unit tests of that
+    /// function — so what this test actually proves is the route's
+    /// orchestration: the order, then the file, then a subsequent request
+    /// hitting a manifest that no longer declares the name.
+    #[tokio::test]
+    async fn an_undeclared_plugin_is_no_longer_relaunchable_unlike_a_disabled_one() {
+        let (state, dir, mut rx) = app_state_with_plugins();
+        let status = state.status.clone();
+        let core = tokio::spawn(async move {
+            let order = rx.recv().await.unwrap();
+            assert_eq!(order.name, "cd");
+            assert_eq!(order.action, PluginAction::Undeclare);
+            status.write().await.plugins.retain(|p| p.name != "cd");
+            let _ = order.ack.send(true);
+        });
+
+        let response =
+            plugin_delete(axum::extract::State(state.clone()), axum::extract::Path("cd".to_string()))
+                .await;
+        core.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // The catalog message, resolved and interpolated — not a raw key —
+        // and carrying the sentence that tells the operator their
+        // configuration survives.
+        let message = v["message"].as_str().unwrap();
+        assert!(message.contains("cd"), "{message}");
+        assert!(message.contains("kept"), "the operator must learn their data survives: {message}");
+
+        let after = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+        assert!(!after.contains("\"cd\""), "the block must be gone: {after}");
+
+        assert!(
+            !state.status.read().await.plugins.iter().any(|p| p.name == "cd"),
+            "gone, not merely `disabled`: nothing left to switch back on"
+        );
+
+        let refused = plugin_enabled_put(
+            axum::extract::State(state),
+            axum::extract::Path("cd".to_string()),
+            axum::Json(PluginEnabledReq { enabled: true }),
+        )
+        .await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::NOT_FOUND,
+            "nothing declares it any more: a relaunch attempt must be refused, exactly as it would \
+             be for a name nobody ever declared"
+        );
+    }
+
+    /// The bare file name `Job::RemovePlugin` must carry is the `exec`'s own
+    /// last component, **not** the plugin's `name` — this fixture's `cd` and
+    /// `radio` share the same `exec` (`/bin/true`) precisely so a test that
+    /// confused the two would be caught. Once `remove_entry` has run, `exec`
+    /// is the only place this is still knowable, which is why the route
+    /// reads it before removing the block rather than after.
+    #[tokio::test]
+    async fn a_successful_uninstall_queues_the_binarys_removal_by_its_exec_file_name() {
+        let (base, dir, mut rx) = app_state_with_plugins();
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(4);
+        let state = AppState { update_tx, ..base };
+        let core = tokio::spawn(async move {
+            let order = rx.recv().await.unwrap();
+            let _ = order.ack.send(true);
+        });
+
+        let response =
+            plugin_delete(axum::extract::State(state), axum::extract::Path("cd".to_string())).await;
+        core.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let after = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+        assert!(!after.contains("\"cd\""), "{after}");
+
+        match update_rx.try_recv().expect("the binary's removal must be queued") {
+            crate::update::Job::RemovePlugin { name, file } => {
+                assert_eq!(name, "cd");
+                assert_eq!(file, "true", "the exec's own file name, not the plugin's `name`");
+            }
+            other => panic!("unexpected job: {other:?}"),
+        }
+    }
+
+    /// A name the manifest does not declare is refused before the core is
+    /// even asked, and nothing is written.
+    #[tokio::test]
+    async fn deleting_an_undeclared_name_is_refused_without_writing_or_asking_the_core() {
+        let (state, dir, mut rx) = app_state_with_plugins();
+        let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+
+        let response = plugin_delete(
+            axum::extract::State(state),
+            axum::extract::Path("never-seen".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(rx.try_recv().is_err(), "the core must never be asked about a name nobody declares");
+        assert_eq!(std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(), before);
+    }
+
+    /// `hot_unplug`'s own refusal — a process the core does not own — must
+    /// stop the whole gesture: nothing is removed from the file, and the
+    /// binary's removal is never queued.
+    #[tokio::test]
+    async fn a_core_refusal_leaves_the_declaration_and_the_binary_alone() {
+        let (state, dir, mut rx) = app_state_with_plugins();
+        let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+        let core = tokio::spawn(async move {
+            let order = rx.recv().await.unwrap();
+            let _ = order.ack.send(false);
+        });
+
+        let response =
+            plugin_delete(axum::extract::State(state), axum::extract::Path("cd".to_string())).await;
+        core.await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(),
+            before,
+            "a refused stop must not be followed by removing the declaration"
+        );
     }
 
     #[tokio::test]
