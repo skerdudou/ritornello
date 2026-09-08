@@ -168,6 +168,15 @@ pub fn parse_releases(body: &str) -> Result<Vec<Release>, ReleasesError> {
 /// old versions over new ones with nothing to notice. An ISO-8601 UTC
 /// timestamp sorts chronologically as text, so the guard costs a string
 /// comparison.
+///
+/// Two archives for the same component INSIDE one release — a rerun workflow
+/// that uploaded a rebuilt archive — resolve by asset order, which this code
+/// does not control and no test pins.
+///
+/// `Offer::Bundle` IS emitted here, because it appears in every release like
+/// any other component: this fold does not filter it out. A caller must skip
+/// it itself — `download_name` returning `None` for it is the signal to do
+/// so — rather than assume it never reaches a `Published`.
 pub fn fold(releases: &[Release], arch: &str) -> Vec<Published> {
     let mut ordered: Vec<&Release> = releases.iter().collect();
     ordered.sort_by(|a, b| b.published_at.cmp(&a.published_at));
@@ -226,12 +235,13 @@ fn is_version(s: &str) -> bool {
 /// compare a name against.
 ///
 /// The bundle is tested BEFORE the singular prefix, and that order is the
-/// point: `ritornello-plugins-` also starts with `ritornello-plugin`, so the
-/// other order would read the bundle as a plugin named "s".
+/// point: the plugin branch below returns via `?` on `strip_prefix`, so
+/// testing it first would make `ritornello-plugins-…` fail that `strip_prefix`
+/// (its next byte is `s`, not `-`) and return `None` — never falling through
+/// to be recognised as the bundle at all.
 ///
-/// The plugin's version is split from the RIGHT, because three plugin names in
-/// this repository contain a dash (`nrj-metas`, `generic-input`,
-/// `radiofrance-metas`) while a version never does.
+/// The plugin's version is split from the RIGHT, because a plugin name may
+/// contain a dash while a version never does.
 pub fn classify_asset(name: &str, arch: &str) -> Option<(Offer, String)> {
     let stem = name.strip_suffix(&format!("-{arch}.tar.gz"))?;
     if let Some(version) = stem.strip_prefix("ritornello-core-") {
@@ -313,7 +323,7 @@ mod tests {
         );
     }
 
-    /// The case the whole extraction rule exists for: three plugin names in
+    /// The case the whole extraction rule exists for: some plugin names in
     /// this repository contain a dash, so the version cannot be found by
     /// splitting at the FIRST dash after the prefix.
     #[test]
@@ -343,6 +353,9 @@ mod tests {
             "ritornello-plugin-radio-0.2.0.1-armv7.tar.gz",
             // Not numeric.
             "ritornello-plugin-radio-x.y.z-armv7.tar.gz",
+            // Empty version part.
+            "ritornello-plugin-radio-0.2.-armv7.tar.gz",
+            "ritornello-plugin-radio-0..2-armv7.tar.gz",
             // Empty plugin name.
             "ritornello-plugin--0.2.0-armv7.tar.gz",
             // Another architecture: downloading it would install a binary
@@ -369,13 +382,25 @@ mod tests {
         let assets: Vec<String> = assets
             .iter()
             .map(|n| {
+                // Tag-qualified, as GitHub's real download URLs are. A helper
+                // that derived every URL from the asset name alone made two
+                // releases indistinguishable, and no test could then prove
+                // that a digest comes from the release carrying the archive.
                 format!(
-                    r#"{{"name":"{n}","browser_download_url":"https://x/{n}","size":10}}"#
+                    r#"{{"name":"{n}","browser_download_url":"https://x/{tag}/{n}","size":{}}}"#,
+                    n.len()
                 )
             })
             .collect();
+        // An absent timestamp is genuinely null on the wire, not the empty
+        // string: a draft carries no publication date.
+        let when = if published_at.is_empty() {
+            "null".to_string()
+        } else {
+            format!("\"{published_at}\"")
+        };
         format!(
-            r#"{{"tag_name":"{tag}","published_at":"{published_at}","draft":{draft},"prerelease":{pre},"assets":[{}]}}"#,
+            r#"{{"tag_name":"{tag}","published_at":{when},"draft":{draft},"prerelease":{pre},"assets":[{}]}}"#,
             assets.join(",")
         )
     }
@@ -409,6 +434,7 @@ mod tests {
             .expect("radio");
         assert_eq!(radio.version, "0.2.4");
         assert_eq!(radio.release_tag, "v0.2.7");
+        assert_eq!(radio.checksums_url.as_deref(), Some("https://x/v0.2.7/SHA256SUMS"));
 
         // The core did not move in v0.2.7, so it is still installable — from
         // the release that last carried it. This is the property that makes
@@ -417,7 +443,9 @@ mod tests {
         let core = published.iter().find(|p| p.offer == Offer::Core).expect("core");
         assert_eq!(core.version, "0.2.1");
         assert_eq!(core.release_tag, "v0.2.6");
-        assert_eq!(core.checksums_url.as_deref(), Some("https://x/SHA256SUMS"));
+        // The release that actually carries the core, not the newest one: a
+        // digest from the wrong release would verify nothing.
+        assert_eq!(core.checksums_url.as_deref(), Some("https://x/v0.2.6/SHA256SUMS"));
     }
 
     /// GitHub documents this endpoint as newest-first, but the fold does not
@@ -439,6 +467,53 @@ mod tests {
         let published = fold(&parse_releases(&text).unwrap(), "armv7");
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].version, "0.2.4");
+    }
+
+    /// The URL and the size are the asset's own, and this is the pair the
+    /// device acts on: everything else in a `Published` only decides whether
+    /// to act. A fold that carried the release's tag here instead would fail
+    /// every download while every other assertion in this module still held.
+    #[test]
+    fn the_download_url_and_the_size_come_from_the_asset() {
+        let name = "ritornello-core-0.2.1-armv7.tar.gz";
+        let text = body(&rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[name]));
+        let published = fold(&parse_releases(&text).unwrap(), "armv7");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].url, format!("https://x/v0.2.6/{name}"));
+        assert_eq!(published[0].size, name.len() as u64);
+    }
+
+    /// A release published without a checksum file offers no digest, rather
+    /// than borrowing one from elsewhere. The caller must refuse that
+    /// component instead of installing unverified bytes.
+    #[test]
+    fn a_release_without_a_checksum_file_offers_no_digest() {
+        let text = body(&rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+            "ritornello-core-0.2.1-armv7.tar.gz",
+        ]));
+        let published = fold(&parse_releases(&text).unwrap(), "armv7");
+        assert_eq!(published[0].checksums_url, None);
+    }
+
+    /// An undated release sorts last and can therefore win a component only
+    /// when nothing else carries it. The opposite would be the worst outcome
+    /// this module can produce: a device pinned to an old version by a release
+    /// whose date GitHub simply did not send.
+    #[test]
+    fn an_undated_release_cannot_outrank_a_dated_one() {
+        let text = body(&[
+            rel("v0.2.9", "", false, false, &[
+                "ritornello-plugin-radio-0.2.1-armv7.tar.gz",
+            ]),
+            rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+                "ritornello-plugin-radio-0.2.3-armv7.tar.gz",
+            ]),
+        ]
+        .join(","));
+        let published = fold(&parse_releases(&text).unwrap(), "armv7");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].version, "0.2.3");
+        assert_eq!(published[0].release_tag, "v0.2.6");
     }
 
     #[test]
