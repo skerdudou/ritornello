@@ -367,8 +367,11 @@ fn under_voltage_since_boot(info: &SystemInfo) -> Option<bool> {
 /// the same tension: `clippy::useless_conversion` fires here instead. The
 /// conversion stays because it is required on armv7; the allow documents
 /// that this specific "useless" call is platform-dependent, not sloppy.
+///
+/// `pub(crate)` since the updater checks for room before downloading: the
+/// System tab is no longer its only reader.
 #[allow(clippy::useless_conversion)]
-fn disk_usage(path: &str) -> Option<Usage> {
+pub(crate) fn disk_usage(path: &str) -> Option<Usage> {
     let c = std::ffi::CString::new(path).ok()?;
     // SAFETY: `statvfs` only writes into the struct we hand it, and the
     // path stays a valid NUL-terminated C string for the whole call.

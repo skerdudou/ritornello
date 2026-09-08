@@ -16,3 +16,7 @@ pub mod release;
 // later task.
 #[allow(dead_code)]
 pub mod archive;
+
+// Same story: the download path gets its first caller in a later task.
+#[allow(dead_code)]
+pub mod download;
