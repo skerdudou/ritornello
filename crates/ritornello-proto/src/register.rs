@@ -116,7 +116,13 @@ pub struct Announcement {
     /// operator to configure.
     ///
     /// `None` = a plugin whose manifest names no repository, or one predating
-    /// this field: it is simply left alone.
+    /// this field. The core does not go asking anybody's repository about it —
+    /// there is none to ask — but it does **not** leave the row alone: with
+    /// nothing announced to say otherwise, the component is judged against the
+    /// core's own release, because that is also the state of every plugin that
+    /// is switched off, dead, or not yet installed, and those rows have to
+    /// stay installable. A third-party plugin that wants to be judged by its
+    /// own repository must announce one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
 }

@@ -892,9 +892,13 @@ async fn run_privileged_unit() -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
-    // systemctl's own words, verbatim, all the way to the page: when the
-    // polkit rule is missing it names the file, which is exactly the
-    // diagnosis. Same choice as the files plugin makes for its mount.
+    // systemctl's own words, verbatim, all the way to the page. Same choice
+    // as the files plugin makes for its mount, and for the same reason: a
+    // sentence we paraphrase is a sentence that goes stale. It does **not**
+    // name the missing polkit rule — systemctl has no idea which `.rules`
+    // file would have granted the action, and says only `Access denied` or
+    // `Interactive authentication required`; `docs/installation.md` is where
+    // the reader is told to read those two as "the rule is not installed".
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Err(if stderr.is_empty() {
         format!("systemctl failed ({})", output.status)
@@ -1552,9 +1556,10 @@ impl Worker {
             .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", request_path.display())))?;
 
         if let Err(detail) = run_privileged_unit().await {
-            // systemctl's own words travel verbatim to the page: when the
-            // polkit rule is missing it names the file, which is the whole
-            // diagnosis.
+            // systemctl's own words travel verbatim to the page. They do not
+            // name the missing polkit rule — see `run_privileged_unit` — but
+            // they are the only account of the failure that exists on this
+            // side of the boundary.
             return Err(Refusal::Privileged(detail));
         }
         // Written only once the placement actually succeeded: a refusal above
@@ -1906,6 +1911,7 @@ impl Worker {
                 tracing::warn!(
                     "update: {file} is now declared by a plugin; the queued removal for {name} was skipped"
                 );
+                self.publish_failure(self.message_for("update_removal_skipped", name).await).await;
                 return;
             }
             Ok(_) => {}
@@ -1919,28 +1925,48 @@ impl Worker {
         let request =
             Request { format: REQUEST_FORMAT, actions: vec![Action::RemovePlugin { file: file.to_string() }] };
         if let Err(e) = std::fs::create_dir_all(&self.staging) {
-            tracing::warn!("update: uninstalling {name}: creating {}: {e}", self.staging.display());
+            self.removal_failed(name, format!("creating {}: {e}", self.staging.display())).await;
             return;
         }
         let request_path = self.staging.join("request.json");
         let text = match serde_json::to_string(&request) {
             Ok(t) => t,
             Err(e) => {
-                tracing::warn!("update: uninstalling {name}: encoding the request: {e}");
+                self.removal_failed(name, format!("encoding the request: {e}")).await;
                 return;
             }
         };
         if let Err(e) = std::fs::write(&request_path, text) {
-            tracing::warn!(
-                "update: uninstalling {name}: writing {}: {e}",
-                request_path.display()
-            );
+            self.removal_failed(name, format!("writing {}: {e}", request_path.display())).await;
             return;
         }
         match run_privileged_unit().await {
             Ok(()) => tracing::info!("update: {name}'s binary removed"),
-            Err(detail) => tracing::warn!("update: uninstalling {name}: the privileged unit failed: {detail}"),
+            Err(detail) => self.removal_failed(name, detail).await,
         }
+    }
+
+    /// **The erasure did not happen, and the page has to hear about it.**
+    ///
+    /// Uninstall and "Remove the binary" answer 204 the moment the job is
+    /// queued, which is honest in itself — the queue is real and the
+    /// privileged unit can take two minutes. What was not honest is that the
+    /// *outcome* of that job reached nothing but the journal. Without the
+    /// polkit rule — a state `docs/installation.md` explicitly supports — both
+    /// gestures answered "OK" for ever and erased nothing: the row simply came
+    /// back as "Installed but not declared", with no account of why.
+    ///
+    /// `CheckOutcome::Failed` is the one free-text channel this payload has,
+    /// and the update card shows it — the same channel every install refusal
+    /// already uses. Deliberately not `busy`: that field belongs to the update
+    /// card's own gesture, and an uninstall is not one.
+    async fn removal_failed(&self, name: &str, detail: String) {
+        tracing::warn!("update: erasing {name}'s binary: {detail}");
+        let message = self
+            .message_for("update_removal_failed", name)
+            .await
+            .replace("{detail}", &detail);
+        self.publish_failure(message).await;
     }
 }
 
@@ -3414,6 +3440,58 @@ mod tests {
     /// this sandbox's `systemctl` at all, the same "no systemctl is needed"
     /// doctrine the comment above `targz` already states for its two
     /// neighbours.
+    /// **Success theatre, closed and pinned.** The route answers 204 the
+    /// instant the erasure is queued; until the failure had a channel of its
+    /// own, a device without the polkit rule said "OK" to every Uninstall and
+    /// every "Remove the binary" for ever, erased nothing, and put the row
+    /// back as "Installed but not declared" with no account anywhere the
+    /// operator looks.
+    ///
+    /// Driven through the real `remove_plugin_binary`, with the privileged
+    /// unit answering exactly what a missing polkit rule produces. The
+    /// assertion is on `outcome`, which is what the card renders — not on the
+    /// log, which is where this used to stop.
+    #[tokio::test]
+    async fn a_binary_that_could_not_be_erased_says_so_on_the_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), stalled_line());
+        let _privileged = Privileged::answers(Err("Access denied".to_string()));
+
+        // A file no declaration names, which is the state an uninstall leaves
+        // behind: `radio` is the one `worker_at` declares, so `mpd` cannot
+        // collide with it.
+        worker.remove_plugin_binary("mpd", "ritornello-plugin-mpd").await;
+
+        match &worker.state.read().await.outcome {
+            CheckOutcome::Failed(message) => {
+                assert!(message.contains("mpd"), "the sentence must name the component: {message}");
+                assert!(
+                    message.contains("Access denied"),
+                    "and carry the installer's own words, which are the whole diagnosis: {message}"
+                );
+            }
+            other => panic!("a failed erasure must reach the page, not only the log: {other:?}"),
+        }
+    }
+
+    /// The other half: an erasure that is skipped because the file became
+    /// declared again is not a failure of the privileged step, and it is not
+    /// silence either — the operator asked for something that did not happen.
+    #[tokio::test]
+    async fn an_erasure_skipped_because_the_file_is_declared_again_also_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), stalled_line());
+        // `worker_at` declares `radio` with exactly this file.
+        worker.remove_plugin_binary("radio", "ritornello-plugin-radio").await;
+        match &worker.state.read().await.outcome {
+            CheckOutcome::Failed(message) => {
+                assert!(message.contains("radio"), "{message}");
+                assert!(!message.contains('{'), "a parameter was left unfilled: {message}");
+            }
+            other => panic!("a skipped erasure must reach the page too: {other:?}"),
+        }
+    }
+
     /// The same rig for the **core's** own archive: the asset name carries no
     /// plugin, and the offer is `Offer::Core`, which is what sends
     /// `install_one` down the branch that ends in the restart.

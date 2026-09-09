@@ -71,6 +71,29 @@ const coreArchiveNoteCount = computed(() => {
   const core = props.update.components.find((c) => c.kind === 'core')
   return core?.not_installed_files?.length ?? 0
 })
+
+/**
+ * The rollback sentence, and **which** of the two it is.
+ *
+ * `update_rolled_back` says "the previous version was put back", and a
+ * rollback that restored nothing used to say exactly that. The rollback unit
+ * writes a report with an empty `restored` and a populated `failed` when the
+ * backup manifest is corrupt, and then deliberately does not restart the
+ * service — so the device is down, and when the operator brings it back by
+ * hand the card told them the previous version was in place. A failure
+ * reported as a success, in the one place a nocturnal rollback is ever
+ * mentioned.
+ *
+ * Anything less than a clean rollback takes the other sentence: nothing
+ * restored, or something restored and something else not. `null` when there is
+ * no report, which is the ordinary device.
+ */
+const rollbackNote = computed(() => {
+  const report = props.update.last_rollback
+  if (!report) return null
+  const clean = report.restored.length > 0 && report.failed.length === 0
+  return t.value(clean ? 'update_rolled_back' : 'update_rollback_failed')
+})
 </script>
 
 <template>
@@ -95,8 +118,8 @@ const coreArchiveNoteCount = computed(() => {
 
       <!-- Without this, the only trace of a 3 a.m. rollback is a version
            number that did not move. -->
-      <p v-if="update.last_rollback" data-update-rollback class="text-sm text-muted-foreground">
-        {{ t('update_rolled_back') }}
+      <p v-if="rollbackNote" data-update-rollback class="text-sm text-muted-foreground">
+        {{ rollbackNote }}
       </p>
 
       <p v-if="coreArchiveNoteCount > 0" data-update-core-notes class="text-xs text-muted-foreground">

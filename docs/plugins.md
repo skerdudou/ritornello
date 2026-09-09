@@ -83,9 +83,18 @@ single number shared by the whole protocol crate, not one per message kind.
 A plugin built outside this repository is a **third-party** plugin, and the
 core tells one from its own by the `repository` it announces and nothing else:
 there is no flag to set and nothing for an operator to configure. Parsed as a
-GitHub `owner/repo` pair it either is ours or it is not; a manifest with no
-`repository` key at all announces nothing, and the core then simply leaves the
-plugin alone. Four things follow, and they are the whole contract:
+GitHub `owner/repo` pair it either is ours or it is not.
+
+**A manifest with no `repository` key announces nothing, and the core then
+treats the plugin as one of its own.** That is not an oversight, and it is the
+one thing to get right when writing a plugin. "Announced nothing" is also the
+state of every plugin that is switched off, dead, or not installed yet, and
+those rows have to stay installable — so a component the core knows nothing
+about is judged against the core's own release. If your plugin's name happens
+to match one of ours, its row will offer our version of that name, and an
+operator who clicks Install gets our binary in place of yours. Declaring
+`repository` is what prevents it, and it is one line. Four things follow, and
+they are the whole contract:
 
 1. **Build the runtime with the macro**, `ritornello_plugin_sdk::declare_runtime!()?`,
    and give your crate a `repository = "https://github.com/<owner>/<repo>"` in

@@ -585,13 +585,27 @@ Backed by `GET /api/update`. One line: never checked, no release
 published yet, up to date, or an update available (the installed and the
 offered version, in that order, so a reader notices if they were ever
 swapped). An error from the last check, and a one-off note naming what a
-just-finished install placed, show below it when there is one. A note
-that a rollback happened is read once, at process start, from the report
-the rollback service leaves behind, and stays on screen for as long as
-this run of the core lasts (see
+just-finished install placed, show below it when there is one — **except
+for the core**, whose install ends this process before it can write that
+note, so the page comes back reading "Never checked" until the next check
+(the automatic run for that day has already been counted, so on an
+unattended device that is the next night; **Check** answers at once at any
+time).
+
+A note that a rollback happened is read once, at process start, from the
+report the rollback service leaves behind. It is **not** limited to that
+run: the report is never deleted, so the note stays until a core update
+this device actually keeps supersedes it — a device that was reverted and
+never updated again is still running the reverted version, and that is
+still the last thing that happened to it. Two sentences and not one: a
+rollback that put everything back says so, and one that restored nothing,
+or failed on part of what it tried, says *that* instead. The second case
+leaves the device down on purpose (the unit does not restart a service it
+could not repair), so the sentence has to be the honest one when the
+operator finally brings it back by hand. See
 [Automatic update policy](#automatic-update-policy) and
 [installation.md](installation.md#enabling-automatic-updates-once-by-hand)
-for what it can and cannot write).
+for what it can and cannot write.
 
 **Check** asks GitHub for the list of releases — one small JSON document
 per repository it consults, this project's own and, for every declared
@@ -659,17 +673,34 @@ whenever they like.
 
 **A restart that follows an update keeps the device as it was, rather
 than reading the Startup card again — a device in standby stays in
-standby.** The updater and the rollback each leave a dated marker before
-they restart the core, and for as long as that marker is fresh (ten
-minutes, `MARKER_WINDOW_S` in `crates/ritornello-updater/src/marker.rs`)
-the core resumes whatever it was doing the instant before instead of
-consulting "Startup", the same way "previous state" does (see [Startup
-card](#startup-card)). Every restart on this path — an install, or the
-rollback that follows a failed one — completes within that window with
-room to spare, so this covers any ordinary case; only a boot that starts
-more than ten minutes after the marker was written falls back to reading
-the Startup setting as normal. A device asleep at 3 a.m. that updates
-itself at 3 a.m. is still asleep afterwards.
+standby.** Each of the two things that can restart the core leaves its own
+dated file first, and the core reads both: the installer leaves the pending
+marker, and the rollback leaves its report. For as long as either is fresh
+(ten minutes, `MARKER_WINDOW_S` in
+`crates/ritornello-updater/src/marker.rs`) the core resumes whatever it was
+doing the instant before instead of consulting "Startup", the same way
+"previous state" does (see [Startup card](#startup-card)).
+
+**Two files and not one**, because the rollback *consumes* the installer's
+marker — it has to, or a second failure would roll the device back twice —
+so the core it puts back would otherwise find nothing at all and read
+"Startup", whose default is *on*: a device asleep at 3 a.m. would wake at
+3:01 after a failed update. That was a real defect on this branch, fixed by
+having the restored core read the rollback's own report.
+
+Every restart on this path — an install, or the rollback that follows a
+failed one — completes within that window with room to spare, so this
+covers any ordinary case; only a boot that starts more than ten minutes
+after either file was written falls back to reading the Startup setting as
+normal. A device asleep at 3 a.m. that updates itself at 3 a.m. is still
+asleep afterwards, whether the update took or was reverted.
+
+**A plugin gesture arms nothing.** The rollback net is for the core, whose
+install and whose crash-loop are the same event; a plugin runs in a process
+of its own and cannot crash-loop the core. So installing or uninstalling a
+plugin leaves no marker — and clears any the last core update left — which
+is what stops an unrelated core failure, minutes later, from quietly
+undoing the plugin gesture instead of addressing its own cause.
 
 ### Plugins table
 
@@ -690,6 +721,18 @@ an enable/disable switch: the other two have no line in `plugins.toml`
 for either to act on, and the arrows are disabled rather than hidden at
 either end of the declared list, so a greyed arrow reads as "already
 there" instead of inviting a press that can only fail.
+
+**Uninstall and "Remove the binary" answer before the file is gone**, and
+that is deliberate: erasing it goes through the same privileged step as an
+install, behind the same queue, so it can take up to two minutes. The
+declaration is removed and the plugin stopped straight away, which is why
+the row reappears at once as "Installed but not declared" and settles on
+the next reload. If the erasure itself fails — no polkit rule, most likely
+(see
+[installation.md](installation.md#enabling-automatic-updates-once-by-hand))
+— the reason is shown on the Update card above, in the same place an install
+refusal appears. A row that stays "Installed but not declared" with a
+sentence up there is telling you the binary is still on the device.
 
 **The physical remote's source key now cycles through the sources in
 this table's own order, not alphabetically.** Reordering with the arrows

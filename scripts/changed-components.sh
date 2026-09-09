@@ -31,8 +31,17 @@ fi
 # all eleven. Publishing "what changed" would then leave ten plugins on the
 # device built against the old crate, with version equality claiming
 # everything is up to date. A change to any of them therefore counts as a
-# change to everything — decided by content, not by a number, and failing in
-# the safe direction.
+# change to everything — decided by content, not by a number.
+#
+# **Republishing is not, by itself, delivering**, and that limit is real: the
+# archives go out under the components' UNCHANGED versions, and the device
+# decides what to install with `release::differs`, which is plain version
+# inequality. Equal versions read as "up to date", so not one of those
+# rebuilt archives is ever fetched. A shared-crate change reaches devices
+# only if **every** component's version is bumped by hand in the same commit.
+# This script cannot do that for you and does not refuse the release: it says
+# so on stderr, `docs/installation.md` says so, and the release-notes
+# template asks for it.
 #
 # Not detected, and assumed: an external dependency bump lives in Cargo.lock,
 # which moves whenever any version moves. Detecting it would republish
@@ -53,6 +62,9 @@ fi
 SHARED=(crates/ritornello-proto crates/ritornello-i18n crates/ritornello-plugin-sdk crates/ritornello-updater)
 if [ -n "$PREV" ] && ! git diff --quiet "$PREV" -- "${SHARED[@]}"; then
   echo "a shared crate changed since $PREV — every component is published" >&2
+  echo "  NOTE: republished archives keep their unchanged version numbers, and a device" >&2
+  echo "  installs on version inequality alone — so no device will fetch any of them." >&2
+  echo "  For a shared-crate change to reach devices, bump EVERY component's version." >&2
   PREV=""
 fi
 

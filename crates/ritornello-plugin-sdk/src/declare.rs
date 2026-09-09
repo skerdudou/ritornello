@@ -14,8 +14,11 @@
 ///
 /// `option_env!` and not `env!` for the repository: a crate whose manifest
 /// carries no `repository` key still compiles, which is what a minimal
-/// third-party plugin looks like. The core reads that absence as "nothing to
-/// say" and leaves the plugin alone.
+/// third-party plugin looks like. The core has nothing to ask about such a
+/// plugin — there is no repository to query — but it does **not** leave its
+/// row alone: with nothing announced, the component is judged against the
+/// core's own release. Declare `repository` in `Cargo.toml` if your plugin is
+/// not ours; `docs/plugins.md` says what happens if you do not.
 #[macro_export]
 macro_rules! declare_runtime {
     () => {

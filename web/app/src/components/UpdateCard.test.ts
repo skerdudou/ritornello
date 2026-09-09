@@ -15,7 +15,10 @@ const CATALOG = {
   update_aligned: 'Up to date',
   update_unknown: 'Unknown',
   update_rolled_back: 'The update did not start and the previous version was put back',
-  update_archive_notes: 'This release also carries {count} files that were not installed — see the release notes',
+  update_rollback_failed:
+    'The update did not start, and putting the previous version back did not fully succeed — see the log',
+  update_archive_notes:
+    'The version now installed also carried {count} files that were not installed — see its release notes',
   update_partial_failure_note:
     'If several components were involved, only the first failure is shown here — see the log for the rest',
   update_release_notes: 'Release notes',
@@ -137,6 +140,31 @@ describe('UpdateCard', () => {
     )
   })
 
+  /// **A rollback that put nothing back must not read like one that
+  /// succeeded.** The unit writes an empty `restored` and a populated
+  /// `failed` when the backup manifest is corrupt, and then deliberately does
+  /// not restart the service — so the device is down, and the sentence the
+  /// operator eventually reads used to tell them the previous version was in
+  /// place.
+  ///
+  /// Two rows, because a single one could not tell the two clauses apart: the
+  /// first restored nothing at all, the second restored one thing and failed
+  /// on another. Both are "not a clean rollback", and each on its own must
+  /// take the other sentence.
+  it.each([
+    ['nothing was restored', [] as string[], ['backup manifest at /var/…: expected value']],
+    ['something could not be restored', ['radio'], ['core: Permission denied']],
+  ])('does not claim the previous version is back when %s', (_why, restored, failed) => {
+    const w = mountCard(
+      payload({
+        last_rollback: { at_unix_s: 1_760_000_500, restored, failed, core_restored: false },
+      }),
+    )
+    expect(w.get('[data-update-rollback]').text()).toBe(
+      'The update did not start, and putting the previous version back did not fully succeed — see the log',
+    )
+  })
+
   it('emits check when the button is pressed', async () => {
     const w = mountCard(payload())
     await w.get('[data-update-check]').trigger('click')
@@ -174,7 +202,7 @@ describe('UpdateCard', () => {
       }),
     )
     expect(w.get('[data-update-core-notes]').text()).toBe(
-      'This release also carries 2 files that were not installed — see the release notes',
+      'The version now installed also carried 2 files that were not installed — see its release notes',
     )
   })
 

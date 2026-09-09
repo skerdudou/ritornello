@@ -161,6 +161,20 @@ pub fn component_offers(
         // One reading of the announcement, and everything about this row that
         // depends on where the binary came from falls out of it.
         let from = origin(plugin.repository.as_deref());
+        // **`Unknown` joins `Ours`, deliberately.** "Announced no repository"
+        // and "has not announced at all" are the same value here, and the
+        // second covers every row the page offers an Install button for: a
+        // declared plugin whose binary is missing, one that is switched off,
+        // one that is dead, one the device does not have. Judged against
+        // nothing, those rows would carry no offered version and could never
+        // be installed — which is three documented gestures gone.
+        //
+        // The price is stated in `docs/plugins.md` rather than hidden: a
+        // third-party plugin that announces no repository *and* takes one of
+        // our names is offered our archive of that name. One line of
+        // `Cargo.toml` on the author's side settles it, and the automatic
+        // policy never touches such a row anyway (its installed version is
+        // unknown, and `automatic_install_list` excludes that).
         let is_third_party = !matches!(from, Origin::Unknown | Origin::Ours);
         // A third-party plugin's version is decided by **its own** repository,
         // and this release says nothing about it: never `plugin_offered`, even

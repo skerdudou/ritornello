@@ -90,6 +90,44 @@ describe('UpdateDialog', () => {
     expect(isChecked('mpd')).toBe('false')
   })
 
+  /// **The third of the dialog's three exclusions, and the one nothing
+  /// watched.** `docs/interface.md` says a component already known to need a
+  /// manual step is not pre-ticked, because ticking it again would only repeat
+  /// the same refusal — and deleting `.filter((c) => c.installable !== false)`
+  /// left all 89 tests in this file and `ConfigView.test.ts` green, since no
+  /// fixture anywhere carried `installable: false`.
+  ///
+  /// The row is one of **ours**, `update_available`, declared and installed,
+  /// so every sibling filter passes it: `installable` is the only thing that
+  /// can be excluding it. `radio` beside it is the positive control — without
+  /// it, a `defaultChecked` that returned an empty set would pass.
+  it('leaves a component known to need a manual step unchecked', async () => {
+    mountDialog([
+      {
+        name: 'files',
+        kind: 'plugin',
+        declared: true,
+        binary_present: true,
+        installed: '0.2.0',
+        offered: '0.3.0',
+        availability: 'update_available',
+        installable: false,
+      },
+      {
+        name: 'radio',
+        kind: 'plugin',
+        declared: true,
+        binary_present: true,
+        installed: '0.2.0',
+        offered: '0.3.0',
+        availability: 'update_available',
+      },
+    ])
+    await flushPromises()
+    expect(isChecked('files')).toBe('false')
+    expect(isChecked('radio')).toBe('true')
+  })
+
   it('leaves a third-party plugin unchecked and shows where it comes from', async () => {
     mountDialog([
       core('aligned'),

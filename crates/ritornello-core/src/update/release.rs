@@ -144,8 +144,17 @@ fn is_repo_segment(s: &str) -> bool {
 /// the broken one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
-    /// Announced no repository at all: a plugin whose manifest names none, or
-    /// one predating the field. Nothing to say and nothing to check.
+    /// Announced no repository at all: a plugin whose manifest names none, one
+    /// predating the field, **or one that has not announced anything yet** —
+    /// switched off, dead, its binary absent, or not installed at all.
+    ///
+    /// **Treated as one of ours**, and that is a decision rather than a
+    /// fall-through: the last three cases are the ordinary state of every row
+    /// the page offers an *Install* button for, and a component judged against
+    /// nothing has no offered version, so it could never be installed at all.
+    /// See `state::component_offers`, where `Unknown` joins `Ours`, and
+    /// `docs/plugins.md` for what that means for a third-party author — one
+    /// line in `Cargo.toml`.
     Unknown,
     /// Ours. The path all ten official plugins take.
     Ours,

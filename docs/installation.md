@@ -91,6 +91,19 @@ silent no-op: that component ships nothing this release, and if *no*
 component moved the script exits 2 and fails the job loudly rather than
 publishing an empty release that looks like success.
 
+**One case is a silent no-op, and it is the one to know about.** A change to
+a shared crate (`ritornello-proto`, `ritornello-i18n`,
+`ritornello-plugin-sdk`, `ritornello-updater`) makes the script republish
+*every* component — correctly, because all eleven binaries were rebuilt — but
+under their **unchanged** version numbers. A device decides what to install
+by comparing versions and nothing else, so it sees every row as up to date
+and fetches none of the new archives. The release looks complete and delivers
+nothing. **For a shared-crate change to reach devices, bump every
+component's version in the same commit.** The script prints this on stderr
+when it detects such a change; it does not refuse the release, because
+republishing is still the right thing to build — it is only not, on its own,
+delivering.
+
 Detection reads a single page of the GitHub releases API — one hundred
 releases (`per_page=100`). A component that has not shipped a new archive of
 its own within the last hundred deliveries would drop off that page and out
@@ -173,7 +186,13 @@ The updated `ritornello.service` carries the start limit and the
     sudo systemctl restart ritornello
 
 Without the polkit rule the page still checks and still reports, and every
-install fails with `systemctl`'s own refusal — which names the missing file.
+install fails with `systemctl`'s own refusal, shown verbatim in the card:
+`Access denied`, or `Interactive authentication required`. **It does not name
+the rule that is missing** — systemctl knows nothing about which `.rules` file
+would have granted the action — so if an install refuses with either of those
+two sentences and this file has not been installed, that is the cause. (A
+missing *unit* is a different failure and does name its file: `Unit
+ritornello-update.service not found`.)
 Without the `OnFailure=` line everything works and there is no safety net.
 
 **Why a blind `sudo tar -C /` cannot clobber a configuration.** Each
