@@ -13,17 +13,39 @@
 #   - attributes are one or two letters ("D" as well as "DA");
 #   - one folder name contains spaces.
 
-case "$*" in
-  *--version*)
+# **Which argument, not which substring.** This used to switch on `case "$*"`,
+# the whole command line flattened into one string, and `*-L*` therefore
+# matched anything containing those two characters anywhere — including a
+# *path*. `serve.mjs` builds its throwaway directory with `mkdtemp(…,
+# 'ritornello-e2e-')`, and `mkdtemp` appends six random characters that
+# include capitals: roughly one run in sixty-two got a directory called
+# `…/ritornello-e2e-Lxxxxx`, whose name reached this script inside the
+# `-A <auth file>` argument of the *folder listing*. This fake then answered
+# the share list, the folder parser could not read it, and the journey failed
+# on "Yann Tiersen" with an error quoting share names — a once-in-sixty-two
+# failure that looks exactly like a product defect in the share browser.
+# Seen for real in CI (run 34354707135), and green again on a re-run with
+# nothing changed.
+mode=other
+for a in "$@"; do
+  case "$a" in
+    --version) mode=version ;;
+    -L) mode=shares ;;
+    ls) [ "$mode" = other ] && mode=ls ;;
+  esac
+done
+
+case "$mode" in
+  version)
     echo "Version 4.19.5-Ubuntu"
     ;;
-  *-L*)
+  shares)
     echo "Disk|music|System default shared folder"
     echo "Disk|photo|System default shared folder"
     echo "IPC|IPC\$|IPC Service ()"
     echo "SMB1 disabled -- no workgroup available"
     ;;
-  *-c*ls*)
+  ls)
     echo "  .                                  DA        0  Fri Apr 17 14:46:30 2026"
     echo "  ..                                  D        0  Sun Aug 16 16:23:48 2026"
     echo "  Yann Tiersen                       DA        0  Tue Jul 17 23:07:00 2018"
