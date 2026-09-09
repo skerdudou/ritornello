@@ -191,7 +191,25 @@ fn automatic_install_list(components: &[ComponentOffer]) -> Vec<String> {
 /// never as "up to date".
 const THIRD_PARTY_MAX: usize = 4;
 
-/// The third-party repositories this check will query: `(plugin name, `owner/repo`)`.
+/// One repository this check will ask about one plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Target {
+    /// The plugin's name, which is also the name the asset must carry: a
+    /// repository publishing an archive under another name has published
+    /// nothing for the binary sitting on this device.
+    name: String,
+    /// `owner/repo`, kept for the log — the address beside it is already
+    /// formed, so nothing downstream ever builds one.
+    repo: String,
+    /// Where to ask, formed **here** by `release::releases_url_for`. That
+    /// keeps the one place a host is chosen the one place a host is chosen:
+    /// `third_party_offers` receives an address and never composes one, so no
+    /// announced string can reach a URL template.
+    url: String,
+}
+
+/// The third-party repositories this check will query, and the addresses to
+/// query them at.
 ///
 /// Pure, and separated from the requests it feeds, because the ceiling is the
 /// one thing about this list that can be wrong without any I/O being involved.
@@ -203,11 +221,15 @@ const THIRD_PARTY_MAX: usize = 4;
 ///
 /// An `Origin::Foreign` is deliberately absent: there is no GitHub endpoint to
 /// address for it, so it must not consume one of the four either.
-fn third_party_targets(installed: &[Installed]) -> Vec<(String, String)> {
+fn third_party_targets(installed: &[Installed]) -> Vec<Target> {
     installed
         .iter()
         .filter_map(|p| match origin(p.repository.as_deref()) {
-            Origin::ThirdParty(repo) => Some((p.name.clone(), repo)),
+            Origin::ThirdParty(repo) => Some(Target {
+                name: p.name.clone(),
+                url: releases_url_for(&repo),
+                repo,
+            }),
             Origin::Unknown | Origin::Ours | Origin::Foreign(_) => None,
         })
         .take(THIRD_PARTY_MAX)
@@ -987,12 +1009,14 @@ impl Worker {
     /// stays `Unknown`, which says "nothing is known" and never "up to date".
     /// It is never a failure of the whole check — a stranger's server being
     /// down must not blank out the core's own row.
-    async fn third_party_offers(&self, client: &reqwest::Client, installed: &[Installed]) -> Vec<ThirdPartyOffer> {
-        let targets = third_party_targets(installed);
+    async fn third_party_offers(
+        &self,
+        client: &reqwest::Client,
+        targets: &[Target],
+    ) -> Vec<ThirdPartyOffer> {
         let mut out = Vec::with_capacity(targets.len());
-        for (name, repo) in targets {
-            let url = releases_url_for(&repo);
-            let (status, body) = match fetch_text(client, &url).await {
+        for Target { name, repo, url } in targets {
+            let (status, body) = match fetch_text(client, url).await {
                 Ok(answer) => answer,
                 Err(e) => {
                     tracing::warn!("update: {repo} (for the third-party plugin {name}): {e}");
@@ -1010,17 +1034,20 @@ impl Worker {
                     continue;
                 }
             };
-            // The asset must be named for **this plugin**: a repository that
+            // **The asset must be named for this plugin.** A repository that
             // publishes an archive under another name has published nothing
-            // for the binary sitting on this device.
+            // for the binary sitting on this device — and this is also what
+            // stops a stranger's release from producing an `Offer::Core`,
+            // which downstream would be a component the plugin rule never
+            // judges.
             let Some(published) = fold(&releases, ARCH)
                 .into_iter()
-                .find(|p| matches!(&p.offer, Offer::Plugin(n) if *n == name))
+                .find(|p| matches!(&p.offer, Offer::Plugin(n) if n == name))
             else {
                 tracing::info!("update: {repo} publishes no {ARCH} archive named for {name}");
                 continue;
             };
-            out.push(ThirdPartyOffer { name, published });
+            out.push(ThirdPartyOffer { name: name.clone(), published });
         }
         out
     }
@@ -1072,7 +1099,7 @@ impl Worker {
                 let installed = self.installed_when_settled().await;
                 // Our repository publishing nothing says nothing about a
                 // stranger's, so the third-party rows are still answered.
-                let theirs = self.third_party_offers(client, &installed).await;
+                let theirs = self.third_party_offers(client, &third_party_targets(&installed)).await;
                 let mut components =
                     component_offers(self.core_version, &[], &theirs, &installed);
                 let mut state = self.state.write().await;
@@ -1104,7 +1131,7 @@ impl Worker {
         };
         let published = fold(&releases, ARCH);
         let installed = self.installed_when_settled().await;
-        let theirs = self.third_party_offers(client, &installed).await;
+        let theirs = self.third_party_offers(client, &third_party_targets(&installed)).await;
         let mut components =
             component_offers(self.core_version, &published, &theirs, &installed);
         let core = published.iter().find(|p| p.offer == Offer::Core);
@@ -1992,17 +2019,25 @@ mod tests {
             announcing("foxtrot", Some("https://github.com/f/foxtrot")),
         ];
         let targets = third_party_targets(&installed);
+        let asked: Vec<(&str, &str)> =
+            targets.iter().map(|t| (t.name.as_str(), t.repo.as_str())).collect();
         assert_eq!(
-            targets,
+            asked,
             vec![
-                ("alpha".to_string(), "a/alpha".to_string()),
-                ("bravo".to_string(), "b/bravo".to_string()),
-                ("charlie".to_string(), "c/charlie".to_string()),
-                ("delta".to_string(), "d/delta".to_string()),
+                ("alpha", "a/alpha"),
+                ("bravo", "b/bravo"),
+                ("charlie", "c/charlie"),
+                ("delta", "d/delta"),
             ],
             "at most four repositories are queried, and they are the first four in file order"
         );
         assert_eq!(targets.len(), THIRD_PARTY_MAX);
+        // The address is formed here and nowhere downstream, so this is where
+        // the host a request goes to is decided.
+        assert_eq!(
+            targets[0].url,
+            "https://api.github.com/repos/a/alpha/releases?per_page=100"
+        );
 
         // **The cap bounds who is asked, never who counts as a stranger.**
         // The same fixture answered by `third_party_names`: all six, plus the
@@ -2692,10 +2727,10 @@ mod tests {
         gz.finish().expect("finish gz")
     }
 
-    /// One HTTP/1.1 200 answer, served to the first connection, at a URL whose
-    /// last segment is `file` — that is what `asset_name` reads to look the
-    /// digest up in `SHA256SUMS`.
-    async fn serve_once(body: Vec<u8>, file: &str) -> String {
+    /// One HTTP/1.1 answer of `status`, served to the first connection, at a
+    /// URL whose last segment is `file` — that is what `asset_name` reads to
+    /// look the digest up in `SHA256SUMS`.
+    async fn serve_with(status: u16, body: Vec<u8>, file: &str) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -2704,7 +2739,7 @@ mod tests {
                 let mut ignored = [0u8; 4096];
                 let _ = socket.read(&mut ignored).await;
                 let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = socket.write_all(head.as_bytes()).await;
@@ -2713,6 +2748,20 @@ mod tests {
             }
         });
         format!("http://127.0.0.1:{port}/{file}")
+    }
+
+    async fn serve_once(body: Vec<u8>, file: &str) -> String {
+        serve_with(200, body, file).await
+    }
+
+    /// An address nothing is listening on: the listener is bound only to
+    /// reserve a port, then dropped. Drives the connection-failure branch,
+    /// which no status code can produce.
+    async fn refused_url() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}/releases")
     }
 
     /// A `Published` pointing at those two servers, with a digest that
@@ -2731,6 +2780,127 @@ mod tests {
             release_tag: "v2.0.0".to_string(),
             checksums_url: Some(checksums_url),
         }
+    }
+
+    /// A GitHub releases listing carrying exactly these asset names, one
+    /// published release. Written out rather than built from a fixture helper
+    /// because what it must exercise is `parse_releases`' own reading.
+    fn releases_body(assets: &[&str]) -> Vec<u8> {
+        let assets: Vec<String> = assets
+            .iter()
+            .map(|n| {
+                format!(r#"{{"name":"{n}","browser_download_url":"https://x/{n}","size":1}}"#)
+            })
+            .collect();
+        format!(
+            r#"[{{"tag_name":"v2.0.0","published_at":"2026-01-01T00:00:00Z","draft":false,"prerelease":false,"assets":[{}]}}]"#,
+            assets.join(",")
+        )
+        .into_bytes()
+    }
+
+    /// The asset name a repository must publish for the plugin `name`, for the
+    /// architecture this binary was built for.
+    fn asset_for(name: &str, version: &str) -> String {
+        format!("ritornello-plugin-{name}-{version}-{ARCH}.tar.gz")
+    }
+
+    /// **The last decision on the path that lets bytes arrive from a
+    /// repository we do not control, and the one that had no test.**
+    ///
+    /// Five repositories answering five different ways, driven through the
+    /// real `fetch_text` against real sockets. Two properties in one run,
+    /// because they are one loop:
+    ///
+    /// - **an asset must be named for the plugin it is being fetched for.** A
+    ///   repository publishing `ritornello-plugin-radio-…` when asked about
+    ///   `bravo` has published nothing for the binary on this device, and a
+    ///   repository publishing `ritornello-core-…` must never produce an offer
+    ///   at all — a core offer from a stranger is the one component the plugin
+    ///   rule never judges;
+    /// - **one bad answer costs only its own row.** The three failure shapes
+    ///   are distinct branches — a refused connection, a non-200, a body that
+    ///   is not a release list — and the two good repositories are placed
+    ///   **around** them, so an implementation that gave up on the first
+    ///   failure would lose `foxtrot` and one that gave up on the last would
+    ///   lose nothing visible.
+    #[tokio::test]
+    async fn a_third_party_repository_answers_only_for_the_plugin_it_names() {
+        let (worker, _dir) = worker_rig(starting_line());
+        let client = client().unwrap();
+
+        let targets = vec![
+            // Publishes an archive named for somebody else's plugin.
+            Target {
+                name: "bravo".to_string(),
+                repo: "b/bravo".to_string(),
+                url: serve_once(releases_body(&[&asset_for("radio", "3.0.0")]), "releases").await,
+            },
+            // Answers properly.
+            Target {
+                name: "alpha".to_string(),
+                repo: "a/alpha".to_string(),
+                url: serve_once(releases_body(&[&asset_for("alpha", "2.0.0")]), "releases").await,
+            },
+            // Nothing listening at all.
+            Target {
+                name: "charlie".to_string(),
+                repo: "c/charlie".to_string(),
+                url: refused_url().await,
+            },
+            // Rate-limited — and its body is a **perfectly good** release
+            // listing naming delta's own asset. Deliberately: an error body
+            // that also failed to parse would be refused by the next clause
+            // for a different reason, and the fixture could then not tell the
+            // status check from its absence. What this pins is that the
+            // **status** decides, not the bytes that came with it.
+            Target {
+                name: "delta".to_string(),
+                repo: "d/delta".to_string(),
+                url: serve_with(403, releases_body(&[&asset_for("delta", "6.0.0")]), "releases")
+                    .await,
+            },
+            // 200, and a body that is not a release list.
+            Target {
+                name: "echo".to_string(),
+                repo: "e/echo".to_string(),
+                url: serve_once(b"<html>not json</html>".to_vec(), "releases").await,
+            },
+            // Publishes a CORE archive: a stranger must never offer one.
+            Target {
+                name: "foxtrot".to_string(),
+                repo: "f/foxtrot".to_string(),
+                url: serve_once(
+                    releases_body(&[
+                        &format!("ritornello-core-4.0.0-{ARCH}.tar.gz"),
+                        &asset_for("foxtrot", "5.1.0"),
+                    ]),
+                    "releases",
+                )
+                .await,
+            },
+        ];
+
+        let offers = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.third_party_offers(&client, &targets),
+        )
+        .await
+        .expect("third_party_offers hung");
+
+        let got: Vec<(&str, &str)> =
+            offers.iter().map(|o| (o.name.as_str(), o.published.version.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![("alpha", "2.0.0"), ("foxtrot", "5.1.0")],
+            "only the repositories that published an archive named for their own plugin answer, and a bad answer costs only its own row"
+        );
+        // The stranger publishing a core archive offered its plugin and
+        // nothing else: no `Offer::Core` can reach the rows this way.
+        assert!(
+            offers.iter().all(|o| matches!(&o.published.offer, Offer::Plugin(n) if *n == o.name)),
+            "a third-party offer is always a plugin offer, named for that plugin: {offers:#?}"
+        );
     }
 
     /// **RULING 64 at the call site: the third-party path really does call the
@@ -2860,9 +3030,10 @@ mod tests {
             Some("https://github.com/someone/their-plugin"),
             "relayed verbatim and unparsed, exactly as the announcement gave it"
         );
+        let targets = third_party_targets(&installed);
         assert_eq!(
-            third_party_targets(&installed),
-            vec![("radio".to_string(), "someone/their-plugin".to_string())],
+            targets.iter().map(|t| (t.name.as_str(), t.repo.as_str())).collect::<Vec<_>>(),
+            vec![("radio", "someone/their-plugin")],
             "and it is what decides which repository the check goes and asks"
         );
     }
