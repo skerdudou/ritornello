@@ -644,8 +644,18 @@ note are worth knowing:
 - a plugin whose new binary **died before announcing itself** has no
   known version, which normally keeps the automatic policy away from it
   for good. A version this device placed is one it may replace, so the
-  next release repairs it on its own — at the cost of one download per
-  released version, never one per night.
+  next release repairs it on its own — at the cost of one *successful*
+  placement per released version, never one per night. An install that
+  fails before the files are placed (no room, a bad checksum, the
+  privileged step refused) writes nothing down and is retried the next
+  night, exactly as it is for a component whose version is known.
+
+The note is written for a hand-clicked install as much as for an
+automatic one: what it records is that this device was given that archive
+and did not keep it, which is no less true when a person asked for it. So
+an automatic run will not repeat, at three in the morning, a version that
+failed under somebody's finger — and that person can still try it again
+whenever they like.
 
 **A restart that follows an update keeps the device as it was, rather
 than reading the Startup card again — a device in standby stays in

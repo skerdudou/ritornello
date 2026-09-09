@@ -49,7 +49,7 @@ pub struct PlacedComponent {
     /// version it describes are **one fact**: two files would be two records
     /// of "the core version the updater placed", free to disagree. And it is
     /// what lets the note be shown only while it still describes the core that
-    /// is actually running — see `main::apply_core_archive_note`.
+    /// is actually running — see `main::core_archive_note`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_installed_files: Option<Vec<String>>,
 }

@@ -180,8 +180,13 @@ fn carries(published: &Published, name: &str) -> bool {
 ///   this updater placed** and which then died before announcing — the one
 ///   case where the version is unknown *because of an update*, and the one
 ///   case where an automatic repair is worth most. Its cost is bounded by the
-///   fifth exclusion below: one attempt per released version, never one per
-///   night.
+///   fifth exclusion below — but only on the **success** path, and that is
+///   worth being exact about: the memory is written after the privileged unit
+///   has placed the bytes, so a run that fails before that (no room, a bad
+///   digest, the unit refused) records nothing and is tried again the next
+///   night. That is what already happens for a component whose version *is*
+///   known, and it is bounded by the same things; what changes here is only
+///   that the previous cost for a switched-off plugin was zero.
 ///
 /// - a component whose **offered version is the one already placed** is left
 ///   alone. Reaching this line at all means the placement did not take: had it
@@ -796,6 +801,30 @@ const PRIVILEGED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 /// the one failure this whole gesture must not have.
 const RESTART_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+// **A test's answer for `run_privileged_unit`, and the only way past it on a
+// machine with no systemd.**
+//
+// A red light rather than a field on `Worker`, and the difference matters:
+// this exists nowhere in a release build, no production struct gains a
+// pluggable member, and nothing invites a future reader to think the
+// privileged step can be swapped out. Each test runs on its own thread and
+// `Privileged` puts the light out on the way through `Drop`, so no test can
+// inherit another's answer.
+//
+// It is what makes the one property this whole memory exists for observable —
+// that the note of what was placed is written **before** the process leaves.
+// Everything downstream of the privileged call (the memory, the restart hook)
+// is unreachable without it, and "unreachable" was the wrong word: what was
+// missing was a red light, not an injectable design.
+//
+// A `//` comment and not a `///` one: a doc comment on a macro invocation is
+// an `unused doc comment` error under `-D warnings`.
+#[cfg(test)]
+thread_local! {
+    static FAKE_PRIVILEGED: std::cell::RefCell<Option<Result<(), String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Asks systemd for the privileged unit, and waits for it.
 ///
 /// No `--no-block`: it is a `oneshot`, and the core is not what it stops, so
@@ -803,6 +832,10 @@ const RESTART_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// deadline, because an I/O that hangs has already made a page disappear in
 /// this product — here it would leave `busy` set for ever.
 async fn run_privileged_unit() -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(answer) = FAKE_PRIVILEGED.with(|f| f.borrow().clone()) {
+        return answer;
+    }
     let call = tokio::process::Command::new("systemctl")
         .arg("start")
         .arg("ritornello-update.service")
@@ -1545,10 +1578,30 @@ impl Worker {
     /// lists. Not writing the entry is how that collision is made impossible
     /// here rather than reasoned about.
     ///
+    /// **A manual placement is written down too**, and the brief only asked
+    /// for the automatic policy's own. It is the better reading: what the
+    /// memory records is that *this device* was given that archive and did not
+    /// keep it, and that fact is no less true when a person clicked the
+    /// button. So the robot learns from a failed hand install as well and does
+    /// not repeat it at three in the morning, while the person is never
+    /// stopped from trying again — `automatic_install_list` is the only reader
+    /// there is. Said out loud in `docs/interface.md` too, since it is the
+    /// difference between "the robot gave up" and "nobody may install this".
+    ///
     /// Best-effort and never a `Refusal`: by the time this runs the bytes are
     /// already at their target, and refusing an install that has happened
     /// would be a lie. A memory that fails to be written costs one more
     /// attempt at the next run, which is where this started.
+    ///
+    /// **One production caller, on purpose** (`install_one`). The tests reach
+    /// the memory through `placed::record` instead, which leaves this method
+    /// dead the moment that call is deleted and makes
+    /// `cargo clippy --all-targets -- -D warnings` say so. That tripwire is
+    /// belt to the braces of
+    /// `the_memory_of_a_core_install_is_on_disk_by_the_time_the_process_leaves`,
+    /// which observes the real thing — and it **disarms silently** if a future
+    /// test ever calls this method directly, so route new tests through
+    /// `placed::record`.
     fn remember_placed(&self, name: &str, version: &str, not_installed_files: Option<Vec<String>>) {
         if let Err(e) = placed::record(&self.staging, name, version, not_installed_files) {
             tracing::warn!(
@@ -2316,7 +2369,15 @@ mod tests {
         // Switched off, so it never announced a version: `differs` says yes
         // against every release for ever, and without the guard this row
         // alone would make the device re-download the same archive nightly.
-        let mut silent = row("console", ComponentKind::Plugin, Availability::UpdateAvailable);
+        //
+        // **Its own name, not a second `console` row.** It used to share that
+        // name with the `BinaryMissing` row below, which was harmless while
+        // the decision knew nothing but the rows — and stopped being harmless
+        // the moment the memory keyed itself by component name: two rows that
+        // cannot be told apart is the class of fixture this chantier has been
+        // caught by seven times, and this table is fed `nothing_placed()`
+        // precisely so it never has to be.
+        let mut silent = row("generic-input", ComponentKind::Plugin, Availability::UpdateAvailable);
         silent.installed = None;
         let components = vec![
             row("core", ComponentKind::Core, Availability::UpdateAvailable),
@@ -2362,18 +2423,16 @@ mod tests {
     /// The first assertion is not decoration: without it, a rule that refused
     /// everything for ever would satisfy the second.
     ///
-    /// **What no test here can reach, and the one tripwire that covers part of
-    /// it.** The write itself happens in `install_one`, behind a release
-    /// server and a privileged systemd unit, neither of which exists on this
-    /// machine — so nothing proves that function calls `remember_placed`.
-    /// These tests therefore go through `placed::record`, the same function
-    /// the worker's method delegates to, **deliberately rather than through
-    /// `Worker::remember_placed`**: that leaves the method with exactly one
-    /// caller, the production one, so deleting that call makes it dead code
-    /// and `cargo clippy --all-targets -- -D warnings` refuses the build. It
-    /// catches the call disappearing; it does not catch it moving after the
-    /// restart, which stays a property of the shape of `install_one` (see the
-    /// comment at that call site).
+    /// **What this one does not reach, and what does.** The write itself
+    /// happens in `install_one`, behind a release server and the privileged
+    /// unit; this test starts from a memory that already exists, so it proves
+    /// the rule and not the writing of it. Two other things cover that:
+    /// `the_memory_of_a_core_install_is_on_disk_by_the_time_the_process_leaves`
+    /// drives the real pass and observes the write against the restart, and
+    /// these tests go through `placed::record` rather than
+    /// `Worker::remember_placed` so that deleting the production call leaves
+    /// the method dead and `cargo clippy --all-targets -- -D warnings` refuses
+    /// the build.
     #[test]
     fn a_core_release_that_was_rolled_back_is_not_installed_again_the_next_night() {
         let dir = tempfile::tempdir().unwrap();
@@ -2411,14 +2470,13 @@ mod tests {
     /// automatic policy.** The operator is allowed to try 0.4.1 again — it is
     /// also the only escape if this memory is ever wrong.
     ///
-    /// What this test can and cannot show, said plainly: the skip is a
-    /// property of `automatic_install_list`, which is called from exactly one
-    /// place — the `Job::Scheduled` arm of `run_worker`. `Job::Install`
+    /// The skip is a property of `automatic_install_list`, which has exactly
+    /// one caller — the `Job::Scheduled` arm of `run_worker`. `Job::Install`
     /// carries the operator's names to `install` untouched, and the only
     /// transform between the two is `install_order`, asserted here beside it.
-    /// A defect that moved the memory check down into `install` or
-    /// `install_one` would be caught by neither: reaching those needs a
-    /// release server and a privileged unit, and this machine has neither.
+    /// The stronger half of the claim — that nothing further down consults the
+    /// memory either — is proven over the real install pass by
+    /// `an_install_asked_for_by_hand_goes_through_a_version_the_memory_has_given_up_on`.
     #[test]
     fn the_memory_never_stands_in_the_way_of_an_install_asked_for_by_hand() {
         let dir = tempfile::tempdir().unwrap();
@@ -3211,6 +3269,157 @@ mod tests {
     /// this sandbox's `systemctl` at all, the same "no systemctl is needed"
     /// doctrine the comment above `targz` already states for its two
     /// neighbours.
+    /// The same rig for the **core's** own archive: the asset name carries no
+    /// plugin, and the offer is `Offer::Core`, which is what sends
+    /// `install_one` down the branch that ends in the restart.
+    async fn served_core(archive: &[u8]) -> Published {
+        let file = format!("ritornello-core-2.0.0-{ARCH}.tar.gz");
+        let url = serve_once(archive.to_vec(), &file).await;
+        let sums = format!("{}  {file}\n", digest_hex(archive));
+        let checksums_url = serve_once(sums.into_bytes(), "SHA256SUMS").await;
+        Published {
+            offer: Offer::Core,
+            version: "2.0.0".to_string(),
+            url,
+            size: 0,
+            release_tag: "v2.0.0".to_string(),
+            checksums_url: Some(checksums_url),
+        }
+    }
+
+    /// Holds the privileged unit's answer for one test, and puts the light out
+    /// again on the way out.
+    ///
+    /// A guard rather than a bare set, so no test can inherit another's answer
+    /// even if two of them ever share a thread. Nothing production-side can
+    /// see this: `FAKE_PRIVILEGED` is `cfg(test)`.
+    struct Privileged;
+
+    impl Privileged {
+        fn answers(answer: Result<(), String>) -> Self {
+            FAKE_PRIVILEGED.with(|f| *f.borrow_mut() = Some(answer));
+            Self
+        }
+    }
+
+    impl Drop for Privileged {
+        fn drop(&mut self) {
+            FAKE_PRIVILEGED.with(|f| *f.borrow_mut() = None);
+        }
+    }
+
+    /// A core archive: its binary, plus one file the installer never places —
+    /// which is what `archive::core_not_installed` puts in the note.
+    fn core_archive() -> Vec<u8> {
+        targz(&[
+            (archive::CORE_BINARY, b"ELF, as far as this test is concerned"),
+            ("etc/systemd/system/ritornello-rollback.service", b"[Unit]\n"),
+        ])
+    }
+
+    /// Runs one install pass for the core and answers what the memory looked
+    /// like **at the instant the restart hook fired** — which on a device is
+    /// the instant the process stops existing. `None` means it never fired.
+    ///
+    /// The hook is the observer, and that is the whole trick: it is already
+    /// injectable, it is already the last thing a core install does, and
+    /// snapshotting inside it is the only way to see which side of the exit a
+    /// write fell on.
+    async fn memory_at_the_exit(worker: &mut Worker, checked: &Checked) -> Option<placed::Placed> {
+        let staging = worker.staging.clone();
+        let seen: Arc<std::sync::Mutex<Option<placed::Placed>>> = Arc::default();
+        let recorder = seen.clone();
+        worker.restart = Arc::new(move || {
+            *recorder.lock().unwrap() = Some(placed::read(&staging));
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install(&client().unwrap(), checked, &names(&[CORE])),
+        )
+        .await
+        .expect("the install pass hung");
+        let snapshot = seen.lock().unwrap();
+        snapshot.clone()
+    }
+
+    /// **The property this whole task exists for, observed rather than
+    /// reasoned about: the note of what was placed is on disk before the
+    /// process leaves.**
+    ///
+    /// The first version of this work called it unreachable and settled for a
+    /// dead-code tripwire, on the grounds that getting here needed a release
+    /// server and an injectable privileged step. Half of that was already in
+    /// this module (`served`, `targz`), and the other half is a `cfg(test)`
+    /// red light inside `run_privileged_unit` — no field on `Worker`, no
+    /// production struct touched. That is one more instance of this project's
+    /// oldest lesson: "untestable" is one hard part welded to one merely
+    /// unbuilt one.
+    ///
+    /// What it catches that the tripwire cannot: moving the write to **after**
+    /// `(self.restart)()`. That leaves `remember_placed` called, so
+    /// `-D warnings` is satisfied and every other test in the workspace stays
+    /// green — and on a device it is exactly the original defect, a write
+    /// performed by a process that has already exited.
+    ///
+    /// The version is `2.0.0`, which no other fixture here places and which no
+    /// `worker_at` core version equals, so a snapshot taken off the wrong file
+    /// or the wrong key cannot read as a pass.
+    #[tokio::test]
+    async fn the_memory_of_a_core_install_is_on_disk_by_the_time_the_process_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = worker_at(dir.path(), stalled_line());
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = Checked {
+            ours: vec![served_core(&core_archive()).await],
+            theirs: Vec::new(),
+            third_party: Vec::new(),
+        };
+
+        let memory = memory_at_the_exit(&mut worker, &checked)
+            .await
+            .expect("the install never reached the restart");
+
+        assert_eq!(
+            placed::version_of(&memory, CORE),
+            Some("2.0.0"),
+            "the placed version must already be on disk when the restart hook fires: written after it, it would be written by a process that no longer exists"
+        );
+        assert_eq!(
+            memory[CORE].not_installed_files.as_deref(),
+            Some(["etc/systemd/system/ritornello-rollback.service".to_string()].as_slice()),
+            "and so must the note of what the archive carried and nobody installed"
+        );
+    }
+
+    /// **The way out, driven through the real install pass.**
+    ///
+    /// The memory already says this policy placed 2.0.0 and the device did not
+    /// keep it — which is exactly what stops an automatic run. The operator
+    /// ticks the row anyway, and the install goes all the way to the restart.
+    ///
+    /// Its companion over the decision function states the same rule; this one
+    /// proves that nothing between `Job::Install` and the privileged unit
+    /// consults the memory at all. A defect that moved the check down into
+    /// `install` or `install_one` — the tempting "fix" — reddens here and
+    /// nowhere else.
+    #[tokio::test]
+    async fn an_install_asked_for_by_hand_goes_through_a_version_the_memory_has_given_up_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = worker_at(dir.path(), stalled_line());
+        placed::record(&worker.staging, CORE, "2.0.0", None).unwrap();
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = Checked {
+            ours: vec![served_core(&core_archive()).await],
+            theirs: Vec::new(),
+            third_party: Vec::new(),
+        };
+
+        assert!(
+            memory_at_the_exit(&mut worker, &checked).await.is_some(),
+            "a manual install of the version the automatic policy skips must still reach the restart"
+        );
+    }
+
     async fn served_with_wrong_digest(name: &str, archive: &[u8]) -> Published {
         let file = format!("ritornello-plugin-{name}-2.0.0-x86_64.tar.gz");
         let url = serve_once(archive.to_vec(), &file).await;
