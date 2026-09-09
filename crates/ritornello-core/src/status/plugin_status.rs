@@ -82,6 +82,20 @@ pub struct PluginStatus {
     /// Additive like `missing_binary`: absent from the JSON when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub undeclared_binary: bool,
+    /// The bare file name in the plugins directory, when this line is an
+    /// `undeclared_binary`. Absent otherwise.
+    ///
+    /// `name` above is the **component** name, recovered from this file name
+    /// by `plugins::component_name_from_file` so that "Declare" (which asks
+    /// the release for that component, never for a file) can succeed — but
+    /// erasing the binary directly (`DELETE /api/plugins/binaries/{file}`,
+    /// task 18's fix round) has to name the file itself, since a hand-dropped
+    /// binary may carry no component name the release would recognise at
+    /// all. Carrying both is what lets each gesture use the name the thing it
+    /// asks actually needs, rather than the operator seeing one name and the
+    /// removal quietly acting on a guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_file: Option<String>,
     /// Reachable plugin whose admin page does not answer the `Ping`: a long
     /// `set_data` holds its lock (most often a network share). Computed at
     /// `/api/status` time, never stored: it is a state that changes by the
@@ -152,6 +166,7 @@ impl PluginStatus {
             disabled: false,
             missing_binary: false,
             undeclared_binary: false,
+            binary_file: None,
             busy: false,
             ui_version: None,
             version: None,
@@ -176,6 +191,7 @@ impl PluginStatus {
             disabled: false,
             missing_binary: false,
             undeclared_binary: false,
+            binary_file: None,
             busy: false,
             ui_version: None,
             version: None,
@@ -197,12 +213,22 @@ impl PluginStatus {
     /// Undeclared, and its binary is there. The twin of `binary_missing`; see
     /// the field's documentation.
     ///
+    /// `name` is the **component** name — already recovered from `file` by
+    /// the caller (`plugins::component_name_from_file`), not the bare file
+    /// name the scan actually found. `file` is kept verbatim in
+    /// `binary_file`, for the one gesture (erasing the binary) that has to
+    /// name the file rather than the component.
+    ///
     /// Computed at `/api/status` time by `status_json`, from the same scan
     /// that feeds `Availability::Undeclared` on `/api/update` — never called
     /// from `main`'s startup loop, since nothing in `plugins.toml` names such
     /// a plugin for the loop to have an opinion about.
-    pub fn undeclared_binary(name: &str) -> Self {
-        Self { undeclared_binary: true, ..Self::unknown_kind(name, false) }
+    pub fn undeclared_binary(name: &str, file: &str) -> Self {
+        Self {
+            undeclared_binary: true,
+            binary_file: Some(file.to_string()),
+            ..Self::unknown_kind(name, false)
+        }
     }
 
     /// Line of a plugin that was just launched: it has not spoken, and that is
@@ -221,6 +247,7 @@ impl PluginStatus {
             disabled: false,
             missing_binary: false,
             undeclared_binary: false,
+            binary_file: None,
             busy: false,
             ui_version: None,
             version: None,
@@ -242,6 +269,7 @@ impl PluginStatus {
             disabled: true,
             missing_binary: false,
             undeclared_binary: false,
+            binary_file: None,
             busy: false,
             ui_version: None,
             version: None,
@@ -266,6 +294,7 @@ impl PluginStatus {
             disabled: false,
             missing_binary: false,
             undeclared_binary: false,
+            binary_file: None,
             busy: false,
             ui_version: None,
             version: None,
@@ -438,8 +467,11 @@ pub(super) async fn plugin_enabled_put(
 /// `input-bindings.toml`, `media-roots.toml` and the plugin's own
 /// configuration all stay, so reinstalling finds them again. Deleting them
 /// would be the one irreversible gesture in this whole feature, and nothing
-/// asked for it — the success message is the one place the operator learns
-/// it.
+/// asked for it — the client's own uninstall confirmation dialog is where
+/// the operator reads this, **before** the gesture, in
+/// `plugin_uninstall_confirm` (ruling 73: this route answers a bare 204 on
+/// success, and nothing on the client ever reads a success body to say it
+/// again afterwards).
 pub(super) async fn plugin_delete(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -538,6 +570,53 @@ pub(super) async fn plugin_delete(
     // success body — nothing was ever going to see that sentence. The
     // confirmation the operator actually reads is shown **before** the
     // gesture, in the client's own uninstall dialog.
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Erases a binary nothing declares — the second gesture an
+/// `undeclared_binary` row offers, and the twin of `plugin_delete`: that one
+/// erases a **declaration** and queues the binary's removal behind it; this
+/// one erases the **binary** directly, since there is no declaration here to
+/// remove first.
+///
+/// A sibling route rather than a fallthrough on `DELETE /api/plugins/{name}`:
+/// that route's `plugin_unknown` means "no such plugin is declared", and this
+/// one's refusal means something else entirely ("not a removable stray
+/// binary") — folding the two into one status code would make the same 404
+/// carry two different diagnoses depending on which button sent it.
+///
+/// `plugins::binary_is_removable` makes the actual decision, from a **fresh**
+/// scan taken here and now — never from anything the page sent or a previous
+/// check cached, the same doctrine every sibling route already follows, and
+/// the one that matters most here: this is the one gesture in this file that
+/// cannot be undone by writing the manifest back.
+pub(super) async fn plugin_binary_delete(
+    State(state): State<AppState>,
+    axum::extract::Path(file): axum::extract::Path<String>,
+) -> Response {
+    let manifest = match crate::plugins::PluginManifest::load(&state.plugins.manifest) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("reading {} to remove {file}: {e:#}", state.plugins.manifest.display());
+            let msg = state.catalog.read().await.get("plugin_manifest_unreadable").to_string();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg })))
+                .into_response();
+        }
+    };
+    let plugins_dir = ritornello_updater::target::plugins_dir(&state.plugins.root);
+    let currently_undeclared = crate::plugins::undeclared_binaries(&plugins_dir, &manifest);
+    if !crate::plugins::binary_is_removable(&file, &manifest, &currently_undeclared) {
+        let msg = state.catalog.read().await.get("plugin_binary_unknown").replace("{file}", &file);
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": msg }))).into_response();
+    }
+
+    // `name` is for the log only (see `Job::RemovePlugin`'s doc); there is no
+    // declared plugin behind this file to name it by, so the file name serves
+    // for both.
+    let job = crate::update::Job::RemovePlugin { name: file.clone(), file: file.clone() };
+    if state.update_tx.try_send(job).is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 

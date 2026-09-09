@@ -24,7 +24,7 @@ use locales::{i18n_json, locale_json, locale_put};
 // here, next to `/api/locale` which they already gate — `admin_i18n` reuses
 // both rather than inventing a second grammar.
 pub(crate) use locales::{list_locales, valid_locale};
-use plugin_status::{plugin_delete, plugin_enabled_put, plugin_move_post};
+use plugin_status::{plugin_binary_delete, plugin_delete, plugin_enabled_put, plugin_move_post};
 pub use plugin_status::{
     mark_plugin_disconnected, replace_plugin_lines, resequence_plugin_lines, PluginAction,
     PluginOrder, PluginStatus, PluginsControl,
@@ -155,6 +155,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plugins/{name}/enabled", axum::routing::put(plugin_enabled_put))
         .route("/api/plugins/{name}/move", axum::routing::post(plugin_move_post))
         .route("/api/plugins/{name}", axum::routing::delete(plugin_delete))
+        // A sibling of the route above, not a fallthrough on it: erasing a
+        // binary nothing declares is a different gesture from uninstalling a
+        // declared plugin, and folding the two together would make
+        // `plugin_unknown`'s 404 mean two different things (task 18's fix
+        // round, review finding I1).
+        .route("/api/plugins/binaries/{file}", axum::routing::delete(plugin_binary_delete))
         .merge(crate::web::routes())
         .fallback(crate::web::shell)
         .with_state(state)
@@ -214,14 +220,22 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
         crate::plugins::PluginManifest::default()
     });
     let plugins_dir = ritornello_updater::target::plugins_dir(&state.plugins.root);
-    for name in crate::plugins::undeclared_binaries(&plugins_dir, &manifest) {
+    for file in crate::plugins::undeclared_binaries(&plugins_dir, &manifest) {
+        // The scan only ever knows the bare file name; `name` is what the
+        // rest of the page (and the release) recognise this plugin by — see
+        // `component_name_from_file`'s own doc for why the two must not be
+        // conflated (task 18's fix round).
+        let name = crate::plugins::component_name_from_file(&file);
         match status.plugins.iter_mut().find(|p| p.name == name) {
             // Alive and out of the core's control (the `OutOfReach` case
             // `declare_plugin`'s doc names): it already has a real line from
             // its own announcement, which is decorated rather than
             // duplicated.
-            Some(line) => line.undeclared_binary = true,
-            None => status.plugins.push(PluginStatus::undeclared_binary(&name)),
+            Some(line) => {
+                line.undeclared_binary = true;
+                line.binary_file = Some(file.clone());
+            }
+            None => status.plugins.push(PluginStatus::undeclared_binary(name, &file)),
         }
     }
     // Clamped to the installed set, falling back to `en`: `locale_current` can
@@ -1003,9 +1017,15 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|p| p["name"] == "ritornello-plugin-orphan")
+            // Named by the **component** the release would publish
+            // (`plugins::component_name_from_file`), not by the bare file the
+            // scan found — the file name is what a review of this task found
+            // missing here, and what made "Declare" unable to ever resolve
+            // against the release.
+            .find(|p| p["name"] == "orphan")
             .expect("a synthetic line for the undeclared binary");
         assert_eq!(line["undeclared_binary"], true);
+        assert_eq!(line["binary_file"], "ritornello-plugin-orphan");
     }
 
     /// The second case: a declared plugin's own binary, present at its

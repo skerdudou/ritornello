@@ -365,6 +365,22 @@ interface PluginRow {
    * have no line in that file for `move_entry` to act on.
    */
   declared: boolean
+  /**
+   * The version `/api/update` currently offers this component, from the same
+   * row `ComponentOffer` carries it on — `null` when no offer exists (never
+   * checked, dropped out of the release window, or a release that never
+   * carried this name). Ruling 88's guard, applied here to the table's own
+   * Install button for the same reason it applies to the dialog's switch: a
+   * row with nothing to install cannot be selected for installing, and
+   * without this a `missing_binary` row whose release does not carry it
+   * would press "Install" into `Resolved::Nothing` — refused, but silently
+   * enough from the operator's chair that the guard is worth having anyway.
+   */
+  offered: string | null
+  /** The bare file name to erase for "Remove the binary" — present only when
+   * `undeclared_binary` is true. Never the same string as `name` once the
+   * release's own convention applies to it (`ritornello-plugin-<name>`). */
+  binary_file?: string
 }
 
 /** Intermediate accumulator: the raw kinds, before we decide what must stay in
@@ -383,6 +399,7 @@ interface PluginAccumulator {
   incompatible?: number
   missing_binary: boolean
   undeclared_binary: boolean
+  binary_file?: string
 }
 
 /**
@@ -411,6 +428,7 @@ const plugins = computed<PluginRow[]>(() => {
         incompatible: p.incompatible,
         missing_binary: !!p.missing_binary,
         undeclared_binary: !!p.undeclared_binary,
+        binary_file: p.binary_file,
       })
       continue
     }
@@ -428,6 +446,7 @@ const plugins = computed<PluginRow[]>(() => {
     acc.incompatible = acc.incompatible ?? p.incompatible
     acc.missing_binary = acc.missing_binary || !!p.missing_binary
     acc.undeclared_binary = acc.undeclared_binary || !!p.undeclared_binary
+    acc.binary_file = acc.binary_file ?? p.binary_file
   }
   const declaredRows: PluginRow[] = [...byName.values()].map((acc) => {
     // "unknown" is never shown next to a real kind: we only keep it when it is
@@ -435,8 +454,19 @@ const plugins = computed<PluginRow[]>(() => {
     // over the complete set of received kinds — not by looking only at what the
     // accumulator held at a given instant, which would depend on the arrival
     // order of the lines.
+    //
+    // A row whose every received kind is "unknown" reads "—", not the word
+    // "unknown": that word never announced anything real, and it used to be
+    // one of two different spellings this table gave to "no kind" — a
+    // `not_installed` row (below) already spells it "—". Both the ordinary
+    // "not yet announced" rows and an `undeclared_binary` line get the same
+    // dash (review of task 18, M6).
     const realKinds = acc.receivedKinds.filter((k) => k !== 'unknown')
-    const kinds = (realKinds.length > 0 ? realKinds : acc.receivedKinds).join(', ')
+    const kinds = realKinds.length > 0 ? realKinds.join(', ') : '—'
+    // Looked up by name rather than carried through the accumulator: the
+    // offer lives on a wholly different payload (`/api/update`), read once
+    // here rather than threaded through every accumulator field above.
+    const offer = update.value.components.find((c) => c.name === acc.name)
     return {
       name: acc.name,
       kinds,
@@ -456,6 +486,8 @@ const plugins = computed<PluginRow[]>(() => {
       // "not declared" — everything else here (including `missing_binary`)
       // has a `[[plugin]]` block, `move_entry`'s own unit.
       declared: !acc.undeclared_binary,
+      offered: offer?.offered ?? null,
+      binary_file: acc.binary_file,
     }
   })
 
@@ -483,6 +515,7 @@ const plugins = computed<PluginRow[]>(() => {
       undeclared_binary: false,
       not_installed: true,
       declared: false,
+      offered: c.offered,
     }))
 
   return [...declaredRows, ...availableRows]
@@ -542,12 +575,22 @@ async function togglePlugin(row: PluginRow) {
  * reworded on this side.
  */
 async function movePlugin(name: string, delta: 1 | -1) {
-  const err = await api.post(`/api/plugins/${encodeURIComponent(name)}/move`, { delta })
-  if (err) {
-    toast.error(err)
-    return
+  // Fix round 1, M2: `inProgress` already exists for `togglePlugin`, and
+  // every gesture this table added shares its row's name with that same
+  // marker — a plugin mid-move is not a plugin that should also be toggled
+  // or reinstalled from the very same row in the same instant.
+  if (inProgress.value.has(name)) return
+  inProgress.value.add(name)
+  try {
+    const err = await api.post(`/api/plugins/${encodeURIComponent(name)}/move`, { delta })
+    if (err) {
+      toast.error(err)
+      return
+    }
+    await refreshPlugins()
+  } finally {
+    inProgress.value.delete(name)
   }
-  await refreshPlugins()
 }
 
 /**
@@ -559,15 +602,27 @@ async function movePlugin(name: string, delta: 1 | -1) {
  * declaration and needs a binary, the second already has a binary and needs a
  * declaration, and either way `/api/update/install` is the one gesture that
  * can write it. Same async, poll-while-busy shape as `onConfirmInstall`.
+ *
+ * `inProgress` here only spans the enqueue request, not the background
+ * install itself (that one is `update.busy`, the update card's own field,
+ * covered by `pollUpdateWhileBusy`) — enough to stop the same row's button
+ * being pressed twice in the same instant, though not to stop a second press
+ * once the 202 has come back and the worker is still busy underneath it.
  */
 async function installPlugin(name: string) {
-  const err = await api.post('/api/update/install', { components: [name] })
-  if (err) {
-    toast.error(err)
-    return
+  if (inProgress.value.has(name)) return
+  inProgress.value.add(name)
+  try {
+    const err = await api.post('/api/update/install', { components: [name] })
+    if (err) {
+      toast.error(err)
+      return
+    }
+    pollUpdateWhileBusy()
+    await refreshUpdate()
+  } finally {
+    inProgress.value.delete(name)
   }
-  pollUpdateWhileBusy()
-  await refreshUpdate()
 }
 
 /** Name of the plugin an uninstall confirmation is open for, or `null` when
@@ -578,39 +633,62 @@ const uninstallTarget = ref<string | null>(null)
 async function confirmUninstall() {
   const name = uninstallTarget.value
   uninstallTarget.value = null
-  if (!name) return
-  const err = await api.del(`/api/plugins/${encodeURIComponent(name)}`)
-  if (err) {
-    toast.error(err)
-  } else {
-    // Nothing richer than "OK": the sentence the operator actually needs —
-    // that their stations survive — was already said in the confirmation
-    // they just read (Ruling 73), not repeated here as a second, drifting
-    // copy of it.
-    toast.success(t.value('ok'))
+  if (!name || inProgress.value.has(name)) return
+  inProgress.value.add(name)
+  try {
+    const err = await api.del(`/api/plugins/${encodeURIComponent(name)}`)
+    if (err) {
+      toast.error(err)
+    } else {
+      // Nothing richer than "OK": the sentence the operator actually needs —
+      // that their stations survive — was already said in the confirmation
+      // they just read (Ruling 73), not repeated here as a second, drifting
+      // copy of it.
+      toast.success(t.value('ok'))
+    }
+    await loadAll()
+  } finally {
+    inProgress.value.delete(name)
   }
-  await loadAll()
 }
+
+/** File name a "remove the binary" confirmation is open for, or `null` when
+ * the dialog is closed. Routed through the same `Dialog` pattern as
+ * `uninstallTarget`, with its own sentence (fix round 1, M1): this is the one
+ * gesture in this table that cannot be undone by writing the manifest back,
+ * so it earns the confirmation Uninstall already had. */
+const removeBinaryTarget = ref<string | null>(null)
 
 /**
  * Erases a binary nothing declares — what a hand-dropped file or an
  * interrupted uninstall (declaration removed, the privileged unit never run)
- * leaves behind. **Known limitation**: `DELETE /api/plugins/{name}` refuses
- * before any write when the manifest does not declare the name — by design,
- * for the ordinary uninstall this same route serves — so this call currently
- * cannot succeed against an `undeclared_binary` row; the operator sees the
- * server's own refusal rather than nothing happening. No client-side route
- * exists yet to erase a binary that has no declaration to remove first; see
- * the task report.
+ * leaves behind.
+ *
+ * `DELETE /api/plugins/binaries/{file}` (fix round 1, I1), never
+ * `DELETE /api/plugins/{name}`: that route erases a **declaration** and
+ * refuses a name it does not find in `plugins.toml`, which an
+ * `undeclared_binary` row's name never is by definition. This one takes the
+ * **file** name (`p.binary_file`), not the component name (`p.name`) — the
+ * two differ once the release's own naming convention applies to the file,
+ * and the server-side route addresses the plugins directory by file, not by
+ * component.
  */
-async function removeBinary(name: string) {
-  const err = await api.del(`/api/plugins/${encodeURIComponent(name)}`)
-  if (err) {
-    toast.error(err)
-  } else {
-    toast.success(t.value('ok'))
+async function confirmRemoveBinary() {
+  const file = removeBinaryTarget.value
+  removeBinaryTarget.value = null
+  if (!file || inProgress.value.has(file)) return
+  inProgress.value.add(file)
+  try {
+    const err = await api.del(`/api/plugins/binaries/${encodeURIComponent(file)}`)
+    if (err) {
+      toast.error(err)
+    } else {
+      toast.success(t.value('ok'))
+    }
+    await loadAll()
+  } finally {
+    inProgress.value.delete(file)
   }
-  await loadAll()
 }
 
 async function changeOutput() {
@@ -979,13 +1057,13 @@ function goTo(id: string) {
                     <div v-if="p.declared" class="flex gap-1">
                       <Button
                         variant="outline" size="icon-sm" data-plugin-up
-                        :disabled="isFirstDeclared(p.name)"
+                        :disabled="isFirstDeclared(p.name) || inProgress.has(p.name)"
                         :aria-label="t('plugin_move_up')"
                         @click="movePlugin(p.name, -1)"
                       >↑</Button>
                       <Button
                         variant="outline" size="icon-sm" data-plugin-down
-                        :disabled="isLastDeclared(p.name)"
+                        :disabled="isLastDeclared(p.name) || inProgress.has(p.name)"
                         :aria-label="t('plugin_move_down')"
                         @click="movePlugin(p.name, 1)"
                       >↓</Button>
@@ -1002,21 +1080,30 @@ function goTo(id: string) {
                          remove and no binary to erase; every other row already
                          has its binary and its declaration, so only
                          uninstalling applies. -->
+                    <!-- Ruling 88, applied here for the same reason it
+                         applies to `UpdateDialog`'s switch: `offered ===
+                         null` (never `kind`) is the guard, and it is
+                         kind-agnostic on purpose — a `missing_binary` row the
+                         release does not currently carry, or an
+                         `undeclared_binary` row with nothing to declare it
+                         from, must not offer a button that can only fail. -->
                     <div class="flex gap-1">
                       <Button
                         v-if="p.missing_binary || p.not_installed"
                         variant="outline" size="xs" data-plugin-install
+                        :disabled="p.offered === null || inProgress.has(p.name)"
                         @click="installPlugin(p.name)"
                       >{{ t('plugin_install') }}</Button>
                       <Button
                         v-if="p.undeclared_binary"
                         variant="outline" size="xs" data-plugin-declare
+                        :disabled="p.offered === null || inProgress.has(p.name)"
                         @click="installPlugin(p.name)"
                       >{{ t('plugin_declare') }}</Button>
                       <Button
                         v-if="p.undeclared_binary"
                         variant="outline" size="xs" data-plugin-remove-binary
-                        @click="removeBinary(p.name)"
+                        @click="removeBinaryTarget = p.binary_file ?? p.name"
                       >{{ t('plugin_remove_binary') }}</Button>
                       <Button
                         v-if="!p.undeclared_binary && !p.not_installed"
@@ -1051,8 +1138,39 @@ function goTo(id: string) {
                 {{ uninstallTarget ? t('plugin_uninstall_confirm', { name: uninstallTarget }) : '' }}
               </DialogDescription>
             </DialogHeader>
-            <Button variant="destructive" data-plugin-uninstall-confirm @click="confirmUninstall">
+            <Button
+              variant="destructive" data-plugin-uninstall-confirm
+              :disabled="uninstallTarget !== null && inProgress.has(uninstallTarget)"
+              @click="confirmUninstall"
+            >
               {{ t('plugin_uninstall') }}
+            </Button>
+          </DialogContent>
+        </Dialog>
+
+        <!-- Fix round 1, M1: erasing a binary is the one gesture here that
+             cannot be undone by writing the manifest back (Uninstall, by
+             contrast, is one Install away from reversed), and it did not
+             have a confirmation of its own until the backend that makes it
+             actually succeed existed (I1). Same shared-dialog pattern, its
+             own sentence. -->
+        <Dialog
+          :open="removeBinaryTarget !== null"
+          @update:open="(v: boolean) => { if (!v) removeBinaryTarget = null }"
+        >
+          <DialogContent data-plugin-remove-binary-dialog>
+            <DialogHeader>
+              <DialogTitle>{{ t('plugin_remove_binary') }}</DialogTitle>
+              <DialogDescription>
+                {{ removeBinaryTarget ? t('plugin_remove_binary_confirm', { file: removeBinaryTarget }) : '' }}
+              </DialogDescription>
+            </DialogHeader>
+            <Button
+              variant="destructive" data-plugin-remove-binary-confirm
+              :disabled="removeBinaryTarget !== null && inProgress.has(removeBinaryTarget)"
+              @click="confirmRemoveBinary"
+            >
+              {{ t('plugin_remove_binary') }}
             </Button>
           </DialogContent>
         </Dialog>

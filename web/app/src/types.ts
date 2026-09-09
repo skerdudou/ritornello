@@ -40,6 +40,14 @@ export interface PluginStatus {
    * `ComponentOffer.availability: 'undeclared'` on `/api/update`, so the two
    * payloads cannot disagree about it. Optional: absent when false. */
   undeclared_binary?: boolean
+  /** The bare file name in the plugins directory, present only when
+   * `undeclared_binary` is true. `name` above is the **component** name,
+   * recovered from this file by the core so "Declare" can ask the release
+   * for it; erasing the binary directly
+   * (`DELETE /api/plugins/binaries/{file}`) has to name the file itself,
+   * since a hand-dropped binary may carry no component name the release
+   * would recognise at all. */
+  binary_file?: string
 }
 export interface StatusPayload {
   plugins: PluginStatus[]

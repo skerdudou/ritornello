@@ -84,5 +84,6 @@ describe('api', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
     await expect(api.put('/x', {})).resolves.toBe('Failed to fetch')
     await expect(api.post('/x', {})).resolves.toBe('Failed to fetch')
+    await expect(api.del('/x')).resolves.toBe('Failed to fetch')
   })
 })

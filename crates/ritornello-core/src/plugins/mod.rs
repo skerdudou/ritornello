@@ -176,19 +176,87 @@ fn duplicate_names(plugins: &[PluginConfig]) -> Vec<String> {
 /// silently empty rather than an error: nothing here is a fault, only a
 /// question with no directory to answer it from.
 pub fn undeclared_binaries(plugins_dir: &Path, manifest: &PluginManifest) -> Vec<String> {
-    let declared: std::collections::HashSet<PathBuf> =
-        manifest.plugins.iter().map(|p| PathBuf::from(&p.exec)).collect();
+    // Canonicalised, not compared as written: a declared `exec` reached
+    // through a relative path, a doubled separator or a symlink is the exact
+    // same file as the one the scan lists, and comparing the raw `PathBuf`s
+    // (task 18's own review) would report it undeclared regardless — a
+    // display bug when this function only feeds a badge, and a way to let a
+    // *declared* binary through the belt-and-braces check `plugin_binary_delete`
+    // adds on top of this, once that route exists. A declared `exec` that
+    // cannot be canonicalised (the plugin's `missing_binary` case: nothing is
+    // there to resolve) falls back to the path as written, which is exactly
+    // this function's previous, narrower behaviour for that one entry.
+    let declared: std::collections::HashSet<PathBuf> = manifest
+        .plugins
+        .iter()
+        .map(|p| {
+            let raw = PathBuf::from(&p.exec);
+            std::fs::canonicalize(&raw).unwrap_or(raw)
+        })
+        .collect();
     let Ok(entries) = std::fs::read_dir(plugins_dir) else {
         return Vec::new();
     };
     let mut out: Vec<String> = entries
         .flatten()
         .filter(|entry| entry.path().is_file())
-        .filter(|entry| !declared.contains(&entry.path()))
+        .filter(|entry| {
+            let path = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path());
+            !declared.contains(&path)
+        })
         .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
         .collect();
     out.sort();
     out
+}
+
+/// Recovers the component name a release would publish this binary under,
+/// from the bare file name a directory scan finds it as (`undeclared_binaries`
+/// returns file names, never anything else). The release's own packaging
+/// convention (see `update::archive` and `update::release::classify_asset`)
+/// names a plugin's binary `ritornello-plugin-<name>`; a file that does not
+/// follow it — a hand-dropped binary, never one of ours — has no name to
+/// recover, and is returned unchanged.
+///
+/// **The one place this mapping is made.** Both `/api/status` (`PluginStatus`,
+/// in `status::status_json`) and `/api/update` (`Installed`, in
+/// `update::Worker::installed`) call this rather than each repeating the
+/// prefix — a second, independent copy of it is exactly how a review of this
+/// task found the two sides had stopped agreeing: `update::mod::resolve`
+/// matches a **component** name against the release (`mpd`), so a row left
+/// named by its bare file (`ritornello-plugin-mpd`) can never resolve to
+/// anything the release publishes, and "Declare" failed with no message at
+/// all.
+pub fn component_name_from_file(file: &str) -> &str {
+    file.strip_prefix("ritornello-plugin-").unwrap_or(file)
+}
+
+/// May `file` be erased as an undeclared binary? **Two independent checks**,
+/// because unlike every sibling route this one deletes a file and cannot be
+/// undone by writing the manifest back:
+///
+/// 1. `file` must be in `currently_undeclared` — a **fresh** scan
+///    (`undeclared_binaries`), taken at request time, never anything the page
+///    sent or a previous check cached. The same "the file is the authority"
+///    doctrine `plugin_enabled_put`, `plugin_move_post` and `plugin_delete`
+///    already follow.
+/// 2. `file` must not equal any declared plugin's own `exec` file name —
+///    belt and braces against the scan's own path comparison ever missing a
+///    declared binary (`undeclared_binaries` now canonicalises, but this
+///    check does not depend on that staying true forever, or on the scan
+///    being the only caller ever routed here).
+///
+/// A pure function over the manifest and a scan result, rather than the scan
+/// run twice: what the second check must catch is precisely a scan that
+/// disagrees with the manifest, so it cannot trust the same scan to have
+/// already ruled itself out.
+pub fn binary_is_removable(file: &str, manifest: &PluginManifest, currently_undeclared: &[String]) -> bool {
+    let in_current_scan = currently_undeclared.iter().any(|f| f == file);
+    let matches_a_declared_exec = manifest
+        .plugins
+        .iter()
+        .any(|p| Path::new(&p.exec).file_name().and_then(|f| f.to_str()) == Some(file));
+    in_current_scan && !matches_a_declared_exec
 }
 
 /// Wipes and recreates `{runtime_dir}/sockets`, and returns its path.
@@ -622,6 +690,84 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("not-there-yet");
         assert!(undeclared_binaries(&missing, &PluginManifest::default()).is_empty());
+    }
+
+    /// Task 18's review: the scan used to compare `PathBuf`s exactly, so a
+    /// declared `exec` written with a doubled separator was a **different**
+    /// path from the same file as the scan sees it, and the binary showed up
+    /// here as undeclared despite being declared. Without the canonicalising
+    /// fix this asserts, `undeclared_binaries` returns `["radio"]` instead of
+    /// the empty list a genuinely declared binary must produce.
+    #[test]
+    fn a_doubled_separator_in_the_declared_exec_does_not_make_the_binary_look_undeclared() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("radio"), b"").unwrap();
+        // Same file as `dir.path().join("radio")`, written with a doubled
+        // separator in the middle — a shape `canonicalize` resolves and a raw
+        // `PathBuf` comparison does not.
+        let declared_exec = format!("{}//radio", dir.path().to_string_lossy());
+        let manifest = PluginManifest {
+            plugins: vec![PluginConfig { name: "radio".into(), exec: declared_exec, enabled: true }],
+        };
+        assert!(undeclared_binaries(dir.path(), &manifest).is_empty());
+    }
+
+    /// The ordinary case: a name the fresh scan reports, and no declared
+    /// plugin claims. Removable.
+    #[test]
+    fn a_name_the_scan_reports_and_nothing_declares_is_removable() {
+        let manifest = PluginManifest {
+            plugins: vec![PluginConfig { name: "radio".into(), exec: "/a/radio".into(), enabled: true }],
+        };
+        assert!(binary_is_removable("ritornello-plugin-mpd", &manifest, &["ritornello-plugin-mpd".into()]));
+    }
+
+    /// First operand: absent from the fresh scan. Even with an empty
+    /// manifest (nothing could possibly "declare" it), a name the scan does
+    /// not currently report is not removable — the scan is what makes this
+    /// route's decision, not the page's memory of an earlier one.
+    #[test]
+    fn a_name_absent_from_the_fresh_scan_is_not_removable() {
+        assert!(!binary_is_removable("ritornello-plugin-mpd", &PluginManifest::default(), &[]));
+    }
+
+    /// Second operand, tested independently of the first: a name the
+    /// (possibly stale or wrong) scan claims is undeclared, but that is
+    /// nonetheless a declared plugin's own `exec` file name. Passing it
+    /// through `currently_undeclared` directly — rather than trusting
+    /// `undeclared_binaries` to already agree — is what proves this check is
+    /// truly a *second*, independent reason to refuse, not a restatement of
+    /// the first.
+    #[test]
+    fn a_name_matching_a_declared_execs_file_name_is_never_removable_even_if_the_scan_says_so() {
+        let manifest = PluginManifest {
+            plugins: vec![PluginConfig {
+                name: "radio".into(),
+                exec: "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio".into(),
+                enabled: true,
+            }],
+        };
+        assert!(!binary_is_removable(
+            "ritornello-plugin-radio",
+            &manifest,
+            &["ritornello-plugin-radio".into()],
+        ));
+    }
+
+    /// The release's naming convention, in one direction: what a scan finds
+    /// on disk (`ritornello-plugin-mpd`) becomes the component name the
+    /// release publishes and the operator would recognise (`mpd`).
+    #[test]
+    fn component_name_from_file_strips_the_release_prefix() {
+        assert_eq!(component_name_from_file("ritornello-plugin-mpd"), "mpd");
+    }
+
+    /// A hand-dropped binary that never followed the convention has no name
+    /// but its own: the function must not invent one, or truncate a name that
+    /// only coincidentally starts with something else.
+    #[test]
+    fn component_name_from_file_leaves_a_foreign_name_unchanged() {
+        assert_eq!(component_name_from_file("my-homebrew-daemon"), "my-homebrew-daemon");
     }
 
     #[tokio::test]

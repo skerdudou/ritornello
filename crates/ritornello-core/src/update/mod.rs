@@ -273,7 +273,11 @@ enum Resolved<'a> {
     /// replaced by the official `radio` archive, installed under the plugin
     /// rule with everything that rule allows into `/etc/ritornello`.
     UncheckedThirdParty,
-    /// Nothing published carries this name at all.
+    /// Nothing published carries this name at all: dropped out of the
+    /// hundred-release window, or one this release never carried.
+    ///
+    /// `install`'s own handling of this variant is a named refusal
+    /// (`Refusal::NothingPublished`), not a silent skip — see its doc.
     Nothing,
 }
 
@@ -462,6 +466,15 @@ enum Refusal {
     /// The privileged unit refused or could not be started. Carries
     /// systemctl's own words.
     Privileged(String),
+    /// Nothing published carries this name at all: dropped out of the
+    /// hundred-release window this check reads, or never one of ours.
+    ///
+    /// A refusal and not a silent skip, for the same reason `ThirdPartyUnchecked`
+    /// is one (task 18's review, C1): the operator pressed a specific row's
+    /// gesture, and "nothing happened" reads as the request never having
+    /// reached the server, not as the honest "there is nothing to install"
+    /// it actually means.
+    NothingPublished,
 }
 
 impl std::fmt::Display for Refusal {
@@ -484,6 +497,7 @@ impl std::fmt::Display for Refusal {
             }
             Self::NoFragment => write!(f, "the archive carries no plugins.toml block"),
             Self::Download(d) | Self::Prepare(d) | Self::Privileged(d) => write!(f, "{d}"),
+            Self::NothingPublished => write!(f, "nothing published carries this name"),
         }
     }
 }
@@ -508,6 +522,7 @@ fn refusal_message(catalog: &Catalog, component: &str, why: &Refusal) -> String 
         Refusal::Download(d) => ("update_download_failed", Some(d)),
         Refusal::Prepare(d) => ("update_install_failed", Some(d)),
         Refusal::Privileged(d) => ("update_privileged_failed", Some(d)),
+        Refusal::NothingPublished => ("update_nothing_published", None),
     };
     let text = catalog.get(key).replace("{component}", component);
     match detail {
@@ -978,9 +993,15 @@ impl Worker {
             })
             .collect();
         let dir = plugins_dir(&self.root);
-        for name in crate::plugins::undeclared_binaries(&dir, &manifest) {
+        for file in crate::plugins::undeclared_binaries(&dir, &manifest) {
             out.push(Installed {
-                name,
+                // The **component** name, not the bare file the scan
+                // returns: `resolve`/`carries` below match a component name
+                // against the release, and a row left named by its file
+                // (`ritornello-plugin-mpd`) can never match the release's own
+                // `mpd` — the exact defect a review of task 18 found, which
+                // made "Declare" fail with nothing reaching the page at all.
+                name: crate::plugins::component_name_from_file(&file).to_string(),
                 declared: false,
                 binary_present: true,
                 version: None,
@@ -1178,11 +1199,19 @@ impl Worker {
                     continue;
                 }
                 Resolved::Nothing => {
-                    // A component that dropped out of the hundred-release
-                    // window, or one this release never carried. Nothing to
-                    // install and nothing to say to the page — the row already
-                    // reads `Unknown`.
+                    // A named refusal, not a silent skip (task 18's review,
+                    // C1): a `missing_binary` or `undeclared_binary` row's
+                    // badge does **not** read `Unknown` (it reads "Not
+                    // installed" or "Installed but not declared" — see
+                    // `ConfigView.vue`), so silence here was never the
+                    // harmless case its old comment assumed. It is also the
+                    // one shape that made "Declare" fail with no toast at
+                    // all when the row's name did not match the release.
                     tracing::warn!("update: nothing published for {name}, skipping it");
+                    let catalog = self.catalog.read().await;
+                    let message = refusal_message(&catalog, &name, &Refusal::NothingPublished);
+                    drop(catalog);
+                    first_failure.get_or_insert(message);
                     continue;
                 }
             };
@@ -1735,7 +1764,32 @@ impl Worker {
     /// only share this queue because both ultimately reach the same
     /// privileged unit and the same staging directory, which must not be
     /// touched by two of them at once.
+    ///
+    /// **Re-reads the manifest before erasing anything** (task 18's review,
+    /// I1): `Job::RemovePlugin` is serialised behind any install already in
+    /// flight, and an install places its binary *before* writing its
+    /// declaration — so a file undeclared when the route accepted the
+    /// request can be declared by the time this runs. What was true at
+    /// enqueue time is not trusted; what is true right now, immediately
+    /// before the file is actually erased, is.
     async fn remove_plugin_binary(&self, name: &str, file: &str) {
+        match PluginManifest::load(&self.manifest) {
+            Ok(m) if m.plugins.iter().any(|p| {
+                Path::new(&p.exec).file_name().and_then(|f| f.to_str()) == Some(file)
+            }) => {
+                tracing::warn!(
+                    "update: {file} is now declared by a plugin; the queued removal for {name} was skipped"
+                );
+                return;
+            }
+            Ok(_) => {}
+            // A transient read failure is not a reason to refuse an erasure
+            // that was already accepted: proceed as `installed()` does on the
+            // same error, rather than block an uninstall on it.
+            Err(e) => {
+                tracing::warn!("update: reading {} before removing {file}: {e:#}", self.manifest.display());
+            }
+        }
         let request =
             Request { format: REQUEST_FORMAT, actions: vec![Action::RemovePlugin { file: file.to_string() }] };
         if let Err(e) = std::fs::create_dir_all(&self.staging) {
@@ -2501,6 +2555,7 @@ mod tests {
             Refusal::Download("connection reset by peer".to_string()),
             Refusal::Prepare("no space left on device".to_string()),
             Refusal::Privileged("Job for ritornello-update.service failed".to_string()),
+            Refusal::NothingPublished,
         ];
         for catalog in [&english, &french()] {
             for why in &all {
@@ -2684,14 +2739,129 @@ mod tests {
         let installed = worker.installed_when_settled().await;
 
         assert!(installed.iter().any(|i| i.name == "radio"), "the declared plugin must still be there");
+        // Named by the component the release would publish, not by the bare
+        // file the scan found underneath it — see `component_name_from_file`.
         let orphan = installed
             .iter()
-            .find(|i| i.name == "ritornello-plugin-orphan")
-            .expect("the undeclared binary must be reported");
+            .find(|i| i.name == "orphan")
+            .expect("the undeclared binary must be reported, named as the release would know it");
         assert!(!orphan.declared);
         assert!(orphan.binary_present);
     }
 
+    /// **C1 of task 18's review.** Before the fix, an `undeclared_binary`
+    /// row's `Installed.name` was the bare file (`ritornello-plugin-mpd`);
+    /// `resolve`/`carries` only ever match a **component** name (`mpd`)
+    /// against the release; so the name the row sent to `install()` never
+    /// matched anything, `resolve` returned `Resolved::Nothing`, and that arm
+    /// is a `tracing::warn!` plus a silent `continue` — no catalog message,
+    /// `state.outcome` untouched. The operator pressed "Declare" and nothing
+    /// happened, with no toast.
+    ///
+    /// This reads the name from `Worker::installed()` itself — never
+    /// hard-coded as `"mpd"`, which would only prove `resolve` can match a
+    /// name that was never wrong in the first place — and calls `install()`
+    /// with it, which is what the route actually calls, not `resolve()` in
+    /// isolation. It asserts on `state.outcome`, the payload `/api/update`
+    /// serves: the one thing a review of this task singled out as the
+    /// difference between "a function returns the right value" and "the
+    /// gesture actually reaches the page". Before the fix, `state.outcome`
+    /// stays whatever it was (nothing happened); after it, `install_one` is
+    /// genuinely entered — a real request lands on the mock server below —
+    /// and fails at digest verification (`served_with_wrong_digest`), never
+    /// at the real, un-mockable `systemctl` this sandbox has no unit for.
+    #[tokio::test]
+    async fn declaring_an_undeclared_binary_by_its_component_name_reaches_install_one() {
+        let status = one_line(PluginStatus::kind("radio", "source", true, false));
+        let (worker, dir) = worker_rig(status);
+        let dir_plugins = plugins_dir(dir.path());
+        // What a hand-drop or an interrupted uninstall leaves: present,
+        // undeclared, named the way the release's own convention names it.
+        std::fs::write(dir_plugins.join("ritornello-plugin-mpd"), b"old").unwrap();
+
+        let fragment = format!(
+            "[[plugin]]\nname = \"mpd\"\nexec = {:?}\n",
+            dir_plugins.join("ritornello-plugin-mpd").to_string_lossy()
+        );
+        let archive = targz(&[
+            ("usr/local/lib/ritornello/plugins/ritornello-plugin-mpd", b"NEW"),
+            ("plugins.toml.fragment", fragment.as_bytes()),
+        ]);
+        let published = served_with_wrong_digest("mpd", &archive).await;
+        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![] };
+        let client = client().unwrap();
+
+        // The name **as the row itself reports it** — not hard-coded as
+        // "mpd" here, which would only prove `resolve` can match a name that
+        // was never wrong in the first place. This is what ties the two
+        // halves of the fix together: `Worker::installed()` must derive the
+        // component name, and `install()` must then resolve *that* name
+        // against the release.
+        let installed = worker.installed_when_settled().await;
+        let orphan =
+            installed.iter().find(|i| !i.declared).expect("the undeclared binary must be reported");
+        let name = orphan.name.clone();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install(&client, &checked, &[name]),
+        )
+        .await
+        .expect("install() hung");
+
+        match &worker.state.read().await.outcome {
+            CheckOutcome::Failed(message) => {
+                assert!(message.contains("mpd"), "the refusal must name the component: {message}");
+            }
+            other => panic!(
+                "expected install_one to have been reached and refused at digest \
+                 verification, got {other:?} — resolve() likely fell back to \
+                 Resolved::Nothing and never made the request at all"
+            ),
+        }
+    }
+
+    /// I1's second adjustment: `Job::RemovePlugin` is serialised behind any
+    /// install in flight, and an install places its binary *before* writing
+    /// its declaration — so a file undeclared when the route accepted the
+    /// request can be declared by the time this job actually runs.
+    /// `remove_plugin_binary` must re-read the manifest and skip rather than
+    /// erase a now-declared plugin's binary.
+    #[tokio::test]
+    async fn remove_plugin_binary_skips_a_file_that_became_declared_while_queued() {
+        let status = one_line(PluginStatus::kind("radio", "source", true, false));
+        let (worker, _dir) = worker_rig(status);
+        // `worker_rig` already declares "radio" with exactly this exec file
+        // name — the file this call names is, right now, a declared plugin's
+        // own binary.
+        worker.remove_plugin_binary("orphan", "ritornello-plugin-radio").await;
+
+        assert!(
+            !worker.staging.join("request.json").exists(),
+            "a file that is now declared must never reach the privileged installer"
+        );
+    }
+
+    /// The other side of the same check: a file matching no declared plugin's
+    /// exec proceeds to the privileged side (observed here as `request.json`
+    /// reaching the staging directory, the same seam the two tests above this
+    /// one already use — `run_privileged_unit` is never awaited to succeed).
+    #[tokio::test]
+    async fn remove_plugin_binary_proceeds_for_a_file_matching_no_declared_exec() {
+        let status = one_line(PluginStatus::kind("radio", "source", true, false));
+        let (worker, _dir) = worker_rig(status);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.remove_plugin_binary("orphan", "ritornello-plugin-orphan"),
+        )
+        .await
+        .expect("remove_plugin_binary hung");
+
+        assert!(
+            worker.staging.join("request.json").exists(),
+            "an undeclared file's removal must reach the privileged installer"
+        );
+    }
 
     /// A check that found only our own release, which is the ordinary shape.
     fn ours(published: Vec<Published>) -> Checked {
@@ -2771,6 +2941,32 @@ mod tests {
         let file = format!("ritornello-plugin-{name}-2.0.0-x86_64.tar.gz");
         let url = serve_once(archive.to_vec(), &file).await;
         let sums = format!("{}  {file}\n", digest_hex(archive));
+        let checksums_url = serve_once(sums.into_bytes(), "SHA256SUMS").await;
+        Published {
+            offer: Offer::Plugin(name.to_string()),
+            version: "2.0.0".to_string(),
+            url,
+            size: 0,
+            release_tag: "v2.0.0".to_string(),
+            checksums_url: Some(checksums_url),
+        }
+    }
+
+    /// The same rig as `served`, but the checksums file names a digest that
+    /// does not match the archive — so `install_one` reaches the real
+    /// download and fails at `verify_digest`, never at `run_privileged_unit`.
+    ///
+    /// Built for exactly one test
+    /// (`declaring_an_undeclared_binary_by_its_component_name_reaches_install_one`):
+    /// that test needs a refusal that proves `install_one` was actually
+    /// entered — a real request against a real socket — without depending on
+    /// this sandbox's `systemctl` at all, the same "no systemctl is needed"
+    /// doctrine the comment above `targz` already states for its two
+    /// neighbours.
+    async fn served_with_wrong_digest(name: &str, archive: &[u8]) -> Published {
+        let file = format!("ritornello-plugin-{name}-2.0.0-x86_64.tar.gz");
+        let url = serve_once(archive.to_vec(), &file).await;
+        let sums = format!("{}  {file}\n", digest_hex(b"not the archive's real bytes"));
         let checksums_url = serve_once(sums.into_bytes(), "SHA256SUMS").await;
         Published {
             offer: Offer::Plugin(name.to_string()),

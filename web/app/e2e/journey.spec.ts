@@ -408,9 +408,12 @@ test('the stable bundles are served immutable, under a single URL each', async (
  * a reorder rewrites the harness's `plugins.toml` and changes the source
  * cycle three other journeys depend on — one cause already produced four red
  * tests here once. The reconciliation is to press it and immediately press
- * it back, checked against `/api/status` both times, so no other journey
- * — before or after this one, in this file or in `files.spec.ts` — ever
- * observes anything but the declared order the harness started with.
+ * it back, checked against `/api/status` both times, with a `finally` that
+ * restores the order through the API directly if anything above it throws —
+ * so no other journey, before or after this one, in this file or in
+ * `files.spec.ts`, observes anything but the declared order the harness
+ * started with **on the happy path, and on a failing one alike** (review of
+ * this task, I2: the `finally` is what makes that true on both).
  */
 test('an order arrow writes a real reorder, checked against the server, and is put back', async ({
   page,
@@ -435,19 +438,41 @@ test('an order arrow writes a real reorder, checked against the server, and is p
     has: page.getByText('radio', { exact: true }),
   })
 
-  await radioRow.locator('[data-plugin-down]').click()
-  // Polled against the real core: a route that answered 202 without writing
-  // anything, or a `move_entry` that silently no-oped, would leave this
-  // unchanged, whatever the page renders in the meantime.
-  await expect.poll(order).not.toEqual(before)
-  const afterMove = await order()
+  // I2 (fix round 1): without this `finally`, a failure between the two
+  // presses below — the second click's actionability timeout, a hiccup
+  // inside `order()`, a refusal from the core — leaves the harness on
+  // `files, radio, generic-input` for good. The next spec on this single
+  // worker (`phone.spec.ts`'s last test, which reads the same `/api/status`
+  // order through `usePlugins().admins`) would then fail too, as an
+  // unrelated-looking **second** red test — exactly the shape Step 4 of this
+  // task's own brief warns a reorder here has already produced once.
+  try {
+    await radioRow.locator('[data-plugin-down]').click()
+    // Polled against the real core: a route that answered 202 without
+    // writing anything, or a `move_entry` that silently no-oped, would leave
+    // this unchanged, whatever the page renders in the meantime.
+    await expect.poll(order).not.toEqual(before)
+    const afterMove = await order()
 
-  // Put it back: radio now sits one place later than it started, so its own
-  // up arrow is the inverse of the gesture just made.
-  await radioRow.locator('[data-plugin-up]').click()
-  await expect.poll(order).toEqual(before)
+    // Put it back: radio now sits one place later than it started, so its own
+    // up arrow is the inverse of the gesture just made.
+    await radioRow.locator('[data-plugin-up]').click()
+    await expect.poll(order).toEqual(before)
 
-  // The move actually swapped two adjacent names rather than, say, dropping
-  // one — the same two names, reordered.
-  expect([...afterMove].sort()).toEqual([...before].sort())
+    // The move actually swapped two adjacent names rather than, say,
+    // dropping one — the same two names, reordered.
+    expect([...afterMove].sort()).toEqual([...before].sort())
+  } finally {
+    // Restored through the API directly, not through the page: by the time
+    // this runs, the page itself may be the thing that failed. A no-op
+    // (`current` already equals `before`) when the happy path above already
+    // completed successfully — `order()` is read fresh rather than assumed.
+    const current = await order();
+    if (JSON.stringify(current) !== JSON.stringify(before)) {
+      const radioIndex = current.indexOf('radio')
+      const delta = radioIndex > before.indexOf('radio') ? -1 : 1
+      await request.post('/api/plugins/radio/move', { data: { delta } })
+      await expect.poll(order).toEqual(before)
+    }
+  }
 })

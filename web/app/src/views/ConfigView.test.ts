@@ -33,6 +33,7 @@ const CATALOGUE = {
   plugin_install: 'Installer', plugin_declare: 'Déclarer',
   plugin_remove_binary: 'Supprimer le binaire', plugin_uninstall: 'Désinstaller',
   plugin_uninstall_confirm: 'Désinstaller {name} ? Sa configuration est conservée, une réinstallation la retrouve.',
+  plugin_remove_binary_confirm: 'Supprimer le binaire « {file} » ? Cette action est irréversible.',
   plugin_order_note: "L'ordre commande la clé de source et la priorité des métadonnées.",
   audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
   language: 'Langue', change: 'Changer', ok: 'OK',
@@ -557,6 +558,111 @@ describe('ConfigView — plugin table', () => {
     expect(rows[1]!.get('[data-plugin-down]').attributes('disabled')).toBeDefined()
   })
 
+  // I3 (fix round 1): the table's own Install button, not only the update
+  // dialog's switch, must refuse a component the release does not currently
+  // offer — one mutation per operand, so two tests rather than one.
+  it('disables Install on a missing_binary row the release does not currently offer', async () => {
+    const { w } = await mountView({
+      '/api/status': {
+        plugins: [{ name: 'mpd', kind: 'source', connected: false, admin: false, missing_binary: true }],
+        active_source: 'radio',
+      },
+      '/api/update': {
+        outcome: { kind: 'ok' },
+        release_version: '1.0.0',
+        release_url: null,
+        last_check_unix_s: 1,
+        components: [
+          {
+            name: 'mpd', kind: 'plugin', declared: true, binary_present: false,
+            installed: null, offered: null, availability: 'binary_missing',
+          },
+        ],
+        busy: null,
+        last_rollback: null,
+      },
+    })
+    expect(w.get('[data-plugin-install]').attributes('disabled')).toBeDefined()
+  })
+
+  it('enables Install on a missing_binary row the release does currently offer', async () => {
+    const { w } = await mountView({
+      '/api/status': {
+        plugins: [{ name: 'mpd', kind: 'source', connected: false, admin: false, missing_binary: true }],
+        active_source: 'radio',
+      },
+      '/api/update': {
+        outcome: { kind: 'ok' },
+        release_version: '1.0.0',
+        release_url: null,
+        last_check_unix_s: 1,
+        components: [
+          {
+            name: 'mpd', kind: 'plugin', declared: true, binary_present: false,
+            installed: null, offered: '1.0.0', availability: 'binary_missing',
+          },
+        ],
+        busy: null,
+        last_rollback: null,
+      },
+    })
+    expect(w.get('[data-plugin-install]').attributes('disabled')).toBeUndefined()
+  })
+
+  // I4 (fix round 1): the arrows must send the request ruling 77 §2 built a
+  // reader for, and that reader must actually show the toast.
+  it('sends delta -1 up and delta 1 down to the move route', async () => {
+    const { w, posts } = await mountView({
+      '/api/status': {
+        plugins: [
+          { name: 'radio', kind: 'source', connected: true, admin: false },
+          { name: 'cd', kind: 'source', connected: false, admin: false },
+        ],
+        active_source: 'radio',
+      },
+    })
+    await w.findAll('[data-plugin-row]')[1]!.get('[data-plugin-up]').trigger('click')
+    await flushPromises()
+    expect(posts).toContainEqual({ url: '/api/plugins/cd/move', body: { delta: -1 } })
+
+    // Re-queried rather than reused: the successful move above triggers a
+    // reload, and a stale wrapper reference is not what this test means to
+    // exercise.
+    await w.findAll('[data-plugin-row]')[0]!.get('[data-plugin-down]').trigger('click')
+    await flushPromises()
+    expect(posts).toContainEqual({ url: '/api/plugins/radio/move', body: { delta: 1 } })
+  })
+
+  it('toasts the server refusal when an arrow is pressed past the end of a stale list', async () => {
+    // A middle row, whose arrows are both enabled client-side: this is the
+    // "second tab" ruling 77 §2 describes — the button the operator presses
+    // looks perfectly legal, and only the server (reading a manifest a first
+    // tab has since changed) knows it no longer is. Pressing an end arrow
+    // instead would prove nothing: a native `disabled` button never dispatches
+    // a click at all, and a mounted test that pressed one would only be
+    // measuring jsdom's own handling of that attribute.
+    const { w } = await mountView(
+      {
+        '/api/status': {
+          plugins: [
+            { name: 'radio', kind: 'source', connected: true, admin: false },
+            { name: 'cd', kind: 'source', connected: false, admin: false },
+            { name: 'files', kind: 'source', connected: false, admin: false },
+          ],
+          active_source: 'radio',
+        },
+      },
+      undefined,
+      "'cd' is already at that end of the list; the page was out of date.",
+    )
+    const rows = w.findAll('[data-plugin-row]')
+    await rows[1]!.get('[data-plugin-up]').trigger('click')
+    await flushPromises()
+    expect(toast.error).toHaveBeenCalledWith(
+      "'cd' is already at that end of the list; the page was out of date.",
+    )
+  })
+
   it('asks for confirmation before uninstalling, and says the configuration is kept', async () => {
     const { w, deletes } = await mountView({
       '/api/status': {
@@ -581,6 +687,36 @@ describe('ConfigView — plugin table', () => {
     ;(document.body.querySelector('[data-plugin-uninstall-confirm]') as HTMLElement).click()
     await flushPromises()
     expect(deletes).toEqual([{ url: '/api/plugins/cd' }])
+  })
+
+  // Fix round 1, I1/M1: the backend now exists (`DELETE
+  // /api/plugins/binaries/{file}`), and it must be asked for the **file**
+  // name, never the component name — the two differ once the release's own
+  // naming convention applies (`ritornello-plugin-mpd` vs `mpd`), and a
+  // mutation that sent `p.name` here would ask the server to erase a file
+  // that was never on disk under that name at all.
+  it('asks for confirmation before erasing an undeclared binary, by its file name', async () => {
+    const { w, deletes } = await mountView({
+      '/api/status': {
+        plugins: [
+          {
+            name: 'mpd', kind: 'unknown', connected: false, admin: false,
+            undeclared_binary: true, binary_file: 'ritornello-plugin-mpd',
+          },
+        ],
+        active_source: 'radio',
+      },
+    })
+    await w.get('[data-plugin-remove-binary]').trigger('click')
+    await flushPromises()
+    expect(deletes).toHaveLength(0)
+    const dialog = document.body.querySelector('[data-plugin-remove-binary-dialog]')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.textContent).toContain('ritornello-plugin-mpd')
+
+    ;(document.body.querySelector('[data-plugin-remove-binary-confirm]') as HTMLElement).click()
+    await flushPromises()
+    expect(deletes).toEqual([{ url: '/api/plugins/binaries/ritornello-plugin-mpd' }])
   })
 })
 

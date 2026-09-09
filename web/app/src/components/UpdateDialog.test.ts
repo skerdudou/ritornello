@@ -298,4 +298,32 @@ describe('UpdateDialog', () => {
     await flushPromises()
     expect(isChecked('legacy')).toBe('false')
   })
+
+  // I5 (fix round 1): the two tests above only pin the `offered === null`
+  // side of the guard. A mutation replacing it with
+  // `kind === 'third_party' || offered === null` — exactly the "disable
+  // every third-party row" instinct ruling 88 overruled — passed every test
+  // in this file, because the *other* third-party test above never clicks
+  // the switch. This one does, and it is the operand that mutation deletes.
+  it('a third-party row with a real offer stays hand-checkable', async () => {
+    mountDialog([
+      core('aligned'),
+      {
+        name: 'someones-plugin',
+        kind: 'third_party',
+        declared: true,
+        binary_present: true,
+        installed: '1.4.0',
+        offered: '2.0.0',
+        availability: 'update_available',
+        third_party_repo: 'someone/their-plugin',
+      },
+    ])
+    await flushPromises()
+    // Never pre-checked (task 17's own default), but reachable by hand.
+    expect(isChecked('someones-plugin')).toBe('false')
+    await row('someones-plugin')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
+    await flushPromises()
+    expect(isChecked('someones-plugin')).toBe('true')
+  })
 })
