@@ -63,7 +63,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # Honest about what this buys: that file travels in the same release, so it
 # catches a corrupted download, not a malicious release. Authenticity comes
 # from HTTPS to GitHub with the repository fixed at compile time.
-sha2 = "0.10"
+sha2 = "0.11"
 # Reading a release archive entry by entry. The `tar` crate rather than
 # shelling out to tar(1), and that is a security choice: entry-by-entry
 # control is the whole mechanism — the core takes the one binary, the
