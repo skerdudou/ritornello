@@ -203,6 +203,14 @@ jobs:
           # This step runs before `gh release create`, so the newest published
           # release is genuinely the previous one. Empty on a first release,
           # which publishes everything.
+          #
+          # `--exclude-pre-releases` is what keeps the baseline the last
+          # **stable** release, and it carries an invariant worth naming: a
+          # component that a beta shipped had, by definition, changed since
+          # that same baseline — so the final delivery ships it too, and no
+          # tester is left holding a `-beta` binary that nothing will ever
+          # replace. Measuring against the last beta instead would break
+          # exactly that.
           prev=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')
           echo "previous published release: ${prev:-none}"
           echo "prev=$prev" >> "$GITHUB_OUTPUT"
@@ -252,8 +260,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
+          # A tag carrying a semver prerelease suffix — `v0.2.1-beta.1` — is
+          # published as a prerelease. **The shape of the tag decides**, so
+          # there is no checkbox to forget and no second place where a human
+          # states the same intent; and a device only ever offers one to an
+          # owner who asked for prereleases (`update_prereleases`).
+          #
+          # Still a draft: a prerelease is read before it is published like
+          # any other. Unquoted `$pre` on purpose — its value is either empty
+          # or that one literal flag, never anything the tag can influence.
+          pre=
+          case "$TAG" in *-*) pre=--prerelease ;; esac
           gh release create "$TAG" \
-            --draft \
+            --draft $pre \
             --title "$TAG" \
             --notes-file .github/release-notes-template.md \
             assets/*

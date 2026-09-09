@@ -70,8 +70,20 @@ mod tests {
         panic!("manifest declares no version at all");
     }
 
+    /// The part after the first dash, if any: `beta.1` of `0.2.1-beta.1`.
+    fn prerelease(version: &str) -> Option<&str> {
+        version.split_once('-').map(|(_, suffix)| suffix)
+    }
+
+    /// The generation, `major.minor`, of a version that may carry a
+    /// prerelease suffix.
+    ///
+    /// The suffix is cut off before counting components: a beta names the
+    /// same generation as the delivery it prepares, so `0.2.1-beta.1` is
+    /// `0.2` and not a version with four numbers in it.
     fn generation(version: &str) -> (String, String) {
-        let mut parts = version.split('.');
+        let core = version.split('-').next().unwrap_or(version);
+        let mut parts = core.split('.');
         let major = parts.next().unwrap_or_default().to_string();
         let minor = parts.next().unwrap_or_default().to_string();
         let patch = parts.next().unwrap_or_default();
@@ -146,6 +158,109 @@ mod tests {
                  after it — it must inherit the product number"
             );
         }
+    }
+
+    /// A prerelease suffix is the product's own, or there is none at all.
+    ///
+    /// **Why a component may not keep a beta number of its own.** The device
+    /// decides by `differs`, which compares versions for *equality* and never
+    /// for order. So a component shipped as `0.2.1` inside `v0.2.1-beta.1`
+    /// and shipped again as `0.2.1` in the final `v0.2.1` would look
+    /// identical to a device that already has the beta's bytes: nothing to
+    /// do, and the tester keeps the older binary for ever, silently. A beta
+    /// therefore ships what it changed under the beta's own number, which is
+    /// what makes the final differ from it.
+    ///
+    /// The other direction is the one that would leak: a **stable** product
+    /// forbids a suffix outright, so a component left at `-beta.2` cannot
+    /// ride into a real release under a number that says "prerelease" to
+    /// every device that reads it.
+    #[test]
+    fn a_prerelease_suffix_is_the_products_own_or_absent() {
+        let product = product_version();
+        let expected = prerelease(&product);
+        let mut names = vec!["ritornello-core".to_string()];
+        names.extend(
+            SHIPPED_PLUGINS
+                .iter()
+                .map(|p| format!("ritornello-plugin-{p}")),
+        );
+        for name in names {
+            let version = declared_version(&crate_manifest(&name))
+                .unwrap_or_else(|| panic!("{name} declares no version of its own"));
+            match (prerelease(&version), expected) {
+                (None, _) => {}
+                (Some(theirs), Some(ours)) => assert_eq!(
+                    theirs, ours,
+                    "{name} is {version}, carrying a prerelease suffix that is \
+                     not the product's {product}; a device compares versions \
+                     for equality, so a stale beta number is a binary that is \
+                     never replaced"
+                ),
+                (Some(_), None) => panic!(
+                    "{name} is {version}, a prerelease number inside the \
+                     stable product {product}; the final delivery must not \
+                     ship a component that still says beta"
+                ),
+            }
+        }
+    }
+
+    /// The README advertises the **latest published release**, and it does so
+    /// without a number written in the file.
+    ///
+    /// A hand-written badge has three places to drift — the URL, its `alt`
+    /// text and the prose below — and it drifted: the page read `0.2` while
+    /// the product was `0.2.0`, and no test noticed. Shields reading GitHub's
+    /// own release list cannot drift, and it advertises what can actually be
+    /// downloaded rather than what the repository is preparing: between a
+    /// version bump and a publication, those are different answers.
+    ///
+    /// Prereleases stay out of it on purpose — the endpoint excludes them
+    /// unless asked — so the beta channel never shows up as the version of
+    /// the product.
+    #[test]
+    fn the_readme_badge_reads_the_release_list_rather_than_a_number() {
+        let readme = read(&repo_root().join("README.md"));
+        assert!(
+            readme.contains("img.shields.io/github/v/release/"),
+            "the README's version badge must be the dynamic one, so it \
+             follows the latest published release on its own"
+        );
+        assert!(
+            !readme.contains("img.shields.io/badge/version-"),
+            "the README has a version number written into a badge again; \
+             that is the shape that drifted, and the dynamic endpoint exists \
+             precisely so nobody has to keep it in step"
+        );
+        assert!(
+            !readme.contains("include_prereleases"),
+            "the version badge must exclude prereleases: the beta channel is \
+             opt-in on the device and must not be advertised as the product's \
+             version"
+        );
+    }
+
+    /// The one number the prose keeps is the **generation**, and it is
+    /// guarded.
+    ///
+    /// The sentence's subject is that the protocol and the configuration may
+    /// still move before 1.0, which is a fact about the generation and not
+    /// about the third number. A generation moves once per minor bump, so
+    /// this is the only version-shaped text in the README that does not go
+    /// stale on every delivery — and this test is what makes the once true.
+    #[test]
+    fn the_readme_prose_names_the_product_generation() {
+        let (major, minor) = generation(&product_version());
+        let readme = read(&repo_root().join("README.md"));
+        let expected = format!("**{major}.{minor}.x**");
+        assert!(
+            readme.contains(&expected),
+            "the README's status sentence must name the generation as \
+             {expected}; it is the product's own {}, and the sentence is \
+             about what may still change before 1.0",
+            product_version()
+        );
     }
 
     /// The list above is only worth something if it cannot fall behind the

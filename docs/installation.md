@@ -232,6 +232,45 @@ cross-compiled) and `arm64` (Pi 3/4/5 class) — cross-compiled on every
 release but **never started on real hardware**, for lack of a device to try
 it on.
 
+### Publishing a prerelease
+
+For trying a redeployment before it reaches anyone, or for offering an edge
+channel to whoever wants it. A prerelease is an ordinary release in every
+respect but one flag, so the path it exercises is the production path: the
+same archives, the same `SHA256SUMS`, the same rollback net.
+
+**The shape of the tag decides.** A tag carrying a semver prerelease
+suffix — `v0.2.1-beta.1` — is created as a prerelease; anything else is a
+finished release. There is no checkbox to forget and no second place where
+the same intent is stated. Like any release it lands as a **draft** first,
+so the notes are read before it can be installed by anything.
+
+Two rules, and neither is a convention that can be bent:
+
+1. **The tag equals the product number**, suffix included. So the beta is
+   prepared by setting `[workspace.package] version` to `0.2.1-beta.1` and
+   tagging `v0.2.1-beta.1`. A workflow step refuses a tag that disagrees.
+2. **Every component the beta ships carries the beta's own number.** The
+   device decides by version *equality*, never by order: a component
+   shipped as `0.2.1` inside `v0.2.1-beta.1` and shipped again as `0.2.1`
+   in the finished `v0.2.1` would look identical to a device that already
+   has the beta's bytes, and the tester would keep the older binary for
+   ever, silently. `version_coherence.rs` refuses a suffix that is not the
+   product's — and refuses any suffix at all in a finished product, which
+   is what stops a leftover `-beta.2` from riding into a real release.
+
+The finished release then needs no special handling: its components differ
+from the beta's, so every device installs them, testers included. That
+holds because the "what changed" step measures against the last *finished*
+release, so anything a beta shipped is shipped again by the delivery it
+prepared.
+
+On the device, prereleases are only ever *offered* to an owner who ticked
+"Offer prereleases" (see
+[interface.md](interface.md#prereleases-and-how-a-device-asks-for-them)).
+The switch is off by default, and a device that has never been told
+otherwise cannot be offered one.
+
 ## Example: Raspberry Pi 2
 
 Two distributions are exercised on this project's hardware: Raspberry Pi

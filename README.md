@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/back-Rust-b7410e?logo=rust&logoColor=white" alt="Back end in Rust">
   <img src="https://img.shields.io/badge/targets-armv7%20%7C%20aarch64%20%7C%20x86__64-blue" alt="armv7, aarch64, x86_64">
   <img src="https://img.shields.io/badge/UI-Vue%203-42b883?logo=vue.js&logoColor=white" alt="Vue 3">
-  <img src="https://img.shields.io/badge/version-0.2.0-yellow" alt="Version 0.2.0">
+  <a href="https://github.com/skerdudou/ritornello/releases/latest"><img src="https://img.shields.io/github/v/release/skerdudou/ritornello?label=version&amp;color=yellow" alt="Latest release"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green" alt="MIT OR Apache-2.0"></a>
 </p>
 
@@ -238,7 +238,7 @@ documents above.
 
 ## Status and contributing
 
-Ritornello is at **0.2.0**: it runs every day in one living room and the
+Ritornello is at **0.2.x**: it runs every day in one living room and the
 feature set above is real, but the plugin protocol and the configuration
 files may still change before a 1.0. CI builds the UI, runs clippy with
 warnings denied, the Rust test suite and the Playwright end-to-end
