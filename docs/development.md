@@ -328,6 +328,22 @@ documented at the top of `serve.mjs`.
   above, run `npm run build --workspaces` then `cargo build --workspace`
   first — the core the script screenshots is the one just built.
 
+  The script takes an optional list of shot names — `node
+  scripts/captures.mjs system config-update` — and does all of them when
+  given none. Worth knowing, because the two home shots depend on what the
+  station happens to be playing at that moment: re-running everything to
+  redo one of them can lose a good one, and there is no getting it back.
+
+  The showcase pictures are richer than what `e2e/serve.mjs` alone gives
+  (one station, no metadata plugin, hence a grey note and "Presets: 1").
+  They were taken with a throwaway copy of that file — never committed,
+  since the journeys need its minimal configuration — declaring
+  `radiofrance-metas`, `musicbrainz` and `mpd` (on port 16600, so a real
+  6600 is never touched) and six Radio France stations as presets. Radio
+  France is what makes the shot speak: FIP broadcasts no ICY, so title,
+  artist, year and cover all come from that plugin, and the provenance
+  `(?)` then has something to show.
+
 ## Build guardrails
 
 `web/app/scripts/check-dist.mjs` checks after every npm build that the

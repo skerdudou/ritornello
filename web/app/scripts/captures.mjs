@@ -22,7 +22,11 @@ mkdirSync(OUT, { recursive: true })
 // /system, whose CPU usage is a delta computed in the page and whose history is
 // a sliding window: opened less than one refresh cycle ago, they show "—" and
 // an empty curve.
-async function capture(browser, name, { width, height, mode, path = '/', wait = 800 }) {
+// `scrollTo`: a selector to bring into view before the shot. The config page
+// is long, and its most interesting card — updates and the plugins table —
+// sits below the fold; a screenshot of its top would show the audio picker
+// instead of the thing the README is pointing at.
+async function capture(browser, name, { width, height, mode, path = '/', wait = 800, scrollTo }) {
   const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 2 })
   try {
     await page.goto(`${BASE}/`)
@@ -32,6 +36,12 @@ async function capture(browser, name, { width, height, mode, path = '/', wait = 
     try {
       await page.evaluate((m) => fetch('/api/theme', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(m) }), { ...theme, mode })
       await page.goto(`${BASE}${path}`)
+      if (scrollTo) {
+        // `scrollIntoViewIfNeeded` and not a hash in the URL: the router owns
+        // the scroll position, and a hash it did not put there is not honoured
+        // on a fresh load — the shot would silently be of the page's top.
+        await page.locator(scrollTo).scrollIntoViewIfNeeded()
+      }
       await page.waitForTimeout(wait)
       await page.screenshot({ path: resolve(OUT, `${name}.png`), fullPage: false })
     } finally {
@@ -45,13 +55,38 @@ async function capture(browser, name, { width, height, mode, path = '/', wait = 
   }
 }
 
+const SHOTS = {
+  'home-light': { width: 1280, height: 800, mode: 'light' },
+  'home-dark': { width: 1280, height: 800, mode: 'dark' },
+  'home-phone': { width: 390, height: 844, mode: 'light' },
+  'radio-admin': { width: 1280, height: 800, mode: 'light', path: '/plugins/radio/' },
+  // Ninety seconds, not twenty-five. Measured: the history is a sliding
+  // window fed by the page's own polling, so at 25 s it still reads "0 min
+  // window" over an empty frame — a graph the README's caption promises and
+  // the picture does not show. At 90 s it reads "1 min window" and has a
+  // curve. The CPU usage, a delta, is already right well before that.
+  system: { width: 1280, height: 800, mode: 'light', path: '/system', wait: 90_000 },
+  // The flagship of the update work: the check card, the automatic policy
+  // with its prerelease switch, and the plugins table underneath.
+  'config-update': { width: 1280, height: 800, mode: 'light', path: '/config', scrollTo: '#update' },
+}
+
+// Named on the command line, one or more, to redo a single shot without
+// disturbing the others: the home shots depend on what the station happens to
+// be playing, and re-running everything to fix one of them can lose a good
+// one. No argument means all of them.
+const wanted = process.argv.slice(2)
+const unknown = wanted.filter((n) => !(n in SHOTS))
+if (unknown.length > 0) {
+  throw new Error(`unknown capture(s): ${unknown.join(', ')} — known: ${Object.keys(SHOTS).join(', ')}`)
+}
+const todo = wanted.length > 0 ? wanted : Object.keys(SHOTS)
+
 const browser = await chromium.launch()
 try {
-  await capture(browser, 'home-light', { width: 1280, height: 800, mode: 'light' })
-  await capture(browser, 'home-dark', { width: 1280, height: 800, mode: 'dark' })
-  await capture(browser, 'home-phone', { width: 390, height: 844, mode: 'light' })
-  await capture(browser, 'radio-admin', { width: 1280, height: 800, mode: 'light', path: '/plugins/radio/' })
-  await capture(browser, 'system', { width: 1280, height: 800, mode: 'light', path: '/system', wait: 25_000 })
+  for (const name of todo) {
+    await capture(browser, name, SHOTS[name])
+  }
 } finally {
   // Otherwise a Chromium browser stays open (and the process never exits) as
   // soon as one of the four shots fails.

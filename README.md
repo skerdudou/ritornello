@@ -84,8 +84,11 @@ and 5) and `x86_64`, so a plain Linux PC runs it just as well.
   <img src="docs/captures/radio-admin.png" width="49%" alt="The radio plugin's administration page: reorderable stations and directory search">
 </p>
 <p align="center">
+  <img src="docs/captures/config-update.png" width="49%" alt="The configuration page's update section: what has been checked, the automatic policy with its prerelease switch, and the plugins table with each plugin's version and state">
+  <img src="docs/captures/system.png" width="49%" alt="The system page: CPU, memory, a history graph, load average, storage — and shutdown/reboot further down">
+</p>
+<p align="center">
   <img src="docs/captures/home-phone.png" width="30%" alt="The home page on a phone: the remote control fits the screen">
-  <img src="docs/captures/system.png" width="66%" alt="The system page: CPU, memory, a history graph, load average, storage — and shutdown/reboot further down">
 </p>
 
 ## Architecture
