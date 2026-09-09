@@ -26,6 +26,13 @@
 #                   crates/ritornello-updater against it
 #   without a ref — first release: nothing to compare against, so the guard
 #                   requires the same opening line unconditionally
+#
+# What this deliberately does NOT cover: any other privileged file a future
+# component might introduce outside these three paths (say, a new file
+# staged by deploy/packaging.toml) trips no alarm here. Ruling 52 named
+# exactly this set, on purpose — a wider net would also fire on changes that
+# need no action by hand and teach everyone to click past the warning. Its
+# silence on anything else is a scope, not a guarantee.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

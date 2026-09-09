@@ -564,10 +564,12 @@ source it names that is gone.
 
 The former status page is now the **config page**, at
 `http://<host>:8080/config` — `/status`, its historical URL, redirects
-there, so existing bookmarks and links keep working. It lists the
-plugins with their connection state and admin link, the audio output and
-language pickers (below), the four settings cards described here, and
-the recent error log.
+there, so existing bookmarks and links keep working. It opens on
+self-update and plugin management (below), then the audio output and
+language pickers, the rest of the settings cards described here, and the
+recent error log. Every plugin — its connection state, its admin link,
+and now whether it is declared, installed or neither — lives in the
+plugins table, not in a separate list.
 
 A **sticky table of contents** sits alongside the cards (from the `lg`
 breakpoint up): the entry for the section currently scrolled into view is
@@ -576,6 +578,112 @@ band at the top of the viewport, and the first section still visible
 there wins, so the highlight tracks what's actually being read rather
 than whichever callback fired last. Clicking an entry scrolls smoothly to
 its section.
+
+### Update card
+
+Backed by `GET /api/update`. One line: never checked, no release
+published yet, up to date, or an update available (the installed and the
+offered version, in that order, so a reader notices if they were ever
+swapped). An error from the last check, and a one-off note naming what a
+just-finished install placed, show below it when there is one. A note
+that a rollback happened is read once, at process start, from the report
+the rollback service leaves behind, and stays on screen for as long as
+this run of the core lasts (see
+[Automatic update policy](#automatic-update-policy) and
+[installation.md](installation.md#enabling-automatic-updates-once-by-hand)
+for what it can and cannot write).
+
+**Check** asks GitHub for the list of releases — one small JSON document
+per repository it consults, this project's own and, for every declared
+third-party plugin, that plugin's own (capped at four repositories per
+check, so one slow stranger cannot stall the whole thing) — and downloads
+no archive. **Install** opens a confirmation dialog listing every
+component, pre-ticking the ones out of step with what a release offers,
+except a third-party plugin (its own repository decided that, not this
+one) and a component already known to need a manual step. Leaving the
+core unticked while an update is offered for it warns on every other
+ticked row: installing a plugin without the core it was built against
+risks the protocol refusal described in
+[plugins.md](plugins.md#writing-a-plugin-of-your-own) — this warning
+comes first, that refusal is the backstop if it is ignored. Confirming
+installs only the ticked names; installing the core ends the process so
+systemd starts the replacement (see the paragraph below on what that does
+to the device's power state), installing a plugin stops and relaunches
+only that plugin.
+
+### Automatic update policy
+
+Three settings, backed by `GET`/`PUT /api/settings`: **Off** (default —
+a device that starts phoning home because it was updated is not a
+behaviour to inherit silently), **Check** (a silent daily or weekly
+check, updating the row above without installing anything), and **Check
+and install** (the same check, followed by installing whatever it found
+out of step). An hour (0-23, 3 by default) and a cadence — daily, or
+weekly on a chosen day — decide when: once past that hour, on each day
+or each week that has not already run one, so a device that was off
+exactly at that hour still gets it once it comes back, rather than
+waiting for the next cycle.
+
+An automatic install only ever touches a component the device **already
+runs**: it never introduces a plugin the device does not have, and never
+a third-party one — those stay a hand-declared, hand-updated affair (see
+[Third-party plugins](#third-party-plugins) below). It can restart the
+core and any plugin it updates, the same as a manual install.
+
+**A restart caused by an update never wakes a device that was in
+standby, whatever the Startup card says.** The core does not read that
+setting after a restart the updater or the rollback just triggered — it
+resumes whatever it was doing the instant before, the same way "previous
+state" does (see [Startup card](#startup-card)), regardless of what
+"Startup" is actually set to. A device asleep at 3 a.m. that updates
+itself at 3 a.m. is still asleep afterwards.
+
+### Plugins table
+
+One row per plugin, plus one row per component a release offers that
+this device has neither declared nor installed. Four install states,
+each licensing its own gestures, and the first two are opposite
+situations that must not be confused with each other:
+
+| State | What it means | Gestures |
+|---|---|---|
+| Declared, binary present | The ordinary case | Enable/disable switch, reorder, Uninstall |
+| Declared, binary **missing** | `plugins.toml` names it but nothing is on disk | Install, or Uninstall (removes the declaration) |
+| Binary present, **undeclared** | A file sits in the plugins directory that nothing declares | Declare, or Remove the binary |
+| Neither, offered by a release | The device has never had it | Install only — there is no declaration to remove and no binary to erase |
+
+Only a genuinely declared row (the first two) carries an order arrow or
+an enable/disable switch: the other two have no line in `plugins.toml`
+for either to act on, and the arrows are disabled rather than hidden at
+either end of the declared list, so a greyed arrow reads as "already
+there" instead of inviting a press that can only fail.
+
+**The physical remote's source key now cycles through the sources in
+this table's own order, not alphabetically.** Reordering with the arrows
+changes both: which source the key lands on next, and (see
+[plugins.md](plugins.md)) metadata priority for the fields more than one
+plugin can supply.
+
+### Third-party plugins
+
+A plugin announcing a `repository` other than this project's own is
+checked against **that** repository instead — its own releases, never
+this project's — and shown as such in the update dialog. Checking only
+reads that repository's release list, the same as for an official
+component; its archive is not opened until an install is actually
+confirmed, and at that point it may carry nothing but its own binary —
+no systemd unit, no polkit rule, no locale catalog, nothing else — or the
+install is refused (the full contract, including how the core tells a
+third-party plugin from its own, is in
+[plugins.md](plugins.md#writing-a-plugin-of-your-own)). A third-party
+plugin is never installed by this page in the first place, and never
+touched by the automatic policy above, whatever it is set to: its first
+`[[plugin]]` block is always added by hand, and only its updates go
+through this page from then on.
+
+None of installing, uninstalling or reordering — official or
+third-party — has run on the device this project actually ships on; see
+[installation.md](installation.md#what-has-not-been-verified).
 
 ### Audio output picker
 
