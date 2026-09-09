@@ -594,6 +594,27 @@ pub(super) async fn plugin_binary_delete(
     State(state): State<AppState>,
     axum::extract::Path(file): axum::extract::Path<String>,
 ) -> Response {
+    // Refused before a single directory read, and before `try_send` — a
+    // re-review of this task's fix round (Finding 3): the privileged binary
+    // itself refuses any name outside `ritornello_updater::request::valid_name`
+    // before forming a path, so nothing outside the plugins directory can
+    // ever be touched. But this route, unlike `plugin_delete`, is reachable
+    // for **any** regular file physically sitting in the plugins directory —
+    // including one a human copied there by hand with a name that never went
+    // through that check (uppercase, a dot, a space, over 64 characters).
+    // Without this guard such a file passed `binary_is_removable` (it is
+    // genuinely undeclared and matches no declared `exec`), the route
+    // answered 204, and the privileged binary then refused it silently to its
+    // own journal — the operator read "OK" for a file that was never
+    // touched. Checking the same predicate here, before queuing anything,
+    // is what keeps the answer honest rather than merely safe.
+    if !ritornello_updater::request::valid_name(&file) {
+        tracing::warn!(
+            "update: refusing to queue removal of {file:?}: not a name the privileged side would ever accept"
+        );
+        let msg = state.catalog.read().await.get("plugin_binary_invalid_name").replace("{file}", &file);
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": msg }))).into_response();
+    }
     let manifest = match crate::plugins::PluginManifest::load(&state.plugins.manifest) {
         Ok(m) => m,
         Err(e) => {
@@ -1128,6 +1149,85 @@ mod tests {
             crate::update::Job::RemovePlugin { name, file } => {
                 assert_eq!(name, "cd");
                 assert_eq!(file, "true", "the exec's own file name, not the plugin's `name`");
+            }
+            other => panic!("unexpected job: {other:?}"),
+        }
+    }
+
+    /// Re-review of this task's fix round, Finding 3: a hand-dropped file
+    /// whose name never went through `valid_name` (here: uppercase and a
+    /// dot) is a genuine, undeclared regular file the scan legitimately
+    /// reports — `binary_is_removable` would say yes — but the privileged
+    /// binary can never form a path from it and would refuse it silently, to
+    /// its own journal, with the route having already answered 204. Checking
+    /// the same name rule here, before a single directory read, is what
+    /// keeps the answer honest instead of merely safe.
+    #[tokio::test]
+    async fn a_name_the_privileged_side_would_refuse_is_caught_before_anything_is_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("plugins.toml");
+        std::fs::write(&manifest_path, "").unwrap();
+        let plugins_dir = ritornello_updater::target::plugins_dir(dir.path());
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(plugins_dir.join("Not.Valid"), b"").unwrap();
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            plugins: Arc::new(PluginsControl {
+                manifest: manifest_path,
+                tx: tokio::sync::mpsc::channel(1).0,
+                root: dir.path().to_path_buf(),
+            }),
+            update_tx,
+            ..app_state()
+        };
+
+        let response = plugin_binary_delete(
+            axum::extract::State(state),
+            axum::extract::Path("Not.Valid".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            update_rx.try_recv().is_err(),
+            "nothing must be queued for a name the privileged side would refuse"
+        );
+    }
+
+    /// The ordinary success path this route exists for, exercised end to
+    /// end: a genuinely undeclared, validly-named binary is queued for
+    /// removal by its own file name.
+    #[tokio::test]
+    async fn removing_a_genuinely_undeclared_binary_queues_its_erasure_by_file_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("plugins.toml");
+        std::fs::write(&manifest_path, "").unwrap();
+        let plugins_dir = ritornello_updater::target::plugins_dir(dir.path());
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(plugins_dir.join("ritornello-plugin-orphan"), b"").unwrap();
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            plugins: Arc::new(PluginsControl {
+                manifest: manifest_path,
+                tx: tokio::sync::mpsc::channel(1).0,
+                root: dir.path().to_path_buf(),
+            }),
+            update_tx,
+            ..app_state()
+        };
+
+        let response = plugin_binary_delete(
+            axum::extract::State(state),
+            axum::extract::Path("ritornello-plugin-orphan".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        match update_rx.try_recv().expect("the binary's removal must be queued") {
+            crate::update::Job::RemovePlugin { file, .. } => {
+                assert_eq!(file, "ritornello-plugin-orphan");
             }
             other => panic!("unexpected job: {other:?}"),
         }

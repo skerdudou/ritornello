@@ -263,6 +263,7 @@ plugin_persist_failed = "Could not write the choice for '{name}' to plugins.toml
 plugin_action_failed = "The core could not apply the change for '{name}'. See the error log."
 plugin_manifest_unreadable = "The plugin list could not be read"
 plugin_binary_unknown = "'{file}' is not an undeclared binary; nothing was removed."
+plugin_binary_invalid_name = "'{file}' cannot be removed here: its name is not one this device would ever install under, so nothing was queued."
 plugin_already_at_end = "'{name}' is already at that end of the list; the page was out of date."
 update_no_release = "No release published yet"
 update_never_checked = "Never checked"

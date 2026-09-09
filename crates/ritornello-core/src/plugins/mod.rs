@@ -692,24 +692,34 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
         assert!(undeclared_binaries(&missing, &PluginManifest::default()).is_empty());
     }
 
-    /// Task 18's review: the scan used to compare `PathBuf`s exactly, so a
-    /// declared `exec` written with a doubled separator was a **different**
-    /// path from the same file as the scan sees it, and the binary showed up
-    /// here as undeclared despite being declared. Without the canonicalising
-    /// fix this asserts, `undeclared_binaries` returns `["radio"]` instead of
-    /// the empty list a genuinely declared binary must produce.
+    /// Task 18's re-review, Finding 2: a doubled separator (this test's
+    /// original fixture) proves nothing about canonicalisation — Rust's own
+    /// `Path`/`PathBuf` equality already collapses redundant separators at
+    /// the component level (`PathBuf::from("/a//b") == PathBuf::from("/a/b")`
+    /// is `true` with or without `canonicalize`), so that fixture passed
+    /// identically whether the fix was present or not. A `..` hop is
+    /// different: `Path`'s own component-wise equality does **not** resolve
+    /// it lexically (`["a","b","..","c"]` and `["a","c"]` are different
+    /// component sequences to `Path`), so only `canonicalize` — which
+    /// actually consults the filesystem — can prove the two name the same
+    /// file. Without the fix this asserts, `undeclared_binaries` wrongly
+    /// returns `["radio"]` for a genuinely declared binary; confirmed by
+    /// commenting out the `canonicalize` calls and re-running: it reddens.
     #[test]
-    fn a_doubled_separator_in_the_declared_exec_does_not_make_the_binary_look_undeclared() {
+    fn a_relative_hop_through_parent_in_the_declared_exec_does_not_make_the_binary_look_undeclared() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("radio"), b"").unwrap();
-        // Same file as `dir.path().join("radio")`, written with a doubled
-        // separator in the middle — a shape `canonicalize` resolves and a raw
-        // `PathBuf` comparison does not.
-        let declared_exec = format!("{}//radio", dir.path().to_string_lossy());
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("radio"), b"").unwrap();
+        // The same file as `sub.join("radio")`, reached through a `..` hop
+        // back into the same directory — a shape only `canonicalize` (by
+        // actually resolving it against the filesystem) collapses to the
+        // scan's own path.
+        let declared_exec = format!("{}/../sub/radio", sub.to_string_lossy());
         let manifest = PluginManifest {
             plugins: vec![PluginConfig { name: "radio".into(), exec: declared_exec, enabled: true }],
         };
-        assert!(undeclared_binaries(dir.path(), &manifest).is_empty());
+        assert!(undeclared_binaries(&sub, &manifest).is_empty());
     }
 
     /// The ordinary case: a name the fresh scan reports, and no declared

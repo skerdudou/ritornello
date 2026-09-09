@@ -2811,7 +2811,22 @@ mod tests {
 
         match &worker.state.read().await.outcome {
             CheckOutcome::Failed(message) => {
-                assert!(message.contains("mpd"), "the refusal must name the component: {message}");
+                // Exact equality, not `contains("mpd")` (re-review Finding 1):
+                // the unmapped file name is `ritornello-plugin-mpd`, and its
+                // own refusal message — "No release publishes
+                // ritornello-plugin-mpd…" — still contains the substring
+                // "mpd" (its own last three characters), so a `contains`
+                // check here cannot tell the fixed name from the broken one
+                // and stays green under the exact mutation this test exists
+                // to catch. Confirmed by reverting `component_name_from_file`
+                // to the identity function and re-running: with the old
+                // `contains` assertion the test stayed green; with this exact
+                // comparison it reddens (`state.outcome` carries
+                // `update_nothing_published` filled with the file name
+                // instead of `update_digest_mismatch` filled with `mpd`).
+                let catalog = Catalog::load("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+                let expected = refusal_message(&catalog, "mpd", &Refusal::DigestMismatch);
+                assert_eq!(message, &expected, "the refusal must name exactly the component `mpd`");
             }
             other => panic!(
                 "expected install_one to have been reached and refused at digest \
