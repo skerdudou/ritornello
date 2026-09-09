@@ -2361,6 +2361,19 @@ mod tests {
     ///
     /// The first assertion is not decoration: without it, a rule that refused
     /// everything for ever would satisfy the second.
+    ///
+    /// **What no test here can reach, and the one tripwire that covers part of
+    /// it.** The write itself happens in `install_one`, behind a release
+    /// server and a privileged systemd unit, neither of which exists on this
+    /// machine — so nothing proves that function calls `remember_placed`.
+    /// These tests therefore go through `placed::record`, the same function
+    /// the worker's method delegates to, **deliberately rather than through
+    /// `Worker::remember_placed`**: that leaves the method with exactly one
+    /// caller, the production one, so deleting that call makes it dead code
+    /// and `cargo clippy --all-targets -- -D warnings` refuses the build. It
+    /// catches the call disappearing; it does not catch it moving after the
+    /// restart, which stays a property of the shape of `install_one` (see the
+    /// comment at that call site).
     #[test]
     fn a_core_release_that_was_rolled_back_is_not_installed_again_the_next_night() {
         let dir = tempfile::tempdir().unwrap();
@@ -2376,11 +2389,13 @@ mod tests {
         // What `install_one` writes the instant the privileged unit reports
         // the bytes are in place — before `install` calls the restart hook,
         // which on a device does not return.
-        night_one.remember_placed(
+        placed::record(
+            &night_one.staging,
             "core",
             "0.4.1",
             Some(vec!["etc/systemd/system/ritornello.service".to_string()]),
-        );
+        )
+        .unwrap();
 
         // 0.4.1 never starts. The rollback unit puts 0.2.0 back and the
         // device comes up on it, in a new process.
@@ -2408,7 +2423,7 @@ mod tests {
     fn the_memory_never_stands_in_the_way_of_an_install_asked_for_by_hand() {
         let dir = tempfile::tempdir().unwrap();
         let worker = worker_at(dir.path(), stalled_line());
-        worker.remember_placed("core", "0.4.1", None);
+        placed::record(&worker.staging, "core", "0.4.1", None).unwrap();
         let rows = core_offered("0.2.0", "0.4.1");
         let memory = placed::read(&worker.staging);
 
@@ -2434,7 +2449,7 @@ mod tests {
     fn a_release_newer_than_the_one_that_was_rolled_back_is_installed() {
         let dir = tempfile::tempdir().unwrap();
         let worker = worker_at(dir.path(), stalled_line());
-        worker.remember_placed("core", "0.4.1", None);
+        placed::record(&worker.staging, "core", "0.4.1", None).unwrap();
         assert_eq!(
             automatic_install_list(&core_offered("0.2.0", "0.5.0"), &placed::read(&worker.staging)),
             names(&["core"]),
@@ -2455,7 +2470,7 @@ mod tests {
     fn a_plugin_this_updater_never_placed_stays_excluded_while_its_version_is_unknown() {
         let dir = tempfile::tempdir().unwrap();
         let worker = worker_at(dir.path(), stalled_line());
-        worker.remember_placed("radio", "1.7.3", None);
+        placed::record(&worker.staging, "radio", "1.7.3", None).unwrap();
 
         let mut console = row("console", ComponentKind::Plugin, Availability::UpdateAvailable);
         console.installed = None;
@@ -2480,7 +2495,7 @@ mod tests {
     fn a_plugin_whose_placed_binary_never_spoke_is_repaired_by_the_next_release() {
         let dir = tempfile::tempdir().unwrap();
         let worker = worker_at(dir.path(), stalled_line());
-        worker.remember_placed("console", "0.4.1", None);
+        placed::record(&worker.staging, "console", "0.4.1", None).unwrap();
 
         let mut console = row("console", ComponentKind::Plugin, Availability::UpdateAvailable);
         console.installed = None;
