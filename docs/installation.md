@@ -689,28 +689,43 @@ against an older protocol.
 **Known edges and debts in the code, recorded here rather than fixed or
 dressed up as design:**
 
-- The three places that rewrite `plugins.toml` on a live device — behind
-  declaring a plugin, removing one, and reordering the list — each read the
-  file, transform the text and write it back, with no lock across the
-  three. It is safe today only because none of them awaits anything between
-  the read and the write, so two requests cannot interleave. That is a
-  **fact about the code as it stands, not a designed property**: nothing —
-  no type, no test, no lint — would notice an `await` introduced into that
-  window, and the natural edit that would introduce one (reading the
-  language catalog for a translated success message, the way the
-  neighbouring error branches already do) is an easy one to make without
-  realising what it breaks. The bounded fix, if this is ever exercised for
-  real, is a `tokio::sync::Mutex<()>` guarding the section; nothing has hit
-  the race yet, so nothing has been added.
+- The **four** places that rewrite `plugins.toml` on a live device — behind
+  declaring a plugin, removing one, reordering the list, and the update
+  worker appending the block of a plugin it has just installed — each read
+  the file, transform the text and write it back, with no lock across the
+  three steps. **An earlier version of this note claimed they were safe
+  because none of them awaits anything between the read and the write; that
+  reasoning is wrong and is corrected here.** Not awaiting keeps one task
+  from yielding mid-window, but these run on *different* tasks of a
+  multi-threaded runtime — three axum handlers and the update worker — so
+  two windows can overlap in wall-clock time regardless. The atomic rename
+  makes a torn file impossible; it does nothing about a **lost update**: the
+  worker appends a block (reads V0, writes V0+block) while a move handler
+  reads V0 and writes V0+move, and whichever renames last wins.
+
+  Reach is narrow — the worker only writes this file on a *fresh* install,
+  so it takes an operator acting on a different plugin from a second tab
+  during one — and every loss is visible and undoable: a lost declaration
+  shows as "Installed but not declared" and re-declares, a lost move is
+  redone with one arrow. It is left unfixed deliberately, at the end of this
+  project, because the fix is a refactor of three request handlers rather
+  than a lock added in four places: they build their messages with
+  `catalog.read().await` inside the very window that has to be locked, and a
+  synchronous mutex cannot be held across that. The shape it should take is
+  written out at `plugins::write_atomic`, where the next person to touch this
+  file will meet it.
 - `run_privileged_unit` (`crates/ritornello-core/src/update/mod.rs`)
   hard-codes the string `"systemctl"` rather than going through
-  `SystemInfo::systemctl`, the field that exists precisely so a test can
+  `SystemInfo::systemctl`, the field that exists precisely so a test could
   substitute `/bin/true` or `/bin/false` for it, the way the power-button
-  tests already do. Consequence: the unit-failure path of an update has
-  never actually been driven end to end by a test, and on a real failure
-  the page shows systemctl's own generic message ("Job for
-  ritornello-update.service failed"), while the actual cause sits only in
-  the journal.
+  tests already do. It is no longer untested — a `cfg(test)` red light inside
+  that function lets a test answer for the unit, which is how the "the note
+  of what was placed is on disk before the process leaves" and "a binary that
+  could not be erased says so on the page" tests reach the code they are
+  about — but the real `systemctl` is still never run here, and on a real
+  failure the page shows systemctl's own generic message ("Job for
+  ritornello-update.service failed", or a polkit `Access denied`), while the
+  actual cause sits only in the journal.
 - `archive::read` decompresses up to 64 MiB synchronously inside an async
   worker task, sharing the tokio runtime with the HTTP handlers. On a Pi 2
   that can hold one runtime thread for several seconds during an update. A

@@ -110,6 +110,33 @@ pub fn set_enabled(path: &Path, name: &str, enabled: bool) -> Result<()> {
 /// `pub(crate)`: `status::plugin_status::plugin_delete` reuses it to persist
 /// `edit::remove_entry`'s output, the same way this module's own
 /// `set_enabled` already does.
+///
+/// **Known debt, recorded rather than dressed up: the four read-modify-write
+/// sequences over `plugins.toml` are not serialised against each other.**
+/// They are `set_enabled` just above, `plugin_move_post` and `plugin_delete`
+/// in `status::plugin_status`, and `update::Worker::write_declaration`. Each
+/// reads the file, transforms the text and renames a temporary onto it, with
+/// no lock across the three steps. The rename makes a *torn* file impossible;
+/// it does nothing about a **lost update** — the worker appends a plugin block
+/// (reads V0, writes V0+block) while a move handler reads V0 and writes
+/// V0+move, and whichever renames last wins. "No `.await` inside the window"
+/// does not serialise them: they run on different tasks of a multi-threaded
+/// runtime.
+///
+/// Reach is narrow — the worker only writes this file on a **fresh** install,
+/// so it takes an operator moving, switching or deleting a *different* plugin
+/// from a second tab during one — and the loss is visible and undoable (a lost
+/// declaration shows as "Installed but not declared" and re-declares; a lost
+/// move is re-done with one arrow). Contrast `update::placed::record`, whose
+/// identical read-modify-write **is** safe, and for the reason this one is
+/// not: it has a single serial writer.
+///
+/// The shape of the fix, for whoever takes it: one process-wide mutex and one
+/// `edit_manifest(path, transform)` helper here that holds it across read,
+/// transform and rename, returning an enum the callers match on — the three
+/// handlers build their messages with `catalog.read().await`, so those awaits
+/// have to move out of the locked region, which is why this is a refactor of
+/// three handlers rather than four added lines.
 pub(crate) fn write_atomic(path: &Path, content: &str) -> Result<()> {
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
