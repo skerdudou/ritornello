@@ -251,4 +251,51 @@ describe('UpdateDialog', () => {
     await flushPromises()
     expect(isChecked('core')).toBe('false')
   })
+
+  // Ruling 88: the guard is `offered === null`, never `kind` — a third-party
+  // row whose own repository could not be consulted, and an official plugin
+  // this release does not carry, must both refuse the click, not merely skip
+  // the pre-check.
+  it('a third-party row with no offer at all cannot be hand-checked', async () => {
+    mountDialog([
+      core('aligned'),
+      {
+        name: 'someones-plugin',
+        kind: 'third_party',
+        declared: true,
+        binary_present: true,
+        installed: '1.4.0',
+        offered: null,
+        availability: 'unknown',
+        third_party_repo: 'someone/their-plugin',
+      },
+    ])
+    await flushPromises()
+    expect(isChecked('someones-plugin')).toBe('false')
+    await row('someones-plugin')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
+    await flushPromises()
+    expect(isChecked('someones-plugin')).toBe('false')
+  })
+
+  it('an official plugin this release does not carry cannot be hand-checked either', async () => {
+    // Same guard, kind-agnostic: disabling only `third_party` rows would have
+    // left this one clickable, offering an install that could only fail.
+    mountDialog([
+      core('aligned'),
+      {
+        name: 'legacy',
+        kind: 'plugin',
+        declared: true,
+        binary_present: true,
+        installed: '0.1.0',
+        offered: null,
+        availability: 'unknown',
+      },
+    ])
+    await flushPromises()
+    expect(isChecked('legacy')).toBe('false')
+    await row('legacy')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
+    await flushPromises()
+    expect(isChecked('legacy')).toBe('false')
+  })
 })

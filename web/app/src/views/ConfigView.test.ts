@@ -21,12 +21,19 @@ const CATALOGUE = {
   config_title: 'Configuration',
   plugins_title: 'Plugins',
   col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_admin: 'Admin', col_enabled: 'Actif',
-  col_version: 'Version',
+  col_version: 'Version', col_order: 'Ordre', col_actions: 'Actions',
   connected: 'connecté', unavailable: 'unavailable', stalled: 'figé', disabled: 'désactivé',
   starting: 'démarrage', busy: 'occupé',
   plugin_incompatible: 'Compilé pour le protocole {found} ; ce cœur parle le {expected}',
   admin_link: 'admin', toggle_plugin: 'Activer ou désactiver {name}',
   plugin_enabled: '{name} activé.', plugin_disabled: '{name} désactivé.',
+  update_binary_missing: 'Non installé', update_undeclared: 'Installé mais non déclaré',
+  update_not_installed: 'Disponible',
+  plugin_move_up: 'Monter', plugin_move_down: 'Descendre',
+  plugin_install: 'Installer', plugin_declare: 'Déclarer',
+  plugin_remove_binary: 'Supprimer le binaire', plugin_uninstall: 'Désinstaller',
+  plugin_uninstall_confirm: 'Désinstaller {name} ? Sa configuration est conservée, une réinstallation la retrouve.',
+  plugin_order_note: "L'ordre commande la clé de source et la priorité des métadonnées.",
   audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
   language: 'Langue', change: 'Changer', ok: 'OK',
   recent_errors: 'Dernières erreurs',
@@ -145,7 +152,12 @@ class FakeIO {
  * by the SFC: it needs a real router, which additionally lets us observe the
  * `href` actually resolved) and a spied `fetch`.
  */
-async function mountView(overrides: Partial<Payloads> = {}, putError?: string, postError?: string) {
+async function mountView(
+  overrides: Partial<Payloads> = {},
+  putError?: string,
+  postError?: string,
+  deleteError?: string,
+) {
   const table = { ...payloads(), ...overrides }
   const puts: Array<{ url: string; body: unknown }> = []
   // `api.post`'s body is `JSON.stringify(undefined)`, which **is** `undefined`
@@ -153,6 +165,9 @@ async function mountView(overrides: Partial<Payloads> = {}, putError?: string, p
   // 43), so `undefined` is recorded as such rather than forced through
   // `JSON.parse`, which would throw on it.
   const posts: Array<{ url: string; body: unknown }> = []
+  // `api.del` carries no body at all (Step 1): only the URL is worth
+  // recording.
+  const deletes: Array<{ url: string }> = []
   const spy = vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'PUT') {
       puts.push({ url, body: JSON.parse(String(init.body)) })
@@ -169,6 +184,13 @@ async function mountView(overrides: Partial<Payloads> = {}, putError?: string, p
       // The real route answers 202 on enqueue only: `busy` is set later, by
       // the worker task (see the polling tests below).
       return new Response(null, { status: 202 })
+    }
+    if (init?.method === 'DELETE') {
+      deletes.push({ url })
+      if (deleteError) {
+        return new Response(JSON.stringify({ error: deleteError }), { status: 404 })
+      }
+      return new Response(null, { status: 204 })
     }
     const data = (table as Record<string, unknown>)[url]
     if (data === undefined) return new Response('unknown', { status: 404 })
@@ -197,7 +219,7 @@ async function mountView(overrides: Partial<Payloads> = {}, putError?: string, p
   document.body.innerHTML = ''
   const w = mount(ConfigView, { global: { plugins: [router] }, attachTo: document.body })
   await flushPromises()
-  return { w, spy, puts, posts, table }
+  return { w, spy, puts, posts, deletes, table }
 }
 
 /**
@@ -227,7 +249,7 @@ function resetMocks() {
 describe('ConfigView — plugin table', () => {
   beforeEach(resetMocks)
 
-  it('renders one row per plugin with its six columns', async () => {
+  it('renders one row per plugin with its eight columns', async () => {
     const { w } = await mountView()
     const rows = w.findAll('[data-plugin-row]')
     expect(rows).toHaveLength(2)
@@ -235,9 +257,13 @@ describe('ConfigView — plugin table', () => {
     expect(rows[0]!.find('[data-plugin-kind]').text()).toBe('source')
     expect(rows[1]!.find('[data-plugin-name]').text()).toBe('cd')
     expect(rows[1]!.find('[data-plugin-kind]').text()).toBe('source')
-    // The six headers are translated from the core catalog.
+    // The eight headers are translated from the core catalog: the six
+    // pre-existing ones, plus the order arrows and the install/uninstall
+    // gestures this task adds.
     const headers = w.findAll('th').map((h) => h.text())
-    expect(headers).toEqual(['Plugin', 'Genre', 'Version', 'État', 'Admin', 'Actif'])
+    expect(headers).toEqual([
+      'Plugin', 'Genre', 'Version', 'État', 'Admin', 'Actif', 'Ordre', 'Actions',
+    ])
   })
 
   it('distinguishes the connected state from the unavailable state', async () => {
@@ -479,6 +505,82 @@ describe('ConfigView — plugin table', () => {
     resolve(null)
     await flushPromises()
     expect(wrapper.find('[data-plugin-toggle]').attributes('disabled')).toBeUndefined()
+  })
+
+  // Ruling 13: a declared plugin whose binary is absent must read as
+  // something to fix, not as dead. `toBe`, not `toContain` — "Mort — non
+  // installé" would also pass `toContain`, which is exactly the confusion
+  // this state exists to forbid.
+  it('says a plugin is not installed rather than dead when its binary is absent', async () => {
+    const w = await mountWithStatus({
+      plugins: [{ name: 'mpd', kind: 'source', connected: false, admin: false, missing_binary: true }],
+      active_source: 'radio',
+      protocol: 1,
+    })
+    expect(w.get('[data-plugin-row] [data-plugin-state]').text()).toBe('Non installé')
+  })
+
+  // Ruling 65: the fixture is `undeclared_binary: true` on a `/api/status`
+  // line, not `declared`/`binary_present` (those live on `ComponentOffer`,
+  // reached through `/api/update`, which `mountWithStatus` does not touch).
+  it('offers the two gestures that end an undeclared binary, and no repair', async () => {
+    const w = await mountWithStatus({
+      plugins: [
+        { name: 'mpd', kind: 'unknown', connected: false, admin: false, undeclared_binary: true },
+      ],
+      active_source: 'radio',
+      protocol: 1,
+    })
+    const row = w.get('[data-plugin-row]')
+    expect(row.find('[data-plugin-declare]').exists()).toBe(true)
+    expect(row.find('[data-plugin-remove-binary]').exists()).toBe(true)
+    // Nothing repairs this state on its own: it is what a hand edit or an
+    // interrupted uninstall leaves, not a fault with an "Install" or an
+    // "Uninstall" gesture of its own.
+    expect(row.find('[data-plugin-install]').exists()).toBe(false)
+    expect(row.find('[data-plugin-uninstall]').exists()).toBe(false)
+    expect(row.get('[data-plugin-state]').text()).toBe('Installé mais non déclaré')
+  })
+
+  it('disables the up arrow on the first row and the down arrow on the last', async () => {
+    const w = await mountWithStatus({
+      plugins: [
+        { name: 'radio', kind: 'source', connected: true, admin: false },
+        { name: 'cd', kind: 'source', connected: false, admin: false },
+      ],
+      active_source: 'radio',
+    })
+    const rows = w.findAll('[data-plugin-row]')
+    expect(rows[0]!.get('[data-plugin-up]').attributes('disabled')).toBeDefined()
+    expect(rows[0]!.get('[data-plugin-down]').attributes('disabled')).toBeUndefined()
+    expect(rows[1]!.get('[data-plugin-up]').attributes('disabled')).toBeUndefined()
+    expect(rows[1]!.get('[data-plugin-down]').attributes('disabled')).toBeDefined()
+  })
+
+  it('asks for confirmation before uninstalling, and says the configuration is kept', async () => {
+    const { w, deletes } = await mountView({
+      '/api/status': {
+        plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false }],
+        active_source: 'cd',
+      },
+    })
+    await w.get('[data-plugin-uninstall]').trigger('click')
+    await flushPromises()
+    // The click opens a confirmation; it does not act on its own.
+    expect(deletes).toHaveLength(0)
+    // Teleported (`DialogPortal`) into `document.body` itself, a sibling of
+    // the mounted wrapper's own root rather than a descendant of it — same
+    // reason `UpdateDialog.test.ts` queries `document.body` directly instead
+    // of the wrapper.
+    const dialog = document.body.querySelector('[data-plugin-uninstall-dialog]')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.textContent).toContain('cd')
+    // The one place the operator learns their stations survive.
+    expect(dialog!.textContent).toContain('conservée')
+
+    ;(document.body.querySelector('[data-plugin-uninstall-confirm]') as HTMLElement).click()
+    await flushPromises()
+    expect(deletes).toEqual([{ url: '/api/plugins/cd' }])
   })
 })
 

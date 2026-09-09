@@ -531,8 +531,14 @@ pub(super) async fn plugin_delete(
         None => tracing::warn!("update: {name}'s exec {exec:?} has no file name; its binary will not be erased"),
     }
 
-    let msg = state.catalog.read().await.get("plugin_uninstalled").replace("{name}", &name);
-    (StatusCode::OK, Json(serde_json::json!({ "message": msg }))).into_response()
+    // No body: like `plugin_enabled_put` and `plugin_move_post`, a success
+    // carries nothing to read. `plugin_uninstalled` used to be built here for
+    // exactly this response, but `api.del` (the web client's own DELETE
+    // helper) follows the same convention as `put`/`post` and never reads a
+    // success body — nothing was ever going to see that sentence. The
+    // confirmation the operator actually reads is shown **before** the
+    // gesture, in the client's own uninstall dialog.
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]
@@ -986,15 +992,12 @@ mod tests {
             plugin_delete(axum::extract::State(state.clone()), axum::extract::Path("cd".to_string()))
                 .await;
         core.await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // The catalog message, resolved and interpolated — not a raw key —
-        // and carrying the sentence that tells the operator their
-        // configuration survives.
-        let message = v["message"].as_str().unwrap();
-        assert!(message.contains("cd"), "{message}");
-        assert!(message.contains("kept"), "the operator must learn their data survives: {message}");
+        // No content: nothing reads a success body here any more (Ruling 73)
+        // — the sentence that tells the operator their configuration survives
+        // is shown by the client **before** this request is even sent, in its
+        // own uninstall confirmation, not echoed back from a body nobody's
+        // `api.del` reads.
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         let after = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
         assert!(!after.contains("\"cd\""), "the block must be gone: {after}");
@@ -1037,7 +1040,7 @@ mod tests {
         let response =
             plugin_delete(axum::extract::State(state), axum::extract::Path("cd".to_string())).await;
         core.await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         let after = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
         assert!(!after.contains("\"cd\""), "{after}");

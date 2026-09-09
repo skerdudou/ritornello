@@ -121,9 +121,18 @@ function confirm() {
           :data-name="row.offer.name"
           class="flex items-start gap-2"
         >
+          <!-- Ruling 88: guard on `offered === null`, never on `kind`. A row
+               with no offered version cannot be selected for install, whoever
+               published it — it catches a third-party row whose repository
+               was over the cap, down or unaddressable, and it equally catches
+               an official plugin this release does not carry. Disabling every
+               third-party row would have also switched off the case task 17
+               made real: a third-party plugin **with** an offer, which can
+               now genuinely be updated from its own repository. -->
           <Switch
             data-update-row-check
             :model-value="row.checked"
+            :disabled="row.offer.offered === null"
             :aria-label="row.offer.name"
             @update:model-value="(v: boolean) => setChecked(row.offer.name, v)"
           />

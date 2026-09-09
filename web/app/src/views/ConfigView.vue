@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
-  api, Badge, Button, Card, CardContent, CardHeader, CardTitle, Input,
+  api, Badge, Button, Card, CardContent, CardHeader, CardTitle, Dialog, DialogContent,
+  DialogDescription, DialogHeader, DialogTitle, Input,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, toast,
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
@@ -348,6 +349,22 @@ interface PluginRow {
   admin: boolean
   version?: string
   incompatible?: number
+  /** Declared in plugins.toml, and its binary is not on disk. */
+  missing_binary: boolean
+  /** A binary on disk that nothing declares — the twin of `missing_binary`. */
+  undeclared_binary: boolean
+  /**
+   * Fabricated from `/api/update` alone, never from `/api/status`: the
+   * release offers this plugin and nothing on this device — no declaration,
+   * no binary — knows it yet. It has no kind, because it has never run.
+   */
+  not_installed: boolean
+  /**
+   * Is this row's move index meaningful? Only a name `plugins.toml` actually
+   * declares can be reordered — `undeclared_binary` and `not_installed` rows
+   * have no line in that file for `move_entry` to act on.
+   */
+  declared: boolean
 }
 
 /** Intermediate accumulator: the raw kinds, before we decide what must stay in
@@ -364,6 +381,8 @@ interface PluginAccumulator {
   admin: boolean
   version?: string
   incompatible?: number
+  missing_binary: boolean
+  undeclared_binary: boolean
 }
 
 /**
@@ -390,6 +409,8 @@ const plugins = computed<PluginRow[]>(() => {
         admin: p.admin,
         version: p.version,
         incompatible: p.incompatible,
+        missing_binary: !!p.missing_binary,
+        undeclared_binary: !!p.undeclared_binary,
       })
       continue
     }
@@ -405,8 +426,10 @@ const plugins = computed<PluginRow[]>(() => {
     // protocol 0 (were that ever to happen) is not mistaken for "none".
     acc.version = acc.version ?? p.version
     acc.incompatible = acc.incompatible ?? p.incompatible
+    acc.missing_binary = acc.missing_binary || !!p.missing_binary
+    acc.undeclared_binary = acc.undeclared_binary || !!p.undeclared_binary
   }
-  return [...byName.values()].map((acc) => {
+  const declaredRows: PluginRow[] = [...byName.values()].map((acc) => {
     // "unknown" is never shown next to a real kind: we only keep it when it is
     // the only information received for this name. This holds by construction,
     // over the complete set of received kinds — not by looking only at what the
@@ -425,9 +448,54 @@ const plugins = computed<PluginRow[]>(() => {
       admin: acc.admin,
       version: acc.version,
       incompatible: acc.incompatible,
+      missing_binary: acc.missing_binary,
+      undeclared_binary: acc.undeclared_binary,
+      not_installed: false,
+      // Only a name `plugins.toml` truly declares can be reordered.
+      // `undeclared_binary` is the one flag among these rows that means
+      // "not declared" — everything else here (including `missing_binary`)
+      // has a `[[plugin]]` block, `move_entry`'s own unit.
+      declared: !acc.undeclared_binary,
     }
   })
+
+  // The release offers a plugin and nothing on this device declares it or has
+  // its binary: no line for it exists in `/api/status` at all (nothing ever
+  // ran, nothing sits on disk to scan), so this is the one row shape that can
+  // only be known from `/api/update`. Declared plugins come first, in the
+  // file's own order (preserved by the `Map` above); these come after them —
+  // the release's own order, which is the order the components arrived in.
+  const availableNames = new Set(declaredRows.map((r) => r.name))
+  const availableRows: PluginRow[] = update.value.components
+    .filter((c) => c.availability === 'not_installed' && !availableNames.has(c.name))
+    .map((c) => ({
+      name: c.name,
+      kinds: '—',
+      connected: false,
+      stalled: false,
+      starting: false,
+      disabled: false,
+      busy: false,
+      admin: false,
+      version: c.offered ?? undefined,
+      incompatible: undefined,
+      missing_binary: false,
+      undeclared_binary: false,
+      not_installed: true,
+      declared: false,
+    }))
+
+  return [...declaredRows, ...availableRows]
 })
+
+/** Position of every row that `plugins.toml` actually declares, among
+ * themselves only: an `undeclared_binary` or `not_installed` row never
+ * carries an arrow, so it must not count when deciding which declared row
+ * sits at either end. */
+const declaredOrder = computed(() => plugins.value.filter((p) => p.declared).map((p) => p.name))
+const isFirstDeclared = (name: string) => declaredOrder.value[0] === name
+const isLastDeclared = (name: string) =>
+  declaredOrder.value[declaredOrder.value.length - 1] === name
 
 /** The protocol this core speaks, as `/api/status` last reported it (loaded
  * alongside `status.value.plugins` — see `usePlugins`). The other half of the
@@ -462,6 +530,87 @@ async function togglePlugin(row: PluginRow) {
   } finally {
     inProgress.value.delete(row.name)
   }
+}
+
+/**
+ * One place a stale second tab can be told an arrow no longer applies:
+ * `move_entry` refuses out of range rather than clamping, and unlike the
+ * `delta` guard (which the page can never trigger, since it only ever sends
+ * ±1) this refusal is reachable by an ordinary operator, and carries a
+ * catalog sentence of its own (`plugin_already_at_end`). Surfaced exactly
+ * like any other refusal here: read from the server's answer, never
+ * reworded on this side.
+ */
+async function movePlugin(name: string, delta: 1 | -1) {
+  const err = await api.post(`/api/plugins/${encodeURIComponent(name)}/move`, { delta })
+  if (err) {
+    toast.error(err)
+    return
+  }
+  await refreshPlugins()
+}
+
+/**
+ * Gets a component's binary onto the device: the release is downloaded,
+ * placed, and — for a name `plugins.toml` does not yet declare — the archive's
+ * own `[[plugin]]` fragment is appended first. That single worker path
+ * (`Worker::install_one`) is what a `missing_binary` row's "Install" and an
+ * `undeclared_binary` row's "Declare" both reduce to: the first has a
+ * declaration and needs a binary, the second already has a binary and needs a
+ * declaration, and either way `/api/update/install` is the one gesture that
+ * can write it. Same async, poll-while-busy shape as `onConfirmInstall`.
+ */
+async function installPlugin(name: string) {
+  const err = await api.post('/api/update/install', { components: [name] })
+  if (err) {
+    toast.error(err)
+    return
+  }
+  pollUpdateWhileBusy()
+  await refreshUpdate()
+}
+
+/** Name of the plugin an uninstall confirmation is open for, or `null` when
+ * the dialog is closed. One name, not a `Set` like `inProgress`: only one
+ * confirmation can be on screen at a time. */
+const uninstallTarget = ref<string | null>(null)
+
+async function confirmUninstall() {
+  const name = uninstallTarget.value
+  uninstallTarget.value = null
+  if (!name) return
+  const err = await api.del(`/api/plugins/${encodeURIComponent(name)}`)
+  if (err) {
+    toast.error(err)
+  } else {
+    // Nothing richer than "OK": the sentence the operator actually needs —
+    // that their stations survive — was already said in the confirmation
+    // they just read (Ruling 73), not repeated here as a second, drifting
+    // copy of it.
+    toast.success(t.value('ok'))
+  }
+  await loadAll()
+}
+
+/**
+ * Erases a binary nothing declares — what a hand-dropped file or an
+ * interrupted uninstall (declaration removed, the privileged unit never run)
+ * leaves behind. **Known limitation**: `DELETE /api/plugins/{name}` refuses
+ * before any write when the manifest does not declare the name — by design,
+ * for the ordinary uninstall this same route serves — so this call currently
+ * cannot succeed against an `undeclared_binary` row; the operator sees the
+ * server's own refusal rather than nothing happening. No client-side route
+ * exists yet to erase a binary that has no declaration to remove first; see
+ * the task report.
+ */
+async function removeBinary(name: string) {
+  const err = await api.del(`/api/plugins/${encodeURIComponent(name)}`)
+  if (err) {
+    toast.error(err)
+  } else {
+    toast.success(t.value('ok'))
+  }
+  await loadAll()
 }
 
 async function changeOutput() {
@@ -710,6 +859,8 @@ function goTo(id: string) {
                   <th class="text-left font-normal">{{ t('col_state') }}</th>
                   <th class="text-left font-normal">{{ t('col_admin') }}</th>
                   <th class="text-left font-normal">{{ t('col_enabled') }}</th>
+                  <th class="text-left font-normal">{{ t('col_order') }}</th>
+                  <th class="text-left font-normal">{{ t('col_actions') }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -722,29 +873,42 @@ function goTo(id: string) {
                       :variant="
                         p.incompatible !== undefined
                           ? 'destructive'
-                          : p.disabled
+                          : p.missing_binary
                             ? 'outline'
-                            : p.busy
+                            : p.undeclared_binary
                               ? 'outline'
-                              : p.connected
-                                ? 'secondary'
-                                : p.starting
-                                  ? 'secondary'
-                                  : p.stalled
+                              : p.not_installed
+                                ? 'outline'
+                                : p.disabled
+                                  ? 'outline'
+                                  : p.busy
                                     ? 'outline'
-                                    : 'destructive'
+                                    : p.connected
+                                      ? 'secondary'
+                                      : p.starting
+                                        ? 'secondary'
+                                        : p.stalled
+                                          ? 'outline'
+                                          : 'destructive'
                       "
                     >
                       <!-- "Incompatible" comes **first**: a refused plugin is
                            neither connected, nor busy, nor merely silent, and
                            any other position would describe it with a word
-                           that is false. "Busy" comes **before** "connected": a
-                           busy plugin is reachable, and that is precisely why
-                           "connected" says nothing useful. "Starting" comes
-                           **before** "stalled": both say the plugin has not
-                           spoken yet, and only the elapsed time tells them
-                           apart. Showing "stalled" during a normal startup
-                           wrongly accused a perfectly healthy binary.
+                           that is false. `missing_binary` (declared, no
+                           binary) and `undeclared_binary` (binary, no
+                           declaration) come next, **before** "connected": both
+                           are more precise than a bare "not connected", and
+                           must not be confused with each other — they license
+                           opposite gestures. `not_installed` (the release
+                           offers it, nothing here knows it yet) sits beside
+                           them for the same reason. "Busy" comes **before**
+                           "connected": a busy plugin is reachable, and that is
+                           precisely why "connected" says nothing useful.
+                           "Starting" comes **before** "stalled": both say the
+                           plugin has not spoken yet, and only the elapsed time
+                           tells them apart. Showing "stalled" during a normal
+                           startup wrongly accused a perfectly healthy binary.
 
                            `!== undefined` and not a truthiness test, in both
                            chains: `"protocol":0` deserializes perfectly well
@@ -752,21 +916,34 @@ function goTo(id: string) {
                            *absent*, so a refusal at protocol 0 would read as
                            "no refusal" and be shown as merely unavailable.
                            The accumulator already takes that care with `??`;
-                           testing `p.incompatible` here would undo it. -->
+                           testing `p.incompatible` here would undo it.
+
+                           `update_binary_missing`/`update_undeclared`/
+                           `update_not_installed` are the same catalog keys
+                           `/api/update`'s own card would use for the matching
+                           `Availability` — one wording per condition, never
+                           reinvented here, so the table and the update card
+                           can never disagree about what to call it. -->
                       {{
                         p.incompatible !== undefined
                           ? t('plugin_incompatible', { found: p.incompatible, expected: protocol })
-                          : p.disabled
-                            ? t('disabled')
-                            : p.busy
-                              ? t('busy')
-                              : p.connected
-                                ? t('connected')
-                              : p.starting
-                                ? t('starting')
-                                : p.stalled
-                                  ? t('stalled')
-                                  : t('unavailable')
+                          : p.missing_binary
+                            ? t('update_binary_missing')
+                            : p.undeclared_binary
+                              ? t('update_undeclared')
+                              : p.not_installed
+                                ? t('update_not_installed')
+                                : p.disabled
+                                  ? t('disabled')
+                                  : p.busy
+                                    ? t('busy')
+                                    : p.connected
+                                      ? t('connected')
+                                    : p.starting
+                                      ? t('starting')
+                                      : p.stalled
+                                        ? t('stalled')
+                                        : t('unavailable')
                       }}
                     </Badge>
                   </td>
@@ -778,20 +955,107 @@ function goTo(id: string) {
                   </td>
                   <td>
                     <!-- No confirmation: the action is reversible from this
-                         same row, and the notification says what happened. -->
+                         same row, and the notification says what happened.
+                         Only a declared row has anything to enable or
+                         disable: `not_installed` and `undeclared_binary` rows
+                         carry no manifest entry for the switch to flip. -->
                     <Switch
+                      v-if="p.declared"
                       data-plugin-toggle
                       :model-value="!p.disabled"
                       :disabled="inProgress.has(p.name)"
                       :aria-label="t('toggle_plugin', { name: p.name })"
                       @click="togglePlugin(p)"
                     />
+                    <span v-else>-</span>
+                  </td>
+                  <td data-plugin-order>
+                    <!-- Arrows write `/etc/ritornello/plugins.toml` and only
+                         a truly declared name has a line in it for
+                         `move_entry` to act on. Disabled, not hidden, at
+                         either end: `move_entry` refuses out of range rather
+                         than clamping, and an arrow that can be pressed and
+                         always fails is worse than a greyed one. -->
+                    <div v-if="p.declared" class="flex gap-1">
+                      <Button
+                        variant="outline" size="icon-sm" data-plugin-up
+                        :disabled="isFirstDeclared(p.name)"
+                        :aria-label="t('plugin_move_up')"
+                        @click="movePlugin(p.name, -1)"
+                      >↑</Button>
+                      <Button
+                        variant="outline" size="icon-sm" data-plugin-down
+                        :disabled="isLastDeclared(p.name)"
+                        :aria-label="t('plugin_move_down')"
+                        @click="movePlugin(p.name, 1)"
+                      >↓</Button>
+                    </div>
+                    <span v-else>-</span>
+                  </td>
+                  <td data-plugin-actions>
+                    <!-- Four states, two gestures each, and never the same
+                         pair twice (Ruling 13/65): `missing_binary` (declared,
+                         no binary) installs or uninstalls; `undeclared_binary`
+                         (binary, no declaration) declares or removes the
+                         binary; `not_installed` (neither, offered by the
+                         release) only installs — there is no declaration to
+                         remove and no binary to erase; every other row already
+                         has its binary and its declaration, so only
+                         uninstalling applies. -->
+                    <div class="flex gap-1">
+                      <Button
+                        v-if="p.missing_binary || p.not_installed"
+                        variant="outline" size="xs" data-plugin-install
+                        @click="installPlugin(p.name)"
+                      >{{ t('plugin_install') }}</Button>
+                      <Button
+                        v-if="p.undeclared_binary"
+                        variant="outline" size="xs" data-plugin-declare
+                        @click="installPlugin(p.name)"
+                      >{{ t('plugin_declare') }}</Button>
+                      <Button
+                        v-if="p.undeclared_binary"
+                        variant="outline" size="xs" data-plugin-remove-binary
+                        @click="removeBinary(p.name)"
+                      >{{ t('plugin_remove_binary') }}</Button>
+                      <Button
+                        v-if="!p.undeclared_binary && !p.not_installed"
+                        variant="outline" size="xs" data-plugin-uninstall
+                        @click="uninstallTarget = p.name"
+                      >{{ t('plugin_uninstall') }}</Button>
+                    </div>
                   </td>
                 </tr>
               </tbody>
             </table>
+            <p class="mt-2 text-xs text-muted-foreground">{{ t('plugin_order_note') }}</p>
           </CardContent>
         </Card>
+
+        <!-- One shared dialog for the whole table, keyed by `uninstallTarget`
+             rather than one per row: only one confirmation is ever on screen,
+             and `Dialog` stays mounted between rows the same way it does
+             between openings elsewhere on this page (see `UpdateDialog`). -->
+        <Dialog
+          :open="uninstallTarget !== null"
+          @update:open="(v: boolean) => { if (!v) uninstallTarget = null }"
+        >
+          <DialogContent data-plugin-uninstall-dialog>
+            <DialogHeader>
+              <DialogTitle>{{ t('plugin_uninstall') }}</DialogTitle>
+              <!-- The one place the operator learns their stations survive
+                   (Ruling 13/73): said here, before the gesture, not echoed
+                   back afterwards by a second, drifting copy of the same
+                   sentence. -->
+              <DialogDescription>
+                {{ uninstallTarget ? t('plugin_uninstall_confirm', { name: uninstallTarget }) : '' }}
+              </DialogDescription>
+            </DialogHeader>
+            <Button variant="destructive" data-plugin-uninstall-confirm @click="confirmUninstall">
+              {{ t('plugin_uninstall') }}
+            </Button>
+          </DialogContent>
+        </Dialog>
       </section>
 
       <section id="audio" class="scroll-mt-6">

@@ -58,6 +58,24 @@ describe('api', () => {
     expect(spy.mock.calls[0]?.[1]).toMatchObject({ method: 'POST' })
   })
 
+  it('del sends no body and follows the same convention as put', async () => {
+    const spy = mockFetch(new Response(null, { status: 204 }))
+    await expect(api.del('/api/plugins/cd')).resolves.toBeNull()
+    // `JSON.stringify(undefined)` is `undefined`, not the string `"undefined"`:
+    // `fetch` accepts that as no body at all. Checked rather than assumed —
+    // the whole reason this test exists.
+    expect(spy).toHaveBeenCalledWith('/api/plugins/cd', {
+      method: 'DELETE',
+      headers: { 'content-type': 'application/json' },
+      body: undefined,
+    })
+  })
+
+  it('del returns the message of the error field on a refusal', async () => {
+    mockFetch(new Response(JSON.stringify({ error: "No plugin named 'cd'" }), { status: 404 }))
+    await expect(api.del('/api/plugins/cd')).resolves.toBe("No plugin named 'cd'")
+  })
+
   it('put and post render a network failure as a message, never as an exception', async () => {
     // Regression (review 2026-07-27): a rejection of `fetch` itself (core
     // restarting, Wi-Fi down) escaped the "return value" convention — callers

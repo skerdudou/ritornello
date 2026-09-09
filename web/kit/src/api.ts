@@ -23,7 +23,7 @@ async function errorMessage(r: Response): Promise<string> {
 /// the `error` field of a 422's JSON body when it is there, `HTTP <code>`
 /// otherwise. Convention taken as is from the `put()` helper of the current
 /// pages, so that migrated views do not have to change their logic.
-async function send(method: 'PUT' | 'POST', url: string, body: unknown): Promise<string | null> {
+async function send(method: 'PUT' | 'POST' | 'DELETE', url: string, body: unknown): Promise<string | null> {
   // A rejection of `fetch` itself (core restarting, Wi-Fi down) is part of the
   // "return value" convention, like the non-ok statuses: nearly all callers do
   // not wrap an `api.put` in a `try`, and an exception here became a silent
@@ -50,4 +50,9 @@ export const api = {
   },
   put: (url: string, body: unknown) => send('PUT', url, body),
   post: (url: string, body: unknown) => send('POST', url, body),
+  // Same return convention as put/post — an error message or null, never a
+  // rejection. Nearly no caller wraps these in a try, and an exception here
+  // became a silent unhandled rejection: the user pressed a button and
+  // nothing happened, with no toast and no message.
+  del: (url: string) => send('DELETE', url, undefined),
 }

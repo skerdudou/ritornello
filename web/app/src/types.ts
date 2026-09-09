@@ -35,6 +35,11 @@ export interface PluginStatus {
   incompatible?: number
   /** Declared, and its binary is not on disk. Optional: absent when false. */
   missing_binary?: boolean
+  /** A binary sitting in the plugins directory that nothing declares — the
+   * twin of `missing_binary`. Computed from the same scan that feeds
+   * `ComponentOffer.availability: 'undeclared'` on `/api/update`, so the two
+   * payloads cannot disagree about it. Optional: absent when false. */
+  undeclared_binary?: boolean
 }
 export interface StatusPayload {
   plugins: PluginStatus[]

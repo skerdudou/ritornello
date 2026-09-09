@@ -50,10 +50,11 @@ test('navigation between the home page, the config and the plugin pages', async 
   // The plugins table's columns, against a real core. Nothing here counted
   // them before, so the Version column could have been added — or dropped
   // again — without a single test noticing, while the design assumed this
-  // journey was the barrier that kept them in sync. Six headers, exact: that
-  // is what makes it a lock rather than a lower bound.
+  // journey was the barrier that kept them in sync. Eight headers, exact —
+  // the six pre-existing ones plus the order arrows and the install/uninstall
+  // gestures (task 18) — is what makes it a lock rather than a lower bound.
   const pluginsTable = page.locator('[data-plugins-table]')
-  await expect(pluginsTable.locator('thead th')).toHaveCount(6)
+  await expect(pluginsTable.locator('thead th')).toHaveCount(8)
   // And the cell under it carries a real version. Asserted as "not the em
   // dash placeholder" rather than as a fixed string: the SDK derives the
   // number from the plugin crate's own `CARGO_PKG_VERSION`, so a version is
@@ -64,6 +65,13 @@ test('navigation between the home page, the config and the plugin pages', async 
     .locator('[data-plugin-version]')
   await expect(radioVersion).toBeVisible()
   await expect(radioVersion).not.toHaveText('—')
+  // The order arrows exist and are greyed out at either end of the declared
+  // list — counted, not pressed: a reorder here writes the harness's own
+  // `plugins.toml` and changes the source cycle three other journeys depend
+  // on (see the dedicated reorder journey below, which presses one and puts
+  // it back).
+  await expect(pluginsTable.locator('[data-plugin-row]').first().locator('[data-plugin-up]')).toBeDisabled()
+  await expect(pluginsTable.locator('[data-plugin-row]').last().locator('[data-plugin-down]')).toBeDisabled()
 
   // A save announces its outcome with a notification. Reported in use: the
   // vue-sonner stylesheet was imported nowhere, so the message rendered
@@ -385,4 +393,61 @@ test('the stable bundles are served immutable, under a single URL each', async (
   const stamped = map.match(/"vue":"([^"]+)"/)![1]!
   const head = await request.get(stamped)
   expect(head.headers()['cache-control']).toContain('immutable')
+})
+
+/**
+ * Ruling 77 sends this here: task 16 built `POST /api/plugins/{name}/move`
+ * and its arrows without a single web file to carry its own e2e debt, and
+ * "the columns are there and the ends are greyed" (asserted above, in the
+ * first journey) is exactly the shape that stays green against an endpoint
+ * that writes nothing — a client-side default satisfies it regardless. So
+ * this journey presses an arrow for real and reads the order back from the
+ * server, not from the page's own idea of what it just sent.
+ *
+ * It is also the one arrow-press this suite is on record refusing (Step 4):
+ * a reorder rewrites the harness's `plugins.toml` and changes the source
+ * cycle three other journeys depend on — one cause already produced four red
+ * tests here once. The reconciliation is to press it and immediately press
+ * it back, checked against `/api/status` both times, so no other journey
+ * — before or after this one, in this file or in `files.spec.ts` — ever
+ * observes anything but the declared order the harness started with.
+ */
+test('an order arrow writes a real reorder, checked against the server, and is put back', async ({
+  page,
+  request,
+}) => {
+  const order = async () => {
+    const status = (await (await request.get('/api/status')).json()) as {
+      plugins: { name: string }[]
+    }
+    // One entry per **name**, in first-seen (i.e. file) order: a multi-kind
+    // plugin otherwise counts more than once and could look like a move that
+    // never happened.
+    return [...new Set(status.plugins.map((p) => p.name))]
+  }
+
+  await page.goto('/config')
+  const before = await order()
+  expect(before.length).toBeGreaterThanOrEqual(2)
+
+  const pluginsTable = page.locator('[data-plugins-table]')
+  const radioRow = pluginsTable.locator('[data-plugin-row]', {
+    has: page.getByText('radio', { exact: true }),
+  })
+
+  await radioRow.locator('[data-plugin-down]').click()
+  // Polled against the real core: a route that answered 202 without writing
+  // anything, or a `move_entry` that silently no-oped, would leave this
+  // unchanged, whatever the page renders in the meantime.
+  await expect.poll(order).not.toEqual(before)
+  const afterMove = await order()
+
+  // Put it back: radio now sits one place later than it started, so its own
+  // up arrow is the inverse of the gesture just made.
+  await radioRow.locator('[data-plugin-up]').click()
+  await expect.poll(order).toEqual(before)
+
+  // The move actually swapped two adjacent names rather than, say, dropping
+  // one — the same two names, reordered.
+  expect([...afterMove].sort()).toEqual([...before].sort())
 })
