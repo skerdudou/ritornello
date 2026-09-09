@@ -116,9 +116,22 @@ line. Four things follow, and they are the whole contract:
 2. **Name your archive the way ours are named**:
    `ritornello-plugin-<name>-<version>-<arch>.tar.gz`, where `<name>` is the
    name the device declares in `plugins.toml`, `<version>` is three
-   dot-separated runs of digits, and `<arch>` is `armv7`, `arm64` or `x86_64`.
+   dot-separated runs of digits — optionally followed by a semver prerelease
+   suffix, `1.4.0-beta.1` — and `<arch>` is `armv7`, `arm64` or `x86_64`.
    Publish a `SHA256SUMS` beside it in the same release: an archive with no
    published digest is refused rather than installed unverified.
+
+   A plugin name may contain a dash and so may a prerelease suffix, which is
+   why the boundary between the two is found by reading from the left and
+   keeping the first split whose right-hand side is a whole version. The
+   practical consequence for you: do not end your plugin's **name** with
+   something that parses as a version.
+
+   If you publish your release with GitHub's **prerelease** flag, it reaches
+   only the devices whose owner ticked "Offer prereleases" — that switch
+   applies to every repository a device reads, yours included. A **draft** of
+   yours reaches nothing at all: the core polls anonymously, and GitHub does
+   not list drafts to a reader without push access.
 3. **Your archive may carry your plugin binary and nothing else** — one file
    under `usr/local/lib/ritornello/plugins/`, no subdirectory, no second
    binary. No systemd unit, no polkit rule, no locale catalog, no initial

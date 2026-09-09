@@ -741,6 +741,14 @@ Three consequences, none of them accidental:
   the beta, and it is also why every prerelease must carry its own number.
   See [installation.md](installation.md#publishing-a-prerelease) for the
   numbering rule and what enforces it.
+- **It composes with the automatic policy, deliberately.** A device set to
+  "Check and install" *and* to prereleases installs betas on its own,
+  which is the point of an edge channel and is the composition of two
+  settings its owner turned on one after the other — neither implies the
+  other, and both default to the cautious answer. The net underneath is
+  the same one every automatic install has: a core that fails to start is
+  rolled back, and a version this device already placed once is not
+  installed again by itself, so a bad beta cannot become a nightly loop.
 
 ### Plugins table
 

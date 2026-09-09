@@ -31,6 +31,14 @@ running. If an existing device meets this refusal on its next update, the
 fix is to move the binary under the plugins directory, or to point `exec`
 there.
 
+New setting, and no behaviour change unless it is ticked: "Offer
+prereleases", in the automatic-checks card. Off by default, so a device that
+is not told otherwise is offered finished releases only, exactly as before.
+Ticked, betas and release candidates are offered too — on every check, for
+the core, the plugins and any third-party plugin. A device on prereleases
+moves to a finished release as soon as one is published, since the two carry
+different version numbers.
+
 ## Install
 
 Common case — the core and every plugin:
