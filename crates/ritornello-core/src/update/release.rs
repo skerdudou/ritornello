@@ -103,15 +103,32 @@ pub fn releases_url_for(repo: &str) -> String {
 /// Strict on the prefix on purpose — `https://evil.example/github.com/a/b`
 /// contains our host name and is not it, and this function is what decides
 /// which host a request is about to be sent to.
+///
+/// Each segment is also held to GitHub's own charset. The host cannot move —
+/// `releases_url_for` writes `api.github.com` itself — but the pair is
+/// **interpolated into the path**, so without this a segment carrying `..`,
+/// `?` or `#` would address a different endpoint on that host:
+/// `https://github.com/a/..` would become `/repos/a/../releases?…`, which
+/// normalises to `/repos/releases?…`. Nothing today acts on such an answer
+/// (it is not a release list, so the check moves on), and that is precisely
+/// the kind of "harmless for now" a whitelist costs one line to close.
 pub fn parse_repo_url(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://github.com/")?;
     let rest = rest.strip_suffix('/').unwrap_or(rest);
     let rest = rest.strip_suffix(".git").unwrap_or(rest);
     let (owner, repo) = rest.split_once('/')?;
-    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+    if !is_repo_segment(owner) || !is_repo_segment(repo) {
         return None;
     }
     Some(format!("{owner}/{repo}"))
+}
+
+/// One segment of a GitHub `owner/repo`: non-empty, `[A-Za-z0-9_.-]`, and not
+/// made of dots alone — `.` and `..` pass the charset and are path traversal.
+fn is_repo_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+        && !s.bytes().all(|b| b == b'.')
 }
 
 /// Where a plugin's binary comes from, decided from the one thing that knows:
@@ -728,9 +745,22 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
             "https://github.com/someone/thing/extra",
             "https://github.com//thing",
             "",
+            // The pair is interpolated into the API path, so a segment that is
+            // not a GitHub name is a segment that can address another endpoint
+            // on that host. `a/..` would normalise to `/repos/releases?…`.
+            "https://github.com/a/..",
+            "https://github.com/./thing",
+            "https://github.com/someone/thing?x=1",
+            "https://github.com/someone/thing#frag",
+            "https://github.com/some one/thing",
         ] {
             assert_eq!(parse_repo_url(url), None, "{url:?}");
         }
+        // And the charset a real repository uses is not narrowed by accident.
+        assert_eq!(
+            parse_repo_url("https://github.com/Some-One_2/my.plugin-v2"),
+            Some("Some-One_2/my.plugin-v2".to_string())
+        );
     }
 
     /// **The majority path, and the one the other tests cannot reach.**

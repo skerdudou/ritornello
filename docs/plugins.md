@@ -85,7 +85,7 @@ core tells one from its own by the `repository` it announces and nothing else:
 there is no flag to set and nothing for an operator to configure. Parsed as a
 GitHub `owner/repo` pair it either is ours or it is not; a manifest with no
 `repository` key at all announces nothing, and the core then simply leaves the
-plugin alone. Three things follow, and they are the whole contract:
+plugin alone. Four things follow, and they are the whole contract:
 
 1. **Build the runtime with the macro**, `ritornello_plugin_sdk::declare_runtime!()?`,
    and give your crate a `repository = "https://github.com/<owner>/<repo>"` in
@@ -110,7 +110,14 @@ plugin alone. Three things follow, and they are the whole contract:
    if it carries any, and the refusal is shown on the page. A consequence
    worth knowing in advance: a third-party plugin is therefore **updated**
    from the UI, never freshly installed by it — its `[[plugin]]` block is
-   yours to add to `plugins.toml` once, by hand or from the plugins page.
+   yours to add to `plugins.toml` once, by hand: the plugins page can switch
+   a plugin on, reorder it and remove it, but nothing in the UI declares one.
+4. **That binary must be named after your own plugin**, not after somebody
+   else's: the core refuses an archive whose binary is not the file
+   `plugins.toml` declares as this plugin's `exec`, and refuses one whose
+   declared `exec` lives outside `usr/local/lib/ritornello/plugins/` — the
+   only directory the privileged installer writes to. Both refusals apply to
+   official archives too; nothing here is a rule for strangers alone.
 
 A third-party plugin is also **never** installed by the automatic policy,
 whatever that policy is set to: an unattended device does not fetch bytes from

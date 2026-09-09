@@ -214,6 +214,64 @@ fn third_party_targets(installed: &[Installed]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Every component the announcement says is third-party — **no cap, and
+/// `Foreign` included**, unlike `third_party_targets`.
+///
+/// Two lists out of one reading, and the difference between them is the point:
+/// `third_party_targets` answers "whom do we go and ask", which is bounded and
+/// only covers repositories we can address; this one answers "what is a
+/// stranger", which admits no ceiling at all. A component left out of the four
+/// this check consulted, or announcing a repository we cannot address, is not
+/// thereby one of ours — and the fall-through that treated it as one is
+/// exactly how our own release ends up installed under a colliding name.
+fn third_party_names(installed: &[Installed]) -> Vec<String> {
+    installed
+        .iter()
+        .filter(|p| !matches!(origin(p.repository.as_deref()), Origin::Unknown | Origin::Ours))
+        .map(|p| p.name.clone())
+        .collect()
+}
+
+/// What one named component may be installed from.
+#[derive(Debug, PartialEq, Eq)]
+enum Resolved<'a> {
+    /// Our own release publishes it.
+    Ours(&'a Published),
+    /// Its own repository published it, and that archive is what will be
+    /// fetched.
+    Theirs(&'a Published),
+    /// The announcement says it is a stranger's, and this check did not get an
+    /// answer from its repository — over the cap of four, unreachable,
+    /// unaddressable, or publishing no archive for this architecture under
+    /// this name.
+    ///
+    /// **Never our release of the same name**, and that is the whole reason
+    /// this variant exists rather than falling through: a third-party plugin
+    /// keeping its fork's name (`radio`, say) would otherwise be silently
+    /// replaced by the official `radio` archive, installed under the plugin
+    /// rule with everything that rule allows into `/etc/ritornello`.
+    UncheckedThirdParty,
+    /// Nothing published carries this name at all.
+    Nothing,
+}
+
+/// Which of the two lists answers for this name — decided by **what the
+/// component is**, never by which lookup happened to return something.
+fn resolve<'a>(checked: &'a Checked, name: &str) -> Resolved<'a> {
+    if let Some(offer) = checked.theirs.iter().find(|o| o.name == name) {
+        return Resolved::Theirs(&offer.published);
+    }
+    // Before `ours` and not after it: the membership test is what keeps a
+    // stranger's row from ever being served from our release.
+    if checked.third_party.iter().any(|n| n == name) {
+        return Resolved::UncheckedThirdParty;
+    }
+    match checked.ours.iter().find(|p| carries(p, name)) {
+        Some(published) => Resolved::Ours(published),
+        None => Resolved::Nothing,
+    }
+}
+
 /// Which rule an archive must pass to be installed from the UI.
 ///
 /// One function for the three answers, because they are one decision made
@@ -356,6 +414,18 @@ enum Refusal {
     /// to read our release notes, and this one names a rule a stranger's
     /// archive broke, which no release note of ours will explain.
     ThirdPartyArchive,
+    /// The archive's binary is not the file this component is declared to run:
+    /// it names a sibling, or the declaration points outside the plugins
+    /// directory. Carries which two names disagreed.
+    NotItsOwnFile(String),
+    /// A third-party component whose own repository could not be consulted by
+    /// this check — over the cap of four, unreachable, unaddressable, or
+    /// publishing no archive for this architecture under this name.
+    ///
+    /// A refusal and **not** a silent skip, because the alternative that used
+    /// to happen here was worse than either: falling through to our own
+    /// release and installing the official archive of a colliding name.
+    ThirdPartyUnchecked,
     /// A plugin the device does not declare, whose archive carries no
     /// `[[plugin]]` block. Installing it would place a binary nothing ever
     /// launches — the silent failure this repository's own documentation
@@ -386,6 +456,10 @@ impl std::fmt::Display for Refusal {
             Self::ThirdPartyArchive => {
                 write!(f, "a third-party archive may carry nothing but its own binary")
             }
+            Self::NotItsOwnFile(d) => write!(f, "{d}"),
+            Self::ThirdPartyUnchecked => {
+                write!(f, "its own repository was not consulted by this check")
+            }
             Self::NoFragment => write!(f, "the archive carries no plugins.toml block"),
             Self::Download(d) | Self::Prepare(d) | Self::Privileged(d) => write!(f, "{d}"),
         }
@@ -406,6 +480,8 @@ fn refusal_message(catalog: &Catalog, component: &str, why: &Refusal) -> String 
         Refusal::DigestMismatch => ("update_digest_mismatch", None),
         Refusal::NeedsManualStep => ("update_needs_manual_step", None),
         Refusal::ThirdPartyArchive => ("update_third_party_archive", None),
+        Refusal::NotItsOwnFile(d) => ("update_wrong_file", Some(d)),
+        Refusal::ThirdPartyUnchecked => ("update_third_party_unchecked", None),
         Refusal::NoFragment => ("update_no_fragment", None),
         Refusal::Download(d) => ("update_download_failed", Some(d)),
         Refusal::Prepare(d) => ("update_install_failed", Some(d)),
@@ -519,6 +595,46 @@ fn declaration_needed(
         Some(fragment) => Ok(Some(fragment.to_string())),
         None => Err(Refusal::NoFragment),
     }
+}
+
+/// Is the file root will be asked to place **this component's own**?
+///
+/// `installable_from_ui` and `only_its_own_binary` both count binaries and
+/// neither reads the name; `install_one` then hands that bare name to the
+/// privileged installer, which validates its *shape* and forms
+/// `plugins_dir/<name>`. So an archive naming a **sibling** gets that sibling
+/// overwritten with its own bytes.
+///
+/// No privilege is gained by that — the plugins directory is where a plugin
+/// binary belongs either way, the root-run helpers live in its parent, and
+/// `valid_name` still holds on the privileged side. What is gained is the
+/// **choice of which** of the installed plugins gets replaced, and by whoever
+/// built the archive rather than by the operator who ticked one row. That is
+/// an integrity decision, so it is made here rather than left to the archive.
+///
+/// The parent is checked as well, and it is not belt and braces: root only
+/// ever writes into the plugins directory, so a declaration whose `exec` lives
+/// anywhere else gets a file placed where its own `exec` will never look — an
+/// install that reports success and changes nothing, with a row that then
+/// claims the new version.
+///
+/// Asked **only of a component the manifest already declares**: a fresh
+/// install has no `exec` to compare against, and the name the archive carries
+/// is the one its own fragment is about to declare.
+fn placement_target(exec: &str, plugins_dir: &Path, file: &str) -> Result<(), Refusal> {
+    let path = Path::new(exec);
+    if path.parent() != Some(plugins_dir) {
+        return Err(Refusal::NotItsOwnFile(format!(
+            "it is declared to run {exec}, which is not in {}",
+            plugins_dir.display()
+        )));
+    }
+    if path.file_name().and_then(|n| n.to_str()) != Some(file) {
+        return Err(Refusal::NotItsOwnFile(format!(
+            "it is declared to run {exec}, and the archive carries {file}"
+        )));
+    }
+    Ok(())
 }
 
 /// The operating name a shipped initial configuration takes on the device.
@@ -700,6 +816,11 @@ struct Checked {
     /// What each third-party plugin's own repository publishes for it, at most
     /// `THIRD_PARTY_MAX` of them.
     theirs: Vec<ThirdPartyOffer>,
+    /// Every component the announcements call a stranger's, uncapped — see
+    /// `third_party_names`. Carried beside `theirs` because a name absent from
+    /// `theirs` is not thereby one of ours: it may simply be the fifth
+    /// third-party plugin, or one whose server did not answer.
+    third_party: Vec<String>,
 }
 
 /// Everything the worker needs, and nothing it could read twice.
@@ -961,7 +1082,16 @@ impl Worker {
                 state.release_url = None;
                 state.last_check_unix_s = Some(now_unix_s());
                 state.components = components;
-                return None;
+                // `Some` with an empty `ours`, and not `None`: this branch has
+                // just offered third-party updates on the page, and returning
+                // `None` would make Install do nothing and say nothing about
+                // them. Our own components resolve to `Nothing` from an empty
+                // list, which is the truth here.
+                return Some(Checked {
+                    ours: Vec::new(),
+                    theirs,
+                    third_party: third_party_names(&installed),
+                });
             }
             Err(ReleasesError::Unreadable) => {
                 let message = self
@@ -986,7 +1116,7 @@ impl Worker {
         state.release_url = core.map(|p| release_page(&p.release_tag));
         state.last_check_unix_s = Some(now_unix_s());
         state.components = components;
-        Some(Checked { ours: published, theirs })
+        Some(Checked { ours: published, theirs, third_party: third_party_names(&installed) })
     }
 
     /// Installs the named components, plugins first and the core last.
@@ -1002,24 +1132,32 @@ impl Worker {
         // has already returned.
         let mut placed: Vec<Placement> = Vec::new();
         for name in install_order(names) {
-            // A third-party plugin's own repository answers first, and that
-            // order is the decision, not a fallback: its name is free-form and
-            // may collide with an official one, so reading our release first
-            // would swap the operator's binary for ours under the same name.
-            let (offered, third_party) = match checked.theirs.iter().find(|o| o.name == name) {
-                Some(o) => (&o.published, true),
-                None => match checked.ours.iter().find(|p| carries(p, &name)) {
-                    Some(p) => (p, false),
-                    None => {
-                        // A name nothing published carries: a third-party
-                        // plugin whose repository could not be read, or a
-                        // component that dropped out of the hundred-release
-                        // window. Nothing to install and nothing to say to the
-                        // page — the row already reads `Unknown`.
-                        tracing::warn!("update: nothing published for {name}, skipping it");
-                        continue;
-                    }
-                },
+            // What the component **is** decides which list answers for it —
+            // never which lookup happened to return something. See `resolve`.
+            let (offered, third_party) = match resolve(checked, &name) {
+                Resolved::Theirs(published) => (published, true),
+                Resolved::Ours(published) => (published, false),
+                Resolved::UncheckedThirdParty => {
+                    // A named refusal and not a silent skip: the operator
+                    // ticked this row, and "nothing happened" would read as a
+                    // failure of the gesture rather than as what it is.
+                    tracing::warn!(
+                        "update: {name} is a third-party plugin whose repository this check did not consult, skipping it"
+                    );
+                    let catalog = self.catalog.read().await;
+                    let message = refusal_message(&catalog, &name, &Refusal::ThirdPartyUnchecked);
+                    drop(catalog);
+                    first_failure.get_or_insert(message);
+                    continue;
+                }
+                Resolved::Nothing => {
+                    // A component that dropped out of the hundred-release
+                    // window, or one this release never carried. Nothing to
+                    // install and nothing to say to the page — the row already
+                    // reads `Unknown`.
+                    tracing::warn!("update: nothing published for {name}, skipping it");
+                    continue;
+                }
             };
             self.set_busy(Some(self.message_for("update_installing", &name).await))
                 .await;
@@ -1182,6 +1320,23 @@ impl Worker {
             } else {
                 Refusal::NeedsManualStep
             });
+        }
+        // The rule above counts binaries; this one **names** the one that will
+        // be placed. Both are refusals, both happen before a single byte is
+        // written, and they are separate because the second is a fact about
+        // this component's declaration rather than about the archive alone —
+        // see `placement_target` for what an archive naming a sibling buys.
+        //
+        // The same rule for ours and for a stranger's: `installable_from_ui`
+        // does not read the name either, so an official archive built wrong
+        // would place the wrong file just as quietly. No exemption here, not
+        // even the core's — the core has no `exec` in `plugins.toml`, so the
+        // question is not asked of it at all rather than waived for it.
+        if !is_core
+            && let Some((file, _)) = &contents.binary
+            && let Some(exec) = self.exec_of(name)
+        {
+            placement_target(&exec, &plugins_dir(&self.root), file)?;
         }
         // A component nothing declares is an **installation**, not a
         // replacement: it needs a declaration, an initial configuration, and a
@@ -1407,6 +1562,26 @@ impl Worker {
             Err(e) => {
                 tracing::warn!("update: reading {}: {e:#}", self.manifest.display());
                 false
+            }
+        }
+    }
+
+    /// The `exec` `plugins.toml` declares for this plugin, if it declares one.
+    ///
+    /// Read from the file and never from the row the page showed, for the same
+    /// reason `declared` is: the file is the authority, and the row was
+    /// computed at the last check. `None` for a name the file does not carry
+    /// and for a file that cannot be read — in both cases there is no
+    /// declaration to hold an archive to, and `install_one` then falls back on
+    /// the refusals that already cover a fresh install.
+    fn exec_of(&self, name: &str) -> Option<String> {
+        match PluginManifest::load(&self.manifest) {
+            Ok(manifest) => {
+                manifest.plugins.iter().find(|p| p.name == name).map(|p| p.exec.clone())
+            }
+            Err(e) => {
+                tracing::warn!("update: reading {}: {e:#}", self.manifest.display());
+                None
             }
         }
     }
@@ -1828,6 +2003,18 @@ mod tests {
             "at most four repositories are queried, and they are the first four in file order"
         );
         assert_eq!(targets.len(), THIRD_PARTY_MAX);
+
+        // **The cap bounds who is asked, never who counts as a stranger.**
+        // The same fixture answered by `third_party_names`: all six, plus the
+        // unaddressable one, and neither of the two that are ours or silent.
+        // Conflating the two lists is what let a fifth third-party plugin — or
+        // one on GitLab — fall through to our own release under a colliding
+        // name.
+        assert_eq!(
+            third_party_names(&installed),
+            names(&["alpha", "elsewhere", "bravo", "charlie", "delta", "echo", "foxtrot"]),
+            "being a stranger admits no ceiling, and an unaddressable repository is still a stranger's"
+        );
     }
 
     /// **Refusal 2 of 3: a third-party archive may carry nothing but its own
@@ -2007,6 +2194,103 @@ mod tests {
         assert_eq!(automatic_install_list(&components), names(&["core", "radio"]));
     }
 
+    /// **A stranger's archive does not get to choose which of your plugins it
+    /// replaces.**
+    ///
+    /// `installable_from_ui` and `only_its_own_binary` both count binaries and
+    /// neither reads the name, and `install_one` hands that bare name to root,
+    /// which validates its shape and forms `plugins_dir/<name>`. So without
+    /// this rule an archive for `theirs` carrying
+    /// `ritornello-plugin-radio` gets the **official radio binary** overwritten
+    /// with the stranger's bytes — no privilege gained, and the wrong process
+    /// running someone else's code.
+    ///
+    /// One case per operand, because it is a conjunction: the second row breaks
+    /// the name and the third breaks the directory, and each alone must refuse.
+    #[test]
+    fn an_archive_may_not_name_a_sibling_for_root_to_replace() {
+        let dir = Path::new("/usr/local/lib/ritornello/plugins");
+        assert!(
+            placement_target(
+                "/usr/local/lib/ritornello/plugins/ritornello-plugin-theirs",
+                dir,
+                "ritornello-plugin-theirs"
+            )
+            .is_ok(),
+            "the ordinary shape: the declaration and the archive name the same file"
+        );
+        assert!(
+            matches!(
+                placement_target(
+                    "/usr/local/lib/ritornello/plugins/ritornello-plugin-theirs",
+                    dir,
+                    "ritornello-plugin-radio"
+                ),
+                Err(Refusal::NotItsOwnFile(_))
+            ),
+            "an archive naming a sibling must never reach the privileged installer"
+        );
+        assert!(
+            matches!(
+                placement_target(
+                    "/opt/theirs/ritornello-plugin-theirs",
+                    dir,
+                    "ritornello-plugin-theirs"
+                ),
+                Err(Refusal::NotItsOwnFile(_))
+            ),
+            "root only writes into the plugins directory: a declaration pointing elsewhere would get a file its own exec never looks at, and a row claiming the new version"
+        );
+    }
+
+    /// **A third-party plugin whose repository was not consulted is never
+    /// served from our release.**
+    ///
+    /// The fall-through this replaces was reachable by an ordinary failure —
+    /// the fifth third-party plugin, a slow server, a GitLab fork — and not by
+    /// an attack: the row would fall to `ours`, where a colliding name (a fork
+    /// of `radio` kept as `radio`) resolves to the **official** archive and is
+    /// then installed under the plugin rule, `/etc/ritornello` files and all.
+    ///
+    /// The three other answers are asserted beside it so this cannot pass by
+    /// `resolve` having quietly become "nothing resolves".
+    #[test]
+    fn a_third_party_plugin_whose_repository_was_not_consulted_is_never_served_from_ours() {
+        let unconsulted = Checked {
+            ours: radio_published("9.9.9"),
+            theirs: Vec::new(),
+            third_party: names(&["radio"]),
+        };
+        assert_eq!(
+            resolve(&unconsulted, "radio"),
+            Resolved::UncheckedThirdParty,
+            "our own release must never answer for a name the announcement calls a stranger's"
+        );
+
+        let consulted = Checked {
+            ours: radio_published("9.9.9"),
+            theirs: vec![ThirdPartyOffer {
+                name: "radio".to_string(),
+                published: radio_published("2.0.0").remove(0),
+            }],
+            third_party: names(&["radio"]),
+        };
+        match resolve(&consulted, "radio") {
+            Resolved::Theirs(published) => assert_eq!(
+                published.version, "2.0.0",
+                "its own repository answers, never the colliding official entry"
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        let mine = ours(radio_published("0.3.0"));
+        match resolve(&mine, "radio") {
+            Resolved::Ours(published) => assert_eq!(published.version, "0.3.0"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(resolve(&mine, "mpd"), Resolved::Nothing);
+    }
+
     /// **Refusal 3 of 3: a third-party component is never taken by the
     /// automatic policy, whatever that policy is.**
     ///
@@ -2176,6 +2460,8 @@ mod tests {
             Refusal::DigestMismatch,
             Refusal::NeedsManualStep,
             Refusal::ThirdPartyArchive,
+            Refusal::NotItsOwnFile("it is declared to run /a/b, and the archive carries c".to_string()),
+            Refusal::ThirdPartyUnchecked,
             Refusal::NoFragment,
             Refusal::Download("connection reset by peer".to_string()),
             Refusal::Prepare("no space left on device".to_string()),
@@ -2216,7 +2502,12 @@ mod tests {
     /// The same worker, on a root the caller owns — for the tests that write
     /// files under it and then read them back.
     fn worker_at(root: &Path, status: Arc<RwLock<StatusState>>) -> Worker {
-        let exec = root.join("ritornello-plugin-radio");
+        // In the **real** plugins directory, not at the bare root: that is
+        // where a declared binary lives on a device, and `placement_target`
+        // now refuses an install for a declaration pointing anywhere else.
+        let dir = plugins_dir(root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exec = dir.join("ritornello-plugin-radio");
         std::fs::write(&exec, b"not a real binary, only its presence is read\n").unwrap();
         let manifest = root.join("plugins.toml");
         std::fs::write(
@@ -2342,11 +2633,11 @@ mod tests {
     }
 
     /// RULING 51: `Availability::Undeclared` needs a producer, and this is
-    /// it — a binary sitting in the real plugins directory (the same path
-    /// `ritornello_updater::target::plugins_dir` computes, not the bare root
-    /// `worker_rig`'s declared plugin uses) that nothing declares becomes an
-    /// `Installed` row with `declared: false, binary_present: true`,
-    /// alongside — not instead of — the declared plugin's own row.
+    /// it — a binary sitting in the real plugins directory that nothing
+    /// declares becomes an `Installed` row with `declared: false,
+    /// binary_present: true`, alongside — not instead of — the declared
+    /// plugin's own row, which lives in that same directory and must not be
+    /// swept up with it.
     #[tokio::test]
     async fn a_binary_with_no_declaration_is_reported_as_installed_but_undeclared() {
         let status = one_line(PluginStatus::kind("radio", "source", true, false));
@@ -2369,7 +2660,181 @@ mod tests {
 
     /// A check that found only our own release, which is the ordinary shape.
     fn ours(published: Vec<Published>) -> Checked {
-        Checked { ours: published, theirs: Vec::new() }
+        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new() }
+    }
+
+    // ---- The refusals AT THEIR CALL SITE --------------------------------
+    //
+    // The doctrine in this module is that the worker is untested, and for most
+    // of it that is right: it fetches from GitHub and starts a systemd unit.
+    // But both refusals below happen **before** any byte is written and before
+    // `systemctl` is ever reached, which is exactly what makes them
+    // observable: a one-shot `TcpListener` for the archive and one for its
+    // `SHA256SUMS` is the whole rig, and no `systemctl` is needed at all.
+    //
+    // Written down because the first version of this task called that
+    // impossible: the missing seam was never a seam, only the assumption that
+    // `install_one` had to run to completion to be observed.
+
+    /// A gzipped tar of `(path, bytes)`, as a release archive is built.
+    fn targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append_data(&mut header, path, *data).expect("append");
+        }
+        let tar = builder.into_inner().expect("finish");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar).expect("compress");
+        gz.finish().expect("finish gz")
+    }
+
+    /// One HTTP/1.1 200 answer, served to the first connection, at a URL whose
+    /// last segment is `file` — that is what `asset_name` reads to look the
+    /// digest up in `SHA256SUMS`.
+    async fn serve_once(body: Vec<u8>, file: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut ignored = [0u8; 4096];
+                let _ = socket.read(&mut ignored).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://127.0.0.1:{port}/{file}")
+    }
+
+    /// A `Published` pointing at those two servers, with a digest that
+    /// matches — so the download and the verification both succeed and what
+    /// the test observes is the refusal, not a checksum failure.
+    async fn served(name: &str, archive: &[u8]) -> Published {
+        let file = format!("ritornello-plugin-{name}-2.0.0-x86_64.tar.gz");
+        let url = serve_once(archive.to_vec(), &file).await;
+        let sums = format!("{}  {file}\n", digest_hex(archive));
+        let checksums_url = serve_once(sums.into_bytes(), "SHA256SUMS").await;
+        Published {
+            offer: Offer::Plugin(name.to_string()),
+            version: "2.0.0".to_string(),
+            url,
+            size: 0,
+            release_tag: "v2.0.0".to_string(),
+            checksums_url: Some(checksums_url),
+        }
+    }
+
+    /// **RULING 64 at the call site: the third-party path really does call the
+    /// stricter rule.**
+    ///
+    /// The archive carries its binary **and a locale catalog** — a shape
+    /// `installable_from_ui` accepts, asserted here so the fixture is proven to
+    /// be the discriminating one. Deleting the `archive_allowed` guard in
+    /// `install_one` makes this red, and what goes red is not only the outcome:
+    /// the mutated path writes the stranger's catalog under `/etc/ritornello`
+    /// and goes on to `systemctl`.
+    #[tokio::test]
+    async fn install_one_refuses_a_third_party_archive_before_writing_anything() {
+        let status = one_line(PluginStatus {
+            version: Some("1.0.0".into()),
+            repository: Some("https://github.com/someone/radio".into()),
+            ..PluginStatus::kind("radio", "source", true, false)
+        });
+        let (worker, dir) = worker_rig(status);
+        let archive = targz(&[
+            ("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
+            ("etc/ritornello/locales/radio/fr.toml", b"a = \"b\"\n"),
+        ]);
+        assert!(
+            installable_from_ui(&archive::read(&archive, DECOMPRESSED_MAX).unwrap().entries),
+            "our own rule accepts this archive — that is what makes it the discriminating fixture"
+        );
+        let published = served("radio", &archive).await;
+        let client = client().unwrap();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install_one(&client, "radio", &published, true),
+        )
+        .await
+        .expect("install_one hung");
+        assert!(
+            matches!(outcome, Err(Refusal::ThirdPartyArchive)),
+            "expected ThirdPartyArchive, got {:?}",
+            outcome.as_ref().err()
+        );
+        assert!(
+            !dir.path().join("etc/ritornello/locales/radio/fr.toml").exists(),
+            "the core wrote /etc/ritornello for a stranger's archive"
+        );
+        assert!(
+            !worker.staging.join("request.json").exists(),
+            "a refused archive must never reach the privileged installer"
+        );
+    }
+
+    /// The same seam for the other half of the boundary: an archive that
+    /// passes the strict rule — one binary, nothing else — but names a
+    /// **sibling**.
+    ///
+    /// Without `placement_target`, this writes a `request.json` asking root to
+    /// place `ritornello-plugin-radio` from the stranger's bytes, and the page
+    /// then says "theirs updated to 2.0.0" while radio's row still reads
+    /// aligned until its next restart runs someone else's code.
+    #[tokio::test]
+    async fn install_one_refuses_an_archive_that_names_another_plugins_file() {
+        let status = one_line(PluginStatus {
+            version: Some("1.0.0".into()),
+            repository: Some("https://github.com/someone/theirs".into()),
+            ..PluginStatus::kind("theirs", "source", true, false)
+        });
+        let (worker, dir) = worker_rig(status);
+        // `theirs` is declared, and its own file sits beside radio's.
+        let theirs_exec = plugins_dir(dir.path()).join("ritornello-plugin-theirs");
+        std::fs::write(&theirs_exec, b"x").unwrap();
+        let mut manifest = std::fs::read_to_string(&worker.manifest).unwrap();
+        manifest.push_str(&format!(
+            "\n[[plugin]]\nname = \"theirs\"\nexec = {:?}\n",
+            theirs_exec.to_string_lossy()
+        ));
+        std::fs::write(&worker.manifest, manifest).unwrap();
+
+        let archive =
+            targz(&[("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"STRANGER")]);
+        assert!(
+            only_its_own_binary(&archive::read(&archive, DECOMPRESSED_MAX).unwrap().entries),
+            "the strict archive rule accepts this — it counts binaries and does not read names, which is why the second refusal exists"
+        );
+        let published = served("theirs", &archive).await;
+        let client = client().unwrap();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install_one(&client, "theirs", &published, true),
+        )
+        .await
+        .expect("install_one hung");
+        assert!(
+            matches!(outcome, Err(Refusal::NotItsOwnFile(_))),
+            "expected NotItsOwnFile, got {:?}",
+            outcome.as_ref().err()
+        );
+        assert!(
+            !worker.staging.join("request.json").exists(),
+            "root must never be asked to place a file the plugin is not declared to run"
+        );
+        assert_eq!(
+            std::fs::read(plugins_dir(dir.path()).join("ritornello-plugin-radio")).unwrap(),
+            b"not a real binary, only its presence is read\n",
+            "the sibling the archive named must be untouched"
+        );
     }
 
     /// **The hop RULING 5 exists for**, driven from the event rather than from

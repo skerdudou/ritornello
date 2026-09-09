@@ -204,6 +204,12 @@ pub fn installable_from_ui(entries: &[String]) -> bool {
 /// fragment. That costs nothing in practice — a plugin is only ever known to
 /// be third-party because it ran and announced its repository, which means it
 /// was already declared by hand.
+///
+/// **What this counts, it does not name.** Like `installable_from_ui`, it
+/// answers "exactly one binary, and in the right place" and says nothing about
+/// *which* binary — an archive naming a sibling passes here. That second
+/// question belongs to the component being installed rather than to the
+/// archive alone, and it is answered by `update::placement_target`.
 pub fn only_its_own_binary(entries: &[String]) -> bool {
     let mut binaries = 0;
     for entry in entries {
@@ -216,10 +222,16 @@ pub fn only_its_own_binary(entries: &[String]) -> bool {
         let Some(rest) = entry.strip_prefix(PLUGINS_PREFIX) else {
             return false;
         };
-        // A nested path (`plugins/sub/evil`), or the doubled-separator shape
-        // (`plugins//x` strips to `/x`): the privileged side only ever forms
-        // one validated bare name directly under `plugins/`.
-        if rest.is_empty() || rest.contains('/') {
+        // A nested path (`plugins/sub/evil`) **and** the doubled-separator
+        // shape (`plugins//x` strips to `/x`), both caught by this one
+        // condition: the privileged side only ever forms one validated bare
+        // name directly under `plugins/`.
+        //
+        // No `rest.is_empty()` beside it, deliberately: the only entry that
+        // could strip to nothing is `PLUGINS_PREFIX` itself, which ends with
+        // `/` and was already skipped above. An operand no fixture can reach
+        // is an operand no mutation can catch.
+        if rest.contains('/') {
             return false;
         }
         binaries += 1;
