@@ -2,7 +2,34 @@
 <!-- Or, when a manual step is needed, replace the line above by:
      **Action required** — <what to do by hand>.
      In 0.x semver the minor carries breaks, so the digit alone cannot say
-     this. The sentence can. -->
+     this. The sentence can.
+
+     Action required when this release changes any of:
+
+     - a systemd unit (`deploy/*.service`)
+     - a polkit rule (`deploy/*.rules`)
+     - `ritornello-media-mount`, the helper root runs for network shares
+
+     The updater cannot write any of those, by design. Say so here, with the
+     command, or the device will update its binaries and silently keep the
+     old unit. -->
+
+## Behaviour changes
+
+Behaviour change: the source key's cycle now follows the order of
+`/etc/ritornello/plugins.toml` instead of being sorted alphabetically. On a
+device in service the cycle order therefore changes at the first start after
+this update. The configuration page reorders it, and the same order now also
+sets metadata priority.
+
+Behaviour change: updating a plugin now refuses when its `plugins.toml`
+entry declares an `exec` outside
+`/usr/local/lib/ritornello/plugins/`. Before this release that case was a
+silent half-success — the archive's binary landing where the entry is never
+read from, and the row then claiming a version that is not the one actually
+running. If an existing device meets this refusal on its next update, the
+fix is to move the binary under the plugins directory, or to point `exec`
+there.
 
 ## Install
 

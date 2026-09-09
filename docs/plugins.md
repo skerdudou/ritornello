@@ -151,10 +151,19 @@ that moves this rarely is exactly what makes it trustworthy when it does:
 seeing it change is the signal that something must actually be
 recompiled, not routine noise. Because a protocol break changes what a
 plugin and the core can promise each other, it carries a minor version bump
-of the whole product — the single version declared once in
-`[workspace.package]` and inherited by every crate, `ritornello-proto`
-included (see `ritornello_proto::PROTOCOL_VERSION`'s own doc comment,
-which this paragraph mirrors).
+of the whole product — the major.minor declared in `[workspace.package]`,
+which every shipped component's own version must stay on (see
+[installation.md's versioning
+paragraph](installation.md#installing-from-a-release) and
+`version_coherence.rs`). It is not, any more, a single version inherited by
+every crate: the core and each plugin declare their own patch version, so a
+device legitimately runs its components at different patch levels from each
+other and from the core — that is not a misconfiguration to repair, it is
+the point of the per-component release scheme. `ritornello-proto`,
+`ritornello-plugin-sdk`, `ritornello-i18n` and `ritornello-updater` are the
+exception and keep inheriting the workspace version, since none of them
+ships as its own archive (see `ritornello_proto::PROTOCOL_VERSION`'s own doc
+comment, which this paragraph otherwise mirrors).
 
 This "bind first, announce second" order is not merely a convention:
 the SDK's `Runtime` enforces it structurally (see [Writing a `metadata`

@@ -66,6 +66,37 @@ over SSH and remains the development path (see [Deploying](#deploying)
 below); a release archive is for putting a specific tagged version onto a
 device with no build toolchain at all.
 
+Three different numbers are at play here, and they answer three different
+questions. The **product number** — `vX.Y.Z`, the git tag — names the
+release and carries the generation: `0.2.7` is the seventh delivery of the
+`0.2` generation. Each shipped component (the core, each plugin) declares
+**its own** patch version, so a fix confined to one plugin does not
+renumber everything else and does not make the updater think ten unrelated
+components changed too. `PROTOCOL_VERSION`, the wire-compatibility contract
+between the core and a plugin (see [plugins.md](plugins.md)), is a third
+number again, and it moves only on a breaking change to that wire format —
+not on every release, and not with every component's own patch bumps. Major
+and minor are kept identical everywhere — the product number and every
+component's own version — so only the patch digit is ever free, component
+by component.
+
+The release gesture, then: bump the version of whichever component you
+changed, and tag with the next product number. The workflow publishes
+exactly the components whose declared version moved since the previous
+published release (`scripts/changed-components.sh`, run from a development
+machine against an arbitrary ref — see [What has not been
+verified](#what-has-not-been-verified) below for how much of this has
+actually been exercised). Forgetting to bump a component's version is not a
+silent no-op: that component ships nothing this release, and if *no*
+component moved the script exits 2 and fails the job loudly rather than
+publishing an empty release that looks like success.
+
+Detection reads a single page of the GitHub releases API — one hundred
+releases (`per_page=100`). A component that has not shipped a new archive of
+its own within the last hundred deliveries would drop off that page and out
+of the catalogue: distant at this project's pace, but not impossible, and
+worth knowing about rather than discovering it the day it happens.
+
 A published release must never be deleted, nor its attached files removed.
 The archive of a component that has not changed in a long time lives in the
 release where it last changed, and that is where the device installs or
@@ -119,6 +150,31 @@ reconciles the declared network shares (see [Network
 shares](#network-shares)). `deploy.sh` does this for you; an archive cannot,
 so a `files` plugin installed from a release and never enabled this way stops
 reconciling shares at the next reboot, in silence.
+
+### Enabling automatic updates (once, by hand)
+
+An update can replace binaries and locale catalogs. It can never write a
+systemd unit or a polkit rule — that is what stops a forged archive from
+gaining root, and it is why this feature's own installation is manual.
+
+From a release archive of the core, extracted as described above, four
+files are new:
+
+    sudo tar --no-same-owner -C / -xzf ritornello-core-<version>-<arch>.tar.gz \
+      ./usr/local/lib/ritornello/ritornello-update \
+      ./etc/systemd/system/ritornello-update.service \
+      ./etc/systemd/system/ritornello-rollback.service \
+      ./etc/polkit-1/rules.d/52-ritornello-update.rules
+
+The updated `ritornello.service` carries the start limit and the
+`OnFailure=` line that arm the rollback, so install it too, then:
+
+    sudo systemctl daemon-reload
+    sudo systemctl restart ritornello
+
+Without the polkit rule the page still checks and still reports, and every
+install fails with `systemctl`'s own refusal — which names the missing file.
+Without the `OnFailure=` line everything works and there is no safety net.
 
 **Why a blind `sudo tar -C /` cannot clobber a configuration.** Each
 archive's tree holds files only at the exact path they occupy on the
@@ -535,3 +591,113 @@ change that matters, not its magnitude.
 
 To tell the two causes apart, run `journalctl -u ritornello -f` during a
 dropout: mpv logs the network cache draining, not ALSA underruns.
+
+## What has not been verified
+
+Self-update and plugin management were built and tested on a development
+machine, never on the device they are meant to run on. This section names
+each gesture, rather than leaving one blanket disclaimer that a reader could
+mistake for caution instead of fact.
+
+**Nothing has run on a Pi.** Installing, uninstalling and reordering a
+plugin, and updating the core itself, all rewrite
+`/etc/ritornello/plugins.toml` and ask the privileged
+`ritornello-update.service` to place the files. None of the following has
+been observed for real:
+
+- `systemctl start ritornello-update.service` running with the actual
+  polkit rule in place;
+- a running binary being replaced on disk while its own process is live;
+- systemd restarting `ritornello.service` after an update, rather than a
+  test process exiting on its own;
+- the rollback firing.
+
+Every one of those is covered by unit and integration tests that fake the
+privileged step; none is covered by the privileged step itself.
+
+**The release workflow has never run**, on this repository or before this
+project's own self-update work began — it fires only on a `git tag`, and no
+tag has been pushed since. Consequently:
+
+- "publish only what changed" is proven by running
+  `scripts/changed-components.sh` by hand against a handful of refs on this
+  checkout, and by reading `.github/workflows/ci.yml`, not by a real
+  release. The first `git tag` pushed to this repository is the first real
+  test of the whole workflow;
+- `fetch-depth: 0` on the `publish` job is load-bearing and unproven:
+  without it, the checkout has no tag history, `git show <ref>:...` finds
+  nothing, `changed-components.sh` receives no previous ref, and the
+  release publishes **every** component instead of only what changed. That
+  failure mode is safe — nothing is lost or corrupted — but silent, and
+  from the outside it looks exactly like the feature working;
+- the guard added by this task, which refuses to draft a release that
+  changed a systemd unit, a polkit rule or the updater without the notes
+  saying "Action required" (`scripts/release-notes-guard.sh`), has been run
+  by hand against commits of this repository, never inside the actual
+  GitHub Actions job;
+- nothing about the per-component versioning scheme itself — three
+  archives named after three different numbers, a catalogue read from one
+  page of a hundred releases — has been exercised by an actual device
+  fetching an actual release.
+
+**The rollback only recognises "does not start."** It watches the service
+failing to come up — systemd's start-limit plus `OnFailure=` on the unit —
+which is what a marker-and-restart scheme can cheaply detect. A core that
+starts, stays up, and misbehaves quietly (a bad decode, a protocol
+mismatch nobody wired for, a corrupted file it degrades under rather than
+rejecting) triggers nothing at all. There is no health check beyond "the
+process is alive."
+
+**`arm64` has never started on real hardware.** It is cross-compiled on
+every tagged release like the other two architectures (see
+[Architectures](#installing-from-a-release) above), but nobody owns a
+board of that class to try it on.
+
+**The protocol-incompatibility refusal is proven only by tests.** The core
+refuses a plugin whose announced `protocol` is not strictly equal to its
+own `PROTOCOL_VERSION` (see [plugins.md](plugins.md)), but that number has
+never actually moved in this project's history — there has been no real
+wire break to refuse. The path is exercised by unit tests that fabricate a
+mismatched announcement, not by an actually incompatible plugin built
+against an older protocol.
+
+**Known edges and debts in the code, recorded here rather than fixed or
+dressed up as design:**
+
+- The three places that rewrite `plugins.toml` on a live device — behind
+  declaring a plugin, removing one, and reordering the list — each read the
+  file, transform the text and write it back, with no lock across the
+  three. It is safe today only because none of them awaits anything between
+  the read and the write, so two requests cannot interleave. That is a
+  **fact about the code as it stands, not a designed property**: nothing —
+  no type, no test, no lint — would notice an `await` introduced into that
+  window, and the natural edit that would introduce one (reading the
+  language catalog for a translated success message, the way the
+  neighbouring error branches already do) is an easy one to make without
+  realising what it breaks. The bounded fix, if this is ever exercised for
+  real, is a `tokio::sync::Mutex<()>` guarding the section; nothing has hit
+  the race yet, so nothing has been added.
+- `run_privileged_unit` (`crates/ritornello-core/src/update/mod.rs`)
+  hard-codes the string `"systemctl"` rather than going through
+  `SystemInfo::systemctl`, the field that exists precisely so a test can
+  substitute `/bin/true` or `/bin/false` for it, the way the power-button
+  tests already do. Consequence: the unit-failure path of an update has
+  never actually been driven end to end by a test, and on a real failure
+  the page shows systemctl's own generic message ("Job for
+  ritornello-update.service failed"), while the actual cause sits only in
+  the journal.
+- `archive::read` decompresses up to 64 MiB synchronously inside an async
+  worker task, sharing the tokio runtime with the HTTP handlers. On a Pi 2
+  that can hold one runtime thread for several seconds during an update. A
+  comment on `run_privileged_unit` already notes that an I/O left without a
+  deadline has made a page of this product disappear once before; this is
+  the same shape of risk in a different place. Not observed to cause a
+  problem on this project's own hardware, not fixed — flagged rather than
+  silently carried.
+
+Not something left unverified, but worth recording here for whoever meets
+its traces in the history: `plugin_action_refusal`, the scaffold that made
+every not-yet-wired plugin gesture refuse honestly instead of silently
+doing nothing, was retired once the last gesture (reordering) was wired.
+Nothing depends on it any more; it was dismantled on purpose, not
+forgotten.

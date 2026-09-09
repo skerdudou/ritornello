@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/back-Rust-b7410e?logo=rust&logoColor=white" alt="Back end in Rust">
   <img src="https://img.shields.io/badge/targets-armv7%20%7C%20aarch64%20%7C%20x86__64-blue" alt="armv7, aarch64, x86_64">
   <img src="https://img.shields.io/badge/UI-Vue%203-42b883?logo=vue.js&logoColor=white" alt="Vue 3">
-  <img src="https://img.shields.io/badge/version-0.1-yellow" alt="Version 0.1">
+  <img src="https://img.shields.io/badge/version-0.2-yellow" alt="Version 0.2">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green" alt="MIT OR Apache-2.0"></a>
 </p>
 
@@ -59,6 +59,11 @@ and 5) and `x86_64`, so a plain Linux PC runs it just as well.
   page (CPU, temperature, under-voltage, shutdown/reboot).
 - **HDMI screen** — the console plugin composes now-playing and clock
   screens on the framebuffer console, no X11 or Wayland involved.
+- **Self-update and plugin management** — the core and each plugin check
+  GitHub releases and install what changed from the browser, with an
+  automatic rollback if the new binary fails to start; a plugin can also be
+  installed, removed or reordered live, and a third-party plugin is checked
+  against its own repository.
 
 <p align="center">
   <img src="docs/captures/home-dark.png" width="49%" alt="The same home page in dark mode">
@@ -219,11 +224,13 @@ documents above.
 
 ## Status and contributing
 
-Ritornello is at **0.1**: it runs every day in one living room and the
+Ritornello is at **0.2**: it runs every day in one living room and the
 feature set above is real, but the plugin protocol and the configuration
 files may still change before a 1.0. CI builds the UI, runs clippy with
 warnings denied, the Rust test suite and the Playwright end-to-end
-journeys on every push; a `v*` tag produces the `armv7` release bundle.
+journeys on every push; a `v*` tag drafts a GitHub release with per-component
+archives for three architectures (armv7, arm64, x86_64) — see
+[docs/installation.md](docs/installation.md#installing-from-a-release).
 
 Contributions are welcome — especially reports from other boards, other
 DACs and other remotes, since the author only owns one of each. Open an

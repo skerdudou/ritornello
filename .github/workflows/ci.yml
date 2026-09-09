@@ -180,6 +180,7 @@ jobs:
           merge-multiple: true
           path: assets
       - name: Keep only the components whose version moved
+        id: changed
         # A release carries what changed, and nothing else — so a fix in one
         # plugin does not re-publish eleven archives and does not make the
         # device replace components that are identical to what it already runs.
@@ -204,6 +205,7 @@ jobs:
           # which publishes everything.
           prev=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')
           echo "previous published release: ${prev:-none}"
+          echo "prev=$prev" >> "$GITHUB_OUTPUT"
           ./scripts/changed-components.sh $prev > changed.txt
           cat changed.txt
           mkdir keep
@@ -215,6 +217,14 @@ jobs:
           rm -rf assets
           mv keep assets
           ls -l assets
+      - name: Refuse a unit/rule/updater change announced as "Nothing to do"
+        # The one place in this workflow that *knows* a systemd unit, a
+        # polkit rule or the updater changed — the updater cannot write any
+        # of those itself, so the release notes are the only place a manual
+        # step ever gets said. See scripts/release-notes-guard.sh for the
+        # rule; kept out of this file so it can be run and read on a
+        # development machine instead of discovered by pushing a tag.
+        run: ./scripts/release-notes-guard.sh "${{ steps.changed.outputs.prev }}"
       - name: One checksum file for every asset
         # This step runs after the filtering above, not before: SHA256SUMS
         # must describe only what this release carries. The core reads a
