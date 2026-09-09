@@ -1,10 +1,14 @@
 //! What the configuration page is told about every component.
 //!
 //! One pure function over three lists — what is declared, what is on disk,
-//! what the release offers — and that is the whole of it. The four states it
-//! distinguishes exist because three were not enough: a declared plugin whose
-//! binary is absent used to show as **dead**, which is what the release
-//! archives made possible and what sent the diagnosis in the wrong direction.
+//! what the release offers — and that is the whole of it. `Availability` began
+//! at four states because three were not enough: a declared plugin whose binary
+//! is absent used to show as **dead**, which is what the release archives made
+//! possible and what sent the diagnosis in the wrong direction. It carries six
+//! now — installing a plugin that was never declared, and undeclaring one whose
+//! binary stays on disk, are each their own situation licensing its own
+//! gesture, and collapsing either into a neighbour would tell the operator to
+//! do the wrong thing.
 
 use crate::update::release::{differs, origin, Offer, Origin, Published};
 use serde::Serialize;
