@@ -2229,6 +2229,7 @@ async fn main() -> Result<()> {
         status: status_state.clone(),
         manifest: plugins_path.clone(),
         plugins_tx: plugin_order_tx.clone(),
+        settings: settings_current.clone(),
         staging: staging_dir,
         root: PathBuf::from("/"),
         core_version: env!("CARGO_PKG_VERSION"),

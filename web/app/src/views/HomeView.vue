@@ -55,6 +55,7 @@ const settings = ref<SettingsPayload>({
   update_policy: 'off',
   update_hour: 3,
   update_cadence: { kind: 'daily' },
+  update_prereleases: false,
 })
 onMounted(async () => {
   settings.value = await api.get<SettingsPayload>('/api/settings').catch(() => settings.value)

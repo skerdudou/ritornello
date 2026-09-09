@@ -30,7 +30,7 @@ use crate::update::download::{
 };
 use crate::update::release::{
     download_name, fold, origin, parse_checksums, parse_releases, releases_url, releases_url_for,
-    Offer, Origin, Published, ReleasesError, ARCH, REPO,
+    Channel, Offer, Origin, Published, ReleasesError, ARCH, REPO,
 };
 use crate::update::state::{
     component_offers, Availability, CheckOutcome, ComponentKind, ComponentOffer, Installed,
@@ -975,6 +975,13 @@ pub struct Worker {
     /// The core loop's ear, for the restart that follows a plugin's
     /// replacement.
     pub plugins_tx: mpsc::Sender<PluginOrder>,
+    /// The behaviour settings, for the one field this worker reads:
+    /// `update_prereleases`. Read **per check** and never remembered, for the
+    /// same reason `manifest` is — an owner who ticks the box expects the next
+    /// check to obey it, not the next restart. The same handle
+    /// `GET`/`PUT /api/settings` serves, so there is no second copy to keep in
+    /// step.
+    pub settings: Arc<RwLock<crate::state::Settings>>,
     /// `<state dir>/staging`: what the service writes and root distrusts. Not
     /// to be confused with `/var/lib/ritornello-update`, which only root
     /// writes.
@@ -994,6 +1001,17 @@ pub struct Worker {
 impl Worker {
     async fn message(&self, key: &str) -> String {
         self.catalog.read().await.get(key).to_string()
+    }
+
+    /// The channel this check reads in, from the setting as it stands now.
+    ///
+    /// The guard is dropped before returning — the `bool` is copied out — so
+    /// no caller can hold the settings lock across the network I/O that
+    /// follows. That is not a stylistic preference here: no HTTP route in this
+    /// product may block, and `PUT /api/settings` takes this same lock to
+    /// write.
+    async fn channel(&self) -> Channel {
+        Channel::from_setting(self.settings.read().await.update_prereleases)
     }
 
     /// A catalog message with its one named parameter filled in. Named and
@@ -1129,6 +1147,11 @@ impl Worker {
         client: &reqwest::Client,
         targets: &[Target],
     ) -> Vec<ThirdPartyOffer> {
+        // One read for the whole sweep: the setting cannot meaningfully change
+        // between two strangers' repositories inside one check, and re-reading
+        // per target would let it, which would make a check's answer depend on
+        // the order the targets happen to be in.
+        let channel = self.channel().await;
         let mut out = Vec::with_capacity(targets.len());
         for Target { name, repo, url } in targets {
             let (status, body) = match fetch_text(client, url).await {
@@ -1142,7 +1165,7 @@ impl Worker {
                 tracing::warn!("update: {repo} answered HTTP {status} for {name}");
                 continue;
             }
-            let releases = match parse_releases(&body) {
+            let releases = match parse_releases(&body, channel) {
                 Ok(releases) => releases,
                 Err(e) => {
                     tracing::warn!("update: {repo} published nothing usable for {name}: {e:?}");
@@ -1199,7 +1222,7 @@ impl Worker {
             self.publish_failure(message).await;
             return None;
         }
-        let releases = match parse_releases(&body) {
+        let releases = match parse_releases(&body, self.channel().await) {
             Ok(releases) => releases,
             Err(ReleasesError::NoRelease) => {
                 // A state, and never a failure: this is what a device sees
@@ -3073,6 +3096,10 @@ mod tests {
             status,
             manifest,
             plugins_tx: mpsc::channel(1).0,
+            // The product default: finished releases only. A test that wants
+            // the other channel writes to this handle — see
+            // `asking_for_prereleases_is_what_makes_one_visible`.
+            settings: Arc::new(RwLock::new(crate::state::Settings::default())),
             staging: root.join("staging"),
             root: root.to_path_buf(),
             core_version: "0.2.0",
@@ -3662,6 +3689,17 @@ mod tests {
     /// published release. Written out rather than built from a fixture helper
     /// because what it must exercise is `parse_releases`' own reading.
     fn releases_body(assets: &[&str]) -> Vec<u8> {
+        one_release(assets, false)
+    }
+
+    /// The same list, with the release flagged as a **prerelease**: the one
+    /// bit that decides whether a device on the finished-releases channel may
+    /// see it at all.
+    fn prerelease_body(assets: &[&str]) -> Vec<u8> {
+        one_release(assets, true)
+    }
+
+    fn one_release(assets: &[&str], prerelease: bool) -> Vec<u8> {
         let assets: Vec<String> = assets
             .iter()
             .map(|n| {
@@ -3669,7 +3707,7 @@ mod tests {
             })
             .collect();
         format!(
-            r#"[{{"tag_name":"v2.0.0","published_at":"2026-01-01T00:00:00Z","draft":false,"prerelease":false,"assets":[{}]}}]"#,
+            r#"[{{"tag_name":"v2.0.0","published_at":"2026-01-01T00:00:00Z","draft":false,"prerelease":{prerelease},"assets":[{}]}}]"#,
             assets.join(",")
         )
         .into_bytes()
@@ -3776,6 +3814,84 @@ mod tests {
         assert!(
             offers.iter().all(|o| matches!(&o.published.offer, Offer::Plugin(n) if *n == o.name)),
             "a third-party offer is always a plugin offer, named for that plugin: {offers:#?}"
+        );
+    }
+
+    /// **The switch is what makes a prerelease visible, and it is read on the
+    /// path rather than remembered.**
+    ///
+    /// Two runs of the same worker over two repositories — one publishing a
+    /// finished release, one publishing a prerelease — with nothing changed
+    /// between them but `update_prereleases`. Real sockets, the real
+    /// `fetch_text`, the real `third_party_offers`.
+    ///
+    /// What this pins is not the filter itself, which `parse_releases` has its
+    /// own tests for on both channels, but that the setting is **consulted by
+    /// the code that fetches**: a worker that had copied the value at
+    /// construction, or that never passed it down, would answer the same
+    /// thing twice and this test would catch it.
+    ///
+    /// It also drives a prerelease version through `classify_asset` on a real
+    /// path — `…-3.0.0-beta.1-<arch>.tar.gz`, the very name whose extra dash
+    /// made the archive invisible before this branch.
+    #[tokio::test]
+    async fn asking_for_prereleases_is_what_makes_one_visible() {
+        let (worker, _dir) = worker_rig(starting_line());
+        let client = client().unwrap();
+
+        // Fresh listeners for each run: `serve_once` answers one request.
+        async fn two_repositories() -> Vec<Target> {
+            vec![
+                Target {
+                    name: "alpha".to_string(),
+                    repo: "a/alpha".to_string(),
+                    url: serve_once(releases_body(&[&asset_for("alpha", "2.0.0")]), "releases")
+                        .await,
+                },
+                Target {
+                    name: "bravo".to_string(),
+                    repo: "b/bravo".to_string(),
+                    url: serve_once(
+                        prerelease_body(&[&asset_for("bravo", "3.0.0-beta.1")]),
+                        "releases",
+                    )
+                    .await,
+                },
+            ]
+        }
+
+        async fn sweep(worker: &Worker, client: &reqwest::Client) -> Vec<(String, String)> {
+            let targets = two_repositories().await;
+            let offers = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                worker.third_party_offers(client, &targets),
+            )
+            .await
+            .expect("third_party_offers hung");
+            offers.into_iter().map(|o| (o.name, o.published.version)).collect()
+        }
+
+        // Off, which is the product default and is left untouched here.
+        assert!(
+            !worker.settings.read().await.update_prereleases,
+            "the rig must start on the default, or this test proves nothing"
+        );
+        assert_eq!(
+            sweep(&worker, &client).await,
+            vec![("alpha".to_string(), "2.0.0".to_string())],
+            "a prerelease must not be offered to a device that never asked for one"
+        );
+
+        // On, and nothing else changed.
+        worker.settings.write().await.update_prereleases = true;
+        assert_eq!(
+            sweep(&worker, &client).await,
+            vec![
+                ("alpha".to_string(), "2.0.0".to_string()),
+                ("bravo".to_string(), "3.0.0-beta.1".to_string()),
+            ],
+            "the finished release still answers, and the prerelease now does too — \
+             with its whole version, dash included"
         );
     }
 

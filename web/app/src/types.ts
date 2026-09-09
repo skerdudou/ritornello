@@ -271,6 +271,12 @@ export interface SettingsPayload {
   update_hour: number
   /** How often an automatic run is due. */
   update_cadence: UpdateCadence
+  /**
+   * Offer prereleases too, from our repository and from every third-party
+   * one. False by default: a prerelease is something an owner opts into,
+   * never something a device starts installing on its own.
+   */
+  update_prereleases: boolean
 }
 /**
  * State of the player, as pushed by `/api/player`: everything that is volatile.

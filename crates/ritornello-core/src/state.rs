@@ -231,6 +231,19 @@ pub struct Settings {
     pub update_hour: u32,
     /// Every day, or one chosen weekday.
     pub update_cadence: crate::update::schedule::UpdateCadence,
+    /// Offer prereleases too — betas and release candidates — from our
+    /// repository and from every third-party one alike.
+    ///
+    /// It governs **every** check, the scheduled one and the button on the
+    /// update card, because it says what this owner is willing to be offered
+    /// and not when to look. Drafts are dropped whatever it says: see
+    /// `update::release::parse_releases`.
+    ///
+    /// False by default, and that default is the same judgement as
+    /// `update_policy`'s `Off`: unfinished software is something an owner asks
+    /// for, never something a device starts installing because nobody said
+    /// otherwise.
+    pub update_prereleases: bool,
 }
 
 impl Default for Settings {
@@ -286,6 +299,9 @@ impl Default for Settings {
             update_policy: crate::update::schedule::UpdatePolicy::Off,
             update_hour: 3,
             update_cadence: crate::update::schedule::UpdateCadence::Daily,
+            // Finished releases only, for the same reason `update_policy` is
+            // `Off`: this is an appetite an owner declares.
+            update_prereleases: false,
         }
     }
 }
@@ -537,6 +553,12 @@ mod tests {
                 update_cadence: crate::update::schedule::UpdateCadence::Weekly(
                     crate::update::schedule::Weekday::Monday,
                 ),
+                // `true`, because the default is `false`: a fixture carrying
+                // the default would not tell a stored `false` from a field
+                // that was never written at all — and this one governs
+                // whether a device is offered unfinished software, so
+                // "survived the round trip" is exactly what must be proven.
+                update_prereleases: true,
             },
             ..Default::default()
         };

@@ -45,6 +45,15 @@ test('navigation between the home page, the config and the plugin pages', async 
   await expect(page.locator('[data-update-policy]')).toBeVisible()
   await expect(page.locator('[data-update-hour]')).toBeVisible()
   await expect(page.locator('[data-update-cadence]')).toBeVisible()
+  // The prerelease switch, and **the position it starts in** against a real
+  // core with a real state file: off. That default is the whole safety of the
+  // feature — a device nobody told otherwise is never offered unfinished
+  // software — and it is the one thing a unit test with a hand-written
+  // payload cannot show, since it supplies the value it then asserts.
+  await expect(page.locator('[data-update-prereleases]')).toHaveAttribute(
+    'aria-checked',
+    'false',
+  )
   await expect(page.locator('[data-update-policy-change]')).toHaveCount(1)
 
   // The plugins table's columns, against a real core. Nothing here counted

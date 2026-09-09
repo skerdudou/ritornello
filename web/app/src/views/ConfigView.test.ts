@@ -93,6 +93,8 @@ const CATALOGUE = {
   update_cadence_daily: 'Quotidienne',
   update_cadence_weekly: 'Hebdomadaire',
   update_cadence_day_label: 'Jour',
+  update_prereleases_label: 'Proposer les préversions',
+  update_prereleases_help: 'Les betas et les candidates sont proposées aussi.',
 }
 
 /** Payloads served by the fake `fetch`, overridable per test. */
@@ -121,6 +123,7 @@ function payloads() {
       cover_source_max_mio: 20, cover_rendition: true, cover_max_edge_px: 640,
       cover_jpeg_quality: 85, cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16,
       update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
+      update_prereleases: false,
     } as unknown,
     '/api/update': {
       outcome: { kind: 'never_checked' },
@@ -939,6 +942,7 @@ describe('ConfigView — settings', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
+          update_prereleases: false,
         },
       },
     ])
@@ -960,6 +964,7 @@ describe('ConfigView — settings', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
+          update_prereleases: false,
         },
       },
     ])
@@ -982,6 +987,7 @@ describe('ConfigView — settings', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
+          update_prereleases: false,
         },
       },
     ])
@@ -1033,6 +1039,7 @@ describe('ConfigView — overlays', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
+          update_prereleases: false,
         },
       },
     ])
@@ -1450,6 +1457,24 @@ describe('ConfigView — update', () => {
     await flushPromises()
     expect(puts).toHaveLength(1)
     expect((puts[0]!.body as Record<string, unknown>).update_policy).toBe('check')
+  })
+
+  it('the prerelease switch starts from what the core served, and its flip reaches the PUT', async () => {
+    // Both halves matter and they fail differently. A switch that ignored the
+    // served value would show `false` on a device that had asked for
+    // prereleases — and the operator would tick it again, sending `true` to a
+    // core that already held `true`, i.e. a setting that looks unsaveable. A
+    // flip that never reached the body would be the opposite lie: the page
+    // shows the new position and the device keeps the old channel.
+    const { w, puts } = await mountView({
+      '/api/settings': { update_policy: 'off', update_hour: 3, update_prereleases: true },
+    })
+    expect(w.find('[data-update-prereleases]').attributes('aria-checked')).toBe('true')
+
+    await w.find('[data-update-prereleases]').trigger('click')
+    await w.find('[data-update-policy-change]').trigger('click')
+    await flushPromises()
+    expect((puts[0]!.body as Record<string, unknown>).update_prereleases).toBe(false)
   })
 
   it('casts the update hour to a number before sending it', async () => {

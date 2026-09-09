@@ -253,16 +253,55 @@ struct WireRelease {
     assets: Vec<WireAsset>,
 }
 
-/// Every published release of the body, drafts and prereleases dropped.
+/// Whether this device is willing to be offered unfinished software.
 ///
-/// A draft is dropped because the workflow creates one: publishing is the
-/// green light, so nothing can leave before a human has read the notes.
-pub fn parse_releases(body: &str) -> Result<Vec<Release>, ReleasesError> {
+/// A device asks for prereleases or it does not (`Settings`'
+/// `update_prereleases`, off by default), and the answer applies to **every**
+/// repository it reads — ours and each third-party one — because it states
+/// this owner's appetite and not a fact about who publishes.
+///
+/// An enum and not the bare `bool` it comes from: `parse_releases(&body,
+/// true)` at a call site says nothing, and there are two call sites that must
+/// not drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel {
+    /// Finished releases only — what an owner who never heard of this gets.
+    Stable,
+    /// Prereleases as well. Drafts are still dropped.
+    WithPrereleases,
+}
+
+impl Channel {
+    /// From the setting, so neither call site spells the mapping out itself.
+    pub fn from_setting(prereleases: bool) -> Self {
+        if prereleases {
+            Self::WithPrereleases
+        } else {
+            Self::Stable
+        }
+    }
+}
+
+/// Which of a repository's releases this device will consider: **drafts
+/// always dropped, prereleases dropped unless the owner asked for them**.
+///
+/// A draft is dropped whatever the channel, because the workflow creates one:
+/// publishing is the green light, so nothing can leave before a human has
+/// read the notes. That filter is belt and braces rather than the only guard
+/// — GitHub lists drafts only to a reader with push access, and this core
+/// polls with no token at all — and it is kept because the fold downstream
+/// must never depend on which of the two stopped it.
+///
+/// A prerelease is a **published** release GitHub flags as such, so nothing
+/// but this filter separates it from a finished one: same assets, same
+/// checksums, same fold. Hence `Channel`, and hence a single place where the
+/// question is asked for our repository and for a stranger's alike.
+pub fn parse_releases(body: &str, channel: Channel) -> Result<Vec<Release>, ReleasesError> {
     let wire: Vec<WireRelease> =
         serde_json::from_str(body).map_err(|_| ReleasesError::Unreadable)?;
     let out: Vec<Release> = wire
         .into_iter()
-        .filter(|r| !r.draft && !r.prerelease)
+        .filter(|r| !r.draft && (!r.prerelease || channel == Channel::WithPrereleases))
         .map(|r| Release {
             tag: r.tag_name,
             published_at: r.published_at.unwrap_or_default(),
@@ -339,15 +378,34 @@ pub fn fold(releases: &[Release], arch: &str) -> Vec<Published> {
 /// one dependency fewer, and the rule is short enough to read. It is what
 /// stops `ritornello-plugin-radio-armv7.tar.gz` from being read as a plugin
 /// named "radio" at version "armv7".
+/// A version is `major.minor.patch`, optionally followed by a **prerelease
+/// suffix**: `0.2.1`, and `0.2.1-beta.1`.
+///
+/// The three numbers stay digits only — that is what refuses `armv7` — and
+/// the suffix is semver's own shape: dot-separated identifiers of letters,
+/// digits and hyphens, none of them empty. `0.2.1-` and `0.2-beta.1` are
+/// therefore not versions, and neither is a bare `beta.1`.
 fn is_version(s: &str) -> bool {
+    let (numbers, suffix) = match s.split_once('-') {
+        Some((numbers, suffix)) => (numbers, Some(suffix)),
+        None => (s, None),
+    };
     let mut parts = 0;
-    for part in s.split('.') {
+    for part in numbers.split('.') {
         if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
             return false;
         }
         parts += 1;
     }
-    parts == 3
+    if parts != 3 {
+        return false;
+    }
+    match suffix {
+        None => true,
+        Some(suffix) => suffix
+            .split('.')
+            .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')),
+    }
 }
 
 /// `<base>-<version>-<arch>.tar.gz`, read from the right-hand side, yielding
@@ -363,8 +421,20 @@ fn is_version(s: &str) -> bool {
 /// (its next byte is `s`, not `-`) and return `None` — never falling through
 /// to be recognised as the bundle at all.
 ///
-/// The plugin's version is split from the RIGHT, because a plugin name may
-/// contain a dash while a version never does.
+/// The plugin's version is found by **scanning the dashes from the left and
+/// keeping the first split whose right-hand side is a whole version**.
+///
+/// It used to be split from the right, on the stated grounds that a plugin
+/// name may contain a dash while a version never does. A **prerelease**
+/// version does: splitting `nrj-metas-0.2.1-beta.1` from the right yields the
+/// plugin `nrj-metas-0.2.1` at version `beta.1`, which is not a version — so
+/// the archive was classified as nothing at all and the component's row read
+/// "nothing published" while a release was carrying it. A silence, not an
+/// error, which is the worst shape for this to take.
+///
+/// Scanning from the left and testing each candidate keeps both dashes
+/// readable, the name's and the version's: the first candidate that parses is
+/// the boundary, because a plugin name cannot itself end in a version.
 pub fn classify_asset(name: &str, arch: &str) -> Option<(Offer, String)> {
     let stem = name.strip_suffix(&format!("-{arch}.tar.gz"))?;
     if let Some(version) = stem.strip_prefix("ritornello-core-") {
@@ -374,11 +444,17 @@ pub fn classify_asset(name: &str, arch: &str) -> Option<(Offer, String)> {
         return is_version(version).then(|| (Offer::Bundle, version.to_string()));
     }
     let rest = stem.strip_prefix("ritornello-plugin-")?;
-    let (plugin, version) = rest.rsplit_once('-')?;
-    if plugin.is_empty() || plugin.starts_with('-') || !is_version(version) {
-        return None;
+    for (dash, _) in rest.match_indices('-') {
+        let (plugin, version) = (&rest[..dash], &rest[dash + 1..]);
+        // `is_empty` and `starts_with('-')` both stay: they are what refuse
+        // `ritornello-plugin--0.2.0` and `ritornello-plugin---0.2.0`, whose
+        // plugin name would be nothing or a lone dash.
+        if plugin.is_empty() || plugin.starts_with('-') || !is_version(version) {
+            continue;
+        }
+        return Some((Offer::Plugin(plugin.to_string()), version.to_string()));
     }
-    Some((Offer::Plugin(plugin.to_string()), version.to_string()))
+    None
 }
 
 /// `<hex>  <name>` per line, as `sha256sum` writes it.
@@ -448,7 +524,8 @@ mod tests {
 
     /// The case the whole extraction rule exists for: some plugin names in
     /// this repository contain a dash, so the version cannot be found by
-    /// splitting at the FIRST dash after the prefix.
+    /// splitting *blindly* at the first dash after the prefix — only at the
+    /// first one whose right-hand side is a whole version.
     #[test]
     fn a_plugin_name_containing_dashes_survives_extraction() {
         for (name, plugin) in [
@@ -461,6 +538,57 @@ mod tests {
         ] {
             let (offer, _) = classify_asset(name, "armv7").expect(name);
             assert_eq!(offer, Offer::Plugin(plugin.to_string()), "{name}");
+        }
+    }
+
+    /// A prerelease version carries a dash of its own, and the whole of it
+    /// must come back — including for a plugin whose name is dashed too, the
+    /// case where the two dashes meet in one file name.
+    ///
+    /// The version travels to the device as an identity compared by equality
+    /// (`differs`), so a version read as `0.2.1` where the archive says
+    /// `0.2.1-beta.1` would make the final release look already installed.
+    #[test]
+    fn a_prerelease_version_comes_back_whole_dash_included() {
+        for (name, offer, version) in [
+            ("ritornello-core-0.2.1-beta.1-armv7.tar.gz", Offer::Core, "0.2.1-beta.1"),
+            (
+                "ritornello-plugin-radio-0.2.1-beta.1-armv7.tar.gz",
+                Offer::Plugin("radio".to_string()),
+                "0.2.1-beta.1",
+            ),
+            (
+                "ritornello-plugin-nrj-metas-0.3.0-rc.2-armv7.tar.gz",
+                Offer::Plugin("nrj-metas".to_string()),
+                "0.3.0-rc.2",
+            ),
+            ("ritornello-plugins-0.2.1-beta.1-armv7.tar.gz", Offer::Bundle, "0.2.1-beta.1"),
+        ] {
+            assert_eq!(
+                classify_asset(name, "armv7"),
+                Some((offer, version.to_string())),
+                "{name}"
+            );
+        }
+    }
+
+    /// Reading a suffix does not mean accepting anything with a dash in it.
+    #[test]
+    fn a_suffix_does_not_make_a_version_out_of_nothing() {
+        for name in [
+            // The guard the digits-only rule exists for, untouched by
+            // prereleases: an architecture is not a version.
+            "ritornello-plugin-radio-armv7.tar.gz",
+            // A suffix with no numbers in front of it.
+            "ritornello-plugin-radio-beta.1-armv7.tar.gz",
+            // An empty identifier in the suffix.
+            "ritornello-core-0.2.1--armv7.tar.gz",
+            // Two numbers is not a version, suffix or no suffix.
+            "ritornello-core-0.2-beta.1-armv7.tar.gz",
+            // Four is not either.
+            "ritornello-core-0.2.1.4-armv7.tar.gz",
+        ] {
+            assert_eq!(classify_asset(name, "armv7"), None, "{name}");
         }
     }
 
@@ -542,7 +670,7 @@ mod tests {
             ]),
         ]
         .join(","));
-        let published = fold(&parse_releases(&text).unwrap(), "armv7");
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
 
         // Two components, not three: radio appears in both releases and the
         // fold must keep only the newest. Asserted here rather than left to
@@ -587,7 +715,7 @@ mod tests {
             ]),
         ]
         .join(","));
-        let published = fold(&parse_releases(&text).unwrap(), "armv7");
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].version, "0.2.4");
     }
@@ -600,7 +728,7 @@ mod tests {
     fn the_download_url_and_the_size_come_from_the_asset() {
         let name = "ritornello-core-0.2.1-armv7.tar.gz";
         let text = body(&rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[name]));
-        let published = fold(&parse_releases(&text).unwrap(), "armv7");
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].url, format!("https://x/v0.2.6/{name}"));
         assert_eq!(published[0].size, name.len() as u64);
@@ -614,7 +742,7 @@ mod tests {
         let text = body(&rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
             "ritornello-core-0.2.1-armv7.tar.gz",
         ]));
-        let published = fold(&parse_releases(&text).unwrap(), "armv7");
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
         assert_eq!(published[0].checksums_url, None);
     }
 
@@ -633,7 +761,7 @@ mod tests {
             ]),
         ]
         .join(","));
-        let published = fold(&parse_releases(&text).unwrap(), "armv7");
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].version, "0.2.3");
         assert_eq!(published[0].release_tag, "v0.2.6");
@@ -641,21 +769,49 @@ mod tests {
 
     #[test]
     fn drafts_and_prereleases_are_not_offered() {
-        let text = body(&[
-            rel("v0.2.8", "2026-09-09T10:00:00Z", true, false, &[
-                "ritornello-plugin-radio-0.2.9-armv7.tar.gz",
-            ]),
-            rel("v0.2.7", "2026-09-08T10:00:00Z", false, true, &[
-                "ritornello-plugin-radio-0.2.8-armv7.tar.gz",
-            ]),
-            rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
-                "ritornello-plugin-radio-0.2.3-armv7.tar.gz",
-            ]),
-        ]
-        .join(","));
-        let published = fold(&parse_releases(&text).unwrap(), "armv7");
+        let published = fold(&parse_releases(&draft_pre_stable(), Channel::Stable).unwrap(), "armv7");
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].version, "0.2.3");
+    }
+
+    /// The **same three releases**, read on the other channel: the prerelease
+    /// is now the newest thing carrying `radio`, and the draft above it is
+    /// still not offered.
+    ///
+    /// One fixture and two channels, which is what makes this separate the
+    /// two flags rather than merely re-state the filter: an implementation
+    /// that let drafts in alongside prereleases would answer `0.2.9` here,
+    /// and one that let nothing in would answer `0.2.3`. Only reading the
+    /// prerelease and refusing the draft gives `0.2.8`.
+    #[test]
+    fn a_prerelease_is_offered_on_the_prerelease_channel_and_a_draft_still_is_not() {
+        let published =
+            fold(&parse_releases(&draft_pre_stable(), Channel::WithPrereleases).unwrap(), "armv7");
+        assert_eq!(published.len(), 1);
+        assert_eq!(
+            published[0].version, "0.2.8",
+            "the prerelease, and not the draft published a day after it"
+        );
+    }
+
+    /// Three releases of `radio`, newest first: a **draft** (0.2.9), a
+    /// **prerelease** (0.2.8), and a finished release (0.2.3). Shared by the
+    /// two tests above, which read it on the two channels.
+    fn draft_pre_stable() -> String {
+        body(
+            &[
+                rel("v0.2.8", "2026-09-09T10:00:00Z", true, false, &[
+                    "ritornello-plugin-radio-0.2.9-armv7.tar.gz",
+                ]),
+                rel("v0.2.7", "2026-09-08T10:00:00Z", false, true, &[
+                    "ritornello-plugin-radio-0.2.8-armv7.tar.gz",
+                ]),
+                rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+                    "ritornello-plugin-radio-0.2.3-armv7.tar.gz",
+                ]),
+            ]
+            .join(","),
+        )
     }
 
     #[test]
@@ -663,21 +819,21 @@ mod tests {
         let text = body(&rel("v0.2.7", "2026-09-08T10:00:00Z", false, false, &[
             "ritornello-plugin-radio-0.2.4-arm64.tar.gz",
         ]));
-        assert!(fold(&parse_releases(&text).unwrap(), "armv7").is_empty());
+        assert!(fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7").is_empty());
     }
 
     #[test]
     fn an_empty_list_is_no_release_and_not_a_failure() {
-        assert_eq!(parse_releases("[]"), Err(ReleasesError::NoRelease));
+        assert_eq!(parse_releases("[]", Channel::Stable), Err(ReleasesError::NoRelease));
         // Only drafts is the same answer: nothing has been published.
         let text = body(&rel("v0.2.8", "2026-09-09T10:00:00Z", true, false, &[]));
-        assert_eq!(parse_releases(&text), Err(ReleasesError::NoRelease));
+        assert_eq!(parse_releases(&text, Channel::Stable), Err(ReleasesError::NoRelease));
     }
 
     #[test]
     fn a_body_that_is_not_a_release_list_is_unreadable() {
         for text in ["", "{}", "not json", r#"{"message":"Not Found"}"#] {
-            assert_eq!(parse_releases(text), Err(ReleasesError::Unreadable), "{text}");
+            assert_eq!(parse_releases(text, Channel::Stable), Err(ReleasesError::Unreadable), "{text}");
         }
     }
 

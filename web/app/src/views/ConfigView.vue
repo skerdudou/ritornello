@@ -45,6 +45,7 @@ const settings = ref<SettingsPayload>({
   update_policy: 'off',
   update_hour: 3,
   update_cadence: { kind: 'daily' },
+  update_prereleases: false,
 })
 
 /**
@@ -912,6 +913,25 @@ function goTo(id: string) {
                 </SelectContent>
               </Select>
             </label>
+            <!-- Full width, so it reads as its own subject rather than a
+                 fifth field of the "when" row above — and its label names
+                 its scope, because it governs **every** check, the one this
+                 card schedules and the one the button on the card above
+                 fires. It lives here all the same: this is the card that
+                 owns a save path, and the update card above has none. -->
+            <div class="w-full border-t border-border pt-4">
+              <label class="flex items-start gap-3 text-sm">
+                <Switch
+                  data-update-prereleases
+                  :model-value="settings.update_prereleases"
+                  @update:model-value="(v: boolean) => (settings.update_prereleases = v)"
+                />
+                <span class="grid gap-1">
+                  {{ t('update_prereleases_label') }}
+                  <span class="text-xs text-muted-foreground">{{ t('update_prereleases_help') }}</span>
+                </span>
+              </label>
+            </div>
             <Button data-update-policy-change @click="saveSettings">{{ t('change') }}</Button>
           </CardContent>
         </Card>

@@ -702,6 +702,46 @@ plugin leaves no marker — and clears any the last core update left — which
 is what stops an unrelated core failure, minutes later, from quietly
 undoing the plugin gesture instead of addressing its own cause.
 
+### Prereleases, and how a device asks for them
+
+One switch in the automatic-checks card, **off by default**: "Offer
+prereleases". It lives in that card because that is the card with a save
+path — the update card above it has none — and its label names its real
+scope, because it governs **every** check: the scheduled one, and the
+"Check" button above it. For our repository and for every third-party one
+alike, since what it states is this owner's appetite for unfinished
+software and not a fact about who publishes.
+
+What it changes is one rule in the reading of a release list, and nothing
+else. A **draft** is dropped whatever the switch says: publishing is the
+green light, and a device could not read one anyway — GitHub lists drafts
+only to a reader with push access, and the core polls with no token. A
+**prerelease** is a published release GitHub flags as such: dropped when
+the switch is off, read like any other when it is on. Past that filter
+nothing differs — the same fold picks the newest release carrying each
+component, the same `SHA256SUMS` is verified, the same rollback net arms
+behind a core install.
+
+Three consequences, none of them accidental:
+
+- **A tester is never stranded on a beta.** A component that a prerelease
+  shipped had, by definition, changed since the last *finished* release —
+  which is the baseline the release workflow measures against — so the
+  finished delivery ships that component too, and the device installs it
+  in the ordinary way.
+- **Turning the switch back off rolls nothing back.** It stops prereleases
+  from being *offered*; what is installed stays installed until some
+  finished release offers a different version of that component. The way
+  back to a finished version is that version being published, or an
+  install by hand — never a silent downgrade, which this device has no
+  concept of.
+- **A prerelease number is a real version number.** The device decides by
+  equality and never by order (`differs`), so `0.2.1-beta.2` and `0.2.1`
+  are simply *different*: that is what makes the finished release replace
+  the beta, and it is also why every prerelease must carry its own number.
+  See [installation.md](installation.md#publishing-a-prerelease) for the
+  numbering rule and what enforces it.
+
 ### Plugins table
 
 One row per plugin, plus one row per component a release offers that
