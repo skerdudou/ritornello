@@ -98,11 +98,21 @@ a shared crate (`ritornello-proto`, `ritornello-i18n`,
 under their **unchanged** version numbers. A device decides what to install
 by comparing versions and nothing else, so it sees every row as up to date
 and fetches none of the new archives. The release looks complete and delivers
-nothing. **For a shared-crate change to reach devices, bump every
-component's version in the same commit.** The script prints this on stderr
-when it detects such a change; it does not refuse the release, because
-republishing is still the right thing to build — it is only not, on its own,
-delivering.
+nothing.
+
+**For a shared-crate change to reach devices, bump the version of every
+component it actually reaches, in the same commit.** For `ritornello-proto`,
+`ritornello-i18n` and `ritornello-plugin-sdk` that is all eleven: they are
+linked into every binary. For `ritornello-updater` it is **the core alone** —
+its binary is not linked into anything and ships only inside the core's
+archive, so bumping the ten plugins for it would deliver ten identical
+archives. The script republishes everything in either case, because
+over-publishing is the safe direction and one mechanism beats two for a crate
+that changes this rarely; what you choose is which versions to move.
+
+The script prints all of this on stderr when it detects such a change. It does
+not refuse the release, because republishing is still the right thing to
+build — it is only not, on its own, delivering.
 
 Detection reads a single page of the GitHub releases API — one hundred
 releases (`per_page=100`). A component that has not shipped a new archive of

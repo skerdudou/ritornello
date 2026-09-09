@@ -131,12 +131,14 @@ pub fn set_enabled(path: &Path, name: &str, enabled: bool) -> Result<()> {
 /// identical read-modify-write **is** safe, and for the reason this one is
 /// not: it has a single serial writer.
 ///
-/// The shape of the fix, for whoever takes it: one process-wide mutex and one
-/// `edit_manifest(path, transform)` helper here that holds it across read,
-/// transform and rename, returning an enum the callers match on — the three
-/// handlers build their messages with `catalog.read().await`, so those awaits
-/// have to move out of the locked region, which is why this is a refactor of
-/// three handlers rather than four added lines.
+/// The shape of the fix, for whoever takes it: one process-wide
+/// `tokio::sync::Mutex<()>` and four `lock().await` lines, one per writer,
+/// each held across read, transform and rename. **Four lines, not a
+/// refactor** — an earlier version of this note claimed the handlers'
+/// `catalog.read().await` forced the awaits out of the locked region and made
+/// this a rewrite of three handlers. That is true of `std::sync::Mutex`, whose
+/// guard cannot cross an await, and false of the tokio one, whose guard can.
+/// Price the debt from this paragraph, not from that one.
 pub(crate) fn write_atomic(path: &Path, content: &str) -> Result<()> {
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;

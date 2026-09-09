@@ -172,9 +172,18 @@ pub fn component_offers(
         // The price is stated in `docs/plugins.md` rather than hidden: a
         // third-party plugin that announces no repository *and* takes one of
         // our names is offered our archive of that name. One line of
-        // `Cargo.toml` on the author's side settles it, and the automatic
-        // policy never touches such a row anyway (its installed version is
-        // unknown, and `automatic_install_list` excludes that).
+        // `Cargo.toml` on the author's side settles it.
+        //
+        // **What stops it is `placement_target`, not the automatic policy.** A
+        // row that is switched off or dead announces no version, and
+        // `automatic_install_list` does exclude those — but a **running** one
+        // announces its version, so the automatic policy does reach it. What
+        // it then meets is the check that the archive's bare name is the file
+        // this plugin's `exec` declares: our archive carries
+        // `ritornello-plugin-<name>`, so the install is refused with a named
+        // cause unless the author called their binary exactly that too. Three
+        // coincidences, all on their side, and the last one is the one they
+        // control.
         let is_third_party = !matches!(from, Origin::Unknown | Origin::Ours);
         // A third-party plugin's version is decided by **its own** repository,
         // and this release says nothing about it: never `plugin_offered`, even

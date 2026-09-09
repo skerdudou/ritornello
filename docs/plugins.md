@@ -91,10 +91,19 @@ one thing to get right when writing a plugin. "Announced nothing" is also the
 state of every plugin that is switched off, dead, or not installed yet, and
 those rows have to stay installable — so a component the core knows nothing
 about is judged against the core's own release. If your plugin's name happens
-to match one of ours, its row will offer our version of that name, and an
-operator who clicks Install gets our binary in place of yours. Declaring
-`repository` is what prevents it, and it is one line. Four things follow, and
-they are the whole contract:
+to match one of ours, its row will offer our version of that name — to the
+operator who clicks Install, and, while your plugin is running and therefore
+announcing a version, to the automatic policy as well.
+
+What stops it there is a second check, and it is worth knowing because it
+decides whether the collision is a nuisance or a replacement: an install is
+refused unless the binary the archive carries is named exactly as the `exec`
+your `plugins.toml` entry declares. Our archives carry
+`ritornello-plugin-<name>`, so a plugin of yours called `radio` but running a
+binary named anything else is refused with its cause named, not overwritten. It
+is only if you also named your binary `ritornello-plugin-radio` that ours
+replaces it. Declaring `repository` avoids the whole question, and it is one
+line. Four things follow, and they are the whole contract:
 
 1. **Build the runtime with the macro**, `ritornello_plugin_sdk::declare_runtime!()?`,
    and give your crate a `repository = "https://github.com/<owner>/<repo>"` in
