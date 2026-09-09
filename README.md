@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/back-Rust-b7410e?logo=rust&logoColor=white" alt="Back end in Rust">
   <img src="https://img.shields.io/badge/targets-armv7%20%7C%20aarch64%20%7C%20x86__64-blue" alt="armv7, aarch64, x86_64">
   <img src="https://img.shields.io/badge/UI-Vue%203-42b883?logo=vue.js&logoColor=white" alt="Vue 3">
-  <img src="https://img.shields.io/badge/version-0.2-yellow" alt="Version 0.2">
+  <img src="https://img.shields.io/badge/version-0.2.0-yellow" alt="Version 0.2.0">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green" alt="MIT OR Apache-2.0"></a>
 </p>
 
@@ -35,17 +35,30 @@ and 5) and `x86_64`, so a plain Linux PC runs it just as well.
   [Radio Browser](https://api.radio-browser.info) (by name and by
   country), stations reorderable by drag and drop.
 - **CD player** — disc detection, track list, album recognition and
-  cover art through MusicBrainz.
+  cover art through MusicBrainz; arriving at the source plays nothing,
+  starts at track 1 or resumes the last track, as you prefer.
 - **Audio files** — from a USB stick, a folder of the device, or an
   authenticated SMB share mounted on demand; a file browser with search;
   playlists built by adding folders recursively, saved and loaded again.
+  A root can also be armed to **keep the covers it finds**: the picture
+  fetched for an album is written as a `cover.jpg` beside the tracks —
+  never over an image already there — so any other player finds it too.
+- **Shuffle and repeat-all** — on any source that has a finite list (a
+  folder, a disc), driven from the web page, from a key on the remote or
+  from an MPD client. Shuffle draws the list once and then stops rather
+  than rolling dice at every track, and both modes belong to the device:
+  they survive a source change, a stop and a restart.
 - **Now-playing metadata, with provenance** — the stream's ICY header,
-  enriched by dedicated plugins (MusicBrainz for discs, OUI FM's metadata
-  feed, Radio France's live endpoint for its 74 stations — which broadcast
-  no ICY at all). Each field says where it came from.
+  enriched by dedicated plugins (MusicBrainz for discs and for cutting up
+  an ICY string, OUI FM's metadata feed, Radio France's live endpoint for
+  its 74 stations — which broadcast no ICY at all — and the NRJ group's
+  365 webradios). Each field says where it came from, down to the release
+  year and the links to the streaming platforms.
 - **Any remote control** — any Linux input device (`evdev`) will do,
   including a USB infrared receiver; keys are learned from the browser,
-  presets ship with the project (MCE, keyboard).
+  presets ship with the project (MCE, keyboard). Beside the fixed actions,
+  every installed source gets a row of its own, so a key can jump straight
+  to the radio rather than cycling to it.
 - **MPD server** — the device shows up as an MPD server on port 6600, so
   existing phone clients (tested with M.A.L.P.) drive playback, volume and
   cover art out of the box, each source appearing as a stored playlist. A
@@ -56,7 +69,8 @@ and 5) and `x86_64`, so a plain Linux PC runs it just as well.
 - **Embedded web UI** — Vue 3, served by the core binary: player state
   pushed continuously (SSE), full remote control, light/dark toggle and 42
   themes, English/French extensible through TOML language packs, a system
-  page (CPU, temperature, under-voltage, shutdown/reboot).
+  page (CPU, memory and the Ritornello process tree, temperature,
+  under-voltage, shutdown/reboot).
 - **HDMI screen** — the console plugin composes now-playing and clock
   screens on the framebuffer console, no X11 or Wayland involved.
 - **Self-update and plugin management** — the core and each plugin check
@@ -111,8 +125,8 @@ executable.
 |---|---|---|
 | `radio` | source | Internet radio, presets, Radio Browser directory, admin page |
 | `cd` | source | CD drive (`/dev/sr0`), disc identification, eject |
-| `files` | source | Local folders, USB, SMB shares mounted on demand, playlists, file browser |
-| `generic-input` | input | Any `evdev` device: IR receiver, keyboard, remote; key learning in the browser |
+| `files` | source | Local folders, USB, SMB shares mounted on demand, playlists, file browser, covers archived beside the tracks |
+| `generic-input` | input | Any `evdev` device: IR receiver, keyboard, remote; key learning in the browser, one key per source |
 | `console` | display | Now-playing and clock screens on the Linux console (HDMI) |
 | `musicbrainz` | metadata | Album, year, cover art and platform links for discs and streams |
 | `ouifm-metas` | metadata | OUI FM's now-playing feed (21 webradios) |
@@ -212,9 +226,9 @@ network's metadata feed, another language pack.
 
 | Document | Contents |
 |---|---|
-| [docs/installation.md](docs/installation.md) | Building, installing on a Pi or a Linux PC, deploying, unprivileged service, tuning the audio buffers |
-| [docs/plugins.md](docs/plugins.md) | The bundled plugins, the `metadata` kind, writing your own plugin and its UI |
-| [docs/interface.md](docs/interface.md) | The web UI, the command API, the physical remote, languages, themes |
+| [docs/installation.md](docs/installation.md) | Building, installing on a Pi or a Linux PC, deploying, unprivileged service, installing from a release, arming the self-update, tuning the audio buffers |
+| [docs/plugins.md](docs/plugins.md) | The bundled plugins, the `metadata` kind, writing your own plugin and its UI, publishing a third-party plugin |
+| [docs/interface.md](docs/interface.md) | The web UI, the command API, the physical remote, updates and plugin management, languages, themes |
 | [docs/development.md](docs/development.md) | Local instance without hardware, tests, e2e journeys, regenerating embedded data |
 
 The project is developed through written specifications, implementation
@@ -224,7 +238,7 @@ documents above.
 
 ## Status and contributing
 
-Ritornello is at **0.2**: it runs every day in one living room and the
+Ritornello is at **0.2.0**: it runs every day in one living room and the
 feature set above is real, but the plugin protocol and the configuration
 files may still change before a 1.0. CI builds the UI, runs clippy with
 warnings denied, the Rust test suite and the Playwright end-to-end
