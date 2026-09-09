@@ -56,6 +56,19 @@ pub fn report_path(prefix: &Path) -> PathBuf {
 /// one event are judged by one rule; and stale for every boot after, so a
 /// rollback last March does not silently override the Startup setting in
 /// September.
+///
+/// **One asymmetry with the marker is worth stating, because this file is
+/// never consumed and that one is.** `within_window` calls a clock that has
+/// gone *backwards* fresh — the safe answer for a device with no
+/// battery-backed clock, since NTP corrects minutes after boot and the
+/// alternative would wake a device mid-rollback. For the marker that leniency
+/// expires with the file; here it does not. So a device whose clock reads
+/// before the epoch-ish at boot, and on which a rollback happened at any point
+/// in the past, resumes what it was doing instead of consulting Startup — for
+/// as long as the clock stays wrong. The outcome is the benign direction (a
+/// device that was asleep stays asleep, one that was playing plays), it is the
+/// same direction the marker already chose, and the alternative trades it for
+/// the failure this whole pair exists to prevent.
 pub fn is_fresh(report: &Report, now_unix_s: u64) -> bool {
     crate::marker::within_window(report.at_unix_s, now_unix_s)
 }
@@ -323,6 +336,29 @@ mod tests {
             prefix.join("usr/local/lib/ritornello/plugins/ritornello-plugin-mpd").exists(),
             "and the plugin is not undone by a crash loop the core update caused"
         );
+    }
+
+    /// The report's own window, and the asymmetry `is_fresh`'s doc names: it
+    /// expires (unlike the marker, nothing consumes this file), and a clock
+    /// that went backwards reads as fresh (like the marker, and for the same
+    /// reason — but here that leniency has no expiry, which is the
+    /// consequence written down beside it).
+    #[test]
+    fn the_reports_window_expires_and_a_backwards_clock_still_reads_as_fresh() {
+        let r = Report {
+            at_unix_s: 1_000,
+            restored: vec!["core".into()],
+            failed: vec![],
+            core_restored: true,
+        };
+        assert!(is_fresh(&r, 1_000), "the instant of the rollback");
+        assert!(is_fresh(&r, 1_000 + crate::marker::MARKER_WINDOW_S), "the last second");
+        assert!(
+            !is_fresh(&r, 1_000 + crate::marker::MARKER_WINDOW_S + 1),
+            "one second later the restored core is an ordinary boot again"
+        );
+        assert!(!is_fresh(&r, 1_000 + 86_400 * 180), "and a rollback last March is not this boot");
+        assert!(is_fresh(&r, 0), "a clock that has not been set yet keeps the device as it was");
     }
 
     #[test]
