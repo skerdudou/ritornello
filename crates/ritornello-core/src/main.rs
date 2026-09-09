@@ -431,19 +431,109 @@ fn read_rollback_report(prefix: &Path) -> Option<ritornello_updater::rollback::R
     }
 }
 
-/// What `Worker::write_core_archive_notes` left behind for the core's own
-/// row, if anything. `None` for an absent or corrupt file, same convention as
-/// `read_rollback_report` just above — an unreadable note says less than no
-/// note at all, and is not a reason to refuse booting.
-fn read_core_archive_notes(staging: &Path) -> Option<Vec<String>> {
-    let path = update::core_notes_path(staging);
-    let text = std::fs::read_to_string(&path).ok()?;
-    match serde_json::from_str(&text) {
-        Ok(entries) => Some(entries),
-        Err(e) => {
-            tracing::warn!("ignoring {}: {e}", path.display());
-            None
-        }
+/// What the last core update left out — but only while it still describes the
+/// core that is **running**.
+///
+/// `install_one` computes this note in the process that then exits, so it can
+/// only reach the row through a file (`update::placed`), read here at boot.
+/// Two ways it used to go stale, both named by the review of task 13 and both
+/// closed by the version the memory now stamps on it:
+///
+/// - the rollback unit puts the previous core back, and the note went on
+///   describing the archive of a version no longer running — the card then
+///   said "this release also carries 6 files that were not installed" directly
+///   under "the previous version was put back";
+/// - a core placed **by hand** (a `tar` over the binary, a redeployment) left
+///   the note of the last self-update in place, describing an archive that is
+///   not the one on disk.
+///
+/// Comparing the stamped version against this binary's own answers both, and
+/// answers them better than the expiry the ruling suggested: "a rollback
+/// report newer than the note" would wrongly expire the note after a rollback
+/// that restored only a **plugin** (`core_restored: false`), and would not
+/// notice the hand-placed core at all, since no rollback happened there.
+///
+/// The note is therefore either about the running core or absent. `None` is
+/// never "nothing was left out": the core's archive always carries something
+/// here, by design.
+fn core_archive_note(placed: &update::placed::Placed, running: &str) -> Option<Vec<String>> {
+    let entry = placed.get(update::CORE)?;
+    if entry.version != running {
+        tracing::info!(
+            "the last core update placed {}, this binary is {running}: its archive note does not describe what is running and is not shown",
+            entry.version
+        );
+        return None;
+    }
+    entry.not_installed_files.clone()
+}
+
+#[cfg(test)]
+mod core_archive_note_tests {
+    //! Ruling 67: the note the core update leaves must describe the core that
+    //! is **running**, and must survive an ordinary install-and-restart —
+    //! which is the whole reason it is persisted at all, and why it is not
+    //! simply dropped at every boot.
+
+    use super::*;
+    use update::placed;
+
+    /// A distinctive list, not a plausible one: two entries no other fixture
+    /// in this file produces, so a note read off the wrong entry cannot look
+    /// right.
+    fn entries() -> Vec<String> {
+        vec![
+            "etc/systemd/system/ritornello-rollback.service".to_string(),
+            "usr/local/lib/ritornello/ritornello-update".to_string(),
+        ]
+    }
+
+    fn memory(version: &str, files: Option<Vec<String>>) -> placed::Placed {
+        let dir = tempfile::tempdir().unwrap();
+        placed::record(dir.path(), update::CORE, version, files).unwrap();
+        placed::read(dir.path())
+    }
+
+    /// The ordinary case, and the one the ruling explicitly protects: the
+    /// update took, the device restarted on the new binary, and the note is
+    /// still there. Clearing it at boot would break exactly this.
+    #[test]
+    fn the_note_survives_the_restart_that_follows_a_successful_core_update() {
+        assert_eq!(
+            core_archive_note(&memory("0.4.1", Some(entries())), "0.4.1"),
+            Some(entries())
+        );
+    }
+
+    /// 0.4.1 did not start, the rollback unit put 0.2.0 back, and the card
+    /// used to show "this release also carries 2 files that were not
+    /// installed" directly under "the previous version was put back".
+    #[test]
+    fn a_note_left_by_a_core_that_was_rolled_back_is_not_shown() {
+        assert_eq!(core_archive_note(&memory("0.4.1", Some(entries())), "0.2.0"), None);
+    }
+
+    /// The second stale case, and the one an expiry keyed on the rollback
+    /// report would miss entirely: no rollback happened here at all — somebody
+    /// untarred a newer core over the old one, or redeployed. The note of the
+    /// last self-update would otherwise describe an archive that is not the
+    /// one on disk.
+    #[test]
+    fn a_note_left_by_a_previous_core_is_not_shown_after_one_placed_by_hand() {
+        assert_eq!(core_archive_note(&memory("0.3.0", Some(entries())), "0.9.0"), None);
+    }
+
+    /// A device that has never updated itself: nothing to say, and nothing
+    /// invented.
+    #[test]
+    fn a_device_this_updater_never_touched_has_no_note() {
+        assert_eq!(core_archive_note(&placed::Placed::new(), "0.4.1"), None);
+        // And a memory that knows only about plugins says nothing about the
+        // core either — a lookup that answered "the only entry there is"
+        // would pass the line above.
+        let dir = tempfile::tempdir().unwrap();
+        placed::record(dir.path(), "radio", "1.7.3", None).unwrap();
+        assert_eq!(core_archive_note(&placed::read(dir.path()), "1.7.3"), None);
     }
 }
 
@@ -2049,8 +2139,12 @@ async fn main() -> Result<()> {
     // The core's own archive note, read the same way and for the same reason
     // as the rollback report just above: `install_one` computed it in the
     // process that is about to exit and hand off to this one, so there is no
-    // other door through which it could reach the row it belongs on.
-    if let Some(entries) = read_core_archive_notes(&staging_dir) {
+    // other door through which it could reach the row it belongs on. Shown
+    // only while the version stamped beside it is this binary's own — see
+    // `core_archive_note`.
+    if let Some(entries) =
+        core_archive_note(&update::placed::read(&staging_dir), env!("CARGO_PKG_VERSION"))
+    {
         let mut state = update_state.write().await;
         if let Some(core) =
             state.components.iter_mut().find(|c| c.kind == update::state::ComponentKind::Core)

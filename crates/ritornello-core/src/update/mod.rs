@@ -16,6 +16,7 @@ pub mod archive;
 pub mod download;
 pub mod state;
 pub mod schedule;
+pub mod placed;
 
 pub mod routes;
 
@@ -122,9 +123,10 @@ pub enum Job {
     },
 }
 
-/// The name of the core's own row, and the name the page sends to install it.
-/// Written once here rather than quoted at each of its three uses.
-const CORE: &str = "core";
+/// The name of the core's own row, the name the page sends to install it, and
+/// the key its entry takes in `placed::Placed`. Written once here rather than
+/// quoted at each of its uses.
+pub(crate) const CORE: &str = "core";
 
 /// Plugins first, the core last.
 ///
@@ -163,20 +165,45 @@ fn carries(published: &Published, name: &str) -> bool {
 /// - a component already known to need a manual step is not attempted again
 ///   every night, which would download the same archive daily to refuse it
 ///   for the same reason;
-/// - a component whose **installed version is unknown** is left alone. That
-///   is not caution for its own sake: a plugin switched off, or dead, or
-///   predating the version field never announces one, so `differs` answers
-///   "yes" against every release for ever — and without this line the device
-///   would download and install that archive again every single night,
-///   learning nothing each time. The operator can still install it by hand,
-///   where the gesture is asked for once.
-fn automatic_install_list(components: &[ComponentOffer]) -> Vec<String> {
+/// - a component whose **installed version is unknown and that this updater
+///   has never placed** is left alone. That is not caution for its own sake: a
+///   plugin switched off, or dead, or predating the version field never
+///   announces one, so `differs` answers "yes" against every release for ever
+///   — and without this line the device would download and install that
+///   archive again every single night, learning nothing each time. The
+///   operator can still install it by hand, where the gesture is asked for
+///   once.
+///
+///   The second half of that clause is what task 12B added, and it does not
+///   loosen the guard: a component this updater never touched stays excluded
+///   exactly as before. What it lets back in is the plugin whose **new binary
+///   this updater placed** and which then died before announcing — the one
+///   case where the version is unknown *because of an update*, and the one
+///   case where an automatic repair is worth most. Its cost is bounded by the
+///   fifth exclusion below: one attempt per released version, never one per
+///   night.
+///
+/// - a component whose **offered version is the one already placed** is left
+///   alone. Reaching this line at all means the placement did not take: had it
+///   taken, the component would announce that version and its row would read
+///   `Aligned` rather than `UpdateAvailable`. So "offered == placed" is
+///   exactly "this automatic policy has already tried this archive and the
+///   device did not keep it" — a core that crash-looped and was rolled back, a
+///   plugin whose new binary dies before it speaks — and trying it again
+///   tonight, and every night until a newer release appears, teaches the
+///   device nothing and overwrites the rollback report each time.
+///
+///   Only the **automatic** policy consults this: `Job::Install` never comes
+///   through here, so an operator may always retry by hand — which is also the
+///   only way out if this memory is ever wrong.
+fn automatic_install_list(components: &[ComponentOffer], placed: &placed::Placed) -> Vec<String> {
     components
         .iter()
         .filter(|c| c.availability == Availability::UpdateAvailable)
         .filter(|c| matches!(c.kind, ComponentKind::Core | ComponentKind::Plugin))
         .filter(|c| c.installable != Some(false))
-        .filter(|c| c.installed.is_some())
+        .filter(|c| c.installed.is_some() || placed.contains_key(&c.name))
+        .filter(|c| c.offered.as_deref() != placed::version_of(placed, &c.name))
         .map(|c| c.name.clone())
         .collect()
 }
@@ -720,15 +747,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         return Err(e);
     }
     Ok(())
-}
-
-/// Where the core's own archive note lives: beside the staging area, which
-/// this same unprivileged service already owns and creates before a download
-/// starts. Public so `main` can read it back at boot with the same path —
-/// see `read_core_archive_notes` there, the counterpart of
-/// `read_rollback_report`.
-pub fn core_notes_path(staging: &Path) -> PathBuf {
-    staging.join("core-archive-notes.json")
 }
 
 /// What the page is told once an install pass is over, or `None` when the
@@ -1467,10 +1485,14 @@ impl Worker {
             // diagnosis.
             return Err(Refusal::Privileged(detail));
         }
-        // Written only once the placement actually succeeded: a refusal
-        // above must not claim a note about a core that was never placed.
-        if let Some(entries) = &core_notes {
-            self.write_core_archive_notes(entries);
+        // Written only once the placement actually succeeded: a refusal above
+        // must not claim that anything was placed. And written **here**,
+        // before this function returns — the core's caller leaves the process
+        // the moment it sees `Placed::Core`, so this is the last instant at
+        // which anything can be remembered about a core update. See
+        // `remember_placed`, and `automatic_install_list` for what reads it.
+        if !third_party {
+            self.remember_placed(name, &offered.version, core_notes);
         }
         // The installer **copies** what it places (it renames a copy made
         // inside the target's own directory, since a rename across mounts is
@@ -1504,23 +1526,35 @@ impl Worker {
             .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", path.display())))
     }
 
-    /// Records what this core's own archive did not install, so the row can
-    /// still say so after the restart that follows a successful placement.
+    /// Writes down what this pass just placed, and — for the core — what its
+    /// archive carried that nothing here installs.
     ///
-    /// Best-effort and never a `Refusal`: a release note the page fails to
-    /// show is a much smaller loss than an install refused over writing it,
-    /// and by the time this runs the binary is already placed.
-    fn write_core_archive_notes(&self, entries: &[String]) {
-        let path = core_notes_path(&self.staging);
-        let text = match serde_json::to_string(entries) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("update: encoding the core's archive note: {e}");
-                return;
-            }
-        };
-        if let Err(e) = write_atomic(&path, text.as_bytes()) {
-            tracing::warn!("update: writing {}: {e}", path.display());
+    /// **Called from `install_one`, after the privileged unit has succeeded
+    /// and before it returns**, which is what puts it before the restart: the
+    /// core's placement ends with `install` calling `self.restart`, and that
+    /// hook does not return. Anything written after it would be written never.
+    /// Keeping the write inside `install_one` rather than at the three `Ok`
+    /// arms of `install` is what makes that ordering a fact about the shape of
+    /// the code instead of a rule three call sites have to remember.
+    ///
+    /// **Nothing is remembered for a third-party component**, and that is not
+    /// an oversight: the automatic policy never installs one (see
+    /// `automatic_install_list`), so there is nothing for the memory to bound
+    /// — and a third-party plugin's name is chosen by its own author and may
+    /// collide with one of ours, which is the very reason `Checked` keeps two
+    /// lists. Not writing the entry is how that collision is made impossible
+    /// here rather than reasoned about.
+    ///
+    /// Best-effort and never a `Refusal`: by the time this runs the bytes are
+    /// already at their target, and refusing an install that has happened
+    /// would be a lie. A memory that fails to be written costs one more
+    /// attempt at the next run, which is where this started.
+    fn remember_placed(&self, name: &str, version: &str, not_installed_files: Option<Vec<String>>) {
+        if let Err(e) = placed::record(&self.staging, name, version, not_installed_files) {
+            tracing::warn!(
+                "update: writing {}: {e}",
+                placed::path(&self.staging).display()
+            );
         }
     }
 
@@ -1864,7 +1898,16 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
                 if let Some(checked) = worker.check(&client).await
                     && install
                 {
-                    let names = automatic_install_list(&worker.state.read().await.components);
+                    // The memory is read from disk at the moment of the
+                    // decision rather than held in the `Worker`: it is
+                    // written by the process that then leaves, so the run
+                    // that has to honour it is very often a *later* process.
+                    // One reader, one writer, one file, and no copy to keep
+                    // in step with it.
+                    let names = automatic_install_list(
+                        &worker.state.read().await.components,
+                        &placed::read(&worker.staging),
+                    );
                     if names.is_empty() {
                         tracing::debug!("update: scheduled run, nothing to install");
                     } else {
@@ -2254,7 +2297,13 @@ mod tests {
         }
     }
 
-    /// The four exclusions of the automatic policy, each on its own row so a
+    /// Nothing has ever been placed by this updater: the memory an automatic
+    /// run reads on a device that has only ever been deployed by hand.
+    fn nothing_placed() -> placed::Placed {
+        placed::Placed::new()
+    }
+
+    /// The exclusions of the automatic policy, each on its own row so a
     /// filter that disappeared has somewhere to be caught. Stated positively
     /// too: without the `radio` row, a function that returned nothing at all
     /// would pass.
@@ -2280,7 +2329,176 @@ mod tests {
             refused,
             silent,
         ];
-        assert_eq!(automatic_install_list(&components), names(&["core", "radio"]));
+        assert_eq!(automatic_install_list(&components, &nothing_placed()), names(&["core", "radio"]));
+    }
+
+    // ---- What the updater placed, and the nights that follow --------------
+
+    /// The rows a check builds on a device running 0.2.0 that is offered
+    /// 0.4.1 — night after night, because a rollback puts 0.2.0 back and the
+    /// release does not change. That identity between the two nights *is* the
+    /// first defect: nothing in these rows can tell "not tried yet" from
+    /// "tried and reverted".
+    fn core_offered(installed: &str, offered: &str) -> Vec<ComponentOffer> {
+        let mut core = row("core", ComponentKind::Core, Availability::UpdateAvailable);
+        core.installed = Some(installed.to_string());
+        core.offered = Some(offered.to_string());
+        vec![core]
+    }
+
+    /// **The two nights, through the file and through a second process.**
+    ///
+    /// Night 1 installs 0.4.1; it does not start; systemd exhausts its start
+    /// limit, the rollback unit puts 0.2.0 back, and the device reboots on the
+    /// old binary. Night 2 sees *exactly the same rows* — that is why the
+    /// comparison between what runs and what is offered can never settle this
+    /// — and must install nothing.
+    ///
+    /// Deliberately built on **two** workers rather than one: night 2 runs in
+    /// a different process, so what it reads has to have come off the disk at
+    /// a path it derived for itself. A memory held in the `Worker` would pass
+    /// a one-worker test and fail on the device.
+    ///
+    /// The first assertion is not decoration: without it, a rule that refused
+    /// everything for ever would satisfy the second.
+    #[test]
+    fn a_core_release_that_was_rolled_back_is_not_installed_again_the_next_night() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = core_offered("0.2.0", "0.4.1");
+
+        // Night 1: nothing has ever been placed on this device.
+        let night_one = worker_at(dir.path(), stalled_line());
+        assert_eq!(
+            automatic_install_list(&rows, &placed::read(&night_one.staging)),
+            names(&["core"]),
+            "the first night installs it: this policy has never placed 0.4.1 here"
+        );
+        // What `install_one` writes the instant the privileged unit reports
+        // the bytes are in place — before `install` calls the restart hook,
+        // which on a device does not return.
+        night_one.remember_placed(
+            "core",
+            "0.4.1",
+            Some(vec!["etc/systemd/system/ritornello.service".to_string()]),
+        );
+
+        // 0.4.1 never starts. The rollback unit puts 0.2.0 back and the
+        // device comes up on it, in a new process.
+        let night_two = worker_at(dir.path(), stalled_line());
+        assert_eq!(
+            automatic_install_list(&rows, &placed::read(&night_two.staging)),
+            Vec::<String>::new(),
+            "the second night installs nothing: 0.4.1 is the version this policy already placed and the device did not keep"
+        );
+    }
+
+    /// **The way out, and the reason the memory is only ever read by the
+    /// automatic policy.** The operator is allowed to try 0.4.1 again — it is
+    /// also the only escape if this memory is ever wrong.
+    ///
+    /// What this test can and cannot show, said plainly: the skip is a
+    /// property of `automatic_install_list`, which is called from exactly one
+    /// place — the `Job::Scheduled` arm of `run_worker`. `Job::Install`
+    /// carries the operator's names to `install` untouched, and the only
+    /// transform between the two is `install_order`, asserted here beside it.
+    /// A defect that moved the memory check down into `install` or
+    /// `install_one` would be caught by neither: reaching those needs a
+    /// release server and a privileged unit, and this machine has neither.
+    #[test]
+    fn the_memory_never_stands_in_the_way_of_an_install_asked_for_by_hand() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), stalled_line());
+        worker.remember_placed("core", "0.4.1", None);
+        let rows = core_offered("0.2.0", "0.4.1");
+        let memory = placed::read(&worker.staging);
+
+        assert_eq!(
+            automatic_install_list(&rows, &memory),
+            Vec::<String>::new(),
+            "the automatic policy has given up on this version"
+        );
+        assert_eq!(
+            install_order(&names(&["core"])),
+            names(&["core"]),
+            "and nothing between the operator's tick and `install_one` drops it"
+        );
+    }
+
+    /// A **newer** release than the one that was rolled back goes in. The
+    /// memory says "0.4.1 did not work here", not "the core is frozen".
+    ///
+    /// Its own test rather than a second assertion above, because the memory
+    /// is non-empty here: an implementation that skipped a component merely
+    /// for *having* an entry would pass the two-nights test and fail this one.
+    #[test]
+    fn a_release_newer_than_the_one_that_was_rolled_back_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), stalled_line());
+        worker.remember_placed("core", "0.4.1", None);
+        assert_eq!(
+            automatic_install_list(&core_offered("0.2.0", "0.5.0"), &placed::read(&worker.staging)),
+            names(&["core"]),
+            "0.5.0 is not the version that failed, and nothing is known against it"
+        );
+    }
+
+    /// **The guard is not loosened.** A plugin whose installed version is
+    /// unknown and that this updater has never placed stays excluded, exactly
+    /// as before: switched off, dead of its own accord, or predating the
+    /// version field, it would otherwise be re-downloaded every night for
+    /// ever.
+    ///
+    /// The memory is deliberately **not empty** — it carries an entry for
+    /// another component entirely — so this cannot pass by the lookup being
+    /// asked of a map that answers `None` to everything.
+    #[test]
+    fn a_plugin_this_updater_never_placed_stays_excluded_while_its_version_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), stalled_line());
+        worker.remember_placed("radio", "1.7.3", None);
+
+        let mut console = row("console", ComponentKind::Plugin, Availability::UpdateAvailable);
+        console.installed = None;
+        console.offered = Some("0.4.1".to_string());
+        assert_eq!(
+            automatic_install_list(&[console], &placed::read(&worker.staging)),
+            Vec::<String>::new(),
+            "an unknown version this updater is not responsible for is still nobody's business to fix nightly"
+        );
+    }
+
+    /// **The second defect, and its repair.** A plugin whose new binary dies
+    /// before announcing keeps an unknown installed version for ever, so the
+    /// guard above would exclude it from every automatic run — including the
+    /// release that repairs it. Having placed it is what tells this case apart
+    /// from the one above.
+    ///
+    /// The offered version is deliberately **not** the one that was placed:
+    /// that is the difference between "the release that would fix it" and the
+    /// broken archive itself, which the two-nights rule still refuses.
+    #[test]
+    fn a_plugin_whose_placed_binary_never_spoke_is_repaired_by_the_next_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), stalled_line());
+        worker.remember_placed("console", "0.4.1", None);
+
+        let mut console = row("console", ComponentKind::Plugin, Availability::UpdateAvailable);
+        console.installed = None;
+        console.offered = Some("0.5.0".to_string());
+        assert_eq!(
+            automatic_install_list(&[console.clone()], &placed::read(&worker.staging)),
+            names(&["console"]),
+            "the release after the one that broke it is exactly where an automatic repair is worth most"
+        );
+
+        // And the archive that broke it is still refused, so the repair costs
+        // one download per released version and never one per night.
+        console.offered = Some("0.4.1".to_string());
+        assert_eq!(
+            automatic_install_list(&[console], &placed::read(&worker.staging)),
+            Vec::<String>::new(),
+            "the same broken archive is not fetched again tonight"
+        );
     }
 
     /// **A stranger's archive does not get to choose which of your plugins it
@@ -2401,7 +2619,7 @@ mod tests {
         theirs.offered = Some("2.0.0".to_string());
         let mine = row("radio", ComponentKind::Plugin, Availability::UpdateAvailable);
         assert_eq!(
-            automatic_install_list(&[theirs, mine]),
+            automatic_install_list(&[theirs, mine], &nothing_placed()),
             names(&["radio"]),
             "a third-party plugin is never installed while nobody is watching, even when its own repository offers a newer version"
         );

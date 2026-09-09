@@ -630,6 +630,23 @@ a third-party one — those stay a hand-declared, hand-updated affair (see
 [Third-party plugins](#third-party-plugins) below). It can restart the
 core and any plugin it updates, the same as a manual install.
 
+**It also never installs the same version twice by itself.** The device
+writes down, per component, the version of the archive an automatic or
+manual install last placed, and keeps that note across restarts. Without
+it, a core release that does not start would be installed, fail, be put
+back by the rollback — and be installed again the next night, and every
+night after, until a newer release appeared. Two consequences of that
+note are worth knowing:
+
+- **Install** on this page is never affected. Ticking a component the
+  automatic policy has given up on installs it, which is also the way out
+  if that note is ever wrong;
+- a plugin whose new binary **died before announcing itself** has no
+  known version, which normally keeps the automatic policy away from it
+  for good. A version this device placed is one it may replace, so the
+  next release repairs it on its own — at the cost of one download per
+  released version, never one per night.
+
 **A restart that follows an update keeps the device as it was, rather
 than reading the Startup card again — a device in standby stays in
 standby.** The updater and the rollback each leave a dated marker before

@@ -610,7 +610,13 @@ been observed for real:
 - a running binary being replaced on disk while its own process is live;
 - systemd restarting `ritornello.service` after an update, rather than a
   test process exiting on its own;
-- the rollback firing.
+- the rollback firing;
+- the note of what an install placed being written **before** the process
+  leaves. On a device that write is followed by an exit that does not
+  return, and the note is what stops a release that fails to start from
+  being reinstalled every night; here the exit is a test closure that
+  returns like any other, so the ordering is a property of the code's
+  shape rather than something observed.
 
 Every one of those is covered by unit and integration tests that fake the
 privileged step; none is covered by the privileged step itself.
