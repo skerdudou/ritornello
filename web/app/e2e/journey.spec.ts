@@ -106,7 +106,7 @@ test('navigation between the home page, the config and the plugin pages', async 
   await expect(page.locator('[data-save]')).toBeVisible()
   await page.goto('/plugins/generic-input/')
   // Twenty-five fixed rows — the two seek keys, then the two play modes —
-  // plus one per source the core announces, here `files` and `radio`.
+  // plus one per source the core announces, here `radio` and `files`.
   //
   // This count is the only lock that counts the **rendered** rows: the unit
   // tests lock the `ACTIONS` list upstream, but none of them mounts the real
@@ -117,9 +117,17 @@ test('navigation between the home page, the config and the plugin pages', async 
   // And they are the last rows, in the catalogue's order, which is the order
   // the source key walks. A count alone would not notice a row rendering
   // empty — precisely what an unreachable catalogue would produce.
+  //
+  // **`radio` then `files`, which is the order of the fixture's
+  // `plugins.toml` and no longer the alphabet.** This assertion read
+  // `files` first until the auto-update branch landed, and it was right to
+  // fail: that branch deliberately made the source cycle follow the
+  // declared order, and this is the only test in the repository that
+  // observes the rendered consequence. It could not be updated with the
+  // change because the e2e suite cannot run on the development machine.
   const labels = page.locator('[data-action-row] td:first-child')
-  await expect(labels.nth(25)).toHaveText(/files/)
-  await expect(labels.nth(26)).toHaveText(/radio/)
+  await expect(labels.nth(25)).toHaveText(/radio/)
+  await expect(labels.nth(26)).toHaveText(/files/)
 })
 
 test('a single Vue instance serves the shell and the plugin modules', async ({ page }) => {

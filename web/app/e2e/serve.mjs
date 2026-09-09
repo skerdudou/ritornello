@@ -184,11 +184,15 @@ mkdirSync(join(configDirNative, 'bin'), { recursive: true })
 // JSON naming its kinds and whether it carries an admin page. An old file
 // still carrying `kind` loads fine, serde ignores it.
 //
-// Its position in the file does not decide the starting source: the core sorts
-// `source_order` by name and starts on the *persisted* source, which a fresh
-// state.json sets to `radio`. `files` is therefore one `SourceCycle` away —
-// and a second one comes back, which is what lets the journey put the harness
-// back the way it found it.
+// Its position in the file does not decide the *starting* source — the core
+// starts on the **persisted** one, which a fresh state.json sets to `radio` —
+// but it does decide the **cycle**: `source_order` follows the order of this
+// file, and no longer the alphabet. Here the two happen to agree that `files`
+// is one `SourceCycle` away from `radio`, and a second one comes back, which
+// is what lets the journey put the harness back the way it found it. What the
+// file's order does decide outright is the order the sources are announced
+// in, hence the order the rows appear in on the generic-input page — the
+// journey asserts `radio` then `files` for that reason.
 writeFileSync(
   join(configDirNative, 'plugins.toml'),
   `[[plugin]]
