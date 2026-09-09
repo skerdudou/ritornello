@@ -388,8 +388,19 @@ impl<P: Player> Core<P> {
     /// Called after each late announcement with the **complete** list
     /// recomputed from the manifest: the priority is that of `plugins.toml`,
     /// never the arrival order of the announcements.
+    ///
+    /// **And it publishes**, for the same reason `set_source_order` does. The
+    /// order is not what anyone reads: `winner()` is evaluated when the frame
+    /// is composed, and `publish_state` is otherwise only reached from the
+    /// enrichment and command paths. Without this line, an operator who moves
+    /// a `metadata` plugin up **because the wrong title is showing** keeps
+    /// seeing the wrong title until the next enrichment or the next track —
+    /// that is, until they have stopped looking to see whether their gesture
+    /// worked. Deduplicated inside `publish_state`, so a re-ordering that
+    /// changes no winner costs nothing.
     pub fn set_metadata_order(&mut self, order: Vec<String>) {
         self.metadata.set_order(order);
+        self.publish_state();
     }
 
     /// The arbitration order currently in force.

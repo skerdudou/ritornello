@@ -721,6 +721,53 @@ mod tests {
         assert_eq!(state_rx.borrow().track.artist.as_deref(), Some("Station"));
     }
 
+    /// Re-ordering the arbitration reaches the screen **at once**, without
+    /// waiting for a new enrichment.
+    ///
+    /// This is the gesture the plugin table's arrows exist for: the wrong
+    /// title is showing, so the operator moves the plugin that gets it right
+    /// above the one that gets it wrong. A `set_order` that changed the winner
+    /// without publishing would leave the wrong title on screen until the next
+    /// enrichment or the next track — that is, until the operator has stopped
+    /// looking to see whether their gesture worked.
+    ///
+    /// Both plugins speak **before** the flip and nothing speaks after it, so
+    /// the only thing that can have refreshed the two channels is
+    /// `set_metadata_order` itself. Both are read, because they are two
+    /// different audiences: `state` is what the SPA and the Display plugins
+    /// compose from, `now_playing.known` is what a `metadata` plugin sees of
+    /// what is already known.
+    #[tokio::test]
+    async fn flipping_the_arbitration_order_reaches_the_screen_without_a_new_enrichment() {
+        let (mut core, np_rx, state_rx, _d) =
+            setup_metadata(vec!["musicbrainz".into(), "ouifm".into()]);
+        let id = serde_json::json!({"url": "one"});
+        core.handle_source_update("radio", plays(id.clone()));
+        core.handle_enrichment("musicbrainz", enrichment(id.clone(), "Base", "Online"));
+        core.handle_enrichment("ouifm", enrichment(id, "Station", "Direct"));
+        assert_eq!(
+            state_rx.borrow().track.artist.as_deref(),
+            Some("Base"),
+            "the manifest order in force: `musicbrainz` first, so it wins"
+        );
+
+        // The operator moved `ouifm` above `musicbrainz` in `plugins.toml`,
+        // and the core re-read the file.
+        core.set_metadata_order(vec!["ouifm".to_string(), "musicbrainz".to_string()]);
+
+        assert_eq!(core.metadata.winner(), Some("ouifm"), "the arbitration itself has flipped");
+        assert_eq!(
+            state_rx.borrow().track.artist.as_deref(),
+            Some("Station"),
+            "and the frame the SPA and the displays compose from was re-sent, not left as it was"
+        );
+        assert_eq!(
+            np_rx.borrow().known.artist.as_deref(),
+            Some("Station"),
+            "and so was what a `metadata` plugin reads of what is already known"
+        );
+    }
+
     #[tokio::test]
     async fn the_declared_selection_is_broadcast_then_forgotten_when_nothing_plays() {
         // The numbered key highlighted on the web UI's remote designates

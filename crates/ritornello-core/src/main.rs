@@ -3878,17 +3878,28 @@ mod toggle_tests {
     /// - `children.manifest_order`, the door a late announcement comes
     ///   through.
     ///
-    /// The fixture is built so that no two of them can be confused: the file
-    /// order after the move is `cd, radio, ouifm-metas, musicbrainz, mpd`,
-    /// which is neither the alphabet nor what the core held a moment ago, and
-    /// `mpd` is a display — in the manifest order, in no source cycle, and in
-    /// the metadata arbitration of neither.
+    /// **The source projection is deliberately not the alphabet, and that is
+    /// the load-bearing part of this fixture.** The first version of this test
+    /// expected `["cd", "radio"]` — which is exactly what `add_source` sorts
+    /// and broadcasts on its own. Dropping `publish_catalog()` from
+    /// `set_source_order`, the precise defect task 14 was caught by and the
+    /// one this assertion exists to catch, left the channel holding that same
+    /// pair, and the test passed. A reviewer found it by running that mutant.
+    /// The file therefore moves `radio` to the **top**, so the expected
+    /// catalog is `["radio", "cd"]`: a value no sort can produce, and one that
+    /// can only be there because this gesture published it.
+    ///
+    /// The rest of the fixture keeps the same property: the file order after
+    /// the move is `radio, cd, ouifm-metas, musicbrainz, mpd`, which is
+    /// neither the alphabet nor what the core held a moment ago, and `mpd` is
+    /// a display — in the manifest order, in no source cycle, and in the
+    /// metadata arbitration of neither.
     #[tokio::test]
     async fn a_move_re_sequences_the_published_catalog_the_priority_and_the_page() {
         let mut b = bench();
         b.children.manifest_order = vec![
-            "radio".to_string(),
             "cd".to_string(),
+            "radio".to_string(),
             "musicbrainz".to_string(),
             "ouifm-metas".to_string(),
             "mpd".to_string(),
@@ -3915,13 +3926,13 @@ mod toggle_tests {
             PluginStatus::kind("ouifm-metas", "metadata", true, false),
             PluginStatus::kind("mpd", "display", true, true),
         ]);
-        // What `plugin_move_post` has just written: `cd` moved up, and the
+        // What `plugin_move_post` has just written: `radio` moved up, and the
         // two metadata plugins swapped in an earlier move.
         let manifest = b._dir.path().join("plugins.toml");
         std::fs::write(
             &manifest,
-            "[[plugin]]\nname = \"cd\"\nexec = \"/bin/true\"\n\n\
-             [[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
+            "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
+             [[plugin]]\nname = \"cd\"\nexec = \"/bin/true\"\n\n\
              [[plugin]]\nname = \"ouifm-metas\"\nexec = \"/bin/true\"\n\n\
              [[plugin]]\nname = \"musicbrainz\"\nexec = \"/bin/true\"\n\n\
              [[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\n",
@@ -3935,9 +3946,11 @@ mod toggle_tests {
             b.children.catalog_rx.borrow().sources.iter().map(|s| s.name.clone()).collect();
         assert_eq!(
             published,
-            vec!["cd".to_string(), "radio".to_string()],
-            "the cycle the remote follows must be the file's, and it must have been sent — the \
-             displays and `listplaylists` read this channel, never the core's vector"
+            vec!["radio".to_string(), "cd".to_string()],
+            "the cycle the remote follows must be the file's, and it must have been SENT — the \
+             displays and `listplaylists` read this channel, never the core's vector. Sorted, \
+             this pair reads `cd, radio`, so nothing but a publication of the file order can put \
+             it this way round"
         );
         assert_eq!(
             b.core.metadata_order(),
@@ -3956,8 +3969,8 @@ mod toggle_tests {
         assert_eq!(
             names,
             vec![
-                "cd".to_string(),
                 "radio".to_string(),
+                "cd".to_string(),
                 "ouifm-metas".to_string(),
                 "musicbrainz".to_string(),
                 "mpd".to_string(),
@@ -3967,8 +3980,8 @@ mod toggle_tests {
         assert_eq!(
             b.children.manifest_order,
             vec![
-                "cd".to_string(),
                 "radio".to_string(),
+                "cd".to_string(),
                 "ouifm-metas".to_string(),
                 "musicbrainz".to_string(),
                 "mpd".to_string(),

@@ -537,14 +537,17 @@ pub(super) struct PluginMoveReq {
 /// **`delta` is ±1 and nothing else, refused with a bare 400.** The only
 /// gesture the page offers is an arrow, and accepting an arbitrary jump would
 /// be an interface nothing uses — with `move_entry`'s uniform re-spacing pass
-/// to re-validate over a distance no test covers. The refusal carries no
-/// catalog message on purpose: it describes a request the UI cannot make, not
-/// a state an operator can act on.
+/// to re-validate over a distance no test covers. This one refusal carries no
+/// catalog message on purpose, and the precedent is `update_install_post`: it
+/// describes a request the page cannot make, so nobody can be looking at it.
 ///
-/// Out of range is the same 400 rather than a clamp, and that is
-/// `move_entry`'s own choice, inherited here: an arrow at the end of the list
-/// that could be pressed and did nothing would be worse than one that is
-/// disabled, which is what the table does with it.
+/// Out of range is the same 400 rather than a clamp — that is `move_entry`'s
+/// own choice, inherited here, and it is what lets the table disable an arrow
+/// at the end of the list instead of offering one that does nothing. **But it
+/// carries a catalog sentence**, because unlike the guard above it is
+/// reachable by an ordinary operator: a second tab that has not reloaded
+/// still shows the up-arrow on a row the first tab has already moved to the
+/// top. Pressing it must say what happened, not `HTTP 400`.
 pub(super) async fn plugin_move_post(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
@@ -590,7 +593,9 @@ pub(super) async fn plugin_move_post(
         Ok(u) => u,
         Err(crate::plugins::edit::EditError::OutOfRange) => {
             tracing::info!("moving {name} by {}: already at that end of the list", req.delta);
-            return StatusCode::BAD_REQUEST.into_response();
+            let msg = state.catalog.read().await.get("plugin_already_at_end").replace("{name}", &name);
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg })))
+                .into_response();
         }
         Err(e) => {
             tracing::warn!("moving {name} in {}: {e}", state.plugins.manifest.display());
@@ -1245,6 +1250,15 @@ mod tests {
     /// route passes that refusal on instead of answering "done" to a move that
     /// did not happen — which is what lets the table disable the arrow
     /// honestly.
+    ///
+    /// **This 400 is reachable by an ordinary operator** — a second tab whose
+    /// list is one gesture out of date — so unlike the `delta` guard's it must
+    /// carry a sentence. Resolved against the **embedded** catalog rather than
+    /// compared to a copy of the string: `Catalog::get` returns the key itself
+    /// when it finds nothing, so a key misspelled in the code would put
+    /// `plugin_already_at_end` on the operator's screen with no test
+    /// complaining, and the parity test between the two catalogs does not look
+    /// at the code at all.
     #[tokio::test]
     async fn moving_the_first_plugin_up_is_refused_and_leaves_the_file_byte_for_byte() {
         let (state, dir, mut rx) = app_state_with_plugins();
@@ -1264,6 +1278,17 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(rx.try_recv().is_err(), "nothing moved: the core has nothing to re-sequence");
         assert_eq!(std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(), before);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let catalog =
+            Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        let message = v["error"].as_str().expect("a refusal an operator can reach needs a sentence");
+        assert_eq!(message, catalog.get("plugin_already_at_end").replace("{name}", "radio"));
+        assert!(
+            message.contains(' ') && message.contains("radio"),
+            "a raw key or an uninterpolated token reached the screen: {message:?}"
+        );
     }
 
     /// The same doctrine as its two neighbours: a name the file does not

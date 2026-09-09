@@ -252,6 +252,7 @@ plugin_persist_failed = "Could not write the choice for '{name}' to plugins.toml
 plugin_action_failed = "The core could not apply the change for '{name}'. See the error log."
 plugin_manifest_unreadable = "The plugin list could not be read"
 plugin_uninstalled = "{name} uninstalled. Its configuration was kept."
+plugin_already_at_end = "'{name}' is already at that end of the list; the page was out of date."
 update_no_release = "No release published yet"
 update_never_checked = "Never checked"
 update_checking = "Checking…"

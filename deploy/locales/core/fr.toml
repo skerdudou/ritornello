@@ -254,6 +254,7 @@ plugin_persist_failed = "Le choix pour « {name} » n'a pas pu être écrit dans
 plugin_action_failed = "Le cœur n'a pas pu appliquer le changement pour « {name} ». Voir le journal d'erreurs."
 plugin_manifest_unreadable = "La liste des greffons n'a pas pu être lue"
 plugin_uninstalled = "{name} désinstallé. Sa configuration a été conservée."
+plugin_already_at_end = "'{name}' est déjà à cette extrémité de la liste ; la page n'était plus à jour."
 update_no_release = "Aucune version publiée pour l'instant"
 update_never_checked = "Jamais vérifié"
 update_checking = "Vérification…"
