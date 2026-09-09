@@ -630,12 +630,18 @@ a third-party one — those stay a hand-declared, hand-updated affair (see
 [Third-party plugins](#third-party-plugins) below). It can restart the
 core and any plugin it updates, the same as a manual install.
 
-**A restart caused by an update never wakes a device that was in
-standby, whatever the Startup card says.** The core does not read that
-setting after a restart the updater or the rollback just triggered — it
-resumes whatever it was doing the instant before, the same way "previous
-state" does (see [Startup card](#startup-card)), regardless of what
-"Startup" is actually set to. A device asleep at 3 a.m. that updates
+**A restart that follows an update keeps the device as it was, rather
+than reading the Startup card again — a device in standby stays in
+standby.** The updater and the rollback each leave a dated marker before
+they restart the core, and for as long as that marker is fresh (ten
+minutes, `MARKER_WINDOW_S` in `crates/ritornello-updater/src/marker.rs`)
+the core resumes whatever it was doing the instant before instead of
+consulting "Startup", the same way "previous state" does (see [Startup
+card](#startup-card)). Every restart on this path — an install, or the
+rollback that follows a failed one — completes within that window with
+room to spare, so this covers any ordinary case; only a boot that starts
+more than ten minutes after the marker was written falls back to reading
+the Startup setting as normal. A device asleep at 3 a.m. that updates
 itself at 3 a.m. is still asleep afterwards.
 
 ### Plugins table
