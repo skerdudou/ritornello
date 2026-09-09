@@ -38,12 +38,50 @@ pub fn report_path(prefix: &Path) -> PathBuf {
     prefix.join("var/lib/ritornello-update/last-rollback.json")
 }
 
-/// `Ok(None)` when nothing authorises a rollback — no marker, or a stale one.
-/// That is the ordinary case for a crash loop unrelated to an update, and it
-/// is not an error: the unit exits 0 and systemd is left to give up.
+/// **This report is the rollback's own dated marker**, and not only a trace
+/// for the page.
+///
+/// `rollback` consumes the install marker before it restarts the core it has
+/// just restored — it must, or a second `OnFailure=` would roll back twice —
+/// so the restored core boots with nothing to tell it that this is not an
+/// ordinary start. Without a second signal it reads the Startup setting, whose
+/// default is *on*, and wakes a device that was in standby: the
+/// three-in-the-morning failure the marker exists to prevent, happening on the
+/// one path no test ever ran.
+///
+/// This file is that signal, and it needed no new writing: it is already
+/// written immediately after the marker is cleared, already left in place for
+/// ever, and already read by the core at boot. Only the reading was missing.
+/// Same window as the marker (`marker::within_window`), so the two halves of
+/// one event are judged by one rule; and stale for every boot after, so a
+/// rollback last March does not silently override the Startup setting in
+/// September.
+pub fn is_fresh(report: &Report, now_unix_s: u64) -> bool {
+    crate::marker::within_window(report.at_unix_s, now_unix_s)
+}
+
+/// `Ok(None)` when nothing authorises a rollback — no marker, a stale one, or
+/// one left by an apply that did not replace the core. That is the ordinary
+/// case for a crash loop unrelated to an update, and it is not an error: the
+/// unit exits 0 and systemd is left to give up.
+///
+/// **`core_replaced` is checked here as well as in `marker::arm`**, and the
+/// duplication is deliberate rather than belt and braces. This binary is the
+/// one thing an update cannot replace — `target.rs` cannot form its path — so
+/// a device routinely runs a new core beside an installer from months ago. An
+/// older installer still arms this net for a plugin gesture, and the refusal
+/// has to live on the reading side to cover that device at all.
 pub fn rollback(prefix: &Path, now_unix_s: u64) -> std::io::Result<Option<Report>> {
     let Some(marker) = marker::read(prefix) else { return Ok(None) };
     if !marker::is_fresh(&marker, now_unix_s) {
+        return Ok(None);
+    }
+    if !marker.core_replaced {
+        // A plugin runs in a process of its own and cannot crash-loop the
+        // core, so this marker attributes nothing: acting on it would undo a
+        // plugin gesture for an unrelated failure and leave the real cause
+        // alone. The marker is left where it is — it is not this unit's to
+        // consume, and the next apply overwrites it.
         return Ok(None);
     }
 
@@ -167,8 +205,52 @@ mod tests {
         assert!(crate::marker::read(&prefix).is_none());
     }
 
+    /// A pass that installed a plugin the device did not have **and** replaced
+    /// the core, which is now the only shape in which a plugin's first install
+    /// is ever undone: only a core replacement arms this net (`marker::arm`),
+    /// and only a core replacement is accepted where it is read.
     #[test]
     fn undoing_a_first_install_deletes_rather_than_restores() {
+        let (_d, prefix, staging) = fake_root();
+        fs::write(prefix.join("usr/local/bin/ritornello-core"), b"the core that worked").unwrap();
+        fs::write(staging.join("staged-mpd"), b"fresh").unwrap();
+        fs::write(staging.join("staged-core"), b"the core that does not start").unwrap();
+        let req = Request {
+            format: REQUEST_FORMAT,
+            actions: vec![
+                Action::PlacePlugin {
+                    file: "ritornello-plugin-mpd".to_string(),
+                    staged: "staged-mpd".to_string(),
+                },
+                Action::PlaceCore { staged: "staged-core".to_string() },
+            ],
+        };
+        let applied = apply(&prefix, &staging, &req).unwrap();
+        crate::marker::arm(&prefix, &applied, 1_000).unwrap();
+
+        rollback(&prefix, 1_005).unwrap().expect("a fresh marker authorises it");
+        // There was nothing before, so putting "what was there" back means
+        // leaving nothing. Restoring an empty file instead would leave a
+        // plugin the core declares and cannot execute.
+        assert!(!prefix.join("usr/local/lib/ritornello/plugins/ritornello-plugin-mpd").exists());
+        // And the core it came with went back, which is what authorised any of
+        // this in the first place.
+        assert_eq!(
+            fs::read(prefix.join("usr/local/bin/ritornello-core")).unwrap(),
+            b"the core that worked"
+        );
+    }
+
+    /// **A plugin gesture arms nothing.** `marker::arm` writes no marker, and
+    /// — for the device whose installer predates this rule, which is every
+    /// device that has not been redeployed by hand — `rollback` refuses one
+    /// written anyway.
+    ///
+    /// Without this, an unrelated core crash loop within ten minutes of a
+    /// plugin gesture deleted the binary just installed, or put back the one
+    /// just uninstalled, and left the actual cause of the crash untouched.
+    #[test]
+    fn a_plugin_only_apply_never_authorises_a_rollback() {
         let (_d, prefix, staging) = fake_root();
         fs::write(staging.join("staged-mpd"), b"fresh").unwrap();
         let req = Request {
@@ -179,13 +261,68 @@ mod tests {
             }],
         };
         let applied = apply(&prefix, &staging, &req).unwrap();
-        crate::marker::write(&prefix, &applied, 1_000).unwrap();
+        let installed = prefix.join("usr/local/lib/ritornello/plugins/ritornello-plugin-mpd");
+        assert!(installed.exists(), "the fixture must really have installed it");
 
-        rollback(&prefix, 1_005).unwrap().expect("a fresh marker authorises it");
-        // There was nothing before, so putting "what was there" back means
-        // leaving nothing. Restoring an empty file instead would leave a
-        // plugin the core declares and cannot execute.
-        assert!(!prefix.join("usr/local/lib/ritornello/plugins/ritornello-plugin-mpd").exists());
+        crate::marker::arm(&prefix, &applied, 1_000).unwrap();
+        assert!(crate::marker::read(&prefix).is_none(), "arm writes nothing for a plugin");
+        assert!(rollback(&prefix, 1_005).unwrap().is_none(), "and there is nothing to authorise");
+
+        // The reading-side guard, for an installer that predates `arm`.
+        crate::marker::write(&prefix, &applied, 1_000).unwrap();
+        assert!(
+            rollback(&prefix, 1_005).unwrap().is_none(),
+            "a marker saying the core was not replaced attributes nothing"
+        );
+        assert!(installed.exists(), "the operator's plugin survives an unrelated crash loop");
+    }
+
+    /// **`arm` clears a marker an earlier core update left behind.** Every
+    /// apply rewrites the backup manifest, so a still-fresh marker standing
+    /// over a plugin gesture's manifest would have a crash loop undo the plugin
+    /// gesture and leave the core exactly where it was — the worst of both
+    /// outcomes.
+    #[test]
+    fn a_plugin_gesture_disarms_the_net_an_earlier_core_update_armed() {
+        let (_d, prefix, staging) = fake_root();
+        fs::write(prefix.join("usr/local/bin/ritornello-core"), b"old").unwrap();
+        fs::write(staging.join("staged-core"), b"new").unwrap();
+        let core_apply = apply(
+            &prefix,
+            &staging,
+            &Request {
+                format: REQUEST_FORMAT,
+                actions: vec![Action::PlaceCore { staged: "staged-core".to_string() }],
+            },
+        )
+        .unwrap();
+        crate::marker::arm(&prefix, &core_apply, 1_000).unwrap();
+        assert!(crate::marker::read(&prefix).is_some(), "the core update armed it");
+
+        fs::write(staging.join("staged-mpd"), b"fresh").unwrap();
+        let plugin_apply = apply(
+            &prefix,
+            &staging,
+            &Request {
+                format: REQUEST_FORMAT,
+                actions: vec![Action::PlacePlugin {
+                    file: "ritornello-plugin-mpd".to_string(),
+                    staged: "staged-mpd".to_string(),
+                }],
+            },
+        )
+        .unwrap();
+        crate::marker::arm(&prefix, &plugin_apply, 1_060).unwrap();
+
+        assert!(
+            crate::marker::read(&prefix).is_none(),
+            "the manifest now describes the plugin gesture, so the authorisation over it must go"
+        );
+        assert!(rollback(&prefix, 1_090).unwrap().is_none());
+        assert!(
+            prefix.join("usr/local/lib/ritornello/plugins/ritornello-plugin-mpd").exists(),
+            "and the plugin is not undone by a crash loop the core update caused"
+        );
     }
 
     #[test]

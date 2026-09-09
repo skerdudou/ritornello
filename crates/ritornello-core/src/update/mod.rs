@@ -53,32 +53,71 @@ pub enum StartupOverride {
 
 /// Pure, and the whole of the "do not start playing at 3 a.m." requirement.
 ///
-/// The marker is **read and not consumed**, which is what makes the rollback
-/// case work: it puts back the previous core, and that binary must still find
-/// the instruction even though the broken one already read it. Nothing to
-/// delete, no ownership to hand over, no race.
+/// **Two dated files, because two different processes restart this device and
+/// only one of them can read the marker.** An install writes the marker, and
+/// the core it installed reads it. A rollback *consumes* that marker — it
+/// must, or a second `OnFailure=` would roll back twice — and then restarts
+/// the core it put back; that core finds no marker at all, and until this
+/// function read the second file it fell through to the Startup setting, whose
+/// default is *on*, and woke a device that had been asleep. Three documents on
+/// this branch, this comment included, asserted the opposite ("read and not
+/// consumed"); none of them was true of the rollback unit, and no test on the
+/// branch ever ran `rollback()`.
+///
+/// So the rollback's own restart is authorised by its own dated file: the
+/// report it already writes and never deletes (`rollback::is_fresh`). Either
+/// file, while fresh, means "this boot was started by something that was
+/// already running, so keep doing what it was doing".
 pub fn startup_override(
     marker: Option<ritornello_updater::marker::Marker>,
+    rollback: Option<&ritornello_updater::rollback::Report>,
     now_unix_s: u64,
 ) -> StartupOverride {
-    match marker {
-        Some(m) if ritornello_updater::marker::is_fresh(&m, now_unix_s) => {
-            StartupOverride::Previous
-        }
-        _ => StartupOverride::AsConfigured,
+    let after_an_install =
+        marker.is_some_and(|m| ritornello_updater::marker::is_fresh(&m, now_unix_s));
+    let after_a_rollback =
+        rollback.is_some_and(|r| ritornello_updater::rollback::is_fresh(r, now_unix_s));
+    if after_an_install || after_a_rollback {
+        StartupOverride::Previous
+    } else {
+        StartupOverride::AsConfigured
     }
 }
 
-/// The instruction this boot must obey, read from the one place it can be
+/// The instruction this boot must obey, read from the two places it can be
 /// written.
 ///
-/// Two lines, and they are separated from `startup_override` on purpose: the
-/// "read and not consumed" property lives in the **read**, not in the
-/// decision, and a pure function handed a value twice cannot tell a read that
-/// deletes the file from one that leaves it. This is what a test can drive
-/// against a real marker on a real directory.
+/// Separated from `startup_override` on purpose: whether a read consumes its
+/// file lives in the **read**, not in the decision, and a pure function handed
+/// a value twice cannot tell the two apart. This is what a test can drive
+/// against a real directory a real `rollback()` has just been through — which
+/// is the test that was missing, and the reason the defect above survived
+/// twenty reviews.
 pub fn startup_instruction(prefix: &Path, now_unix_s: u64) -> StartupOverride {
-    startup_override(ritornello_updater::marker::read(prefix), now_unix_s)
+    startup_override(
+        ritornello_updater::marker::read(prefix),
+        read_rollback_report(prefix).as_ref(),
+        now_unix_s,
+    )
+}
+
+/// What the rollback unit left behind, if anything.
+///
+/// `None` for an absent, unreadable or corrupt file, exactly as `marker::read`
+/// answers for its own: both readers — the page's note and the startup
+/// instruction above — have a correct answer without it. **Never deleted**: it
+/// is the only trace of a nocturnal rollback, and the next rollback overwrites
+/// it.
+pub fn read_rollback_report(prefix: &Path) -> Option<ritornello_updater::rollback::Report> {
+    let path = ritornello_updater::rollback::report_path(prefix);
+    let text = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str(&text) {
+        Ok(report) => Some(report),
+        Err(e) => {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            None
+        }
+    }
 }
 
 /// What the update worker is asked to do. One enum rather than one channel per
@@ -1992,65 +2031,171 @@ mod tests {
         }
     }
 
+    /// A rollback report dated `at`, as the unit leaves one behind.
+    fn report(at: u64) -> ritornello_updater::rollback::Report {
+        ritornello_updater::rollback::Report {
+            at_unix_s: at,
+            restored: vec!["core".into()],
+            failed: vec![],
+            core_restored: true,
+        }
+    }
+
     /// The requirement the owner raised, and it is the one that would have
     /// been missed: the startup power setting defaults to **on**, so a restart
     /// at 3 a.m. would wake the active source and start playing music nobody
     /// asked for.
     #[test]
     fn a_restart_right_after_an_install_preserves_whatever_the_player_was_doing() {
-        assert_eq!(startup_override(Some(marker(1_000)), 1_002), StartupOverride::Previous);
+        assert_eq!(startup_override(Some(marker(1_000)), None, 1_002), StartupOverride::Previous);
     }
 
     #[test]
     fn a_restart_long_after_an_install_obeys_the_setting_again() {
         let stale = 1_000 + ritornello_updater::marker::MARKER_WINDOW_S + 1;
-        assert_eq!(startup_override(Some(marker(1_000)), stale), StartupOverride::AsConfigured);
+        assert_eq!(
+            startup_override(Some(marker(1_000)), None, stale),
+            StartupOverride::AsConfigured
+        );
     }
 
     #[test]
     fn an_ordinary_boot_obeys_the_setting() {
-        assert_eq!(startup_override(None, 5_000), StartupOverride::AsConfigured);
+        assert_eq!(startup_override(None, None, 5_000), StartupOverride::AsConfigured);
     }
 
-    /// The case the owner pointed at, and the reason the marker is not
-    /// consumed on read: the rollback puts back the PREVIOUS core, and it must
-    /// still find the instruction even though the broken one already read it.
+    /// **One operand each**, because the rule is a disjunction and a test that
+    /// fed both would pass with either half deleted. The rollback's own dated
+    /// file has to carry the instruction on its own: by the time the restored
+    /// core boots, the marker is gone.
     #[test]
-    fn the_reverted_core_finds_the_instruction_the_broken_one_had_already_read() {
-        let m = marker(1_000);
-        assert_eq!(startup_override(Some(m.clone()), 1_002), StartupOverride::Previous);
-        // Read again, by a different binary, seconds later. Same answer.
-        assert_eq!(startup_override(Some(m), 1_020), StartupOverride::Previous);
+    fn a_restart_right_after_a_rollback_preserves_it_too_with_no_marker_left() {
+        assert_eq!(startup_override(None, Some(&report(1_000)), 1_002), StartupOverride::Previous);
+        let stale = 1_000 + ritornello_updater::marker::MARKER_WINDOW_S + 1;
+        assert_eq!(
+            startup_override(None, Some(&report(1_000)), stale),
+            StartupOverride::AsConfigured,
+            "a rollback last March must not override the Startup setting in September"
+        );
     }
 
-    /// The whole of the rollback case, driven through the file: the reverted
-    /// core must find the instruction even though the broken one already read
-    /// it.
+    /// **The three-in-the-morning requirement on the path that actually broke
+    /// it, driven through a real `rollback()`.**
     ///
-    /// Deliberately **not** the same test as the pure one above, and not a
-    /// duplicate of it: that one hands the same value in twice, which passes
-    /// identically whether the read consumes the marker or not. Only a second
-    /// read of the same file can tell those two apart.
+    /// This replaces two tests that were named for the reverted core and never
+    /// ran a rollback: one handed the same `Marker` value in twice, the other
+    /// read the same file twice with nothing in between. Both passed
+    /// identically whether or not the rollback deleted the marker — and it
+    /// does delete it, deliberately, so that a second `OnFailure=` cannot roll
+    /// back twice. The device woke up, and the suite was green.
+    ///
+    /// Here the marker is really consumed by `rollback::rollback`, and the
+    /// restored core still has to answer `Previous`.
     #[test]
-    fn a_second_core_reads_the_same_instruction_off_the_same_file() {
+    fn the_core_a_real_rollback_put_back_still_knows_not_to_wake_the_device() {
         let dir = tempfile::tempdir().unwrap();
-        let applied = ritornello_updater::apply::Applied {
-            placed: vec!["core".into()],
-            removed: vec![],
-            core_replaced: true,
-        };
-        ritornello_updater::marker::write(dir.path(), &applied, 1_000).unwrap();
-        // The core that was just installed reads it...
-        assert_eq!(startup_instruction(dir.path(), 1_002), StartupOverride::Previous);
-        // ...and so does the one the rollback put back, seconds later.
-        assert_eq!(startup_instruction(dir.path(), 1_020), StartupOverride::Previous);
+        let prefix = dir.path();
+        let staging = prefix.join("staging");
+        std::fs::create_dir_all(prefix.join("usr/local/bin")).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(prefix.join("usr/local/bin/ritornello-core"), b"the core that worked")
+            .unwrap();
+        std::fs::write(staging.join("staged-core"), b"the core that does not start").unwrap();
+
+        // 03:00 — the privileged unit places the new core and arms the net.
+        let applied = ritornello_updater::apply::apply(
+            prefix,
+            &staging,
+            &Request {
+                format: REQUEST_FORMAT,
+                actions: vec![Action::PlaceCore { staged: "staged-core".to_string() }],
+            },
+        )
+        .unwrap();
+        ritornello_updater::marker::arm(prefix, &applied, 1_000).unwrap();
+        assert_eq!(
+            startup_instruction(prefix, 1_002),
+            StartupOverride::Previous,
+            "the core that was just installed keeps the device as it was"
+        );
+
+        // 03:00:10 — it never starts, systemd exhausts the start limit, and
+        // the rollback unit puts the previous binary back. It consumes the
+        // marker on the way, which is what left the restored core with nothing
+        // to read.
+        let done = ritornello_updater::rollback::rollback(prefix, 1_030)
+            .unwrap()
+            .expect("a fresh marker authorises the rollback");
+        assert!(done.core_restored, "the fixture must really have rolled the core back");
+        assert!(
+            ritornello_updater::marker::read(prefix).is_none(),
+            "the authorisation is consumed exactly once — that part was always right"
+        );
+
+        // 03:00:11 — the restored core boots. Startup is `on` by default, and
+        // the device was asleep.
+        assert_eq!(
+            startup_instruction(prefix, 1_031),
+            StartupOverride::Previous,
+            "the core the rollback put back must not wake a device that was in standby"
+        );
     }
 
-    /// No marker at all: the ordinary boot, and the setting decides.
+    /// No marker and no report: the ordinary boot, and the setting decides.
     #[test]
-    fn a_directory_with_no_marker_leaves_the_setting_alone() {
+    fn a_directory_with_neither_file_leaves_the_setting_alone() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(startup_instruction(dir.path(), 1_002), StartupOverride::AsConfigured);
+    }
+
+    /// **A plugin gesture arms no rollback**, driven through a real `apply`
+    /// and a real `rollback` from the core's own side of the boundary.
+    ///
+    /// A plugin runs in a process of its own and cannot crash-loop the core.
+    /// Before this, the privileged binary armed the net for every apply, so
+    /// any unrelated core start-limit failure inside the ten-minute window
+    /// deleted a just-installed plugin binary — undoing a gesture nobody
+    /// asked to undo, and leaving the real cause alone.
+    #[test]
+    fn a_plugin_gesture_arms_no_rollback_and_an_unrelated_crash_undoes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path();
+        let staging = prefix.join("staging");
+        let installed = plugins_dir(prefix).join("ritornello-plugin-mpd");
+        std::fs::create_dir_all(plugins_dir(prefix)).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("staged-plugin-mpd"), b"the new mpd").unwrap();
+
+        let applied = ritornello_updater::apply::apply(
+            prefix,
+            &staging,
+            &Request {
+                format: REQUEST_FORMAT,
+                actions: vec![Action::PlacePlugin {
+                    file: "ritornello-plugin-mpd".to_string(),
+                    staged: "staged-plugin-mpd".to_string(),
+                }],
+            },
+        )
+        .unwrap();
+        assert!(!applied.core_replaced, "the fixture must be a plugin-only apply");
+        assert!(installed.exists(), "and it must really have placed the binary");
+
+        ritornello_updater::marker::arm(prefix, &applied, 1_000).unwrap();
+        assert!(
+            ritornello_updater::marker::read(prefix).is_none(),
+            "a plugin gesture must leave no authorisation to roll the device back"
+        );
+        assert!(
+            ritornello_updater::rollback::rollback(prefix, 1_030).unwrap().is_none(),
+            "so an unrelated crash loop finds nothing to undo"
+        );
+        assert!(installed.exists(), "the plugin the operator installed is still there");
+        assert_eq!(
+            startup_instruction(prefix, 1_031),
+            StartupOverride::AsConfigured,
+            "and a boot after a plugin gesture is an ordinary boot, which reads the setting"
+        );
     }
 
     /// **Why the core is exempt from `installable_from_ui`**, pinned rather

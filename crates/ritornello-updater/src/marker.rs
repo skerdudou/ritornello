@@ -1,20 +1,40 @@
-//! One marker file, two meanings — and that is a design decision, not a
-//! shortcut.
+//! One dated file per restarting event — and there are **two** events, which
+//! is a correction of what this module used to claim.
 //!
-//! While it is fresh, it says both:
+//! While it is fresh, this marker says both:
 //!
 //! 1. **restart without changing what the player was doing.** An install at
 //!    3 a.m. must not wake the active source and start playing, which is what
 //!    the startup power setting would otherwise do;
-//! 2. **a crash loop right now is attributable to this install**, so the
-//!    rollback unit may act. Three months later, an unrelated crash loop finds
-//!    a stale marker and nothing happens.
+//! 2. **a crash loop right now is attributable to this core replacement**, so
+//!    the rollback unit may act. Three months later, an unrelated crash loop
+//!    finds a stale marker and nothing happens.
 //!
-//! Deriving both from one dated file is what removes every synchronisation
-//! problem the alternative had: no file for the core to delete, no ownership
-//! to hand over, and **no race between the core that crashes and the rollback
-//! that repairs** — the reverted core finds the instruction even if the broken
-//! one had already read it.
+//! **The second meaning is consumed and the first is not, so they cannot both
+//! live in one file.** `rollback::rollback` deletes this marker before it
+//! restarts the core it has just put back — deliberately, because an
+//! authorisation that survived would let a second `OnFailure=` roll back
+//! twice. This module used to claim the opposite ("no race between the core
+//! that crashes and the rollback that repairs — the reverted core finds the
+//! instruction even if the broken one had already read it"), and that sentence
+//! was false: the reverted core found nothing, read the Startup setting
+//! instead, and woke a device that had been asleep — the exact
+//! three-in-the-morning failure this whole mechanism exists to prevent.
+//!
+//! So the instruction the **restored** core needs is carried by the other
+//! dated file, the one the rollback writes and never deletes:
+//! `rollback::Report`, whose `at_unix_s` is the moment of the rollback.
+//! `is_fresh` here and `rollback::is_fresh` share one window through
+//! `within_window`, and the core's `startup_override` reads both. One file per
+//! restarting event, each read by the process that event started.
+//!
+//! **Armed only by a core replacement.** `arm` writes this file when the apply
+//! replaced the core and *clears* it otherwise. A plugin runs in a process of
+//! its own and cannot crash-loop the core, so a plugin gesture must never
+//! point the rollback net at its own backup manifest: any unrelated core
+//! start-limit failure inside the window would otherwise delete a
+//! just-installed plugin binary, or put back a just-uninstalled one, and leave
+//! the real cause untouched.
 
 use crate::apply::{write_atomic, Applied};
 use serde::{Deserialize, Serialize};
@@ -60,10 +80,23 @@ pub fn marker_path(prefix: &Path) -> PathBuf {
     prefix.join("var/lib/ritornello-update/pending.json")
 }
 
+/// Is a dated file written at `at_unix_s` still describing the restart this
+/// boot is part of?
+///
+/// Shared with `rollback::is_fresh` rather than copied: the two files answer
+/// the same question for the two halves of the same event — an install's
+/// restart and the rollback's — and a window that drifted between them would
+/// make one of the two halves wake the device.
+///
+/// A clock that went backwards reads as fresh: see the module documentation.
+pub fn within_window(at_unix_s: u64, now_unix_s: u64) -> bool {
+    now_unix_s < at_unix_s || now_unix_s - at_unix_s <= MARKER_WINDOW_S
+}
+
 /// Pure, and therefore tested. See the module documentation for why a clock
 /// that went backwards reads as fresh.
 pub fn is_fresh(marker: &Marker, now_unix_s: u64) -> bool {
-    now_unix_s < marker.at_unix_s || now_unix_s - marker.at_unix_s <= MARKER_WINDOW_S
+    within_window(marker.at_unix_s, now_unix_s)
 }
 
 /// Written through `apply::write_atomic`: a marker truncated by a power cut
@@ -92,6 +125,29 @@ pub fn write(prefix: &Path, applied: &Applied, now_unix_s: u64) -> std::io::Resu
 pub fn read(prefix: &Path) -> Option<Marker> {
     let text = std::fs::read_to_string(marker_path(prefix)).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// Arms the core's rollback net for what this apply did — **or disarms it**.
+///
+/// The whole of the "a plugin gesture must not arm the core's rollback"
+/// decision, in one branch, in the library rather than in the binary, so that
+/// a test can drive it.
+///
+/// The `clear` in the first arm is not tidiness. The marker authorises rolling
+/// back **the backup manifest as it now stands**, and every apply rewrites
+/// that manifest from scratch. A still-fresh marker from an earlier core
+/// replacement, left standing over a plugin gesture's manifest, would mean an
+/// unrelated crash loop undoing the plugin gesture and *not* putting the core
+/// back — the worst of both. The cost is named and accepted: a core update
+/// that started successfully and is followed by a plugin gesture inside the
+/// same ten minutes loses its rollback net. A core that got far enough to
+/// serve that gesture has already contradicted the attribution the window
+/// stands for.
+pub fn arm(prefix: &Path, applied: &Applied, now_unix_s: u64) -> std::io::Result<()> {
+    if !applied.core_replaced {
+        return clear(prefix);
+    }
+    write(prefix, applied, now_unix_s)
 }
 
 pub fn clear(prefix: &Path) -> std::io::Result<()> {

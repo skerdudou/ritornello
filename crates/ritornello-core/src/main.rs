@@ -412,23 +412,42 @@ fn status_for_spawn_failure(name: &str, err: &anyhow::Error) -> PluginStatus {
     }
 }
 
-/// What the rollback unit left behind, if anything.
+/// The rollback note the card shows — dropped once a later core update has
+/// superseded it.
 ///
-/// `None` for an absent, unreadable or corrupt file, exactly as
-/// `marker::read` answers for its own: the page has a correct thing to show
-/// without it — nothing — and a rollback report that cannot be parsed says
-/// less than no report at all. **Never deleted**: it is the only trace of a
-/// nocturnal rollback, and the next rollback overwrites it.
-fn read_rollback_report(prefix: &Path) -> Option<ritornello_updater::rollback::Report> {
-    let path = ritornello_updater::rollback::report_path(prefix);
-    let text = std::fs::read_to_string(&path).ok()?;
-    match serde_json::from_str(&text) {
-        Ok(report) => Some(report),
-        Err(e) => {
-            tracing::warn!("ignoring {}: {e}", path.display());
-            None
-        }
+/// The report itself is never deleted (`update::read_rollback_report` says
+/// why), so without this the sentence "the update did not start and the
+/// previous version was put back" is shown on **every** boot for the life of
+/// the device: a rollback in March was still being announced in September,
+/// under a card reading "Up to date".
+///
+/// What supersedes it is the one event that makes it untrue: a core the
+/// updater placed **and the device kept**. That is exactly
+/// `placed[core].version == running` — the same equality `core_archive_note`
+/// uses, read the other way round, and the two are complementary by
+/// construction: after a rollback the placed version is the one that failed
+/// and the running one is the one restored, so the rollback note is shown and
+/// the archive note is not.
+///
+/// It is deliberately **not** gated on freshness. A device that was rolled
+/// back and never updated again is still running the reverted version, and the
+/// last thing that happened to it is still the rollback; hiding that after ten
+/// minutes would lose the only trace a nocturnal rollback leaves.
+/// `docs/interface.md` now says this, rather than "for as long as this run of
+/// the core lasts".
+fn rollback_note(
+    report: Option<ritornello_updater::rollback::Report>,
+    placed: &update::placed::Placed,
+    running: &str,
+) -> Option<ritornello_updater::rollback::Report> {
+    let report = report?;
+    if placed.get(update::CORE).is_some_and(|p| p.version == running) {
+        tracing::info!(
+            "a rollback was reported, but the running core {running} is one the updater placed and this device kept: the note is superseded"
+        );
+        return None;
     }
+    Some(report)
 }
 
 /// What the last core update left out — but only while it still describes the
@@ -521,6 +540,50 @@ mod core_archive_note_tests {
     #[test]
     fn a_note_left_by_a_previous_core_is_not_shown_after_one_placed_by_hand() {
         assert_eq!(core_archive_note(&memory("0.3.0", Some(entries())), "0.9.0"), None);
+    }
+
+    fn a_rollback_at(at: u64) -> ritornello_updater::rollback::Report {
+        ritornello_updater::rollback::Report {
+            at_unix_s: at,
+            restored: vec!["core".into()],
+            failed: vec![],
+            core_restored: true,
+        }
+    }
+
+    /// **The note used to outlive its own subject.** The report is never
+    /// deleted, so the sentence "the update did not start and the previous
+    /// version was put back" was shown on every boot for the life of the
+    /// device — a rollback in March still announced in September, under a card
+    /// reading "Up to date".
+    ///
+    /// The two rows below are the same report read against two devices, and
+    /// together they are the whole rule: while the running core is *not* the
+    /// one the updater placed, the rollback is still the last thing that
+    /// happened to it; once a later core update has been placed and kept, it
+    /// is not.
+    #[test]
+    fn a_rollback_is_announced_until_a_core_update_supersedes_it() {
+        assert!(
+            rollback_note(Some(a_rollback_at(1_000)), &memory("0.4.1", None), "0.2.0").is_some(),
+            "0.4.1 was placed and 0.2.0 is running: the device is still living with the rollback"
+        );
+        assert!(
+            rollback_note(Some(a_rollback_at(1_000)), &memory("0.5.0", None), "0.5.0").is_none(),
+            "a later core update was placed and kept, so the old rollback is no longer what happened last"
+        );
+    }
+
+    /// No report, nothing to show — and a report on a device this updater
+    /// never placed a core on is still shown, because nothing has superseded
+    /// it. A hand-deployed device that was once rolled back is exactly that.
+    #[test]
+    fn a_rollback_note_needs_a_report_and_survives_an_empty_memory() {
+        assert!(rollback_note(None, &memory("0.4.1", None), "0.2.0").is_none());
+        assert!(
+            rollback_note(Some(a_rollback_at(1_000)), &placed::Placed::new(), "0.2.0").is_some(),
+            "nothing the updater placed means nothing has superseded the rollback"
+        );
     }
 
     /// A device that has never updated itself: nothing to say, and nothing
@@ -2126,15 +2189,25 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION"),
         &[],
     )));
-    // The rollback unit's own report, read once at startup and never erased:
-    // it is the only trace of a nocturnal rollback, and the next rollback
-    // overwrites it, which is enough. An absent file is the ordinary case.
-    update_state.write().await.last_rollback = read_rollback_report(Path::new("/"));
     // `state.json`'s own directory: the staging area is state, not
     // configuration, and the privileged binary reads it from exactly this
     // path.
     let staging_dir = update::download::staging_dir(
         state_path.parent().unwrap_or(Path::new("/var/lib/ritornello")),
+    );
+    // What the updater placed here, read once: it answers both the rollback
+    // note below and the core's archive note further down, which are the two
+    // halves of one question — is the core that is running the one the updater
+    // last put here?
+    let placed = update::placed::read(&staging_dir);
+    // The rollback unit's own report, read once at startup and never erased:
+    // it is the only trace of a nocturnal rollback, and the next rollback
+    // overwrites it. An absent file is the ordinary case. Shown until a core
+    // update supersedes it — see `rollback_note`.
+    update_state.write().await.last_rollback = rollback_note(
+        update::read_rollback_report(Path::new("/")),
+        &placed,
+        env!("CARGO_PKG_VERSION"),
     );
     // The core's own archive note, read the same way and for the same reason
     // as the rollback report just above: `install_one` computed it in the
@@ -2142,9 +2215,7 @@ async fn main() -> Result<()> {
     // other door through which it could reach the row it belongs on. Shown
     // only while the version stamped beside it is this binary's own — see
     // `core_archive_note`.
-    if let Some(entries) =
-        core_archive_note(&update::placed::read(&staging_dir), env!("CARGO_PKG_VERSION"))
-    {
+    if let Some(entries) = core_archive_note(&placed, env!("CARGO_PKG_VERSION")) {
         let mut state = update_state.write().await;
         if let Some(core) =
             state.components.iter_mut().find(|c| c.kind == update::state::ComponentKind::Core)

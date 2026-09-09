@@ -46,8 +46,11 @@ fn do_apply() -> Result<()> {
         .with_context(|| format!("parsing {REQUEST}"))?;
     let applied = apply::apply(Path::new("/"), Path::new(STAGING), &request)
         .context("applying the update")?;
-    marker::write(Path::new("/"), &applied, now_unix_s())
-        .context("writing the pending marker")?;
+    // Arms the rollback net only if the core itself was replaced, and clears
+    // it otherwise — see `marker::arm`. A plugin gesture that armed it would
+    // have any unrelated core crash loop inside the window undo that gesture.
+    marker::arm(Path::new("/"), &applied, now_unix_s())
+        .context("arming the pending marker")?;
     // Named individually rather than counted: this line is what an operator
     // reads in the journal to know what actually moved.
     println!(
