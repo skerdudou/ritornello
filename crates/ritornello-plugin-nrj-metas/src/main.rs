@@ -27,7 +27,7 @@ mod table;
 
 use anyhow::Result;
 use live::Meta;
-use ritornello_plugin_sdk::{MetadataPlugin, Runtime};
+use ritornello_plugin_sdk::MetadataPlugin;
 use ritornello_proto::{CoverRef, Enrichment, NowPlaying};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -248,7 +248,7 @@ async fn main() -> Result<()> {
         table.stations.len(),
         table_path.display()
     );
-    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.metadata(NrjMetas::new(table))?.run().await
+    ritornello_plugin_sdk::declare_runtime!()?.metadata(NrjMetas::new(table))?.run().await
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ use crate::admin::RadioAdmin;
 use anyhow::Result;
 use config::Stations;
 use ritornello_i18n::Catalog;
-use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
+use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
 use ritornello_proto::{Preset, SourceAction};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -313,7 +313,7 @@ async fn main() -> Result<()> {
         countries: RwLock::new(Vec::new()),
         preset_count_tx,
     };
-    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.source(source)?.admin(admin)?.run().await
+    ritornello_plugin_sdk::declare_runtime!()?.source(source)?.admin(admin)?.run().await
 }
 
 #[cfg(test)]

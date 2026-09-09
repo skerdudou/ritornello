@@ -21,7 +21,7 @@ use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::roots::{RootKind, Roots};
 use ritornello_plugin_files::FILES_EN;
-use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
+use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
 use ritornello_proto::{Preset, SourceAction};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -1283,7 +1283,7 @@ async fn main() -> Result<()> {
         browse: Arc::new(Mutex::new(serde_json::json!({}))),
         preset_count_tx,
     };
-    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.source(source)?.admin(admin)?.run().await
+    ritornello_plugin_sdk::declare_runtime!()?.source(source)?.admin(admin)?.run().await
 }
 
 #[cfg(test)]

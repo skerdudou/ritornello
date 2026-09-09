@@ -182,6 +182,53 @@ pub fn installable_from_ui(entries: &[String]) -> bool {
     binaries == 1
 }
 
+/// True when the archive carries **its plugin binary and nothing else**.
+///
+/// The rule for a third-party archive, and it is strictly stronger than
+/// `installable_from_ui`: that one also allows `etc/ritornello/locales/`,
+/// `etc/ritornello/input-presets/`, an initial configuration, examples and a
+/// `plugins.toml.fragment` — all of which the **core** writes, unprivileged,
+/// with its own hands.
+///
+/// Only the binary, and this is where that is enforced rather than promised.
+/// The privileged side cannot write outside the plugins directory anyway, but
+/// the core CAN write `/etc/ritornello` — so without this check a third-party
+/// archive would be handed the operator's configuration directory by the one
+/// component allowed to write it. The fragment is refused for the same reason
+/// and a sharper one: a `[[plugin]]` block names an `exec` path, and appending
+/// one is asking the core to launch whatever path a stranger's archive chose.
+///
+/// A consequence worth stating rather than discovering: a third-party plugin
+/// can therefore only ever be **updated** from the UI, never freshly
+/// installed, because a fresh install is exactly the case that needs a
+/// fragment. That costs nothing in practice — a plugin is only ever known to
+/// be third-party because it ran and announced its repository, which means it
+/// was already declared by hand.
+pub fn only_its_own_binary(entries: &[String]) -> bool {
+    let mut binaries = 0;
+    for entry in entries {
+        // A directory entry describes no content, exactly as in
+        // `installable_from_ui`: `tar` writes them for the parents of what it
+        // packs, so judging on them would refuse every archive.
+        if entry.ends_with('/') {
+            continue;
+        }
+        let Some(rest) = entry.strip_prefix(PLUGINS_PREFIX) else {
+            return false;
+        };
+        // A nested path (`plugins/sub/evil`), or the doubled-separator shape
+        // (`plugins//x` strips to `/x`): the privileged side only ever forms
+        // one validated bare name directly under `plugins/`.
+        if rest.is_empty() || rest.contains('/') {
+            return false;
+        }
+        binaries += 1;
+    }
+    // Exactly one, not at least one: with two, the core would have to pick,
+    // and picking silently is how a wrong binary gets installed.
+    binaries == 1
+}
+
 /// What a **core** archive carries that `install_one` never places anywhere:
 /// everything outside the core binary and the two `etc/ritornello`
 /// subdirectories a release owns. In practice this is the privileged

@@ -16,7 +16,7 @@ use crate::bindings::Bindings;
 use crate::devices::Hub;
 use anyhow::Result;
 use ritornello_i18n::Catalog;
-use ritornello_plugin_sdk::{InputPlugin, Runtime};
+use ritornello_plugin_sdk::InputPlugin;
 use ritornello_proto::InputMessage;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
         catalog,
         locales_root,
     };
-    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.input(EvdevInput { rx })?.admin(admin)?.run().await
+    ritornello_plugin_sdk::declare_runtime!()?.input(EvdevInput { rx })?.admin(admin)?.run().await
 }
 
 #[cfg(test)]

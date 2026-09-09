@@ -31,7 +31,7 @@ mod placeholder;
 use anyhow::Result;
 use musicbrainz::DiscInfo;
 use ritornello_i18n::Catalog;
-use ritornello_plugin_sdk::{MetadataPlugin, Runtime};
+use ritornello_plugin_sdk::MetadataPlugin;
 use ritornello_proto::{CoverRef, Enrichment, NowPlaying};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1243,7 +1243,7 @@ async fn main() -> Result<()> {
         MUSICBRAINZ_EN,
     )));
 
-    Runtime::from_args(env!("CARGO_PKG_VERSION"))?
+    ritornello_plugin_sdk::declare_runtime!()?
         .metadata(MusicBrainzPlugin::new(store.clone(), state_path.clone()))?
         .admin(admin::MusicBrainzAdmin::new(store, state_path, catalog, locales_root))?
         .run()

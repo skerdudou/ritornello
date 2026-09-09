@@ -931,6 +931,7 @@ mod tests {
                     ui_version: None,
                     protocol: ritornello_proto::PROTOCOL_VERSION,
                     version: None,
+                    repository: None,
                 },
             );
         }
@@ -944,6 +945,7 @@ mod tests {
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,
                 version: None,
+                repository: None,
             },
         );
         let g = Gathered { announcements, ..Default::default() };

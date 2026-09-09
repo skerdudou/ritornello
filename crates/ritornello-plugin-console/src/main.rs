@@ -3,7 +3,7 @@ mod display;
 use anyhow::Result;
 use async_trait::async_trait;
 use display::ConsoleDisplay;
-use ritornello_plugin_sdk::{DisplayPlugin, Runtime};
+use ritornello_plugin_sdk::DisplayPlugin;
 use ritornello_proto::PlayerState;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     let display = Arc::new(Mutex::new(ConsoleDisplay::open(&tty)?));
     let last = Arc::new(Mutex::new(None));
     tokio::spawn(tick_clock(display.clone(), last.clone()));
-    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.display(ConsolePlugin { display, last })?.run().await
+    ritornello_plugin_sdk::declare_runtime!()?.display(ConsolePlugin { display, last })?.run().await
 }
 
 #[cfg(test)]

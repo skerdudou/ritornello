@@ -57,6 +57,16 @@ pub struct Runtime {
     /// because the whole workspace shares one number — a coincidence that
     /// would turn into the announcement lying the day they diverge.
     version: &'static str,
+    /// The plugin crate's own `repository` key, handed in by the caller for
+    /// exactly the reason `version` is: `env!` — here `option_env!` — expands
+    /// where it is written, and written in this file it would report the
+    /// SDK's.
+    ///
+    /// Relayed verbatim, a full URL and not an `owner/repo` pair: this crate
+    /// depends only on `ritornello-proto`, so it has no path to the core's
+    /// `parse_repo_url` and no business inventing a second one. The core
+    /// interprets what the manifest says; the SDK only carries it.
+    repository: Option<&'static str>,
 }
 
 /// Fingerprint of a plugin's UI assets.
@@ -78,18 +88,38 @@ pub fn ui_fingerprint(plugin: &impl AdminPlugin) -> String {
 
 impl Runtime {
     /// Builds a `Runtime` from the arguments passed by the core.
-    pub fn from_args(version: &'static str) -> Result<Self> {
+    ///
+    /// Called through [`crate::declare_runtime!`] and not by hand: the macro
+    /// is what expands the two `env!` at the plugin's own call site, which is
+    /// the only place they mean the plugin.
+    pub fn from_args(version: &'static str, repository: Option<&'static str>) -> Result<Self> {
         Ok(Self::new(
             crate::plugin_name(),
             crate::register_socket(),
             crate::socket_prefix(),
             version,
+            repository,
         ))
     }
 
     /// Useful for tests, which don't go through `std::env::args`.
-    pub fn new(name: String, register: PathBuf, prefix: PathBuf, version: &'static str) -> Self {
-        Self { name, register, prefix, halves: Vec::new(), admin: None, ui_version: None, version }
+    pub fn new(
+        name: String,
+        register: PathBuf,
+        prefix: PathBuf,
+        version: &'static str,
+        repository: Option<&'static str>,
+    ) -> Self {
+        Self {
+            name,
+            register,
+            prefix,
+            halves: Vec::new(),
+            admin: None,
+            ui_version: None,
+            version,
+            repository,
+        }
     }
 
     pub fn source(mut self, plugin: impl SourcePlugin) -> Result<Self> {
@@ -162,6 +192,9 @@ impl Runtime {
             ui_version: self.ui_version.clone(),
             protocol: ritornello_proto::PROTOCOL_VERSION,
             version: Some(self.version.to_string()),
+            // Derived like the rest of this line: the caller handed in what
+            // its own manifest says, and nothing here can invent one.
+            repository: self.repository.map(str::to_string),
         }
     }
 
@@ -292,7 +325,7 @@ mod tests {
 
         let (_tx, rx) = tokio::sync::mpsc::channel(4);
         let received = Arc::new(Mutex::new(Vec::new()));
-        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone(), "0.0.0-test")
+        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone(), "0.0.0-test", None)
             .display(PlaceholderDisplay { received })
             .unwrap()
             .input(PlaceholderInput { rx })
@@ -323,7 +356,7 @@ mod tests {
             let listener = UnixListener::bind(&register).unwrap();
             let prefix = dir.path().join("display");
 
-            let rt = Runtime::new("display".into(), register.clone(), prefix.clone(), "0.0.0-test");
+            let rt = Runtime::new("display".into(), register.clone(), prefix.clone(), "0.0.0-test", None);
             let rt = if plugin == 0 {
                 // Does not override `wants_covers`: the default body decides.
                 rt.display(PlaceholderDisplay { received: Arc::new(Mutex::new(Vec::new())) })
@@ -353,7 +386,7 @@ mod tests {
         let prefix = dir.path().join("input");
 
         let (_tx, rx) = tokio::sync::mpsc::channel(4);
-        let rt = Runtime::new("input".into(), register.clone(), prefix.clone(), "0.0.0-test")
+        let rt = Runtime::new("input".into(), register.clone(), prefix.clone(), "0.0.0-test", None)
             .input(PlaceholderInput { rx })
             .unwrap();
         tokio::spawn(async move { rt.run().await.unwrap() });
@@ -374,7 +407,7 @@ mod tests {
 
         let (_tx, rx) = tokio::sync::mpsc::channel(4);
         let received = Arc::new(Mutex::new(Vec::new()));
-        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone(), "0.0.0-test")
+        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone(), "0.0.0-test", None)
             .display(PlaceholderDisplay { received })
             .unwrap()
             .input(PlaceholderInput { rx })
@@ -401,7 +434,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let received = Arc::new(Mutex::new(Vec::new()));
         let received_test = received.clone();
-        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone(), "0.0.0-test")
+        let rt = Runtime::new("mpd".into(), register.clone(), prefix.clone(), "0.0.0-test", None)
             .display(PlaceholderDisplay { received })
             .unwrap()
             .input(PlaceholderInput { rx })
@@ -438,20 +471,48 @@ mod tests {
     }
 
     #[test]
-    fn the_runtime_announces_the_protocol_and_the_version_it_was_given() {
+    fn the_runtime_announces_the_protocol_the_version_and_the_repository_it_was_given() {
         // Written from what the Runtime was constructed with, not from a
-        // constant re-read here: the point of the parameter is that the
-        // version comes from the plugin's crate, so a test that recomputed it
-        // locally would prove nothing.
+        // constant re-read here: the point of the parameters is that both come
+        // from the plugin's crate, so a test that recomputed either locally
+        // would prove nothing. Hence values that are deliberately **not** this
+        // workspace's — `9.9.9` is no version this repository ever had, and
+        // `someone/their-plugin` is no repository of ours.
         let r = Runtime::new(
             "radio".into(),
             std::path::PathBuf::from("/tmp/register.sock"),
             std::path::PathBuf::from("/tmp/radio"),
             "9.9.9",
+            Some("https://github.com/someone/their-plugin"),
         );
         let a = r.announcement();
         assert_eq!(a.protocol, ritornello_proto::PROTOCOL_VERSION);
         assert_eq!(a.version.as_deref(), Some("9.9.9"), "the version must be the plugin's, verbatim");
+        assert_eq!(
+            a.repository.as_deref(),
+            Some("https://github.com/someone/their-plugin"),
+            "the repository must be the plugin's manifest URL, verbatim and unparsed"
+        );
+    }
+
+    /// A crate whose manifest carries no `repository` key — what a minimal
+    /// third-party plugin looks like, and why `declare_runtime!` expands
+    /// `option_env!` rather than `env!`.
+    ///
+    /// Its own test rather than a second assertion above: `None` and
+    /// `Some(url)` are the two answers the core branches on, and a fixture
+    /// that only ever saw one of them could not tell a relayed field from a
+    /// hard-coded one.
+    #[test]
+    fn a_plugin_whose_manifest_names_no_repository_announces_none() {
+        let r = Runtime::new(
+            "minimal".into(),
+            std::path::PathBuf::from("/tmp/register.sock"),
+            std::path::PathBuf::from("/tmp/minimal"),
+            "1.0.0",
+            None,
+        );
+        assert_eq!(r.announcement().repository, None);
     }
 
     #[test]

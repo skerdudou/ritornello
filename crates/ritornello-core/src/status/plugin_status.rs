@@ -109,6 +109,18 @@ pub struct PluginStatus {
     /// Additive: absent from the JSON when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Where this plugin's releases live, as its announcement gave it —
+    /// verbatim, unparsed, a full URL where the manifest holds one.
+    ///
+    /// Relayed and never recomputed, for the same reason as `version`: the
+    /// binary is the only thing that knows. A plugin announcing **our**
+    /// repository is one of ours; anything else is third-party, and its own
+    /// repository decides its version. `update::release::origin` is what
+    /// makes that reading, in one place.
+    ///
+    /// Additive: absent from the JSON when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     /// Protocol this binary announced, present **only** when it differs from
     /// the core's.
     ///
@@ -143,6 +155,7 @@ impl PluginStatus {
             busy: false,
             ui_version: None,
             version: None,
+            repository: None,
             incompatible: None,
         }
     }
@@ -166,6 +179,7 @@ impl PluginStatus {
             busy: false,
             ui_version: None,
             version: None,
+            repository: None,
             incompatible: None,
         }
     }
@@ -210,6 +224,7 @@ impl PluginStatus {
             busy: false,
             ui_version: None,
             version: None,
+            repository: None,
             incompatible: None,
         }
     }
@@ -230,6 +245,7 @@ impl PluginStatus {
             busy: false,
             ui_version: None,
             version: None,
+            repository: None,
             incompatible: None,
         }
     }
@@ -253,6 +269,7 @@ impl PluginStatus {
             busy: false,
             ui_version: None,
             version: None,
+            repository: None,
             incompatible: Some(found),
         }
     }

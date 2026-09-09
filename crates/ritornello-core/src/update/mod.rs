@@ -21,17 +21,19 @@ pub mod routes;
 
 use crate::plugins::PluginManifest;
 use crate::status::{PluginAction, PluginOrder, StatusState};
-use crate::update::archive::{core_not_installed, installable_from_ui, DECOMPRESSED_MAX};
+use crate::update::archive::{
+    core_not_installed, installable_from_ui, only_its_own_binary, DECOMPRESSED_MAX,
+};
 use crate::update::download::{
     client, digest_hex, enough_room, fetch_capped, fetch_text, DownloadError, COMPRESSED_MAX,
 };
 use crate::update::release::{
-    download_name, fold, parse_checksums, parse_releases, releases_url, Offer, Published,
-    ReleasesError, ARCH, REPO,
+    download_name, fold, origin, parse_checksums, parse_releases, releases_url, releases_url_for,
+    Offer, Origin, Published, ReleasesError, ARCH, REPO,
 };
 use crate::update::state::{
     component_offers, Availability, CheckOutcome, ComponentKind, ComponentOffer, Installed,
-    UpdateState,
+    ThirdPartyOffer, UpdateState,
 };
 use ritornello_i18n::Catalog;
 use ritornello_updater::request::{Action, Request, REQUEST_FORMAT};
@@ -179,6 +181,66 @@ fn automatic_install_list(components: &[ComponentOffer]) -> Vec<String> {
         .collect()
 }
 
+/// How many third-party repositories one check is allowed to query.
+///
+/// Without a ceiling, ten third-party plugins make ten requests a day to ten
+/// different servers, and a single slow host blocks the whole check behind its
+/// own timeout — a check that never answers leaves `busy` set and the buttons
+/// disabled. Four covers the real use and bounds the worst case; the plugins
+/// past it are simply not checked this time, which reads as `Unknown` and
+/// never as "up to date".
+const THIRD_PARTY_MAX: usize = 4;
+
+/// The third-party repositories this check will query: `(plugin name, `owner/repo`)`.
+///
+/// Pure, and separated from the requests it feeds, because the ceiling is the
+/// one thing about this list that can be wrong without any I/O being involved.
+///
+/// **In `plugins.toml` order and truncated, never sampled**: the order is
+/// already the priority order this product uses everywhere else, and a stable
+/// prefix means the same four plugins are checked every day rather than a
+/// different four each time.
+///
+/// An `Origin::Foreign` is deliberately absent: there is no GitHub endpoint to
+/// address for it, so it must not consume one of the four either.
+fn third_party_targets(installed: &[Installed]) -> Vec<(String, String)> {
+    installed
+        .iter()
+        .filter_map(|p| match origin(p.repository.as_deref()) {
+            Origin::ThirdParty(repo) => Some((p.name.clone(), repo)),
+            Origin::Unknown | Origin::Ours | Origin::Foreign(_) => None,
+        })
+        .take(THIRD_PARTY_MAX)
+        .collect()
+}
+
+/// Which rule an archive must pass to be installed from the UI.
+///
+/// One function for the three answers, because they are one decision made
+/// once, at one call site in `install_one`:
+///
+/// - the **core** is exempt (task 12, ruling 49): its archive always carries
+///   two systemd units, polkit rules and the privileged installer, so the
+///   plugin rule would refuse every core update there will ever be. Root can
+///   form the core binary's path; the units and the rules are listed for the
+///   page and written by nobody here;
+/// - one of **ours** is judged by `installable_from_ui`, which allows the
+///   locale catalogs, input presets, examples and the `[[plugin]]` block that
+///   the core itself writes;
+/// - a **third-party** component gets `only_its_own_binary`, which allows none
+///   of that. **No third-party component is ever exempt**, and the core's
+///   exemption must never be generalised into one: it is a statement about one
+///   archive built in this repository, not about archives that carry units.
+fn archive_allowed(is_core: bool, third_party: bool, entries: &[String]) -> bool {
+    if is_core {
+        return true;
+    }
+    if third_party {
+        return only_its_own_binary(entries);
+    }
+    installable_from_ui(entries)
+}
+
 /// Carries a remembered "cannot be installed from here" across a check.
 ///
 /// Installability is read off the archive, so it is only ever learnt at the
@@ -285,6 +347,15 @@ enum Refusal {
     NoDigest,
     DigestMismatch,
     NeedsManualStep,
+    /// A **third-party** archive carrying anything besides its own binary: a
+    /// unit, a polkit rule, a nested path, a locale catalog, an initial
+    /// configuration, a `[[plugin]]` block, a second binary.
+    ///
+    /// Its own variant and not `NeedsManualStep`, because the two sentences
+    /// say different things to different people: that one tells the operator
+    /// to read our release notes, and this one names a rule a stranger's
+    /// archive broke, which no release note of ours will explain.
+    ThirdPartyArchive,
     /// A plugin the device does not declare, whose archive carries no
     /// `[[plugin]]` block. Installing it would place a binary nothing ever
     /// launches — the silent failure this repository's own documentation
@@ -312,6 +383,9 @@ impl std::fmt::Display for Refusal {
             Self::NeedsManualStep => {
                 write!(f, "the archive carries something the core may not install")
             }
+            Self::ThirdPartyArchive => {
+                write!(f, "a third-party archive may carry nothing but its own binary")
+            }
             Self::NoFragment => write!(f, "the archive carries no plugins.toml block"),
             Self::Download(d) | Self::Prepare(d) | Self::Privileged(d) => write!(f, "{d}"),
         }
@@ -331,6 +405,7 @@ fn refusal_message(catalog: &Catalog, component: &str, why: &Refusal) -> String 
         Refusal::NoDigest => ("update_no_digest", None),
         Refusal::DigestMismatch => ("update_digest_mismatch", None),
         Refusal::NeedsManualStep => ("update_needs_manual_step", None),
+        Refusal::ThirdPartyArchive => ("update_third_party_archive", None),
         Refusal::NoFragment => ("update_no_fragment", None),
         Refusal::Download(d) => ("update_download_failed", Some(d)),
         Refusal::Prepare(d) => ("update_install_failed", Some(d)),
@@ -610,6 +685,23 @@ struct Placement {
     fresh: bool,
 }
 
+/// What one check learnt, kept whole so an install that follows it asks GitHub
+/// nothing a second time.
+///
+/// **Two lists and not one concatenated**, and that separation is the security
+/// property rather than tidiness: a third-party plugin's name is chosen by its
+/// own author and may collide with an official one, so a single list keyed by
+/// name could hand a third-party row — or a third-party install — the official
+/// archive of that name, silently swapping what the operator installed for
+/// something else.
+struct Checked {
+    /// The fold of **our** release list.
+    ours: Vec<Published>,
+    /// What each third-party plugin's own repository publishes for it, at most
+    /// `THIRD_PARTY_MAX` of them.
+    theirs: Vec<ThirdPartyOffer>,
+}
+
 /// Everything the worker needs, and nothing it could read twice.
 ///
 /// A struct rather than nine parameters threaded through five async
@@ -734,9 +826,11 @@ impl Worker {
                     declared: true,
                     binary_present: Path::new(&p.exec).exists(),
                     version: line.and_then(|l| l.version.clone()),
-                    // Relayed from the announcement in Task 17; until then no
-                    // plugin can declare a repository, so none is third-party.
-                    third_party_repo: None,
+                    // Relayed from the announcement, verbatim and unparsed,
+                    // for the same reason as `version`: the binary is the only
+                    // thing that knows. `release::origin` is what reads it,
+                    // once, wherever the answer is needed.
+                    repository: line.and_then(|l| l.repository.clone()),
                 }
             })
             .collect();
@@ -747,8 +841,65 @@ impl Worker {
                 declared: false,
                 binary_present: true,
                 version: None,
-                third_party_repo: None,
+                // A binary nothing declares has never been launched by this
+                // core, so it has announced nothing — there is no repository
+                // to read, and inventing one would make a stranger's file
+                // official.
+                repository: None,
             });
+        }
+        out
+    }
+
+    /// What each third-party plugin's own repository publishes for it.
+    ///
+    /// At most `THIRD_PARTY_MAX` requests, decided by `third_party_targets`
+    /// before a single socket is opened. Each answer goes through the **same**
+    /// `parse_releases` and `fold` as our own: drafts and prereleases dropped
+    /// by one rule, the newest archive for this architecture picked by one
+    /// rule, and the version read off the asset name rather than off the tag —
+    /// which is what makes an offered version the version of the archive that
+    /// would actually be installed, rather than a number nothing can deliver.
+    ///
+    /// A repository that answers badly, or that publishes nothing for this
+    /// architecture and this plugin name, simply yields no offer: its row
+    /// stays `Unknown`, which says "nothing is known" and never "up to date".
+    /// It is never a failure of the whole check — a stranger's server being
+    /// down must not blank out the core's own row.
+    async fn third_party_offers(&self, client: &reqwest::Client, installed: &[Installed]) -> Vec<ThirdPartyOffer> {
+        let targets = third_party_targets(installed);
+        let mut out = Vec::with_capacity(targets.len());
+        for (name, repo) in targets {
+            let url = releases_url_for(&repo);
+            let (status, body) = match fetch_text(client, &url).await {
+                Ok(answer) => answer,
+                Err(e) => {
+                    tracing::warn!("update: {repo} (for the third-party plugin {name}): {e}");
+                    continue;
+                }
+            };
+            if status != 200 {
+                tracing::warn!("update: {repo} answered HTTP {status} for {name}");
+                continue;
+            }
+            let releases = match parse_releases(&body) {
+                Ok(releases) => releases,
+                Err(e) => {
+                    tracing::warn!("update: {repo} published nothing usable for {name}: {e:?}");
+                    continue;
+                }
+            };
+            // The asset must be named for **this plugin**: a repository that
+            // publishes an archive under another name has published nothing
+            // for the binary sitting on this device.
+            let Some(published) = fold(&releases, ARCH)
+                .into_iter()
+                .find(|p| matches!(&p.offer, Offer::Plugin(n) if *n == name))
+            else {
+                tracing::info!("update: {repo} publishes no {ARCH} archive named for {name}");
+                continue;
+            };
+            out.push(ThirdPartyOffer { name, published });
         }
         out
     }
@@ -760,7 +911,7 @@ impl Worker {
     ///
     /// Returns the fold so a scheduled run can install from it without asking
     /// GitHub the same question twice.
-    async fn check(&self, client: &reqwest::Client) -> Option<Vec<Published>> {
+    async fn check(&self, client: &reqwest::Client) -> Option<Checked> {
         self.set_busy(Some(self.message("update_checking").await)).await;
         let (status, body) = match fetch_text(client, &releases_url()).await {
             Ok(answer) => answer,
@@ -798,7 +949,11 @@ impl Worker {
                 // "0.3.0 available" from a previous check would be a claim
                 // about a release that is no longer there.
                 let installed = self.installed_when_settled().await;
-                let mut components = component_offers(self.core_version, &[], &installed);
+                // Our repository publishing nothing says nothing about a
+                // stranger's, so the third-party rows are still answered.
+                let theirs = self.third_party_offers(client, &installed).await;
+                let mut components =
+                    component_offers(self.core_version, &[], &theirs, &installed);
                 let mut state = self.state.write().await;
                 carry_core_notes(&state.components, &mut components);
                 state.outcome = CheckOutcome::NoRelease;
@@ -819,7 +974,9 @@ impl Worker {
         };
         let published = fold(&releases, ARCH);
         let installed = self.installed_when_settled().await;
-        let mut components = component_offers(self.core_version, &published, &installed);
+        let theirs = self.third_party_offers(client, &installed).await;
+        let mut components =
+            component_offers(self.core_version, &published, &theirs, &installed);
         let core = published.iter().find(|p| p.offer == Offer::Core);
         let mut state = self.state.write().await;
         carry_installable(&state.components, &mut components);
@@ -829,7 +986,7 @@ impl Worker {
         state.release_url = core.map(|p| release_page(&p.release_tag));
         state.last_check_unix_s = Some(now_unix_s());
         state.components = components;
-        Some(published)
+        Some(Checked { ours: published, theirs })
     }
 
     /// Installs the named components, plugins first and the core last.
@@ -838,24 +995,35 @@ impl Worker {
     /// attempted: one refusal should say one thing, not cancel a gesture the
     /// operator asked for on five rows. Only the **first** cause reaches the
     /// page, which is the honest limit of a payload with one message field.
-    async fn install(&self, client: &reqwest::Client, published: &[Published], names: &[String]) {
+    async fn install(&self, client: &reqwest::Client, checked: &Checked, names: &[String]) {
         let mut first_failure: Option<String> = None;
         // `(component, version)` per plugin actually placed. The core is never
         // in here: it exits at the end of its own install and this function
         // has already returned.
         let mut placed: Vec<Placement> = Vec::new();
         for name in install_order(names) {
-            let Some(offered) = published.iter().find(|p| carries(p, &name)) else {
-                // A name this release does not carry: a third-party plugin, or
-                // a component that dropped out of the hundred-release window.
-                // Nothing to install and nothing to say to the page — the row
-                // already reads `Unknown`.
-                tracing::warn!("update: nothing published for {name}, skipping it");
-                continue;
+            // A third-party plugin's own repository answers first, and that
+            // order is the decision, not a fallback: its name is free-form and
+            // may collide with an official one, so reading our release first
+            // would swap the operator's binary for ours under the same name.
+            let (offered, third_party) = match checked.theirs.iter().find(|o| o.name == name) {
+                Some(o) => (&o.published, true),
+                None => match checked.ours.iter().find(|p| carries(p, &name)) {
+                    Some(p) => (p, false),
+                    None => {
+                        // A name nothing published carries: a third-party
+                        // plugin whose repository could not be read, or a
+                        // component that dropped out of the hundred-release
+                        // window. Nothing to install and nothing to say to the
+                        // page — the row already reads `Unknown`.
+                        tracing::warn!("update: nothing published for {name}, skipping it");
+                        continue;
+                    }
+                },
             };
             self.set_busy(Some(self.message_for("update_installing", &name).await))
                 .await;
-            match self.install_one(client, &name, offered).await {
+            match self.install_one(client, &name, offered, third_party).await {
                 Ok(Placed::Plugin) => {
                     self.restart_plugin(&name).await;
                     placed.push(Placement {
@@ -893,7 +1061,7 @@ impl Worker {
                 }
             }
         }
-        self.conclude_install(published, &placed, first_failure).await;
+        self.conclude_install(checked, &placed, first_failure).await;
     }
 
     /// The end of an install pass: the rows the page reads, and the report of
@@ -919,13 +1087,14 @@ impl Worker {
     /// forget it.
     async fn conclude_install(
         &self,
-        published: &[Published],
+        checked: &Checked,
         placed: &[Placement],
         failure: Option<String>,
     ) {
         if !placed.is_empty() {
             let installed = self.installed_when_settled().await;
-            let mut components = component_offers(self.core_version, published, &installed);
+            let mut components =
+                component_offers(self.core_version, &checked.ours, &checked.theirs, &installed);
             let mut state = self.state.write().await;
             carry_installable(&state.components, &mut components);
             carry_core_notes(&state.components, &mut components);
@@ -954,6 +1123,7 @@ impl Worker {
         client: &reqwest::Client,
         name: &str,
         offered: &Published,
+        third_party: bool,
     ) -> Result<Placed, Refusal> {
         let is_core = offered.offer == Offer::Core;
         let root = self.root.to_string_lossy().to_string();
@@ -991,7 +1161,7 @@ impl Worker {
 
         let contents = archive::read(&bytes, DECOMPRESSED_MAX)
             .map_err(|e| Refusal::Prepare(format!("reading the archive of {name}: {e}")))?;
-        // **The core is not judged by this rule, and that is not an
+        // **The core is not judged by the plugin rule, and that is not an
         // oversight.** `installable_from_ui` asks whether an archive holds
         // anything root would have to place outside the plugins directory —
         // the core's own archive always does, since it carries the core binary
@@ -1000,9 +1170,18 @@ impl Worker {
         // they are listed so the page can say the release changes them, and
         // never written. A release that changes them says "Action required" in
         // its notes, which is the mechanism the design gives that case.
-        if !is_core && !installable_from_ui(&contents.entries) {
+        //
+        // **A third-party archive is judged more strictly, and is never
+        // exempt**: only its own binary, nothing for `/etc/ritornello` and no
+        // `[[plugin]]` block. See `archive_allowed`, which holds all three
+        // answers, and `only_its_own_binary` for what this refusal stops.
+        if !archive_allowed(is_core, third_party, &contents.entries) {
             self.remember_manual_step(name).await;
-            return Err(Refusal::NeedsManualStep);
+            return Err(if third_party {
+                Refusal::ThirdPartyArchive
+            } else {
+                Refusal::NeedsManualStep
+            });
         }
         // A component nothing declares is an **installation**, not a
         // replacement: it needs a declaration, an initial configuration, and a
@@ -1421,12 +1600,12 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
                 // A check first, always: it is what gives the download URLs
                 // and the digests of the release as it stands right now, and
                 // it costs two small requests next to an archive.
-                if let Some(published) = worker.check(&client).await {
-                    worker.install(&client, &published, &names).await;
+                if let Some(checked) = worker.check(&client).await {
+                    worker.install(&client, &checked, &names).await;
                 }
             }
             Job::Scheduled { install } => {
-                if let Some(published) = worker.check(&client).await
+                if let Some(checked) = worker.check(&client).await
                     && install
                 {
                     let names = automatic_install_list(&worker.state.read().await.components);
@@ -1434,7 +1613,7 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
                         tracing::debug!("update: scheduled run, nothing to install");
                     } else {
                         tracing::info!("update: scheduled run installing {names:?}");
-                        worker.install(&client, &published, &names).await;
+                        worker.install(&client, &checked, &names).await;
                     }
                 }
             }
@@ -1596,6 +1775,183 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
+    /// A declared, running plugin that announced `repository`.
+    fn announcing(name: &str, repository: Option<&str>) -> Installed {
+        Installed {
+            name: name.to_string(),
+            declared: true,
+            binary_present: true,
+            version: Some("1.0.0".to_string()),
+            repository: repository.map(str::to_string),
+        }
+    }
+
+    /// **Refusal 1 of 3: at most four third-party repositories per check.**
+    ///
+    /// Without the ceiling, ten third-party plugins make ten requests a day to
+    /// ten different servers, and a single slow host blocks the whole check
+    /// behind its own timeout — which leaves `busy` set and every button on
+    /// the page disabled.
+    ///
+    /// **Six** third-party plugins and not four, with an official one, an
+    /// unaddressable one and a silent one interleaved: a fixture of exactly
+    /// four could not tell a ceiling from its absence, and a fixture made only
+    /// of third-party rows could not tell "the first four third-party
+    /// repositories" from "the first four rows".
+    #[test]
+    fn a_check_queries_at_most_four_third_party_repositories() {
+        let installed = vec![
+            // Ours — the majority path. It must not consume one of the four.
+            announcing("radio", Some("https://github.com/skerdudou/ritornello")),
+            announcing("alpha", Some("https://github.com/a/alpha")),
+            // Present and unaddressable: there is no GitHub endpoint to call
+            // for it, so it must not consume one of the four either.
+            announcing("elsewhere", Some("https://gitlab.com/x/y")),
+            announcing("bravo", Some("https://github.com/b/bravo")),
+            // Announced nothing at all: switched off, dead, or predating the
+            // field.
+            announcing("silent", None),
+            announcing("charlie", Some("https://github.com/c/charlie")),
+            announcing("delta", Some("https://github.com/d/delta")),
+            announcing("echo", Some("https://github.com/e/echo")),
+            announcing("foxtrot", Some("https://github.com/f/foxtrot")),
+        ];
+        let targets = third_party_targets(&installed);
+        assert_eq!(
+            targets,
+            vec![
+                ("alpha".to_string(), "a/alpha".to_string()),
+                ("bravo".to_string(), "b/bravo".to_string()),
+                ("charlie".to_string(), "c/charlie".to_string()),
+                ("delta".to_string(), "d/delta".to_string()),
+            ],
+            "at most four repositories are queried, and they are the first four in file order"
+        );
+        assert_eq!(targets.len(), THIRD_PARTY_MAX);
+    }
+
+    /// **Refusal 2 of 3: a third-party archive may carry nothing but its own
+    /// binary.**
+    ///
+    /// The privileged side cannot write outside the plugins directory anyway,
+    /// but the **core** can write `/etc/ritornello` and can append to
+    /// `plugins.toml` — so without this rule a stranger's archive would be
+    /// handed the operator's configuration directory, and a `[[plugin]]` block
+    /// naming any `exec` path it liked, by the one component allowed to do
+    /// both.
+    ///
+    /// The three shapes `installable_from_ui` already refuses are here so the
+    /// third-party path is shown to refuse them too — but the two that matter
+    /// most are the **catalog** and the **fragment**: our own rule accepts
+    /// both, so they are the only fixtures that can tell "the third-party path
+    /// calls the stricter rule" from "the third-party path calls the plugin
+    /// rule". A fixture both rules answer the same way proves neither.
+    #[test]
+    fn a_third_party_archive_may_carry_nothing_but_its_own_binary() {
+        let dirs = [
+            "usr/",
+            "usr/local/",
+            "usr/local/lib/",
+            "usr/local/lib/ritornello/",
+            "usr/local/lib/ritornello/plugins/",
+        ];
+        let with = |extra: &[&str]| -> Vec<String> {
+            let mut all: Vec<&str> = dirs.to_vec();
+            all.push("usr/local/lib/ritornello/plugins/ritornello-plugin-theirs");
+            all.extend_from_slice(extra);
+            names(&all)
+        };
+
+        // The only shape that passes: one binary, directly under the plugins
+        // prefix, and nothing else.
+        assert!(
+            archive_allowed(false, true, &with(&[])),
+            "a third-party archive carrying only its binary must install"
+        );
+
+        assert!(
+            !archive_allowed(false, true, &with(&["etc/systemd/system/theirs.service"])),
+            "a third-party archive carrying a systemd unit must be refused"
+        );
+        assert!(
+            !archive_allowed(
+                false,
+                true,
+                &with(&["etc/polkit-1/rules.d/60-theirs.rules"])
+            ),
+            "a third-party archive carrying a polkit rule must be refused"
+        );
+        assert!(
+            !archive_allowed(
+                false,
+                true,
+                &with(&["usr/local/lib/ritornello/plugins/sub/evil"])
+            ),
+            "a third-party archive carrying a nested path under the plugins prefix must be refused"
+        );
+        // The same shape with **no** bare binary beside it, and it is the one
+        // that actually proves the nested-path rule: with the binary present,
+        // the assertion above is answered by the "exactly one binary" clause
+        // instead, so deleting the `/` check leaves it green. Measured, not
+        // reasoned about.
+        assert!(
+            !archive_allowed(
+                false,
+                true,
+                &names(&[
+                    "usr/",
+                    "usr/local/",
+                    "usr/local/lib/",
+                    "usr/local/lib/ritornello/",
+                    "usr/local/lib/ritornello/plugins/",
+                    "usr/local/lib/ritornello/plugins/sub/",
+                    "usr/local/lib/ritornello/plugins/sub/evil",
+                ])
+            ),
+            "a nested path is not a bare name the privileged side could ever form"
+        );
+        assert!(
+            !archive_allowed(
+                false,
+                true,
+                &with(&["usr/local/lib/ritornello/plugins/ritornello-plugin-second"])
+            ),
+            "two binaries would make the core pick one silently"
+        );
+
+        // The two that separate this rule from the plugin rule. Both are
+        // asserted against `installable_from_ui` first, so the fixture is
+        // proven to be one our own rule accepts.
+        let catalog = with(&["etc/ritornello/locales/theirs/fr.toml"]);
+        assert!(
+            installable_from_ui(&catalog),
+            "the plugin rule accepts a locale catalog — that is what makes this fixture the discriminating one"
+        );
+        assert!(
+            !archive_allowed(false, true, &catalog),
+            "a third-party archive must not be handed /etc/ritornello by the core"
+        );
+
+        let fragment = with(&["plugins.toml.fragment"]);
+        assert!(
+            installable_from_ui(&fragment),
+            "the plugin rule accepts a [[plugin]] block — the second discriminating fixture"
+        );
+        assert!(
+            !archive_allowed(false, true, &fragment),
+            "a [[plugin]] block names an exec path, and appending a stranger's is asking the core to launch it"
+        );
+
+        // And the two neighbouring answers of the same function, so this test
+        // cannot pass by the rule having quietly become "nothing installs":
+        // one of ours keeps the plugin rule, and the core keeps its exemption.
+        assert!(archive_allowed(false, false, &catalog), "one of ours may ship its catalog");
+        assert!(
+            archive_allowed(true, false, &names(&["etc/systemd/system/ritornello.service"])),
+            "the core's archive always carries units, and root can form its binary's path"
+        );
+    }
+
     /// The core exits at the end of its own install, so anything queued behind
     /// it never happens.
     #[test]
@@ -1649,6 +2005,33 @@ mod tests {
             silent,
         ];
         assert_eq!(automatic_install_list(&components), names(&["core", "radio"]));
+    }
+
+    /// **Refusal 3 of 3: a third-party component is never taken by the
+    /// automatic policy, whatever that policy is.**
+    ///
+    /// Its own test rather than the row inside the table above, because the
+    /// refusal only became load-bearing now: since a third-party plugin's own
+    /// repository answers for it, its row can legitimately read
+    /// `UpdateAvailable` with a known installed version and a known offered
+    /// one — so it passes every other filter in that list, and the kind is the
+    /// only thing left standing between an unattended device and bytes from a
+    /// repository nobody vetted.
+    ///
+    /// The official row beside it is not decoration: without it, a function
+    /// that returned nothing at all would pass.
+    #[test]
+    fn the_automatic_policy_never_installs_from_a_third_party_repository() {
+        let mut theirs =
+            row("someones-plugin", ComponentKind::ThirdParty, Availability::UpdateAvailable);
+        theirs.third_party_repo = Some("someone/theirs".to_string());
+        theirs.offered = Some("2.0.0".to_string());
+        let mine = row("radio", ComponentKind::Plugin, Availability::UpdateAvailable);
+        assert_eq!(
+            automatic_install_list(&[theirs, mine]),
+            names(&["radio"]),
+            "a third-party plugin is never installed while nobody is watching, even when its own repository offers a newer version"
+        );
     }
 
     /// Installability is only ever learnt at the moment of a gesture, so a
@@ -1792,6 +2175,7 @@ mod tests {
             Refusal::NoDigest,
             Refusal::DigestMismatch,
             Refusal::NeedsManualStep,
+            Refusal::ThirdPartyArchive,
             Refusal::NoFragment,
             Refusal::Download("connection reset by peer".to_string()),
             Refusal::Prepare("no space left on device".to_string()),
@@ -1982,6 +2366,60 @@ mod tests {
         assert!(orphan.binary_present);
     }
 
+
+    /// A check that found only our own release, which is the ordinary shape.
+    fn ours(published: Vec<Published>) -> Checked {
+        Checked { ours: published, theirs: Vec::new() }
+    }
+
+    /// **The hop RULING 5 exists for**, driven from the event rather than from
+    /// the method: `Installed.repository` is fed from the published status
+    /// line, so without this relay no row is ever classified third-party, no
+    /// repository is ever queried, and the whole third-party path silently
+    /// does nothing while every row still renders.
+    ///
+    /// Both ends are asserted: the raw string arrives verbatim, and it is the
+    /// fact the third-party path actually acts on.
+    #[tokio::test]
+    async fn the_repository_a_plugin_announced_reaches_the_rows_that_judge_it() {
+        let status = one_line(PluginStatus {
+            version: Some("1.4.0".into()),
+            repository: Some("https://github.com/someone/their-plugin".into()),
+            ..PluginStatus::kind("radio", "source", true, false)
+        });
+        let (worker, _dir) = worker_rig(status);
+        let installed = worker.installed_when_settled().await;
+        let radio = installed.iter().find(|i| i.name == "radio").expect("the declared plugin");
+        assert_eq!(
+            radio.repository.as_deref(),
+            Some("https://github.com/someone/their-plugin"),
+            "relayed verbatim and unparsed, exactly as the announcement gave it"
+        );
+        assert_eq!(
+            third_party_targets(&installed),
+            vec![("radio".to_string(), "someone/their-plugin".to_string())],
+            "and it is what decides which repository the check goes and asks"
+        );
+    }
+
+    /// The other side of the same relay, and the majority path: the ten
+    /// official plugins all announce the workspace's full URL, and a line
+    /// carrying it must produce **no** third-party request at all.
+    #[tokio::test]
+    async fn a_plugin_announcing_our_own_url_makes_no_third_party_request() {
+        let status = one_line(PluginStatus {
+            version: Some("0.2.0".into()),
+            repository: Some("https://github.com/skerdudou/ritornello".into()),
+            ..PluginStatus::kind("radio", "source", true, false)
+        });
+        let (worker, _dir) = worker_rig(status);
+        let installed = worker.installed_when_settled().await;
+        assert!(
+            third_party_targets(&installed).is_empty(),
+            "an official plugin must never send the core asking a stranger's repository about it"
+        );
+    }
+
     fn radio_published(version: &str) -> Vec<Published> {
         vec![Published {
             offer: Offer::Plugin("radio".to_string()),
@@ -2013,7 +2451,7 @@ mod tests {
         announces_shortly(status, "0.3.0");
         worker
             .conclude_install(
-                &radio_published("0.3.0"),
+                &ours(radio_published("0.3.0")),
                 &[replaced("radio", "0.3.0")],
                 None,
             )
@@ -2042,7 +2480,7 @@ mod tests {
         let before = worker.state.read().await.components.clone();
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            worker.conclude_install(&radio_published("0.3.0"), &[], Some("nope".to_string())),
+            worker.conclude_install(&ours(radio_published("0.3.0")), &[], Some("nope".to_string())),
         )
         .await
         .expect("a pass that placed nothing waited on the plugins anyway");

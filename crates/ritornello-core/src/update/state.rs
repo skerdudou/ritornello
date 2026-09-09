@@ -6,7 +6,7 @@
 //! binary is absent used to show as **dead**, which is what the release
 //! archives made possible and what sent the diagnosis in the wrong direction.
 
-use crate::update::release::{differs, Offer, Published};
+use crate::update::release::{differs, origin, Offer, Origin, Published};
 use serde::Serialize;
 
 /// What the core knows about one plugin, before the release is consulted.
@@ -20,9 +20,30 @@ pub struct Installed {
     /// As its announcement gave it. `None` for a plugin that never announced —
     /// switched off, absent, or predating the field.
     pub version: Option<String>,
-    /// `owner/repo`, as its announcement gave it. Present makes it
-    /// third-party.
-    pub third_party_repo: Option<String>,
+    /// Where its announcement said its releases live, **verbatim**: today a
+    /// full URL, because that is what `CARGO_PKG_REPOSITORY` holds.
+    ///
+    /// Stored raw and interpreted through `release::origin`, in one place, so
+    /// there is exactly one fact here and no second field to disagree with it.
+    /// A plugin that never announced — switched off, dead, predating the
+    /// field — says `None`, which is "nothing to say", never "ours".
+    pub repository: Option<String>,
+}
+
+/// What a third-party plugin's **own** repository publishes for it.
+///
+/// Kept apart from the official fold rather than concatenated into it, and
+/// that separation is the point: a third-party plugin's name is free-form and
+/// may collide with an official one, so a single list keyed by name could hand
+/// a third-party row the official archive of the same name — the silent swap
+/// `a_third_party_plugin_does_not_inherit_a_colliding_official_version`
+/// exists to forbid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThirdPartyOffer {
+    /// The plugin's name as `plugins.toml` declares it, which is also the name
+    /// its announcement echoed back.
+    pub name: String,
+    pub published: Published,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -91,6 +112,7 @@ pub struct ComponentOffer {
 pub fn component_offers(
     core_version: &str,
     published: &[Published],
+    third_party: &[ThirdPartyOffer],
     installed: &[Installed],
 ) -> Vec<ComponentOffer> {
     let core_offered = published.iter().find(|p| p.offer == Offer::Core).map(|p| p.version.clone());
@@ -132,10 +154,19 @@ pub fn component_offers(
     });
 
     for plugin in installed {
-        let third_party = plugin.third_party_repo.is_some();
-        // A third-party plugin's version is decided by its own repository, and
-        // this release says nothing about it.
-        let offered = if third_party { None } else { plugin_offered(&plugin.name) };
+        // One reading of the announcement, and everything about this row that
+        // depends on where the binary came from falls out of it.
+        let from = origin(plugin.repository.as_deref());
+        let is_third_party = !matches!(from, Origin::Unknown | Origin::Ours);
+        // A third-party plugin's version is decided by **its own** repository,
+        // and this release says nothing about it: never `plugin_offered`, even
+        // when a name collides. An `Origin::Foreign` has no repository this
+        // updater can address, so it has no offer either.
+        let offered = if is_third_party {
+            third_party.iter().find(|o| o.name == plugin.name).map(|o| o.published.version.clone())
+        } else {
+            plugin_offered(&plugin.name)
+        };
         let availability = if plugin.declared && !plugin.binary_present {
             Availability::BinaryMissing
         } else if !plugin.declared && plugin.binary_present {
@@ -149,14 +180,14 @@ pub fn component_offers(
         };
         out.push(ComponentOffer {
             name: plugin.name.clone(),
-            kind: if third_party { ComponentKind::ThirdParty } else { ComponentKind::Plugin },
+            kind: if is_third_party { ComponentKind::ThirdParty } else { ComponentKind::Plugin },
             declared: plugin.declared,
             binary_present: plugin.binary_present,
             installed: plugin.version.clone(),
             offered,
             availability,
             installable: None,
-            third_party_repo: plugin.third_party_repo.clone(),
+            third_party_repo: from.third_party_repo(),
             // A plugin's own row, never the core's: this field is a fact
             // about the core's archive alone.
             not_installed_files: None,
@@ -245,7 +276,7 @@ impl UpdateState {
             release_version: None,
             release_url: None,
             last_check_unix_s: None,
-            components: component_offers(core_version, &[], installed),
+            components: component_offers(core_version, &[], &[], installed),
             busy: None,
             last_rollback: None,
         }
@@ -256,13 +287,23 @@ impl UpdateState {
 mod tests {
     use super::*;
 
+    /// Shorthand for the tests that have no third-party offer to make: the
+    /// ordinary shape, where every row is judged against our own release.
+    fn offers(
+        core_version: &str,
+        published: &[Published],
+        installed: &[Installed],
+    ) -> Vec<ComponentOffer> {
+        component_offers(core_version, published, &[], installed)
+    }
+
     fn declared(name: &str, version: Option<&str>, binary: bool) -> Installed {
         Installed {
             name: name.to_string(),
             declared: true,
             binary_present: binary,
             version: version.map(str::to_string),
-            third_party_repo: None,
+            repository: None,
         }
     }
 
@@ -283,7 +324,7 @@ mod tests {
 
     #[test]
     fn a_declared_plugin_with_its_binary_and_the_release_version_is_aligned() {
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[published(Offer::Plugin("radio".to_string()), "0.2.0")],
             &[declared("radio", Some("0.2.0"), true)],
@@ -294,7 +335,7 @@ mod tests {
 
     #[test]
     fn a_declared_plugin_at_another_version_is_offered_an_update() {
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[published(Offer::Plugin("radio".to_string()), "0.3.0")],
             &[declared("radio", Some("0.2.0"), true)],
@@ -309,7 +350,7 @@ mod tests {
     /// dead, which sends the diagnosis in the wrong direction.
     #[test]
     fn a_declared_plugin_whose_binary_is_absent_is_not_installed_rather_than_dead() {
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[published(Offer::Plugin("mpd".to_string()), "0.2.0")],
             &[declared("mpd", None, false)],
@@ -320,7 +361,7 @@ mod tests {
 
     #[test]
     fn a_plugin_the_release_offers_and_nothing_declares_can_be_added() {
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[
                 published(Offer::Plugin("radio".to_string()), "0.2.0"),
@@ -335,7 +376,7 @@ mod tests {
 
     #[test]
     fn a_binary_present_but_undeclared_is_reported_as_such() {
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[published(Offer::Plugin("cd".to_string()), "0.2.0")],
             &[Installed {
@@ -343,7 +384,7 @@ mod tests {
                 declared: false,
                 binary_present: true,
                 version: None,
-                third_party_repo: None,
+                repository: None,
             }],
         );
         let cd = offers.iter().find(|o| o.name == "cd").unwrap();
@@ -355,7 +396,7 @@ mod tests {
 
     #[test]
     fn the_core_is_always_a_component_even_when_no_release_is_known() {
-        let offers = component_offers("0.2.0", &[], &[]);
+        let offers = offers("0.2.0", &[], &[]);
         let core = offers.iter().find(|o| o.kind == ComponentKind::Core).unwrap();
         assert_eq!(core.installed.as_deref(), Some("0.2.0"));
         assert_eq!(core.offered, None);
@@ -369,7 +410,7 @@ mod tests {
 
     #[test]
     fn the_bundle_is_never_offered_as_a_component() {
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[published(Offer::Bundle, "0.2.0")],
             &[],
@@ -379,7 +420,7 @@ mod tests {
 
     #[test]
     fn a_third_party_plugin_is_listed_with_its_repository_and_never_as_official() {
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[],
             &[Installed {
@@ -387,7 +428,7 @@ mod tests {
                 declared: true,
                 binary_present: true,
                 version: Some("1.4.0".to_string()),
-                third_party_repo: Some("someone/their-plugin".to_string()),
+                repository: Some("https://github.com/someone/their-plugin".to_string()),
             }],
         );
         let it = offers.iter().find(|o| o.name == "someones-plugin").unwrap();
@@ -419,7 +460,7 @@ mod tests {
     /// fixture failing for two reasons proves neither.
     #[test]
     fn a_third_party_plugin_does_not_inherit_a_colliding_official_version() {
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[published(Offer::Plugin("someones-plugin".to_string()), "9.9.9")],
             &[Installed {
@@ -427,11 +468,105 @@ mod tests {
                 declared: true,
                 binary_present: true,
                 version: Some("1.4.0".to_string()),
-                third_party_repo: Some("someone/their-plugin".to_string()),
+                repository: Some("https://github.com/someone/their-plugin".to_string()),
             }],
         );
         let it = offers.iter().find(|o| o.name == "someones-plugin").unwrap();
         assert_eq!(it.offered, None);
+        assert_eq!(it.availability, Availability::Unknown);
+    }
+
+    /// **The majority path, and the one every other test in this module
+    /// misses.** All ten official plugin crates inherit
+    /// `repository = "https://github.com/skerdudou/ritornello"` from
+    /// `[workspace.package]`, so this literal is exactly what their
+    /// announcements carry — while `release::REPO` is the pair
+    /// `skerdudou/ritornello`. Compared as raw strings the two can never be
+    /// equal, and every official plugin would come out `ThirdParty`: the core
+    /// would go asking GitHub for a "third-party" release of its own plugins,
+    /// and the row would still render, which is what makes the defect quiet.
+    ///
+    /// Written with the literal rather than with `REPO` or with whatever the
+    /// code computes: a test that reused the code's own value could not catch
+    /// this class of defect at all.
+    #[test]
+    fn a_plugin_announcing_our_own_workspace_url_is_official_and_judged_by_this_release() {
+        let offers = offers(
+            "0.2.0",
+            &[published(Offer::Plugin("radio".to_string()), "0.3.0")],
+            &[Installed {
+                name: "radio".to_string(),
+                declared: true,
+                binary_present: true,
+                version: Some("0.2.0".to_string()),
+                repository: Some("https://github.com/skerdudou/ritornello".to_string()),
+            }],
+        );
+        let radio = offers.iter().find(|o| o.name == "radio").unwrap();
+        assert_eq!(radio.kind, ComponentKind::Plugin, "an official plugin, not a stranger");
+        assert_eq!(radio.third_party_repo, None, "nothing third-party to check or to show");
+        assert_eq!(radio.offered.as_deref(), Some("0.3.0"), "this release is what judges it");
+        assert_eq!(radio.availability, Availability::UpdateAvailable);
+    }
+
+    /// A third-party plugin's own repository is what answers for it, and the
+    /// answer lands on the same two fields every other row uses.
+    #[test]
+    fn a_third_party_plugin_is_judged_by_the_release_of_its_own_repository() {
+        let theirs = ThirdPartyOffer {
+            name: "someones-plugin".to_string(),
+            published: published(Offer::Plugin("someones-plugin".to_string()), "2.0.0"),
+        };
+        let rows = component_offers(
+            "0.2.0",
+            // Ours publishes a colliding name at another version: it must not
+            // be the one that answers, which is what tells a correct lookup
+            // from one that merely found something.
+            &[published(Offer::Plugin("someones-plugin".to_string()), "9.9.9")],
+            &[theirs],
+            &[Installed {
+                name: "someones-plugin".to_string(),
+                declared: true,
+                binary_present: true,
+                version: Some("1.4.0".to_string()),
+                repository: Some("https://github.com/someone/their-plugin".to_string()),
+            }],
+        );
+        let it = rows.iter().find(|o| o.name == "someones-plugin").unwrap();
+        assert_eq!(it.kind, ComponentKind::ThirdParty);
+        assert_eq!(it.third_party_repo.as_deref(), Some("someone/their-plugin"));
+        assert_eq!(it.offered.as_deref(), Some("2.0.0"), "its own repository, never ours");
+        assert_eq!(it.availability, Availability::UpdateAvailable);
+    }
+
+    /// A repository that is present and is not a GitHub URL this updater can
+    /// address: third-party, and **not checkable**.
+    ///
+    /// Never adopted as ours — that would let any string which fails to parse
+    /// pass for official — and never shown as up to date, which is the one
+    /// answer that would be a claim rather than a silence.
+    #[test]
+    fn a_repository_we_cannot_address_is_third_party_and_says_so_rather_than_up_to_date() {
+        let offers = offers(
+            "0.2.0",
+            &[published(Offer::Plugin("elsewhere".to_string()), "9.9.9")],
+            &[Installed {
+                name: "elsewhere".to_string(),
+                declared: true,
+                binary_present: true,
+                version: Some("1.4.0".to_string()),
+                repository: Some("https://gitlab.com/someone/thing".to_string()),
+            }],
+        );
+        let it = offers.iter().find(|o| o.name == "elsewhere").unwrap();
+        assert_eq!(it.kind, ComponentKind::ThirdParty);
+        assert_eq!(
+            it.third_party_repo.as_deref(),
+            Some("https://gitlab.com/someone/thing"),
+            "the row still names where the binary claims to come from"
+        );
+        assert_eq!(it.offered, None);
+        assert_ne!(it.availability, Availability::Aligned, "never a claim of being up to date");
         assert_eq!(it.availability, Availability::Unknown);
     }
 
@@ -440,7 +575,7 @@ mod tests {
         // A plugin dropped from a later release, or one built by hand. Nothing
         // is known about it, and "not installed" would be a lie about a
         // plugin that is running.
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[],
             &[declared("legacy", Some("0.2.0"), true)],
@@ -460,7 +595,7 @@ mod tests {
     /// never-published plugin is up to date.
     #[test]
     fn a_component_missing_from_published_is_unknown_on_its_own_while_its_neighbour_is_answered() {
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[published(Offer::Plugin("radio".to_string()), "0.2.0")],
             &[
@@ -477,7 +612,7 @@ mod tests {
 
     #[test]
     fn the_order_of_declared_plugins_is_preserved_because_it_is_the_priority() {
-        let offers = component_offers(
+        let offers = offers(
             "0.2.0",
             &[published(Offer::Plugin("mpd".to_string()), "0.2.0")],
             &[

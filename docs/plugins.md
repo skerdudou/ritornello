@@ -56,7 +56,7 @@ that the core opens before launching a single plugin:
    describing exactly what it just bound, e.g.:
 
    ```json
-   {"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":1,"version":"0.2.0"}
+   {"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":1,"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}
    ```
 
    before closing the connection. That last flag is a display's opt-in for
@@ -65,15 +65,56 @@ that the core opens before launching a single plugin:
    implements rather than asked of its author, which is the invariant of
    this handshake: an announcement cannot lie.
 
-The announcement carries two more fields, `protocol` and `version`, both
-**derived** the same way `admin` and `covers` are — the SDK writes them,
-never the plugin's author, so an announcement cannot misreport either. The
-version is `env!("CARGO_PKG_VERSION")` expanded in the *plugin's own* crate,
-at `Runtime::from_args`: written inside the SDK instead, it would report the
-SDK's version rather than the plugin's, since that is whose `Cargo.toml` a
-Rust binary compiles against. `protocol` is `ritornello_proto::PROTOCOL_VERSION`
-as the plugin was built, a single number shared by the whole protocol crate,
-not one per message kind.
+The announcement carries three more fields, `protocol`, `version` and
+`repository`, all **derived** the same way `admin` and `covers` are — the SDK
+writes them, never the plugin's author, so an announcement cannot misreport any
+of them. The version is `env!("CARGO_PKG_VERSION")` and the repository is
+`option_env!("CARGO_PKG_REPOSITORY")`, both expanded in the *plugin's own*
+crate by the `ritornello_plugin_sdk::declare_runtime!()` macro: written inside
+the SDK instead, they would report the SDK's, since that is whose `Cargo.toml`
+a Rust binary compiles against. That is also why it is a macro rather than two
+more parameters on `Runtime::from_args` — `env!` expands where it is written,
+and the next derived field then costs nothing at ten call sites.
+`protocol` is `ritornello_proto::PROTOCOL_VERSION` as the plugin was built, a
+single number shared by the whole protocol crate, not one per message kind.
+
+### Writing a plugin of your own
+
+A plugin built outside this repository is a **third-party** plugin, and the
+core tells one from its own by the `repository` it announces and nothing else:
+there is no flag to set and nothing for an operator to configure. Parsed as a
+GitHub `owner/repo` pair it either is ours or it is not; a manifest with no
+`repository` key at all announces nothing, and the core then simply leaves the
+plugin alone. Three things follow, and they are the whole contract:
+
+1. **Build the runtime with the macro**, `ritornello_plugin_sdk::declare_runtime!()?`,
+   and give your crate a `repository = "https://github.com/<owner>/<repo>"` in
+   its `Cargo.toml`. The core checks that repository's own releases for you,
+   at most four third-party repositories per check — one slow host must not
+   block the whole check — and a repository that is not an
+   `https://github.com/<owner>/<repo>` URL is left alone rather than guessed
+   at: the updater speaks one API, and your row then reads "unknown" rather
+   than claiming to be up to date.
+2. **Name your archive the way ours are named**:
+   `ritornello-plugin-<name>-<version>-<arch>.tar.gz`, where `<name>` is the
+   name the device declares in `plugins.toml`, `<version>` is three
+   dot-separated runs of digits, and `<arch>` is `armv7`, `arm64` or `x86_64`.
+   Publish a `SHA256SUMS` beside it in the same release: an archive with no
+   published digest is refused rather than installed unverified.
+3. **Your archive may carry your plugin binary and nothing else** — one file
+   under `usr/local/lib/ritornello/plugins/`, no subdirectory, no second
+   binary. No systemd unit, no polkit rule, no locale catalog, no initial
+   configuration and no `plugins.toml.fragment`. Official archives may carry
+   some of those because the core writes them itself, unprivileged, into
+   `/etc/ritornello` and into `plugins.toml`; a third-party archive is refused
+   if it carries any, and the refusal is shown on the page. A consequence
+   worth knowing in advance: a third-party plugin is therefore **updated**
+   from the UI, never freshly installed by it — its `[[plugin]]` block is
+   yours to add to `plugins.toml` once, by hand or from the plugins page.
+
+A third-party plugin is also **never** installed by the automatic policy,
+whatever that policy is set to: an unattended device does not fetch bytes from
+a repository nobody vetted.
 
 The core compares that number to its own `PROTOCOL_VERSION` by **strict
 equality**, at both doors an announcement can come through — the startup
@@ -2272,15 +2313,15 @@ chain it onto a `Runtime` and `run()` it:
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    ritornello_plugin_sdk::Runtime::from_args()?
+    ritornello_plugin_sdk::declare_runtime!()?
         .metadata(MonGreffon::new())?
         .run()
         .await
 }
 ```
 
-`Runtime::from_args()` reads the three arguments the core launches every
-plugin with (`--register`, `--name`, `--socket-prefix` — see [Declaring
+`declare_runtime!()` builds a `Runtime` from the three arguments the core
+launches every plugin with (`--register`, `--name`, `--socket-prefix` — see [Declaring
 the plugins](#declaring-the-plugins)). Each kind-specific method
 (`.metadata()`, `.source()`, `.display()`, `.input()`, `.admin()`) binds
 that kind's socket the moment it is called and returns a `Result<Self>`,
@@ -2366,7 +2407,7 @@ the same announcement) — for instance a plugin serving both `input` and
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    ritornello_plugin_sdk::Runtime::from_args()?
+    ritornello_plugin_sdk::declare_runtime!()?
         .input(MesEntrees::new())?
         .display(MonAffichage::new())?
         .admin(MaPage::new()?)?

@@ -72,7 +72,104 @@ pub enum Offer {
 /// feature accepts: a component not published in the last hundred deliveries
 /// would drop out of the catalogue. Written down rather than suffered.
 pub fn releases_url() -> String {
-    format!("https://api.github.com/repos/{REPO}/releases?per_page=100")
+    releases_url_for(REPO)
+}
+
+/// The same endpoint, for any `owner/repo`.
+///
+/// The one place a repository other than `REPO` is ever addressed, and it is
+/// reached only for a plugin that **announced** that repository — a fact
+/// derived from the binary's own manifest, not from anything an operator or a
+/// page can set. `REPO` stays the anchor for the core and for every official
+/// plugin; this is what lets a third-party plugin be checked against the
+/// repository it actually came from instead of against ours, where it would
+/// be answered a 404 or, worse, an official archive of the same name.
+///
+/// Still `https://api.github.com/repos/…`: the host is fixed here, and
+/// `parse_repo_url` is what refuses anything that is not a GitHub URL, so no
+/// announced string can redirect this request elsewhere.
+pub fn releases_url_for(repo: &str) -> String {
+    format!("https://api.github.com/repos/{repo}/releases?per_page=100")
+}
+
+/// `owner/repo` out of a GitHub project URL, or nothing.
+///
+/// The exact prefix `https://github.com/`, a trailing `/` and a `.git` suffix
+/// dropped, and **exactly two** non-empty segments. Anything else is left
+/// alone rather than guessed at: the updater speaks one API, and a GitLab URL
+/// turned into a GitHub path would produce a 404 the operator has no way to
+/// interpret.
+///
+/// Strict on the prefix on purpose — `https://evil.example/github.com/a/b`
+/// contains our host name and is not it, and this function is what decides
+/// which host a request is about to be sent to.
+pub fn parse_repo_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let (owner, repo) = rest.split_once('/')?;
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+/// Where a plugin's binary comes from, decided from the one thing that knows:
+/// its own announcement.
+///
+/// **The comparison is made on the parsed pair, never on the raw string.**
+/// `[workspace.package]` sets `repository` to the full URL
+/// `https://github.com/skerdudou/ritornello`, which every plugin crate
+/// inherits, while `REPO` is `skerdudou/ritornello`. A direct string
+/// comparison between the two can never be equal, so it would classify all ten
+/// official plugins as third-party — the core would go asking GitHub for a
+/// "third-party" release of its own plugins, and the majority path would be
+/// the broken one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// Announced no repository at all: a plugin whose manifest names none, or
+    /// one predating the field. Nothing to say and nothing to check.
+    Unknown,
+    /// Ours. The path all ten official plugins take.
+    Ours,
+    /// Another GitHub repository, addressable as `owner/repo`: its own
+    /// releases decide this plugin's version.
+    ThirdParty(String),
+    /// A repository that is present and is **not** a GitHub URL this updater
+    /// can address. Third-party, and not checkable.
+    ///
+    /// Deliberately not folded into `Ours`: that would let any string which
+    /// fails to parse be adopted as official, which is the opposite of what
+    /// failing to understand something should mean here.
+    Foreign(String),
+}
+
+impl Origin {
+    /// What the row shows as its repository, and `None` for a plugin this
+    /// release is entitled to speak about.
+    ///
+    /// Derived here rather than stored beside the origin: two fields for one
+    /// fact are two fields that can disagree.
+    pub fn third_party_repo(&self) -> Option<String> {
+        match self {
+            Self::Unknown | Self::Ours => None,
+            Self::ThirdParty(repo) => Some(repo.clone()),
+            // The raw announced string, because there is no `owner/repo` to
+            // show: the row must still name where the operator's binary claims
+            // to come from.
+            Self::Foreign(raw) => Some(raw.clone()),
+        }
+    }
+}
+
+/// Reads an announced repository. The single place that decision is made.
+pub fn origin(announced: Option<&str>) -> Origin {
+    let Some(raw) = announced else { return Origin::Unknown };
+    match parse_repo_url(raw) {
+        Some(repo) if repo == REPO => Origin::Ours,
+        Some(repo) => Origin::ThirdParty(repo),
+        None => Origin::Foreign(raw.to_string()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -594,5 +691,103 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
         // A plugin that announced no version at all: it predates the field, so
         // it cannot be shown as aligned.
         assert!(differs(None, "0.2.0"));
+    }
+
+    #[test]
+    fn a_github_url_yields_owner_and_repo() {
+        assert_eq!(
+            parse_repo_url("https://github.com/skerdudou/ritornello"),
+            Some("skerdudou/ritornello".to_string())
+        );
+        assert_eq!(
+            parse_repo_url("https://github.com/skerdudou/ritornello/"),
+            Some("skerdudou/ritornello".to_string())
+        );
+        assert_eq!(
+            parse_repo_url("https://github.com/skerdudou/ritornello.git"),
+            Some("skerdudou/ritornello".to_string())
+        );
+    }
+
+    /// Anything but GitHub is left alone rather than guessed at. The updater
+    /// speaks one API, and a GitLab URL turned into a GitHub path would
+    /// produce a 404 the operator has no way to interpret.
+    ///
+    /// `https://evil.example/github.com/a/b` is the one worth reading twice:
+    /// it contains our host name and is not our host, and this function is
+    /// what decides where a request is about to be sent.
+    #[test]
+    fn anything_that_is_not_github_is_not_a_repository_we_can_check() {
+        for url in [
+            "https://gitlab.com/someone/thing",
+            "git@github.com:someone/thing.git",
+            "https://github.com/only-one-segment",
+            "https://github.com/",
+            "https://evil.example/github.com/a/b",
+            "http://github.com/someone/thing",
+            "https://github.com/someone/thing/extra",
+            "https://github.com//thing",
+            "",
+        ] {
+            assert_eq!(parse_repo_url(url), None, "{url:?}");
+        }
+    }
+
+    /// **The majority path, and the one the other tests cannot reach.**
+    ///
+    /// `[workspace.package]` sets `repository` to a full URL and all ten
+    /// plugin crates inherit it, so this literal is exactly what
+    /// `declare_runtime!` puts in every official announcement. Written out
+    /// rather than built from `REPO`: a test that reused whatever the code
+    /// computes could not catch a comparison made on the raw string, which
+    /// would classify all ten official plugins as third-party.
+    #[test]
+    fn a_plugin_announcing_the_workspace_url_is_one_of_ours() {
+        assert_eq!(origin(Some("https://github.com/skerdudou/ritornello")), Origin::Ours);
+        assert_eq!(
+            origin(Some("https://github.com/skerdudou/ritornello")).third_party_repo(),
+            None,
+            "an official plugin has no third-party repository to check"
+        );
+    }
+
+    /// The other three answers, each distinguishable from the two it sits
+    /// between.
+    #[test]
+    fn an_announced_repository_is_read_as_ours_theirs_or_unaddressable() {
+        assert_eq!(origin(None), Origin::Unknown);
+        assert_eq!(origin(None).third_party_repo(), None);
+
+        assert_eq!(
+            origin(Some("https://github.com/someone/their-plugin")),
+            Origin::ThirdParty("someone/their-plugin".to_string())
+        );
+        assert_eq!(
+            origin(Some("https://github.com/someone/their-plugin")).third_party_repo().as_deref(),
+            Some("someone/their-plugin")
+        );
+
+        // Present, and not a GitHub URL: third-party and not checkable. Never
+        // `Ours` — adopting a string we failed to parse as official is the
+        // opposite of what failing to understand it should mean.
+        let foreign = origin(Some("https://gitlab.com/someone/thing"));
+        assert_eq!(foreign, Origin::Foreign("https://gitlab.com/someone/thing".to_string()));
+        assert_eq!(
+            foreign.third_party_repo().as_deref(),
+            Some("https://gitlab.com/someone/thing"),
+            "the row still names where the binary claims to come from"
+        );
+    }
+
+    /// The endpoint is built from `owner/repo` and the host is fixed here, so
+    /// nothing an announcement carries can redirect the request elsewhere.
+    #[test]
+    fn a_third_party_repository_is_queried_on_the_same_github_api() {
+        assert_eq!(
+            releases_url_for("someone/their-plugin"),
+            "https://api.github.com/repos/someone/their-plugin/releases?per_page=100"
+        );
+        // And ours is the same function applied to the compile-time anchor.
+        assert_eq!(releases_url(), releases_url_for(REPO));
     }
 }

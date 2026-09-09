@@ -22,7 +22,7 @@ use admin::CdAdmin;
 
 use anyhow::Result;
 use rand::seq::SliceRandom;
-use ritornello_plugin_sdk::{Notification, Runtime, SourceOutcome, SourcePlugin};
+use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
 use ritornello_proto::SourceAction;
 use state::{OnArrival, Remembered};
 use std::path::PathBuf;
@@ -1255,7 +1255,7 @@ async fn main() -> Result<()> {
         cursor: 0,
     };
     let admin = CdAdmin { state_path, on_arrival, catalog, locales_root };
-    Runtime::from_args(env!("CARGO_PKG_VERSION"))?.source(source)?.admin(admin)?.run().await
+    ritornello_plugin_sdk::declare_runtime!()?.source(source)?.admin(admin)?.run().await
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 pub mod args;
 pub mod client;
+pub mod declare;
 pub mod runtime;
 pub mod server;
 

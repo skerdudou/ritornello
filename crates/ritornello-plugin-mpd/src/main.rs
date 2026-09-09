@@ -17,7 +17,7 @@ use anyhow::Result;
 use config::Config;
 use state::SharedState;
 use ritornello_i18n::Catalog;
-use ritornello_plugin_sdk::{DisplayPlugin, InputPlugin, Runtime};
+use ritornello_plugin_sdk::{DisplayPlugin, InputPlugin};
 use ritornello_proto::{SourcesCatalog, Cover, InputMessage, PlayerState};
 use session::listen;
 use std::path::PathBuf;
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
         rebind_tx: Some(rebind_tx),
     };
 
-    Runtime::from_args(env!("CARGO_PKG_VERSION"))?
+    ritornello_plugin_sdk::declare_runtime!()?
         .input(MpdInput { rx: cmd_rx })?
         .display(MpdDisplay { state })?
         .admin(admin)?

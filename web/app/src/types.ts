@@ -22,6 +22,13 @@ export interface PluginStatus {
   /** Version of the plugin binary, as its announcement gave it. Absent for a
    * binary predating the field. */
   version?: string
+  /** Where this plugin's releases live, as its announcement gave it: a full
+   * URL, verbatim and unparsed. Absent for a plugin whose manifest names none
+   * or one predating the field. Read by the core — a plugin announcing our own
+   * repository is one of ours, anything else is third-party — and relayed here
+   * for completeness; the update rows carry the interpreted `owner/repo` as
+   * `ComponentOffer.third_party_repo`. */
+  repository?: string
   /** Protocol this binary announced, present **only** when it differs from
    * this core's own (see `StatusPayload.protocol`). Its presence is the
    * refusal itself. */
@@ -83,6 +90,11 @@ export interface ComponentOffer {
   availability: Availability
   /** Absent until an archive has been read. `false` is the files plugin. */
   installable?: boolean
+  /** For a `third_party` row: the repository its binary announced, as
+   * `owner/repo` when that is a GitHub URL the core can address, and the raw
+   * announced string when it is not — in which case the row is third-party and
+   * **not checkable**, so `offered` stays `null` and `availability` stays
+   * `unknown`. Absent on every other kind of row. */
   third_party_repo?: string
   /**
    * The core's own row only: what its last-installed archive carried outside

@@ -96,6 +96,29 @@ pub struct Announcement {
     /// string would silently turn into a claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Where this binary's releases live, as its own manifest gives it —
+    /// today a full URL, because that is what `CARGO_PKG_REPOSITORY` holds.
+    ///
+    /// **Derived, never asked**, like `version`, `protocol` and `covers`: the
+    /// SDK reads `CARGO_PKG_REPOSITORY` from the plugin's own manifest. That
+    /// is the invariant of this handshake — the announcement cannot lie.
+    ///
+    /// Relayed **verbatim**, and the core is what interprets it: this crate
+    /// depends on nothing, and normalising a URL here would bake a GitHub
+    /// convention into the protocol. `ritornello_core::update::release`
+    /// parses it (`parse_repo_url`, then `origin`) before comparing it to
+    /// anything.
+    ///
+    /// It is also the whole of the third-party story. A plugin announcing
+    /// **our** repository is one of ours; anything else is third-party, and
+    /// the core offers to check it against that repository rather than
+    /// against this release. There is no flag to declare and nothing for an
+    /// operator to configure.
+    ///
+    /// `None` = a plugin whose manifest names no repository, or one predating
+    /// this field: it is simply left alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// Serde needs a function, not a literal, for a non-zero default.
@@ -119,11 +142,12 @@ mod tests {
             ui_version: None,
             protocol: PROTOCOL_VERSION,
             version: Some("0.2.0".into()),
+            repository: Some("https://github.com/skerdudou/ritornello".into()),
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(
             line,
-            r#"{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":1,"version":"0.2.0"}"#
+            r#"{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":1,"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}"#
         );
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
     }
@@ -185,6 +209,7 @@ mod tests {
             ui_version: None,
             protocol: PROTOCOL_VERSION,
             version: None,
+            repository: None,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert!(line.contains(r#""protocol":1"#), "the protocol must always travel: {line}");
@@ -209,6 +234,7 @@ mod tests {
             ui_version: None,
             protocol: PROTOCOL_VERSION,
             version: None,
+            repository: None,
         };
         let back: Announcement =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
@@ -235,8 +261,20 @@ mod tests {
             ui_version: Some("deadbeef".into()),
             protocol: PROTOCOL_VERSION,
             version: None,
+            repository: None,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
+    }
+
+    #[test]
+    fn an_absent_repository_stays_unknown() {
+        // Same idiom as `version`, and the same consequence: a binary built
+        // before this field says nothing about where its releases live, and
+        // inventing "ours" for it would let any silent plugin pass for
+        // official.
+        let line = r#"{"name":"x","kinds":["source"]}"#;
+        let a: Announcement = serde_json::from_str(line).unwrap();
+        assert_eq!(a.repository, None);
     }
 }

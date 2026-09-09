@@ -832,6 +832,7 @@ async fn hotplug<P: player::Player>(
                         lines.push(PluginStatus {
                             ui_version: announcement.ui_version.clone(),
                             version: announcement.version.clone(),
+                            repository: announcement.repository.clone(),
                             ..PluginStatus::kind(&name, "source", true, announcement.admin)
                         });
                     }
@@ -840,6 +841,7 @@ async fn hotplug<P: player::Player>(
                         lines.push(PluginStatus {
                             ui_version: announcement.ui_version.clone(),
                             version: announcement.version.clone(),
+                            repository: announcement.repository.clone(),
                             ..PluginStatus::kind(&name, "source", false, announcement.admin)
                         });
                     }
@@ -862,6 +864,7 @@ async fn hotplug<P: player::Player>(
                     lines.push(PluginStatus {
                         ui_version: announcement.ui_version.clone(),
                         version: announcement.version.clone(),
+                        repository: announcement.repository.clone(),
                         ..PluginStatus::kind(&name, "display", true, announcement.admin)
                     });
                 }
@@ -870,6 +873,7 @@ async fn hotplug<P: player::Player>(
                     lines.push(PluginStatus {
                         ui_version: announcement.ui_version.clone(),
                         version: announcement.version.clone(),
+                        repository: announcement.repository.clone(),
                         ..PluginStatus::kind(&name, "display", false, announcement.admin)
                     });
                 }
@@ -892,6 +896,7 @@ async fn hotplug<P: player::Player>(
                 lines.push(PluginStatus {
                     ui_version: announcement.ui_version.clone(),
                     version: announcement.version.clone(),
+                    repository: announcement.repository.clone(),
                     ..PluginStatus::kind(&name, "input", true, announcement.admin)
                 });
             }
@@ -912,6 +917,7 @@ async fn hotplug<P: player::Player>(
                 lines.push(PluginStatus {
                     ui_version: announcement.ui_version.clone(),
                     version: announcement.version.clone(),
+                    repository: announcement.repository.clone(),
                     ..PluginStatus::kind(&name, "metadata", true, announcement.admin)
                 });
             }
@@ -1809,6 +1815,7 @@ async fn main() -> Result<()> {
                             plugin_statuses.push(PluginStatus {
                                 ui_version: announcement.ui_version.clone(),
                                 version: announcement.version.clone(),
+                                repository: announcement.repository.clone(),
                                 ..PluginStatus::kind(name, "source", true, announcement.admin)
                             });
                         }
@@ -1817,6 +1824,7 @@ async fn main() -> Result<()> {
                             plugin_statuses.push(PluginStatus {
                                 ui_version: announcement.ui_version.clone(),
                                 version: announcement.version.clone(),
+                                repository: announcement.repository.clone(),
                                 ..PluginStatus::kind(name, "source", false, announcement.admin)
                             });
                         }
@@ -1828,6 +1836,7 @@ async fn main() -> Result<()> {
                         plugin_statuses.push(PluginStatus {
                             ui_version: announcement.ui_version.clone(),
                             version: announcement.version.clone(),
+                            repository: announcement.repository.clone(),
                             ..PluginStatus::kind(name, "display", true, announcement.admin)
                         });
                     }
@@ -1836,6 +1845,7 @@ async fn main() -> Result<()> {
                         plugin_statuses.push(PluginStatus {
                             ui_version: announcement.ui_version.clone(),
                             version: announcement.version.clone(),
+                            repository: announcement.repository.clone(),
                             ..PluginStatus::kind(name, "display", false, announcement.admin)
                         });
                     }
@@ -1860,6 +1870,7 @@ async fn main() -> Result<()> {
                     plugin_statuses.push(PluginStatus {
                         ui_version: announcement.ui_version.clone(),
                         version: announcement.version.clone(),
+                        repository: announcement.repository.clone(),
                         ..PluginStatus::kind(name, "input", true, announcement.admin)
                     });
                 }
@@ -1883,6 +1894,7 @@ async fn main() -> Result<()> {
                     plugin_statuses.push(PluginStatus {
                         ui_version: announcement.ui_version.clone(),
                         version: announcement.version.clone(),
+                        repository: announcement.repository.clone(),
                         ..PluginStatus::kind(name, "metadata", true, announcement.admin)
                     });
                 }
@@ -3227,6 +3239,7 @@ mod toggle_tests {
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,
                 version: None,
+                repository: None,
             },
         );
 
@@ -3255,6 +3268,7 @@ mod toggle_tests {
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             version: None,
+            repository: None,
         }
     }
 
@@ -4162,6 +4176,7 @@ mod toggle_tests {
             ui_version: None,
             protocol: foreign,
             version: Some("0.2.0".into()),
+            repository: None,
         };
 
         hotplug(
@@ -4205,6 +4220,7 @@ mod toggle_tests {
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             version: Some("0.3.0".into()),
+            repository: None,
         };
 
         hotplug(
@@ -4243,6 +4259,7 @@ mod toggle_tests {
             ui_version: None,
             protocol: foreign,
             version: Some("0.2.0".into()),
+            repository: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
@@ -4286,6 +4303,7 @@ mod toggle_tests {
             ui_version: None,
             protocol: foreign,
             version: Some("0.2.0".into()),
+            repository: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
@@ -4334,6 +4352,7 @@ mod toggle_tests {
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION + 1,
             version: Some("0.2.0".into()),
+            repository: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
@@ -4359,6 +4378,7 @@ mod toggle_tests {
             ui_version: None,
             protocol: foreign,
             version: Some("0.2.0".into()),
+            repository: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
