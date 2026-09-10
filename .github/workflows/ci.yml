@@ -35,7 +35,15 @@ jobs:
         # than a new one because `main` requires three checks by name: a new
         # job would need branch protection edited before it could ever block
         # anything.
-        run: node --test .github/scripts/
+        #
+        # The glob is quoted so **node** expands it, not the shell. Measured:
+        # a bare directory argument does not enumerate the directory, it is
+        # taken as a module path -- node reports
+        # `Cannot find module .../.github/scripts` and emits a *failing test*
+        # named after the directory, which would fail this job on every pull
+        # request. Quoting also makes the same command work from PowerShell,
+        # which does not glob for native commands.
+        run: node --test ".github/scripts/*.test.mjs"
       - uses: actions/setup-node@v7
         with:
           node-version: 24
