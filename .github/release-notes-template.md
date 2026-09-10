@@ -1,6 +1,40 @@
-**Nothing to do** — replace the binaries.
-<!-- Or, when a manual step is needed, replace the line above by:
+**Action required** — this is the first release, so it carries every
+privileged file at once: the updater's binary, two new systemd units, a new
+polkit rule, and a `ritornello.service` that gained the start limit and the
+`OnFailure=` line arming the rollback. An update can write none of those, by
+design, so they are placed by hand or by `deploy.sh`.
+
+On a device deployed with `deploy/deploy.sh`, nothing to do: the script
+places all four and reloads systemd.
+
+On a device installed from these archives, after extracting the core's:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl restart ritornello
+```
+
+The four files are inside `ritornello-core-<version>-<arch>.tar.gz` at the
+paths they occupy on the device, so the ordinary `tar -C /` of the Install
+section below already put them there. What does not happen on its own is the
+`daemon-reload`: without it systemd keeps the old `ritornello.service`, the
+rollback stays unarmed, and every install attempt is refused by polkit with
+`Access denied` — a message that names no file.
+
+Until this release is installed, the update card checks and reports
+correctly and every install fails. That is expected: the feature installs
+its own privileged half exactly once, and this is that once.
+<!-- The opening block above is this release's answer to "is there anything
+     to do by hand?", and it is rewritten at every release rather than left
+     to rot. When the next one needs nothing, the whole block above becomes
+     one line:
+
+     **Nothing to do** — replace the binaries.
+
+     and when it does need something, it stays as it is here:
+
      **Action required** — <what to do by hand>.
+
      In 0.x semver the minor carries breaks, so the digit alone cannot say
      this. The sentence can.
 
