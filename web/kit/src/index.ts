@@ -26,6 +26,11 @@ export {
   type Preset,
 } from './themes/engine'
 
+// Not a widget: the one place from which reka-ui's own configuration can be
+// set, and the only import path that keeps the provider and the components it
+// configures inside the *same* reka-ui instance. See the component's comment.
+export { ConfigProvider } from './components/ui/config-provider'
+
 export { Button } from './components/ui/button'
 export { Input } from './components/ui/input'
 export { Label } from './components/ui/label'

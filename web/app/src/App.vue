@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Skeleton, Toaster, useSkeleton } from '@ritornello/ui'
+import { ConfigProvider, Skeleton, Toaster, useSkeleton } from '@ritornello/ui'
 import { computed, onMounted } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import BottomNav from './components/BottomNav.vue'
@@ -82,76 +82,100 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="min-h-screen">
-    <header class="border-b border-border">
-      <nav class="mx-auto flex max-w-5xl items-center gap-4 px-4 py-3">
-        <!-- The brand is the home link, so it carries the same marker:
-             without it, the home page would be the only one with nothing
-             underlined. -->
-        <RouterLink to="/" :class="[LINK, 'font-semibold']" :exact-active-class="LINK_ACTIVE">
-          Ritornello
-        </RouterLink>
-        <!-- Hidden below `md`: the fixed bottom bar (`BottomNav`) takes over
-             on phones, with its four fixed tabs. -->
-        <div class="hidden items-center gap-4 md:flex" data-top-nav>
-          <RouterLink
-            to="/config"
-            :class="[LINK, 'text-sm text-muted-foreground']"
-            :exact-active-class="LINK_ACTIVE"
-          >
-            {{ t('config_title') }}
+  <!-- `scroll-body="false"` pairs with `html { scrollbar-gutter: stable }`
+       in app.css, and neither of the two is right without the other.
+
+       While a dropdown or a dialog is open, reka-ui locks the body and
+       compensates for the scrollbar it assumes is about to give its space
+       back, by adding a `padding-right` of `innerWidth - clientWidth` to it.
+       The gutter above is reserved permanently, so that space is never given
+       back and the compensation is pure loss: measured, the centered column
+       slid 7.5px to the left of a 15px gutter each time a list opened on a
+       page long enough to scroll — and not at all on a short page, where the
+       deficit reads 0. Which is exactly the shape of the report: only the
+       pages that scroll moved.
+
+       So the compensation is only safe to switch off *because* the gutter is
+       stable; dropping the CSS rule and leaving this would bring the jump
+       back, in the other direction. e2e/dropdown-width.spec.ts measures both
+       edges of that pair.
+
+       One provider at the root is enough for the plugin admin screens too: a
+       single Vue instance and a single reka-ui live in the page (see
+       vue-entry.ts, and the kit's ConfigProvider for why the import goes
+       through the kit). -->
+  <ConfigProvider :scroll-body="false">
+    <div class="min-h-screen">
+      <header class="border-b border-border">
+        <nav class="mx-auto flex max-w-5xl items-center gap-4 px-4 py-3">
+          <!-- The brand is the home link, so it carries the same marker:
+               without it, the home page would be the only one with nothing
+               underlined. -->
+          <RouterLink to="/" :class="[LINK, 'font-semibold']" :exact-active-class="LINK_ACTIVE">
+            Ritornello
           </RouterLink>
-          <RouterLink
-            to="/system"
-            :class="[LINK, 'text-sm text-muted-foreground']"
-            :exact-active-class="LINK_ACTIVE"
-          >
-            {{ t('system_title') }}
-          </RouterLink>
-          <!-- `first-letter:uppercase` in CSS, not in i18n: these names come
-               from plugins.toml (including third-party plugins), no catalog
-               could cover them, and adding a label field to the plugin
-               protocol would be disproportionate for a single capital
-               letter. -->
-          <RouterLink
-            v-for="name in admins"
-            :key="name"
-            :to="`/plugins/${name}/`"
-            :class="[LINK, 'text-sm text-muted-foreground first-letter:uppercase']"
-            :exact-active-class="LINK_ACTIVE"
-          >
-            {{ name }}
-          </RouterLink>
+          <!-- Hidden below `md`: the fixed bottom bar (`BottomNav`) takes over
+               on phones, with its four fixed tabs. -->
+          <div class="hidden items-center gap-4 md:flex" data-top-nav>
+            <RouterLink
+              to="/config"
+              :class="[LINK, 'text-sm text-muted-foreground']"
+              :exact-active-class="LINK_ACTIVE"
+            >
+              {{ t('config_title') }}
+            </RouterLink>
+            <RouterLink
+              to="/system"
+              :class="[LINK, 'text-sm text-muted-foreground']"
+              :exact-active-class="LINK_ACTIVE"
+            >
+              {{ t('system_title') }}
+            </RouterLink>
+            <!-- `first-letter:uppercase` in CSS, not in i18n: these names come
+                 from plugins.toml (including third-party plugins), no catalog
+                 could cover them, and adding a label field to the plugin
+                 protocol would be disproportionate for a single capital
+                 letter. -->
+            <RouterLink
+              v-for="name in admins"
+              :key="name"
+              :to="`/plugins/${name}/`"
+              :class="[LINK, 'text-sm text-muted-foreground first-letter:uppercase']"
+              :exact-active-class="LINK_ACTIVE"
+            >
+              {{ name }}
+            </RouterLink>
+          </div>
+          <!-- In the header rather than in a view: the question it answers is
+               worth the same on every page, including the plugin ones where
+               nothing else would report a device that stopped replying. It
+               takes the `ml-auto` the toggle used to carry, and the nav's
+               `gap-4` separates the two. -->
+          <ConnectionStatus class="ml-auto" />
+          <ThemeToggle />
+        </nav>
+      </header>
+      <main class="mx-auto max-w-5xl px-4 py-6 pb-24 md:pb-6">
+        <!-- `role="status"` carries the only text: the blocks themselves are
+             `aria-hidden`, so a screen reader hears the wait announced once
+             rather than a run of empty boxes. Same shape as the placeholder
+             `PluginView` draws, so the two waits look alike. -->
+        <div v-if="skeleton" data-catalog-skeleton role="status" class="space-y-3">
+          <span class="sr-only">{{ t('loading') }}</span>
+          <Skeleton class="h-7 w-48" />
+          <Skeleton class="h-4 w-full" />
+          <Skeleton class="h-4 w-5/6" />
+          <Skeleton class="h-4 w-2/3" />
         </div>
-        <!-- In the header rather than in a view: the question it answers is
-             worth the same on every page, including the plugin ones where
-             nothing else would report a device that stopped replying. It
-             takes the `ml-auto` the toggle used to carry, and the nav's
-             `gap-4` separates the two. -->
-        <ConnectionStatus class="ml-auto" />
-        <ThemeToggle />
-      </nav>
-    </header>
-    <main class="mx-auto max-w-5xl px-4 py-6 pb-24 md:pb-6">
-      <!-- `role="status"` carries the only text: the blocks themselves are
-           `aria-hidden`, so a screen reader hears the wait announced once
-           rather than a run of empty boxes. Same shape as the placeholder
-           `PluginView` draws, so the two waits look alike. -->
-      <div v-if="skeleton" data-catalog-skeleton role="status" class="space-y-3">
-        <span class="sr-only">{{ t('loading') }}</span>
-        <Skeleton class="h-7 w-48" />
-        <Skeleton class="h-4 w-full" />
-        <Skeleton class="h-4 w-5/6" />
-        <Skeleton class="h-4 w-2/3" />
-      </div>
-      <RouterView v-if="!catalogPending" />
-    </main>
-    <BottomNav />
-    <!-- Centered at the bottom and colored by type: on a living-room screen,
-         a discreet notification in a corner goes unnoticed, and "saved" must
-         be told apart from a refusal without having to read. `rich-colors` is
-         what gives vue-sonner's green and red; without it the two outcomes
-         look alike. -->
-    <Toaster position="bottom-center" rich-colors />
-  </div>
+        <RouterView v-if="!catalogPending" />
+      </main>
+      <BottomNav />
+      <!-- Centered at the bottom and colored by type: on a living-room screen,
+           a discreet notification in a corner goes unnoticed, and "saved" must
+           be told apart from a refusal without having to read. `rich-colors` is
+           what gives vue-sonner's green and red; without it the two outcomes
+           look alike. -->
+      <Toaster position="bottom-center" rich-colors />
+    </div>
+  </ConfigProvider>
 </template>
