@@ -56,11 +56,22 @@ test('guard 2 accepts a diff that adds tests', () => {
 })
 
 test('guard 2 refuses a newly skipped test even when the count holds', () => {
+  // The count genuinely holds here: one declaration removed, one added, and
+  // the skipped one is not counted at all, since `\bit\s*\(` does not match
+  // `it.skip(`. So the silencer check is the only thing that can fire, which
+  // is what this case is for -- asserted on `failures.length` so that a
+  // count-drop sneaking back in would show up as a second failure.
+  //
+  // An earlier version used a diff where the count *also* dropped, which made
+  // the name a false claim about the mechanism and proved nothing the next
+  // case does not.
   const text = diff('web/kit/src/lib/api.test.ts', [
     "-  it('follows a redirect', () => {})",
-    "+  it.skip('follows a redirect', () => {})",
+    "+  it('follows a redirect', () => {})",
+    "+  it.skip('handles a 500', () => {})",
   ])
   assert.deepEqual(failedGuards(text), [2])
+  assert.equal(checkGuards(text).failures.length, 1)
 })
 
 test('a silenced test that also drops the count is reported twice, once per reason', () => {
@@ -138,6 +149,135 @@ test('all three can fail at once, and each is reported', () => {
 test('a failure names the file, so the comment can say where', () => {
   const text = diff('.github/workflows/ci.yml', ['+        run: true'])
   assert.match(checkGuards(text).failures[0].detail, /\.github\/workflows\/ci\.yml/)
+})
+
+test('guard 1 refuses a deletion under .github, as the first file in the diff', () => {
+  // A deletion emits `+++ /dev/null`. The first parser kept the previous
+  // file's path here -- or null, for the first file -- and dropped it, so
+  // deleting the workflow that runs the tests was invisible. This is the
+  // module's whole purpose, and it was open.
+  const text = [
+    'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml',
+    'deleted file mode 100644',
+    'index 1111111..0000000',
+    '--- a/.github/workflows/ci.yml',
+    '+++ /dev/null',
+    '@@ -1,2 +0,0 @@',
+    '-name: CI',
+    '-on: pull_request',
+  ].join('\n')
+  assert.deepEqual(failedGuards(text), [1])
+})
+
+test('guard 1 refuses a deletion under .github that follows an innocent file', () => {
+  // The stale-path variant, which is the nastier of the two: without the
+  // source path the removed lines are attributed to the *previous* file and
+  // the deletion passes while looking accounted for.
+  const text = [
+    diff('web/kit/src/lib/api.ts', ['-  const a = 1', '+  const a = 2']),
+    'diff --git a/.github/dependabot.yml b/.github/dependabot.yml',
+    'deleted file mode 100644',
+    '--- a/.github/dependabot.yml',
+    '+++ /dev/null',
+    '@@ -1,1 +0,0 @@',
+    '-version: 2',
+  ].join('\n')
+  assert.deepEqual(failedGuards(text), [1])
+})
+
+test('guard 1 refuses moving a file out of .github and editing it at once', () => {
+  // Renaming this very file to `scripts/` while weakening its predicate: the
+  // destination is outside `.github/`, so only the `---` line and the
+  // `rename from` line carry the fact that a control was touched.
+  const text = [
+    'diff --git a/.github/scripts/check-guards.mjs b/scripts/check-guards.mjs',
+    'similarity index 90%',
+    'rename from .github/scripts/check-guards.mjs',
+    'rename to scripts/check-guards.mjs',
+    '--- a/.github/scripts/check-guards.mjs',
+    '+++ b/scripts/check-guards.mjs',
+    '@@ -1,1 +1,1 @@',
+    '-export function checkGuards(diffText) {',
+    '+export function checkGuards() { return { ok: true, failures: [] } }',
+  ].join('\n')
+  assert.deepEqual(failedGuards(text), [1])
+})
+
+test('guard 1 refuses a rename out of .github that carries no hunk at all', () => {
+  // A 100%-similarity rename emits no `---`, no `+++` and no `@@`. Only
+  // `rename from` names the old path.
+  const text = [
+    'diff --git a/.github/workflows/ci.yml b/ci.yml',
+    'similarity index 100%',
+    'rename from .github/workflows/ci.yml',
+    'rename to ci.yml',
+  ].join('\n')
+  assert.deepEqual(failedGuards(text), [1])
+})
+
+test('guard 1 refuses a mode-only change under .github, which emits no +++ line', () => {
+  // Nothing but the `diff --git` header names the file here.
+  const text = [
+    'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml',
+    'old mode 100644',
+    'new mode 100755',
+  ].join('\n')
+  assert.deepEqual(failedGuards(text), [1])
+})
+
+test('a removed line that looks like a diff header is content, not a header', () => {
+  // A documentation file that quotes a diff. `-` prefixed onto
+  // `-- a/.github/workflows/ci.yml` arrives here as `--- a/...`, which is
+  // byte-for-byte a header. Recognising headers only before the first `@@`
+  // is what stops this from inventing a touched file and **refusing a diff
+  // that touches nothing of the sort**.
+  //
+  // The first version of this case used a harmless line and asserted `ok`.
+  // That proved nothing: the mutation which recognises headers everywhere
+  // also stops collecting content lines, so an empty result still reads as
+  // `ok`. The assertion has to be that a phantom header causes a *false
+  // refusal*, which is the failure that would actually be felt.
+  const text = diff('docs/development.md', [
+    '--- a/.github/workflows/ci.yml',
+    '+-- a/.github/workflows/ci.yml',
+  ])
+  assert.equal(checkGuards(text).ok, true)
+  assert.deepEqual(checkGuards(text).failures, [])
+})
+
+test('guard 2 does not count a test marker inside a comment-only added line', () => {
+  // An added comment pads `after` and makes the guard more permissive, so a
+  // real deletion could be offset by prose. With dense comments mandated in
+  // this repository the collision is realistic, not adversarial.
+  const text = diff('web/kit/src/lib/api.test.ts', [
+    "-  it('follows a redirect', () => {})",
+    '+  // dropped it (the 5.0 changelog explains why)',
+  ])
+  assert.deepEqual(failedGuards(text), [2])
+})
+
+test('guard 2 does not count a test marker inside a comment-only removed line', () => {
+  // The other direction: a removed comment pads `before` and would refuse a
+  // diff that loses no coverage at all.
+  const text = diff('web/kit/src/lib/api.ts', ['-  // call it (once)', '+  callOnce()'])
+  assert.equal(checkGuards(text).ok, true)
+})
+
+test('guard 2 still counts a Rust test attribute, whose line starts with #', () => {
+  // The regression guard for the comment filter: `#` must never be a comment
+  // prefix, or Rust tests stop being counted entirely.
+  const text = diff('crates/ritornello-core/src/status/mod.rs', ['-    #[test]'])
+  assert.deepEqual(failedGuards(text), [2])
+})
+
+test('guard 2 refuses a conditional Rust ignore, which changes no count', () => {
+  // `#[cfg_attr(..., ignore)]` silences a test without matching `#[ignore]`
+  // and without touching the `#[test]` line, so it cleared both halves.
+  const text = diff('crates/ritornello-core/src/status/mod.rs', [
+    '+#[cfg_attr(target_os = "windows", ignore)]',
+    ' #[test]',
+  ])
+  assert.deepEqual(failedGuards(text), [2])
 })
 
 test('CRLF line endings do not make guard 3 blind', () => {

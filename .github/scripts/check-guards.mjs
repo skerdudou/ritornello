@@ -18,56 +18,131 @@ import { pathToFileURL } from 'node:url'
 // and every ordinary edit to a form would read as a test being removed.
 const TEST_MARKERS = [/\bit\s*\(/g, /\btest\s*\(/g, /#\[test\]/g]
 
+// A line that is only a comment declares nothing. This repository mandates
+// dense comments, so a comment carrying `it (` or `test(` is a realistic
+// collision rather than an adversarial one -- and it errs both ways: an added
+// one pads `after` and makes the guard more permissive, a removed one pads
+// `before` and makes it refuse a diff that loses no coverage.
+//
+// `#` is deliberately absent from these prefixes: `#[test]` begins with it,
+// and treating `#` as a comment marker would stop counting Rust tests
+// altogether -- a far worse failure than the one being fixed.
+const COMMENT_ONLY = /^\s*(\/\/|\/\*|\*|<!--)/
+
 // Ways to make a test stop asserting without deleting it. `.skip`, `.only`
 // and `.todo` cover vitest; `#[ignore]` covers Rust. `.only` is here because
 // it silences every sibling in the file, which is a larger loss than a skip.
-const SILENCERS = [/\.skip\s*\(/, /\.only\s*\(/, /\.todo\s*\(/, /#\[ignore\]/]
+// `#[cfg_attr(target_os = "windows", ignore)]` is the idiomatic conditional
+// ignore, and it is the worst case for guard 2: it silences a test without
+// matching `#[ignore]` and without touching the `#[test]` line, so it passed
+// both halves of the guard.
+//
+// Deliberately **not** filtered through `COMMENT_ONLY`. A silencer inside a
+// comment counted as real produces a refusal, and a refusal is the safe
+// direction; a marker miscounted the other way makes the gate permissive.
+const SILENCERS = [/\.skip\s*\(/, /\.only\s*\(/, /\.todo\s*\(/, /#\[ignore\]/, /#\[cfg_attr\([^\]]*\bignore\b/]
 
 const HAS_INSTALL_SCRIPT = /"hasInstallScript"\s*:\s*true/
 
 const countMarkers = (lines) =>
-  lines.reduce((total, { text }) => total + TEST_MARKERS.reduce((n, re) => n + (text.match(re) ?? []).length, 0), 0)
+  lines
+    .filter(({ text }) => !COMMENT_ONLY.test(text))
+    .reduce((total, { text }) => total + TEST_MARKERS.reduce((n, re) => n + (text.match(re) ?? []).length, 0), 0)
 
 // Parse a unified diff into the added and removed lines, each tagged with the
-// file it belongs to. `+++ b/path` is the authority on the path: a rename
-// shows the destination, which is the file the change lands in.
+// file it belongs to, plus **every path the diff names on either side**.
+//
+// Reading both sides is load-bearing, and the first version of this file did
+// not. It tracked only `+++ b/path`, reasoning that a rename shows its
+// destination and the destination is where the change lands. Review found two
+// entirely ordinary diff shapes that walked through guard 1 as a result:
+//
+//   * a **deletion** emits `+++ /dev/null`, so the path stayed stale from the
+//     previous file -- or `null` for the first file in the diff -- and got
+//     dropped. Deleting `.github/workflows/ci.yml` was invisible, which is
+//     precisely the "delete what turns red" move these guards exist to stop.
+//   * a **rename out of `.github/`** names the old path only on the `---`
+//     line, which was skipped. Moving this very file to `scripts/` and
+//     weakening it in the same hunk passed cleanly.
+//
+// The lesson is in the shape of the fix rather than the fix: enumerating diff
+// shapes is how the hole appeared, so `paths` now collects from every header
+// that names a file -- `diff --git`, `rename from`/`rename to`, `---` and
+// `+++` -- and guard 1 judges that union. Mode-only and binary changes, which
+// emit no `---`/`+++` at all, come along for free with `diff --git`.
+//
+// Line attribution still prefers the destination, since that is where content
+// ends up, and falls back to the source for a deletion.
 function parse(diffText) {
   const added = []
   const removed = []
+  const paths = new Set()
+  let inHunk = false
+  let source = null
   let path = null
+
+  const name = (value) => {
+    if (!value || value === '/dev/null') return null
+    paths.add(value)
+    return value
+  }
 
   for (const raw of String(diffText ?? '').split('\n')) {
     const line = raw.replace(/\r$/, '')
 
-    if (line.startsWith('+++ ')) {
-      // Not `.trim()`ed: the carriage return is already gone, stripped once
-      // for the whole line above. Two mechanisms for one problem means the
-      // tested one can be deleted without anything turning red -- which is
-      // exactly what happened before this comment existed.
-      const target = line.slice(4).replace(/^b\//, '')
-      path = target === '/dev/null' ? path : target
+    if (line.startsWith('diff --git')) {
+      inHunk = false
+      source = null
+      path = null
+      // Both sides at once, but only when they are the same path: this is the
+      // only header a mode-only or binary change emits. A rename makes the two
+      // differ, and `rename from`/`rename to` below carry that case.
+      const same = /^diff --git a\/(.+) b\/\1$/.exec(line)
+      if (same) name(same[1])
       continue
     }
-    if (line.startsWith('--- ') || line.startsWith('diff --git') || line.startsWith('@@') || line.startsWith('index ')) continue
+    if (line.startsWith('@@')) {
+      inHunk = true
+      continue
+    }
+
+    // Header lines only count before the first `@@` of a file. Without that,
+    // an ordinary removed line whose content begins `-- ` arrives here as
+    // `--- ` and would be read as a header, resetting the path.
+    if (!inHunk) {
+      if (line.startsWith('rename from ')) source = name(line.slice('rename from '.length))
+      else if (line.startsWith('rename to ')) path = name(line.slice('rename to '.length))
+      else if (line.startsWith('--- ')) source = name(line.slice(4).replace(/^a\//, ''))
+      else if (line.startsWith('+++ ')) {
+        // Not `.trim()`ed: the carriage return is already gone, stripped once
+        // for the whole line above. Two mechanisms for one problem means the
+        // tested one can be deleted without anything turning red -- which is
+        // exactly what happened before this comment existed.
+        path = name(line.slice(4).replace(/^b\//, '')) ?? source
+      }
+      continue
+    }
 
     if (line.startsWith('+')) added.push({ path, text: line.slice(1) })
     else if (line.startsWith('-')) removed.push({ path, text: line.slice(1) })
   }
 
-  return { added, removed }
+  return { added, removed, paths: [...paths] }
 }
 
 export function checkGuards(diffText) {
-  const { added, removed } = parse(diffText)
+  const { added, removed, paths } = parse(diffText)
   const failures = []
 
   // Guard 1 -- nothing under `.github`. Never necessary for a bump, and it is
   // where the controls themselves live. It also keeps policy with the owner:
   // capping a dependency in `dependabot.yml` is a decision, not an
   // adaptation.
-  const touched = [...new Set([...added, ...removed].map(({ path }) => path).filter(Boolean))]
-  for (const path of touched.filter((p) => p.startsWith('.github/'))) {
-    failures.push({ guard: 1, detail: `the fix touches ${path}, which is out of bounds for a dependency bump` })
+  // Every path either side of the diff names, not only the ones content lines
+  // could be attributed to: a deleted or renamed-away file is exactly the case
+  // that has no attributable content under its own name.
+  for (const touched of paths.filter((p) => p.startsWith('.github/'))) {
+    failures.push({ guard: 1, detail: `the fix touches ${touched}, which is out of bounds for a dependency bump` })
   }
 
   // Guard 2 -- the suite does not get quieter. Two ways to lose coverage:
