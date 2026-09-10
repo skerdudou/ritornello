@@ -215,6 +215,21 @@ test('guard 1 refuses a rename out of .github that carries no hunk at all', () =
   assert.deepEqual(failedGuards(text), [1])
 })
 
+test('guard 1 refuses a verbatim copy into .github that carries no hunk', () => {
+  // `git diff -C` reports a copy as `copy from`/`copy to`, and at 100%
+  // similarity there is no hunk at all -- so nothing but those two headers
+  // names the destination. Copy detection is off by default and the workflow
+  // that will call this does not turn it on; the branch exists so that fact
+  // does not have to stay true for the guard to hold.
+  const text = [
+    'diff --git a/scripts/release.sh b/.github/workflows/release.yml',
+    'similarity index 100%',
+    'copy from scripts/release.sh',
+    'copy to .github/workflows/release.yml',
+  ].join('\n')
+  assert.deepEqual(failedGuards(text), [1])
+})
+
 test('guard 1 refuses a mode-only change under .github, which emits no +++ line', () => {
   // Nothing but the `diff --git` header names the file here.
   const text = [

@@ -67,9 +67,15 @@ const countMarkers = (lines) =>
 //
 // The lesson is in the shape of the fix rather than the fix: enumerating diff
 // shapes is how the hole appeared, so `paths` now collects from every header
-// that names a file -- `diff --git`, `rename from`/`rename to`, `---` and
-// `+++` -- and guard 1 judges that union. Mode-only and binary changes, which
-// emit no `---`/`+++` at all, come along for free with `diff --git`.
+// that names a file -- `diff --git`, `rename from`/`rename to`,
+// `copy from`/`copy to`, `---` and `+++` -- and guard 1 judges that union.
+// Mode-only and binary changes, which emit no `---`/`+++` at all, come along
+// for free with `diff --git`.
+//
+// That list is exhaustive as written, and it has to stay that way: a review
+// caught an earlier version of this comment claiming "every header that names
+// a file" while `copy from` was not among them. A comment that overstates a
+// safety guard is worse than no comment.
 //
 // Line attribution still prefers the destination, since that is where content
 // ends up, and falls back to the source for a deletion.
@@ -112,6 +118,15 @@ function parse(diffText) {
     if (!inHunk) {
       if (line.startsWith('rename from ')) source = name(line.slice('rename from '.length))
       else if (line.startsWith('rename to ')) path = name(line.slice('rename to '.length))
+      // Copies, for the same reason as renames and against the same
+      // objection. `copy from`/`copy to` only appear when the diff was taken
+      // with copy detection on, which is off by default and which the workflow
+      // calling this does not enable -- so this branch is unreachable *given
+      // how it is invoked today*. That sentence is precisely the kind of
+      // reasoning that produced the hole this file was rewritten to close, and
+      // two lines cost less than being right about it.
+      else if (line.startsWith('copy from ')) source = name(line.slice('copy from '.length))
+      else if (line.startsWith('copy to ')) path = name(line.slice('copy to '.length))
       else if (line.startsWith('--- ')) source = name(line.slice(4).replace(/^a\//, ''))
       else if (line.startsWith('+++ ')) {
         // Not `.trim()`ed: the carriage return is already gone, stripped once
