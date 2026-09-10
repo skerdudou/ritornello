@@ -180,6 +180,12 @@ An update can replace binaries and locale catalogs. It can never write a
 systemd unit or a polkit rule — that is what stops a forged archive from
 gaining root, and it is why this feature's own installation is manual.
 
+**On a device deployed with `deploy.sh`, it is not:** the script installs
+the four files below itself, alongside the two polkit rules and the units
+it already placed. Deployment over SSH is a privileged gesture by nature;
+an update is not, and that asymmetry is the whole point. What follows is
+for a device installed from release archives.
+
 From a release archive of the core, extracted as described above, four
 files are new:
 
@@ -343,7 +349,8 @@ independently, e.g. `TARGET=x86_64-unknown-linux-gnu PI=user@host
 ./deploy/deploy.sh`. The script chains `build.sh` (so the npm UI build
 **then** the cross-compilation — the order guarantees the embedded SPA is
 fresh), copies the binaries, the language packs and the presets, installs
-the systemd unit and restarts the service.
+the systemd units, the polkit rules and the privileged updater, and
+restarts the service.
 
 Even without an SSH key, the password is asked **once** per run, not once
 per copy: every ssh/scp call of the script shares a single master
@@ -673,6 +680,10 @@ plugin, and updating the core itself, all rewrite
 `ritornello-update.service` to place the files. None of the following has
 been observed for real:
 
+- `deploy.sh` placing the updater's binary, its two units and its polkit
+  rule — the block exists and a test holds it to `packaging.toml`, but no
+  deployment has run since it was written, so the first one is also its
+  first trial;
 - `systemctl start ritornello-update.service` running with the actual
   polkit rule in place;
 - a running binary being replaced on disk while its own process is live;

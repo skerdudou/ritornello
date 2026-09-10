@@ -162,6 +162,40 @@ ssh "${SSHOPTS[@]}" "$PI" 'sudo install -m 0755 -o root -g root \
   && rm -f /tmp/ritornello-media-mount /tmp/ritornello-media-mount.service \
     /tmp/51-ritornello-media.rules'
 
+# The updater: its privileged binary, the two units and the polkit rule that
+# lets the unprivileged core ask for the one it is allowed to start.
+#
+# A release archive cannot place these four files — an update is refused any
+# systemd unit and any polkit rule, which is exactly what stops a forged
+# archive from gaining root — so installing them is a privileged gesture, and
+# deploy.sh is where the privileged gestures live. Without them the update
+# card still checks and still reports, and every install fails with
+# systemctl's own refusal (`Access denied`, `Interactive authentication
+# required`), naming nothing; and `OnFailure=` in ritornello.service points at
+# an absent unit, so a core that will not start is never put back.
+#
+# The binary lands outside the plugins directory, like ritornello-media-mount
+# and for the same reason: the core launches everything it finds there, and
+# this one is started by systemd, as root.
+#
+# Neither unit is enabled. ritornello-update.service is a oneshot the core
+# starts on demand through the polkit grant, and ritornello-rollback.service
+# is reached only by OnFailure= on ritornello.service — systemd is its only
+# caller, deliberately (see 52-ritornello-update.rules).
+scp "${SSHOPTS[@]}" "$OUT/ritornello-update" "$PI:/tmp/ritornello-update"
+scp "${SSHOPTS[@]}" deploy/ritornello-update.service deploy/ritornello-rollback.service \
+  deploy/52-ritornello-update.rules "$PI:/tmp/"
+ssh "${SSHOPTS[@]}" "$PI" 'sudo install -m 0755 -o root -g root \
+    /tmp/ritornello-update /usr/local/lib/ritornello/ritornello-update \
+  && sudo mkdir -p /etc/polkit-1/rules.d \
+  && sudo install -m 0644 -o root -g root \
+    /tmp/ritornello-update.service /tmp/ritornello-rollback.service \
+    /etc/systemd/system/ \
+  && sudo install -m 0644 -o root -g root \
+    /tmp/52-ritornello-update.rules /etc/polkit-1/rules.d/ \
+  && rm -f /tmp/ritornello-update /tmp/ritornello-update.service \
+    /tmp/ritornello-rollback.service /tmp/52-ritornello-update.rules'
+
 # Mount points and credentials. The mount point of a share is imposed
 # (/mnt/ritornello/<name>), never read from the configuration. The credentials
 # directory belongs to the service — the page writes a <name>.cred file there

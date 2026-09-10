@@ -41,7 +41,6 @@ mod tests {
     #[serde(deny_unknown_fields)]
     struct TreeEntry {
         from: String,
-        #[allow(dead_code)]
         to: String,
     }
 
@@ -52,7 +51,6 @@ mod tests {
         /// checked against the source tree.
         #[allow(dead_code)]
         name: String,
-        #[allow(dead_code)]
         to: String,
     }
 
@@ -118,6 +116,52 @@ mod tests {
             }
         }
         assert!(checked > 0, "checked nothing — the walk is not looking where it should");
+    }
+
+    #[test]
+    fn every_privileged_file_a_release_carries_is_also_placed_by_deploy_sh() {
+        // The two installation paths must agree on the privileged files, and
+        // nothing else makes them: `packaging.toml` says what a release
+        // archive carries, `deploy.sh` says what an SSH deployment places,
+        // and they are written months apart. The auto-update work added four
+        // files to the first and none to the second, which left every
+        // development device checking for updates and refusing to install
+        // one — `Access denied`, naming nothing.
+        //
+        // Only units, polkit rules and the binaries systemd runs as root are
+        // held to this. Ordinary plugin binaries are derived from
+        // plugins.example.toml by both sides already, and locale directories
+        // are copied wholesale.
+        let m = manifest();
+        let deploy = std::fs::read_to_string(deploy_dir().join("deploy.sh")).unwrap();
+        let mut checked = 0;
+        for c in std::iter::once(&m.core).chain(m.plugins.values()) {
+            for e in &c.tree {
+                if !e.to.starts_with("etc/systemd/system/")
+                    && !e.to.starts_with("etc/polkit-1/rules.d/")
+                {
+                    continue;
+                }
+                assert!(
+                    deploy.contains(&e.from),
+                    "{} ships in a release archive and deploy.sh never places it",
+                    e.from
+                );
+                checked += 1;
+            }
+            for e in &c.extra_binaries {
+                // The destination path, not the binary name: `ritornello-update`
+                // is a substring of `ritornello-update.service`, so a name
+                // search would pass on the strength of the unit alone.
+                assert!(
+                    deploy.contains(&format!("/{}", e.to)),
+                    "{} is run as root and deploy.sh never installs it",
+                    e.to
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 9, "checked only {checked} privileged files — the walk is wrong");
     }
 
     #[test]
