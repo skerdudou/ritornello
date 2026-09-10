@@ -1,0 +1,170 @@
+name: Dependabot analysis
+
+# **The second chance.** `dependabot-auto-merge.yml` judges a bump on the
+# component a caret pins and queues auto-merge when it is satisfied; that is
+# the fast path and it costs nothing. This workflow only ever sees what that
+# path refused, and asks a different question: has the upstream version
+# actually changed something we use?
+#
+# Two properties of this repository make the shape what it is.
+#
+# **The secret store.** A workflow triggered by a Dependabot pull request
+# reads the *Dependabot* secret store, not the Actions one. The first is empty
+# here; the second holds CLAUDE_CODE_OAUTH_TOKEN. `workflow_run` runs in the
+# context of the default branch and reads the Actions store, so no secret has
+# to be duplicated -- and the workflow definition always comes from `main`,
+# never from the branch under analysis, which matters because Dependabot's
+# github-actions pull requests edit these very files.
+#
+# **The privileged job never executes the pull request tree.** No npm, no
+# cargo, no script from `pr/`. It reads, it writes a patch, it pushes. A
+# hostile `postinstall` in a bumped package would run next to a token here;
+# it runs in `ci.yml` instead, which executes everything and carries no
+# secret. That is the boundary the whole design rests on, and it is why the
+# fix written below is validated by CI on the next round rather than tried
+# out locally.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to analyse by hand
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the default branch, the only tree that executes
+        # `workflow_run` checks out the default branch by default, which is
+        # exactly what is wanted: everything that runs in this job comes from
+        # `main`. The pull request head arrives later, in `pr/`, and is only
+        # ever read.
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Resolve which pull request this run is about
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DISPATCH_PR: ${{ inputs.pr }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          set -euo pipefail
+
+          stop() { echo "skip=true" >> "$GITHUB_OUTPUT"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            number="$DISPATCH_PR"
+            head_sha="$(gh api "repos/$REPO/pulls/$number" --jq .head.sha)"
+            # The **real** conclusion of `CI` on that head, not a placeholder.
+            # A manual dispatch exists so the whole path can be rehearsed
+            # without waiting for Dependabot, and a rehearsal that can never
+            # reach the merge step rehearses nothing: task 6 requires
+            # `success` and would refuse a literal `manual` for ever. This is
+            # the same value the `workflow_run` payload carries, read from the
+            # API rather than from the event.
+            #
+            # Consequence worth knowing: a manual dispatch on a Dependabot
+            # pull request whose three required checks are genuinely green can
+            # therefore queue a real merge. That is the designed behaviour and
+            # not a side effect -- every entry condition below still applies --
+            # but it means the dispatch input is not a dry run.
+            conclusion="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$head_sha&per_page=1" --jq '.workflow_runs[0].conclusion // "pending"')"
+            case "$conclusion" in
+              success|failure) : ;;
+              *) stop "CI on \`$head_sha\` concluded \`$conclusion\`; there is nothing to analyse yet." ;;
+            esac
+          else
+            [ "$RUN_EVENT" = "pull_request" ] || stop "Not a pull request run ($RUN_EVENT); nothing to analyse."
+            case "$HEAD_BRANCH" in
+              dependabot/*) : ;;
+              *) stop "Branch \`$HEAD_BRANCH\` is not Dependabot's; nothing to analyse." ;;
+            esac
+            # `cancelled` and `skipped` are not verdicts. ci.yml cancels the
+            # in-progress run on the same ref, so our own push in stage 2
+            # arrives here as a cancellation of the run it superseded.
+            case "$CONCLUSION" in
+              success|failure) : ;;
+              *) stop "CI concluded \`$CONCLUSION\`, which says nothing about the bump." ;;
+            esac
+            # `workflow_run.pull_requests` is documented as unreliable when
+            # the head is a fork. The head SHA is the authority.
+            number="$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0].number // empty')"
+            head_sha="$HEAD_SHA"
+            conclusion="$CONCLUSION"
+          fi
+
+          [ -n "$number" ] || stop "No open pull request carries $HEAD_SHA."
+
+          author="$(gh api "repos/$REPO/commits/$head_sha" --jq '.commit.author.email')"
+          state="$(gh pr view "$number" --repo "$REPO" --json state --jq .state)"
+          auto="$(gh pr view "$number" --repo "$REPO" --json autoMergeRequest --jq 'if .autoMergeRequest then "queued" else "open" end')"
+
+          [ "$state" = "OPEN" ] || stop "Pull request #$number is $state."
+          [ "$auto" != "queued" ] || stop "Auto-merge is already queued on #$number; the fast path settled it."
+
+          {
+            echo "number=$number"
+            echo "head_sha=$head_sha"
+            echo "conclusion=$conclusion"
+            echo "author=$author"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Decide which round we are in
+        id: state
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          AUTHOR: ${{ steps.pr.outputs.author }}
+          # The identity stage 2 commits under. Round 2 is detected on it, so
+          # the two must never drift apart -- hence one environment variable
+          # read by both.
+          BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          if [ "$AUTHOR" = "$BOT_EMAIL" ]; then
+            echo 'round=2' >> "$GITHUB_OUTPUT"
+            echo 'Round 2: the head commit is ours, so a fix has already been attempted.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'round=1' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read the bump, and ask the caret rule what it thinks
+        id: bump
+        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/pulls/$NUMBER/commits" --paginate --jq '[.[].commit.message]' > commits.json
+          node .github/scripts/read-bump-metadata.mjs commits.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Say what would happen, and do nothing yet
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          NUMBER: ${{ steps.pr.outputs.number }}
+          ROUND: ${{ steps.state.outputs.round }}
+          CONCLUSION: ${{ steps.pr.outputs.conclusion }}
+          SUMMARY: ${{ steps.bump.outputs.summary }}
+        run: |
+          {
+            echo "### Plumbing only"
+            echo "Pull request #$NUMBER, round $ROUND, CI concluded \`$CONCLUSION\`."
+            echo "Bump: ${SUMMARY:-(not read)}"
+            echo "No analysis and no merge: the analysis step arrives in task 5."
+          } >> "$GITHUB_STEP_SUMMARY"
