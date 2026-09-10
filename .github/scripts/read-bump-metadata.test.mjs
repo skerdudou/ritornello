@@ -2,7 +2,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readBumpMetadata } from './read-bump-metadata.mjs'
 
-// Verbatim from commit e3fcd9e in this repository.
+// The `updated-dependencies:` block below is byte-identical to the one in
+// commit e3fcd9e of this repository -- verified by comparison, not by memory.
+// The prose around it is abridged: the parser stops at the block's `...`
+// terminator, so nothing outside the block is input, and pretending otherwise
+// would invite an assertion on text this fixture does not faithfully carry.
 const SINGLE = `chore(deps): bump sha2 from 0.10.9 to 0.11.0 (#24)
 
 Bumps [sha2](https://github.com/RustCrypto/hashes) from 0.10.9 to 0.11.0.
@@ -19,7 +23,8 @@ updated-dependencies:
 Signed-off-by: dependabot[bot] <support@github.com>
 `
 
-// Verbatim from commit 7360da5 in this repository.
+// Same provenance, from commit 7360da5: the block is byte-identical, the
+// prose abridged to the one line that shows a version carrying build metadata.
 const GROUP = `chore(deps): bump the cargo-minor-and-patch group with 2 updates (#23)
 
 Updates \`toml\` from 1.1.4+spec-1.1.0 to 1.1.5+spec-1.1.0
