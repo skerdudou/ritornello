@@ -256,14 +256,28 @@ Two rules, and neither is a convention that can be bent:
 1. **The tag equals the product number**, suffix included. So the beta is
    prepared by setting `[workspace.package] version` to `0.2.1-beta.1` and
    tagging `v0.2.1-beta.1`. A workflow step refuses a tag that disagrees.
-2. **Every component the beta ships carries the beta's own number.** The
-   device decides by version *equality*, never by order: a component
-   shipped as `0.2.1` inside `v0.2.1-beta.1` and shipped again as `0.2.1`
-   in the finished `v0.2.1` would look identical to a device that already
-   has the beta's bytes, and the tester would keep the older binary for
-   ever, silently. `version_coherence.rs` refuses a suffix that is not the
-   product's — and refuses any suffix at all in a finished product, which
-   is what stops a leftover `-beta.2` from riding into a real release.
+2. **No component may declare the number the finished release will
+   carry.** The device decides by version *equality*, never by order: a
+   component shipped as `0.2.1` inside `v0.2.1-beta.1` and shipped again as
+   `0.2.1` in the finished `v0.2.1` looks identical to a device that already
+   has the beta's bytes, and the tester keeps the older binary for ever,
+   silently. So a component the beta delivers carries the beta's own full
+   number, suffix included.
+
+   A component the beta does **not** deliver simply stays where the last
+   finished release left it — `0.2.0` while the product prepares
+   `0.2.1-beta.1` — and that is the normal shape of a narrow beta: only what
+   differs is offered, so there is nothing to be stranded on. A beta may
+   therefore ship one component and leave the other ten alone, which is the
+   cheapest way to try the machinery.
+
+   Three guards, and they now agree. `version_coherence.rs` refuses a suffix
+   that is not the product's, refuses any suffix at all in a finished
+   product (what stops a leftover `-beta.2` from riding into a real
+   release), and refuses a component declaring the finished number inside a
+   prerelease. `scripts/package-release.sh` re-checks the last of those
+   without cargo, since it names the archives; run
+   `scripts/package-release.sh --self-test` to see its case table.
 
 The finished release then needs no special handling: its components differ
 from the beta's, so every device installs them, testers included. That

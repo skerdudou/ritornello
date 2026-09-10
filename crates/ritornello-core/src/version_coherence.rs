@@ -175,6 +175,77 @@ mod tests {
     /// forbids a suffix outright, so a component left at `-beta.2` cannot
     /// ride into a real release under a number that says "prerelease" to
     /// every device that reads it.
+    /// Inside a prerelease, no component may already claim the number the
+    /// finished release will carry.
+    ///
+    /// This is the one shape that strands a tester for ever, and it is not
+    /// caught by the suffix rule above: a component declaring a bare `0.2.1`
+    /// inside product `0.2.1-beta.1` carries no suffix at all, so that test
+    /// waves it through. The device compares versions for **equality** — the
+    /// tester installs the beta's `0.2.1` bytes, the finished `v0.2.1` ships
+    /// its own `0.2.1`, the two strings match, and the newer binary is never
+    /// fetched. Nothing later notices: the release is complete, the archive
+    /// is attached, the row says up to date.
+    ///
+    /// A component that simply did not move — still at `0.2.0` while the
+    /// product prepares `0.2.1-beta.1` — is fine and is the normal case for
+    /// a narrow beta: it is not part of that delivery, so there is nothing
+    /// to be stranded on.
+    #[test]
+    fn a_prerelease_ships_no_component_under_the_finished_number() {
+        let product = product_version();
+        let Some(_) = prerelease(&product) else {
+            return; // a finished product: the rule above already covers it
+        };
+        let finished = product.split('-').next().unwrap_or(&product);
+        let mut names = vec!["ritornello-core".to_string()];
+        names.extend(
+            SHIPPED_PLUGINS
+                .iter()
+                .map(|p| format!("ritornello-plugin-{p}")),
+        );
+        for name in names {
+            let version = declared_version(&crate_manifest(&name))
+                .unwrap_or_else(|| panic!("{name} declares no version of its own"));
+            assert_ne!(
+                version, finished,
+                "{name} is {version} inside prerelease {product}: the finished \
+                 {finished} will carry that same number, and a device compares \
+                 versions for equality, so whoever installs it here keeps the \
+                 beta's bytes for ever"
+            );
+        }
+    }
+
+    /// The same generation rule, in the other language that enforces it.
+    ///
+    /// `scripts/package-release.sh` names every archive of a release and
+    /// re-checks the generation without cargo, because it runs in a job that
+    /// has no toolchain of ours. Its check was written as `${v%.*}`, which
+    /// answers `0.2` for `0.2.0` and `0.2.1-beta` for `0.2.1-beta.1` — so a
+    /// prerelease shipping only the component it fixes was refused, and the
+    /// same suffix written without a dot was not. The script now strips the
+    /// suffix first and carries the case table; this runs it.
+    ///
+    /// The release job is the script's only other exercise, and it fires on
+    /// a tag: without this test the table would first be read on the day a
+    /// release is being cut.
+    #[test]
+    fn the_packaging_script_agrees_about_generations_and_prereleases() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let out = std::process::Command::new("bash")
+            .arg("scripts/package-release.sh")
+            .arg("--self-test")
+            .current_dir(&root)
+            .output()
+            .expect("bash is available: the Rust suite runs on Linux here and in CI");
+        assert!(
+            out.status.success(),
+            "package-release.sh --self-test failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn a_prerelease_suffix_is_the_products_own_or_absent() {
         let product = product_version();

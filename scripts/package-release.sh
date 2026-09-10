@@ -12,10 +12,20 @@
 # hand.
 set -euo pipefail
 
-TARGET="${1:?usage: package-release.sh <cargo-target-triple> <arch-label>}"
-ARCH="${2:?usage: package-release.sh <cargo-target-triple> <arch-label>}"
-
 cd "$(dirname "$0")/.."
+
+SELF_TEST=
+if [ "${1:-}" = "--self-test" ]; then
+  # Runs the version guards below against a table of cases and exits,
+  # building nothing. Called by the Rust suite (version_coherence.rs),
+  # because this script's only other exercise is the release job — which
+  # fires on a tag, so without it the guards are first read on the day a
+  # release is being cut.
+  SELF_TEST=1
+else
+  TARGET="${1:?usage: package-release.sh <cargo-target-triple> <arch-label>}"
+  ARCH="${2:?usage: package-release.sh <cargo-target-triple> <arch-label>}"
+fi
 # `.gitattributes` normalizes *.sh/*.awk/*.service to LF but not *.toml, so a
 # checkout with core.autocrlf=true (the common Windows default) hands this
 # script CRLF-terminated TOML. `tr -d '\r'` keeps every value extracted below
@@ -31,17 +41,80 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | tr -d '\r' | head -1)
 # see the comment on [workspace.package] version. A component that inherits
 # would land here as the literal `version.workspace = true`, which no `sed`
 # below matches, so the guard fires rather than naming an archive `-true-`.
+# The generation of a version: major and minor, with any prerelease suffix
+# removed FIRST.
+#
+# Removing it first is the whole point. `${v%.*}` alone cuts at the last dot,
+# which answers `0.2` for `0.2.0` but `0.2.1-beta` for `0.2.1-beta.1` — not a
+# generation, and equal to no other component's. A beta shipping only the
+# component it fixes was therefore refused outright, while the very same
+# suffix written without a dot (`0.2.1-beta1`) sailed through: the guard was
+# deciding on where the dots fell.
+generation() { # <version>
+  local core=${1%%-*}
+  echo "${core%.*}"
+}
+
+# Whether a component may ship under $VERSION. Split out of crate_version so
+# --self-test exercises these expressions rather than a copy of them: a
+# self-test that restates the rule proves only that it can restate it.
+version_fits() { # <label> <component version>   (reads $VERSION)
+  local label="$1" v="$2"
+  # Major and minor must stay on the product generation. Asserted here as
+  # well as in version_coherence.rs, because this script runs without cargo
+  # and a release must not be buildable with a component off its generation.
+  if [ "$(generation "$v")" != "$(generation "$VERSION")" ]; then
+    echo "$label is $v, off the product generation $(generation "$VERSION")" >&2
+    return 1
+  fi
+  # A component need NOT carry the product's prerelease suffix: a beta may
+  # ship one component and leave the others where the last finished release
+  # left them — the device is offered only what differs, so the others are
+  # simply not part of that beta.
+  #
+  # What it must never do is declare the number the FINISHED release will
+  # carry. The device compares versions for equality: a tester installing
+  # `0.2.1` out of `v0.2.1-beta.1` would never be given the real `0.2.1`,
+  # and would keep the beta's bytes for ever, silently.
+  if [ "$VERSION" != "${VERSION%%-*}" ] && [ "$v" = "${VERSION%%-*}" ]; then
+    echo "$label is $v inside prerelease $VERSION: the finished ${VERSION%%-*} will carry that same number, so a device installing it here would never replace it" >&2
+    return 1
+  fi
+  return 0
+}
+
+# The version a shipped component declares for itself.
 crate_version() { # <crate directory name>
   local v
   v=$(sed -n 's/^version = "\(.*\)"/\1/p' "crates/$1/Cargo.toml" | tr -d '\r' | head -1)
   [ -n "$v" ] || { echo "crates/$1 declares no version of its own" >&2; exit 1; }
-  # Major and minor must stay on the product generation. Asserted here as well
-  # as in version_coherence.rs, because this script runs without cargo and a
-  # release must not be buildable with a component off its generation.
-  [ "${v%.*}" = "${VERSION%.*}" ] \
-    || { echo "crates/$1 is $v, off the product generation ${VERSION%.*}" >&2; exit 1; }
+  version_fits "crates/$1" "$v" || exit 1
   echo "$v"
 }
+
+if [ -n "$SELF_TEST" ]; then
+  fails=0
+  expect() { # <product> <component> <ok|refused> <why>
+    local want="$3" why="$4" got=ok
+    VERSION="$1"
+    version_fits "self-test" "$2" >/dev/null 2>&1 || got=refused
+    if [ "$got" != "$want" ]; then
+      echo "self-test: product=$1 component=$2 -> $got, expected $want ($why)" >&2
+      fails=$((fails + 1))
+    fi
+  }
+  expect 0.2.0 0.2.0 ok "the ordinary case"
+  expect 0.2.7 0.2.0 ok "a component unchanged for seven deliveries"
+  expect 0.3.0 0.2.9 refused "off the generation"
+  expect 0.2.0-beta.1 0.2.0-beta.1 ok "a beta where every component moved"
+  expect 0.2.1-beta.1 0.2.0 ok "a beta shipping one component, others left behind"
+  expect 0.2.1-beta1 0.2.0 ok "the same, with a suffix carrying no dot"
+  expect 0.2.1-beta.1 0.2.1 refused "the number the finished release will carry"
+  expect 0.2.1-beta.1 0.3.0 refused "off the generation, suffix or not"
+  [ "$fails" -eq 0 ] || { echo "self-test: $fails case(s) wrong" >&2; exit 1; }
+  echo "self-test: version guards ok"
+  exit 0
+fi
 
 BIN="target/$TARGET/release"
 OUT="release/$ARCH"
