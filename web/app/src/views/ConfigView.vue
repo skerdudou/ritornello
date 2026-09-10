@@ -382,6 +382,14 @@ interface PluginRow {
    * `undeclared_binary` is true. Never the same string as `name` once the
    * release's own convention applies to it (`ritornello-plugin-<name>`). */
   binary_file?: string
+  /**
+   * This row's binary is already being erased: an uninstall queued it, or
+   * "Remove the binary" was pressed. It replaces both of the gestures an
+   * `undeclared_binary` row licenses, because both would ask for something
+   * already in flight — which is what made an ordinary uninstall read as a
+   * job left half done.
+   */
+  removal_pending: boolean
 }
 
 /** Intermediate accumulator: the raw kinds, before we decide what must stay in
@@ -401,6 +409,7 @@ interface PluginAccumulator {
   missing_binary: boolean
   undeclared_binary: boolean
   binary_file?: string
+  removal_pending: boolean
 }
 
 /**
@@ -430,6 +439,7 @@ const plugins = computed<PluginRow[]>(() => {
         missing_binary: !!p.missing_binary,
         undeclared_binary: !!p.undeclared_binary,
         binary_file: p.binary_file,
+        removal_pending: !!p.removal_pending,
       })
       continue
     }
@@ -448,6 +458,7 @@ const plugins = computed<PluginRow[]>(() => {
     acc.missing_binary = acc.missing_binary || !!p.missing_binary
     acc.undeclared_binary = acc.undeclared_binary || !!p.undeclared_binary
     acc.binary_file = acc.binary_file ?? p.binary_file
+    acc.removal_pending = acc.removal_pending || !!p.removal_pending
   }
   const declaredRows: PluginRow[] = [...byName.values()].map((acc) => {
     // "unknown" is never shown next to a real kind: we only keep it when it is
@@ -489,6 +500,7 @@ const plugins = computed<PluginRow[]>(() => {
       declared: !acc.undeclared_binary,
       offered: offer?.offered ?? null,
       binary_file: acc.binary_file,
+      removal_pending: acc.removal_pending,
     }
   })
 
@@ -517,6 +529,8 @@ const plugins = computed<PluginRow[]>(() => {
       not_installed: true,
       declared: false,
       offered: c.offered,
+      // Nothing on disk to erase, so nothing can be in flight for it.
+      removal_pending: false,
     }))
 
   return [...declaredRows, ...availableRows]
@@ -1028,7 +1042,7 @@ function goTo(id: string) {
                           : p.missing_binary
                             ? t('update_binary_missing')
                             : p.undeclared_binary
-                              ? t('update_undeclared')
+                              ? t(p.removal_pending ? 'update_removal_pending' : 'update_undeclared')
                               : p.not_installed
                                 ? t('update_not_installed')
                                 : p.disabled
@@ -1114,14 +1128,19 @@ function goTo(id: string) {
                         :disabled="p.offered === null || inProgress.has(p.name)"
                         @click="installPlugin(p.name)"
                       >{{ t('plugin_install') }}</Button>
+                      <!-- Both gestures this state licenses are withheld while
+                           the binary is already being erased: declaring a file
+                           that is about to vanish, or asking a second time for
+                           the erasure in flight, are the two ways this row used
+                           to mislead. The row says what is happening instead. -->
                       <Button
-                        v-if="p.undeclared_binary"
+                        v-if="p.undeclared_binary && !p.removal_pending"
                         variant="outline" size="xs" data-plugin-declare
                         :disabled="p.offered === null || inProgress.has(p.name)"
                         @click="installPlugin(p.name)"
                       >{{ t('plugin_declare') }}</Button>
                       <Button
-                        v-if="p.undeclared_binary"
+                        v-if="p.undeclared_binary && !p.removal_pending"
                         variant="outline" size="xs" data-plugin-remove-binary
                         @click="removeBinaryTarget = p.binary_file ?? p.name"
                       >{{ t('plugin_remove_binary') }}</Button>

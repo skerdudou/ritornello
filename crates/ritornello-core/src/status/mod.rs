@@ -220,6 +220,11 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
         crate::plugins::PluginManifest::default()
     });
     let plugins_dir = ritornello_updater::target::plugins_dir(&state.plugins.root);
+    // The queue's own answer to "is this file's erasure already in flight",
+    // taken once for the whole scan rather than per file. Read and not stored:
+    // the update worker owns this list, and a copy here would be a second
+    // answer to a question that has one.
+    let pending_removals = state.update.read().await.pending_removals.clone();
     for file in crate::plugins::undeclared_binaries(&plugins_dir, &manifest) {
         // The scan only ever knows the bare file name; `name` is what the
         // rest of the page (and the release) recognise this plugin by — see
@@ -234,8 +239,13 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
             Some(line) => {
                 line.undeclared_binary = true;
                 line.binary_file = Some(file.clone());
+                line.removal_pending = pending_removals.contains(&file);
             }
-            None => status.plugins.push(PluginStatus::undeclared_binary(name, &file)),
+            None => {
+                let mut line = PluginStatus::undeclared_binary(name, &file);
+                line.removal_pending = pending_removals.contains(&file);
+                status.plugins.push(line);
+            }
         }
     }
     // Clamped to the installed set, falling back to `en`: `locale_current` can
@@ -1026,6 +1036,62 @@ mod tests {
             .expect("a synthetic line for the undeclared binary");
         assert_eq!(line["undeclared_binary"], true);
         assert_eq!(line["binary_file"], "ritornello-plugin-orphan");
+    }
+
+    /// **A queued erasure is stamped onto the very row that would otherwise
+    /// offer to start it.** The scan of RULING 63 says only "undeclared"; the
+    /// update worker's queue is the one thing that knows this file is already
+    /// on its way out, and this route is where the two facts meet.
+    ///
+    /// The defect pinned here is what an owner reported: an uninstall answers
+    /// as soon as the erasure is queued, so the plugin came straight back as
+    /// "installed but not declared" offering "Remove the binary" — for a
+    /// gesture already in flight. It read as an uninstall that had left its
+    /// job half done.
+    ///
+    /// **Two strays and one queued**, so the fixture cannot pass by stamping
+    /// every undeclared row alike: `queued` must carry the flag and `stray`
+    /// must not carry the key at all.
+    #[tokio::test]
+    async fn an_undeclared_binary_whose_erasure_is_queued_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("plugins.toml");
+        std::fs::write(&manifest, "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n").unwrap();
+        let plugins_dir = ritornello_updater::target::plugins_dir(dir.path());
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(plugins_dir.join("ritornello-plugin-queued"), b"").unwrap();
+        std::fs::write(plugins_dir.join("ritornello-plugin-stray"), b"").unwrap();
+
+        let update =
+            Arc::new(RwLock::new(crate::update::state::UpdateState::initial("0.2.0", &[])));
+        update.write().await.mark_removal_pending("ritornello-plugin-queued");
+
+        let state = AppState {
+            plugins: Arc::new(PluginsControl {
+                manifest,
+                tx: tokio::sync::mpsc::channel(1).0,
+                root: dir.path().to_path_buf(),
+            }),
+            update,
+            ..app_state()
+        };
+        let app = router(state);
+        let resp =
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let lines = v["plugins"].as_array().unwrap();
+
+        let queued = lines.iter().find(|p| p["name"] == "queued").expect("the queued row");
+        assert_eq!(queued["undeclared_binary"], true);
+        assert_eq!(queued["removal_pending"], true);
+
+        let stray = lines.iter().find(|p| p["name"] == "stray").expect("the stray row");
+        assert_eq!(stray["undeclared_binary"], true);
+        assert!(
+            stray.get("removal_pending").is_none(),
+            "additive, and nothing queued this one: {stray}"
+        );
     }
 
     /// The second case: a declared plugin's own binary, present at its

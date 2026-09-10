@@ -383,7 +383,14 @@ before opening it:
   then looks complete and delivers nothing. This is the one failure here
   that is entirely silent;
 - the release lands as a draft, and a tag with a prerelease suffix lands
-  as a prerelease.
+  as a prerelease. **A draft is invisible to every device** — GitHub lists
+  drafts to a reader with push access alone, and the core polls with no
+  token — so publishing it by hand is part of the gesture, not an
+  afterthought. Skip it and every device reports "no release published
+  yet", which is the truth from where it stands;
+- a device whose "Offer prereleases" switch is off reads a repository
+  holding only a beta as "only prereleases published" — its own sentence,
+  naming the switch, and not the same one as "nothing published".
 
 ## Process
 

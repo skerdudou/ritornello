@@ -48,6 +48,12 @@ export interface PluginStatus {
    * since a hand-dropped binary may carry no component name the release
    * would recognise at all. */
   binary_file?: string
+  /** This undeclared binary's erasure is queued behind the update worker and
+   * has not answered yet — an uninstall a moment ago, or a press of "Remove
+   * the binary". The row shows that instead of offering either gesture
+   * again, and the probe stays armed until it clears. Optional: absent when
+   * false. */
+  removal_pending?: boolean
 }
 export interface StatusPayload {
   plugins: PluginStatus[]
@@ -138,6 +144,12 @@ export interface UpdatePayload {
   outcome:
     | { kind: 'never_checked' }
     | { kind: 'no_release' }
+    /**
+     * Something is published and every published release is a prerelease this
+     * device declined — a different sentence from `no_release`, because this
+     * one names a switch the reader owns.
+     */
+    | { kind: 'only_prereleases' }
     | { kind: 'ok' }
     | { kind: 'installed'; detail: string }
     | { kind: 'failed'; detail: string }

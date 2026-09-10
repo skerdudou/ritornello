@@ -11,6 +11,8 @@ import UpdateCard from './UpdateCard.vue'
 const CATALOG = {
   update_title: 'Updates',
   update_no_release: 'No release published yet',
+  update_only_prereleases:
+    'Only prereleases are published; tick “Offer prereleases” below to be offered them',
   update_never_checked: 'Never checked',
   update_aligned: 'Up to date',
   update_unknown: 'Unknown',
@@ -87,6 +89,37 @@ describe('UpdateCard', () => {
   it('says nothing has been published rather than showing a fault', () => {
     const w = mountCard(payload({ outcome: { kind: 'no_release' }, release_version: null }))
     expect(w.get('[data-update-summary]').text()).toBe('No release published yet')
+    expect(w.find('[data-update-error]').exists()).toBe(false)
+  })
+
+  // The payload is the shape the core really sends for this outcome: it
+  // rebuilds every row against an empty offer, so the core row is `unknown`
+  // with no offered version. That is what makes this test discriminating —
+  // read as anything but its own sentence, this payload falls through to
+  // "Up to date", which is the defect: a beta was published, the switch was
+  // off, and the card claimed the device was current.
+  it('names the switch when only prereleases are published', () => {
+    const w = mountCard(
+      payload({
+        outcome: { kind: 'only_prereleases' },
+        release_version: null,
+        components: [
+          {
+            name: 'core',
+            kind: 'core',
+            declared: true,
+            binary_present: true,
+            installed: '0.2.0',
+            offered: null,
+            availability: 'unknown',
+          },
+        ],
+      }),
+    )
+    expect(w.get('[data-update-summary]').text()).toBe(
+      'Only prereleases are published; tick “Offer prereleases” below to be offered them',
+    )
+    // A statement, not a fault: nothing failed here.
     expect(w.find('[data-update-error]').exists()).toBe(false)
   })
 

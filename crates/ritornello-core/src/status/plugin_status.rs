@@ -96,6 +96,22 @@ pub struct PluginStatus {
     /// removal quietly acting on a guess.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_file: Option<String>,
+    /// This undeclared binary's **erasure is queued and has not answered
+    /// yet** — an uninstall a moment ago, or a "Remove the binary" press.
+    ///
+    /// The row is honest without it and misleading all the same: an uninstall
+    /// answers as soon as the job is queued, so the plugin correctly
+    /// reappears here as "installed but not declared", and the two gestures
+    /// that state licenses — "Declare" and "Remove the binary" — then invite
+    /// the operator to ask for something already in flight. This is the field
+    /// that lets the page say "erasure in progress" instead, and keep probing
+    /// until the row settles on its own rather than waiting for an F5.
+    ///
+    /// Read from `update::state::UpdateState.pending_removals` at
+    /// `/api/status` time, never stored here: the queue is the authority, and
+    /// a second copy would be a second answer. Additive like the flags above.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removal_pending: bool,
     /// Reachable plugin whose admin page does not answer the `Ping`: a long
     /// `set_data` holds its lock (most often a network share). Computed at
     /// `/api/status` time, never stored: it is a state that changes by the
@@ -167,6 +183,7 @@ impl PluginStatus {
             missing_binary: false,
             undeclared_binary: false,
             binary_file: None,
+            removal_pending: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -192,6 +209,7 @@ impl PluginStatus {
             missing_binary: false,
             undeclared_binary: false,
             binary_file: None,
+            removal_pending: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -248,6 +266,7 @@ impl PluginStatus {
             missing_binary: false,
             undeclared_binary: false,
             binary_file: None,
+            removal_pending: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -270,6 +289,7 @@ impl PluginStatus {
             missing_binary: false,
             undeclared_binary: false,
             binary_file: None,
+            removal_pending: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -295,6 +315,7 @@ impl PluginStatus {
             missing_binary: false,
             undeclared_binary: false,
             binary_file: None,
+            removal_pending: false,
             busy: false,
             ui_version: None,
             version: None,
@@ -547,7 +568,17 @@ pub(super) async fn plugin_delete(
     match std::path::Path::new(&exec).file_name().and_then(|f| f.to_str()) {
         Some(file) => {
             let job = crate::update::Job::RemovePlugin { name: name.clone(), file: file.to_string() };
-            if state.update_tx.try_send(job).is_err() {
+            if state.update_tx.try_send(job).is_ok() {
+                // The stored `/api/update` snapshot is brought to where this
+                // gesture just left the device: undeclared, binary still on
+                // disk, erasure in flight. Left alone it went on claiming the
+                // plugin declared, and the page — which merges this payload
+                // with `/api/status` to build a row — lost the row entirely
+                // once the binary was gone, with no gesture left to reinstall
+                // from. Only on `is_ok`: a dropped job is not in flight, and
+                // marking it so would be a promise nothing keeps.
+                state.update.write().await.declaration_removed(&name, file);
+            } else {
                 // Nothing retries this on its own: no scheduled check, no
                 // restart, no future task re-derives a `Job::RemovePlugin`
                 // for a dropped one. The binary sits there until an operator
@@ -638,6 +669,10 @@ pub(super) async fn plugin_binary_delete(
     if state.update_tx.try_send(job).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+    // In flight from here, so the row that offered this button stops offering
+    // it. No declaration was touched — there was none — so unlike
+    // `plugin_delete` this marks the file and nothing else.
+    state.update.write().await.mark_removal_pending(&file);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1152,6 +1187,65 @@ mod tests {
             }
             other => panic!("unexpected job: {other:?}"),
         }
+    }
+
+    /// **The route is what has to move the stored snapshot**, and a test that
+    /// called `declaration_removed` itself would prove the transition and
+    /// never prove that anything invokes it.
+    ///
+    /// `GET /api/update` serves a stored value. With the route silent the row
+    /// went on claiming `cd` declared, and since the page builds each
+    /// plugin's row by merging that payload with `/api/status`, the row left
+    /// the table outright the moment the binary was erased — no declaration
+    /// on one side, a stale "declared" on the other, and no gesture left to
+    /// reinstall from. Two things are asserted because the route writes two:
+    /// the row's own state, and the file marked in flight.
+    #[tokio::test]
+    async fn a_successful_uninstall_moves_the_stored_update_row_and_marks_the_erasure() {
+        use crate::update::state::{Availability, ComponentKind, ComponentOffer, UpdateState};
+
+        let (base, _dir, mut rx) = app_state_with_plugins();
+        let (update_tx, _update_rx) = tokio::sync::mpsc::channel(4);
+        let update = std::sync::Arc::new(tokio::sync::RwLock::new(UpdateState {
+            components: vec![ComponentOffer {
+                name: "cd".to_string(),
+                kind: ComponentKind::Plugin,
+                declared: true,
+                binary_present: true,
+                installed: Some("0.2.0".to_string()),
+                offered: Some("0.2.1".to_string()),
+                availability: Availability::UpdateAvailable,
+                installable: None,
+                third_party_repo: None,
+                not_installed_files: None,
+            }],
+            ..UpdateState::initial("0.2.0", &[])
+        }));
+        let state = AppState { update_tx, update: update.clone(), ..base };
+        let core = tokio::spawn(async move {
+            let order = rx.recv().await.unwrap();
+            let _ = order.ack.send(true);
+        });
+
+        let response =
+            plugin_delete(axum::extract::State(state), axum::extract::Path("cd".to_string())).await;
+        core.await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let after = update.read().await;
+        let row = after.components.iter().find(|c| c.name == "cd").expect("the row survives");
+        assert!(!row.declared, "the declaration is gone");
+        assert!(row.binary_present, "the erasure is queued, not done");
+        assert_eq!(row.installed, None, "a stopped plugin announces no version");
+        assert_eq!(row.availability, Availability::Undeclared);
+        assert_eq!(
+            row.offered.as_deref(),
+            Some("0.2.1"),
+            "the offer is what licenses the way back, and it is untouched"
+        );
+        // `true`, the `exec`'s own file name — the same distinction the
+        // sibling test above exists for.
+        assert_eq!(after.pending_removals, vec!["true".to_string()]);
     }
 
     /// Re-review of this task's fix round, Finding 3: a hand-dropped file

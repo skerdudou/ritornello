@@ -252,13 +252,26 @@ pub fn component_offers(
 #[serde(rename_all = "snake_case", tag = "kind", content = "detail")]
 pub enum CheckOutcome {
     NeverChecked,
-    /// The repository has no published release. A statement, not a fault —
-    /// this is what a device sees until the first one is published.
+    /// The repository has no published release **that this device could ever
+    /// be offered**. A statement, not a fault.
     ///
-    /// It arrives as `200` with an empty list, never as a status code: the
-    /// releases endpoint answers `[]` for a repository that has none, which
-    /// is why `parse_releases` and not the HTTP layer is what decides this.
+    /// It arrives as `200` with a list this device read as empty, never as a
+    /// status code: the releases endpoint answers `[]` for a repository that
+    /// has none, which is why `parse_releases` and not the HTTP layer is what
+    /// decides this. Two bodies reduce to it — a genuinely empty list, and one
+    /// holding nothing but drafts, which a device polling with no token cannot
+    /// see in the first place. A list of prereleases alone is **not** one of
+    /// them: that is `OnlyPrereleases`, next.
     NoRelease,
+    /// Something is published, and every published release is a prerelease
+    /// this device declined.
+    ///
+    /// Its own variant and not a shade of `NoRelease`, because the two differ
+    /// in the only way that matters to a reader: this one names a switch they
+    /// own. Telling them "no release published yet" while a beta sits on the
+    /// repository states a falsehood about the world and hides the one gesture
+    /// that would change the answer.
+    OnlyPrereleases,
     Ok,
     /// A component was installed. Carries the sentence naming it and its new
     /// version.
@@ -293,6 +306,44 @@ pub struct UpdateState {
     /// nothing, and its field names are the wire contract this payload
     /// exposes to the page.
     pub last_rollback: Option<ritornello_updater::rollback::Report>,
+    /// Bare file names in the plugins directory whose **erasure is queued and
+    /// has not answered yet**.
+    ///
+    /// Not `busy`, deliberately, and for the reason `remove_plugin_binary`'s
+    /// doc already gives: `busy` is the update card's one line, and an
+    /// uninstall is a plugin-management gesture, not an update. This is a
+    /// second, per-file fact, and it exists because the alternative was
+    /// leaving the operator to guess. An uninstall answers the moment the job
+    /// is queued — the declaration is already gone, the binary is not — so the
+    /// row correctly reappears as "installed but not declared", and without
+    /// this field it also offers "Remove the binary", inviting a gesture that
+    /// is already in flight.
+    ///
+    /// Files and not component names: this is what `Action::RemovePlugin`
+    /// names, what `DELETE /api/plugins/binaries/{file}` names, and what the
+    /// scan behind an undeclared row finds. A hand-dropped binary may carry no
+    /// component name at all.
+    ///
+    /// **Emptied by the worker on every exit of `remove_plugin_binary`**,
+    /// success or failure. A failed erasure must fall back to the plain
+    /// undeclared row with the reason on the card above — a row stuck on
+    /// "erasure in progress" would be the same lie in the other direction.
+    ///
+    /// Lives here rather than in a handle of its own because both writers
+    /// already hold this lock (the route through `AppState.update`, the worker
+    /// through `Worker.state`) and so does `status_json`, which stamps it onto
+    /// `PluginStatus::removal_pending`. A dedicated field would have cost
+    /// `AppState` and `PluginsControl` a member each and bought nothing.
+    ///
+    /// **`skip`, not `skip_serializing_if`: this one never goes on the wire.**
+    /// It is shared state that happens to live in the struct the payload is
+    /// serialized from, and the page already learns the fact where the row it
+    /// decorates lives — `PluginStatus::removal_pending` on `/api/status`.
+    /// Publishing it here as well would put a second, unread representation of
+    /// one fact into the contract, which is the very thing this field's own
+    /// doctrine refuses two paragraphs up.
+    #[serde(skip)]
+    pub pending_removals: Vec<String>,
 }
 
 impl UpdateState {
@@ -306,6 +357,78 @@ impl UpdateState {
             components: component_offers(core_version, &[], &[], installed),
             busy: None,
             last_rollback: None,
+            // Nothing can be in flight before the first HTTP request: this
+            // list only ever grows from a route, and it is not persisted —
+            // a core that restarts mid-erasure has no queue left to wait on,
+            // and the row then tells the truth from the scan alone.
+            pending_removals: Vec::new(),
+        }
+    }
+
+    /// **A declaration has just been removed and the binary's erasure queued.**
+    ///
+    /// The row this component keeps is the one a check would compute a moment
+    /// later: undeclared, binary still on disk, no version — the process is
+    /// stopped, so nothing announces one. `offered` is deliberately left
+    /// alone: a release did not change because a device uninstalled
+    /// something, and that field is what licenses the gesture back.
+    ///
+    /// Written here rather than left to the next check because
+    /// `GET /api/update` serves a **stored** snapshot. Without it the row went
+    /// on claiming the plugin declared and aligned, and since the page builds
+    /// each plugin's row by merging this payload with `/api/status`, the row
+    /// vanished outright the moment the binary was erased — leaving no gesture
+    /// to bring the plugin back short of a GitHub check. That was the defect:
+    /// an uninstall made a plugin unreachable from the page.
+    pub fn declaration_removed(&mut self, name: &str, file: &str) {
+        if let Some(row) = self.components.iter_mut().find(|c| c.name == name) {
+            row.declared = false;
+            row.binary_present = true;
+            row.installed = None;
+            row.availability = Availability::Undeclared;
+        }
+        self.mark_removal_pending(file);
+    }
+
+    /// `file`'s erasure is queued. Idempotent: two presses of the same button
+    /// queue two jobs, and the second one finding the file already listed must
+    /// not make the list carry it twice — `removal_answered` clears by value,
+    /// and a duplicate would survive the first answer.
+    pub fn mark_removal_pending(&mut self, file: &str) {
+        if !self.pending_removals.iter().any(|f| f == file) {
+            self.pending_removals.push(file.to_string());
+        }
+    }
+
+    /// **The queued erasure answered.** `file` is no longer in flight.
+    ///
+    /// `removed` false is a failure or a skip: the row stays undeclared, which
+    /// is the truth, and the reason is already on the card. Only the in-flight
+    /// mark goes — a row left saying "erasure in progress" for ever would be
+    /// the same kind of lie as the button that started this.
+    ///
+    /// On success the component has neither a declaration nor a binary, which
+    /// is a row only when a release offers it. When none does there is nothing
+    /// to click and the row goes: that is the fourth documented state
+    /// answering by its own absence, and it is why publishing a release — not
+    /// this method — is what makes an uninstalled plugin installable again.
+    pub fn removal_answered(&mut self, name: &str, file: &str, removed: bool) {
+        self.pending_removals.retain(|f| f != file);
+        if !removed {
+            return;
+        }
+        match self.components.iter().position(|c| c.name == name) {
+            Some(i) if self.components[i].offered.is_some() => {
+                let row = &mut self.components[i];
+                row.declared = false;
+                row.binary_present = false;
+                row.installed = None;
+                row.availability = Availability::NotInstalled;
+            }
+            Some(i) => {
+                self.components.remove(i);
+            }
+            None => {}
         }
     }
 }
@@ -655,5 +778,113 @@ mod tests {
             .collect();
         // Declared ones first, in file order; then what could be added.
         assert_eq!(names, vec!["radio", "cd", "musicbrainz", "mpd"]);
+    }
+
+    /// A snapshot of a device that declares `console`, runs it at 0.2.0, and
+    /// has read a release offering 0.2.1 — the state every test below starts
+    /// an uninstall from.
+    fn with_console_declared(offered: &[Published]) -> UpdateState {
+        UpdateState {
+            components: offers("0.2.0", offered, &[declared("console", Some("0.2.0"), true)]),
+            ..UpdateState::initial("0.2.0", &[])
+        }
+    }
+
+    fn row<'a>(state: &'a UpdateState, name: &str) -> Option<&'a ComponentOffer> {
+        state.components.iter().find(|c| c.name == name)
+    }
+
+    /// **An uninstall leaves a row, and says the erasure is in flight.**
+    ///
+    /// The regression pinned here is the one an owner actually hit.
+    /// `GET /api/update` serves a **stored** snapshot and nothing rebuilt it
+    /// after an uninstall, so the row went on claiming the plugin declared and
+    /// aligned. The page builds each plugin's row by merging that payload with
+    /// `/api/status`, so once the binary was erased neither payload produced
+    /// one: the plugin left the table altogether, with no gesture left to
+    /// reinstall it short of a GitHub check.
+    #[test]
+    fn an_uninstall_leaves_an_undeclared_row_and_marks_the_erasure() {
+        let mut state = with_console_declared(&[published(Offer::Plugin("console".to_string()), "0.2.1")]);
+        state.declaration_removed("console", "ritornello-plugin-console");
+
+        let row = row(&state, "console").expect("the row survives the uninstall");
+        assert!(!row.declared, "the [[plugin]] block is gone");
+        assert!(row.binary_present, "and the binary is not: its erasure is only queued");
+        assert_eq!(row.installed, None, "a stopped plugin announces no version");
+        assert_eq!(row.availability, Availability::Undeclared);
+        assert_eq!(
+            row.offered.as_deref(),
+            Some("0.2.1"),
+            "a release does not change because a device uninstalled something"
+        );
+        assert_eq!(state.pending_removals, vec!["ritornello-plugin-console".to_string()]);
+    }
+
+    /// The erasure answered: nothing declares it, nothing is on disk, and the
+    /// release still offers it — which is exactly the row whose only gesture
+    /// is Install. **This is the fix's point**: the way back exists without
+    /// waiting on a network check.
+    #[test]
+    fn an_erased_binary_leaves_a_row_the_release_can_reinstall() {
+        let mut state = with_console_declared(&[published(Offer::Plugin("console".to_string()), "0.2.1")]);
+        state.declaration_removed("console", "ritornello-plugin-console");
+        state.removal_answered("console", "ritornello-plugin-console", true);
+
+        let row = row(&state, "console").expect("something is offered, so there is a row");
+        assert!(!row.declared);
+        assert!(!row.binary_present);
+        assert_eq!(row.installed, None);
+        assert_eq!(row.availability, Availability::NotInstalled);
+        assert_eq!(row.offered.as_deref(), Some("0.2.1"));
+        assert!(state.pending_removals.is_empty(), "nothing is in flight any more");
+    }
+
+    /// **And no row when nothing offers it**, which is the fourth documented
+    /// state answering by its own absence: there is genuinely nothing to
+    /// click. Publishing a release, not this method, is what makes an
+    /// uninstalled plugin installable again — the distinction that cost an
+    /// owner an afternoon.
+    #[test]
+    fn an_erased_binary_nothing_offers_leaves_no_row_at_all() {
+        let mut state = with_console_declared(&[]);
+        state.declaration_removed("console", "ritornello-plugin-console");
+        state.removal_answered("console", "ritornello-plugin-console", true);
+
+        assert!(row(&state, "console").is_none());
+        assert!(state.pending_removals.is_empty());
+    }
+
+    /// A refused or failed erasure: the mark goes, the row does not.
+    ///
+    /// Both halves matter and for opposite reasons. Keeping the mark would
+    /// leave the page saying "erasing…" for as long as the core runs, and
+    /// probing for a change that will never come. Moving the row to
+    /// `NotInstalled` would claim a binary gone that is still on the device —
+    /// and it is the undeclared row, with the reason on the card above, that
+    /// tells the operator to go and look.
+    #[test]
+    fn a_failed_erasure_clears_the_mark_and_keeps_the_undeclared_row() {
+        let mut state = with_console_declared(&[published(Offer::Plugin("console".to_string()), "0.2.1")]);
+        state.declaration_removed("console", "ritornello-plugin-console");
+        state.removal_answered("console", "ritornello-plugin-console", false);
+
+        let row = row(&state, "console").expect("the row stays");
+        assert_eq!(row.availability, Availability::Undeclared, "the binary is still there");
+        assert!(row.binary_present);
+        assert!(state.pending_removals.is_empty(), "but nothing is waiting on it any more");
+    }
+
+    /// Two presses queue two jobs, and the first answer clears by value: a
+    /// duplicated entry would survive it and strand the row on "erasing…".
+    #[test]
+    fn queueing_the_same_erasure_twice_lists_the_file_once() {
+        let mut state = with_console_declared(&[]);
+        state.mark_removal_pending("ritornello-plugin-console");
+        state.mark_removal_pending("ritornello-plugin-console");
+        assert_eq!(state.pending_removals.len(), 1);
+
+        state.removal_answered("console", "ritornello-plugin-console", false);
+        assert!(state.pending_removals.is_empty());
     }
 }

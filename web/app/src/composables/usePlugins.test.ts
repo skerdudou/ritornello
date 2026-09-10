@@ -143,6 +143,57 @@ describe('usePlugins', () => {
     expect(admins.value).toEqual(['mpd'])
   })
 
+  it('watches a binary being erased, and stops once the row is gone', async () => {
+    // The third state of the same trap, and the reason the core sends a flag
+    // of its own for it. An uninstall answers as soon as the erasure is
+    // queued, so the plugin comes straight back as "installed but not
+    // declared" — and with nothing here watching, it stayed that way until an
+    // F5, which read as an uninstall that had not done its job.
+    const erasing = row({
+      kind: 'unknown', connected: false, admin: false,
+      undeclared_binary: true, removal_pending: true,
+    })
+    const spy = vi
+      .fn()
+      .mockResolvedValueOnce(response([erasing]))
+      .mockResolvedValue(response([]))
+    vi.stubGlobal('fetch', spy)
+    const { usePlugins } = await import('./usePlugins')
+    const { refresh } = usePlugins()
+
+    await refresh()
+    expect(spy).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(spy).toHaveBeenCalledTimes(2)
+
+    // The erasure answered and the row left the payload: there is nothing to
+    // watch any more, so the loop disarms instead of burning its budget.
+    await vi.advanceTimersByTimeAsync(1500 * 4)
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
+  it('never probes a stray binary, whose state is stable by design', async () => {
+    // The discriminating half of the pair above: watching `undeclared_binary`
+    // would have worked just as well for an uninstall and been wrong here. A
+    // binary somebody dropped into the plugins directory is not going
+    // anywhere, so probing it spends the whole 30 s budget, on every page
+    // load, on a row that will never change.
+    const stray = row({
+      kind: 'unknown', connected: false, admin: false, undeclared_binary: true,
+    })
+    const spy = vi.fn().mockResolvedValue(response([stray]))
+    vi.stubGlobal('fetch', spy)
+    const { usePlugins } = await import('./usePlugins')
+    const { refresh } = usePlugins()
+
+    await refresh()
+    expect(spy).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1500 * 5)
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
   it('a plugin that never announces itself stops being probed after 30 s', async () => {
     // `Gathered::figes` of the core: launched, alive, silent. This is a faulty
     // plugin, not a slow one, and the "stalled" row then becomes a diagnosis

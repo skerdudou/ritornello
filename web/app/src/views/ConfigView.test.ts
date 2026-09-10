@@ -28,6 +28,7 @@ const CATALOGUE = {
   admin_link: 'admin', toggle_plugin: 'Activer ou désactiver {name}',
   plugin_enabled: '{name} activé.', plugin_disabled: '{name} désactivé.',
   update_binary_missing: 'Non installé', update_undeclared: 'Installé mais non déclaré',
+  update_removal_pending: 'Effacement du binaire…',
   update_not_installed: 'Disponible',
   plugin_move_up: 'Monter', plugin_move_down: 'Descendre',
   plugin_install: 'Installer', plugin_declare: 'Déclarer',
@@ -544,6 +545,31 @@ describe('ConfigView — plugin table', () => {
     expect(row.find('[data-plugin-install]').exists()).toBe(false)
     expect(row.find('[data-plugin-uninstall]').exists()).toBe(false)
     expect(row.get('[data-plugin-state]').text()).toBe('Installé mais non déclaré')
+  })
+
+  // The sibling of the test above, and the pair is the point: the same
+  // `undeclared_binary` row offers both gestures, or neither, on this one
+  // flag. It is what an owner met — an uninstall answers as soon as the
+  // erasure is queued, so the plugin reappeared here at once offering to
+  // remove a binary already on its way out, which read as a job left half
+  // done.
+  it('withholds both gestures while the binary is already being erased', async () => {
+    const w = await mountWithStatus({
+      plugins: [
+        {
+          name: 'mpd', kind: 'unknown', connected: false, admin: false,
+          undeclared_binary: true, binary_file: 'ritornello-plugin-mpd',
+          removal_pending: true,
+        },
+      ],
+      active_source: 'radio',
+      protocol: 1,
+    })
+    const row = w.get('[data-plugin-row]')
+    expect(row.find('[data-plugin-declare]').exists()).toBe(false)
+    expect(row.find('[data-plugin-remove-binary]').exists()).toBe(false)
+    // And the row says what is happening instead of what could be asked for.
+    expect(row.get('[data-plugin-state]').text()).toBe('Effacement du binaire…')
   })
 
   it('disables the up arrow on the first row and the down arrow on the last', async () => {

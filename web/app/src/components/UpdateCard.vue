@@ -29,6 +29,10 @@ const actionable = computed(() =>
 const summary = computed(() => {
   const { outcome, release_version } = props.update
   if (outcome.kind === 'no_release') return t.value('update_no_release')
+  // Before `never_checked` is irrelevant, but before the `core` lookup below
+  // is not: like `no_release`, this outcome rebuilt every row against an empty
+  // offer, so the core row reads `unknown` and "Up to date" would be a lie.
+  if (outcome.kind === 'only_prereleases') return t.value('update_only_prereleases')
   if (outcome.kind === 'never_checked') return t.value('update_never_checked')
   const core = props.update.components.find((c) => c.kind === 'core')
   if (!core) return t.value('update_unknown')

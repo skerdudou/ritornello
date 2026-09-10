@@ -66,6 +66,23 @@ over SSH and remains the development path (see [Deploying](#deploying)
 below); a release archive is for putting a specific tagged version onto a
 device with no build toolchain at all.
 
+**A draft is not yet a release, and pushing the tag is therefore not the
+last step.** The workflow deliberately stops at a draft — publishing is the
+green light, and the notes are read before anything can install from them —
+so the gesture ends with a human publishing it:
+
+```sh
+gh release edit vX.Y.Z --draft=false     # or the "Publish release" button
+```
+
+Until that happens, **no device can see it at all**: GitHub lists drafts
+only to a reader holding push access, and the core polls with no token, so
+what the update card reports is "No release published yet" — correctly, and
+indistinguishably from a repository that has never released anything. A tag
+pushed, a green workflow and 37 attached archives are not evidence a device
+can reach any of it. If a device says nothing is published, look first at
+whether the release is still a draft.
+
 Three different numbers are at play here, and they answer three different
 questions. The **product number** — `vX.Y.Z`, the git tag — names the
 release and carries the generation: `0.2.7` is the seventh delivery of the

@@ -1224,9 +1224,14 @@ impl Worker {
         }
         let releases = match parse_releases(&body, self.channel().await) {
             Ok(releases) => releases,
-            Err(ReleasesError::NoRelease) => {
-                // A state, and never a failure: this is what a device sees
-                // until the first release is published.
+            Err(e @ (ReleasesError::NoRelease | ReleasesError::OnlyPrereleases)) => {
+                // A state, and never a failure. Two of them, sharing every
+                // line of this branch but the sentence they end on: nothing is
+                // published at all, or something is and this channel declined
+                // it. They behave identically — the same empty offer, the same
+                // third-party rows — because in both cases *this* device has
+                // nothing of ours to install; they read differently because
+                // only one of them is undone by a switch its reader owns.
                 //
                 // The rows are rebuilt against an empty offer rather than
                 // left as they were: a repository that has no release offers
@@ -1242,7 +1247,10 @@ impl Worker {
                     component_offers(self.core_version, &[], &theirs, &installed);
                 let mut state = self.state.write().await;
                 carry_core_notes(&state.components, &mut components);
-                state.outcome = CheckOutcome::NoRelease;
+                state.outcome = match e {
+                    ReleasesError::OnlyPrereleases => CheckOutcome::OnlyPrereleases,
+                    _ => CheckOutcome::NoRelease,
+                };
                 state.release_version = None;
                 state.release_url = None;
                 state.last_check_unix_s = Some(now_unix_s());
@@ -1927,6 +1935,21 @@ impl Worker {
     /// enqueue time is not trusted; what is true right now, immediately
     /// before the file is actually erased, is.
     async fn remove_plugin_binary(&self, name: &str, file: &str) {
+        let removed = self.erase_plugin_binary(name, file).await;
+        // **Answered on every path out of the erasure, and that is the whole
+        // point of the wrapper.** The page is probing this row until the mark
+        // clears, so a path that returned without clearing would leave it
+        // saying "erasure in progress" for as long as the core runs — the same
+        // lie as the button this replaced, only harder to notice. On failure
+        // the row falls back to the plain undeclared one, which is the truth,
+        // with the reason `removal_failed` has already put on the card.
+        self.state.write().await.removal_answered(name, file, removed);
+    }
+
+    /// The erasure itself. `true` when the privileged unit reported the file
+    /// gone; `false` for every refusal, skip and failure — each of which has
+    /// already published its own sentence by the time this returns.
+    async fn erase_plugin_binary(&self, name: &str, file: &str) -> bool {
         match PluginManifest::load(&self.manifest) {
             Ok(m) if m.plugins.iter().any(|p| {
                 Path::new(&p.exec).file_name().and_then(|f| f.to_str()) == Some(file)
@@ -1935,7 +1958,7 @@ impl Worker {
                     "update: {file} is now declared by a plugin; the queued removal for {name} was skipped"
                 );
                 self.publish_failure(self.message_for("update_removal_skipped", name).await).await;
-                return;
+                return false;
             }
             Ok(_) => {}
             // A transient read failure is not a reason to refuse an erasure
@@ -1949,23 +1972,29 @@ impl Worker {
             Request { format: REQUEST_FORMAT, actions: vec![Action::RemovePlugin { file: file.to_string() }] };
         if let Err(e) = std::fs::create_dir_all(&self.staging) {
             self.removal_failed(name, format!("creating {}: {e}", self.staging.display())).await;
-            return;
+            return false;
         }
         let request_path = self.staging.join("request.json");
         let text = match serde_json::to_string(&request) {
             Ok(t) => t,
             Err(e) => {
                 self.removal_failed(name, format!("encoding the request: {e}")).await;
-                return;
+                return false;
             }
         };
         if let Err(e) = std::fs::write(&request_path, text) {
             self.removal_failed(name, format!("writing {}: {e}", request_path.display())).await;
-            return;
+            return false;
         }
         match run_privileged_unit().await {
-            Ok(()) => tracing::info!("update: {name}'s binary removed"),
-            Err(detail) => self.removal_failed(name, detail).await,
+            Ok(()) => {
+                tracing::info!("update: {name}'s binary removed");
+                true
+            }
+            Err(detail) => {
+                self.removal_failed(name, detail).await;
+                false
+            }
         }
     }
 
@@ -3343,6 +3372,30 @@ mod tests {
         assert!(
             !worker.staging.join("request.json").exists(),
             "a file that is now declared must never reach the privileged installer"
+        );
+    }
+
+    /// **The in-flight mark is lifted on the skip path too**, which is the
+    /// whole reason the erasure sits inside a wrapper rather than clearing the
+    /// mark at each of its own six exits.
+    ///
+    /// The page probes this row for as long as the mark stands, so a path that
+    /// returned without lifting it would leave the row reading "erasing…" for
+    /// as long as the core runs, and probing for a change that can never come
+    /// — the same lie as the button this replaced, only harder to notice. The
+    /// skip is the right path to pin it on: it is the one refusal reachable
+    /// without the privileged unit, so the test is fast and deterministic.
+    #[tokio::test]
+    async fn a_skipped_erasure_still_lifts_the_in_flight_mark() {
+        let status = one_line(PluginStatus::kind("radio", "source", true, false));
+        let (worker, _dir) = worker_rig(status);
+        worker.state.write().await.mark_removal_pending("ritornello-plugin-radio");
+
+        worker.remove_plugin_binary("orphan", "ritornello-plugin-radio").await;
+
+        assert!(
+            worker.state.read().await.pending_removals.is_empty(),
+            "the erasure answered — by refusing — so nothing waits on it any more"
         );
     }
 

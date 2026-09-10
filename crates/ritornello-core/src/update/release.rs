@@ -230,6 +230,19 @@ pub enum ReleasesError {
     /// It parsed, and nothing in it is published. A state to display — "no
     /// release published" — and never a failure.
     NoRelease,
+    /// It parsed, something **is** published, and every published release is a
+    /// prerelease this device declined. A state to display, and a different
+    /// sentence from `NoRelease`, because the two are not the same fact and
+    /// only one of them has a switch that changes it.
+    ///
+    /// Worth a variant of its own because the confusion it removes is the
+    /// expensive kind: an owner who publishes a beta and reads "no release
+    /// published yet" has been told something false about the world, when
+    /// what the device meant was "none for the channel you chose". The
+    /// counterpart — only drafts — collapses into `NoRelease` and cannot be
+    /// distinguished from here anyway: GitHub lists drafts to a reader with
+    /// push access alone, and this core polls with no token.
+    OnlyPrereleases,
 }
 
 #[derive(Deserialize)]
@@ -296,12 +309,29 @@ impl Channel {
 /// but this filter separates it from a finished one: same assets, same
 /// checksums, same fold. Hence `Channel`, and hence a single place where the
 /// question is asked for our repository and for a stranger's alike.
+/// **Two ways of ending up with nothing, and they are told apart.** A body
+/// that listed releases of which every one was a prerelease this channel
+/// declines yields `OnlyPrereleases`, not `NoRelease`: the difference is a
+/// switch this owner owns, and reporting it as "nothing published" states a
+/// falsehood about the repository. The reason is counted while filtering
+/// rather than reconstructed after, because a dropped release no longer says
+/// why it went.
 pub fn parse_releases(body: &str, channel: Channel) -> Result<Vec<Release>, ReleasesError> {
     let wire: Vec<WireRelease> =
         serde_json::from_str(body).map_err(|_| ReleasesError::Unreadable)?;
+    let mut declined_prereleases = 0usize;
     let out: Vec<Release> = wire
         .into_iter()
-        .filter(|r| !r.draft && (!r.prerelease || channel == Channel::WithPrereleases))
+        .filter(|r| {
+            if r.draft {
+                return false;
+            }
+            if r.prerelease && channel != Channel::WithPrereleases {
+                declined_prereleases += 1;
+                return false;
+            }
+            true
+        })
         .map(|r| Release {
             tag: r.tag_name,
             published_at: r.published_at.unwrap_or_default(),
@@ -317,7 +347,11 @@ pub fn parse_releases(body: &str, channel: Channel) -> Result<Vec<Release>, Rele
         })
         .collect();
     if out.is_empty() {
-        return Err(ReleasesError::NoRelease);
+        return Err(if declined_prereleases > 0 {
+            ReleasesError::OnlyPrereleases
+        } else {
+            ReleasesError::NoRelease
+        });
     }
     Ok(out)
 }
@@ -828,6 +862,44 @@ mod tests {
         // Only drafts is the same answer: nothing has been published.
         let text = body(&rel("v0.2.8", "2026-09-09T10:00:00Z", true, false, &[]));
         assert_eq!(parse_releases(&text, Channel::Stable), Err(ReleasesError::NoRelease));
+        // A draft that is **also** flagged prerelease is still `NoRelease`,
+        // which pins the order of the two halves of the filter: being a draft
+        // is checked first and counts as nothing, because no switch this
+        // owner can reach turns a draft into an offer. Read the other way —
+        // prerelease first — this body would claim a switch would help.
+        let text = body(&rel("v0.2.8", "", true, true, &[]));
+        assert_eq!(parse_releases(&text, Channel::Stable), Err(ReleasesError::NoRelease));
+    }
+
+    /// **A published prerelease this channel declines is not "nothing
+    /// published"**, and the regression this pins is one that happened: the
+    /// first beta of this project was tagged, built and published while the
+    /// switch was off, and the update card answered "no release published
+    /// yet" — a statement about the repository, and a false one, where the
+    /// true statement names a switch the reader owns.
+    #[test]
+    fn only_prereleases_is_told_apart_from_nothing_published() {
+        let text = body(&rel("v0.2.0-beta.1", "2026-09-10T08:07:25Z", false, true, &[
+            "ritornello-plugin-radio-0.2.0-beta.1-armv7.tar.gz",
+        ]));
+        assert_eq!(
+            parse_releases(&text, Channel::Stable),
+            Err(ReleasesError::OnlyPrereleases),
+            "something is published; this channel is what declined it"
+        );
+        // The very same body, on the channel that asked for them, is not an
+        // error at all — which is what makes the sentence actionable.
+        assert!(parse_releases(&text, Channel::WithPrereleases).is_ok());
+        // A draft sitting beside it changes nothing: the published prerelease
+        // is still what the reader has to hear about.
+        let mixed = body(
+            &[
+                rel("v0.2.1-beta.1", "", true, true, &[]),
+                rel("v0.2.0-beta.1", "2026-09-10T08:07:25Z", false, true, &[]),
+            ]
+            .join(","),
+        );
+        assert_eq!(parse_releases(&mixed, Channel::Stable), Err(ReleasesError::OnlyPrereleases));
     }
 
     #[test]
