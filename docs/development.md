@@ -236,7 +236,7 @@ that is the only visibility the split introduced.
 ### Continuous integration
 
 `.github/workflows/ci.yml` runs those five commands on every push and pull
-request, on Ubuntu, in four jobs:
+request, on Ubuntu, in five jobs — the last two only on a tag:
 
 - `web` — `npm ci`, build of the npm workspaces (the SPA, the kit, and one
   per plugin UI — a count deliberately not written here, it drifts every
@@ -250,9 +250,16 @@ request, on Ubuntu, in four jobs:
 - `e2e` — same dist, debug build of the core, `mpv` installed (the
   journeys really play), Playwright on chromium; the report is uploaded on
   failure;
-- `release` — on a `v*` tag only: `cross build --release` for
-  `armv7-unknown-linux-gnueabihf`, and the binaries `deploy.sh` expects as
-  an artifact.
+- `release` — on a `v*` tag only, once per architecture (`armv7`,
+  `arm64`, `x86_64`): it refuses a tag that is not `v` + the product
+  number, then `cross build --release --workspace` and
+  `scripts/package-release.sh`, which produces that architecture's
+  archives;
+- `publish` — also on a tag: keeps only the components whose own version
+  moved since the last **finished** release, checks the notes, writes one
+  `SHA256SUMS` for every asset, and creates the release as a **draft**. A
+  tag carrying a prerelease suffix (`v0.2.1-beta.1`) makes it a
+  prerelease.
 
 Ubuntu and not Windows because the SDK tests open Unix sockets.
 `scripts/ci-local.sh [web|rust|e2e]` runs the same commands in the same
@@ -356,6 +363,28 @@ Windows checkout, the `dist` fingerprint may not invalidate reliably —
 `touch crates/ritornello-core/build.rs` after an npm rebuild to force
 re-embedding the SPA.
 
+## Cutting a release
+
+The gesture itself lives in
+[installation.md](installation.md#installing-from-a-release), with the
+prerelease variant just below it — it is written there because that is
+where the three numbers and the archive layout are explained, and splitting
+them would give the same rule two homes. What a developer needs to know
+before opening it:
+
+- you bump versions **by hand**, once per component and per delivery, not
+  once per commit: the release compares each component's declared version
+  against the one it had at the last finished release, so fifteen commits
+  to a plugin are one bump;
+- you bump the product number too, and the tag must equal it exactly;
+- a change to a shared crate (`ritornello-proto`, `ritornello-i18n`,
+  `ritornello-plugin-sdk`, `ritornello-updater`) republishes every
+  component under **unchanged** numbers unless you bump them: the release
+  then looks complete and delivers nothing. This is the one failure here
+  that is entirely silent;
+- the release lands as a draft, and a tag with a prerelease suffix lands
+  as a prerelease.
+
 ## Process
 
 The project is developed through specifications, implementation plans and
@@ -366,10 +395,12 @@ the `fix(core)`/`fix(sdk,i18n)`/`fix(plugins)`/`fix(web)`/`fix(deploy)`
 series of fixes visible in the history. Debt identified and **accepted**
 at this stage, in order of interest:
 
-- no protocol version between core and plugins: a request unknown to an
-  old binary is ignored on the plugin side and costs a 5 s timeout on the
-  core side — acceptable as long as core and plugins are deployed
-  together;
+- ~~no protocol version between core and plugins~~ — **settled since**:
+  `ritornello_proto::PROTOCOL_VERSION` exists and the core refuses a
+  plugin whose announced number is not strictly equal to its own. The
+  refusal is proven by tests that fabricate a mismatched announcement,
+  never by an actually incompatible binary: that number has not moved
+  once in this project's history;
 - the "two halves" bootstrap (source/input + admin) and the
   `build.rs`/placeholder pair are duplicated between radio and
   generic-input, as are the `env_or`/`log_half` helpers — to be hoisted
