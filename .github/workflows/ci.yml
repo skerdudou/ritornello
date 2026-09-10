@@ -29,6 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
       - name: Workflow scripts (node:test)
         # No dependency at all -- `node:test` is built in -- so these run
         # before `npm ci` and cost a second. They live in this job rather
@@ -43,11 +47,14 @@ jobs:
         # named after the directory, which would fail this job on every pull
         # request. Quoting also makes the same command work from PowerShell,
         # which does not glob for native commands.
+        #
+        # **After `setup-node`, not before it.** `node --test` takes a glob
+        # as a positional argument only from Node 22 on, and before
+        # `setup-node` runs this step would use the runner image's ambient
+        # Node -- which was 20 until a migration in May 2026. Running here
+        # means the version is the one this file declares, not one the image
+        # happens to ship.
         run: node --test ".github/scripts/*.test.mjs"
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
       - run: npm ci
       - run: npm run build --workspaces --if-present
       - run: npm run typecheck
