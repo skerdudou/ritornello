@@ -364,10 +364,14 @@ jobs:
           #
           # A round with nothing to say prints nothing, so `tee` appends
           # nothing to the summary for an ordinary first round.
-          # Kept as a file as well: the `hand` notice quotes it rather than
-          # asserting a cause of its own. `hand` has three causes -- a
-          # stranger pair, an unreadable listing, a listing at the API cap --
-          # and only the first is "someone pushed by hand".
+          # To a file, then to the summary, rather than through `tee`. The
+          # `hand` notice reads the file and quotes it rather than asserting
+          # a cause of its own: `hand` has three causes -- a stranger pair, a
+          # listing that could not be read, a listing at the API cap -- and
+          # only the first is "someone pushed by hand".
+          #
+          # Dropping the pipe has a second effect worth keeping: node failing
+          # now reddens this step directly instead of through `pipefail`.
           node .github/scripts/classify-round.mjs > round-note.txt
           cat round-note.txt >> "$GITHUB_STEP_SUMMARY"
 
@@ -1358,7 +1362,7 @@ jobs:
           : > hand-comments.txt
           gh pr view "$NUMBER" --repo "$REPO" --json comments --jq '.comments[] | select(.author.login | startswith("github-actions")) | .body' >> hand-comments.txt || true
           if grep -qF "$marker" hand-comments.txt; then
-            echo "#$NUMBER carries a hand-written commit; already said so." >> "$GITHUB_STEP_SUMMARY"
+            echo "#$NUMBER is in the \`hand\` state; already said so." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # The reason comes from the classifier, which computed it and used
@@ -1381,7 +1385,10 @@ jobs:
           BODY
           } > hand.md
           gh pr comment "$NUMBER" --repo "$REPO" --body-file hand.md
-          echo "#$NUMBER carries a hand-written commit: stopped, and said so." >> "$GITHUB_STEP_SUMMARY"
+          # The same care as the body: `hand` is not always a hand-written
+          # commit, and the reason is in `round-note.txt`, above in this
+          # summary already.
+          echo "#$NUMBER is in the \`hand\` state: stopped, and said so on the pull request." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Round 2, CI red -- stop, and do not try again
         # **The bound on the loop, and it bounds FIXES rather than analyses.**

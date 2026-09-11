@@ -250,6 +250,43 @@ test('the skip flag is still consulted', () => {
   assert.match(condition(), /needs\.analyse\.outputs\.skip != 'true'/)
 })
 
+// --- And the one that ends the class ----------------------------------------
+//
+// The four assertions above are the EXPLANATION. This one is the guard.
+//
+// Four rounds of review went the same way: an assertion about structure was
+// written, and an edit was found that satisfies the structure and changes the
+// meaning. Presence of the green-CI test -> moved inside one arm. Top-level
+// conjuncts -> a disjunct naming no round. Every arm names a round -> an arm
+// that names a round and then says more:
+//
+//   round == '1' && (decision == 'merge' || changed != 'true')
+//
+// merges any pull request whose analysis was skipped, because `changed` is
+// then the empty string. Each repair moved the assertion one level deeper and
+// the next edit went one level deeper still. That is not a race worth running
+// again on the single expression that decides whether a bump lands on `main`
+// without a human.
+//
+// So the condition is pinned exactly. Any change to it fails here, including
+// the ones nobody has thought of, and a legitimate change is one line to
+// update -- which is the right cost for this particular expression and for no
+// other in the repository.
+//
+// **If this test fails, do not update the string until you have decided the
+// new condition is what you meant.** The assertions above say what the shape
+// is for; read them first.
+test('the merge condition is exactly this, character for character', () => {
+  // Whitespace-normalised, so reflowing the YAML is not a failure while any
+  // change to the expression is.
+  assert.equal(
+    condition().replace(/\s+/g, ' ').trim(),
+    "needs.analyse.outputs.skip != 'true' && ( ( needs.analyse.outputs.round == '1'"
+      + " && needs.analyse.outputs.decision == 'merge' && needs.analyse.outputs.changed != 'true' )"
+      + " || needs.analyse.outputs.round == '2' ) && needs.analyse.outputs.conclusion == 'success'",
+  )
+})
+
 // --- The resolve step's commit listing --------------------------------------
 //
 // `classify-round.mjs` decides on an author/committer PAIR, and nothing tied
