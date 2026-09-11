@@ -14,9 +14,32 @@ export default defineConfig({
   // Two viewports, one core: the historical journeys on desktop, and the
   // phone journey that checks the bottom bar and the finger-driven sliders.
   // `workers: 1` above applies to both projects, for the same reason.
+  //
+  // A third project, `scrollbars`, differs from `bureau` by a single launch
+  // argument. Playwright's default headless arguments include
+  // `--hide-scrollbars`, which gives the page zero-width scrollbars:
+  // `innerWidth - clientWidth` is then 0 in every journey, and anything that
+  // depends on a scrollbar taking layout space cannot be measured at all —
+  // which is exactly what `dropdown-width.spec.ts` measures. Dropping that one
+  // argument gives it the space-taking scrollbars a desktop browser really
+  // draws. It is a project and not a `test.use` in the spec on purpose:
+  // `test.use({ launchOptions })` *replaces* the whole object, so it would
+  // also discard any other launch option the config comes to need.
   projects: [
-    { name: 'bureau', use: { ...devices['Desktop Chrome'] }, testIgnore: '**/phone.spec.ts' },
+    {
+      name: 'bureau',
+      use: { ...devices['Desktop Chrome'] },
+      testIgnore: ['**/phone.spec.ts', '**/dropdown-width.spec.ts'],
+    },
     { name: 'phone', use: { ...devices['Pixel 7'] }, testMatch: '**/phone.spec.ts' },
+    {
+      name: 'scrollbars',
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: { ignoreDefaultArgs: ['--hide-scrollbars'] },
+      },
+      testMatch: '**/dropdown-width.spec.ts',
+    },
   ],
   // The binary must exist: `cargo build --workspace` is part of the build
   // chain (see deploy/build.sh).

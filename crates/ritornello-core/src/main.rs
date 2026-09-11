@@ -4,6 +4,7 @@ mod core;
 mod cover;
 mod i18n;
 mod metadata;
+mod docs_map;
 mod packaging_manifest;
 mod version_coherence;
 mod placeholder;

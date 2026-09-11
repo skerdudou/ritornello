@@ -229,10 +229,11 @@ network's metadata feed, another language pack.
 
 | Document | Contents |
 |---|---|
-| [docs/installation.md](docs/installation.md) | Building, installing on a Pi or a Linux PC, deploying, unprivileged service, installing from a release, arming the self-update, tuning the audio buffers |
+| [docs/installation.md](docs/installation.md) | Building, installing on a Pi or a Linux PC, deploying, unprivileged service, installing from a release **and publishing one**, prereleases, arming the self-update, tuning the audio buffers |
 | [docs/plugins.md](docs/plugins.md) | The bundled plugins, the `metadata` kind, writing your own plugin and its UI, publishing a third-party plugin |
 | [docs/interface.md](docs/interface.md) | The web UI, the command API, the physical remote, updates and plugin management, languages, themes |
-| [docs/development.md](docs/development.md) | Local instance without hardware, tests, e2e journeys, regenerating embedded data |
+| [docs/development.md](docs/development.md) | Local instance without hardware, tests, e2e journeys, cutting a release, regenerating embedded data |
+| [AGENTS.md](AGENTS.md) | Where each answer lives, and the project rules that are invisible from the code — written for a coding agent, useful to a newcomer |
 
 The project is developed through written specifications, implementation
 plans and systematic reviews; the design record is kept outside this

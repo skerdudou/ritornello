@@ -83,6 +83,13 @@ jobs:
           done
           node --test "${tests[@]}"
       - run: npm ci
+      - name: Check the lockfile
+        # npm ci proves the lock installs, not that the tree it describes can
+        # be loaded. A peer that npm is happy with can still be unreachable by
+        # Node's own resolution, and that failure shows up here rather than on
+        # a developer's machine: a worktree lives inside the main checkout, so
+        # Node walks up into its node_modules and the build passes locally.
+        run: node scripts/check-lockfile.mjs
       - run: npm run build --workspaces --if-present
       - run: npm run typecheck
       - run: npm test --workspaces --if-present
