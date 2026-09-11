@@ -296,7 +296,7 @@ jobs:
           gh pr comment "$NUMBER" --repo "$REPO" --body 'Dependabot analysis: the commit metadata on this pull request could not be read, so this needs a human look. No automated verdict was produced.'
 
       - name: Check out the pull request head into pr/, read-only by convention
-        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true'
+        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true' && steps.bump.outputs.compatible != 'true'
         uses: actions/checkout@v7
         with:
           ref: ${{ steps.pr.outputs.head_sha }}
@@ -313,7 +313,7 @@ jobs:
         # next to a token.
 
       - name: Lay out what the analysis reads
-        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true'
+        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true' && steps.bump.outputs.compatible != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -390,14 +390,37 @@ jobs:
           if gh api "repos/$REPO/dependabot/alerts?state=open&per_page=100" \
               --jq '[.[] | {package: .dependency.package.name, severity: .security_advisory.severity, id: (.security_advisory.cve_id // .security_advisory.ghsa_id), fixed: .security_vulnerability.first_patched_version.identifier}]' \
               > advisories.json 2>/dev/null; then
-            echo "Advisories: $(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync("advisories.json","utf8")).length))') open." >> "$GITHUB_STEP_SUMMARY"
+            # The count on its own line, not interpolated straight into the
+            # summary string: a `node -e` failure inside `$(...)` is not
+            # something `set -e` catches when the substitution sits inside
+            # another command's argument, so a crash here used to be
+            # swallowed and the summary read "Advisories:  open." -- a blank
+            # where the whole point of this line is to distinguish zero open
+            # alerts from a token that cannot read them. Same defensive shape
+            # as the verdict parse: anything that is not a JSON array (a
+            # parse failure, `null`, an object) reports as unreadable rather
+            # than leaving the count blank.
+            advisory_count="$(node -e '
+              let count = "unreadable"
+              try {
+                const parsed = JSON.parse(require("node:fs").readFileSync("advisories.json", "utf8"))
+                if (Array.isArray(parsed)) count = String(parsed.length)
+              } catch {}
+              process.stdout.write(count)
+            ')"
+            if [ "$advisory_count" = unreadable ]; then
+              echo '[]' > advisories.json
+              echo 'Advisories: unreadable (advisories.json did not parse as an array).' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Advisories: $advisory_count open." >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
             echo '[]' > advisories.json
             echo 'Advisories: unreadable with this token.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Analyse the bump against our code
-        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true'
+        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true' && steps.bump.outputs.compatible != 'true'
         # No bound anywhere else in this job would stop a hung analysis: the
         # job default is GitHub's 6-hour cap, and `cancel-in-progress: false`
         # on the workflow's `concurrency:` means a hung run holds its
@@ -415,10 +438,28 @@ jobs:
           # settled. `git-snapshot.txt`, written and checked in the shell
           # steps around this one, is the layer that does not depend on
           # either the allow-list or this deny-list holding.
+          #
+          # The three `Read` denies below close the other direction: bare
+          # `Read` in the allow-list reaches the whole filesystem, not only
+          # the workspace, and this job's own secrets live outside it -- the
+          # process environment readable through `/proc`, and whatever else
+          # the runner's home or `/etc` might hold. A **double** leading
+          # slash is what makes a Claude Code path rule filesystem-absolute;
+          # a single leading slash means "relative to the directory
+          # associated with the settings source" instead, so `Read(/proc/**)`
+          # would silently deny nothing. Written as `Read(...)` because
+          # `Read` and `Edit` are the only two tools whose path rules are
+          # consulted at all.
           settings: |
             {
               "permissions": {
-                "deny": ["Edit(pr/.git/**)", "Edit(.git/**)"]
+                "deny": [
+                  "Edit(pr/.git/**)",
+                  "Edit(.git/**)",
+                  "Read(//proc/**)",
+                  "Read(//etc/**)",
+                  "Read(//home/**)"
+                ]
               }
             }
           # **The security boundary is this allow-list, not the prose below.**
@@ -470,23 +511,40 @@ jobs:
           # context is already gathered deterministically by the step above.
           # Declaring a capability that cannot be used only misleads a reader.
           #
-          # **`WebFetch` is left unscoped, and that rests on an assumption
-          # worth recording rather than leaving implicit.** Both checkout
-          # steps set `persist-credentials: false`, so nothing on disk in
-          # this job is a secret: what remains readable through `Read` and
-          # `Grep` is this repository's own code, the pull request's code,
-          # and `advisories.json` -- all of it already public or about to be.
-          # An unscoped `WebFetch` can only send that same public information
-          # somewhere else, which buys an attacker nothing. If anyone ever
-          # puts a secret back on disk in this job -- a token, a persisted
-          # credential -- this assumption breaks, and `WebFetch` must be
-          # scoped to named domains at that point, not before.
+          # **`WebFetch` is scoped to a host allow-list, not left bare.** An
+          # earlier version of this comment claimed that with the token off
+          # disk, nothing readable was a secret -- that claim was false:
+          # `Read`/`Grep`/`Glob` are filesystem-wide by default, so the job's
+          # own secrets were reachable as files (the process environment
+          # among them, through `/proc`), and a bare `WebFetch` was the way
+          # out. What actually holds the boundary now is the pair above and
+          # below: the `Read(//proc/**)`, `Read(//etc/**)` and
+          # `Read(//home/**)` denies keep reading inside the workspace, and
+          # `WebFetch(domain:...)` keeps egress to the hosts the release
+          # notes this prompt is sent to find actually live on -- a plain
+          # domain match, which unlike a path glob does not depend on how the
+          # matcher treats a dotted directory. **Neither of those is why this
+          # step is safe to run.** The reason is that this job holds
+          # `contents: read` and no PAT at this stage: there is nothing of
+          # consequence to leak even past a hole in either list. Task 7
+          # introduces a PAT into this same job -- when it does, this
+          # sentence stops being true, and whoever adds it must re-examine
+          # both lists rather than inherit this reasoning unchanged.
+          #
+          # The host list covers where the notes for our dependencies
+          # actually live: GitHub releases and raw file contents
+          # (`api.github.com`, `github.com`, `raw.githubusercontent.com`),
+          # crates.io and its static asset host plus docs.rs for Rust
+          # dependencies, and npm's registry and web UI for JavaScript ones.
+          # A source outside this list is a refused fetch, and the prompt
+          # below is told that a refusal is an unread source, not a green
+          # light.
           #
           # `--max-turns 40` bounds the run the same way `timeout-minutes: 20`
           # above bounds the wall clock; either ceiling failing the step lands
           # on the fail-closed path, not on a hang.
           claude_args: >-
-            --allowedTools "Read,Glob,Grep,WebFetch,Edit(pr/**),Edit(verdict.json),Edit(report.md)"
+            --allowedTools "Read,Glob,Grep,WebFetch(domain:api.github.com),WebFetch(domain:github.com),WebFetch(domain:raw.githubusercontent.com),WebFetch(domain:crates.io),WebFetch(domain:static.crates.io),WebFetch(domain:docs.rs),WebFetch(domain:registry.npmjs.org),WebFetch(domain:www.npmjs.com),Edit(pr/**),Edit(verdict.json),Edit(report.md)"
             --max-turns 40
           prompt: |
             Decide whether a Dependabot bump can be merged without a human reading it.
@@ -516,11 +574,15 @@ jobs:
             1. Read `pr-diff.txt`. Note every dependency and the exact arrival version.
             2. Find the upstream release notes and migration guide for each dependency, at
                those versions. `WebFetch` is your only way out to the network -- you have no
-               shell. For a GitHub-hosted project, `https://api.github.com/repos/{owner}/
-               {repo}/releases` is readable without a token; for a crate, crates.io then the
-               repository's CHANGELOG. Read the notes for **every** version between the two,
-               not only the arrival one. If a fetch is refused or throttled, that is an
-               unread source: say so and fail closed.
+               shell -- and it can only reach a fixed list of hosts: GitHub (`api.github.com`,
+               `github.com`, `raw.githubusercontent.com`), crates.io and `docs.rs`, and npm's
+               registry and site. For a GitHub-hosted project, `https://api.github.com/repos/
+               {owner}/{repo}/releases` is readable without a token; for a crate, crates.io
+               then the repository's CHANGELOG. Read the notes for **every** version between
+               the two, not only the arrival one. If a source you need sits on a host outside
+               that list, the fetch will be refused -- that refusal means the source is
+               unread, not that there was nothing to find there. Whether refused, throttled,
+               or simply off the list: an unread source, say so and fail closed.
             3. Grep our own source for the APIs those notes say changed. This is the half
                that decides: a break we do not use is a non-event, and it is the reason most
                of these pull requests could have merged themselves.
@@ -567,7 +629,7 @@ jobs:
 
       - name: Read the verdict, and act on none of it yet
         id: verdict
-        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true'
+        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true' && steps.bump.outputs.compatible != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}

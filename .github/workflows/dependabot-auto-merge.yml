@@ -51,6 +51,15 @@ jobs:
         # `.github/scripts/classify-bump.mjs`. This workflow and
         # `dependabot-analysis.yml` both read that one file, so the fast path
         # and the analysis can never disagree about what "breaking" means.
+        #
+        # `shell: bash` on purpose: GitHub's default shell for a `run:` block
+        # is `bash -e`, without `pipefail`, so a `classify-bump.mjs` crash in
+        # the middle of this pipe would still let the step exit 0 on `tee`'s
+        # success -- a false refusal reason on the pull request instead of a
+        # red step. The explicit `bash` shell is `bash --noprofile --norc
+        # -eo pipefail`, which is `dependabot-analysis.yml`'s twin already
+        # gets from its own `set -euo pipefail`.
+        shell: bash
         env:
           UPDATES: ${{ steps.meta.outputs.updated-dependencies-json }}
         run: node .github/scripts/classify-bump.mjs | tee "$GITHUB_STEP_SUMMARY"

@@ -40,21 +40,26 @@ jobs:
         # job would need branch protection edited before it could ever block
         # anything.
         #
-        # The glob is quoted so **node** expands it, not the shell. Measured:
-        # a bare directory argument does not enumerate the directory, it is
-        # taken as a module path -- node reports
-        # `Cannot find module .../.github/scripts` and emits a *failing test*
-        # named after the directory, which would fail this job on every pull
-        # request. Quoting also makes the same command work from PowerShell,
-        # which does not glob for native commands.
+        # **Named explicitly, not globbed.** `node --test` exits 0 when a
+        # glob matches nothing -- verified -- so `*.test.mjs` would go green
+        # with zero tests run after any rename of these three files, and this
+        # is a required check: the repository would have no signal that its
+        # own guards stopped being exercised. A bare directory argument has
+        # the opposite failure, which is why this was a glob before: node
+        # reports `Cannot find module .../.github/scripts` and emits a
+        # *failing test* named after the directory. Naming the files avoids
+        # both -- a rename or a typo here is a missing file node reports
+        # plainly, not a silent pass and not a mysterious failure.
         #
-        # **After `setup-node`, not before it.** `node --test` takes a glob
-        # as a positional argument only from Node 22 on, and before
-        # `setup-node` runs this step would use the runner image's ambient
-        # Node -- which was 20 until a migration in May 2026. Running here
-        # means the version is the one this file declares, not one the image
-        # happens to ship.
-        run: node --test ".github/scripts/*.test.mjs"
+        # **After `setup-node`, not before it.** Before `setup-node` runs
+        # this step would use the runner image's ambient Node -- which was 20
+        # until a migration in May 2026. Running here means the version is
+        # the one this file declares, not one the image happens to ship.
+        run: >-
+          node --test
+          .github/scripts/check-guards.test.mjs
+          .github/scripts/classify-bump.test.mjs
+          .github/scripts/read-bump-metadata.test.mjs
       - run: npm ci
       - run: npm run build --workspaces --if-present
       - run: npm run typecheck
