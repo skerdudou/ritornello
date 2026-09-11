@@ -352,6 +352,43 @@ describe('ConfigView — plugin table', () => {
     expect(w.text()).toContain('Plugins')
   })
 
+  // The `not_installed` row shape used to grow a synthetic line in this same
+  // table (`availableRows`). It now lives entirely behind
+  // `InstallablesDialog.vue`: this test is what would turn red if that row
+  // ever leaked back into the table it was removed from.
+  it('keeps a not_installed component out of the table, and offers it through its own dialog', async () => {
+    const { w, posts } = await mountView({
+      '/api/update': {
+        outcome: { kind: 'ok' },
+        release_version: '1.0.0',
+        release_url: null,
+        last_check_unix_s: 1,
+        components: [
+          {
+            name: 'console', kind: 'plugin', declared: false, binary_present: false,
+            installed: null, offered: '1.0.0', availability: 'not_installed',
+          },
+        ],
+        busy: null,
+        last_rollback: null,
+      },
+    })
+    // Only the two declared plugins from `/api/status` (radio, cd) — the
+    // release's own component never had a line here to begin with.
+    expect(w.findAll('[data-plugin-name]').map((n) => n.text())).toEqual(['radio', 'cd'])
+
+    await w.find('[data-installables-open]').trigger('click')
+    await flushPromises()
+    // Teleported (`DialogPortal`), same reason `UpdateDialog.test.ts` and the
+    // uninstall confirmation above both query `document.body` directly.
+    const row = document.body.querySelector('[data-installable-row]')
+    expect(row?.getAttribute('data-name')).toBe('console')
+
+    ;(document.body.querySelector('[data-installable-install]') as HTMLElement).click()
+    await flushPromises()
+    expect(posts).toContainEqual({ url: '/api/update/install', body: { components: ['console'] } })
+  })
+
   it('groups the kinds of a same plugin on a single row', async () => {
     // The table must show the unit being manipulated: the toggle applies to
     // the plugin, not to one of its kinds.

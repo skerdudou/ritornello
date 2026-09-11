@@ -7,6 +7,7 @@ import {
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import CoverCacheDetails from '../components/CoverCacheDetails.vue'
+import InstallablesDialog from '../components/InstallablesDialog.vue'
 import UpdateCard from '../components/UpdateCard.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
 import { predictedThumbnailBytes } from '../composables/coverWeight'
@@ -458,36 +459,25 @@ const plugins = computed<PluginRow[]>(() => {
     }
   })
 
-  // The release offers a plugin and nothing on this device declares it or has
-  // its binary: no line for it exists in `/api/status` at all (nothing ever
-  // ran, nothing sits on disk to scan), so this is the one row shape that can
-  // only be known from `/api/update`. Declared plugins come first, in the
-  // file's own order (preserved by the `Map` above); these come after them —
-  // the release's own order, which is the order the components arrived in.
-  const availableNames = new Set(declaredRows.map((r) => r.name))
-  const availableRows: PluginRow[] = update.value.components
-    .filter((c) => c.availability === 'not_installed' && !availableNames.has(c.name))
-    .map((c) => ({
-      name: c.name,
-      kinds: '—',
-      connected: false,
-      stalled: false,
-      starting: false,
-      disabled: false,
-      busy: false,
-      admin: false,
-      version: c.offered ?? undefined,
-      incompatible: undefined,
-      missing_binary: false,
-      undeclared_binary: false,
-      not_installed: true,
-      declared: false,
-      offered: c.offered,
-      // Nothing on disk to erase, so nothing can be in flight for it.
-      removal_pending: false,
-    }))
-
-  return [...declaredRows, ...availableRows]
+  // A `not_installed` component used to grow a synthetic row here — the
+  // release offers a plugin and nothing on this device declares it or has
+  // its binary, so no line for it exists in `/api/status` at all. That row
+  // shape now lives on its own screen (`InstallablesDialog.vue`, behind
+  // "Add a component"): choosing to add something the device does not have
+  // is a different question from managing what it runs, and mixing the two
+  // in one table is what the owner objected to. `update.components` is
+  // passed to the dialog directly, and its own `rows` computed does the
+  // `not_installed` filtering — this table renders declared rows alone.
+  //
+  // The guard this used to carry — `!availableNames.has(c.name)`, excluding
+  // a `not_installed` component already present as a declared row — is gone
+  // with it, deliberately. Measured server-side
+  // (`update::state`, `NotInstalled` is only ever set together with
+  // `declared = false`): the two can never name the same component, so the
+  // guard was only ever protecting row uniqueness inside this one table — a
+  // concern that does not exist once "what you have" and "what you could
+  // add" live on two different surfaces.
+  return declaredRows
 })
 
 /** Position of every row that `plugins.toml` actually declares, among
@@ -755,6 +745,11 @@ async function onUpdateCheck() {
 }
 
 const showInstallDialog = ref(false)
+/** The installables dialog (`InstallablesDialog.vue`), behind its own
+ * button: choosing to add a component the device does not have is a
+ * different question from managing the ones it runs, so it does not share
+ * `showInstallDialog`. */
+const showInstallablesDialog = ref(false)
 
 async function onConfirmInstall(names: string[]) {
   showInstallDialog.value = false
@@ -1079,8 +1074,23 @@ function goTo(id: string) {
               </tbody>
             </table>
             <p class="mt-2 text-xs text-muted-foreground">{{ t('plugin_order_note') }}</p>
+            <!-- Its own screen, behind its own button: choosing to ADD a
+                 component the device does not have is a different question
+                 from managing the ones it runs, so `not_installed` rows no
+                 longer sit in the table above (see the `plugins` computed). -->
+            <Button
+              variant="outline" size="sm" class="mt-3" data-installables-open
+              @click="showInstallablesDialog = true"
+            >{{ t('installables_title') }}</Button>
           </CardContent>
         </Card>
+
+        <InstallablesDialog
+          :open="showInstallablesDialog"
+          :components="update.components"
+          @update:open="(v: boolean) => (showInstallablesDialog = v)"
+          @install="installPlugin"
+        />
 
         <!-- One shared dialog for the whole table, keyed by `uninstallTarget`
              rather than one per row: only one confirmation is ever on screen,
