@@ -6,6 +6,7 @@
 //! `/api/command`, whose 204 means "enqueued".
 
 use crate::status::AppState;
+use crate::update::catalogue::{self, Catalogue};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -14,6 +15,51 @@ use axum::Json;
 pub async fn update_json(State(state): State<AppState>) -> Response {
     let snapshot = state.update.read().await.clone();
     Json(snapshot).into_response()
+}
+
+/// `GET /api/update/catalogue` — what the last read release says about the
+/// components it describes.
+///
+/// Fetched here and not by the page, for three reasons in order: the check
+/// keeps its one document per repository, so the design rule is untouched;
+/// the network stays on the core's side, which already holds the client, the
+/// User-Agent GitHub requires and the deadlines; and a page calling GitHub
+/// itself would meet cross-origin sharing on a release asset, which fails on
+/// some browsers only — the worst kind of outage.
+///
+/// Kept for the life of the session, keyed by the release tag it came from,
+/// so a dialog opened twice asks nothing the second time.
+///
+/// An empty `components` is the honest answer for a release that publishes no
+/// catalogue, which is every release published before this chantier.
+pub async fn update_catalogue_json(State(state): State<AppState>) -> Response {
+    let Some(url) = state.update.read().await.catalogue_url.clone() else {
+        return Json(Catalogue::default()).into_response();
+    };
+    // The URL is tag-qualified (`https://.../<tag>/catalogue.json`), so it is
+    // its own cache key: a fresh check that offers the same release, or one
+    // that has not run again yet, hits this without a socket.
+    if let Some(cached) = state.update_catalogue_cache.read().await.as_ref()
+        && cached.0 == url
+    {
+        return Json(cached.1.clone()).into_response();
+    }
+    let fresh = fetch_catalogue(&url).await.unwrap_or_default();
+    *state.update_catalogue_cache.write().await = Some((url, fresh.clone()));
+    Json(fresh).into_response()
+}
+
+/// The network half, kept apart from the route so a failure of any kind —
+/// no client, a transport error, a non-200, an unreadable body — collapses to
+/// one `None`: the page's honest fallback is the same empty catalogue whether
+/// GitHub refused the request or answered something this core cannot parse.
+async fn fetch_catalogue(url: &str) -> Option<Catalogue> {
+    let client = crate::update::download::client().ok()?;
+    let (status, body) = crate::update::download::fetch_text(&client, url).await.ok()?;
+    if status != 200 {
+        return None;
+    }
+    catalogue::parse(&body).ok()
 }
 
 /// Enqueues a check. Answers 202 even when one is already running: the page
@@ -76,6 +122,7 @@ mod tests {
     use crate::status::{router, AppState};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
     use tower::util::ServiceExt;
 
     /// A rig whose job queue is real: `app_state` drops its receiver, which
@@ -141,6 +188,52 @@ mod tests {
         .await
         .expect("the route answered rather than waiting for room");
         assert_eq!(answer.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// The route answers an empty catalogue rather than an error when the
+    /// release publishes none — the page then shows names alone and says so.
+    #[tokio::test]
+    async fn a_release_without_a_catalogue_answers_an_empty_one() {
+        let (state, _rx) = state_with_queue(4);
+        let app = router(state);
+        let resp = app
+            .oneshot(Request::get("/api/update/catalogue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, serde_json::json!({"components": {}}));
+    }
+
+    /// A cached answer is served without consulting `catalogue_url` again:
+    /// the cache is seeded directly here, and the state's own
+    /// `catalogue_url` is left pointing at an address nothing serves, which
+    /// would fail the request if the cache were bypassed.
+    #[tokio::test]
+    async fn a_cached_catalogue_is_served_without_a_second_fetch() {
+        use crate::update::catalogue::{Catalogue, Entry};
+        use std::collections::BTreeMap;
+
+        let (state, _rx) = state_with_queue(4);
+        state.update.write().await.catalogue_url =
+            Some("https://127.0.0.1:9/unreachable/catalogue.json".to_string());
+        let mut components = BTreeMap::new();
+        components.insert(
+            "radio".to_string(),
+            Entry { kinds: vec!["source".to_string()], description: "Stations".to_string() },
+        );
+        *state.update_catalogue_cache.write().await =
+            Some(("https://127.0.0.1:9/unreachable/catalogue.json".to_string(), Catalogue { components }));
+        let app = router(state);
+        let resp = app
+            .oneshot(Request::get("/api/update/catalogue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["components"]["radio"]["description"], "Stations");
     }
 
     #[tokio::test]

@@ -124,6 +124,11 @@ pub struct AppState {
     /// for the reason `/api/command` already gives: a route must never wait on
     /// work whose duration it does not control.
     pub update_tx: mpsc::Sender<crate::update::Job>,
+    /// The parsed `catalogue.json` last fetched for `GET /api/update/catalogue`,
+    /// keyed by the tag-qualified URL it came from — that URL is itself the
+    /// cache key, so a check that keeps offering the same release costs this
+    /// route no socket at all.
+    pub update_catalogue_cache: Arc<RwLock<Option<(String, crate::update::catalogue::Catalogue)>>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -144,6 +149,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/cover/{key}", get(crate::cover::cover_get))
         .route("/api/cover-cache", get(crate::cover::cache_json))
         .route("/api/update", get(crate::update::routes::update_json))
+        .route("/api/update/catalogue", get(crate::update::routes::update_catalogue_json))
         .route("/api/update/check", axum::routing::post(crate::update::routes::update_check_post))
         .route("/api/update/install", axum::routing::post(crate::update::routes::update_install_post))
         .route(
@@ -485,6 +491,7 @@ pub(crate) mod tests_support {
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
+            update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -528,6 +535,7 @@ pub(crate) mod tests_support {
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
+            update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
         };
         (state, audio_rx)
     }
@@ -573,6 +581,7 @@ pub(crate) mod tests_support {
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
+            update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
         };
         (state, cmd_rx)
     }
@@ -626,6 +635,7 @@ pub(crate) mod tests_support {
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
+            update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
         };
         (state, locale_rx, dir)
     }

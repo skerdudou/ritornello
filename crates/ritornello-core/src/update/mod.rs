@@ -13,6 +13,7 @@
 
 pub mod release;
 pub mod archive;
+pub mod catalogue;
 pub mod download;
 pub mod state;
 pub mod schedule;
@@ -1253,6 +1254,7 @@ impl Worker {
                 };
                 state.release_version = None;
                 state.release_url = None;
+                state.catalogue_url = None;
                 state.last_check_unix_s = Some(now_unix_s());
                 state.components = components;
                 // `Some` with an empty `ours`, and not `None`: this branch has
@@ -1287,6 +1289,7 @@ impl Worker {
         state.outcome = CheckOutcome::Ok;
         state.release_version = core.map(|p| p.version.clone());
         state.release_url = core.map(|p| release_page(&p.release_tag));
+        state.catalogue_url = core.and_then(|p| p.catalogue_url.clone());
         state.last_check_unix_s = Some(now_unix_s());
         state.components = components;
         Some(Checked { ours: published, theirs, third_party: third_party_names(&installed) })
@@ -3506,6 +3509,7 @@ mod tests {
             size: 0,
             release_tag: "v2.0.0".to_string(),
             checksums_url: Some(checksums_url),
+            catalogue_url: None,
         }
     }
 
@@ -3587,6 +3591,7 @@ mod tests {
             size: 0,
             release_tag: "v2.0.0".to_string(),
             checksums_url: Some(checksums_url),
+            catalogue_url: None,
         }
     }
 
@@ -3735,6 +3740,7 @@ mod tests {
             size: 0,
             release_tag: "v2.0.0".to_string(),
             checksums_url: Some(checksums_url),
+            catalogue_url: None,
         }
     }
 
@@ -4109,6 +4115,7 @@ mod tests {
             size: 0,
             release_tag: format!("v{version}"),
             checksums_url: None,
+            catalogue_url: None,
         }]
     }
 

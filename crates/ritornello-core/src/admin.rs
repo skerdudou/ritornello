@@ -460,6 +460,7 @@ mod tests {
                 crate::update::state::UpdateState::initial(env!("CARGO_PKG_VERSION"), &[]),
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
+            update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 

@@ -294,6 +294,11 @@ pub struct UpdateState {
     pub outcome: CheckOutcome,
     pub release_version: Option<String>,
     pub release_url: Option<String>,
+    /// The `catalogue.json` of the release that carries the **core's own**
+    /// archive — the same release `release_url` already names, read off the
+    /// same `Published`. `GET /api/update/catalogue` is what actually fetches
+    /// and parses it; this is only the address, refreshed by every check.
+    pub catalogue_url: Option<String>,
     pub last_check_unix_s: Option<u64>,
     pub components: Vec<ComponentOffer>,
     /// What is happening right now, as a catalog message, or `None` when idle.
@@ -353,6 +358,7 @@ impl UpdateState {
             outcome: CheckOutcome::NeverChecked,
             release_version: None,
             release_url: None,
+            catalogue_url: None,
             last_check_unix_s: None,
             components: component_offers(core_version, &[], &[], installed),
             busy: None,
@@ -469,6 +475,7 @@ mod tests {
             size: 0,
             release_tag: "v0.0.0".to_string(),
             checksums_url: None,
+            catalogue_url: None,
         }
     }
 

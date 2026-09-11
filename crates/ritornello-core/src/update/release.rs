@@ -22,6 +22,12 @@ use std::collections::BTreeMap;
 /// installed.
 pub const REPO: &str = "skerdudou/ritornello";
 
+/// The name the release-wide catalogue asset is published under.
+///
+/// Recognised by literal equality, exactly like `SHA256SUMS`: it is not an
+/// archive, and `classify_asset` must answer `None` for it.
+pub const CATALOGUE_ASSET: &str = "catalogue.json";
+
 /// The architecture label this binary's archives carry.
 ///
 /// Chosen by the compiler rather than probed at runtime: a binary that
@@ -221,6 +227,11 @@ pub struct Published {
     /// The `SHA256SUMS` of that same release, when it has one. The digest of
     /// an archive lives in the release that carries it.
     pub checksums_url: Option<String>,
+    /// The `catalogue.json` of that same release, when it has one — the same
+    /// shape and the same reason as `checksums_url` beside it: an optional
+    /// per-release asset, recognised by name, and `None` is a normal state
+    /// (every release published before this chantier has none).
+    pub catalogue_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -384,6 +395,11 @@ pub fn fold(releases: &[Release], arch: &str) -> Vec<Published> {
             .iter()
             .find(|a| a.name == "SHA256SUMS")
             .map(|a| a.url.clone());
+        let catalogue = release
+            .assets
+            .iter()
+            .find(|a| a.name == CATALOGUE_ASSET)
+            .map(|a| a.url.clone());
         for asset in &release.assets {
             let Some((offer, version)) = classify_asset(&asset.name, arch) else {
                 continue;
@@ -400,6 +416,7 @@ pub fn fold(releases: &[Release], arch: &str) -> Vec<Published> {
                 size: asset.size,
                 release_tag: release.tag.clone(),
                 checksums_url: checksums.clone(),
+                catalogue_url: catalogue.clone(),
             });
         }
     }
@@ -778,6 +795,97 @@ mod tests {
         ]));
         let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
         assert_eq!(published[0].checksums_url, None);
+    }
+
+    /// The catalogue is recognised the way `SHA256SUMS` is: by literal name,
+    /// per release, outside the `classify_asset` loop. It is not an archive,
+    /// so `classify_asset` answers `None` for it — as it does for
+    /// `SHA256SUMS`, which a test already pins.
+    ///
+    /// One release only: the cheapest statement that the field exists and is
+    /// recognised by its literal name. It stays readable when the two-release
+    /// test below fails for an unrelated reason.
+    #[test]
+    fn the_catalogue_of_the_release_carrying_an_archive_travels_with_it() {
+        let text = body(&rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+            "ritornello-core-0.2.1-armv7.tar.gz",
+            "catalogue.json",
+        ]));
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        assert_eq!(published[0].catalogue_url.as_deref(), Some("https://x/v0.2.6/catalogue.json"));
+    }
+
+    /// **The property the single-release test above cannot prove.** With one
+    /// release, "the newest release" and "the release carrying the archive"
+    /// are the same object, so a fold that took the catalogue of the newest
+    /// release rather than the one carrying the archive would still pass it.
+    ///
+    /// Modelled on `the_newest_release_that_carries_a_component_wins`: a
+    /// NEWER release carries some other component's archive and its own
+    /// catalogue, an OLDER release carries the core's archive and its own
+    /// catalogue, and the core's `catalogue_url` must name the OLDER tag. A
+    /// catalogue read from the wrong release would describe components with
+    /// the wrong text, silently — the same failure `checksums_url` guards
+    /// against for a digest, and for the same reason: an asset lives in the
+    /// release that actually carries it, not in whichever release is newest.
+    #[test]
+    fn the_catalogue_of_the_release_carrying_the_archive_wins_over_the_newest_one() {
+        let text = body(&[
+            rel("v0.2.7", "2026-09-08T10:00:00Z", false, false, &[
+                "ritornello-plugin-radio-0.2.4-armv7.tar.gz",
+                "catalogue.json",
+            ]),
+            rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+                "ritornello-core-0.2.1-armv7.tar.gz",
+                "catalogue.json",
+            ]),
+        ]
+        .join(","));
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        let core = published.iter().find(|p| p.offer == Offer::Core).expect("core");
+        assert_eq!(core.release_tag, "v0.2.6");
+        assert_eq!(
+            core.catalogue_url.as_deref(),
+            Some("https://x/v0.2.6/catalogue.json"),
+            "a catalogue from the wrong release would describe the core with the wrong text"
+        );
+    }
+
+    /// A release published before this chantier has none, and that is a
+    /// normal state rather than an error: every release already published,
+    /// `v0.2.0-beta.1` included, is in that case.
+    #[test]
+    fn a_release_without_a_catalogue_offers_none() {
+        let text = body(&rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+            "ritornello-core-0.2.1-armv7.tar.gz",
+        ]));
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        assert_eq!(published[0].catalogue_url, None);
+    }
+
+    /// It is not an archive, and must not be mistaken for one.
+    #[test]
+    fn the_catalogue_is_not_a_component_archive() {
+        assert_eq!(classify_asset("catalogue.json", "armv7"), None);
+    }
+
+    /// **Equality, not a prefix.** Every fixture above names the asset
+    /// exactly `catalogue.json`, so a `fold` that recognised it with
+    /// `starts_with` instead of `==` would still pass every one of them —
+    /// none of them proves the distinction. Only an asset that shares the
+    /// prefix without being the file itself can: `catalogue.json.bak` must
+    /// not be offered as the catalogue.
+    #[test]
+    fn the_catalogue_is_recognised_by_its_exact_name_not_a_prefix_of_it() {
+        let text = body(&rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+            "ritornello-core-0.2.1-armv7.tar.gz",
+            "catalogue.json.bak",
+        ]));
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        assert_eq!(
+            published[0].catalogue_url, None,
+            "catalogue.json.bak is not the catalogue, and must not be offered as one"
+        );
     }
 
     /// An undated release sorts last and can therefore win a component only
