@@ -64,8 +64,21 @@ concurrency:
   group: dependabot-analysis-${{ github.event.workflow_run.head_branch || inputs.pr }}
   cancel-in-progress: false
 
+# **The ceiling, not any one job's grant.** Every job below declares its own
+# `permissions:` block, so this one is only the upper bound they narrow from
+# -- written that way on purpose. `contents: write` is here for exactly one
+# job, `merge`, because `gh pr merge --auto` needs it; the `analyse` job,
+# which runs a model and holds a checkout of the pull request head, narrows
+# itself back to `contents: read` and therefore cannot write a ref anywhere,
+# `main` included.
+#
+# Relying only on narrowing is deliberate. The reference says a job's block
+# "modif[ies] the default permissions granted to the GITHUB_TOKEN, adding or
+# removing access as required", which does not settle whether a job may
+# exceed the workflow-level block. Narrowing is unambiguous under every
+# reading of it, so nothing here depends on resolving that question.
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
   actions: read
   # Required for `claude-code-action`'s OIDC exchange. Both places this
@@ -78,6 +91,30 @@ permissions:
 jobs:
   analyse:
     runs-on: ubuntu-latest
+    # Narrowed back from the workflow-level ceiling above, and this is the
+    # job the narrowing is for: it runs a model, and it holds a checkout of
+    # the pull request head under `pr/`. `contents: read` means that even a
+    # step that went wrong here cannot write a ref -- it can read, comment,
+    # and read run logs, nothing else. The one operation that needs write,
+    # queueing the merge, lives in the `merge` job below, which has no
+    # checkout and no model.
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+      id-token: write
+    # Read by the `merge` job below. A step that did not run contributes the
+    # empty string, which is why every condition there is written as an
+    # explicit positive test rather than a negation: an absent verdict must
+    # refuse, not pass by default.
+    outputs:
+      number: ${{ steps.pr.outputs.number }}
+      skip: ${{ steps.pr.outputs.skip }}
+      round: ${{ steps.state.outputs.round }}
+      conclusion: ${{ steps.pr.outputs.conclusion }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      decision: ${{ steps.verdict.outputs.decision }}
+      changed: ${{ steps.verdict.outputs.changed }}
     env:
       # The identity stage 2 commits under. Round 2 is detected against it
       # in the "Decide which round we are in" step below, so the two must
@@ -284,15 +321,20 @@ jobs:
           AUTHOR: ${{ steps.pr.outputs.author }}
           # BOT_EMAIL comes from the job-level `env:` above, not from this
           # step; it is read here and by the push in a later task, and both
-          # must see the same literal.
+          # must see the same literal. `classify-round.mjs` requires it and
+          # throws if it is empty, rather than letting every commit -- ours
+          # included -- fall through to the refusal.
         run: |
           set -euo pipefail
-          if [ "$AUTHOR" = "$BOT_EMAIL" ]; then
-            echo 'round=2' >> "$GITHUB_OUTPUT"
-            echo 'Round 2: the head commit is ours, so a fix has already been attempted.' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'round=1' >> "$GITHUB_OUTPUT"
-          fi
+          # Three states, and the third one is the point: "not ours" is not
+          # the same claim as "Dependabot's". The predicate lives in a script
+          # so the CI tests cover it -- eight cases, including a hand commit,
+          # an empty author and a lookalike address, all of which a two-state
+          # test would call a pristine round 1. The reasoning is in the file.
+          #
+          # A round with nothing to say prints nothing, so `tee` appends
+          # nothing to the summary for an ordinary first round.
+          node .github/scripts/classify-round.mjs | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Read the bump, and ask the caret rule what it thinks
         id: bump
@@ -802,8 +844,25 @@ jobs:
           # that *fails*, times out, or is cancelled skips this one entirely
           # and reddens the job on its own, which is the same refusal by a
           # different route. What reaches this branch is narrower: the
-          # analysis exited 0 having written no file -- it produced prose
-          # instead, or stopped at its turn limit.
+          # analysis exited 0 having written no file. Three ways that
+          # happens, and the third is the one that matters most:
+          #
+          #   1. it produced prose instead of a file;
+          #   2. it stopped at its turn limit;
+          #   3. **the action ran no model at all and still reported
+          #      success.** `claude-code-action` validates server-side that
+          #      the running workflow file is byte-identical to the default
+          #      branch's copy, and on failure warns, skips, and reports
+          #      `outcome=success`. Measured on run 34596308306, a
+          #      `workflow_dispatch` from a branch carrying one changed
+          #      comment: five seconds, no model, no verdict, green step.
+          #
+          # Case 3 is why this branch is load-bearing beyond what it was
+          # written for, and why the `merge` job's gate is an equality test
+          # on `merge` rather than an inequality on `read-it`. A green step
+          # that silently did nothing must not be something a merge gate has
+          # to interpret. Do not remove this branch, and do not let the
+          # enumeration above fall behind again.
           if [ ! -f verdict.json ]; then
             {
               echo 'decision=read-it'
@@ -867,7 +926,6 @@ jobs:
           {
             echo "### Verdict: \`$decision\`"
             echo "Wrote a fix: \`$changed\` ($(wc -l < fix.diff) diff lines)."
-            echo "Nothing is merged or pushed: that arrives in tasks 6 and 7."
             echo '<details><summary>report.md</summary>'
             echo
             cat report.md 2>/dev/null || echo '(none)'
@@ -887,3 +945,156 @@ jobs:
               gh pr comment "$NUMBER" --repo "$REPO" --body-file report.md
             fi
           fi
+
+      - name: Say why the merge is waiting
+        # Gated on `read-it` and not on `!= 'merge'`, which is the same test
+        # only when the verdict step actually ran. It does not always run:
+        # an unreadable bump, or one the caret rule already found
+        # compatible, skips it, and `decision` is then the empty string --
+        # which `!= 'merge'` would satisfy, making this step state that the
+        # analysis asked for a human when no analysis happened at all, and
+        # point at a comment that for a compatible bump does not exist.
+        # A refusal path must not narrate a reasoning it never produced.
+        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.verdict.outputs.decision == 'read-it'
+        env:
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          echo "#$NUMBER stays open: the analysis asked for a human. Its reasoning is in the pull request comment." >> "$GITHUB_STEP_SUMMARY"
+
+  # **The only job in this workflow that can write a ref, and all it does is
+  # ask GitHub to wait.** Separated from `analyse` for that one reason:
+  # `gh pr merge --auto` needs `contents: write` as well as
+  # `pull-requests: write`, while `analyse` runs a model and holds a checkout
+  # of the pull request head and must not be able to write `main`. No
+  # checkout here, no model, no prompt: two `gh` calls.
+  #
+  # On the permission claim, precisely: it was READ, not measured.
+  # `peter-evans/enable-pull-request-automerge` documents "`GITHUB_TOKEN`
+  # (permissions `pull_requests: write`, `contents: write`)", and
+  # `dependabot-auto-merge.yml` in this repository declares that same pair
+  # for the same operation and works. Both establish that the pair is
+  # SUFFICIENT. Neither establishes that `contents: write` is NECESSARY --
+  # no one has run this with `contents: read` and watched it fail. The split
+  # does not depend on which it is: `analyse` keeps `contents: read` either
+  # way, and that is the property worth having.
+  #
+  # `--auto` queues behind branch protection; it does not decide anything.
+  # The three required checks are already green on this head -- the
+  # `conclusion == 'success'` condition below is what establishes that -- so
+  # in practice this merges within seconds.
+  #
+  # **This job has never run.** Nothing has yet produced a `merge` verdict on
+  # a pull request with green CI, so the path below is reasoned and reviewed
+  # but unexercised. Kept here in the spirit of `docs/installation.md`'s
+  # "What has not been verified": delete this paragraph when a run has
+  # actually queued a merge, and not before.
+  merge:
+    needs: analyse
+    # **The three conditions that decide anything are equality tests**, and
+    # that is the property being relied on: a step that did not run
+    # contributes the empty string to these outputs, so an inequality would
+    # let an absent verdict through. `decision == 'merge'` and
+    # `conclusion == 'success'` are the two that carry the decision, and
+    # `round == '1'` the one that scopes it.
+    #
+    # The other two ARE negations, said plainly rather than glossed over as
+    # "all positive": `skip != 'true'` is redundant behind `round == '1'`
+    # (no round is set when the resolve step stops), and `changed != 'true'`
+    # is reachable only alongside `decision == 'merge'`, which means the
+    # verdict step ran and wrote both. Neither can be satisfied by an empty
+    # string arriving from a skipped step in a way that reaches a merge. If
+    # a later edit makes either of them load-bearing on its own, it has to
+    # become an equality test.
+    #
+    # `needs.analyse` failing skips this job by default -- no `always()` is
+    # written anywhere, which is the fail-closed direction and the same
+    # refusal a red analysis already produces.
+    #
+    # `conclusion == 'success'` is required even for a `merge` verdict with
+    # nothing written. A green CI is the only evidence in this whole path
+    # that was not produced by the analysis itself, and a `merge` verdict
+    # over a red CI with no fix written is a contradiction to refuse rather
+    # than resolve.
+    #
+    # `decision == 'merge'` is also what stops a silently skipped analysis:
+    # `claude-code-action` can report `outcome=success` having run no model
+    # at all, leaving no verdict file, and the verdict step's missing-file
+    # branch answers `read-it` for exactly that case -- case 3 of the
+    # enumeration there. Do not relax either half.
+    if: |
+      needs.analyse.outputs.skip != 'true'
+      && needs.analyse.outputs.round == '1'
+      && needs.analyse.outputs.decision == 'merge'
+      && needs.analyse.outputs.changed != 'true'
+      && needs.analyse.outputs.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    # Two `gh` calls. Nothing here should ever approach
+    # the six-hour job default.
+    timeout-minutes: 5
+    steps:
+      - name: Refuse if the head moved since the analysis
+        # The verdict is about one commit, and the analysis takes minutes --
+        # the model alone ran 5 min 52 s on the first real measurement. A
+        # Dependabot rebase landing in that window leaves a head nobody
+        # judged, and queueing the merge would queue it for that head.
+        #
+        # This is the same check the workflow's `concurrency:` comment
+        # already promises for the push in a later task, applied to the
+        # first step that acts.
+        #
+        # What it closes is the window between the analysis and the queue.
+        # It does not close what follows: `--auto` merges whatever the head
+        # is when the required checks go green. That residue is bounded by
+        # branch protection -- the three checks must pass on the head being
+        # merged, not on the one analysed -- and by the fact that a
+        # Dependabot rebase carries the same bump. Say so rather than imply
+        # a completeness this has not got.
+        #
+        # **It exits non-zero on purpose, and the choice is arguable.** The
+        # condition is usually benign and self-healing: a rebase retriggers
+        # CI, which retriggers the whole analysis, which judges the new head
+        # properly. Refusing quietly would be defensible. Reddening the run
+        # is chosen because a head that moved between verdict and merge is
+        # rare, and when it is NOT benign a red run is the only channel that
+        # reaches the owner without being asked. Revisit this if it ever
+        # fires often enough to be ignored -- a refusal nobody reads is
+        # worse than a quiet one.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ needs.analyse.outputs.number }}
+          ANALYSED_SHA: ${{ needs.analyse.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          # A precondition, so it is tested before the call it guards rather
+          # than after it. Unreachable given the resolve step's invariants --
+          # it writes `head_sha` on every path that does not stop -- and kept
+          # anyway: this is the step that decides a merge, and an empty
+          # expected value compared against a real one would pass a check
+          # that checked nothing.
+          if [ -z "$ANALYSED_SHA" ]; then
+            echo "The analysis reported no head SHA, so there is nothing to compare and nothing to merge." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          current="$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)"
+          if [ "$current" != "$ANALYSED_SHA" ]; then
+            {
+              echo "### Refusing to queue the merge on #$NUMBER"
+              echo "The analysis judged \`$ANALYSED_SHA\`; the head is now \`$current\`. Whatever moved it has not been analysed."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Queue the merge for a bump that needs no change
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ needs.analyse.outputs.number }}
+        run: |
+          set -euo pipefail
+          gh pr merge --auto --squash "$NUMBER" --repo "$REPO"
+          echo "Auto-merge queued on #$NUMBER: the analysis found nothing to change." >> "$GITHUB_STEP_SUMMARY"
