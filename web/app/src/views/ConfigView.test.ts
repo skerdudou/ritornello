@@ -25,6 +25,7 @@ const CATALOGUE = {
   connected: 'connecté', unavailable: 'unavailable', stalled: 'figé', disabled: 'désactivé',
   starting: 'démarrage', busy: 'occupé',
   plugin_incompatible: 'Compilé pour le protocole {found} ; ce cœur parle le {expected}',
+  plugin_catalog_unknown: 'Compilé avant les packs de langue',
   admin_link: 'admin', toggle_plugin: 'Activer ou désactiver {name}',
   plugin_enabled: '{name} activé.', plugin_disabled: '{name} désactivé.',
   update_binary_missing: 'Non installé', update_undeclared: 'Installé mais non déclaré',
@@ -475,6 +476,35 @@ describe('ConfigView — plugin table', () => {
     })
     const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'radio')!
     expect(row.text()).toContain('0.2.1')
+  })
+
+  it('names a wired plugin whose announcement predates the catalog field', async () => {
+    // Unlike `incompatible`, this plugin is fully wired — `connected: true`
+    // — and the badge must say so is not the point: it must name the
+    // missing language packs instead of a bare "connected" that would say
+    // nothing about them. See `PluginRow.catalog_unknown`'s own doc.
+    const w = await mountWithStatus({
+      plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false, catalog_unknown: true }],
+      active_source: '',
+    })
+    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'cd')!
+    expect(row.get('[data-plugin-state]').text()).toBe('Compilé avant les packs de langue')
+    // The raw key must never reach the screen — same discipline as
+    // `plugin_incompatible` above.
+    expect(row.text()).not.toContain('plugin_catalog_unknown')
+  })
+
+  it('a wired plugin with an announced but empty catalog is not named as legacy', async () => {
+    // The mirror case: no `catalog_unknown` in the payload at all — exactly
+    // what a textless but up-to-date plugin (`console`, `ouifm-metas`,
+    // `radiofrance-metas`) announces. Conflating the two would make every
+    // legitimately textless plugin look like an old binary.
+    const w = await mountWithStatus({
+      plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false }],
+      active_source: '',
+    })
+    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'cd')!
+    expect(row.get('[data-plugin-state]').text()).toBe('connecté')
   })
 
   it('encodes the plugin name in the toggle URL', async () => {

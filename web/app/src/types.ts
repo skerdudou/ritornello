@@ -33,6 +33,11 @@ export interface PluginStatus {
    * this core's own (see `StatusPayload.protocol`). Its presence is the
    * refusal itself. */
   incompatible?: number
+  /** This plugin's announcement carried no `catalog` field at all — a binary
+   * built before this core could ask for its embedded translation layers.
+   * Distinct from a plugin that announced an empty catalog, which has no
+   * text of its own and sets nothing here. Optional: absent when false. */
+  catalog_unknown?: boolean
   /** Declared, and its binary is not on disk. Optional: absent when false. */
   missing_binary?: boolean
   /** A binary sitting in the plugins directory that nothing declares — the

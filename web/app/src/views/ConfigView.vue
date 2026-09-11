@@ -350,6 +350,11 @@ interface PluginRow {
   admin: boolean
   version?: string
   incompatible?: number
+  /** This plugin's announcement carried no `catalog` field at all — a binary
+   * built before this core could ask for its embedded translation layers.
+   * Distinct from an announced, empty catalog, which has no text of its own
+   * and is not this. */
+  catalog_unknown: boolean
   /** Declared in plugins.toml, and its binary is not on disk. */
   missing_binary: boolean
   /** A binary on disk that nothing declares — the twin of `missing_binary`. */
@@ -398,6 +403,7 @@ interface PluginAccumulator {
   admin: boolean
   version?: string
   incompatible?: number
+  catalog_unknown: boolean
   missing_binary: boolean
   undeclared_binary: boolean
   binary_file?: string
@@ -427,6 +433,7 @@ const plugins = computed<PluginRow[]>(() => {
         admin: p.admin,
         version: p.version,
         incompatible: p.incompatible,
+        catalog_unknown: !!p.catalog_unknown,
         missing_binary: !!p.missing_binary,
         undeclared_binary: !!p.undeclared_binary,
         binary_file: p.binary_file,
@@ -445,6 +452,11 @@ const plugins = computed<PluginRow[]>(() => {
     // protocol 0 (were that ever to happen) is not mistaken for "none".
     acc.version = acc.version ?? p.version
     acc.incompatible = acc.incompatible ?? p.incompatible
+    // OR, like `stalled`/`busy`: every kind of a given plugin carries the
+    // same fact, derived from the same single announcement, so this is not
+    // really a choice between kinds — it only guards against a kind that
+    // renders no line at all leaving the flag stuck at its initial `false`.
+    acc.catalog_unknown = acc.catalog_unknown || !!p.catalog_unknown
     acc.missing_binary = acc.missing_binary || !!p.missing_binary
     acc.undeclared_binary = acc.undeclared_binary || !!p.undeclared_binary
     acc.binary_file = acc.binary_file ?? p.binary_file
@@ -479,6 +491,7 @@ const plugins = computed<PluginRow[]>(() => {
       admin: acc.admin,
       version: acc.version,
       incompatible: acc.incompatible,
+      catalog_unknown: acc.catalog_unknown,
       missing_binary: acc.missing_binary,
       undeclared_binary: acc.undeclared_binary,
       not_installed: false,
@@ -512,6 +525,7 @@ const plugins = computed<PluginRow[]>(() => {
       admin: false,
       version: c.offered ?? undefined,
       incompatible: undefined,
+      catalog_unknown: false,
       missing_binary: false,
       undeclared_binary: false,
       not_installed: true,
@@ -981,8 +995,10 @@ function goTo(id: string) {
                                   ? 'outline'
                                   : p.busy
                                     ? 'outline'
-                                    : p.connected
-                                      ? 'secondary'
+                                    : p.catalog_unknown
+                                      ? 'outline'
+                                      : p.connected
+                                        ? 'secondary'
                                       : p.starting
                                         ? 'secondary'
                                         : p.stalled
@@ -1003,6 +1019,15 @@ function goTo(id: string) {
                            them for the same reason. "Busy" comes **before**
                            "connected": a busy plugin is reachable, and that is
                            precisely why "connected" says nothing useful.
+                           `catalog_unknown` sits right after: unlike every
+                           condition above it, the plugin is fully wired —
+                           this only names a binary built before this core
+                           could ask it for its language packs (the accepted
+                           mitigation for `PROTOCOL_VERSION` staying at 1, see
+                           `Announcement.catalog`'s own doc) — so it must not
+                           outrank a real fault like "busy", but it must still
+                           outrank a bare "connected", which would say nothing
+                           about the missing translations.
                            "Starting" comes **before** "stalled": both say the
                            plugin has not spoken yet, and only the elapsed time
                            tells them apart. Showing "stalled" during a normal
@@ -1035,8 +1060,10 @@ function goTo(id: string) {
                                   ? t('disabled')
                                   : p.busy
                                     ? t('busy')
-                                    : p.connected
-                                      ? t('connected')
+                                    : p.catalog_unknown
+                                      ? t('plugin_catalog_unknown')
+                                      : p.connected
+                                        ? t('connected')
                                     : p.starting
                                       ? t('starting')
                                       : p.stalled
