@@ -326,3 +326,5 @@ update_dialog_description = "Choose what to install. What is already up to date 
 update_row_third_party = "Third-party plugin from {repo}. Never selected automatically."
 update_row_core_not_selected = "{component} will move while the core stays behind — this may make them incompatible."
 update_confirm = "Install selected"
+ui_stale_title = "The appliance restarted in a new version"
+ui_stale_reload = "Reload"

@@ -328,3 +328,5 @@ update_dialog_description = "Choisissez ce qui doit être installé. Ce qui est 
 update_row_third_party = "Greffon tiers depuis {repo}. Jamais sélectionné automatiquement."
 update_row_core_not_selected = "{component} va évoluer alors que le cœur reste en retrait — cela peut les rendre incompatibles."
 update_confirm = "Installer la sélection"
+ui_stale_title = "L'appareil a redémarré dans une nouvelle version"
+ui_stale_reload = "Recharger"

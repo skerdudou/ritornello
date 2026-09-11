@@ -31,6 +31,19 @@ const state = ref<SystemPayload | null>(null)
 const unavailable = ref(false)
 
 /**
+ * The session of the core as this page first saw it, and whether it has
+ * changed since.
+ *
+ * Latched on purpose (`staleUi` never goes back down): once the core has
+ * restarted, the bundle this page is running is one version behind for good,
+ * and a flapping answer must not make the banner blink.
+ *
+ * `''` until the first answer — an empty first sample is not a change.
+ */
+const firstSession = ref('')
+const staleUi = ref(false)
+
+/**
  * Probing period, at module level like all the state of this file: it thus
  * lives as long as the page, and a choice made on the System tab is still
  * there when coming back to it — the opposite of the view-local version, which
@@ -193,6 +206,11 @@ async function probe() {
   try {
     const s = await api.get<SystemPayload>('/api/system', { signal: controller.signal })
     state.value = s
+    // The one place a restart is observable: this is the only route the app
+    // polls continuously (`/api/status` is read at boot and in bounded
+    // windows only, see `usePlugins`).
+    if (!firstSession.value) firstSession.value = s.session
+    else if (s.session && s.session !== firstSession.value) staleUi.value = true
     unavailable.value = false
     // Re-arm the latch: the next outage will be entitled to its line.
     failureReported = false
@@ -406,6 +424,8 @@ export function resetMetrics(): void {
   periodMs.value = 5000
   previousJiffies.value = null
   currentCpuUsage.value = null
+  firstSession.value = ''
+  staleUi.value = false
 }
 
 export function useMetrics() {
@@ -418,6 +438,7 @@ export function useMetrics() {
     periodMs,
     period,
     windowMinutes,
+    staleUi,
     start,
     pause,
     resume,

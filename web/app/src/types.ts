@@ -496,4 +496,8 @@ export interface SystemPayload {
    */
   cpu_total_jiffies: number | null
   cpu_idle_jiffies: number | null
+  /** Identifier of this run of the core (`AppState::session`), carried here
+   *  because this is the only continuously polled route: it is what lets the
+   *  page notice a restart and offer a reload (see `useMetrics`' `staleUi`). */
+  session: string
 }

@@ -23,6 +23,12 @@ function ok(body: Record<string, unknown> = payload()) {
   return new Response(JSON.stringify(body), { status: 200 })
 }
 
+/** A successful `/api/system` response carrying a given session — the field
+ *  `staleUi` watches. Built on `payload`/`ok` rather than a parallel harness. */
+function systemResponse(over: Record<string, unknown> = {}) {
+  return ok(payload(over))
+}
+
 /** Lets the probe's `await` chain settle. The probe is asynchronous even when
  *  `fetch` resolves at once, so a bare `advanceTimersByTime` returns before
  *  `unavailable` has been written. */
@@ -147,5 +153,60 @@ describe('useMetrics connection state', () => {
     await settle()
 
     expect(connection.value).toBe('online')
+  })
+})
+
+describe('useMetrics staleUi', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.unstubAllGlobals()
+    vi.useFakeTimers()
+  })
+
+  afterEach(async () => {
+    const { resetMetrics } = await import('./useMetrics')
+    resetMetrics()
+    vi.useRealTimers()
+  })
+
+  it('raises staleUi when the core answers with a different session', async () => {
+    // A core that restarted is a core whose assets may have moved: the page
+    // is still running the bundle of the previous version, and nothing
+    // reloads it. Two samples of the same session must NOT raise it — that
+    // would put the banner on screen on every ordinary poll.
+    const spy = vi
+      .fn()
+      .mockResolvedValueOnce(systemResponse({ session: 'a' }))
+      .mockResolvedValueOnce(systemResponse({ session: 'a' }))
+      .mockResolvedValue(systemResponse({ session: 'b' }))
+    vi.stubGlobal('fetch', spy)
+    const { useMetrics } = await import('./useMetrics')
+    const { start, staleUi } = useMetrics()
+    start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(staleUi.value).toBe(false)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(staleUi.value).toBe(false)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(staleUi.value).toBe(true)
+  })
+
+  it('never lowers staleUi once raised', async () => {
+    // A flapping answer must not make the banner blink: the page's code is
+    // stale for good once the core has restarted, whatever comes next.
+    const spy = vi
+      .fn()
+      .mockResolvedValueOnce(systemResponse({ session: 'a' }))
+      .mockResolvedValueOnce(systemResponse({ session: 'b' }))
+      .mockResolvedValue(systemResponse({ session: 'a' }))
+    vi.stubGlobal('fetch', spy)
+    const { useMetrics } = await import('./useMetrics')
+    const { start, staleUi } = useMetrics()
+    start()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(staleUi.value).toBe(true)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(staleUi.value).toBe(true)
   })
 })

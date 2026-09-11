@@ -433,10 +433,26 @@ pub fn collect(info: &SystemInfo) -> Metrics {
     }
 }
 
+/// `/api/system`'s payload: the metrics, plus the identifier of this run of
+/// the core.
+///
+/// Flattened onto `Metrics` rather than added to it, and the precedent is
+/// `status::StatusResponse`: `collect()` is pure over `SystemInfo` and has no
+/// business holding a token the router owns. The field is here because this
+/// is the **only** continuously polled route (`useMetrics`, every 5 s), which
+/// is what lets the page notice a core that restarted under it — its own
+/// assets then being one version behind, with nothing to say so.
+#[derive(Serialize)]
+pub struct SystemResponse {
+    #[serde(flatten)]
+    metrics: Metrics,
+    session: String,
+}
+
 /// Metrics for the System tab. Read on demand, nothing cached: the page
 /// polls, and everything here costs a handful of pseudo-file reads.
-pub async fn system_json(State(state): State<crate::status::AppState>) -> Json<Metrics> {
-    Json(collect(&state.system))
+pub async fn system_json(State(state): State<crate::status::AppState>) -> Json<SystemResponse> {
+    Json(SystemResponse { metrics: collect(&state.system), session: state.session.clone() })
 }
 
 /// What `POST /api/system/power` accepts.
@@ -896,13 +912,25 @@ mod tests {
             "temperature_c", "cpu_mhz", "load", "cpus", "memory", "disk", "under_voltage",
             "under_voltage_since_boot", "uptime_s", "service_uptime_s", "hostname", "ip", "os",
             "kernel", "version", "can_power_off", "can_reboot", "logind_reachable",
-            "cpu_total_jiffies", "cpu_idle_jiffies",
+            "cpu_total_jiffies", "cpu_idle_jiffies", "session",
         ] {
             assert!(v.get(key).is_some(), "key {key} missing");
         }
         assert!(v["version"].is_string());
         assert_eq!(v["can_power_off"], false);
         assert_eq!(v["can_reboot"], false);
+    }
+
+    /// The session must travel on the wire the page actually polls.
+    ///
+    /// `/api/status` carries it too, but is only read at boot, after a plugin
+    /// toggle and during a bounded window (see `usePlugins`), so nothing
+    /// there observes a restart. `/api/system` is the one continuous poll.
+    #[tokio::test]
+    async fn get_system_carries_the_session_of_this_run() {
+        let v = json_body(app(SystemInfo::default()), "/api/system").await;
+        assert!(v["session"].is_string());
+        assert!(!v["session"].as_str().unwrap().is_empty());
     }
 
     #[tokio::test]
