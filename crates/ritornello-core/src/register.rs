@@ -11,7 +11,7 @@ use futures::{Stream, StreamExt};
 use ritornello_proto::{Announcement, PluginKind};
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::UnixListener;
 
 /// What the gathering learned.
@@ -58,6 +58,22 @@ pub struct Gathered {
 /// nothing after that timeout is not a slow plugin but a faulty one.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Upper bound, in bytes, on a single announcement line.
+///
+/// Measured against what a plugin can realistically say: the heaviest
+/// catalogue measured across the plugins (`files`) weighs 6,677 bytes in
+/// English and 7,281 in French, so a plugin declaring five languages lands
+/// near 35 KB. This bound sits well above that ceiling — headroom for
+/// catalogues to grow — while still refusing a line that would otherwise
+/// grow without limit: `BufReader::lines()` buffers until it finds a `\n`,
+/// so nothing before this stopped a connection from holding an unbounded
+/// amount of memory for as long as `READ_TIMEOUT` lets it keep writing. That
+/// stopped being a theoretical risk the day task 3 puts a full translation
+/// catalogue in every announcement; this bound is put in place ahead of that
+/// change, not after it, precisely so the load never meets an unbounded
+/// reader.
+pub const ANNOUNCEMENT_MAX_BYTES: usize = 64 * 1024;
+
 /// Reads **one** announcement line on an accepted connection, decodes it, and
 /// pushes it into the announcements channel.
 ///
@@ -71,13 +87,30 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// failed permanently, could no longer wire **any** announcement on a device
 /// that is never rebooted. The gathering had the same reader but its deadline
 /// bounded it; the permanent loop has none.
+///
+/// The read is also **bounded in bytes**, by `ANNOUNCEMENT_MAX_BYTES`, and
+/// that bound is applied to the stream **before** `lines()` ever sees it —
+/// wrapping it in `take` rather than measuring the string `lines()` hands
+/// back. Checking the length only after a full line was read would still let
+/// an oversized line grow the buffer without limit while it was being
+/// assembled; the point of a byte bound is exactly to stop that growth, so it
+/// has to sit ahead of the buffering, not behind it.
 async fn read_announcement(
     stream: tokio::net::UnixStream,
     tx: tokio::sync::mpsc::Sender<Announcement>,
     timeout: Duration,
 ) {
-    let mut lines = BufReader::new(stream).lines();
+    // One byte past the bound: a line that is exactly `ANNOUNCEMENT_MAX_BYTES`
+    // long still needs its trailing `\n` to be recognised as complete, and
+    // that extra byte is what lets the oversized branch below tell "exactly
+    // at the bound" from "one byte over" instead of both looking identical.
+    let capped = stream.take(ANNOUNCEMENT_MAX_BYTES as u64 + 1);
+    let mut lines = BufReader::new(capped).lines();
     match tokio::time::timeout(timeout, lines.next_line()).await {
+        Ok(Ok(Some(l))) if l.len() > ANNOUNCEMENT_MAX_BYTES => tracing::warn!(
+            "an announcement of at least {} bytes was refused: over the {ANNOUNCEMENT_MAX_BYTES}-byte bound",
+            l.len()
+        ),
         Ok(Ok(Some(l))) => match serde_json::from_str::<Announcement>(&l) {
             Ok(a) => {
                 let _ = tx.send(a).await;
@@ -871,6 +904,69 @@ mod tests {
             .unwrap();
         assert_eq!(read, 0, "end of file: the core gave its descriptor back");
         assert!(rx.try_recv().is_err(), "nothing to wire from a silent connection");
+    }
+
+    #[tokio::test]
+    async fn a_realistically_sized_announcement_passes() {
+        // The heaviest catalogue measured today (`files`) is about 7 KB per
+        // language, so five languages land near 35 KB. `ANNOUNCEMENT_MAX_BYTES`
+        // is not exercised through a real catalogue field here — task 3 is
+        // the one that wires it into `Announcement` — but through a padding
+        // field of that same order of magnitude, so this test exercises the
+        // byte bound at the size it actually has to pass, not at whatever is
+        // convenient to type.
+        let (a, mut b) = tokio::net::UnixStream::pair().unwrap();
+        let (tx, mut rx) = channel();
+        tokio::spawn(read_announcement(a, tx, Duration::from_secs(5)));
+
+        let padding = "x".repeat(30 * 1024);
+        let line = format!(r#"{{"name":"radio","kinds":["source"],"catalog":"{padding}"}}"#);
+        b.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+        b.shutdown().await.unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("a realistically sized announcement must not be dropped")
+            .unwrap();
+        assert_eq!(received.name, "radio");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_announcement_is_refused_and_pushes_nothing() {
+        // The case task 3 makes real: a local process able to write more
+        // within `READ_TIMEOUT` than `ANNOUNCEMENT_MAX_BYTES` allows. The
+        // assertion is on the channel, not the log: a refused announcement
+        // must push nothing, and `try_recv` on an mpsc receiver is how that
+        // absence is observed directly rather than inferred from tracing
+        // output.
+        let (a, mut b) = tokio::net::UnixStream::pair().unwrap();
+        let (tx, mut rx) = channel();
+        let read_task = tokio::spawn(read_announcement(a, tx, Duration::from_secs(5)));
+
+        // One byte over the bound, on a single line, and otherwise valid
+        // JSON: if the bound did not exist, this would parse and be pushed —
+        // exactly the failure this test exists to catch.
+        let oversized = "a".repeat(ANNOUNCEMENT_MAX_BYTES + 1);
+        let line = format!(r#"{{"name":"radio","kinds":["source"],"catalog":"{oversized}"}}"#);
+        // The reader gives up as soon as it has read `ANNOUNCEMENT_MAX_BYTES
+        // + 1` bytes and drops its end of the connection: the tail of this
+        // write is then refused by the kernel as a reset, not a graceful
+        // close, so its result is not what this test is about and is not
+        // asserted on.
+        let _ = b.write_all(format!("{line}\n").as_bytes()).await;
+        let _ = b.shutdown().await;
+
+        // Wait for the read task itself to finish, rather than for a signal
+        // on the socket: a connection reset is not the graceful half-close
+        // `a_silent_connection_is_dropped_after_the_timeout` reads as an EOF,
+        // so awaiting the task directly is what actually orders "the line
+        // was judged" before "the channel is checked" here.
+        tokio::time::timeout(Duration::from_secs(2), read_task)
+            .await
+            .expect("the task must give up on an oversized line, not hang on it")
+            .unwrap();
+
+        assert!(rx.try_recv().is_err(), "an oversized announcement must push nothing");
     }
 
     #[tokio::test]
