@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url'
 
 // The mechanical check on what the analysis wrote, before anything is pushed.
 //
-// The dispositif lets one agent write a fix and judge whether it is good; CI
+// The mechanism lets one agent write a fix and judge whether it is good; CI
 // is the only independent control left. These guards exist so that control
 // cannot be disarmed by the thing it watches -- the shortest path to green
 // must not be to delete what turns red.
