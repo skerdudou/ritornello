@@ -1,104 +1,36 @@
 //! Shared i18n catalog for ritornello.
 //!
-//! Two independent layers per component:
-//! - `own`: the component's embedded English (`en.toml`), overlaid by the
-//!   external pack `<root>/<component>/<lang>.toml`.
-//! - `common`: English embedded in this crate, overlaid by
-//!   `<root>/common/<lang>.toml`.
+//! The model is three types, each built on the one before:
+//! - `Layer` (see `layer`): one language's contribution to one pack, holding
+//!   **only** the keys that language defines — never English filled into
+//!   its holes. That is what makes stacking possible: a layer that carried
+//!   a floor of its own would shadow whatever pack sits below it.
+//! - `Chain` (see `chain`): an ordered stack of layers. The first layer to
+//!   define a key wins; the stacking is what produces the floor, never a
+//!   layer by itself.
+//! - `Catalog` (see `chain`): the resolution actually used at runtime — a
+//!   `Chain` of exactly four layers, built once per (component, locale)
+//!   pair by `Catalog::load`: the component's disk pack, the component's
+//!   embedded English, `common`'s disk pack, `common`'s embedded English.
 //!
-//! Resolution by key: `own` → `common` → the key itself (safety net).
-//! Interpolation: the component does `catalog.get(key)` then
+//! `ModuleLayers` (see `layer`) groups one module's layers by language; it
+//! is data, not resolution, kept alongside `Layer` for the callers that
+//! need to reason about a module's coverage across languages.
+//!
+//! Resolution by key: `own` (component) → `common` → the key itself (safety
+//! net). Interpolation: the caller does `catalog.get(key)` then
 //! `str::replace("{n}", &n.to_string())` (no template engine).
 
-use std::collections::HashMap;
-use std::path::Path;
+mod chain;
+mod layer;
 
-/// Common English vocabulary embedded in the crate.
-const COMMON_EN: &str = include_str!("locales/common_en.toml");
+pub use chain::{Catalog, Chain};
+pub use layer::{try_parse, Layer, ModuleLayers};
 
-/// Pure parse of a flat TOML pack (`key = "value"`). Returns the parse error
-/// to the caller that wants to log it (loading of the base layers).
-pub fn try_parse(s: &str) -> Result<HashMap<String, String>, toml::de::Error> {
-    toml::from_str(s)
-}
-
-/// Overlays `base` with the TOML pack read from disk at `path`. File
-/// **absent**: silent (the normal case — most components have no
-/// pack for most languages). Any other error — permission denied,
-/// invalid UTF-8, invalid TOML — leaves `base` unchanged but is **traced**:
-/// a pack present that the operator meant to install must not disappear
-/// without a log line.
-fn overlay_from_disk(base: &mut HashMap<String, String>, path: &Path) {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(e) => {
-            tracing::warn!("i18n pack {} ignored (read failed): {e}", path.display());
-            return;
-        }
-    };
-    match toml::from_str::<HashMap<String, String>>(&text) {
-        Ok(ext) => base.extend(ext),
-        Err(e) => tracing::warn!("i18n pack {} ignored (invalid TOML): {e}", path.display()),
-    }
-}
-
-pub struct Catalog {
-    own: HashMap<String, String>,
-    common: HashMap<String, String>,
-}
-
-impl Catalog {
-    /// Builds the catalog of a component for a given language.
-    /// Starts from the embedded English (`own_en` for `own`, `COMMON_EN` for
-    /// `common`), then layers on the external packs that are present and valid.
-    /// Never panics: an absent or invalid pack leaves the English in place.
-    pub fn load(component: &str, locale: &str, root: &Path, own_en: &str) -> Catalog {
-        let mut own = match try_parse(own_en) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("embedded pack {component} invalid: {e}");
-                HashMap::new()
-            }
-        };
-        let mut common = match try_parse(COMMON_EN) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("embedded common pack invalid: {e}");
-                HashMap::new()
-            }
-        };
-        overlay_from_disk(&mut common, &root.join("common").join(format!("{locale}.toml")));
-        overlay_from_disk(&mut own, &root.join(component).join(format!("{locale}.toml")));
-        Catalog { own, common }
-    }
-
-    /// Resolves a key: `own` → `common` → the key itself.
-    pub fn get<'a>(&'a self, key: &'a str) -> &'a str {
-        self.own
-            .get(key)
-            .or_else(|| self.common.get(key))
-            .map(String::as_str)
-            .unwrap_or(key)
-    }
-
-    /// Flat map of **all** known keys, `own` overriding
-    /// `common` — the same priority order as `get`, but exposed as one block.
-    ///
-    /// Used to ship the catalog to the browser (`GET /api/i18n`): the SPA
-    /// resolves its keys client-side, which replaces the `{{key}}`
-    /// substitution of old. The values remain **data** end to end:
-    /// no character is dangerous, unlike raw substitution
-    /// into JS source.
-    pub fn entries(&self) -> HashMap<&str, &str> {
-        let mut out: HashMap<&str, &str> =
-            self.common.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        for (k, v) in &self.own {
-            out.insert(k.as_str(), v.as_str());
-        }
-        out
-    }
-}
+// Only the crate's own tests (unmodified below) reach for the embedded
+// common pack directly; outside `cfg(test)` nothing needs it by name.
+#[cfg(test)]
+pub(crate) use chain::COMMON_EN;
 
 #[cfg(test)]
 mod tests {
