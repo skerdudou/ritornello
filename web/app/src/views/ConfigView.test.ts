@@ -47,6 +47,7 @@ const CATALOGUE = {
   startup_previous: 'état précédent',
   volume_hold_title: 'Volume maintenu',
   volume_hold_initial: 'Délai initial (ms)', volume_hold_interval: 'Intervalle de répétition (ms)',
+  volume_hold_hint: 'Quand une touche de volume reste enfoncée : le délai avant que le volume se remette à bouger, puis la cadence à laquelle il avance.',
   overlays_title: 'Incrustations',
   overlay_ms_label: "Durée d'affichage (volume, messages) (ms)",
   tens_window_ms_label: 'Fenêtre de saisie du cumul +10 (ms)',
@@ -1604,6 +1605,14 @@ describe('ConfigView — table of contents', () => {
     const texts = w.findAll('button').map((b) => b.text())
     expect(texts).not.toContain('Changer')
     expect(texts.filter((t) => t === 'Enregistrer')).toHaveLength(9)
+  })
+
+  it('says what the volume-hold delays actually govern', async () => {
+    // Two millisecond fields under a three-word title said nothing about
+    // what they do. The core only arms these on a **held key**: a direct
+    // volume change arms nothing.
+    const { w } = await mountView({})
+    expect(w.find('[data-hold-hint]').text()).toContain('touche de volume')
   })
 
   it('scrolling updates the active section (scrollspy)', async () => {

@@ -1334,6 +1334,7 @@ function goTo(id: string) {
                 v-model="settings.volume_repeat_interval_ms" />
             </label>
             <Button data-hold-change @click="saveSettings">{{ t('save') }}</Button>
+            <p data-hold-hint class="w-full text-sm text-muted-foreground">{{ t('volume_hold_hint') }}</p>
           </CardContent>
         </Card>
       </section>
