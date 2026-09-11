@@ -28,5 +28,5 @@ pub use metadata::{
     valid_year, CoverRef, Enrichment, DateFormat, Clock, IdentityUpdate, Known, Link, Track,
     NowPlaying, Overlay, Playback, PlayerState, Provenance,
 };
-pub use register::{Announcement, PluginKind};
+pub use register::{Announcement, PluginKind, ANNOUNCEMENT_MAX_BYTES};
 pub use source::{Preset, SourceAction, SourceMessage, SourceReq, SourceRequest};

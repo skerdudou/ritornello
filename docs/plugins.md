@@ -65,10 +65,11 @@ that the core opens before launching a single plugin:
    implements rather than asked of its author, which is the invariant of
    this handshake: an announcement cannot lie.
 
-The announcement carries three more fields, `protocol`, `version` and
-`repository`, all **derived** the same way `admin` and `covers` are — the SDK
-writes them, never the plugin's author, so an announcement cannot misreport any
-of them. The version is `env!("CARGO_PKG_VERSION")` and the repository is
+The announcement carries four more fields, `protocol`, `version`,
+`repository` and `catalog`, all **derived** the same way `admin` and
+`covers` are — the SDK writes them, never the plugin's author, so an
+announcement cannot misreport any of them. The version is
+`env!("CARGO_PKG_VERSION")` and the repository is
 `option_env!("CARGO_PKG_REPOSITORY")`, both expanded in the *plugin's own*
 crate by the `ritornello_plugin_sdk::declare_runtime!()` macro: written inside
 the SDK instead, they would report the SDK's, since that is whose `Cargo.toml`
@@ -174,16 +175,17 @@ write.
 
 `PROTOCOL_VERSION` itself is expected to move rarely, and **only on a break
 of the wire format, never on an addition**: every field this protocol has
-gained so far — `admin`, `covers`, `ui_version`, the eject capability, and
-now `protocol` and `version` themselves — was absorbed by a serde default,
-so an old plugin and a new core (or the reverse) keep understanding each
-other, with tests pinning that an old announcement still parses. A number
-that moves this rarely is exactly what makes it trustworthy when it does:
-seeing it change is the signal that something must actually be
-recompiled, not routine noise. Because a protocol break changes what a
-plugin and the core can promise each other, it carries a minor version bump
-of the whole product — the major.minor declared in `[workspace.package]`,
-which every shipped component's own version must stay on (see
+gained so far — `admin`, `covers`, `ui_version`, the eject capability,
+`catalog`, and now `protocol` and `version` themselves — was absorbed by a
+serde default, so an old plugin and a new core (or the reverse) keep
+understanding each other, with tests pinning that an old announcement still
+parses. A number that moves this rarely is exactly what makes it
+trustworthy when it does: seeing it change is the signal that something
+must actually be recompiled, not routine noise. Because a protocol break
+changes what a plugin and the core can promise each other, it carries a
+minor version bump of the whole product — the major.minor declared in
+`[workspace.package]`, which every shipped component's own version must
+stay on (see
 [installation.md's versioning
 paragraph](installation.md#installing-from-a-release) and
 `version_coherence.rs`). It is not, any more, a single version inherited by

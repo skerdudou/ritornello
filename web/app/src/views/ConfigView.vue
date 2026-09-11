@@ -995,7 +995,7 @@ function goTo(id: string) {
                                   ? 'outline'
                                   : p.busy
                                     ? 'outline'
-                                    : p.catalog_unknown
+                                    : p.catalog_unknown && p.connected
                                       ? 'outline'
                                       : p.connected
                                         ? 'secondary'
@@ -1019,15 +1019,27 @@ function goTo(id: string) {
                            them for the same reason. "Busy" comes **before**
                            "connected": a busy plugin is reachable, and that is
                            precisely why "connected" says nothing useful.
-                           `catalog_unknown` sits right after: unlike every
-                           condition above it, the plugin is fully wired —
-                           this only names a binary built before this core
-                           could ask it for its language packs (the accepted
-                           mitigation for `PROTOCOL_VERSION` staying at 1, see
-                           `Announcement.catalog`'s own doc) — so it must not
-                           outrank a real fault like "busy", but it must still
-                           outrank a bare "connected", which would say nothing
-                           about the missing translations.
+                           `catalog_unknown` sits right after, but **paired
+                           with `p.connected`** — unlike every flag above it,
+                           this one is not exclusive with a connection
+                           outcome either way: the core sets it from the
+                           announcement alone, at the same site as
+                           `ui_version`/`version`/`repository`, whether or
+                           not the socket connect that follows succeeds (see
+                           `main.rs`'s per-kind `Ok`/`Err` branches). Without
+                           the `&& p.connected` guard a legacy plugin whose
+                           socket had failed read this sentence instead of
+                           "unavailable" below — the wrong cause, and the
+                           more urgent fact suppressed (a defect this repo's
+                           review caught with a probe test, not by reading
+                           the code). This only names a binary built before
+                           this core could ask it for its language packs
+                           (the accepted mitigation for `PROTOCOL_VERSION`
+                           staying at 1, see `Announcement.catalog`'s own
+                           doc) — so it must not outrank a real fault like
+                           "busy", but among **connected** plugins it must
+                           still outrank a bare "connected", which would say
+                           nothing about the missing translations.
                            "Starting" comes **before** "stalled": both say the
                            plugin has not spoken yet, and only the elapsed time
                            tells them apart. Showing "stalled" during a normal
@@ -1060,7 +1072,7 @@ function goTo(id: string) {
                                   ? t('disabled')
                                   : p.busy
                                     ? t('busy')
-                                    : p.catalog_unknown
+                                    : p.catalog_unknown && p.connected
                                       ? t('plugin_catalog_unknown')
                                       : p.connected
                                         ? t('connected')

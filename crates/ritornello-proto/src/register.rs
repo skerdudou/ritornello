@@ -9,6 +9,41 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Upper bound, in bytes, on a single announcement line.
+///
+/// This bound exists to stop a local process writing without limit for as
+/// long as the core's own read deadline lets it — not to police what a
+/// "reasonable" announcement looks like. A buffered line reader accumulates
+/// until it finds a `\n`, so nothing stops a connection from holding an
+/// unbounded amount of memory for the whole of that window without a bound
+/// like this one. That stopped being a theoretical risk the day task 3 puts
+/// a full translation catalogue in every announcement; this bound is put in
+/// place ahead of that change, not after it, precisely so the load never
+/// meets an unbounded reader.
+///
+/// 256 KiB, not a tighter figure closer to today's measurements: the
+/// heaviest catalogue measured across the plugins (`files`) weighs 6,677
+/// bytes in English and 7,281 in French, but the **core's own** French
+/// catalogue — the better proxy for how rich a single language can get —
+/// is 20,575 bytes, and a third-party plugin embedding a dozen languages at
+/// that size is exactly the kind of legitimate work this whole effort
+/// exists to let happen. A bound tighter than its purpose refuses that
+/// work for no gain: the cost of reading up to 256 KiB once per plugin at
+/// startup is negligible, and the property that actually protects the
+/// core — that the read is bounded at all, rather than open-ended — holds
+/// the same at 64 KiB or at 256 KiB. Do not tighten this back down on the
+/// strength of today's measurements alone; they will keep changing as
+/// plugins add languages, and this bound is not meant to track them.
+///
+/// Lives here, in the wire crate, rather than in the core alone: it is a
+/// property of the protocol both sides must agree on, not a policy the core
+/// enforces unilaterally. `ritornello-plugin-sdk`'s `Runtime::run` checks an
+/// outgoing announcement against this same constant before ever writing it,
+/// so an author who embeds too much text is refused with a message naming
+/// the actual size and the bound, rather than discovering — from the
+/// core's side only — that the process announced and then never registered.
+pub const ANNOUNCEMENT_MAX_BYTES: usize = 256 * 1024;
+
 /// What a plugin can do. The kind is a property of the **binary**, announced
 /// by it, and not a configuration line the operator would have to know (see
 /// the same trade-off made for the admin page).

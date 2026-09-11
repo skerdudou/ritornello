@@ -8,7 +8,7 @@
 //! 10 s of connection retries.
 
 use futures::{Stream, StreamExt};
-use ritornello_proto::{Announcement, PluginKind};
+use ritornello_proto::{Announcement, PluginKind, ANNOUNCEMENT_MAX_BYTES};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -58,33 +58,6 @@ pub struct Gathered {
 /// nothing after that timeout is not a slow plugin but a faulty one.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Upper bound, in bytes, on a single announcement line.
-///
-/// This bound exists to stop a local process writing without limit for as
-/// long as `READ_TIMEOUT` lets it — not to police what a "reasonable"
-/// announcement looks like. `BufReader::lines()` buffers until it finds a
-/// `\n`, so nothing before this stopped a connection from holding an
-/// unbounded amount of memory for the whole of that window. That stopped
-/// being a theoretical risk the day task 3 puts a full translation
-/// catalogue in every announcement; this bound is put in place ahead of
-/// that change, not after it, precisely so the load never meets an
-/// unbounded reader.
-///
-/// 256 KiB, not a tighter figure closer to today's measurements: the
-/// heaviest catalogue measured across the plugins (`files`) weighs 6,677
-/// bytes in English and 7,281 in French, but the **core's own** French
-/// catalogue — the better proxy for how rich a single language can get —
-/// is 20,575 bytes, and a third-party plugin embedding a dozen languages at
-/// that size is exactly the kind of legitimate work this whole effort
-/// exists to let happen. A bound tighter than its purpose refuses that
-/// work for no gain: the cost of reading up to 256 KiB once per plugin at
-/// startup is negligible, and the property that actually protects the
-/// core — that the read is bounded at all, rather than open-ended — holds
-/// the same at 64 KiB or at 256 KiB. Do not tighten this back down on the
-/// strength of today's measurements alone; they will keep changing as
-/// plugins add languages, and this bound is not meant to track them.
-pub const ANNOUNCEMENT_MAX_BYTES: usize = 256 * 1024;
-
 /// Reads **one** announcement line on an accepted connection, decodes it, and
 /// pushes it into the announcements channel.
 ///
@@ -99,7 +72,9 @@ pub const ANNOUNCEMENT_MAX_BYTES: usize = 256 * 1024;
 /// that is never rebooted. The gathering had the same reader but its deadline
 /// bounded it; the permanent loop has none.
 ///
-/// The read is also **bounded in bytes**, by `ANNOUNCEMENT_MAX_BYTES`, and
+/// The read is also **bounded in bytes**, by `ritornello_proto::ANNOUNCEMENT_MAX_BYTES`
+/// — defined in the wire crate, not here, since the SDK enforces the same
+/// bound on the writing side (`Runtime::run`) and the two must agree — and
 /// that bound is applied to the stream **before** `lines()` ever sees it —
 /// wrapping it in `take` rather than measuring the string `lines()` hands
 /// back. Checking the length only after a full line was read would still let

@@ -268,12 +268,33 @@ impl Runtime {
     /// page must not cut the audio, and vice versa — this is
     /// exactly what the `radio`, `files` and `generic-input` plugins
     /// used to do by hand before this constructor.
+    ///
+    /// **Refuses before connecting** if the serialised line would be over
+    /// `ritornello_proto::ANNOUNCEMENT_MAX_BYTES`: the core enforces that
+    /// same bound on its own read (see that constant's own doc — both sides
+    /// must agree), and a plugin that wrote past it anyway would have its
+    /// line silently dropped there, with nothing but a log line on the
+    /// core's side to explain a process that announced and then never
+    /// registered. A third-party author embedding a dozen languages is
+    /// exactly the case this whole effort exists to let happen, so failing
+    /// silently in the direction that *looks like* success is the one shape
+    /// this could not take — the refusal here names the actual size and the
+    /// bound, on the side that can act on it.
     pub async fn run(self) -> Result<()> {
         let announcement = self.announcement();
+        let line = serde_json::to_string(&announcement)?;
+        anyhow::ensure!(
+            line.len() <= ritornello_proto::ANNOUNCEMENT_MAX_BYTES,
+            "announcement for {} is {} bytes, over the {}-byte bound the core enforces \
+             (ritornello_proto::ANNOUNCEMENT_MAX_BYTES) — trim the embedded translation layers",
+            self.name,
+            line.len(),
+            ritornello_proto::ANNOUNCEMENT_MAX_BYTES
+        );
         let mut stream = UnixStream::connect(&self.register)
             .await
             .with_context(|| format!("connecting to {}", self.register.display()))?;
-        stream.write_all(format!("{}\n", serde_json::to_string(&announcement)?).as_bytes()).await?;
+        stream.write_all(format!("{line}\n").as_bytes()).await?;
         stream.shutdown().await?;
         drop(stream);
         tracing::info!("announced as {} ({:?})", announcement.name, announcement.kinds);
@@ -715,5 +736,52 @@ mod tests {
         )
         .texts([("fr", "play = \"Lecture\"\n")]);
         assert!(r.is_err(), "a catalog with no English layer at all must be refused");
+    }
+
+    /// **[MUTATION]** The wire-size barrier: `run()` must refuse an
+    /// announcement over `ANNOUNCEMENT_MAX_BYTES` **before ever connecting**,
+    /// not let the core's own read cap silently drop the line. Proven from
+    /// the event, not by calling a helper in isolation: a real listener is
+    /// bound, `run()` is awaited to completion, and the test asserts both
+    /// that it errs *and* that the listener never even saw a connection
+    /// attempt — the failure this barrier exists to replace was exactly a
+    /// process that looked like it succeeded (`tracing::info!("announced as
+    /// …")` would have fired) while never actually registering.
+    #[tokio::test]
+    async fn run_refuses_an_announcement_over_the_wire_bound_before_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let register = dir.path().join("register.sock");
+        let listener = UnixListener::bind(&register).unwrap();
+        let prefix = dir.path().join("heavy");
+
+        // One key whose value alone already clears the bound: `.texts()`'s
+        // own barrier only rejects an *unsound* English layer, and this one
+        // is perfectly sound TOML — the size is the only thing wrong with
+        // it. Leaked rather than borrowed: `.texts()` takes `&'static str`,
+        // the same shape a real plugin's `include_str!` would hand it, and a
+        // leak in a single test is a fair price for exercising that shape.
+        let huge: &'static str = Box::leak(
+            format!("play = \"{}\"\n", "x".repeat(ritornello_proto::ANNOUNCEMENT_MAX_BYTES + 1))
+                .into_boxed_str(),
+        );
+        let rt = Runtime::new("heavy".into(), register.clone(), prefix, "0.0.0-test", None)
+            .texts([("en", huge)])
+            .unwrap();
+
+        let err = rt.run().await.expect_err("an oversized announcement must be refused");
+        let message = format!("{err:#}");
+        assert!(message.contains("bytes"), "the refusal must name the actual size: {message}");
+        assert!(
+            message.contains(&ritornello_proto::ANNOUNCEMENT_MAX_BYTES.to_string()),
+            "the refusal must name the bound itself: {message}"
+        );
+
+        // Nothing was ever attempted: a bare `accept` must find no one
+        // waiting, proving `run()` bailed before `UnixStream::connect`.
+        let accept = tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await;
+        assert!(
+            accept.is_err(),
+            "the oversized announcement must be refused before any connection is attempted"
+        );
     }
 }

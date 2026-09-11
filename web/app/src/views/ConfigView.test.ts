@@ -494,6 +494,24 @@ describe('ConfigView — plugin table', () => {
     expect(row.text()).not.toContain('plugin_catalog_unknown')
   })
 
+  it('a legacy plugin whose socket failed reads as unavailable, not as legacy', async () => {
+    // The defect this test was added to catch (fix round 2, Important 1):
+    // the core sets `catalog_unknown` from the announcement alone, at the
+    // same site as `ui_version`/`version`/`repository` — whether or not the
+    // socket connect that follows succeeds — so `catalog_unknown: true` and
+    // `connected: false` is a real combination, not a hypothetical one. The
+    // more urgent fact (this specific attempt failed) must win: a legacy
+    // binary that cannot even be reached needs "unavailable", not a
+    // sentence about its language packs.
+    const w = await mountWithStatus({
+      plugins: [{ name: 'cd', kind: 'source', connected: false, admin: false, catalog_unknown: true }],
+      active_source: '',
+    })
+    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'cd')!
+    expect(row.get('[data-plugin-state]').text()).toBe('unavailable')
+    expect(row.text()).not.toContain('plugin_catalog_unknown')
+  })
+
   it('a wired plugin with an announced but empty catalog is not named as legacy', async () => {
     // The mirror case: no `catalog_unknown` in the payload at all — exactly
     // what a textless but up-to-date plugin (`console`, `ouifm-metas`,
