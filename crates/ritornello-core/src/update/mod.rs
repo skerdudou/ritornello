@@ -30,8 +30,8 @@ use crate::update::download::{
     client, digest_hex, enough_room, fetch_capped, fetch_text, DownloadError, COMPRESSED_MAX,
 };
 use crate::update::release::{
-    download_name, fold, origin, parse_checksums, parse_releases, releases_url, releases_url_for,
-    Channel, Offer, Origin, Published, ReleasesError, ARCH, REPO,
+    download_name, fold, newest_catalogue_url, origin, parse_checksums, parse_releases,
+    releases_url, releases_url_for, Channel, Offer, Origin, Published, ReleasesError, ARCH, REPO,
 };
 use crate::update::state::{
     component_offers, Availability, CheckOutcome, ComponentKind, ComponentOffer, Installed,
@@ -1289,7 +1289,7 @@ impl Worker {
         state.outcome = CheckOutcome::Ok;
         state.release_version = core.map(|p| p.version.clone());
         state.release_url = core.map(|p| release_page(&p.release_tag));
-        state.catalogue_url = core.and_then(|p| p.catalogue_url.clone());
+        state.catalogue_url = newest_catalogue_url(&published);
         state.last_check_unix_s = Some(now_unix_s());
         state.components = components;
         Some(Checked { ours: published, theirs, third_party: third_party_names(&installed) })

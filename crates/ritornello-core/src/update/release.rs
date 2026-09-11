@@ -423,6 +423,41 @@ pub fn fold(releases: &[Release], arch: &str) -> Vec<Published> {
     out
 }
 
+/// The most current catalogue available, independent of which component's
+/// archive its release happens to carry.
+///
+/// **Deliberately not `core.and_then(|p| p.catalogue_url.clone())`.** The
+/// installables dialog exists to describe components the device does not
+/// have — overwhelmingly, ones added recently — while the core's own
+/// *carrying* release (the one `release_url` is built from) can be many
+/// releases old: a repository where the core last moved at `v0.2.6` while
+/// `v0.2.7` shipped a new plugin cannot have its new plugin described by a
+/// catalogue read off `v0.2.6`. That degrades silently, too — the row would
+/// show a name with no description, indistinguishable from "this release
+/// publishes no catalogue at all".
+///
+/// `fold` pushes every release's entries **newest-first, in one pass**: it
+/// walks releases newest to oldest, and for a release it has not yet
+/// finished, every classifiable asset becomes a fresh entry (see `fold`'s own
+/// doc). So the first entry in `published` whose `catalogue_url` is `Some`
+/// names the newest release that published one, whatever component that
+/// entry itself happens to be — `find_map` over `published` in that order is
+/// exactly this rule.
+///
+/// This does assume the newest release contributes **at least one** entry to
+/// `published` — true in practice because the publish workflow keeps the
+/// all-plugins bundle in every release unconditionally (`fold` never filters
+/// `Offer::Bundle` out), so every real release names at least one component.
+/// A hypothetical release with no recognisable archive at all — not
+/// something this repository's own release job can produce — would be
+/// skipped by `find_map` in favour of the next release that does contribute
+/// one, which is the same "next best" behaviour `fold` already gives a
+/// component's own version when its own archive is absent from the newest
+/// release.
+pub fn newest_catalogue_url(published: &[Published]) -> Option<String> {
+    published.iter().find_map(|p| p.catalogue_url.clone())
+}
+
 /// Three dot-separated non-empty runs of digits, and nothing else.
 ///
 /// Hand-rolled rather than a regex, like `valid_name` on the privileged side:
@@ -885,6 +920,50 @@ mod tests {
         assert_eq!(
             published[0].catalogue_url, None,
             "catalogue.json.bak is not the catalogue, and must not be offered as one"
+        );
+    }
+
+    /// **The property `newest_catalogue_url` exists for, and the mutation this
+    /// pins**: taking the core's own carrying release (`core.and_then(|p|
+    /// p.catalogue_url.clone())`) instead of the newest one available fails
+    /// this exact fixture — the core sits in the OLDER release here, so that
+    /// expression would answer the older catalogue while a newer one exists.
+    ///
+    /// Two releases, each with its OWN `catalogue.json` (tag-qualified, like
+    /// every asset URL `rel` builds, so the two are distinct addresses): a
+    /// NEWER release carrying `radio`'s archive, an OLDER one carrying the
+    /// core's. `newest_catalogue_url` must name the newer tag regardless of
+    /// which component's archive that release ships.
+    #[test]
+    fn newest_catalogue_url_names_the_newest_release_regardless_of_which_archive_it_carries() {
+        let text = body(&[
+            rel("v0.2.7", "2026-09-08T10:00:00Z", false, false, &[
+                "ritornello-plugin-radio-0.2.4-armv7.tar.gz",
+                "catalogue.json",
+            ]),
+            rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+                "ritornello-core-0.2.1-armv7.tar.gz",
+                "catalogue.json",
+            ]),
+        ]
+        .join(","));
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        let core = published.iter().find(|p| p.offer == Offer::Core).expect("core");
+        // The rejected expression, spelled out rather than merely described:
+        // `core.and_then(|p| p.catalogue_url.clone())` names the OLDER
+        // release here, because that is the one carrying the core's own
+        // archive. Asserted explicitly so this test would have failed
+        // against the code this replaces, not just against a description of
+        // it.
+        assert_eq!(
+            core.catalogue_url.as_deref(),
+            Some("https://x/v0.2.6/catalogue.json"),
+            "fixture sanity: the core sits in the older release, which is what makes the two expressions divergent"
+        );
+        assert_eq!(
+            newest_catalogue_url(&published).as_deref(),
+            Some("https://x/v0.2.7/catalogue.json"),
+            "the newest release's own catalogue, not the one that happens to carry the core"
         );
     }
 

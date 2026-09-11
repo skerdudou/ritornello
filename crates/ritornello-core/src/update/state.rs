@@ -294,10 +294,25 @@ pub struct UpdateState {
     pub outcome: CheckOutcome,
     pub release_version: Option<String>,
     pub release_url: Option<String>,
-    /// The `catalogue.json` of the release that carries the **core's own**
-    /// archive — the same release `release_url` already names, read off the
-    /// same `Published`. `GET /api/update/catalogue` is what actually fetches
-    /// and parses it; this is only the address, refreshed by every check.
+    /// The most current catalogue **available**, from the newest release
+    /// that publishes one — independent of which component's archive that
+    /// release happens to carry, and deliberately NOT tied to the release
+    /// `release_url` names (the one carrying the core's own archive, which
+    /// can be many releases old). A catalogue describes the whole set of
+    /// components regardless of what its own release ships, so the newest
+    /// one available is always at least as complete as an older one and
+    /// often more so — see `release::newest_catalogue_url`'s own doc for why
+    /// the core-release choice was wrong: the installables dialog exists to
+    /// describe components the device does not have, which are
+    /// overwhelmingly the ones added most recently.
+    ///
+    /// Contrast with `Published.catalogue_url`, which is provenance — which
+    /// release's catalogue accompanied *that one* archive, mirroring
+    /// `checksums_url` beside it. This field is coverage: the newest
+    /// description of *all* components, chosen once per check.
+    ///
+    /// `GET /api/update/catalogue` is what actually fetches and parses it;
+    /// this is only the address, refreshed by every check.
     pub catalogue_url: Option<String>,
     pub last_check_unix_s: Option<u64>,
     pub components: Vec<ComponentOffer>,
