@@ -659,6 +659,28 @@ mod tests {
         assert!(r.is_err(), "invalid TOML in the English pack must be refused, not swallowed");
     }
 
+    /// **[MUTATION]** The same barrier again, isolated from its neighbour:
+    /// a broken **non-English** layer, next to a perfectly sound English
+    /// one. Mutation testing found this case matters on its own — a parse
+    /// failure silently swallowed as an empty layer (`unwrap_or_default`)
+    /// still passed `texts_refuses_an_english_layer_that_fails_to_parse`
+    /// above, because the empty-English guard backstops it by accident when
+    /// the *only* confided language is the broken one. With a sound English
+    /// pack present, that backstop cannot fire, so only the parse guard
+    /// itself can catch a broken `fr` here.
+    #[test]
+    fn texts_refuses_when_a_non_english_layer_fails_to_parse() {
+        let r = Runtime::new(
+            "broken".into(),
+            std::path::PathBuf::from("/tmp/register.sock"),
+            std::path::PathBuf::from("/tmp/broken"),
+            "0.2.0-test",
+            None,
+        )
+        .texts([("en", "play = \"Play\"\n"), ("fr", "this is not toml =")]);
+        assert!(r.is_err(), "invalid TOML in a non-English pack must be refused too, not swallowed");
+    }
+
     /// **[MUTATION]** The other branch of the same barrier: an English pack
     /// that parses cleanly but defines **no key at all** is just as unsound
     /// as one that fails to parse — a plugin claiming to have text must
