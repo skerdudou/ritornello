@@ -91,6 +91,10 @@ permissions:
 jobs:
   analyse:
     runs-on: ubuntu-latest
+    # Above the 20 minutes the analysis step may take, and well below the
+    # six-hour default: a job that hangs holds its branch's concurrency
+    # group, and every later run for that pull request waits behind it.
+    timeout-minutes: 45
     # Narrowed back from the workflow-level ceiling above, and this is the
     # job the narrowing is for: it runs a model, and it holds a checkout of
     # the pull request head under `pr/`. `contents: read` means that even a
@@ -421,7 +425,13 @@ jobs:
           # the verdict step recomputes and compares before its first git
           # command. `git-snapshot.txt` lives at the workspace root, which
           # the allow-list does not let the analysis write to.
-          find pr/.git -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 > git-snapshot.txt
+          # From the ROOT here, and only here. This runs before the analysis
+          # step, so nothing but our own shell steps and checkouts has
+          # executed and there is nothing that could have rewritten the
+          # module. Every later call site reads `tools/`, which is fetched
+          # after the analysis has exited -- see that step for why the
+          # distinction is the mechanism rather than a detail.
+          node .github/scripts/hash-git-dir.mjs pr/.git > git-snapshot.txt
 
           gh pr diff "$NUMBER" --repo "$REPO" > pr-diff.txt
           echo "The bump diff is $(wc -l < pr-diff.txt) lines." >> "$GITHUB_STEP_SUMMARY"
@@ -605,7 +615,7 @@ jobs:
             {
               "permissions": {
                 "deny": [
-                  "Edit(pr/.git/**)",
+                  "Edit(pr/.git/**)","Edit(tools/**)","Edit(.github/**)",
                   "Edit(.git/**)",
                   "Read(//proc/**)",
                   "Read(//etc/**)",
@@ -648,8 +658,16 @@ jobs:
           # the default branch: `.github/scripts/check-guards.mjs`, the
           # module task 7 runs to check this step's own fix, sits in it.
           # Scoping `Edit` is what stops the analysis rewriting its own
-          # checker. Task 7 fetching the guards into `guards/` afterwards is
-          # the second layer, not the first.
+          # checker, and the explicit `Edit(.github/**)` and `Edit(tools/**)`
+          # denies below back it up -- deny wins over allow, so they hold
+          # even if a glob in the allow-list turns out to reach further than
+          # it reads.
+          #
+          # Neither of those is the layer that does not depend on this
+          # action's path matching. That one is the `tools/` checkout, taken
+          # from the server AFTER this step has exited: whatever the analysis
+          # might have written is overwritten by a tree fetched once it can no
+          # longer write. Ordering, not matching.
           #
           # **In this context a path outside the list is refused outright.**
           # The action runs Claude headless; there is no terminal to ask, and
@@ -677,12 +695,39 @@ jobs:
           # notes this prompt is sent to find actually live on -- a plain
           # domain match, which unlike a path glob does not depend on how the
           # matcher treats a dotted directory. **Neither of those is why this
-          # step is safe to run.** The reason is that this job holds
-          # `contents: read` and no PAT at this stage: there is nothing of
-          # consequence to leak even past a hole in either list. Task 7
-          # introduces a PAT into this same job -- when it does, this
-          # sentence stops being true, and whoever adds it must re-examine
-          # both lists rather than inherit this reasoning unchanged.
+          # step is safe to run.**
+          #
+          # The reason used to be "this job holds `contents: read` and no
+          # PAT", and that sentence asked whoever introduced a PAT to
+          # re-examine both lists rather than inherit it. A PAT now lives in
+          # the push step of this same job, so here is that re-examination.
+          #
+          # The PAT is never in scope while this step runs. It is declared
+          # as a STEP-level `env:` on the push step alone, and a step's
+          # environment is materialised for that step only, so it is in no
+          # environment this step can inherit and on no disk.
+          #
+          # Not "no process holds it", which would be false: the runner
+          # worker keeps every secret a job references in its own memory for
+          # the whole job. What holds is that the analysis has no way to
+          # read another process's memory -- it is given `Read`, `Glob`,
+          # `Grep`, `WebFetch` and `Edit`, no shell -- and `Read(//proc/**)`
+          # is denied on top of that.
+          #
+          # Nor can the analysis reach the step that does hold it. The push
+          # URL is built from `github.repository` and a branch name taken
+          # from the event payload or from `gh pr view --json headRefName`;
+          # none of the three is anything the analysis writes. What it CAN
+          # influence is the tree that step runs `git` in -- which is what
+          # the fingerprint of `pr/.git` is for, checked as the first
+          # statement of that step against a snapshot taken
+          # at checkout time for the verdict step, and against a second one
+          # taken with the index staged for the push step.
+          #
+          # So the honest statement is no longer "there is nothing to leak"
+          # but "the secret is not in scope, and the step that holds it
+          # takes nothing from this one that is not verified first". Weaker,
+          # and true. Anyone widening the tool list should come back here.
           #
           # The host list covers where the notes for our dependencies
           # actually live: GitHub releases and raw file contents
@@ -808,6 +853,71 @@ jobs:
             precisely what a person has to decide. Do not mention any account name in this
             file.
 
+      - name: Clear the tooling path before fetching into it
+        # `actions/checkout` does not wipe its destination. If a directory
+        # is already there and looks like a repository for the same remote,
+        # it REUSES it -- clean, `reset --hard`, fetch, checkout -- and a
+        # `reset --hard` in a repository whose `.git/config` defines a
+        # `filter.*.smudge` runs that command. So the ordering below fixes
+        # what the checkout writes, but not whether the checkout itself is
+        # inert; this line makes it inert.
+        #
+        # Reaching that sub-case would mean defeating the allow-list AND
+        # the `Edit(tools/**)` deny to create `tools/.git` in the first
+        # place, so it sits a layer deeper than anything else here. Closed
+        # anyway: it costs one line, and it is the difference between "the
+        # contents are fetched fresh" and "nothing from this runner is
+        # consulted at all".
+        if: |
+          steps.pr.outputs.skip != 'true'
+          && steps.state.outputs.round == '1'
+          && steps.bump.outputs.unreadable != 'true'
+          && steps.bump.outputs.compatible != 'true'
+        run: rm -rf tools
+      - name: Fetch this job's own tooling, AFTER the analysis has finished
+        # **The timing is the whole mechanism, and getting it wrong was this
+        # step's first two attempts.**
+        #
+        # Everything this job runs to judge the analysis's output --
+        # `hash-git-dir.mjs`, `check-guards.mjs` -- lands here, and it lands
+        # after the analysis step has exited. That ordering is what makes it
+        # unreachable: whatever the analysis may or may not have been able to
+        # write while it ran is overwritten by a tree fetched from the server
+        # once it can no longer write anything.
+        #
+        # Checking out from the server BEFORE the analysis does not give that.
+        # It fixes what lands, not what is there twenty minutes later, so a
+        # pre-analysis copy is exposed to exactly the assumption the root copy
+        # is: that the allow-list holds. The deny rules below are a second
+        # layer over the same tree, and they are genuinely independent -- but
+        # they are still the action's path matching, which is the one thing
+        # here that could not be settled without a live run. This step depends
+        # on neither.
+        #
+        # Why it matters more for the fingerprint than for the guards: the
+        # analysis can READ `git-snapshot.txt`, so a rewritten
+        # `hash-git-dir.mjs` that merely echoed it would make the verdict
+        # check, the staged snapshot and the push check all agree over a
+        # tampered `pr/.git` -- with the PAT in scope at the last of them.
+        #
+        # The one call site that legitimately runs from the root is the first
+        # snapshot, in the lay-out step above: nothing but our own shell steps
+        # and checkouts has run by then, so there is nothing to have tampered
+        # with it. That is stated there rather than left to be inferred.
+        if: |
+          steps.pr.outputs.skip != 'true'
+          && steps.state.outputs.round == '1'
+          && steps.bump.outputs.unreadable != 'true'
+          && steps.bump.outputs.compatible != 'true'
+        uses: actions/checkout@v7
+        with:
+          path: tools
+          fetch-depth: 1
+          # Only the scripts are needed, and a narrower tree is one less thing
+          # for a later reader to wonder about.
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
       - name: Read the verdict, and act on none of it yet
         id: verdict
         if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true' && steps.bump.outputs.compatible != 'true'
@@ -828,7 +938,7 @@ jobs:
           # post no comment (an attacker's report is not something to
           # publish), and exit non-zero so the job goes red and the owner
           # sees it.
-          current_git_hash="$(find pr/.git -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+          current_git_hash="$(node tools/.github/scripts/hash-git-dir.mjs pr/.git)"
           expected_git_hash="$(cat git-snapshot.txt)"
           if [ "$current_git_hash" != "$expected_git_hash" ]; then
             {
@@ -900,12 +1010,24 @@ jobs:
           # Stage, then diff the index. `git diff` on its own reports only
           # tracked modifications, so a file the analysis CREATED -- one
           # under `pr/.github/` included -- would be absent from the diff
-          # the guards inspect, while task 7's `git add -A` would commit it
+          # the guards inspect, while a later `git add -A` would commit it
           # regardless. Measured in a throwaway repository rather than
           # assumed. Guard 3's parser already reads the `/dev/null` headers
           # a new file produces; that was task 3's fix round.
           git -C pr add -A
           git -C pr diff --cached > fix.diff
+
+          # A second snapshot, and the reason is the push step rather than
+          # this one. The snapshot taken at checkout cannot be reused there:
+          # the `git add -A` above legitimately rewrites `pr/.git/index`, so
+          # it would mismatch every time and a check that always fails gets
+          # deleted. This one is taken with the index already staged, which
+          # is the exact state the push step must still find -- it commits
+          # that index, with a token in scope, and that is the one moment in
+          # this workflow where an unexpected git invocation would cost the
+          # most. Nothing between here and there writes to `pr/`, so the
+          # check is about the step someone inserts later, not about today.
+          node tools/.github/scripts/hash-git-dir.mjs pr/.git > git-snapshot-staged.txt
 
           # `changed` is the measurement, not the model's self-report:
           # `fix.diff` is the ground truth this same step just computed, one
@@ -945,6 +1067,245 @@ jobs:
               gh pr comment "$NUMBER" --repo "$REPO" --body-file report.md
             fi
           fi
+
+      - name: Refuse a fix written over a green CI
+        # **A fix written when nothing was broken is a contradiction, and it
+        # used to be pushed.** The fix path was gated on `decision == 'merge'`
+        # and `changed == 'true'` and nothing else, so an analysis that edited
+        # `pr/` on a GREEN pull request reached the guards -- which only know
+        # about `.github/`, silenced tests and install scripts, and would pass
+        # an arbitrary source edit -- and then the push. Round 2 would then
+        # find green CI and merge it, with no human anywhere in the path.
+        #
+        # Prompt rule 5 says to edit only when CI is red. That is an
+        # instruction, and instructions are not the mechanism this design
+        # relies on; the `merge` job already makes the symmetric check
+        # (`conclusion == 'success'` required before merging a bump with
+        # nothing written) and explains why. This is the other half of it.
+        #
+        # Loud rather than silent: an analysis that edited files it was told
+        # not to edit is something to look at, not something to drop.
+        if: |
+          steps.pr.outputs.skip != 'true'
+          && steps.state.outputs.round == '1'
+          && steps.verdict.outputs.changed == 'true'
+          && steps.pr.outputs.conclusion == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          {
+            echo '### A fix was written over a green CI -- refusing'
+            echo 'The analysis edited files although CI on this head had already passed, so there was nothing to adapt. Nothing was pushed and nothing will merge.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$NUMBER" --repo "$REPO" --body 'Dependabot analysis: a fix was written although CI on this head is green, so there was nothing to adapt. Nothing was pushed; this needs a human look.'
+
+      - name: Check the fix against the three guards
+        # **This wiring has never fired.** The guards' own logic is covered
+        # by 31 unit tests with mutation proof (`check-guards.test.mjs`);
+        # what is untested is the path between them and the push -- a guard
+        # refusing, the comment going out, nothing being pushed.
+        #
+        # It cannot be rehearsed as the plan intended. That called for
+        # temporarily making the analysis write under `.github/` so guard 1
+        # would fire, but `claude-code-action` runs no model unless this
+        # file is byte-identical to the default branch's copy, so a
+        # modified prompt cannot be exercised from a branch -- and doing it
+        # on `main` would mean merging a sabotaged prompt. A dispatch input
+        # that injected a diff would be a capability to push arbitrary
+        # content, which is worse than the gap it closes.
+        #
+        # Recorded here in the spirit of `docs/installation.md`'s "What has
+        # not been verified". Delete this paragraph when a guard has
+        # actually refused a fix on a real run, and not before.
+        id: guards
+        if: |
+          steps.pr.outputs.skip != 'true'
+          && steps.state.outputs.round == '1'
+          && steps.verdict.outputs.decision == 'merge'
+          && steps.verdict.outputs.changed == 'true'
+          && steps.pr.outputs.conclusion == 'failure'
+        run: |
+          set -euo pipefail
+          # From `tools/`, never from the workspace root: that tree was
+          # fetched from the server before the analysis ran, so the module
+          # checking the fix cannot be the fix.
+          node tools/.github/scripts/check-guards.mjs fix.diff | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Refuse the fix, and say which guard stopped it
+        # `steps.guards.outcome` is redundant behind the implicit `success()`
+        # every `if:` without a status function carries -- kept because it
+        # states the intent, and because a reader should not have to know
+        # that rule to see that a crashed guard step does not reach here.
+        if: steps.guards.outcome == 'success' && steps.guards.outputs.ok != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+          OWNER_ALERT: ${{ steps.guards.outputs.owner_alert }}
+          # The one place an account name appears, and only for guard 3.
+          OWNER: skerdudou
+        run: |
+          set -euo pipefail
+          # `GITHUB_TOKEN` and never the write token below. A comment posted
+          # under the owner's own identity, carrying text this workflow
+          # composed, is how a mention would wake `claude.yml`.
+          {
+            if [ "$OWNER_ALERT" = true ]; then
+              # A package that has just gained an install script is the
+              # delivery mechanism of the npm worms, not an ordinary bump. It
+              # asks for a person by name.
+              echo "@$OWNER — a package in this bump gained an install script. Nothing was pushed and nothing will merge."
+              echo
+            fi
+            echo 'The analysis wrote a fix, and a mechanical guard refused it:'
+            echo
+            node -e 'for (const f of require("./guards.json").failures) console.log(`- guard ${f.guard}: ${f.detail}`)'
+            echo
+            echo 'The fix was not pushed. This pull request waits for a human.'
+          } > guard-refusal.md
+          gh pr comment "$NUMBER" --repo "$REPO" --body-file guard-refusal.md
+
+      - name: Commit the fix and push it, so CI can judge it
+        # Three network operations. `cancel-in-progress: false` means a hung
+        # step holds this branch's concurrency group for as long as it hangs,
+        # so the six-hour job default is not a ceiling worth inheriting here.
+        timeout-minutes: 10
+        if: steps.guards.outcome == 'success' && steps.guards.outputs.ok == 'true'
+        env:
+          # **The write token appears here and nowhere else**, and it is
+          # deliberately NOT called `GITHUB_TOKEN`. Every `gh` call in this
+          # workflow reads `GH_TOKEN`/`GITHUB_TOKEN` by convention, so a
+          # `gh pr comment` added to this step later would post under this
+          # token's identity -- the owner's -- carrying text the analysis
+          # composed. A mention in such a comment wakes `claude.yml`. The
+          # name is the guard: **never call `gh pr comment` in this step.**
+          #
+          # A PAT and not the workflow token because a commit pushed with
+          # `GITHUB_TOKEN` triggers no workflow: CI would never run on the
+          # new SHA and auto-merge would wait for checks that cannot arrive.
+          # That is the whole reason this secret exists.
+          FIX_PAT: ${{ secrets.DEPENDABOT_FIX_PAT }}
+          # BOT_EMAIL is NOT declared here. It comes from the job-level
+          # `env:` that task 4 established, shared with the round detection
+          # that matches against it: a step-level copy could drift from the
+          # value round 2 compares, which would make a fix we pushed look
+          # like Dependabot's own commit and start a third round. One
+          # declaration, two readers.
+          HEAD_REF: ${{ github.event.workflow_run.head_branch }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+          # The head the analysis actually read.
+          ANALYSED_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          # **First statement, before anything runs git in `pr/`.** This is
+          # the step that holds a write token, so it is the worst possible
+          # place for an unexpected git invocation to execute something --
+          # `Edit(pr/**)` reaches `pr/.git/`, and a `filter.*.clean` entry
+          # there plus a matching `pr/.gitattributes` turns an innocuous git
+          # command into arbitrary execution. Compared against the snapshot
+          # the verdict step took WITH THE INDEX ALREADY STAGED, which is the
+          # state this step requires.
+          current_git_hash="$(node tools/.github/scripts/hash-git-dir.mjs pr/.git)"
+          if [ "$current_git_hash" != "$(cat git-snapshot-staged.txt)" ]; then
+            {
+              echo '### `pr/.git` changed after the verdict -- refusing to push'
+              echo 'The git directory under `pr/` was modified between the verdict and this step. Treating this as tampering, not as a fix.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          branch="$HEAD_REF"
+          if [ -z "$branch" ]; then
+            branch="$(GH_TOKEN="$FIX_PAT" gh pr view "$NUMBER" --repo "$REPO" --json headRefName --jq .headRefName)"
+          fi
+
+          # Decoration, and it must never be able to veto a fix the guards
+          # passed. `verdict.json` is model-written, so `why` may be absent,
+          # or not a string; a bare `.why.split(...)` throws and `set -e`
+          # would kill the push after the work was judged sound. Same shape
+          # check as the verdict parse -- `typeof null === "object"`, so the
+          # object test alone is not enough.
+          summary="$(node -e '
+            let why = ""
+            try {
+              const v = JSON.parse(require("node:fs").readFileSync("verdict.json", "utf8"))
+              if (v && typeof v === "object" && !Array.isArray(v) && typeof v.why === "string") {
+                why = v.why.split("\n")[0]
+              }
+            } catch {}
+            process.stdout.write(why)
+          ')"
+
+          # **No second `git add -A`.** The verdict step already staged the
+          # tree and `fix.diff` is the diff of THAT index -- the very bytes
+          # the three guards inspected. Re-adding here would commit whatever
+          # the tree holds now, which is not necessarily what was guarded,
+          # and would run the clean filters a second time for no reason.
+          # Commit the index that was judged, nothing else.
+          #
+          # `-c` rather than `git config`, and the honest reason is not the
+          # one first written here. It is NOT that writing `pr/.git/config`
+          # would invalidate the hash: the hash is compared once, as the
+          # first statement above, and never read again -- a later write
+          # would go unnoticed. The reason is simpler and stands on its own:
+          # this job has no business mutating the pull request's git
+          # directory at all, for a value needed exactly once, and leaving
+          # it untouched keeps the fingerprint above meaningful for anyone
+          # who adds a second check later.
+          git -C pr \
+            -c user.name='github-actions[bot]' \
+            -c user.email="$BOT_EMAIL" \
+            commit --file=- <<'MESSAGE'
+          fix(deps): adapt to the bumped dependency
+
+          Written by the Dependabot analysis workflow, checked against three
+          mechanical guards, and validated by CI on this commit -- not by the
+          agent that wrote it. See the workflow comment on this pull request
+          for the reasoning and the sources.
+          MESSAGE
+
+          # A check-and-set on the head, and it is worth being exact about
+          # which hazard it addresses, because it is not the obvious one.
+          #
+          # git's own fast-forward rule already prevents a lost update: if
+          # another job pushed while this one was writing, our push is
+          # rejected and the step goes red. What that rule does NOT prevent
+          # is the shape that actually costs something -- a job that checked
+          # out `pr/` AFTER another push already has that fix in its tree, so
+          # its own push is a clean fast-forward and quietly stacks a second
+          # fix on the first. Two fixes, each written against a different
+          # tree, neither judged together.
+          #
+          # The concurrency group at the top of this file cannot close that
+          # on its own: a manual dispatch and an automatic run for the same
+          # pull request land in different groups. So refuse unless the head
+          # is still the commit the analysis read.
+          now="$(GH_TOKEN="$FIX_PAT" gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)"
+          if [ "$now" != "$ANALYSED_SHA" ]; then
+            {
+              echo "### Refused to push"
+              echo "The head moved from \`$ANALYSED_SHA\` to \`$now\` while the fix was being written, so the fix was judged against a tree that is no longer the pull request's. Nothing pushed; the next CI completion starts a fresh analysis."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git -C pr push "https://x-access-token:${FIX_PAT}@github.com/${REPO}.git" "HEAD:${branch}"
+
+          {
+            echo "Pushed a fix to \`$branch\`: $summary"
+            # Deliberately does not promise a merge. Nothing acts on
+            # `round == '2'` yet -- the `merge` job gates on round 1 -- and
+            # the fast path will not take it either, since a bump the caret
+            # rule called compatible never reaches this step. Saying "round
+            # 2 will queue the merge" would describe a step that does not
+            # exist.
+            echo "CI decides now."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Say why the merge is waiting
         # Gated on `read-it` and not on `!= 'merge'`, which is the same test
