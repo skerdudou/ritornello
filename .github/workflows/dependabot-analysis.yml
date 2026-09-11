@@ -303,12 +303,23 @@ jobs:
           [ "$login" = 'dependabot[bot]' ] || stop "Pull request #$number was opened by \`$login\`, not Dependabot."
           [ "$head_repo" = "$REPO" ] || stop "Pull request #$number's head lives in \`$head_repo\`, not in this repository; refusing to analyse a fork."
 
-          # EVERY commit author on the pull request, on one line. Reading
-          # the head alone is what let the loop bound be spent twice: our
-          # fix fails, round 2 stops for good, and one `@dependabot rebase`
-          # puts a Dependabot commit on top, so the head reads as round 1
-          # and a second analysis writes a second fix. `classify-round.mjs`
-          # carries the reasoning and the tests.
+          # EVERY commit on the pull request, and BOTH identities on each,
+          # on one line as `author|committer`.
+          #
+          # Every commit, because reading the head alone let the loop bound
+          # be spent twice: our fix fails, round 2 stops for good, one
+          # `@dependabot rebase` puts a Dependabot commit on top, the head
+          # reads as round 1 and a second analysis writes a second fix.
+          #
+          # Both identities, because `git commit --amend` and `git rebase`
+          # PRESERVE the author and rewrite the committer. An owner who
+          # adapts our failed fix by amending it -- which the round-2
+          # comment invites in so many words -- would otherwise keep the
+          # pull request in round 2 and have their unreviewed work merged
+          # the moment CI went green.
+          #
+          # `classify-round.mjs` carries the reasoning, the measured pairs
+          # and the tests.
           #
           # One line rather than a multi-line output, which would need a
           # delimiter chosen so the values cannot close it. A git author
@@ -317,7 +328,7 @@ jobs:
           # carrying one splits into two entries, neither matches anything,
           # and the verdict is `hand`. That is the fail-closed direction,
           # which is why it is left to happen rather than guarded against.
-          authors="$(gh api "repos/$REPO/pulls/$number/commits" --paginate --jq '.[].commit.author.email' | tr '\n' ' ')"
+          commits="$(gh api "repos/$REPO/pulls/$number/commits" --paginate --jq '.[] | "\(.commit.author.email)|\(.commit.committer.email)"' | tr '\n' ' ')"
           state="$(gh pr view "$number" --repo "$REPO" --json state --jq .state)"
           auto="$(gh pr view "$number" --repo "$REPO" --json autoMergeRequest --jq 'if .autoMergeRequest then "queued" else "open" end')"
 
@@ -329,14 +340,14 @@ jobs:
             echo "head_sha=$head_sha"
             echo "conclusion=$conclusion"
             echo "ci_run_id=$ci_run_id"
-            echo "authors=$authors"
+            echo "commits=$commits"
           } >> "$GITHUB_OUTPUT"
 
       - name: Decide which round we are in
         id: state
         if: steps.pr.outputs.skip != 'true'
         env:
-          AUTHORS: ${{ steps.pr.outputs.authors }}
+          COMMITS: ${{ steps.pr.outputs.commits }}
           # BOT_EMAIL comes from the job-level `env:` above, not from this
           # step; it is read here and by the push in a later task, and both
           # must see the same literal. `classify-round.mjs` requires it and
@@ -1321,6 +1332,44 @@ jobs:
             echo "CI decides now."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Say that a hand-written commit stopped everything
+        # **`hand` used to be silent, and it is now the easiest state to reach.**
+        # Clicking "Update branch", amending our fix, rebasing the bump, editing
+        # a file through the web UI -- each rewrites an identity and lands here.
+        # A workflow that stops for ever and says so only in a run summary
+        # nobody opens is a workflow that looks broken.
+        #
+        # Same marker idempotence as the round-2 stop, and for the same reason:
+        # every CI completion on that branch reaches this step, so without it
+        # the pull request collects one identical comment per run.
+        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == 'hand'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          marker='<!-- dependabot-analysis: hand-written -->'
+          : > hand-comments.txt
+          gh pr view "$NUMBER" --repo "$REPO" --json comments --jq '.comments[] | select(.author.login | startswith("github-actions")) | .body' >> hand-comments.txt || true
+          if grep -qF "$marker" hand-comments.txt; then
+            echo "#$NUMBER carries a hand-written commit; already said so." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "$marker"
+            cat <<'BODY'
+          A commit on this branch was not written by Dependabot or by this workflow -- pushed by
+          hand, amended, or rebased -- so the automatic analysis stops here and will not run again
+          while that is true.
+
+          Nothing was analysed, nothing was pushed and nothing will merge. Whoever made that commit
+          has write access here and can merge this pull request themselves.
+          BODY
+          } > hand.md
+          gh pr comment "$NUMBER" --repo "$REPO" --body-file hand.md
+          echo "#$NUMBER carries a hand-written commit: stopped, and said so." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Round 2, CI red -- stop, and do not try again
         # **The bound on the loop, and it bounds FIXES rather than analyses.**
         # Our push triggers `synchronize`, `ci.yml` returns, and `workflow_run`
@@ -1366,7 +1415,11 @@ jobs:
           #
           # A failure of the lookup lands on "post it", not on "stay silent":
           # saying it twice is a nuisance, not saying it at all leaves a pull
-          # request that has quietly given up.
+          # request that has quietly given up. That needs `|| true` on the
+          # redirect and an empty file underneath it -- without them `set -e`
+          # aborts the step on a failed `gh` and nothing is posted at all,
+          # which is what this paragraph claimed was impossible while the
+          # code did exactly that.
           #
           # **To a file, never through a pipe into `grep -q`.** `grep -q`
           # exits as soon as it matches and closes the pipe; `gh` then dies
@@ -1380,8 +1433,15 @@ jobs:
           # Only our own comments are searched. Matching every body would
           # let anyone suppress this notice by quoting the marker, and the
           # step says itself that staying silent is the worse direction.
+          #
+          # `startswith`, because the two APIs spell the same account
+          # differently -- `github-actions` through GraphQL, which is what
+          # `gh pr view --json comments` uses, and `github-actions[bot]`
+          # through REST. Pinning the wrong one would mean the marker is
+          # never found and the comment repeats on every re-run, silently.
           marker='<!-- dependabot-analysis: round-2-stop -->'
-          gh pr view "$NUMBER" --repo "$REPO" --json comments --jq '.comments[] | select(.author.login == "github-actions") | .body' > existing-comments.txt
+          : > existing-comments.txt
+          gh pr view "$NUMBER" --repo "$REPO" --json comments --jq '.comments[] | select(.author.login | startswith("github-actions")) | .body' >> existing-comments.txt || true
           if grep -qF "$marker" existing-comments.txt; then
             echo "Round 2 red on #$NUMBER: already said so, not repeating it." >> "$GITHUB_STEP_SUMMARY"
             exit 0

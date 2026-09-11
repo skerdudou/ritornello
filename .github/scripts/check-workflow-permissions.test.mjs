@@ -149,12 +149,63 @@ test('the merge condition was actually found', () => {
   assert.ok(c.length > 50, `read only ${c.length} characters as the merge condition`)
 })
 
-test('the merge requires a green CI on every path into it', () => {
+// Split an expression on its TOP-LEVEL `&&`, ignoring anything inside
+// parentheses. Presence alone is not the property: a conjunct moved inside
+// one arm of the round disjunction still "appears" in the text while no
+// longer applying to the other arm.
+function topLevelConjuncts(expression) {
+  const parts = []
+  let depth = 0
+  let current = ""
+  for (let i = 0; i < expression.length; i += 1) {
+    const ch = expression[i]
+    if (ch === '(') { depth += 1 }
+    if (ch === ')') { depth -= 1 }
+    if (depth === 0 && ch === '&' && expression[i + 1] === '&') {
+      parts.push(current)
+      current = ""
+      i += 1
+      continue
+    }
+    current += ch
+  }
+  parts.push(current)
+  return parts.map((p) => p.replace(/\s+/g, ' ').trim()).filter(Boolean)
+}
+
+test('the splitter ignores operators inside parentheses', () => {
+  // Without this the assertions below could pass by splitting wrongly.
+  assert.deepEqual(topLevelConjuncts('a && (b && c) && d'), ['a', '(b && c)', 'd'])
+  assert.deepEqual(topLevelConjuncts('(x || y)'), ['(x || y)'])
+})
+
+test('the green-CI test applies to BOTH rounds, not to one arm of the disjunction', () => {
   // The only evidence in the whole design that the analysis did not produce
-  // itself. Stated once, outside the round disjunction, so neither arm can be
-  // written without it.
-  assert.match(condition(), /needs\.analyse\.outputs\.conclusion == 'success'/)
-  assert.equal(condition().split("conclusion == 'success'").length - 1, 1)
+  // itself. It has to be a TOP-LEVEL conjunct: moved inside the round-1 arm
+  // it still appears in the text, while round 2 would merge over a red CI.
+  const conjuncts = topLevelConjuncts(condition())
+  assert.ok(
+    conjuncts.some((c) => c === "needs.analyse.outputs.conclusion == 'success'"),
+    `the green-CI test is not a top-level conjunct; conjuncts are ${JSON.stringify(conjuncts)}`,
+  )
+  assert.equal(condition().split("conclusion == 'success'").length - 1, 1, 'stated once, so no arm can carry its own copy')
+})
+
+test('nothing but the skip flag, the round disjunction and the green CI is a top-level conjunct', () => {
+  // Closes the other two edits that slipped through presence regexes: an
+  // `|| round == 'hand'` added inside the disjunction, and an
+  // `event_name == 'workflow_dispatch' ||` prefix that would bypass the lot.
+  const conjuncts = topLevelConjuncts(condition())
+  assert.equal(conjuncts.length, 3, `expected three top-level conjuncts, got ${JSON.stringify(conjuncts)}`)
+  assert.equal(conjuncts[0], "needs.analyse.outputs.skip != 'true'")
+  assert.equal(conjuncts[2], "needs.analyse.outputs.conclusion == 'success'")
+  // The middle one is the disjunction, and it may name only the two rounds.
+  const arms = conjuncts[1]
+  assert.match(arms, /^\(.*\)$/, 'the round disjunction must be parenthesised, or its `||` binds wrongly')
+  assert.doesNotMatch(arms, /github\.event/, 'the event must not reach this decision')
+  assert.doesNotMatch(arms, /hand/)
+  const rounds = [...arms.matchAll(/outputs\.round (==|!=) '([^']*)'/g)].map((m) => `${m[1]}${m[2]}`)
+  assert.deepEqual(rounds.sort(), ['==1', '==2'], `the disjunction names ${JSON.stringify(rounds)}`)
 })
 
 test('both rounds are named, and no negation admits a third value', () => {
