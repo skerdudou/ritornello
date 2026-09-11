@@ -16,8 +16,11 @@ test("Dependabot's own commit is round 1", () => {
 // The three cases below are the whole reason this predicate has three states.
 // A two-state version -- ours, else round 1 -- answers `1` to every one of
 // them, and the step that acts on a `merge` verdict would merge a branch
-// nobody reviewed. Proven by mutation: a valid two-state predicate passes the
-// two tests above and fails exactly these three.
+// nobody reviewed. Proven by mutation, and the figure depends on which
+// mutant: a valid two-state predicate that keeps a refusal branch passes the
+// two tests above and fails exactly these three; one that deletes the branch
+// outright also fails the note test below, for four. Either way the two
+// recognised-identity tests pass, so they are not what proves this.
 test('a hand commit on a Dependabot branch is a refusal, not a first round', () => {
   // #20 is this case: the TypeScript 6 configuration changes were carried onto
   // a Dependabot branch by hand.

@@ -75,6 +75,7 @@ jobs:
           set -euo pipefail
           tests=(
             .github/scripts/check-guards.test.mjs
+            .github/scripts/check-workflow-permissions.test.mjs
             .github/scripts/classify-bump.test.mjs
             .github/scripts/classify-round.test.mjs
             .github/scripts/read-bump-metadata.test.mjs
