@@ -151,15 +151,18 @@ jobs:
           # already gates on `.user.login` (its `if:` on the `auto-merge`
           # job); this workflow was strictly weaker until now.
           #
-          # `.user.login` alone is not enough: Dependabot opens pull requests
-          # from forks too, on repositories configured for it, and a forked
-          # pull request must not reach a job that reads privileged secrets.
-          # `.head.repo.full_name` proves the head lives in this repository.
-          # That also certifies the round-2 check below (`author`, matched
-          # against `BOT_EMAIL`): once the head is proved to live here, only
-          # an actor with write access to this repository can have pushed
-          # it, so its commit author email is trustworthy evidence of who
-          # pushed the last commit.
+          # `.user.login` is the authorization, and it is what refuses a
+          # fork: a third party who forks this public repository and names
+          # their branch `dependabot/anything` still opens the pull request
+          # under their own login, never `dependabot[bot]`.
+          #
+          # `.head.repo.full_name` is kept for a narrower reason: it is what
+          # makes the round-2 check below sound. `author` is a git commit
+          # author email, a field whoever pushes controls; proving the head
+          # branch lives in this repository means only an actor with write
+          # access here can have pushed it, so that email becomes
+          # trustworthy evidence there. Without that proof, the round-2
+          # short-circuit would rest on a forgeable field.
           #
           # Use the REST endpoint, not `gh pr view`: `gh pr view --json
           # author` reports `app/dependabot`, not `dependabot[bot]`, and
