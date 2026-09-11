@@ -13,6 +13,9 @@ stage="${1:-all}"
 if [ "$stage" = all ] || [ "$stage" = web ]; then
   echo "== web =="
   npm ci
+  # Before anything consumes the tree: npm ci proves the lock installs, not
+  # that what it describes can be loaded or still covers every platform.
+  node scripts/check-lockfile.mjs
   npm run build --workspaces --if-present
   npm run typecheck
   npm test --workspaces --if-present
