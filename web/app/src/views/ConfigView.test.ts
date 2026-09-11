@@ -37,7 +37,7 @@ const CATALOGUE = {
   plugin_remove_binary_confirm: 'Supprimer le binaire « {file} » ? Cette action est irréversible.',
   plugin_order_note: "L'ordre commande la clé de source et la priorité des métadonnées.",
   audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
-  language: 'Langue', change: 'Changer', ok: 'OK',
+  language: 'Langue', save: 'Enregistrer', ok: 'OK',
   recent_errors: 'Dernières erreurs',
   startup_title: 'Démarrage', startup_on: 'allumé', startup_standby: 'veille',
   clock_title: 'Date et heure', clock_date_label: 'Date', clock_hours_label: 'Heures',
@@ -1587,6 +1587,23 @@ describe('ConfigView — table of contents', () => {
     await w.findAll('[data-toc-link]')[2]!.trigger('click')
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth' })
     expect(w.findAll('[data-toc-link]')[2]!.attributes('aria-current')).toBe('true')
+  })
+
+  it('labels every save button with the word the other pages use', async () => {
+    // Six plugin packs say `btn_save = "Enregistrer"`; this page said
+    // "Changer" in nine places. The owner asked for consistency, so the
+    // word is theirs, not a new one.
+    //
+    // **The count is a fact about the card layout, and task 4 changes
+    // it**: merging ten cards into seven merges three save buttons into
+    // one (language + date/time + overlays) and two into one (volume
+    // hold + seeking), so this number becomes **6** there. Update it
+    // when that task turns it red; do not delete the count — it is the
+    // only test proving all nine sites were renamed rather than most.
+    const { w } = await mountView({})
+    const texts = w.findAll('button').map((b) => b.text())
+    expect(texts).not.toContain('Changer')
+    expect(texts.filter((t) => t === 'Enregistrer')).toHaveLength(9)
   })
 
   it('scrolling updates the active section (scrollspy)', async () => {

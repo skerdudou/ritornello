@@ -946,7 +946,7 @@ function goTo(id: string) {
                 </span>
               </label>
             </div>
-            <Button data-update-policy-change @click="saveSettings">{{ t('change') }}</Button>
+            <Button data-update-policy-change @click="saveSettings">{{ t('save') }}</Button>
           </CardContent>
         </Card>
 
@@ -1238,7 +1238,7 @@ function goTo(id: string) {
                 </SelectItem>
               </SelectContent>
             </Select>
-            <Button data-audio-change :disabled="audioUnavailable" @click="changeOutput">{{ t('change') }}</Button>
+            <Button data-audio-change :disabled="audioUnavailable" @click="changeOutput">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -1257,7 +1257,7 @@ function goTo(id: string) {
                 </SelectItem>
               </SelectContent>
             </Select>
-            <Button data-lang-change @click="changeLanguage">{{ t('change') }}</Button>
+            <Button data-lang-change @click="changeLanguage">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -1274,7 +1274,7 @@ function goTo(id: string) {
                 <SelectItem value="previous">{{ t('startup_previous') }}</SelectItem>
               </SelectContent>
             </Select>
-            <Button data-startup-change @click="saveSettings">{{ t('change') }}</Button>
+            <Button data-startup-change @click="saveSettings">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -1313,7 +1313,7 @@ function goTo(id: string) {
                 </SelectContent>
               </Select>
             </label>
-            <Button data-clock-change @click="saveSettings">{{ t('change') }}</Button>
+            <Button data-clock-change @click="saveSettings">{{ t('save') }}</Button>
             <p class="w-full text-sm text-muted-foreground">{{ t('clock_hint') }}</p>
           </CardContent>
         </Card>
@@ -1333,7 +1333,7 @@ function goTo(id: string) {
               <Input type="number" min="100" max="2000" step="50" class="w-28" data-hold-interval
                 v-model="settings.volume_repeat_interval_ms" />
             </label>
-            <Button data-hold-change @click="saveSettings">{{ t('change') }}</Button>
+            <Button data-hold-change @click="saveSettings">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -1352,7 +1352,7 @@ function goTo(id: string) {
               <Input type="number" min="1000" max="15000" step="500" class="w-28" data-tens-window-ms
                 v-model="settings.tens_window_ms" />
             </label>
-            <Button data-overlays-change @click="saveSettings">{{ t('change') }}</Button>
+            <Button data-overlays-change @click="saveSettings">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -1366,7 +1366,7 @@ function goTo(id: string) {
               <Input type="number" min="1" max="120" class="w-28" data-seek-step-s
                 v-model="settings.seek_step_s" />
             </label>
-            <Button data-seek-change @click="saveSettings">{{ t('change') }}</Button>
+            <Button data-seek-change @click="saveSettings">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -1508,7 +1508,7 @@ function goTo(id: string) {
               </p>
             </div>
 
-            <Button data-cover-change @click="saveSettings">{{ t('change') }}</Button>
+            <Button data-cover-change @click="saveSettings">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
