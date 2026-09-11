@@ -620,7 +620,16 @@ jobs:
           mapfile -t verdict_fields < <(node -e '
             let v = {}
             try {
-              v = JSON.parse(require("node:fs").readFileSync("verdict.json", "utf8"))
+              const parsed = JSON.parse(require("node:fs").readFileSync("verdict.json", "utf8"))
+              // `JSON.parse("null")` does not throw -- it returns `null`, and
+              // `typeof null === "object"` in JavaScript, so a bare
+              // `typeof parsed !== "object"` test would let it through and
+              // the next property read would throw, uncaught, outside this
+              // try. Reject falsiness and arrays explicitly: a usable
+              // verdict is a non-null, non-array object, nothing else.
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                v = parsed
+              }
             } catch {}
             console.log(v.verdict === "merge" ? "merge" : "read-it")
             console.log(v.changed === true)
