@@ -29,6 +29,26 @@ const { t } = useCatalog()
 const checked = ref<Set<string>>(new Set())
 
 /**
+ * The rows this dialog is about: components the device **has** and that are
+ * not where the release says they should be.
+ *
+ * `not_installed` is deliberately excluded, and it is the whole point of this
+ * change: choosing to add something the device does not have is a different
+ * question, asked by `InstallablesDialog.vue`. Mixing the two is what made
+ * this screen unreadable.
+ *
+ * `binary_missing` stays: installing is the repair for that row, and it is a
+ * component `plugins.toml` declares. `undeclared` and `unknown` have nothing
+ * to install here — the first is a stray binary, the second is a component
+ * this release says nothing about.
+ */
+const relevant = computed(() =>
+  props.components.filter(
+    (c) => c.availability === 'update_available' || c.availability === 'binary_missing',
+  ),
+)
+
+/**
  * What is out of step and nothing else: `update_available`, never
  * third-party (its own repository decides, not this release), and never a
  * component already known to need a manual step (checking it again would
@@ -54,7 +74,7 @@ function defaultChecked(components: ComponentOffer[]): Set<string> {
 watch(
   () => props.open,
   (open) => {
-    if (open) checked.value = defaultChecked(props.components)
+    if (open) checked.value = defaultChecked(relevant.value)
   },
   { immediate: true },
 )
@@ -91,7 +111,7 @@ interface Row {
 }
 
 const rows = computed<Row[]>(() =>
-  props.components.map((offer) => ({
+  relevant.value.map((offer) => ({
     offer,
     checked: checked.value.has(offer.name),
     warning: warningFor(offer),
