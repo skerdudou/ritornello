@@ -43,6 +43,23 @@ on:
 # choice: a later stage in this workflow commits and pushes a fix, and
 # cancelling a job between its commit and its push is worse than making the
 # second run wait its turn. Do not "fix" this to match `ci.yml`.
+#
+# One case this key does not cover: for a single pull request, an automatic
+# `workflow_run` keys on its branch while a manual `workflow_dispatch` keys
+# on the bare number -- two different groups, so the two are not
+# serialized against each other. The key cannot be made identical across
+# the two triggers: at workflow level neither identifier is derivable from
+# the other, since `steps.*` does not exist here to turn one into the
+# other. Consequence: a manual rehearsal can run unserialized against an
+# automatic run analysing the same pull request. Left this way on purpose
+# rather than collapsed to one global group -- GitHub cancels a *pending*
+# job that shares a group with a newer one even with `cancel-in-progress:
+# false`, so a single group would make analyses of unrelated pull requests
+# cancel each other's queued run. The remaining race is closed downstream,
+# where it can actually do harm: the push in a later task re-reads the
+# pull request's head SHA and refuses if it has moved since the SHA that
+# was analysed, which makes the race harmless regardless of which group
+# each run landed in.
 concurrency:
   group: dependabot-analysis-${{ github.event.workflow_run.head_branch || inputs.pr }}
   cancel-in-progress: false
@@ -169,6 +186,15 @@ jobs:
           # would never match. `.user.login` on the REST pull request
           # carries the same literal `dependabot-auto-merge.yml` compares
           # against.
+          #
+          # Left unguarded here, unlike the dispatch path's lookup above: a
+          # transient failure on this call -- a rate limit, an auth error --
+          # must redden the job, not be swallowed into `stop`. `stop` writes
+          # `skip=true`, which downstream reads as "there was nothing to
+          # do"; turning an unknown into a silent skip is the fail-open
+          # direction. Do not "harmonise" this with the guarded lookup
+          # above -- that one guards a bad *input* (a pull request number
+          # that never existed), not a transient failure.
           pr_json="$(gh api "repos/$REPO/pulls/$number")"
           login="$(printf '%s' "$pr_json" | jq -r '.user.login')"
           head_repo="$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // ""')"
