@@ -102,12 +102,28 @@ pub struct AppState {
     /// Not a fingerprint of the content: getting one would mean already
     /// holding the catalog, whereas the stamp has to be written into the very
     /// URL that asks for it. Not the plugin's fingerprint either — an
-    /// operator can edit an on-disk language pack
+    /// operator can edit **a plugin's** on-disk language pack
     /// (`/etc/ritornello/locales/<component>/<lang>.toml`) without
     /// recompiling anything, and the catalog would then stay frozen **for
-    /// ever** in the caches, which is the danger `immutable` carries.
-    /// Editing a pack ends with a restart of the service: that is the
-    /// gesture which refreshes them all.
+    /// ever** in `admin_catalogs`/`admin_assets`, which is the danger
+    /// `immutable` carries. Restarting the service is the only gesture that
+    /// refreshes *these two caches*: nothing here re-fetches a plugin's
+    /// catalog on a locale change, unlike the core's own — see `catalog`'s
+    /// doc, whose "or picking the language again" is not a new capability
+    /// this chantier added, but a fact about `Catalog::load` (and now
+    /// `Registry`) that already held before it: neither ever cached a disk
+    /// read for the core's own module, so calling `set_locale` — even to the
+    /// same locale — has always re-read it. The two doc comments describe
+    /// two different subsystems, not a disagreement: a plugin's admin
+    /// catalogue, fetched once over IPC and then cached indefinitely behind
+    /// an `immutable` URL, versus the core's own, resolved fresh on every
+    /// real locale change. The registry swept for task 4 does hold every
+    /// plugin's on-disk pack too (`Registry::sweep` walks the whole root),
+    /// but nothing reads that tier for a plugin yet — `admin_i18n` still
+    /// goes through the IPC path below, untouched by this field's own
+    /// `resweep`. So the premise `immutable` rests on is intact: nothing a
+    /// browser holds under a stamped plugin URL can change within one
+    /// session.
     ///
     /// **Stated limitation**: the stamp is the core's session alone, not the
     /// plugin's. A plugin restarted *within* one core session, with a

@@ -4700,6 +4700,63 @@ mod toggle_tests {
         assert_eq!(registry.chain_for("mpd", "en", "en").get("greeting"), "Hi there");
     }
 
+    /// The discriminating half of the event-driven proof: `hotplug`'s guard
+    /// (`if let Some(catalog) = &announcement.catalog`) must leave the
+    /// module genuinely **absent** from the registry when the announcement
+    /// carries `None` — not insert an empty `ModuleLayers` in its place.
+    /// `chain_for` alone cannot tell the two apart (both resolve every key
+    /// to itself); `Registry::announced_module` can, and this is the test
+    /// that would fail if the guard were relaxed to `.unwrap_or_default()`.
+    #[tokio::test]
+    async fn hotplug_leaves_the_module_absent_from_the_registry_when_the_catalog_is_none() {
+        let mut b = bench();
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: None,
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        assert_eq!(
+            b.children.registry.read().await.announced_module("mpd"),
+            None,
+            "a binary predating the field must leave the module absent, not present-and-empty"
+        );
+    }
+
+    /// The mirror case, completing the discrimination: `Some({})` — an
+    /// up-to-date binary with no text of its own — must reach the registry
+    /// as a genuinely **present**, merely empty, `ModuleLayers`.
+    #[tokio::test]
+    async fn hotplug_inserts_a_present_but_empty_module_when_the_catalog_is_some_empty() {
+        let mut b = bench();
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: Some(Default::default()),
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        let registry = b.children.registry.read().await;
+        let announced = registry.announced_module("mpd");
+        assert!(announced.is_some(), "an announced, empty catalogue must be present in the registry");
+        assert_eq!(announced.unwrap().languages().count(), 0);
+    }
+
     /// The other half of the event-driven proof: `hot_unplug` must actually
     /// forget the module from the shared registry (via `admin::forget_page`,
     /// its single purge point), not just remove the status line.

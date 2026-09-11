@@ -86,6 +86,34 @@ impl Registry {
         self.announced.remove(module);
     }
 
+    /// Whether `module` has an announced entry at all — `None` if it was
+    /// never inserted (or was `forget`ten), `Some(&ModuleLayers)` if it was,
+    /// **whatever that `ModuleLayers` holds**, including zero languages.
+    ///
+    /// This is the accessor that keeps the wire's `None` vs `Some({})`
+    /// distinction alive once it reaches the registry: a plugin whose
+    /// `Announcement.catalog` was `None` (a binary predating the field)
+    /// must never call `insert_announced` at all — so `announced_module`
+    /// answers `None` for it, exactly as for a module nobody has ever
+    /// mentioned — while a plugin that announced `Some({})` (an up-to-date
+    /// binary with no text of its own) calls `insert_announced` with an
+    /// empty `ModuleLayers`, so `announced_module` answers `Some` with zero
+    /// languages inside. Task 12's completeness denominator needs exactly
+    /// this: counting the second case as the first would grow the
+    /// denominator every time an old binary went unanswered for, instead of
+    /// leaving it out because nothing was ever confided (see
+    /// `Announcement.catalog`'s own doc, in `ritornello-proto`).
+    ///
+    /// Unread by this crate's own production code today —
+    /// `ritornello-core` has no `lib` target, so a method only its tests
+    /// call reads as dead code — ahead of its production consumer (Task
+    /// 12's completeness count), the same situation `Registry::forget` was
+    /// in before this fix round wired it into `admin::forget_page`.
+    #[allow(dead_code)]
+    pub fn announced_module(&self, module: &str) -> Option<&ModuleLayers> {
+        self.announced.get(module)
+    }
+
     /// Builds the resolution chain for `module`, in the fixed order the
     /// chantier turns on: the whole `chosen`-language block, then the
     /// whole `fallback`-language block, then the whole `en` block.
@@ -309,6 +337,23 @@ mod tests {
         let chain = registry.chain_for("radio", "en", "en");
         assert_eq!(chain.get("play"), "disk-play", "the disk pack must survive forget");
         assert_eq!(chain.get("stop"), "stop", "the announced layer must be gone");
+    }
+
+    #[test]
+    fn announced_module_distinguishes_never_inserted_from_inserted_empty() {
+        // The discriminating property Task 12's denominator depends on: a
+        // module that was never `insert_announced`d (an old binary, or one
+        // never asked) must read `None`, never merely `Some` of an empty
+        // `ModuleLayers` — the two facts are not interchangeable even
+        // though both currently resolve zero keys through `chain_for`.
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        assert_eq!(registry.announced_module("console"), None, "never announced at all");
+
+        registry.insert_announced("console", ModuleLayers::new("console"));
+        let announced = registry.announced_module("console");
+        assert!(announced.is_some(), "announced, even with nothing to say, must read Some");
+        assert_eq!(announced.unwrap().languages().count(), 0, "and carry zero languages, not invent one");
     }
 
     #[test]
