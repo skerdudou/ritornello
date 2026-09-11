@@ -34,6 +34,19 @@ on:
         description: Pull request number to analyse by hand
         required: true
 
+# Two `workflow_run` completions can name the same pull request -- a rerun,
+# or two CI runs finishing moments apart -- and would otherwise launch two
+# independent privileged jobs. `steps.pr.outputs.number` does not exist at
+# workflow level, so the branch is the only identifier available here.
+#
+# `cancel-in-progress: false` is deliberate, and the opposite of `ci.yml`'s
+# choice: a later stage in this workflow commits and pushes a fix, and
+# cancelling a job between its commit and its push is worse than making the
+# second run wait its turn. Do not "fix" this to match `ci.yml`.
+concurrency:
+  group: dependabot-analysis-${{ github.event.workflow_run.head_branch || inputs.pr }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   pull-requests: write
@@ -42,6 +55,14 @@ permissions:
 jobs:
   analyse:
     runs-on: ubuntu-latest
+    env:
+      # The identity stage 2 commits under. Round 2 is detected against it
+      # in the "Decide which round we are in" step below, so the two must
+      # never drift apart. Declared at job level, on purpose: a step-level
+      # `env:` is scoped to that one step, so a later step -- and the plan's
+      # task 7, which pushes the fix -- structurally could not have read it
+      # from there.
+      BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
     steps:
       - name: Check out the default branch, the only tree that executes
         # `workflow_run` checks out the default branch by default, which is
@@ -69,7 +90,13 @@ jobs:
 
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             number="$DISPATCH_PR"
-            head_sha="$(gh api "repos/$REPO/pulls/$number" --jq .head.sha)"
+            # `gh api` on a pull request number that does not exist fails
+            # with a raw 404, which under `set -e` would crash the step
+            # instead of giving the same readable refusal every other entry
+            # condition gives. A typo here is the expected failure mode --
+            # this dispatch is how the owner rehearses the feature by hand.
+            head_sha="$(gh api "repos/$REPO/pulls/$number" --jq .head.sha 2>/dev/null || true)"
+            [ -n "$head_sha" ] || stop "Pull request #$number does not exist."
             # The **real** conclusion of `CI` on that head, not a placeholder.
             # A manual dispatch exists so the whole path can be rehearsed
             # without waiting for Dependabot, and a rehearsal that can never
@@ -90,6 +117,12 @@ jobs:
             esac
           else
             [ "$RUN_EVENT" = "pull_request" ] || stop "Not a pull request run ($RUN_EVENT); nothing to analyse."
+            # A cheap pre-filter, nothing more: it skips an API call on the
+            # many CI runs that are not Dependabot's. It proves nothing by
+            # itself -- a branch name is set by whoever pushes it -- so it
+            # must never be mistaken for authorization. The authoritative
+            # check is the GitHub-verified `.user.login` test below, once
+            # `number` is resolved.
             case "$HEAD_BRANCH" in
               dependabot/*) : ;;
               *) stop "Branch \`$HEAD_BRANCH\` is not Dependabot's; nothing to analyse." ;;
@@ -110,6 +143,36 @@ jobs:
 
           [ -n "$number" ] || stop "No open pull request carries $HEAD_SHA."
 
+          # The authorization. A branch name and a commit author email are
+          # both set by whoever pushes; `.user.login` and
+          # `.head.repo.full_name` are not -- GitHub sets them, from its own
+          # record of who opened the pull request and where its head lives.
+          # `dependabot-auto-merge.yml`, the workflow this one extends,
+          # already gates on `.user.login` (its `if:` on the `auto-merge`
+          # job); this workflow was strictly weaker until now.
+          #
+          # `.user.login` alone is not enough: Dependabot opens pull requests
+          # from forks too, on repositories configured for it, and a forked
+          # pull request must not reach a job that reads privileged secrets.
+          # `.head.repo.full_name` proves the head lives in this repository.
+          # That also certifies the round-2 check below (`author`, matched
+          # against `BOT_EMAIL`): once the head is proved to live here, only
+          # an actor with write access to this repository can have pushed
+          # it, so its commit author email is trustworthy evidence of who
+          # pushed the last commit.
+          #
+          # Use the REST endpoint, not `gh pr view`: `gh pr view --json
+          # author` reports `app/dependabot`, not `dependabot[bot]`, and
+          # would never match. `.user.login` on the REST pull request
+          # carries the same literal `dependabot-auto-merge.yml` compares
+          # against.
+          pr_json="$(gh api "repos/$REPO/pulls/$number")"
+          login="$(printf '%s' "$pr_json" | jq -r '.user.login')"
+          head_repo="$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // ""')"
+
+          [ "$login" = 'dependabot[bot]' ] || stop "Pull request #$number was opened by \`$login\`, not Dependabot."
+          [ "$head_repo" = "$REPO" ] || stop "Pull request #$number's head lives in \`$head_repo\`, not in this repository; refusing to analyse a fork."
+
           author="$(gh api "repos/$REPO/commits/$head_sha" --jq '.commit.author.email')"
           state="$(gh pr view "$number" --repo "$REPO" --json state --jq .state)"
           auto="$(gh pr view "$number" --repo "$REPO" --json autoMergeRequest --jq 'if .autoMergeRequest then "queued" else "open" end')"
@@ -129,10 +192,9 @@ jobs:
         if: steps.pr.outputs.skip != 'true'
         env:
           AUTHOR: ${{ steps.pr.outputs.author }}
-          # The identity stage 2 commits under. Round 2 is detected on it, so
-          # the two must never drift apart -- hence one environment variable
-          # read by both.
-          BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          # BOT_EMAIL comes from the job-level `env:` above, not from this
+          # step; it is read here and by the push in a later task, and both
+          # must see the same literal.
         run: |
           set -euo pipefail
           if [ "$AUTHOR" = "$BOT_EMAIL" ]; then
@@ -151,6 +213,16 @@ jobs:
           NUMBER: ${{ steps.pr.outputs.number }}
         run: |
           set -euo pipefail
+          # `--jq` applies once per page and `--paginate` would emit one
+          # array per page, which `read-bump-metadata.mjs` cannot parse
+          # (`--slurp` cannot be combined with `--jq`, or this would read
+          # one array back). Unreachable in practice: `gh` requests 100
+          # items per page, the endpoint caps at 250, and a Dependabot pull
+          # request carries one or two commits, so this never pages. If it
+          # ever did, it fails closed -- concatenated arrays crash the
+          # script's `JSON.parse`, node exits non-zero, `pipefail` reddens
+          # the step, and there is no verdict and therefore no merge. Do not
+          # "repair" this into something that fails open.
           gh api "repos/$REPO/pulls/$NUMBER/commits" --paginate --jq '[.[].commit.message]' > commits.json
           node .github/scripts/read-bump-metadata.mjs commits.json | tee -a "$GITHUB_STEP_SUMMARY"
 
