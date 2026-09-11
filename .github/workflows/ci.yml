@@ -46,13 +46,16 @@ jobs:
         # the files instead looks like it fixes that, but it does not:
         # `node --test` ALSO exits 0 when some, but not all, of several named
         # files are missing -- it just runs a smaller suite and says nothing.
-        # Measured when the list held three files: all three present -> 58
-        # tests, exit 0; `check-guards.test.mjs` renamed away -> 31 tests,
-        # exit 0; `classify-bump.test.mjs` renamed away too -> 13 tests, exit
-        # 0; all three renamed away -> exit 1 (the only case that fails on
-        # its own). The list is six files and 82 tests now, and the shape of
-        # the failure is the same: a one-file rename is the realistic
-        # mistake, and it reproduces exactly the silent-green that naming the
+        # Measured on this exact command when the list held three files: all
+        # three present -> 58 tests, exit 0; `check-guards.test.mjs` renamed
+        # away -> 27 tests REMAINING, exit 0; `classify-bump.test.mjs` renamed
+        # away too -> 13 remaining, exit 0; all three renamed away -> exit 1
+        # (the only case that fails on its own). Those are counts of what was
+        # left, not the size of what went missing -- a rewrite of this comment
+        # once read them the other way round and made it contradict itself.
+        # The list is six files now, 85 tests of which 6 skip off Linux, and
+        # the shape of the failure is the same: a one-file rename is the
+        # realistic mistake, and it reproduces exactly the silent-green that naming the
         # files was supposed to prevent. So this step does not trust
         # `node --test`'s own exit code for that: the loop below asserts each
         # path exists, named once, and fails loudly with the missing path

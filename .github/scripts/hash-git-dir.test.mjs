@@ -191,6 +191,64 @@ test('a newline in a file name does not flatten into its neighbours', (t) => {
   })
 })
 
+test('a symlink is described, never followed', (t) => {
+  // If the digest covered what a link POINTS AT rather than the link itself,
+  // an attacker could park the payload outside the hashed tree and the
+  // fingerprint would never move. Both halves are asserted: the target's
+  // contents do not matter, the target's identity does.
+  withTree((root) => {
+    const outside = join(root, '..', `hash-git-dir-target-${process.pid}`)
+    writeFileSync(outside, 'first')
+    try {
+      symlinkSync(outside, join(root, 'hooks', 'pre-commit'))
+    } catch (error) {
+      if (error.code === 'EPERM' || error.code === 'EACCES') {
+        rmSync(outside, { force: true })
+        t.skip('this platform refuses to create symlinks')
+        return
+      }
+      throw error
+    }
+    const before = hashGitDir(root)
+    writeFileSync(outside, 'second')
+    assert.equal(hashGitDir(root), before, "the link's target contents must not reach the digest")
+
+    const other = join(root, '..', `hash-git-dir-other-${process.pid}`)
+    writeFileSync(other, 'x')
+    rmSync(join(root, 'hooks', 'pre-commit'))
+    symlinkSync(other, join(root, 'hooks', 'pre-commit'))
+    assert.notEqual(hashGitDir(root), before, 'where the link points must reach the digest')
+
+    rmSync(outside, { force: true })
+    rmSync(other, { force: true })
+  })
+})
+
+test('two names differing only in invalid UTF-8 bytes hash differently', (t) => {
+  // Node decodes directory entries as UTF-8 by default and every invalid byte
+  // collapses to U+FFFD, so `0xFF` and `0xFE` were the same name as far as the
+  // digest was concerned -- an injective encoding applied one step too late.
+  // Names are read as bytes now.
+  withTree((root) => {
+    const a = Buffer.concat([Buffer.from(join(root, 'refs', 'x')), Buffer.from([0xff])])
+    const b = Buffer.concat([Buffer.from(join(root, 'refs', 'x')), Buffer.from([0xfe])])
+    try {
+      writeFileSync(a, 'same content')
+    } catch (error) {
+      // Windows file names are UTF-16 and reject this outright.
+      if (error.code === 'EINVAL' || error.code === 'ENOENT' || error.code === 'EPERM') {
+        t.skip('this platform refuses a non-UTF-8 file name')
+        return
+      }
+      throw error
+    }
+    const withA = hashGitDir(root)
+    rmSync(a)
+    writeFileSync(b, 'same content')
+    assert.notEqual(hashGitDir(root), withA)
+  })
+})
+
 test('a missing directory throws rather than hashing to a constant', () => {
   // A fingerprint of a tree that is not there must not be a value the
   // comparison could match. Under `set -e` the step dies, which is the

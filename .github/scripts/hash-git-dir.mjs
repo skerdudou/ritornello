@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync, readlinkSync, lstatSync } from 'node:fs'
-import { join } from 'node:path'
+import { sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 // Fingerprint a git directory, so that a later step can prove nothing rewrote
@@ -15,61 +15,74 @@ import { pathToFileURL } from 'node:url'
 // dotted directory.
 //
 // **It is one file rather than four copies of a `find | sha256sum` pipeline
-// on purpose.** The pipeline appears wherever a git command is about to run
+// on purpose.** The pipeline appeared wherever a git command was about to run
 // on a tree the analysis could have touched, and four copies of a security
 // primitive drift -- this repository has the scars. One implementation, with
-// tests, including the case the shell version got wrong.
+// tests, including the cases the shell version got wrong.
 //
-// What the shell version got wrong: `find … -type f` matches neither symlinks
-// nor the directories they might replace, so a symlinked
-// `pr/.git/hooks/pre-commit` was invisible to the fingerprint and would have
-// been executed by the very commit the fingerprint was meant to protect. No
-// tool the analysis is given can create a symlink today, so it was never
-// reachable -- but an unreachable hole guarded by an assumption is exactly
-// what this design refuses to rely on.
+// Being a file rather than inline shell has a cost, and the workflow pays it
+// rather than ignoring it: a `run:` block's text is materialised by the runner
+// before the job starts, so it cannot be rewritten from the runner, while this
+// module is read at run time. Every call site after the analysis therefore
+// runs it from a `tools/` checkout fetched from the server AFTER the analysis
+// has exited. See that step.
 //
-// Every entry is recorded with its type. A file contributes its content hash,
-// a symlink its target (read, never followed), a directory its name alone.
-// Sorted, so the digest is a property of the tree and not of readdir order.
+// Three things the shell version got wrong, each now a test:
+//
+//   - `find … -type f` matched neither symlinks nor the directories they might
+//     replace, so a symlinked `pr/.git/hooks/pre-commit` was invisible to the
+//     fingerprint and would have been executed by the very commit it was meant
+//     to protect.
+//   - joining the listing with a newline and calling it "a separator that
+//     cannot occur" was false: a file name may contain one.
+//   - and the first version of THIS file classified entries from
+//     `readdirSync`'s dirent flags, which report UNKNOWN wherever `d_type` is
+//     not filled in -- every ordinary file would then have recorded a mode and
+//     no content hash, which is the fail-open direction.
+//
+// **Names are handled as bytes, never as strings.** Node decodes directory
+// entries as UTF-8 by default, and invalid bytes all collapse to U+FFFD, so
+// two names differing only in such bytes would share a digest -- injective
+// encoding applied one step too late to matter. Reading with
+// `encoding: 'buffer'` and hashing the raw bytes closes that. It is a weak
+// hole (it needs non-UTF-8 names and yields nothing useful), and closing it
+// costs two words.
+
+const SEPARATOR = Buffer.from(sep)
 
 export function hashGitDir(root) {
   const entries = []
 
   const walk = (dir) => {
-    for (const name of readdirSync(dir).sort()) {
-      const path = join(dir, name)
-      // **`lstat`, not the dirent's own type flags.** `readdirSync` with
-      // `withFileTypes` reports UNKNOWN on any filesystem that does not fill
-      // in `d_type`, and a classifier that falls through to "something else"
-      // there would record every ordinary file as a mode with no content
-      // hash -- the digest would silently stop covering content, which is the
-      // fail-open direction. `lstat` answers on every filesystem, and it
-      // describes the entry itself rather than what a symlink points at:
-      // following one would hash the target and miss that a link appeared.
+    const names = readdirSync(dir, { encoding: 'buffer' }).sort(Buffer.compare)
+    for (const name of names) {
+      const path = Buffer.concat([dir, SEPARATOR, name])
+      // `lstat`, so the entry is described rather than whatever a symlink
+      // points at: following one would hash the target and miss that a link
+      // appeared at all. Proven by a test that changes a link target's
+      // contents outside the hashed tree and asserts the digest does not move.
       const stat = lstatSync(path)
       if (stat.isSymbolicLink()) {
-        entries.push(['l', path, readlinkSync(path)])
+        entries.push(['l', path.toString('hex'), readlinkSync(path, { encoding: 'buffer' }).toString('hex')])
       } else if (stat.isDirectory()) {
-        entries.push(['d', path])
+        entries.push(['d', path.toString('hex')])
         walk(path)
       } else if (stat.isFile()) {
-        entries.push(['f', path, createHash('sha256').update(readFileSync(path)).digest('hex')])
+        entries.push(['f', path.toString('hex'), createHash('sha256').update(readFileSync(path)).digest('hex')])
       } else {
         // A socket, a fifo, a device. None of these belongs in a git
         // directory, and refusing to classify one as "nothing" is the point:
         // its presence must change the digest.
-        entries.push(['?', path, `mode=${stat.mode}`])
+        entries.push(['?', path.toString('hex'), `mode=${stat.mode}`])
       }
     }
   }
 
-  walk(root)
-  // **JSON, not a joined string.** A separator "that cannot occur in any line
-  // above" was the first version's claim and it was false: a file name and a
-  // symlink target may both contain a newline, so `["f a", "f b"]` and
-  // `["f a\nf b"]` hashed identically -- two different trees, one digest.
-  // JSON escapes the separator inside each value, and the array structure
-  // survives it.
+  walk(Buffer.from(root))
+  // JSON, not a joined string: it escapes any separator inside a value instead
+  // of promising none appears, and the array structure survives it. Every
+  // value here is hex or a small literal, so the encoding is injective over
+  // the bytes the tree actually holds.
   return createHash('sha256').update(JSON.stringify(entries)).digest('hex')
 }
 

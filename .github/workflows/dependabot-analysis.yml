@@ -397,48 +397,6 @@ jobs:
         # which is what makes it safe to have the bumped manifests on disk
         # next to a token.
 
-      - name: Fetch this job's own tooling, from a tree the analysis never sees
-        # **Everything this job runs on the analysis's output comes from here,
-        # and here is fetched from the server.**
-        #
-        # `check-guards.mjs` and `hash-git-dir.mjs` both also exist at the
-        # workspace root, and running either from there would let the thing
-        # being checked rewrite its own checker. For the guards that is
-        # invisible, because guard 1 inspects the PULL REQUEST tree's diff and
-        # not this one. For the fingerprint it is worse: a module that echoed
-        # the contents of `git-snapshot.txt` -- which the analysis can read --
-        # would make the verdict check, the staged snapshot and the push check
-        # all agree over a tampered `pr/.git`, with the PAT in scope.
-        #
-        # The allow-list scopes the analysis to `Edit(pr/**)` plus two named
-        # files, so it should not reach the root at all. "Should not" is the
-        # problem: that rests on the action's path matching behaving as
-        # documented, which is the one thing about it that could not be
-        # established without a live run, and which is how a Critical defect
-        # reached this file once already.
-        #
-        # This checkout is the mechanism instead. It happens BEFORE the
-        # analysis step, and `actions/checkout` fetches from the server, so
-        # nothing the analysis writes can reach what lands here.
-        #
-        # Worth knowing why the inline shell it replaced did not need this.
-        # A `run:` block's text is materialised into the step's script by the
-        # runner before the job starts, so rewriting the workflow file on disk
-        # changes nothing about what executes. A `node some/script.mjs` reads
-        # its file at run time. Moving the fingerprint out of the workflow body
-        # into a module was the right call for having one implementation with
-        # tests -- but it traded an immutable text for a readable file, and
-        # this step is what pays that back.
-        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true' && steps.bump.outputs.compatible != 'true'
-        uses: actions/checkout@v7
-        with:
-          path: tools
-          fetch-depth: 1
-          # Only the scripts are needed, and a narrower tree is one less thing
-          # for a later reader to wonder about.
-          sparse-checkout: .github/scripts
-          persist-credentials: false
-
       - name: Lay out what the analysis reads
         if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true' && steps.bump.outputs.compatible != 'true'
         env:
@@ -467,7 +425,13 @@ jobs:
           # the verdict step recomputes and compares before its first git
           # command. `git-snapshot.txt` lives at the workspace root, which
           # the allow-list does not let the analysis write to.
-          node tools/.github/scripts/hash-git-dir.mjs pr/.git > git-snapshot.txt
+          # From the ROOT here, and only here. This runs before the analysis
+          # step, so nothing but our own shell steps and checkouts has
+          # executed and there is nothing that could have rewritten the
+          # module. Every later call site reads `tools/`, which is fetched
+          # after the analysis has exited -- see that step for why the
+          # distinction is the mechanism rather than a detail.
+          node .github/scripts/hash-git-dir.mjs pr/.git > git-snapshot.txt
 
           gh pr diff "$NUMBER" --repo "$REPO" > pr-diff.txt
           echo "The bump diff is $(wc -l < pr-diff.txt) lines." >> "$GITHUB_STEP_SUMMARY"
@@ -651,7 +615,7 @@ jobs:
             {
               "permissions": {
                 "deny": [
-                  "Edit(pr/.git/**)",
+                  "Edit(pr/.git/**)","Edit(tools/**)","Edit(.github/**)",
                   "Edit(.git/**)",
                   "Read(//proc/**)",
                   "Read(//etc/**)",
@@ -694,8 +658,16 @@ jobs:
           # the default branch: `.github/scripts/check-guards.mjs`, the
           # module task 7 runs to check this step's own fix, sits in it.
           # Scoping `Edit` is what stops the analysis rewriting its own
-          # checker. Task 7 fetching the guards into `guards/` afterwards is
-          # the second layer, not the first.
+          # checker, and the explicit `Edit(.github/**)` and `Edit(tools/**)`
+          # denies below back it up -- deny wins over allow, so they hold
+          # even if a glob in the allow-list turns out to reach further than
+          # it reads.
+          #
+          # Neither of those is the layer that does not depend on this
+          # action's path matching. That one is the `tools/` checkout, taken
+          # from the server AFTER this step has exited: whatever the analysis
+          # might have written is overwritten by a tree fetched once it can no
+          # longer write. Ordering, not matching.
           #
           # **In this context a path outside the list is refused outright.**
           # The action runs Claude headless; there is no terminal to ask, and
@@ -880,6 +852,50 @@ jobs:
             mechanical. If the verdict is `read-it`, the most useful thing you can write is
             precisely what a person has to decide. Do not mention any account name in this
             file.
+
+      - name: Fetch this job's own tooling, AFTER the analysis has finished
+        # **The timing is the whole mechanism, and getting it wrong was this
+        # step's first two attempts.**
+        #
+        # Everything this job runs to judge the analysis's output --
+        # `hash-git-dir.mjs`, `check-guards.mjs` -- lands here, and it lands
+        # after the analysis step has exited. That ordering is what makes it
+        # unreachable: whatever the analysis may or may not have been able to
+        # write while it ran is overwritten by a tree fetched from the server
+        # once it can no longer write anything.
+        #
+        # Checking out from the server BEFORE the analysis does not give that.
+        # It fixes what lands, not what is there twenty minutes later, so a
+        # pre-analysis copy is exposed to exactly the assumption the root copy
+        # is: that the allow-list holds. The deny rules below are a second
+        # layer over the same tree, and they are genuinely independent -- but
+        # they are still the action's path matching, which is the one thing
+        # here that could not be settled without a live run. This step depends
+        # on neither.
+        #
+        # Why it matters more for the fingerprint than for the guards: the
+        # analysis can READ `git-snapshot.txt`, so a rewritten
+        # `hash-git-dir.mjs` that merely echoed it would make the verdict
+        # check, the staged snapshot and the push check all agree over a
+        # tampered `pr/.git` -- with the PAT in scope at the last of them.
+        #
+        # The one call site that legitimately runs from the root is the first
+        # snapshot, in the lay-out step above: nothing but our own shell steps
+        # and checkouts has run by then, so there is nothing to have tampered
+        # with it. That is stated there rather than left to be inferred.
+        if: |
+          steps.pr.outputs.skip != 'true'
+          && steps.state.outputs.round == '1'
+          && steps.bump.outputs.unreadable != 'true'
+          && steps.bump.outputs.compatible != 'true'
+        uses: actions/checkout@v7
+        with:
+          path: tools
+          fetch-depth: 1
+          # Only the scripts are needed, and a narrower tree is one less thing
+          # for a later reader to wonder about.
+          sparse-checkout: .github/scripts
+          persist-credentials: false
 
       - name: Read the verdict, and act on none of it yet
         id: verdict
