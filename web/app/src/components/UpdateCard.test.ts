@@ -23,6 +23,13 @@ const CATALOG = {
     'The version now installed also carried {count} files that were not installed — see its release notes',
   update_partial_failure_note:
     'If several components were involved, only the first failure is shown here — see the log for the rest',
+  // Read by `UpdateSummary.vue`, mounted inside this card since Task 5: the
+  // summary line moved to its own component, but this card's fixture still
+  // has to prime it, the same way it primes every other key the card reads
+  // through a child.
+  update_out_of_step: '{count} components to update to {version}',
+  update_out_of_step_one: '{name}: {installed} → {offered}',
+  update_detail: 'Detail',
   update_release_notes: 'Release notes',
   update_check: 'Check for updates',
   update_install: 'Install',
@@ -79,11 +86,18 @@ function mountCard(update: UpdatePayload) {
 }
 
 describe('UpdateCard', () => {
-  it('says a version is available, with both numbers', () => {
+  // Task 5: the line used to name the core alone and say nothing when other
+  // components were out of step — the very defect an owner reported after a
+  // beta offered ten plugins the card stayed silent about. The line now
+  // counts every component out of step and, for exactly one, names it rather
+  // than showing a bare pair (a payload with only the core out of step is
+  // this single-component case, so it still reads as a name and two
+  // numbers, just no longer bare).
+  it('says a version is available, naming the one component and both numbers', () => {
     const w = mountCard(payload())
     // The whole rendered sentence, with toBe: asserting `toContain('0.3.0')`
     // would pass just as well if the two numbers were swapped.
-    expect(w.get('[data-update-summary]').text()).toBe('0.2.0 → 0.3.0')
+    expect(w.get('[data-update-summary]').text()).toBe('core: 0.2.0 → 0.3.0')
   })
 
   it('says nothing has been published rather than showing a fault', () => {

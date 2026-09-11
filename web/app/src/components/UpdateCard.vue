@@ -3,6 +3,7 @@ import { Button, Card, CardContent, CardHeader, CardTitle } from '@ritornello/ui
 import { computed } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import type { UpdatePayload } from '../types'
+import UpdateSummary from './UpdateSummary.vue'
 
 /**
  * The device's own view of itself against the last release it read: one
@@ -25,23 +26,6 @@ const { t } = useCatalog()
 const actionable = computed(() =>
   props.update.components.filter((c) => c.availability === 'update_available'),
 )
-
-const summary = computed(() => {
-  const { outcome, release_version } = props.update
-  if (outcome.kind === 'no_release') return t.value('update_no_release')
-  // Before `never_checked` is irrelevant, but before the `core` lookup below
-  // is not: like `no_release`, this outcome rebuilt every row against an empty
-  // offer, so the core row reads `unknown` and "Up to date" would be a lie.
-  if (outcome.kind === 'only_prereleases') return t.value('update_only_prereleases')
-  if (outcome.kind === 'never_checked') return t.value('update_never_checked')
-  const core = props.update.components.find((c) => c.kind === 'core')
-  if (!core) return t.value('update_unknown')
-  // Both numbers, in order, so a swap is visible. The arrow is punctuation
-  // and not a word, so it needs no catalog entry.
-  if (core.availability === 'update_available' && core.installed && release_version)
-    return `${core.installed} → ${release_version}`
-  return t.value('update_aligned')
-})
 
 /**
  * Read through a `computed` rather than in the template: narrowing a
@@ -104,7 +88,7 @@ const rollbackNote = computed(() => {
   <Card data-update-card>
     <CardHeader><CardTitle>{{ t('update_title') }}</CardTitle></CardHeader>
     <CardContent class="space-y-2">
-      <p data-update-summary class="text-sm font-medium">{{ summary }}</p>
+      <UpdateSummary :update="update" />
 
       <p v-if="errorDetail" data-update-error class="text-sm text-destructive">{{ errorDetail }}</p>
       <!-- A separate line from the error itself: `data-update-error`'s text
