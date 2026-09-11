@@ -582,12 +582,28 @@ jobs:
           # below is told that a refusal is an unread source, not a green
           # light.
           #
-          # `--max-turns 40` bounds the run the same way `timeout-minutes: 20`
-          # above bounds the wall clock; either ceiling failing the step lands
-          # on the fail-closed path, not on a hang.
+          # `--max-turns` and `timeout-minutes: 20` above are both ceilings,
+          # and only one of them can be overshot. Measured on run 34588634765,
+          # a major `typescript` bump against a red CI: the analysis finished
+          # successfully in **47 turns**, 5 min 52 s, $0.97 -- and the step
+          # failed anyway, because the cap then stood at 40. The action checks
+          # `num_turns > maxTurns` *after* a successful result and throws
+          # (`base-action/src/run-claude-sdk.ts`), so a cap set near the real
+          # figure does not stop the work early: it completes the work and
+          # throws it away, verdict and report included.
+          #
+          # So the wall clock is the ceiling meant to bind. It bounds cost, and
+          # it cannot be overshot. The turn cap's remaining job is breaking a
+          # degenerate tool loop sooner than the clock would, and 150 does that
+          # without ever binding on real work -- twenty minutes at the measured
+          # pace is about 160 turns. Do not "tighten" this back towards the
+          # observed 47; the margin is the point.
+          #
+          # Either ceiling failing the step lands on the fail-closed path, not
+          # on a hang: a failed analysis step skips the verdict step entirely.
           claude_args: >-
             --allowedTools "Read,Glob,Grep,WebFetch(domain:api.github.com),WebFetch(domain:github.com),WebFetch(domain:raw.githubusercontent.com),WebFetch(domain:crates.io),WebFetch(domain:static.crates.io),WebFetch(domain:docs.rs),WebFetch(domain:registry.npmjs.org),WebFetch(domain:www.npmjs.com),Edit(pr/**),Edit(verdict.json),Edit(report.md)"
-            --max-turns 40
+            --max-turns 150
           prompt: |
             Decide whether a Dependabot bump can be merged without a human reading it.
 
