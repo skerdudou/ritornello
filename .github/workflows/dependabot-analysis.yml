@@ -853,6 +853,27 @@ jobs:
             precisely what a person has to decide. Do not mention any account name in this
             file.
 
+      - name: Clear the tooling path before fetching into it
+        # `actions/checkout` does not wipe its destination. If a directory
+        # is already there and looks like a repository for the same remote,
+        # it REUSES it -- clean, `reset --hard`, fetch, checkout -- and a
+        # `reset --hard` in a repository whose `.git/config` defines a
+        # `filter.*.smudge` runs that command. So the ordering below fixes
+        # what the checkout writes, but not whether the checkout itself is
+        # inert; this line makes it inert.
+        #
+        # Reaching that sub-case would mean defeating the allow-list AND
+        # the `Edit(tools/**)` deny to create `tools/.git` in the first
+        # place, so it sits a layer deeper than anything else here. Closed
+        # anyway: it costs one line, and it is the difference between "the
+        # contents are fetched fresh" and "nothing from this runner is
+        # consulted at all".
+        if: |
+          steps.pr.outputs.skip != 'true'
+          && steps.state.outputs.round == '1'
+          && steps.bump.outputs.unreadable != 'true'
+          && steps.bump.outputs.compatible != 'true'
+        run: rm -rf tools
       - name: Fetch this job's own tooling, AFTER the analysis has finished
         # **The timing is the whole mechanism, and getting it wrong was this
         # step's first two attempts.**
