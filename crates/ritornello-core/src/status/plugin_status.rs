@@ -147,6 +147,31 @@ pub struct PluginStatus {
     /// the manifest and would survive the fix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incompatible: Option<u32>,
+    /// This plugin's announcement carried **no** `catalog` field at all — a
+    /// binary built before this core could ask a plugin for its embedded
+    /// translation layers (`ritornello_proto::Announcement::catalog`, whose
+    /// own doc this field is the twin of).
+    ///
+    /// **Distinct from an announced, empty catalog** (`catalog: Some({})`),
+    /// which is a module that legitimately has no text of its own — three
+    /// plugins ship that way and it sets no flag here. This one names only
+    /// the plugin whose announcement predates the field entirely.
+    ///
+    /// This is the accepted mitigation for `PROTOCOL_VERSION` staying at 1
+    /// across the whole language-pack effort (see its own doc): nothing at
+    /// the wire level refuses such a plugin — `incompatible` above stays
+    /// `None` for it, since the protocol itself did not change — so without
+    /// this flag a device stuck with an old plugin binary would go on
+    /// missing its language packs in silence. With it, the cause is named
+    /// on the Système page instead of merely suffered.
+    ///
+    /// Deliberately **not** `disabled`: nothing here writes `enabled = false`
+    /// into the manifest, and this plugin is otherwise wired exactly as any
+    /// other — same idiom as `incompatible`.
+    ///
+    /// Additive like `stalled` and `busy`: absent from the JSON when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub catalog_unknown: bool,
 }
 
 impl PluginStatus {
@@ -172,6 +197,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
+            catalog_unknown: false,
         }
     }
 
@@ -197,6 +223,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
+            catalog_unknown: false,
         }
     }
 
@@ -253,6 +280,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
+            catalog_unknown: false,
         }
     }
 
@@ -275,6 +303,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
+            catalog_unknown: false,
         }
     }
 
@@ -300,6 +329,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: Some(found),
+            catalog_unknown: false,
         }
     }
 }
@@ -1939,5 +1969,29 @@ mod tests {
         let j = serde_json::to_string(&l).unwrap();
         assert!(!j.contains("incompatible"), "{j}");
         assert!(!j.contains("version"), "{j}");
+    }
+
+    /// Twin of `an_incompatible_line_carries_the_number_and_nothing_else_claims_it`:
+    /// a plugin's announcement carrying no `catalog` field at all is flagged
+    /// on its own line, and nothing else about that line lies about it — it
+    /// is not `disabled` (nobody switched it off) and not `incompatible`
+    /// (the protocol itself matched).
+    #[test]
+    fn catalog_unknown_marks_a_wired_line_without_disguising_it_as_something_else() {
+        let l = PluginStatus { catalog_unknown: true, ..PluginStatus::kind("cd", "source", true, false) };
+        assert!(l.catalog_unknown);
+        assert!(l.connected, "the plugin is wired: this is a name, not a refusal");
+        assert!(!l.disabled, "a legacy binary is not the operator's switch");
+        assert_eq!(l.incompatible, None, "the protocol itself matched: this is a different fact");
+    }
+
+    /// Additive idiom, same as `a_compatible_line_omits_the_field_entirely`:
+    /// a plugin whose announcement carried a catalog (whether populated or
+    /// merely `Some({})`) must not grow this field on the wire.
+    #[test]
+    fn a_known_catalog_omits_the_field_entirely() {
+        let l = PluginStatus::kind("radio", "source", true, false);
+        let j = serde_json::to_string(&l).unwrap();
+        assert!(!j.contains("catalog_unknown"), "{j}");
     }
 }

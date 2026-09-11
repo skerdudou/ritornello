@@ -987,6 +987,7 @@ async fn hotplug<P: player::Player>(
                             ui_version: announcement.ui_version.clone(),
                             version: announcement.version.clone(),
                             repository: announcement.repository.clone(),
+                            catalog_unknown: announcement.catalog.is_none(),
                             ..PluginStatus::kind(&name, "source", true, announcement.admin)
                         });
                     }
@@ -996,6 +997,7 @@ async fn hotplug<P: player::Player>(
                             ui_version: announcement.ui_version.clone(),
                             version: announcement.version.clone(),
                             repository: announcement.repository.clone(),
+                            catalog_unknown: announcement.catalog.is_none(),
                             ..PluginStatus::kind(&name, "source", false, announcement.admin)
                         });
                     }
@@ -1019,6 +1021,7 @@ async fn hotplug<P: player::Player>(
                         ui_version: announcement.ui_version.clone(),
                         version: announcement.version.clone(),
                         repository: announcement.repository.clone(),
+                        catalog_unknown: announcement.catalog.is_none(),
                         ..PluginStatus::kind(&name, "display", true, announcement.admin)
                     });
                 }
@@ -1028,6 +1031,7 @@ async fn hotplug<P: player::Player>(
                         ui_version: announcement.ui_version.clone(),
                         version: announcement.version.clone(),
                         repository: announcement.repository.clone(),
+                        catalog_unknown: announcement.catalog.is_none(),
                         ..PluginStatus::kind(&name, "display", false, announcement.admin)
                     });
                 }
@@ -1051,6 +1055,7 @@ async fn hotplug<P: player::Player>(
                     ui_version: announcement.ui_version.clone(),
                     version: announcement.version.clone(),
                     repository: announcement.repository.clone(),
+                    catalog_unknown: announcement.catalog.is_none(),
                     ..PluginStatus::kind(&name, "input", true, announcement.admin)
                 });
             }
@@ -1072,6 +1077,7 @@ async fn hotplug<P: player::Player>(
                     ui_version: announcement.ui_version.clone(),
                     version: announcement.version.clone(),
                     repository: announcement.repository.clone(),
+                    catalog_unknown: announcement.catalog.is_none(),
                     ..PluginStatus::kind(&name, "metadata", true, announcement.admin)
                 });
             }
@@ -1970,6 +1976,7 @@ async fn main() -> Result<()> {
                                 ui_version: announcement.ui_version.clone(),
                                 version: announcement.version.clone(),
                                 repository: announcement.repository.clone(),
+                                catalog_unknown: announcement.catalog.is_none(),
                                 ..PluginStatus::kind(name, "source", true, announcement.admin)
                             });
                         }
@@ -1979,6 +1986,7 @@ async fn main() -> Result<()> {
                                 ui_version: announcement.ui_version.clone(),
                                 version: announcement.version.clone(),
                                 repository: announcement.repository.clone(),
+                                catalog_unknown: announcement.catalog.is_none(),
                                 ..PluginStatus::kind(name, "source", false, announcement.admin)
                             });
                         }
@@ -1991,6 +1999,7 @@ async fn main() -> Result<()> {
                             ui_version: announcement.ui_version.clone(),
                             version: announcement.version.clone(),
                             repository: announcement.repository.clone(),
+                            catalog_unknown: announcement.catalog.is_none(),
                             ..PluginStatus::kind(name, "display", true, announcement.admin)
                         });
                     }
@@ -2000,6 +2009,7 @@ async fn main() -> Result<()> {
                             ui_version: announcement.ui_version.clone(),
                             version: announcement.version.clone(),
                             repository: announcement.repository.clone(),
+                            catalog_unknown: announcement.catalog.is_none(),
                             ..PluginStatus::kind(name, "display", false, announcement.admin)
                         });
                     }
@@ -2025,6 +2035,7 @@ async fn main() -> Result<()> {
                         ui_version: announcement.ui_version.clone(),
                         version: announcement.version.clone(),
                         repository: announcement.repository.clone(),
+                        catalog_unknown: announcement.catalog.is_none(),
                         ..PluginStatus::kind(name, "input", true, announcement.admin)
                     });
                 }
@@ -2049,6 +2060,7 @@ async fn main() -> Result<()> {
                         ui_version: announcement.ui_version.clone(),
                         version: announcement.version.clone(),
                         repository: announcement.repository.clone(),
+                        catalog_unknown: announcement.catalog.is_none(),
                         ..PluginStatus::kind(name, "metadata", true, announcement.admin)
                     });
                 }
@@ -3407,6 +3419,7 @@ mod toggle_tests {
                 protocol: ritornello_proto::PROTOCOL_VERSION,
                 version: None,
                 repository: None,
+                catalog: None,
             },
         );
 
@@ -3436,6 +3449,7 @@ mod toggle_tests {
             protocol: ritornello_proto::PROTOCOL_VERSION,
             version: None,
             repository: None,
+            catalog: None,
         }
     }
 
@@ -4344,6 +4358,7 @@ mod toggle_tests {
             protocol: foreign,
             version: Some("0.2.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(
@@ -4388,6 +4403,7 @@ mod toggle_tests {
             protocol: ritornello_proto::PROTOCOL_VERSION,
             version: Some("0.3.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(
@@ -4427,6 +4443,7 @@ mod toggle_tests {
             protocol: foreign,
             version: Some("0.2.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
@@ -4471,6 +4488,7 @@ mod toggle_tests {
             protocol: foreign,
             version: Some("0.2.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
@@ -4520,6 +4538,7 @@ mod toggle_tests {
             protocol: ritornello_proto::PROTOCOL_VERSION + 1,
             version: Some("0.2.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
@@ -4546,6 +4565,7 @@ mod toggle_tests {
             protocol: foreign,
             version: Some("0.2.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
@@ -4558,6 +4578,67 @@ mod toggle_tests {
         let json = serde_json::to_string(line).unwrap();
         assert!(json.contains(&format!("\"incompatible\":{foreign}")), "{json}");
         assert!(!json.contains("stalled"), "{json}");
+    }
+
+    /// Twin of `the_status_page_says_why_a_plugin_was_refused`, for the other
+    /// silent failure `PROTOCOL_VERSION` staying at 1 lets through: a
+    /// **matching** protocol, so nothing refuses the plugin, but no
+    /// `catalog` at all in the announcement — the binary is legitimately
+    /// wired and simply predates the field. From the announcement to the
+    /// JSON the page reads, exactly as its sibling: proving the constructor
+    /// works would prove nothing about `hotplug` actually calling it.
+    #[tokio::test]
+    async fn the_status_page_names_a_wired_plugin_that_predates_the_catalog_field() {
+        let mut b = bench();
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: Some("0.2.0".into()),
+            repository: None,
+            catalog: None,
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        let statuses = b.children.status_state.read().await;
+        let line = statuses.plugins.iter().find(|l| l.name == "mpd").unwrap();
+        assert!(line.catalog_unknown, "an absent catalog must be named, not silently absorbed");
+        assert_eq!(line.incompatible, None, "the protocol itself matched: not the same refusal");
+
+        let json = serde_json::to_string(line).unwrap();
+        assert!(json.contains("\"catalog_unknown\":true"), "{json}");
+        assert!(!json.contains("incompatible"), "{json}");
+    }
+
+    /// The mirror case: a plugin that **does** announce a catalog — even an
+    /// empty one, `Some({})`, exactly what a textless but up-to-date plugin
+    /// (`console`, `ouifm-metas`, `radiofrance-metas`) writes — must not be
+    /// named as predating the field. Conflating the two would make every
+    /// legitimately textless plugin look like a lagging binary.
+    #[tokio::test]
+    async fn a_wired_plugin_with_an_empty_but_present_catalog_is_not_named() {
+        let mut b = bench();
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: Some("0.2.0".into()),
+            repository: None,
+            catalog: Some(Default::default()),
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        let statuses = b.children.status_state.read().await;
+        let line = statuses.plugins.iter().find(|l| l.name == "mpd").unwrap();
+        assert!(!line.catalog_unknown, "an announced, empty catalog is a legitimate state");
     }
 
     #[test]

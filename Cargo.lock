@@ -1404,6 +1404,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
+ "ritornello-i18n",
  "ritornello-proto",
  "serde_json",
  "tempfile",

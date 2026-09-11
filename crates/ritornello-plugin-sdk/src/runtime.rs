@@ -13,7 +13,9 @@ use crate::server::{
 use anyhow::{Context, Result};
 // `StreamExt` for the `.next()` of `run()`'s `FuturesUnordered`.
 use futures::StreamExt;
+use ritornello_i18n::Layer;
 use ritornello_proto::{Announcement, PluginKind};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -50,6 +52,14 @@ pub struct Runtime {
     /// Fingerprint of the admin page's UI assets, computed in `.admin()`
     /// while the plugin is still in hand — see `ui_fingerprint` below.
     ui_version: Option<String>,
+    /// This plugin's own embedded translation layers, language → parsed
+    /// layer, confided through `.texts()` and never read from anywhere
+    /// else — in particular never from disk: that is the core's job (see
+    /// `Announcement.catalog`'s own doc). Empty when `.texts()` was never
+    /// called, which is exactly right for a plugin with no text of its
+    /// own — the announcement still carries `Some({})`, not `None`, since
+    /// this SDK always knows to write the field (see `announcement()`).
+    texts: HashMap<String, Layer>,
     /// Version of the **plugin's** crate, handed in by the caller.
     ///
     /// Not read from `env!` here: that macro expands where it is written, so a
@@ -117,9 +127,55 @@ impl Runtime {
             halves: Vec::new(),
             admin: None,
             ui_version: None,
+            texts: HashMap::new(),
             version,
             repository,
         }
+    }
+
+    /// Confides this plugin's own translation layers, so `run()` can derive
+    /// `Announcement.catalog` from them instead of the plugin writing the
+    /// field itself — the same invariant as `covers` and `ui_version`:
+    /// **derived, never asked, so the announcement cannot lie.**
+    ///
+    /// `sources` maps a language code to that language's **raw TOML pack
+    /// source**, exactly the form a plugin already holds it in
+    /// (`include_str!("locales/en.toml")`, as `ritornello-plugin-cd` does
+    /// today for English alone — see `CD_EN`). Parsed here with
+    /// [`Layer::parse`], so the refusal below lives where the parse does,
+    /// at **build time**, before a single socket is bound: a plugin that
+    /// has text to confide must be caught here if that text is broken,
+    /// rather than discovered later on a screen.
+    ///
+    /// Refuses (`Err`) in two cases, both meaning the same thing — a
+    /// plugin that calls this method is declaring it has real text, and a
+    /// declaration with nothing sound behind it is refused outright:
+    /// - any layer fails to parse (invalid TOML);
+    /// - the `en` layer is missing, or present but empty.
+    ///
+    /// A plugin with genuinely no text of its own simply never calls this
+    /// method: `run()` still announces `catalog: Some({})` for it (see
+    /// `announcement()`), never `None` — this method exists only to be
+    /// called by a plugin that *does* have something to confide.
+    pub fn texts(
+        mut self,
+        sources: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> Result<Self> {
+        let mut layers = HashMap::new();
+        for (lang, source) in sources {
+            let layer = Layer::parse(source).with_context(|| {
+                format!("plugin {}: the {lang} translation pack is not valid TOML", self.name)
+            })?;
+            layers.insert(lang.to_string(), layer);
+        }
+        let english_is_sound = layers.get("en").is_some_and(|l| !l.is_empty());
+        anyhow::ensure!(
+            english_is_sound,
+            "plugin {}: a plugin registering translation layers must supply a non-empty English one",
+            self.name
+        );
+        self.texts = layers;
+        Ok(self)
     }
 
     pub fn source(mut self, plugin: impl SourcePlugin) -> Result<Self> {
@@ -195,6 +251,14 @@ impl Runtime {
             // Derived like the rest of this line: the caller handed in what
             // its own manifest says, and nothing here can invent one.
             repository: self.repository.map(str::to_string),
+            // Always `Some(_)`, never `None`: a plugin built against this SDK
+            // always knows to write this field, whether or not `.texts()`
+            // was ever called (see that method's own doc, and
+            // `Announcement.catalog`'s — `None` is reserved for a binary
+            // that predates the field entirely, which cannot be this one).
+            catalog: Some(
+                self.texts.iter().map(|(lang, layer)| (lang.clone(), layer.as_map().clone())).collect(),
+            ),
         }
     }
 
@@ -541,5 +605,93 @@ mod tests {
         }
         assert_ne!(ui_fingerprint(&Ui("one")), ui_fingerprint(&Ui("two")));
         assert_eq!(ui_fingerprint(&Ui("one")), ui_fingerprint(&Ui("one")));
+    }
+
+    /// The consequence spelled out in `Announcement.catalog`'s own doc: a
+    /// plugin that never calls `.texts()` — `console`, `ouifm-metas` and
+    /// `radiofrance-metas` today — still announces `Some({})`, never
+    /// `None`. `None` is reserved for a binary that predates the field
+    /// entirely, and a plugin built against this SDK never is one.
+    #[test]
+    fn a_plugin_that_never_calls_texts_announces_an_empty_catalog_not_none() {
+        let r = Runtime::new(
+            "console".into(),
+            std::path::PathBuf::from("/tmp/register.sock"),
+            std::path::PathBuf::from("/tmp/console"),
+            "0.2.0-test",
+            None,
+        );
+        assert_eq!(r.announcement().catalog, Some(HashMap::new()));
+    }
+
+    /// The positive path: a plugin confiding two languages sees both, and
+    /// exactly the keys and values it handed in — nothing invented, nothing
+    /// dropped.
+    #[test]
+    fn texts_derives_the_catalog_from_the_confided_layers() {
+        let r = Runtime::new(
+            "cd".into(),
+            std::path::PathBuf::from("/tmp/register.sock"),
+            std::path::PathBuf::from("/tmp/cd"),
+            "0.2.0-test",
+            None,
+        )
+        .texts([("en", "play = \"Play\"\n"), ("fr", "play = \"Lecture\"\n")])
+        .unwrap();
+        let catalog = r.announcement().catalog.expect("a plugin that confided text must announce it");
+        assert_eq!(catalog.get("en").and_then(|l| l.get("play")).map(String::as_str), Some("Play"));
+        assert_eq!(catalog.get("fr").and_then(|l| l.get("play")).map(String::as_str), Some("Lecture"));
+    }
+
+    /// **[MUTATION]** Barrier 6 of the spec: a plugin declaring text whose
+    /// English pack is not even valid TOML must be refused at build time,
+    /// before a socket is bound — not left to fail silently on screen.
+    #[test]
+    fn texts_refuses_an_english_layer_that_fails_to_parse() {
+        let r = Runtime::new(
+            "broken".into(),
+            std::path::PathBuf::from("/tmp/register.sock"),
+            std::path::PathBuf::from("/tmp/broken"),
+            "0.2.0-test",
+            None,
+        )
+        .texts([("en", "this is not toml =")]);
+        assert!(r.is_err(), "invalid TOML in the English pack must be refused, not swallowed");
+    }
+
+    /// **[MUTATION]** The other branch of the same barrier: an English pack
+    /// that parses cleanly but defines **no key at all** is just as unsound
+    /// as one that fails to parse — a plugin claiming to have text must
+    /// actually have some.
+    #[test]
+    fn texts_refuses_an_empty_english_layer() {
+        let r = Runtime::new(
+            "broken".into(),
+            std::path::PathBuf::from("/tmp/register.sock"),
+            std::path::PathBuf::from("/tmp/broken"),
+            "0.2.0-test",
+            None,
+        )
+        .texts([("en", "")]);
+        assert!(r.is_err(), "an empty English pack must be refused, not accepted as sound");
+    }
+
+    /// **[MUTATION]** The third branch: a plugin confiding languages but no
+    /// `en` entry at all — the key simply absent, not merely empty — must
+    /// be refused the same way. Without this branch tested on its own, a
+    /// guard that only checked "if present, non-empty" would pass every
+    /// other test here while silently accepting a plugin with, say, only a
+    /// French pack.
+    #[test]
+    fn texts_refuses_a_plugin_with_no_english_layer_at_all() {
+        let r = Runtime::new(
+            "broken".into(),
+            std::path::PathBuf::from("/tmp/register.sock"),
+            std::path::PathBuf::from("/tmp/broken"),
+            "0.2.0-test",
+            None,
+        )
+        .texts([("fr", "play = \"Lecture\"\n")]);
+        assert!(r.is_err(), "a catalog with no English layer at all must be refused");
     }
 }

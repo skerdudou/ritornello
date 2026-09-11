@@ -708,6 +708,7 @@ mod tests {
                     protocol: ritornello_proto::PROTOCOL_VERSION,
                     version: None,
                     repository: None,
+                    catalog: None,
                 },
             );
         }

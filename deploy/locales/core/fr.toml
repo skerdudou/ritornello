@@ -21,6 +21,7 @@ plugin_uninstall_confirm = "Désinstaller {name} ? Sa configuration est conserv�
 plugin_remove_binary_confirm = "Supprimer le binaire « {file} » ? Cette action est irréversible."
 plugin_order_note = "L'ordre commande la clé de source et la priorité des métadonnées."
 plugin_incompatible = "Compilé pour le protocole {found} ; ce cœur parle le {expected}"
+plugin_catalog_unknown = "Compilé avant que ce cœur puisse demander ses packs de langue ; réinstallez-le pour recevoir les traductions"
 connected = "connecté"
 unavailable = "indisponible"
 starting = "démarrage"

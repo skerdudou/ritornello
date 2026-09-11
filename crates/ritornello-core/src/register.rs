@@ -921,18 +921,35 @@ mod tests {
     #[tokio::test]
     async fn a_realistically_sized_announcement_passes() {
         // The heaviest catalogue measured today (`files`) is about 7 KB per
-        // language, so five languages land near 35 KB. `ANNOUNCEMENT_MAX_BYTES`
-        // is not exercised through a real catalogue field here — task 3 is
-        // the one that wires it into `Announcement` — but through a padding
-        // field of that same order of magnitude, so this test exercises the
-        // byte bound at the size it actually has to pass, not at whatever is
-        // convenient to type.
+        // language, so five languages land near 35 KB. Built here through the
+        // **real** `Announcement.catalog` field (task 3 wires it in) rather
+        // than a same-sized padding string, so this test exercises the byte
+        // bound at the actual shape it has to pass, not at whatever was
+        // convenient to type before that field existed.
         let (a, mut b) = tokio::net::UnixStream::pair().unwrap();
         let (tx, mut rx) = channel();
         tokio::spawn(read_announcement(a, tx, Duration::from_secs(5)));
 
-        let padding = "x".repeat(30 * 1024);
-        let line = format!(r#"{{"name":"radio","kinds":["source"],"catalog":"{padding}"}}"#);
+        let mut layers: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for lang in ["en", "fr", "de", "es", "it"] {
+            let mut layer = HashMap::new();
+            // ~7 KB per language: 100 keys of about 70 bytes each.
+            for i in 0..100 {
+                layer.insert(format!("key_{i}"), "x".repeat(60));
+            }
+            layers.insert(lang.to_string(), layer);
+        }
+        let line = serde_json::to_string(&serde_json::json!({
+            "name": "radio",
+            "kinds": ["source"],
+            "catalog": layers,
+        }))
+        .unwrap();
+        assert!(
+            line.len() > 30 * 1024,
+            "the fixture must stay realistically sized: {} bytes",
+            line.len()
+        );
         b.write_all(format!("{line}\n").as_bytes()).await.unwrap();
         b.shutdown().await.unwrap();
 
@@ -941,6 +958,11 @@ mod tests {
             .expect("a realistically sized announcement must not be dropped")
             .unwrap();
         assert_eq!(received.name, "radio");
+        assert_eq!(
+            received.catalog.as_ref().and_then(|c| c.get("en")).map(HashMap::len),
+            Some(100),
+            "the catalog itself must have survived the round trip, not just the name"
+        );
     }
 
     #[tokio::test]
@@ -1040,6 +1062,7 @@ mod tests {
                     protocol: ritornello_proto::PROTOCOL_VERSION,
                     version: None,
                     repository: None,
+                    catalog: None,
                 },
             );
         }
@@ -1054,6 +1077,7 @@ mod tests {
                 protocol: ritornello_proto::PROTOCOL_VERSION,
                 version: None,
                 repository: None,
+                catalog: None,
             },
         );
         let g = Gathered { announcements, ..Default::default() };

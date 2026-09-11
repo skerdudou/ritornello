@@ -21,6 +21,7 @@ plugin_uninstall_confirm = "Uninstall {name}? Its configuration is kept, so rein
 plugin_remove_binary_confirm = "Remove the binary '{file}'? This cannot be undone."
 plugin_order_note = "The order commands the source key and metadata priority."
 plugin_incompatible = "Built for protocol {found}; this core speaks {expected}"
+plugin_catalog_unknown = "Built before this core could ask for its language packs; reinstall it to receive translations"
 connected = "connected"
 unavailable = "unavailable"
 starting = "starting"
