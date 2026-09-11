@@ -1,7 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetCatalog, useCatalog } from '../composables/useCatalog'
-import type { UpdatePayload } from '../types'
+import type { SettingsPayload, UpdatePayload } from '../types'
 import UpdateCard from './UpdateCard.vue'
 
 // The catalog keys this card reads are already shipped in `en.toml` (Ruling
@@ -12,7 +12,7 @@ const CATALOG = {
   update_title: 'Updates',
   update_no_release: 'No release published yet',
   update_only_prereleases:
-    'Only prereleases are published; tick “Offer prereleases” below to be offered them',
+    'Only prereleases are published; tick “Offer beta versions” below to be offered them',
   update_never_checked: 'Never checked',
   update_aligned: 'Up to date',
   update_unknown: 'Unknown',
@@ -33,6 +33,28 @@ const CATALOG = {
   update_release_notes: 'Release notes',
   update_check: 'Check for updates',
   update_install: 'Install',
+  // Task 6: the automatic-checks policy, folded into this card below a
+  // separator, and the beta switch that sits above it.
+  update_policy_label: 'Policy',
+  update_policy_off: 'Off',
+  update_policy_check: 'Check only',
+  update_policy_check_and_install: 'Check and install',
+  update_hour_label: 'Hour',
+  update_cadence_label: 'Cadence',
+  update_cadence_daily: 'Daily',
+  update_cadence_weekly: 'Weekly',
+  update_cadence_day_label: 'Day',
+  update_prereleases_label: 'Offer beta versions',
+  update_prereleases_help:
+    'Including when you check by hand; a finished release replaces them as soon as one is published.',
+  weekday_sunday: 'Sunday',
+  weekday_monday: 'Monday',
+  weekday_tuesday: 'Tuesday',
+  weekday_wednesday: 'Wednesday',
+  weekday_thursday: 'Thursday',
+  weekday_friday: 'Friday',
+  weekday_saturday: 'Saturday',
+  save: 'Save',
 }
 
 // The card is handed its payload as a prop and never fetches anything itself
@@ -81,8 +103,37 @@ function payload(over: Partial<UpdatePayload> = {}): UpdatePayload {
   }
 }
 
+// A settings builder, mirroring the shape `ConfigView.vue` keeps as its own
+// default (the fields this card actually reads and writes; the rest of
+// `SettingsPayload` is filled with values this card never touches).
+function settings(over: Partial<SettingsPayload> = {}): SettingsPayload {
+  return {
+    volume_repeat_initial_ms: 800,
+    volume_repeat_interval_ms: 200,
+    startup_power: 'on',
+    date_format: 'day_month_year',
+    clock_24h: true,
+    overlay_ms: 5000,
+    tens_window_ms: 5000,
+    seek_step_s: 10,
+    cover_cache_budget_mio: 50,
+    cover_download_max_mio: 2,
+    cover_source_max_mio: 20,
+    cover_rendition: true,
+    cover_max_edge_px: 640,
+    cover_jpeg_quality: 85,
+    cover_passthrough_max_ko: 150,
+    cover_max_pixels_mpx: 16,
+    update_policy: 'off',
+    update_hour: 3,
+    update_cadence: { kind: 'daily' },
+    update_prereleases: false,
+    ...over,
+  }
+}
+
 function mountCard(update: UpdatePayload) {
-  return mount(UpdateCard, { props: { update } })
+  return mount(UpdateCard, { props: { update, settings: settings() } })
 }
 
 describe('UpdateCard', () => {
@@ -131,7 +182,7 @@ describe('UpdateCard', () => {
       }),
     )
     expect(w.get('[data-update-summary]').text()).toBe(
-      'Only prereleases are published; tick “Offer prereleases” below to be offered them',
+      'Only prereleases are published; tick “Offer beta versions” below to be offered them',
     )
     // A statement, not a fault: nothing failed here.
     expect(w.find('[data-update-error]').exists()).toBe(false)
@@ -272,5 +323,26 @@ describe('UpdateCard', () => {
   it('has no partial-failure note when there is no failure to caveat', () => {
     const w = mountCard(payload())
     expect(w.find('[data-update-error-note]').exists()).toBe(false)
+  })
+
+  it('holds one save path, and the two action buttons are not it', async () => {
+    // The separator carries the card's meaning: above it, two buttons that
+    // act at once; below it, settings that wait. That is why merging does
+    // not break the written decision refusing "two save paths behind one
+    // title" — there is only one.
+    const w = mount(UpdateCard, { props: { update: payload(), settings: settings() } })
+    expect(w.findAll('[data-update-save]')).toHaveLength(1)
+    await w.find('[data-update-check]').trigger('click')
+    expect(w.emitted('save')).toBeUndefined()
+    await w.find('[data-update-save]').trigger('click')
+    expect(w.emitted('save')).toHaveLength(1)
+  })
+
+  it('puts the beta switch and the automatic policy in one card, two lines apart', () => {
+    // The argument for "Offer" rather than "Install" is now visible to the
+    // eye: installing depends on the policy right below it.
+    const w = mount(UpdateCard, { props: { update: payload(), settings: settings() } })
+    expect(w.find('[data-update-prereleases]').exists()).toBe(true)
+    expect(w.find('[data-update-policy]').exists()).toBe(true)
   })
 })

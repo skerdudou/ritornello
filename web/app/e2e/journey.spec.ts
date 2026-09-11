@@ -26,10 +26,14 @@ test('navigation between the home page, the config and the plugin pages', async 
   // caught.
   await expect(page.getByRole('cell', { name: 'radio', exact: true })).toBeVisible()
 
-  // The update card, and its two buttons. Counted rather than merely found:
-  // a button removed by a refactor must turn this red.
+  // The update card, now the one card holding every control the second,
+  // merged-away card used to own too: Check, Install, the beta switch, the
+  // policy trigger, the cadence trigger, and Save (the cadence-day trigger
+  // stays hidden on the harness's default daily cadence, so it does not
+  // count here). Counted rather than merely found: a button removed by a
+  // refactor must turn this red.
   await expect(page.locator('[data-update-card]')).toBeVisible()
-  await expect(page.locator('[data-update-card] button')).toHaveCount(2)
+  await expect(page.locator('[data-update-card] button')).toHaveCount(6)
   // Against the real `/api/update` this harness serves, not only the page:
   // `not.toHaveText('')` and a `toHaveText` pinned to the client's own
   // pre-fetch default would both stay green against a broken or 404
@@ -54,7 +58,7 @@ test('navigation between the home page, the config and the plugin pages', async 
     'aria-checked',
     'false',
   )
-  await expect(page.locator('[data-update-policy-change]')).toHaveCount(1)
+  await expect(page.locator('[data-update-save]')).toHaveCount(1)
 
   // The plugins table's columns, against a real core. Nothing here counted
   // them before, so the Version column could have been added — or dropped

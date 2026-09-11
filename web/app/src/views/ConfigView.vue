@@ -13,7 +13,7 @@ import { predictedThumbnailBytes } from '../composables/coverWeight'
 import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
-import type { AudioPayload, LocalePayload, SettingsPayload, UpdatePayload, Weekday } from '../types'
+import type { AudioPayload, LocalePayload, SettingsPayload, UpdatePayload } from '../types'
 
 const { t, reload } = useCatalog()
 // The plugin state comes from the module, not from a local `ref`: the top
@@ -67,10 +67,6 @@ const update = ref<UpdatePayload>({
   busy: null,
   last_rollback: null,
 })
-
-const WEEKDAYS: Weekday[] = [
-  'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
-]
 
 /**
  * The core's own internal cap on the number of cache entries
@@ -268,53 +264,6 @@ const dateFormatLabel = computed(() => {
 const clockHoursLabel = computed(() =>
   settings.value.clock_24h ? t.value('clock_24h') : t.value('clock_12h'),
 )
-
-const updatePolicyLabel = computed(() => {
-  switch (settings.value.update_policy) {
-    case 'check':
-      return t.value('update_policy_check')
-    case 'check_and_install':
-      return t.value('update_policy_check_and_install')
-    default:
-      return t.value('update_policy_off')
-  }
-})
-
-// `?.` guards a payload older than this setting (or a test fixture that
-// predates it): `/api/settings` is deserialized straight from JSON, so
-// nothing here enforces at runtime what the type says is never absent.
-const updateCadenceLabel = computed(() =>
-  settings.value.update_cadence?.kind === 'weekly'
-    ? t.value('update_cadence_weekly')
-    : t.value('update_cadence_daily'),
-)
-
-/**
- * The day of a weekly cadence, read and written through the same computed —
- * `Select` binds to it directly with `v-model`, same idiom as
- * `settings.startup_power` above. Reading falls back to Sunday only for the
- * trigger's own label while the cadence is `daily`, where the row is hidden
- * anyway; writing always produces a `weekly` cadence, since this select only
- * exists in the template while one is already selected.
- */
-const weeklyDay = computed<Weekday>({
-  get: () => (settings.value.update_cadence?.kind === 'weekly' ? settings.value.update_cadence.day : 'sunday'),
-  set: (day) => {
-    settings.value.update_cadence = { kind: 'weekly', day }
-  },
-})
-
-const weekdayLabel = computed(() => t.value(`weekday_${weeklyDay.value}`))
-
-/**
- * Switching cadence kind starts a fresh `weekly` at Sunday, or drops to
- * `daily`. `unknown`, not `string`: `Select`'s emitted value is typed for
- * reka-ui's whole `AcceptableValue` union (it also admits `null`), and every
- * value here but `'weekly'` means "daily" regardless of its type.
- */
-function onCadenceKindChange(kind: unknown) {
-  settings.value.update_cadence = kind === 'weekly' ? { kind: 'weekly', day: 'sunday' } : { kind: 'daily' }
-}
 
 async function loadAll() {
   // Needed here, not redundant: this is what reloads the catalog after a
@@ -909,81 +858,21 @@ function goTo(id: string) {
   <div class="flex gap-8">
     <div class="min-w-0 flex-1 space-y-4">
       <!-- Above the plugins table, not inside it (decision 8: the whole of
-           auto-update lives on this one tab). The card and the policy below
-           it are two different cards on purpose: the card is what a payload
-           read from `/api/update` renders, and the policy is an ordinary
-           setting saved through `saveSettings`, like every other card on
-           this page — merging them would mean two save paths behind one
-           title. -->
+           auto-update lives on this one tab). The automatic-checks policy
+           lives inside `UpdateCard` itself, below a separator: above it, two
+           buttons — Check, Install — that act at once; below it, settings
+           that wait for one Save button. That is one save path, not two, so
+           merging what used to be a second card here into `UpdateCard` does
+           not repeat the "two save paths behind one title" mistake this
+           section once refused — there is only one. -->
       <section id="update" class="scroll-mt-6 space-y-4">
-        <UpdateCard :update="update" @check="onUpdateCheck" @install="showInstallDialog = true" />
-
-        <Card>
-          <CardHeader><CardTitle>{{ t('update_policy_title') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-end gap-4">
-            <label class="grid gap-1 text-sm">
-              {{ t('update_policy_label') }}
-              <Select v-model="settings.update_policy">
-                <SelectTrigger class="min-w-40" data-update-policy :aria-label="t('update_policy_label')">
-                  <SelectValue>{{ updatePolicyLabel }}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="off">{{ t('update_policy_off') }}</SelectItem>
-                  <SelectItem value="check">{{ t('update_policy_check') }}</SelectItem>
-                  <SelectItem value="check_and_install">{{ t('update_policy_check_and_install') }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <label class="grid gap-1 text-sm">
-              {{ t('update_hour_label') }}
-              <Input type="number" min="0" max="23" class="w-20" data-update-hour
-                v-model="settings.update_hour" />
-            </label>
-            <label class="grid gap-1 text-sm">
-              {{ t('update_cadence_label') }}
-              <Select :model-value="settings.update_cadence?.kind ?? 'daily'" @update:model-value="onCadenceKindChange">
-                <SelectTrigger class="min-w-32" data-update-cadence :aria-label="t('update_cadence_label')">
-                  <SelectValue>{{ updateCadenceLabel }}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="daily">{{ t('update_cadence_daily') }}</SelectItem>
-                  <SelectItem value="weekly">{{ t('update_cadence_weekly') }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <label v-if="settings.update_cadence?.kind === 'weekly'" class="grid gap-1 text-sm">
-              {{ t('update_cadence_day_label') }}
-              <Select v-model="weeklyDay">
-                <SelectTrigger class="min-w-32" data-update-cadence-day :aria-label="t('update_cadence_day_label')">
-                  <SelectValue>{{ weekdayLabel }}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="d in WEEKDAYS" :key="d" :value="d">{{ t(`weekday_${d}`) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <!-- Full width, so it reads as its own subject rather than a
-                 fifth field of the "when" row above — and its label names
-                 its scope, because it governs **every** check, the one this
-                 card schedules and the one the button on the card above
-                 fires. It lives here all the same: this is the card that
-                 owns a save path, and the update card above has none. -->
-            <div class="w-full border-t border-border pt-4">
-              <label class="flex items-start gap-3 text-sm">
-                <Switch
-                  data-update-prereleases
-                  :model-value="settings.update_prereleases"
-                  @update:model-value="(v: boolean) => (settings.update_prereleases = v)"
-                />
-                <span class="grid gap-1">
-                  {{ t('update_prereleases_label') }}
-                  <span class="text-xs text-muted-foreground">{{ t('update_prereleases_help') }}</span>
-                </span>
-              </label>
-            </div>
-            <Button data-update-policy-change @click="saveSettings">{{ t('save') }}</Button>
-          </CardContent>
-        </Card>
+        <UpdateCard
+          :update="update"
+          :settings="settings"
+          @check="onUpdateCheck"
+          @install="showInstallDialog = true"
+          @save="saveSettings"
+        />
 
         <UpdateDialog
           :open="showInstallDialog"

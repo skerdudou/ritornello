@@ -96,8 +96,8 @@ const CATALOGUE = {
   update_cadence_daily: 'Quotidienne',
   update_cadence_weekly: 'Hebdomadaire',
   update_cadence_day_label: 'Jour',
-  update_prereleases_label: 'Proposer les préversions',
-  update_prereleases_help: 'Les betas et les candidates sont proposées aussi.',
+  update_prereleases_label: 'Proposer les versions beta',
+  update_prereleases_help: 'Y compris quand vous vérifiez à la main.',
 }
 
 /** Payloads served by the fake `fetch`, overridable per test. */
@@ -1534,7 +1534,7 @@ describe('ConfigView — update', () => {
     const { w, puts } = await mountView()
     const policySelect = w.findAllComponents(Select)[0]!
     await policySelect.vm.$emit('update:modelValue', 'check')
-    await w.find('[data-update-policy-change]').trigger('click')
+    await w.find('[data-update-save]').trigger('click')
     await flushPromises()
     expect(puts).toHaveLength(1)
     expect((puts[0]!.body as Record<string, unknown>).update_policy).toBe('check')
@@ -1553,7 +1553,7 @@ describe('ConfigView — update', () => {
     expect(w.find('[data-update-prereleases]').attributes('aria-checked')).toBe('true')
 
     await w.find('[data-update-prereleases]').trigger('click')
-    await w.find('[data-update-policy-change]').trigger('click')
+    await w.find('[data-update-save]').trigger('click')
     await flushPromises()
     expect((puts[0]!.body as Record<string, unknown>).update_prereleases).toBe(false)
   })
@@ -1561,7 +1561,7 @@ describe('ConfigView — update', () => {
   it('casts the update hour to a number before sending it', async () => {
     const { w, puts } = await mountView()
     await w.find('[data-update-hour]').setValue('7')
-    await w.find('[data-update-policy-change]').trigger('click')
+    await w.find('[data-update-save]').trigger('click')
     await flushPromises()
     expect((puts[0]!.body as Record<string, unknown>).update_hour).toBe(7)
   })
@@ -1577,7 +1577,7 @@ describe('ConfigView — update', () => {
 
     const daySelect = w.findAllComponents(Select)[2]!
     await daySelect.vm.$emit('update:modelValue', 'wednesday')
-    await w.find('[data-update-policy-change]').trigger('click')
+    await w.find('[data-update-save]').trigger('click')
     await flushPromises()
     expect((puts[0]!.body as Record<string, unknown>).update_cadence).toEqual({
       kind: 'weekly', day: 'wednesday',
@@ -1587,7 +1587,7 @@ describe('ConfigView — update', () => {
     await cadenceSelect.vm.$emit('update:modelValue', 'daily')
     await flushPromises()
     expect(w.find('[data-update-cadence-day]').exists()).toBe(false)
-    await w.find('[data-update-policy-change]').trigger('click')
+    await w.find('[data-update-save]').trigger('click')
     await flushPromises()
     expect((puts[1]!.body as Record<string, unknown>).update_cadence).toEqual({ kind: 'daily' })
   })
