@@ -2,8 +2,18 @@
   "name": "ritornello-web",
   "private": true,
   "type": "module",
-  "workspaces": ["web/kit", "web/app", "crates/*/ui"],
-  "engines": { "node": ">=22" },
+  "workspaces": [
+    "web/kit",
+    "web/app",
+    "crates/*/ui"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "//": "The root declares vite because npm hoists @vitejs/plugin-vue and @tailwindcss/vite here, and both `import 'vite'` at run time: Node resolves that from the root node_modules upwards and never reaches a workspace's own copy. Keep the range in step with the eight workspace manifests — they must all name the same one, or the root and the workspaces load two different Vite instances. Removing it breaks `npm run build` on a clean checkout while still passing inside a worktree, where Node walks up into the main checkout's node_modules.",
+  "devDependencies": {
+    "vite": "^8.2.2"
+  },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
