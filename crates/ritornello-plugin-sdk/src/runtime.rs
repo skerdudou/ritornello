@@ -746,7 +746,12 @@ mod tests {
     /// that it errs *and* that the listener never even saw a connection
     /// attempt — the failure this barrier exists to replace was exactly a
     /// process that looked like it succeeded (`tracing::info!("announced as
-    /// …")` would have fired) while never actually registering.
+    /// …")` would have fired) while never actually registering. `run()`
+    /// itself is awaited under a `tokio::time::timeout`: a regression of
+    /// the guard sends `run()` into a real `write_all` of an oversized line
+    /// on a socket nothing here reads from, which blocks rather than
+    /// errors — so without the bound, this test would hang instead of
+    /// failing on exactly the regression it exists to catch.
     #[tokio::test]
     async fn run_refuses_an_announcement_over_the_wire_bound_before_connecting() {
         let dir = tempfile::tempdir().unwrap();
@@ -768,7 +773,18 @@ mod tests {
             .texts([("en", huge)])
             .unwrap();
 
-        let err = rt.run().await.expect_err("an oversized announcement must be refused");
+        // Bounded, not a bare `.await`: without this, a regression of the
+        // guard itself would not fail this test — it would **hang** it,
+        // since `run()` would then reach a real `write_all` of 256 KiB+ on
+        // a socket nobody here reads from (see this test's own doc, and the
+        // mutation evidence in the task report: disabling the guard once
+        // produced exactly this hang, discovered the hard way). A hung test
+        // is not a failing test, and costs far more to diagnose in CI than
+        // a red assertion with a clear message.
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), rt.run())
+            .await
+            .expect("run() must refuse within 2s rather than hang on an oversized announcement");
+        let err = outcome.expect_err("an oversized announcement must be refused");
         let message = format!("{err:#}");
         assert!(message.contains("bytes"), "the refusal must name the actual size: {message}");
         assert!(
