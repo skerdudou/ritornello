@@ -431,6 +431,26 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # **Without this the action refuses to run at all here**, and the
+          # refusal is its own policy rather than anything about the trigger:
+          # it defaults to allowing no bots, and every run of this workflow is
+          # initiated by Dependabot. Measured on run 34587632136, where every
+          # step up to this one succeeded and this one failed with "Workflow
+          # initiated by non-human actor: dependabot (type: Bot)". That run is
+          # also what settled the design's longest-standing unknown: the
+          # action does work on a `workflow_run` event.
+          #
+          # `dependabot`, never `*`. The action's own warning: "On public
+          # repos with '*', external Apps may be able to invoke this action
+          # with prompts they control" -- and this repository is public, so
+          # `*` would hand the prompt to any app that can trigger a run. The
+          # narrow value admits exactly one bot.
+          #
+          # The suffix is omitted on purpose rather than by accident: the
+          # action strips `[bot]` from both sides and lower-cases before
+          # comparing, so `dependabot` and `dependabot[bot]` are the same
+          # value. Read from its source, not guessed.
+          allowed_bots: dependabot
           # A second, deny-rule layer on top of the allow-list below: deny
           # wins over allow, so this closes `Edit(pr/**)`'s reach into
           # `pr/.git/` regardless of how this action's glob matching treats a
