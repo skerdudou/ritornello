@@ -153,7 +153,7 @@ test('the merge condition was actually found', () => {
 // parentheses. Presence alone is not the property: a conjunct moved inside
 // one arm of the round disjunction still "appears" in the text while no
 // longer applying to the other arm.
-function topLevelConjuncts(expression) {
+function splitTopLevel(expression, operator) {
   const parts = []
   let depth = 0
   let current = ""
@@ -161,7 +161,7 @@ function topLevelConjuncts(expression) {
     const ch = expression[i]
     if (ch === '(') { depth += 1 }
     if (ch === ')') { depth -= 1 }
-    if (depth === 0 && ch === '&' && expression[i + 1] === '&') {
+    if (depth === 0 && ch === operator[0] && expression[i + 1] === operator[1]) {
       parts.push(current)
       current = ""
       i += 1
@@ -173,10 +173,16 @@ function topLevelConjuncts(expression) {
   return parts.map((p) => p.replace(/\s+/g, ' ').trim()).filter(Boolean)
 }
 
-test('the splitter ignores operators inside parentheses', () => {
+const topLevelConjuncts = (expression) => splitTopLevel(expression, "&&")
+
+const topLevelDisjuncts = (expression) => splitTopLevel(expression, "||")
+
+test('the splitters ignore operators inside parentheses', () => {
   // Without this the assertions below could pass by splitting wrongly.
   assert.deepEqual(topLevelConjuncts('a && (b && c) && d'), ['a', '(b && c)', 'd'])
   assert.deepEqual(topLevelConjuncts('(x || y)'), ['(x || y)'])
+  assert.deepEqual(topLevelDisjuncts('a || (b || c) || d'), ['a', '(b || c)', 'd'])
+  assert.deepEqual(topLevelDisjuncts('a && b'), ['a && b'])
 })
 
 test('the green-CI test applies to BOTH rounds, not to one arm of the disjunction', () => {
@@ -206,6 +212,19 @@ test('nothing but the skip flag, the round disjunction and the green CI is a top
   assert.doesNotMatch(arms, /hand/)
   const rounds = [...arms.matchAll(/outputs\.round (==|!=) '([^']*)'/g)].map((m) => `${m[1]}${m[2]}`)
   assert.deepEqual(rounds.sort(), ['==1', '==2'], `the disjunction names ${JSON.stringify(rounds)}`)
+
+  // **And EVERY arm must be about a round.** Pinning the literals is not
+  // enough: a third disjunct naming no round at all passes every test above,
+  // and two such edits were measured to merge without a verdict --
+  // `|| changed != 'true'`, which the empty string satisfies whenever the
+  // analysis was skipped, and `|| decision == 'merge'`, which admits a
+  // round-1 bump a fix WAS written for. The disjunction has exactly two arms
+  // and each is about `round`.
+  const disjuncts = topLevelDisjuncts(arms.replace(/^\(/, '').replace(/\)$/, ''))
+  assert.equal(disjuncts.length, 2, `the round disjunction has ${disjuncts.length} arms: ${JSON.stringify(disjuncts)}`)
+  for (const arm of disjuncts) {
+    assert.match(arm, /needs\.analyse\.outputs\.round ==/, `this arm decides without naming a round: ${arm}`)
+  }
 })
 
 test('both rounds are named, and no negation admits a third value', () => {
@@ -229,4 +248,25 @@ test('no status function reopens the gate on a failed analysis', () => {
 
 test('the skip flag is still consulted', () => {
   assert.match(condition(), /needs\.analyse\.outputs\.skip != 'true'/)
+})
+
+// --- The resolve step's commit listing --------------------------------------
+//
+// `classify-round.mjs` decides on an author/committer PAIR, and nothing tied
+// that to the YAML that produces it: reverting the `--jq` to the author alone
+// was measured at zero failures, and it would make every pull request read
+// `hand` for ever -- fail-closed, but silently and permanently.
+
+test('the resolve step emits both identities per commit', () => {
+  const resolve = source.split('\n').filter((l) => l.includes('pulls/$number/commits'))
+  assert.equal(resolve.length, 1, `expected one commit listing, found ${resolve.length}`)
+  assert.match(resolve[0], /\.commit\.author\.email/)
+  assert.match(resolve[0], /\.commit\.committer\.email/, 'the committer is what closes the amend route')
+  // Joined by a pipe, which is what the module splits each entry on.
+  assert.match(resolve[0], /author\.email\)\|/)
+})
+
+test('the round step passes that listing under the name the module reads', () => {
+  assert.match(source, /COMMITS: \$\{\{ steps\.pr\.outputs\.commits \}\}/)
+  assert.match(source, /echo "commits=\$commits"/)
 })

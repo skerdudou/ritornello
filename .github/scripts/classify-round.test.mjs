@@ -204,10 +204,13 @@ test('entry point: an amended commit of ours refuses', () => {
 })
 
 test('entry point: an entry with no pipe is a stranger, not a half-match', () => {
-  // A malformed entry must not become a pair that happens to match something.
-  // It matches nothing, which is `hand`.
-  const { output } = runEntryPoint({ COMMITS: DEPENDABOT_EMAIL })
-  assert.equal(output, 'round=hand\n')
+  // OUR address, and the choice is the test. With the destructuring default
+  // `committer = ''` a bare Dependabot address refuses anyway, so that
+  // spelling stayed green through the regression it exists to catch --
+  // measured. A bare `OURS` is the one that would return round 2 if the
+  // parse ever admitted a half-pair.
+  assert.equal(runEntryPoint({ COMMITS: OURS }).output, 'round=hand\n')
+  assert.equal(runEntryPoint({ COMMITS: DEPENDABOT_EMAIL }).output, 'round=hand\n')
 })
 
 test('entry point: an unset COMMITS refuses rather than defaulting to round 1', () => {
@@ -217,4 +220,25 @@ test('entry point: an unset COMMITS refuses rather than defaulting to round 1', 
 
 test('entry point: an unset BOT_EMAIL fails loudly instead of misclassifying', () => {
   assert.throws(() => runEntryPoint({ COMMITS: pair(dependabot), BOT_EMAIL: '' }), /ourEmail|Command failed/)
+})
+
+// --- The literals themselves ------------------------------------------------
+//
+// Every fixture above is built FROM the constants, so all three identities
+// could drift to any other value with the suite still green -- and one of them
+// drifting means every pull request reads `hand` for ever, silently. These
+// assertions are the only place the expected bytes are written independently.
+
+test('the identity literals are the ones measured against the API', () => {
+  // Re-measure with:
+  //   gh api repos/skerdudou/ritornello/pulls/18/commits \
+  //     --jq '.[] | "\(.commit.author.email)|\(.commit.committer.email)"'
+  // Swept across every Dependabot pull request this repository has had:
+  // 17 commits, all carrying this pair.
+  assert.equal(DEPENDABOT_EMAIL, '49699333+dependabot[bot]@users.noreply.github.com')
+  assert.equal(GITHUB_COMMITTER_EMAIL, 'noreply@github.com')
+})
+
+test('the cap is the one the API actually imposes', () => {
+  assert.equal(TRUNCATION_CAP, 250)
 })

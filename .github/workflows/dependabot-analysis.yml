@@ -364,7 +364,12 @@ jobs:
           #
           # A round with nothing to say prints nothing, so `tee` appends
           # nothing to the summary for an ordinary first round.
-          node .github/scripts/classify-round.mjs | tee -a "$GITHUB_STEP_SUMMARY"
+          # Kept as a file as well: the `hand` notice quotes it rather than
+          # asserting a cause of its own. `hand` has three causes -- a
+          # stranger pair, an unreadable listing, a listing at the API cap --
+          # and only the first is "someone pushed by hand".
+          node .github/scripts/classify-round.mjs > round-note.txt
+          cat round-note.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Read the bump, and ask the caret rule what it thinks
         id: bump
@@ -1356,15 +1361,23 @@ jobs:
             echo "#$NUMBER carries a hand-written commit; already said so." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # The reason comes from the classifier, which computed it and used
+          # to have it discarded here. Three states reach this step -- a
+          # stranger pair, a listing that could not be read, a listing at the
+          # API cap -- and only one of them is "someone pushed by hand". A
+          # marker makes a claim permanent, so it had better be the right one.
           {
             echo "$marker"
             cat <<'BODY'
-          A commit on this branch was not written by Dependabot or by this workflow -- pushed by
-          hand, amended, or rebased -- so the automatic analysis stops here and will not run again
-          while that is true.
+          The automatic analysis stops here and will not run again while this is true.
 
-          Nothing was analysed, nothing was pushed and nothing will merge. Whoever made that commit
-          has write access here and can merge this pull request themselves.
+          BODY
+            cat round-note.txt
+            cat <<'BODY'
+
+          Nothing was analysed, nothing was pushed and nothing will merge. If a commit was pushed,
+          amended, rebased, or landed here by clicking "Update branch", whoever did it has write
+          access and can merge this pull request themselves.
           BODY
           } > hand.md
           gh pr comment "$NUMBER" --repo "$REPO" --body-file hand.md

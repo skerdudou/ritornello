@@ -31,6 +31,11 @@ import { pathToFileURL } from 'node:url'
 // pair closes that: their amend rewrites the committer, the pair stops
 // matching, and the verdict is `hand`.
 //
+// The risk of reading the pair is the opposite one -- a legitimate shape whose
+// pair matches neither literal would turn a working pull request into `hand`.
+// Swept against every Dependabot pull request this repository has ever had,
+// open or closed: 17 commits, and not one carries a pair this refuses.
+//
 // Measured on #12, #17, #18, #24, #25 and #26, every commit identical:
 // Dependabot's carry author `49699333+dependabot[bot]@…` with committer
 // `noreply@github.com` (GitHub signs what it creates through the API). Ours
