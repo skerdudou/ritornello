@@ -303,7 +303,32 @@ jobs:
           [ "$login" = 'dependabot[bot]' ] || stop "Pull request #$number was opened by \`$login\`, not Dependabot."
           [ "$head_repo" = "$REPO" ] || stop "Pull request #$number's head lives in \`$head_repo\`, not in this repository; refusing to analyse a fork."
 
-          author="$(gh api "repos/$REPO/commits/$head_sha" --jq '.commit.author.email')"
+          # EVERY commit on the pull request, and BOTH identities on each,
+          # on one line as `author|committer`.
+          #
+          # Every commit, because reading the head alone let the loop bound
+          # be spent twice: our fix fails, round 2 stops for good, one
+          # `@dependabot rebase` puts a Dependabot commit on top, the head
+          # reads as round 1 and a second analysis writes a second fix.
+          #
+          # Both identities, because `git commit --amend` and `git rebase`
+          # PRESERVE the author and rewrite the committer. An owner who
+          # adapts our failed fix by amending it -- which the round-2
+          # comment invites in so many words -- would otherwise keep the
+          # pull request in round 2 and have their unreviewed work merged
+          # the moment CI went green.
+          #
+          # `classify-round.mjs` carries the reasoning, the measured pairs
+          # and the tests.
+          #
+          # One line rather than a multi-line output, which would need a
+          # delimiter chosen so the values cannot close it. A git author
+          # email is whatever the pusher wrote and CAN contain a space, so
+          # this is not a claim that the split is faithful -- an address
+          # carrying one splits into two entries, neither matches anything,
+          # and the verdict is `hand`. That is the fail-closed direction,
+          # which is why it is left to happen rather than guarded against.
+          commits="$(gh api "repos/$REPO/pulls/$number/commits" --paginate --jq '.[] | "\(.commit.author.email)|\(.commit.committer.email)"' | tr '\n' ' ')"
           state="$(gh pr view "$number" --repo "$REPO" --json state --jq .state)"
           auto="$(gh pr view "$number" --repo "$REPO" --json autoMergeRequest --jq 'if .autoMergeRequest then "queued" else "open" end')"
 
@@ -315,14 +340,14 @@ jobs:
             echo "head_sha=$head_sha"
             echo "conclusion=$conclusion"
             echo "ci_run_id=$ci_run_id"
-            echo "author=$author"
+            echo "commits=$commits"
           } >> "$GITHUB_OUTPUT"
 
       - name: Decide which round we are in
         id: state
         if: steps.pr.outputs.skip != 'true'
         env:
-          AUTHOR: ${{ steps.pr.outputs.author }}
+          COMMITS: ${{ steps.pr.outputs.commits }}
           # BOT_EMAIL comes from the job-level `env:` above, not from this
           # step; it is read here and by the push in a later task, and both
           # must see the same literal. `classify-round.mjs` requires it and
@@ -332,13 +357,23 @@ jobs:
           set -euo pipefail
           # Three states, and the third one is the point: "not ours" is not
           # the same claim as "Dependabot's". The predicate lives in a script
-          # so the CI tests cover it -- eight cases, including a hand commit,
-          # an empty author and a lookalike address, all of which a two-state
-          # test would call a pristine round 1. The reasoning is in the file.
+          # so the CI tests cover it -- including a hand commit, an empty
+          # author, a lookalike address and a listing at the API cap, none of
+          # which a two-state test refuses. The reasoning, and the reason a
+          # stranger outranks a round-2 state, are in the file.
           #
           # A round with nothing to say prints nothing, so `tee` appends
           # nothing to the summary for an ordinary first round.
-          node .github/scripts/classify-round.mjs | tee -a "$GITHUB_STEP_SUMMARY"
+          # To a file, then to the summary, rather than through `tee`. The
+          # `hand` notice reads the file and quotes it rather than asserting
+          # a cause of its own: `hand` has three causes -- a stranger pair, a
+          # listing that could not be read, a listing at the API cap -- and
+          # only the first is "someone pushed by hand".
+          #
+          # Dropping the pipe has a second effect worth keeping: node failing
+          # now reddens this step directly instead of through `pipefail`.
+          node .github/scripts/classify-round.mjs > round-note.txt
+          cat round-note.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Read the bump, and ask the caret rule what it thinks
         id: bump
@@ -1298,14 +1333,157 @@ jobs:
 
           {
             echo "Pushed a fix to \`$branch\`: $summary"
-            # Deliberately does not promise a merge. Nothing acts on
-            # `round == '2'` yet -- the `merge` job gates on round 1 -- and
-            # the fast path will not take it either, since a bump the caret
-            # rule called compatible never reaches this step. Saying "round
-            # 2 will queue the merge" would describe a step that does not
-            # exist.
+            # Says what CI decides, and no more. The `merge` job does now
+            # take round 2 with a green CI, so a merge is one possible
+            # outcome -- but so is the round-2 stop, and so is `hand` if
+            # anyone pushes to the branch in between. Naming one of the
+            # three here would be a guess about which.
             echo "CI decides now."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Say that a hand-written commit stopped everything
+        # **`hand` used to be silent, and it is now the easiest state to reach.**
+        # Clicking "Update branch", amending our fix, rebasing the bump, editing
+        # a file through the web UI -- each rewrites an identity and lands here.
+        # A workflow that stops for ever and says so only in a run summary
+        # nobody opens is a workflow that looks broken.
+        #
+        # Same marker idempotence as the round-2 stop, and for the same reason:
+        # every CI completion on that branch reaches this step, so without it
+        # the pull request collects one identical comment per run.
+        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == 'hand'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          marker='<!-- dependabot-analysis: hand-written -->'
+          : > hand-comments.txt
+          gh pr view "$NUMBER" --repo "$REPO" --json comments --jq '.comments[] | select(.author.login | startswith("github-actions")) | .body' >> hand-comments.txt || true
+          if grep -qF "$marker" hand-comments.txt; then
+            echo "#$NUMBER is in the \`hand\` state; already said so." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # The reason comes from the classifier, which computed it and used
+          # to have it discarded here. Three states reach this step -- a
+          # stranger pair, a listing that could not be read, a listing at the
+          # API cap -- and only one of them is "someone pushed by hand". A
+          # marker makes a claim permanent, so it had better be the right one.
+          {
+            echo "$marker"
+            cat <<'BODY'
+          The automatic analysis stops here and will not run again while this is true.
+
+          BODY
+            cat round-note.txt
+            cat <<'BODY'
+
+          Nothing was analysed, nothing was pushed and nothing will merge. If a commit was pushed,
+          amended, rebased, or landed here by clicking "Update branch", whoever did it has write
+          access and can merge this pull request themselves.
+          BODY
+          } > hand.md
+          gh pr comment "$NUMBER" --repo "$REPO" --body-file hand.md
+          # The same care as the body: `hand` is not always a hand-written
+          # commit, and the reason is in `round-note.txt`, above in this
+          # summary already.
+          echo "#$NUMBER is in the \`hand\` state: stopped, and said so on the pull request." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Round 2, CI red -- stop, and do not try again
+        # **The bound on the loop, and it bounds FIXES rather than analyses.**
+        # Our push triggers `synchronize`, `ci.yml` returns, and `workflow_run`
+        # returns -- which is wanted, it is how the fix gets validated. What
+        # must be bounded is the number of attempts: in round 2 no analysis is
+        # convoked and no fix is written, so a bump we pushed a fix for and
+        # could not adapt costs one analysis and one fix.
+        #
+        # It does NOT bound the number of analyses on a pull request that
+        # never received a fix. A `read-it` verdict, a guard refusal or a
+        # declined push all leave no commit of ours, so the pull request stays
+        # in round 1 and every later CI completion -- each Dependabot rebase
+        # when `main` moves, every re-run -- convokes a fresh analysis. That
+        # is a real recurring cost on a pull request left open, roughly the
+        # price of one analysis each time. Bounding it is a separate decision
+        # about how often a refusal should be reconsidered, not something to
+        # slip in here; what is not acceptable is a comment claiming a bound
+        # that is not there, which is what this paragraph replaces.
+        #
+        # The round is decided on EVERY commit author on the pull request, not
+        # the head's. See `classify-round.mjs`: reading the head alone let one
+        # `@dependabot rebase` put a Dependabot commit on top and return round
+        # 1, spending the budget a second time.
+        #
+        # What this does NOT bound, said rather than implied: if Dependabot
+        # force-pushes and our commit disappears from the pull request, no
+        # author is ours and round 1 returns. That is correct -- our fix is
+        # gone and the tree is new -- but the property is "one fix per pull
+        # request for as long as that fix is on it", not "ever".
+        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '2' && steps.pr.outputs.conclusion == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+
+          # Idempotent, because nothing else makes it so. Re-running CI on the
+          # same head produces another `workflow_run`, another round 2 and an
+          # identical comment; the other comment paths in this workflow are
+          # each reached once by construction, this one is not. The marker is
+          # an HTML comment, so it is invisible in the rendered body.
+          #
+          # A failure of the lookup lands on "post it", not on "stay silent":
+          # saying it twice is a nuisance, not saying it at all leaves a pull
+          # request that has quietly given up. That needs `|| true` on the
+          # redirect and an empty file underneath it -- without them `set -e`
+          # aborts the step on a failed `gh` and nothing is posted at all,
+          # which is what this paragraph claimed was impossible while the
+          # code did exactly that.
+          #
+          # **To a file, never through a pipe into `grep -q`.** `grep -q`
+          # exits as soon as it matches and closes the pipe; `gh` then dies
+          # on EPIPE, `pipefail` makes the whole pipeline fail, and the `if`
+          # reads false -- so FINDING the marker would have posted the
+          # comment again. Measured: a small producer skips correctly, a
+          # 2 MB one posts anyway, and the report comment alone runs to
+          # 60 000 bytes against a 64 KB pipe buffer, so a busy pull request
+          # reaches it.
+          #
+          # Only our own comments are searched. Matching every body would
+          # let anyone suppress this notice by quoting the marker, and the
+          # step says itself that staying silent is the worse direction.
+          #
+          # `startswith`, because the two APIs spell the same account
+          # differently -- `github-actions` through GraphQL, which is what
+          # `gh pr view --json comments` uses, and `github-actions[bot]`
+          # through REST. Pinning the wrong one would mean the marker is
+          # never found and the comment repeats on every re-run, silently.
+          marker='<!-- dependabot-analysis: round-2-stop -->'
+          : > existing-comments.txt
+          gh pr view "$NUMBER" --repo "$REPO" --json comments --jq '.comments[] | select(.author.login | startswith("github-actions")) | .body' >> existing-comments.txt || true
+          if grep -qF "$marker" existing-comments.txt; then
+            echo "Round 2 red on #$NUMBER: already said so, not repeating it." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # The marker is echoed, the body stays in a QUOTED heredoc. An
+          # unquoted one would expand every `$` in the text, and a fixed
+          # message today is not a reason to leave that open for the next
+          # person who edits it.
+          {
+            echo "$marker"
+            cat <<'BODY'
+          The fix pushed on this pull request did not make CI pass, so this stops here.
+
+          No second attempt will be made. The reasoning behind the fix is in the earlier
+          comment, and the failing run is linked from the checks above -- between the two
+          there should be enough to decide whether to adapt the fix or close this pull
+          request and do the bump by hand.
+          BODY
+          } > round2.md
+          gh pr comment "$NUMBER" --repo "$REPO" --body-file round2.md
+          echo "Round 2 red on #$NUMBER: stopped, no retry." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Say why the merge is waiting
         # Gated on `read-it` and not on `!= 'merge'`, which is the same test
@@ -1383,11 +1561,46 @@ jobs:
     # at all, leaving no verdict file, and the verdict step's missing-file
     # branch answers `read-it` for exactly that case -- case 3 of the
     # enumeration there. Do not relax either half.
+    #
+    # **Two ways in, and round 2 is the second.** `gh pr merge --auto` needs
+    # `contents: write` -- read, not measured, as the paragraph above this
+    # job records -- and only this job has it, so the round-2 merge belongs
+    # here and not as a step in `analyse`, exactly as the round-1 one does.
+    # Round 2 with green CI means a fix this workflow wrote was validated by
+    # CI rather than by the agent that wrote it, which is the whole shape of
+    # the design.
+    #
+    # Round 2 asks for nothing about `decision` or `changed`: no analysis
+    # runs in round 2, so both are the empty string, and requiring them
+    # would make this branch unreachable.
+    #
+    # What stands in their place is NOT "this workflow pushed that commit",
+    # which would be false: the round is inferred from a git author email,
+    # a field whoever pushes sets. What holds is narrower and is enough --
+    # the resolve step verifies `head.repo.full_name` is this repository,
+    # so every commit on the branch was pushed by someone with write access
+    # here, and such a person can merge the pull request themselves. A
+    # forged round 2 is a writer choosing to merge, not an escalation.
+    #
+    # It does have one sharp consequence worth knowing before rehearsing:
+    # **pushing an empty commit under the bot identity onto a Dependabot
+    # pull request whose CI is green will queue a real merge**, with no
+    # analysis anywhere in the path. Rehearse the round-2 bound on a RED
+    # pull request, or on a branch that is not a Dependabot one.
+    #
+    # A stranger among the authors refuses before any of this: `hand` beats
+    # both rounds, which is what stops the owner's own adaptation of a
+    # failed fix being merged under them.
     if: |
       needs.analyse.outputs.skip != 'true'
-      && needs.analyse.outputs.round == '1'
-      && needs.analyse.outputs.decision == 'merge'
-      && needs.analyse.outputs.changed != 'true'
+      && (
+        (
+          needs.analyse.outputs.round == '1'
+          && needs.analyse.outputs.decision == 'merge'
+          && needs.analyse.outputs.changed != 'true'
+        )
+        || needs.analyse.outputs.round == '2'
+      )
       && needs.analyse.outputs.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -1455,7 +1668,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           NUMBER: ${{ needs.analyse.outputs.number }}
+          ROUND: ${{ needs.analyse.outputs.round }}
         run: |
           set -euo pipefail
           gh pr merge --auto --squash "$NUMBER" --repo "$REPO"
-          echo "Auto-merge queued on #$NUMBER: the analysis found nothing to change." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$ROUND" = 2 ]; then
+            echo "Auto-merge queued on #$NUMBER: CI validated the fix this workflow pushed." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Auto-merge queued on #$NUMBER: the analysis found nothing to change." >> "$GITHUB_STEP_SUMMARY"
+          fi
