@@ -24,7 +24,7 @@
 mod chain;
 mod layer;
 
-pub use chain::{Catalog, Chain};
+pub use chain::{common_embedded, Catalog, Chain};
 pub use layer::{try_parse, Layer, ModuleLayers};
 
 // Only the crate's own tests (unmodified below) reach for the embedded

@@ -72,8 +72,8 @@ impl Layer {
 /// coverage count) does, and task 4 ships first.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleLayers {
-    pub module: String,
-    pub layers: HashMap<String, Layer>,
+    module: String,
+    layers: HashMap<String, Layer>,
 }
 
 impl ModuleLayers {

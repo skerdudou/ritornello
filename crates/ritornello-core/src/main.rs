@@ -1674,11 +1674,12 @@ async fn main() -> Result<()> {
     let persisted = state::load(&state_path);
 
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
-    let catalog = Arc::new(RwLock::new(ritornello_i18n::Catalog::load(
-        "core",
+    // "en" stands in for the fallback language until a device has a real one
+    // to pass (a later task's setting); see `i18n::core_catalog`'s doc.
+    let catalog = Arc::new(RwLock::new(i18n::core_catalog(
         persisted.locale.as_deref().unwrap_or("en"),
+        "en",
         &locales_root,
-        i18n::EN,
     )));
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<InputMessage>(32);
@@ -3351,12 +3352,7 @@ mod toggle_tests {
         let (sources_catalog_tx, catalog_rx) = watch::channel(SourcesCatalog::default());
 
         let covers = Arc::new(CoverCache::new());
-        let catalog = Arc::new(RwLock::new(ritornello_i18n::Catalog::load(
-            "core",
-            "en",
-            &root,
-            crate::i18n::EN,
-        )));
+        let catalog = Arc::new(RwLock::new(crate::i18n::core_catalog("en", "en", &root)));
 
         // The one declared name, shared by the core and the hot-plug
         // children: they must agree, and a test that changes it changes both.

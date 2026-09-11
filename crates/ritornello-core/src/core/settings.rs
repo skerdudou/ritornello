@@ -28,9 +28,18 @@ impl<P: Player> Core<P> {
     /// the state: without the latter, changing language during standby left
     /// the word displayed in the old language until the next
     /// `Command::Power` cycle (see the doc of `standby_status`).
+    ///
+    /// The catalog is rebuilt through `crate::i18n::core_catalog`, which
+    /// stacks the full chain a `Registry` produces (task 4) rather than the
+    /// single-tier `Catalog::load` this used to call directly — same
+    /// construction as the core's own startup, so a locale change and a
+    /// fresh boot never resolve a key two different ways. `"en"` stands in
+    /// for the fallback language until a device has a real one to pass
+    /// (a later task's setting); until then it coincides with the
+    /// structural `en` block, which is harmless — see `Registry::chain_for`.
     pub async fn set_locale(&mut self, locale: String) -> Result<()> {
         self.locale = Some(locale.clone());
-        let new_catalog = Catalog::load("core", &locale, &self.locales_root, crate::i18n::EN);
+        let new_catalog = crate::i18n::core_catalog(&locale, "en", &self.locales_root);
         self.standby_status = Some(resolve_standby_status(&new_catalog));
         *self.catalog.write().await = new_catalog;
         self.persist();

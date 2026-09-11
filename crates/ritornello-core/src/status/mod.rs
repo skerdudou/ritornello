@@ -54,6 +54,19 @@ pub struct AppState {
     pub logs: Arc<LogBuffer>,
     pub audio_current: Arc<RwLock<Option<String>>>,
     pub audio_tx: mpsc::Sender<Option<String>>,
+    /// The core's own resolved catalog for the current locale, built by
+    /// `crate::i18n::core_catalog` — itself a `Registry`-stacked `Chain`
+    /// (task 4) wrapped back into `Catalog` for compatibility with every
+    /// existing reader of this field.
+    ///
+    /// **Stated limitation, unchanged by the registry**: this is a snapshot,
+    /// rebuilt only when something calls `Core::set_locale` (a real locale
+    /// change) — not on every read. An operator can still edit a pack on
+    /// disk without recompiling anything, and the gesture that refreshes
+    /// this field for that language is a restart of the service (or picking
+    /// the language again), exactly as before `Registry` existed:
+    /// `Registry::chain_for` itself reads the disk fresh on every call, but
+    /// nothing re-invokes it just because a file changed underneath it.
     pub catalog: Arc<RwLock<ritornello_i18n::Catalog>>,
     pub locale_current: Arc<RwLock<Option<String>>>,
     pub locale_tx: mpsc::Sender<String>,

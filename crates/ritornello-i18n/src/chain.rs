@@ -15,6 +15,24 @@ use crate::layer::Layer;
 /// English.
 pub(crate) const COMMON_EN: &str = include_str!("locales/common_en.toml");
 
+/// The `common` module's embedded English, parsed once.
+///
+/// The exact content `Catalog::load` already uses as its own fourth layer,
+/// exposed here because `ritornello_core::i18n::Registry` (task 4) needs to
+/// place it explicitly within its own language-segregated stack — the
+/// registry treats `common` like any other module, and its embedded layer
+/// has to come from somewhere other than duplicating `COMMON_EN`'s content
+/// or reaching into this crate's private constant.
+pub fn common_embedded() -> Layer {
+    match Layer::parse(COMMON_EN) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("embedded common pack invalid: {e}");
+            Layer::default()
+        }
+    }
+}
+
 /// An ordered stack of layers. The first layer to define a key wins.
 #[derive(Debug, Clone, Default)]
 pub struct Chain(Vec<Layer>);
@@ -92,6 +110,18 @@ impl Catalog {
         layers.push(embedded_common);
 
         Catalog { chain: Chain::new(layers) }
+    }
+
+    /// Wraps an already-built `Chain` as a `Catalog`.
+    ///
+    /// The seam that lets a `Registry`-produced chain (task 4,
+    /// `ritornello-core`) flow through the existing `Catalog` type without
+    /// every one of its consumers changing signature. `Catalog` is kept
+    /// deliberately through this chantier for exactly that compatibility
+    /// (see its module doc) and is expected to go away once nothing needs
+    /// it any more; this constructor exists only to bridge that transition.
+    pub fn from_chain(chain: Chain) -> Catalog {
+        Catalog { chain }
     }
 
     /// Resolves a key: `own` → `common` → the key itself.
