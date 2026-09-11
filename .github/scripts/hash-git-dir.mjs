@@ -36,32 +36,41 @@ export function hashGitDir(root) {
   const entries = []
 
   const walk = (dir) => {
-    // `withFileTypes` reports the entry itself, not what a symlink points at,
-    // which is what is wanted here: following one would hash the target and
-    // miss that a link appeared at all.
-    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      const path = join(dir, entry.name)
-      if (entry.isSymbolicLink()) {
-        entries.push(`l ${path} -> ${readlinkSync(path)}`)
-      } else if (entry.isDirectory()) {
-        entries.push(`d ${path}`)
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name)
+      // **`lstat`, not the dirent's own type flags.** `readdirSync` with
+      // `withFileTypes` reports UNKNOWN on any filesystem that does not fill
+      // in `d_type`, and a classifier that falls through to "something else"
+      // there would record every ordinary file as a mode with no content
+      // hash -- the digest would silently stop covering content, which is the
+      // fail-open direction. `lstat` answers on every filesystem, and it
+      // describes the entry itself rather than what a symlink points at:
+      // following one would hash the target and miss that a link appeared.
+      const stat = lstatSync(path)
+      if (stat.isSymbolicLink()) {
+        entries.push(['l', path, readlinkSync(path)])
+      } else if (stat.isDirectory()) {
+        entries.push(['d', path])
         walk(path)
-      } else if (entry.isFile()) {
-        entries.push(`f ${path} ${createHash('sha256').update(readFileSync(path)).digest('hex')}`)
+      } else if (stat.isFile()) {
+        entries.push(['f', path, createHash('sha256').update(readFileSync(path)).digest('hex')])
       } else {
         // A socket, a fifo, a device. None of these belongs in a git
         // directory, and refusing to classify one as "nothing" is the point:
         // its presence must change the digest.
-        const stat = lstatSync(path)
-        entries.push(`? ${path} mode=${stat.mode}`)
+        entries.push(['?', path, `mode=${stat.mode}`])
       }
     }
   }
 
   walk(root)
-  // Separator that cannot occur in any line above, so two different trees
-  // cannot produce one identical concatenation.
-  return createHash('sha256').update(entries.join('\n')).digest('hex')
+  // **JSON, not a joined string.** A separator "that cannot occur in any line
+  // above" was the first version's claim and it was false: a file name and a
+  // symlink target may both contain a newline, so `["f a", "f b"]` and
+  // `["f a\nf b"]` hashed identically -- two different trees, one digest.
+  // JSON escapes the separator inside each value, and the array structure
+  // survives it.
+  return createHash('sha256').update(JSON.stringify(entries)).digest('hex')
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

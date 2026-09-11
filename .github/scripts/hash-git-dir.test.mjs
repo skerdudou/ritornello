@@ -78,7 +78,7 @@ test('adding an empty directory changes the digest', () => {
   })
 })
 
-test('A SYMLINK APPEARING CHANGES THE DIGEST', () => {
+test('A SYMLINK APPEARING CHANGES THE DIGEST', (t) => {
   // The case the shell version missed: `find … -type f` matches no symlink, so
   // a symlinked hook was invisible to the fingerprint and would still have
   // been executed by the git command it was meant to protect.
@@ -90,7 +90,11 @@ test('A SYMLINK APPEARING CHANGES THE DIGEST', () => {
       // Windows refuses symlinks without privilege; the CI runner is Linux and
       // does not. Skipping silently would make this pass for the wrong reason.
       if (error.code === 'EPERM' || error.code === 'EACCES') {
-        console.log('    (symlink creation not permitted here; this assertion did not run)')
+        // Reported as skipped, never as passed. A test that asserts
+        // nothing while the summary says `skipped 0` is a test that lies
+        // about its own coverage -- and this is the assertion the whole
+        // module was rewritten for, so its absence has to be visible.
+        t.skip('this platform refuses to create symlinks')
         return
       }
       throw error
@@ -99,13 +103,17 @@ test('A SYMLINK APPEARING CHANGES THE DIGEST', () => {
   })
 })
 
-test('repointing a symlink changes the digest', () => {
+test('repointing a symlink changes the digest', (t) => {
   withTree((root) => {
     try {
       symlinkSync('/bin/true', join(root, 'hooks', 'pre-commit'))
     } catch (error) {
       if (error.code === 'EPERM' || error.code === 'EACCES') {
-        console.log('    (symlink creation not permitted here; this assertion did not run)')
+        // Reported as skipped, never as passed. A test that asserts
+        // nothing while the summary says `skipped 0` is a test that lies
+        // about its own coverage -- and this is the assertion the whole
+        // module was rewritten for, so its absence has to be visible.
+        t.skip('this platform refuses to create symlinks')
         return
       }
       throw error
@@ -117,7 +125,7 @@ test('repointing a symlink changes the digest', () => {
   })
 })
 
-test('replacing a file with a symlink of the same name changes the digest', () => {
+test('replacing a file with a symlink of the same name changes the digest', (t) => {
   // The nastiest shape: the entry keeps its name, so a listing that records
   // only names would not move. The type is part of each line for this reason.
   withTree((root) => {
@@ -128,7 +136,11 @@ test('replacing a file with a symlink of the same name changes the digest', () =
       symlinkSync('/bin/sh', join(root, 'hooks', 'pre-commit'))
     } catch (error) {
       if (error.code === 'EPERM' || error.code === 'EACCES') {
-        console.log('    (symlink creation not permitted here; this assertion did not run)')
+        // Reported as skipped, never as passed. A test that asserts
+        // nothing while the summary says `skipped 0` is a test that lies
+        // about its own coverage -- and this is the assertion the whole
+        // module was rewritten for, so its absence has to be visible.
+        t.skip('this platform refuses to create symlinks')
         return
       }
       throw error
@@ -142,6 +154,40 @@ test('renaming a file changes the digest', () => {
     const before = hashGitDir(root)
     renameSync(join(root, 'HEAD'), join(root, 'HEAD2'))
     assert.notEqual(hashGitDir(root), before)
+  })
+})
+
+test('a newline in a file name does not flatten into its neighbours', (t) => {
+  // The first version joined the listing with `\n` and claimed the separator
+  // "cannot occur in any line above". False: a file name may contain one, and
+  // the review demonstrated at the encoding layer that
+  // `["f R/a HA", "f R/z HZ"]` and `["f R/a HA\nf R/z HZ"]` hashed identically
+  // -- two different trees, one digest.
+  //
+  // A filesystem-level collision cannot be constructed from here, since the
+  // content hash in each line is ours and not the attacker's to choose. What
+  // this test does prove is that such a name is recorded, survives, and moves
+  // the digest -- and the encoding is now JSON, which escapes the separator
+  // inside each value instead of promising it never appears.
+  withTree((root) => {
+    const before = hashGitDir(root)
+    const nasty = join(root, 'refs', 'a\nf x')
+    try {
+      writeFileSync(nasty, 'x')
+    } catch (error) {
+      // Windows refuses a newline in a file name outright.
+      if (error.code === 'EINVAL' || error.code === 'ENOENT' || error.code === 'EPERM') {
+        t.skip('this platform refuses a newline in a file name')
+        return
+      }
+      throw error
+    }
+    const withNasty = hashGitDir(root)
+    assert.notEqual(withNasty, before)
+
+    rmSync(nasty)
+    writeFileSync(join(root, 'refs', 'a\nf y'), 'x')
+    assert.notEqual(hashGitDir(root), withNasty)
   })
 })
 

@@ -397,6 +397,48 @@ jobs:
         # which is what makes it safe to have the bumped manifests on disk
         # next to a token.
 
+      - name: Fetch this job's own tooling, from a tree the analysis never sees
+        # **Everything this job runs on the analysis's output comes from here,
+        # and here is fetched from the server.**
+        #
+        # `check-guards.mjs` and `hash-git-dir.mjs` both also exist at the
+        # workspace root, and running either from there would let the thing
+        # being checked rewrite its own checker. For the guards that is
+        # invisible, because guard 1 inspects the PULL REQUEST tree's diff and
+        # not this one. For the fingerprint it is worse: a module that echoed
+        # the contents of `git-snapshot.txt` -- which the analysis can read --
+        # would make the verdict check, the staged snapshot and the push check
+        # all agree over a tampered `pr/.git`, with the PAT in scope.
+        #
+        # The allow-list scopes the analysis to `Edit(pr/**)` plus two named
+        # files, so it should not reach the root at all. "Should not" is the
+        # problem: that rests on the action's path matching behaving as
+        # documented, which is the one thing about it that could not be
+        # established without a live run, and which is how a Critical defect
+        # reached this file once already.
+        #
+        # This checkout is the mechanism instead. It happens BEFORE the
+        # analysis step, and `actions/checkout` fetches from the server, so
+        # nothing the analysis writes can reach what lands here.
+        #
+        # Worth knowing why the inline shell it replaced did not need this.
+        # A `run:` block's text is materialised into the step's script by the
+        # runner before the job starts, so rewriting the workflow file on disk
+        # changes nothing about what executes. A `node some/script.mjs` reads
+        # its file at run time. Moving the fingerprint out of the workflow body
+        # into a module was the right call for having one implementation with
+        # tests -- but it traded an immutable text for a readable file, and
+        # this step is what pays that back.
+        if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true' && steps.bump.outputs.compatible != 'true'
+        uses: actions/checkout@v7
+        with:
+          path: tools
+          fetch-depth: 1
+          # Only the scripts are needed, and a narrower tree is one less thing
+          # for a later reader to wonder about.
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
       - name: Lay out what the analysis reads
         if: steps.pr.outputs.skip != 'true' && steps.state.outputs.round == '1' && steps.bump.outputs.unreadable != 'true' && steps.bump.outputs.compatible != 'true'
         env:
@@ -425,7 +467,7 @@ jobs:
           # the verdict step recomputes and compares before its first git
           # command. `git-snapshot.txt` lives at the workspace root, which
           # the allow-list does not let the analysis write to.
-          node .github/scripts/hash-git-dir.mjs pr/.git > git-snapshot.txt
+          node tools/.github/scripts/hash-git-dir.mjs pr/.git > git-snapshot.txt
 
           gh pr diff "$NUMBER" --repo "$REPO" > pr-diff.txt
           echo "The bump diff is $(wc -l < pr-diff.txt) lines." >> "$GITHUB_STEP_SUMMARY"
@@ -690,11 +732,15 @@ jobs:
           #
           # The PAT is never in scope while this step runs. It is declared
           # as a STEP-level `env:` on the push step alone, and a step's
-          # environment is materialised for that step only -- at the moment
-          # this analysis runs, no process on the runner holds it and it is
-          # on no disk. The deny on `Read(//proc/**)` therefore guards a
-          # secret that is not yet anywhere to be read, which is why it is
-          # kept as depth rather than relied on.
+          # environment is materialised for that step only, so it is in no
+          # environment this step can inherit and on no disk.
+          #
+          # Not "no process holds it", which would be false: the runner
+          # worker keeps every secret a job references in its own memory for
+          # the whole job. What holds is that the analysis has no way to
+          # read another process's memory -- it is given `Read`, `Glob`,
+          # `Grep`, `WebFetch` and `Edit`, no shell -- and `Read(//proc/**)`
+          # is denied on top of that.
           #
           # Nor can the analysis reach the step that does hold it. The push
           # URL is built from `github.repository` and a branch name taken
@@ -702,7 +748,9 @@ jobs:
           # none of the three is anything the analysis writes. What it CAN
           # influence is the tree that step runs `git` in -- which is what
           # the fingerprint of `pr/.git` is for, checked as the first
-          # statement of that step against a snapshot taken here.
+          # statement of that step against a snapshot taken
+          # at checkout time for the verdict step, and against a second one
+          # taken with the index staged for the push step.
           #
           # So the honest statement is no longer "there is nothing to leak"
           # but "the secret is not in scope, and the step that holds it
@@ -853,7 +901,7 @@ jobs:
           # post no comment (an attacker's report is not something to
           # publish), and exit non-zero so the job goes red and the owner
           # sees it.
-          current_git_hash="$(node .github/scripts/hash-git-dir.mjs pr/.git)"
+          current_git_hash="$(node tools/.github/scripts/hash-git-dir.mjs pr/.git)"
           expected_git_hash="$(cat git-snapshot.txt)"
           if [ "$current_git_hash" != "$expected_git_hash" ]; then
             {
@@ -942,7 +990,7 @@ jobs:
           # this workflow where an unexpected git invocation would cost the
           # most. Nothing between here and there writes to `pr/`, so the
           # check is about the step someone inserts later, not about today.
-          node .github/scripts/hash-git-dir.mjs pr/.git > git-snapshot-staged.txt
+          node tools/.github/scripts/hash-git-dir.mjs pr/.git > git-snapshot-staged.txt
 
           # `changed` is the measurement, not the model's self-report:
           # `fix.diff` is the ground truth this same step just computed, one
@@ -1017,37 +1065,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           gh pr comment "$NUMBER" --repo "$REPO" --body 'Dependabot analysis: a fix was written although CI on this head is green, so there was nothing to adapt. Nothing was pushed; this needs a human look.'
 
-      - name: Fetch the guards fresh, from a tree the analysis never saw
-        # **The guard must not come from a tree the analysis could have
-        # written to.** `check-guards.mjs` also exists at the workspace root,
-        # and running it from there would let the thing being checked rewrite
-        # its own checker -- invisibly, because guard 1 inspects the PULL
-        # REQUEST tree's diff, not this one.
-        #
-        # The allow-list already scopes the analysis to `Edit(pr/**)` plus two
-        # named files, so it should not reach the root at all. "Should not" is
-        # the problem: that rests on the action's path matching behaving as
-        # documented, which is the one thing about it that could not be
-        # established without a live run, and which is how a Critical defect
-        # reached this file once already. `actions/checkout` fetches from the
-        # server, so nothing written on this runner can reach what lands here.
-        # Same doctrine as the `pr/.git` hash: a second layer chosen because
-        # it fails independently of the first.
-        if: |
-          steps.pr.outputs.skip != 'true'
-          && steps.state.outputs.round == '1'
-          && steps.verdict.outputs.decision == 'merge'
-          && steps.verdict.outputs.changed == 'true'
-          && steps.pr.outputs.conclusion == 'failure'
-        uses: actions/checkout@v7
-        with:
-          path: guards
-          fetch-depth: 1
-          # Only the scripts are needed, and a narrower tree is one less
-          # thing for a later reader to wonder about.
-          sparse-checkout: .github/scripts
-          persist-credentials: false
-
       - name: Check the fix against the three guards
         # **This wiring has never fired.** The guards' own logic is covered
         # by 31 unit tests with mutation proof (`check-guards.test.mjs`);
@@ -1075,8 +1092,10 @@ jobs:
           && steps.pr.outputs.conclusion == 'failure'
         run: |
           set -euo pipefail
-          # From `guards/`, never from the workspace root: see above.
-          node guards/.github/scripts/check-guards.mjs fix.diff | tee -a "$GITHUB_STEP_SUMMARY"
+          # From `tools/`, never from the workspace root: that tree was
+          # fetched from the server before the analysis ran, so the module
+          # checking the fix cannot be the fix.
+          node tools/.github/scripts/check-guards.mjs fix.diff | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Refuse the fix, and say which guard stopped it
         # `steps.guards.outcome` is redundant behind the implicit `success()`
@@ -1154,7 +1173,7 @@ jobs:
           # command into arbitrary execution. Compared against the snapshot
           # the verdict step took WITH THE INDEX ALREADY STAGED, which is the
           # state this step requires.
-          current_git_hash="$(node .github/scripts/hash-git-dir.mjs pr/.git)"
+          current_git_hash="$(node tools/.github/scripts/hash-git-dir.mjs pr/.git)"
           if [ "$current_git_hash" != "$(cat git-snapshot-staged.txt)" ]; then
             {
               echo '### `pr/.git` changed after the verdict -- refusing to push'
