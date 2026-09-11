@@ -40,6 +40,11 @@ import { pathToFileURL } from 'node:url'
 // bot's account identity and not an ecosystem-specific one.
 export const DEPENDABOT_EMAIL = '49699333+dependabot[bot]@users.noreply.github.com'
 
+// `GET /repos/{o}/{r}/pulls/{n}/commits` returns at most 250 entries, and
+// `--paginate` does not lift that. Exported so the test names the same number
+// the code uses.
+export const TRUNCATION_CAP = 250
+
 export function classifyRound({ authors, ourEmail, dependabotEmail = DEPENDABOT_EMAIL }) {
   // `ourEmail` is a required input rather than a constant here on purpose: the
   // workflow declares that literal at job level because its push step needs
@@ -59,6 +64,39 @@ export function classifyRound({ authors, ourEmail, dependabotEmail = DEPENDABOT_
     }
   }
 
+  // A listing that may be truncated cannot answer "is there a stranger here".
+  // GitHub caps `pulls/{n}/commits` at 250 entries even with `--paginate`, so
+  // at that size the absence of a stranger is not evidence of absence -- and
+  // the whole precedence above turns on that absence. Refuse instead.
+  // Unreachable for a Dependabot pull request, which carries one or two
+  // commits plus at most one of ours; kept because the failure would be
+  // silent and in the wrong direction.
+  if (authors.length >= TRUNCATION_CAP) {
+    return {
+      round: 'hand',
+      note: `This pull request lists ${authors.length} commit authors, at or beyond the ${TRUNCATION_CAP} the API returns, so the listing may be truncated and the absence of a hand-written commit cannot be established.`,
+    }
+  }
+
+  // **A stranger anywhere wins, and the order of these two tests is the whole
+  // safety property.** It used to be the other way round -- ours first, on the
+  // reasoning that round 2 is "the stricter refusal". That was true while
+  // round 2 only refused. It stopped being true the moment round 2 could
+  // MERGE on a green CI, and the result was the exact hazard `hand` exists
+  // for: our fix fails, the round-2 comment invites the owner to adapt it,
+  // they push a commit, CI goes green -- and their unreviewed work is merged
+  // under them because our commit underneath still said "round 2".
+  const strangers = [...new Set(authors.filter((author) => author !== dependabotEmail && author !== ourEmail))]
+  if (strangers.length > 0) {
+    return {
+      round: 'hand',
+      note:
+        `Commits here are authored by ${strangers.map((s) => `\`${s}\``).join(', ')}, which is neither ` +
+        "Dependabot's address nor ours. Someone pushed to this branch by hand, so there is nothing here " +
+        'to decide automatically.',
+    }
+  }
+
   if (authors.includes(ourEmail)) {
     return {
       round: '2',
@@ -66,18 +104,7 @@ export function classifyRound({ authors, ourEmail, dependabotEmail = DEPENDABOT_
     }
   }
 
-  const strangers = [...new Set(authors.filter((author) => author !== dependabotEmail))]
-  if (strangers.length === 0) {
-    return { round: '1', note: null }
-  }
-
-  return {
-    round: 'hand',
-    note:
-      `Commits here are authored by ${strangers.map((s) => `\`${s}\``).join(', ')}, which is neither ` +
-      "Dependabot's address nor ours. Someone pushed to this branch by hand, so there is nothing here " +
-      'to decide automatically.',
-  }
+  return { round: '1', note: null }
 }
 
 // Entry point. Reads BOT_EMAIL and a whitespace-separated AUTHORS from the

@@ -114,3 +114,68 @@ test('the analyse job keeps exactly the scopes it needs and no others', () => {
   assert.equal(jobLevelScope(body, 'actions'), 'read', 'it reads the failing CI run log')
   assert.equal(jobLevelScope(body, 'id-token'), 'write', "claude-code-action's OIDC exchange needs it")
 })
+
+// --- The merge job's condition ----------------------------------------------
+//
+// `merge.if` is the single expression that decides whether a bump lands on
+// `main` without a human, and nothing guarded it while the same job's
+// permissions were guarded twice over. These assertions are deliberately about
+// SHAPE and not behaviour -- a workflow condition cannot be executed from here
+// -- so each names a property whose loss has a consequence, rather than pinning
+// the text.
+
+function mergeCondition(text) {
+  const blocks = jobBlocks(text)
+  const body = blocks.get('merge')
+  assert.ok(body, 'the merge job is gone; this file is reading the wrong shape')
+  const start = body.findIndex((l) => /^ {4}if: \|\s*$/.test(l))
+  assert.notEqual(start, -1, 'the merge job has no `if: |` block')
+  const rest = body.slice(start + 1)
+  const end = rest.findIndex((l) => /^ {4}\S/.test(l))
+  return rest.slice(0, end === -1 ? undefined : end).join('\n')
+}
+
+// Read inside each test, never at module level. A structural change -- the
+// merge job renamed, the `if:` block moved -- would otherwise throw while
+// the module loads, aborting every assertion in this file including the one
+// whose job is to notice exactly that. Measured: the rename mutation left
+// the job-set assertion untested until this became lazy.
+const condition = () => mergeCondition(source)
+
+test('the merge condition was actually found', () => {
+  // Without this the five assertions below could all pass against an empty
+  // string after a refactor moved the block.
+  const c = condition()
+  assert.ok(c.length > 50, `read only ${c.length} characters as the merge condition`)
+})
+
+test('the merge requires a green CI on every path into it', () => {
+  // The only evidence in the whole design that the analysis did not produce
+  // itself. Stated once, outside the round disjunction, so neither arm can be
+  // written without it.
+  assert.match(condition(), /needs\.analyse\.outputs\.conclusion == 'success'/)
+  assert.equal(condition().split("conclusion == 'success'").length - 1, 1)
+})
+
+test('both rounds are named, and no negation admits a third value', () => {
+  // Round 1 carries the verdict conditions; round 2 carries none, because no
+  // analysis runs in it. `hand` must reach neither.
+  assert.match(condition(), /needs\.analyse\.outputs\.round == '1'/)
+  assert.match(condition(), /needs\.analyse\.outputs\.round == '2'/)
+  assert.doesNotMatch(condition(), /round != /, 'a negation here would admit `hand`')
+})
+
+test('the round-1 arm still demands a merge verdict with nothing written', () => {
+  assert.match(condition(), /needs\.analyse\.outputs\.decision == 'merge'/)
+  assert.match(condition(), /needs\.analyse\.outputs\.changed != 'true'/)
+})
+
+test('no status function reopens the gate on a failed analysis', () => {
+  // `needs.analyse` failing skips this job by default; `always()` would undo
+  // that, and a failed analysis is a refusal.
+  assert.doesNotMatch(condition(), /always\(\)|failure\(\)|cancelled\(\)/)
+})
+
+test('the skip flag is still consulted', () => {
+  assert.match(condition(), /needs\.analyse\.outputs\.skip != 'true'/)
+})

@@ -310,10 +310,13 @@ jobs:
           # and a second analysis writes a second fix. `classify-round.mjs`
           # carries the reasoning and the tests.
           #
-          # One line rather than a multi-line output: an email address
-          # cannot contain a space, and a multi-line step output needs a
-          # delimiter chosen so the values cannot close it. No delimiter,
-          # nothing to guess.
+          # One line rather than a multi-line output, which would need a
+          # delimiter chosen so the values cannot close it. A git author
+          # email is whatever the pusher wrote and CAN contain a space, so
+          # this is not a claim that the split is faithful -- an address
+          # carrying one splits into two entries, neither matches anything,
+          # and the verdict is `hand`. That is the fail-closed direction,
+          # which is why it is left to happen rather than guarded against.
           authors="$(gh api "repos/$REPO/pulls/$number/commits" --paginate --jq '.[].commit.author.email' | tr '\n' ' ')"
           state="$(gh pr view "$number" --repo "$REPO" --json state --jq .state)"
           auto="$(gh pr view "$number" --repo "$REPO" --json autoMergeRequest --jq 'if .autoMergeRequest then "queued" else "open" end')"
@@ -343,9 +346,10 @@ jobs:
           set -euo pipefail
           # Three states, and the third one is the point: "not ours" is not
           # the same claim as "Dependabot's". The predicate lives in a script
-          # so the CI tests cover it -- eight cases, including a hand commit,
-          # an empty author and a lookalike address, all of which a two-state
-          # test would call a pristine round 1. The reasoning is in the file.
+          # so the CI tests cover it -- including a hand commit, an empty
+          # author, a lookalike address and a listing at the API cap, none of
+          # which a two-state test refuses. The reasoning, and the reason a
+          # stranger outranks a round-2 state, are in the file.
           #
           # A round with nothing to say prints nothing, so `tee` appends
           # nothing to the summary for an ordinary first round.
@@ -1309,21 +1313,32 @@ jobs:
 
           {
             echo "Pushed a fix to \`$branch\`: $summary"
-            # Deliberately does not promise a merge. Nothing acts on
-            # `round == '2'` yet -- the `merge` job gates on round 1 -- and
-            # the fast path will not take it either, since a bump the caret
-            # rule called compatible never reaches this step. Saying "round
-            # 2 will queue the merge" would describe a step that does not
-            # exist.
+            # Says what CI decides, and no more. The `merge` job does now
+            # take round 2 with a green CI, so a merge is one possible
+            # outcome -- but so is the round-2 stop, and so is `hand` if
+            # anyone pushes to the branch in between. Naming one of the
+            # three here would be a guess about which.
             echo "CI decides now."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Round 2, CI red -- stop, and do not try again
-        # **The bound on the loop.** Our push triggers `synchronize`, `ci.yml`
-        # returns, and `workflow_run` returns -- which is wanted, it is how the
-        # fix gets validated. What must be bounded is the number of attempts:
-        # in round 2 no analysis is convoked and no fix is written, so a bump
-        # that cannot be adapted costs one analysis and one fix, not a loop.
+        # **The bound on the loop, and it bounds FIXES rather than analyses.**
+        # Our push triggers `synchronize`, `ci.yml` returns, and `workflow_run`
+        # returns -- which is wanted, it is how the fix gets validated. What
+        # must be bounded is the number of attempts: in round 2 no analysis is
+        # convoked and no fix is written, so a bump we pushed a fix for and
+        # could not adapt costs one analysis and one fix.
+        #
+        # It does NOT bound the number of analyses on a pull request that
+        # never received a fix. A `read-it` verdict, a guard refusal or a
+        # declined push all leave no commit of ours, so the pull request stays
+        # in round 1 and every later CI completion -- each Dependabot rebase
+        # when `main` moves, every re-run -- convokes a fresh analysis. That
+        # is a real recurring cost on a pull request left open, roughly the
+        # price of one analysis each time. Bounding it is a separate decision
+        # about how often a refusal should be reconsidered, not something to
+        # slip in here; what is not acceptable is a comment claiming a bound
+        # that is not there, which is what this paragraph replaces.
         #
         # The round is decided on EVERY commit author on the pull request, not
         # the head's. See `classify-round.mjs`: reading the head alone let one
@@ -1352,8 +1367,22 @@ jobs:
           # A failure of the lookup lands on "post it", not on "stay silent":
           # saying it twice is a nuisance, not saying it at all leaves a pull
           # request that has quietly given up.
+          #
+          # **To a file, never through a pipe into `grep -q`.** `grep -q`
+          # exits as soon as it matches and closes the pipe; `gh` then dies
+          # on EPIPE, `pipefail` makes the whole pipeline fail, and the `if`
+          # reads false -- so FINDING the marker would have posted the
+          # comment again. Measured: a small producer skips correctly, a
+          # 2 MB one posts anyway, and the report comment alone runs to
+          # 60 000 bytes against a 64 KB pipe buffer, so a busy pull request
+          # reaches it.
+          #
+          # Only our own comments are searched. Matching every body would
+          # let anyone suppress this notice by quoting the marker, and the
+          # step says itself that staying silent is the worse direction.
           marker='<!-- dependabot-analysis: round-2-stop -->'
-          if gh pr view "$NUMBER" --repo "$REPO" --json comments --jq '.comments[].body' | grep -qF "$marker"; then
+          gh pr view "$NUMBER" --repo "$REPO" --json comments --jq '.comments[] | select(.author.login == "github-actions") | .body' > existing-comments.txt
+          if grep -qF "$marker" existing-comments.txt; then
             echo "Round 2 red on #$NUMBER: already said so, not repeating it." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -1453,18 +1482,35 @@ jobs:
     # branch answers `read-it` for exactly that case -- case 3 of the
     # enumeration there. Do not relax either half.
     #
-    # **Two ways in, and round 2 is the second.** `gh pr merge --auto`
-    # needs `contents: write`, which only this job has -- so the round-2
-    # merge belongs here and not as a step in `analyse`, exactly as the
-    # round-1 one does. Round 2 with green CI means a fix this workflow
-    # wrote was validated by CI rather than by the agent that wrote it,
-    # which is the whole shape of the design.
+    # **Two ways in, and round 2 is the second.** `gh pr merge --auto` needs
+    # `contents: write` -- read, not measured, as the paragraph above this
+    # job records -- and only this job has it, so the round-2 merge belongs
+    # here and not as a step in `analyse`, exactly as the round-1 one does.
+    # Round 2 with green CI means a fix this workflow wrote was validated by
+    # CI rather than by the agent that wrote it, which is the whole shape of
+    # the design.
     #
     # Round 2 asks for nothing about `decision` or `changed`: no analysis
     # runs in round 2, so both are the empty string, and requiring them
-    # would make this branch unreachable. What stands in their place is
-    # that a round-2 state can only exist because this workflow pushed a
-    # commit, and it only pushed one that passed the three guards.
+    # would make this branch unreachable.
+    #
+    # What stands in their place is NOT "this workflow pushed that commit",
+    # which would be false: the round is inferred from a git author email,
+    # a field whoever pushes sets. What holds is narrower and is enough --
+    # the resolve step verifies `head.repo.full_name` is this repository,
+    # so every commit on the branch was pushed by someone with write access
+    # here, and such a person can merge the pull request themselves. A
+    # forged round 2 is a writer choosing to merge, not an escalation.
+    #
+    # It does have one sharp consequence worth knowing before rehearsing:
+    # **pushing an empty commit under the bot identity onto a Dependabot
+    # pull request whose CI is green will queue a real merge**, with no
+    # analysis anywhere in the path. Rehearse the round-2 bound on a RED
+    # pull request, or on a branch that is not a Dependabot one.
+    #
+    # A stranger among the authors refuses before any of this: `hand` beats
+    # both rounds, which is what stops the owner's own adaptation of a
+    # failed fix being merged under them.
     if: |
       needs.analyse.outputs.skip != 'true'
       && (
