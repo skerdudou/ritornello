@@ -78,6 +78,7 @@ jobs:
             .github/scripts/check-workflow-permissions.test.mjs
             .github/scripts/classify-bump.test.mjs
             .github/scripts/classify-round.test.mjs
+            .github/scripts/hash-git-dir.test.mjs
             .github/scripts/read-bump-metadata.test.mjs
           )
           for f in "${tests[@]}"; do

@@ -91,6 +91,10 @@ permissions:
 jobs:
   analyse:
     runs-on: ubuntu-latest
+    # Above the 20 minutes the analysis step may take, and well below the
+    # six-hour default: a job that hangs holds its branch's concurrency
+    # group, and every later run for that pull request waits behind it.
+    timeout-minutes: 45
     # Narrowed back from the workflow-level ceiling above, and this is the
     # job the narrowing is for: it runs a model, and it holds a checkout of
     # the pull request head under `pr/`. `contents: read` means that even a
@@ -421,7 +425,7 @@ jobs:
           # the verdict step recomputes and compares before its first git
           # command. `git-snapshot.txt` lives at the workspace root, which
           # the allow-list does not let the analysis write to.
-          find pr/.git -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 > git-snapshot.txt
+          node .github/scripts/hash-git-dir.mjs pr/.git > git-snapshot.txt
 
           gh pr diff "$NUMBER" --repo "$REPO" > pr-diff.txt
           echo "The bump diff is $(wc -l < pr-diff.txt) lines." >> "$GITHUB_STEP_SUMMARY"
@@ -677,12 +681,33 @@ jobs:
           # notes this prompt is sent to find actually live on -- a plain
           # domain match, which unlike a path glob does not depend on how the
           # matcher treats a dotted directory. **Neither of those is why this
-          # step is safe to run.** The reason is that this job holds
-          # `contents: read` and no PAT at this stage: there is nothing of
-          # consequence to leak even past a hole in either list. Task 7
-          # introduces a PAT into this same job -- when it does, this
-          # sentence stops being true, and whoever adds it must re-examine
-          # both lists rather than inherit this reasoning unchanged.
+          # step is safe to run.**
+          #
+          # The reason used to be "this job holds `contents: read` and no
+          # PAT", and that sentence asked whoever introduced a PAT to
+          # re-examine both lists rather than inherit it. A PAT now lives in
+          # the push step of this same job, so here is that re-examination.
+          #
+          # The PAT is never in scope while this step runs. It is declared
+          # as a STEP-level `env:` on the push step alone, and a step's
+          # environment is materialised for that step only -- at the moment
+          # this analysis runs, no process on the runner holds it and it is
+          # on no disk. The deny on `Read(//proc/**)` therefore guards a
+          # secret that is not yet anywhere to be read, which is why it is
+          # kept as depth rather than relied on.
+          #
+          # Nor can the analysis reach the step that does hold it. The push
+          # URL is built from `github.repository` and a branch name taken
+          # from the event payload or from `gh pr view --json headRefName`;
+          # none of the three is anything the analysis writes. What it CAN
+          # influence is the tree that step runs `git` in -- which is what
+          # the fingerprint of `pr/.git` is for, checked as the first
+          # statement of that step against a snapshot taken here.
+          #
+          # So the honest statement is no longer "there is nothing to leak"
+          # but "the secret is not in scope, and the step that holds it
+          # takes nothing from this one that is not verified first". Weaker,
+          # and true. Anyone widening the tool list should come back here.
           #
           # The host list covers where the notes for our dependencies
           # actually live: GitHub releases and raw file contents
@@ -828,7 +853,7 @@ jobs:
           # post no comment (an attacker's report is not something to
           # publish), and exit non-zero so the job goes red and the owner
           # sees it.
-          current_git_hash="$(find pr/.git -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+          current_git_hash="$(node .github/scripts/hash-git-dir.mjs pr/.git)"
           expected_git_hash="$(cat git-snapshot.txt)"
           if [ "$current_git_hash" != "$expected_git_hash" ]; then
             {
@@ -917,7 +942,7 @@ jobs:
           # this workflow where an unexpected git invocation would cost the
           # most. Nothing between here and there writes to `pr/`, so the
           # check is about the step someone inserts later, not about today.
-          find pr/.git -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 > git-snapshot-staged.txt
+          node .github/scripts/hash-git-dir.mjs pr/.git > git-snapshot-staged.txt
 
           # `changed` is the measurement, not the model's self-report:
           # `fix.diff` is the ground truth this same step just computed, one
@@ -958,6 +983,40 @@ jobs:
             fi
           fi
 
+      - name: Refuse a fix written over a green CI
+        # **A fix written when nothing was broken is a contradiction, and it
+        # used to be pushed.** The fix path was gated on `decision == 'merge'`
+        # and `changed == 'true'` and nothing else, so an analysis that edited
+        # `pr/` on a GREEN pull request reached the guards -- which only know
+        # about `.github/`, silenced tests and install scripts, and would pass
+        # an arbitrary source edit -- and then the push. Round 2 would then
+        # find green CI and merge it, with no human anywhere in the path.
+        #
+        # Prompt rule 5 says to edit only when CI is red. That is an
+        # instruction, and instructions are not the mechanism this design
+        # relies on; the `merge` job already makes the symmetric check
+        # (`conclusion == 'success'` required before merging a bump with
+        # nothing written) and explains why. This is the other half of it.
+        #
+        # Loud rather than silent: an analysis that edited files it was told
+        # not to edit is something to look at, not something to drop.
+        if: |
+          steps.pr.outputs.skip != 'true'
+          && steps.state.outputs.round == '1'
+          && steps.verdict.outputs.changed == 'true'
+          && steps.pr.outputs.conclusion == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          {
+            echo '### A fix was written over a green CI -- refusing'
+            echo 'The analysis edited files although CI on this head had already passed, so there was nothing to adapt. Nothing was pushed and nothing will merge.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$NUMBER" --repo "$REPO" --body 'Dependabot analysis: a fix was written although CI on this head is green, so there was nothing to adapt. Nothing was pushed; this needs a human look.'
+
       - name: Fetch the guards fresh, from a tree the analysis never saw
         # **The guard must not come from a tree the analysis could have
         # written to.** `check-guards.mjs` also exists at the workspace root,
@@ -979,6 +1038,7 @@ jobs:
           && steps.state.outputs.round == '1'
           && steps.verdict.outputs.decision == 'merge'
           && steps.verdict.outputs.changed == 'true'
+          && steps.pr.outputs.conclusion == 'failure'
         uses: actions/checkout@v7
         with:
           path: guards
@@ -990,7 +1050,7 @@ jobs:
 
       - name: Check the fix against the three guards
         # **This wiring has never fired.** The guards' own logic is covered
-        # by 27 unit tests with mutation proof (`check-guards.test.mjs`);
+        # by 31 unit tests with mutation proof (`check-guards.test.mjs`);
         # what is untested is the path between them and the push -- a guard
         # refusing, the comment going out, nothing being pushed.
         #
@@ -1012,6 +1072,7 @@ jobs:
           && steps.state.outputs.round == '1'
           && steps.verdict.outputs.decision == 'merge'
           && steps.verdict.outputs.changed == 'true'
+          && steps.pr.outputs.conclusion == 'failure'
         run: |
           set -euo pipefail
           # From `guards/`, never from the workspace root: see above.
@@ -1052,6 +1113,10 @@ jobs:
           gh pr comment "$NUMBER" --repo "$REPO" --body-file guard-refusal.md
 
       - name: Commit the fix and push it, so CI can judge it
+        # Three network operations. `cancel-in-progress: false` means a hung
+        # step holds this branch's concurrency group for as long as it hangs,
+        # so the six-hour job default is not a ceiling worth inheriting here.
+        timeout-minutes: 10
         if: steps.guards.outcome == 'success' && steps.guards.outputs.ok == 'true'
         env:
           # **The write token appears here and nowhere else**, and it is
@@ -1089,7 +1154,7 @@ jobs:
           # command into arbitrary execution. Compared against the snapshot
           # the verdict step took WITH THE INDEX ALREADY STAGED, which is the
           # state this step requires.
-          current_git_hash="$(find pr/.git -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+          current_git_hash="$(node .github/scripts/hash-git-dir.mjs pr/.git)"
           if [ "$current_git_hash" != "$(cat git-snapshot-staged.txt)" ]; then
             {
               echo '### `pr/.git` changed after the verdict -- refusing to push'
@@ -1127,9 +1192,15 @@ jobs:
           # and would run the clean filters a second time for no reason.
           # Commit the index that was judged, nothing else.
           #
-          # `-c` rather than `git config`: setting the identity in the
-          # repository would write `pr/.git/config` and invalidate the hash
-          # checked above, for a value needed exactly once.
+          # `-c` rather than `git config`, and the honest reason is not the
+          # one first written here. It is NOT that writing `pr/.git/config`
+          # would invalidate the hash: the hash is compared once, as the
+          # first statement above, and never read again -- a later write
+          # would go unnoticed. The reason is simpler and stands on its own:
+          # this job has no business mutating the pull request's git
+          # directory at all, for a value needed exactly once, and leaving
+          # it untouched keeps the fingerprint above meaningful for anyone
+          # who adds a second check later.
           git -C pr \
             -c user.name='github-actions[bot]' \
             -c user.email="$BOT_EMAIL" \
@@ -1171,7 +1242,13 @@ jobs:
 
           {
             echo "Pushed a fix to \`$branch\`: $summary"
-            echo "CI decides now. Round 2 will queue the merge if it passes."
+            # Deliberately does not promise a merge. Nothing acts on
+            # `round == '2'` yet -- the `merge` job gates on round 1 -- and
+            # the fast path will not take it either, since a bump the caret
+            # rule called compatible never reaches this step. Saying "round
+            # 2 will queue the merge" would describe a step that does not
+            # exist.
+            echo "CI decides now."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Say why the merge is waiting
