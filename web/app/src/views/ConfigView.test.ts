@@ -38,6 +38,7 @@ const CATALOGUE = {
   plugin_order_note: "L'ordre commande la clé de source et la priorité des métadonnées.",
   audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
   language: 'Langue', save: 'Enregistrer', ok: 'OK',
+  display_card_title: 'Langue et affichage', player_card_title: 'Lecteur',
   recent_errors: 'Dernières erreurs',
   startup_title: 'Démarrage', startup_on: 'allumé', startup_standby: 'veille',
   clock_title: 'Date et heure', clock_date_label: 'Date', clock_hours_label: 'Heures',
@@ -750,24 +751,71 @@ describe('ConfigView — plugin table', () => {
   })
 })
 
-describe('ConfigView — language', () => {
+describe('ConfigView — language and display', () => {
   beforeEach(resetMocks)
 
-  it('sends the language PUT then reloads the catalog', async () => {
+  it('writes the settings before the locale, so a reload cannot erase them', async () => {
+    // `PUT /api/locale` reloads the whole page state behind it. Sent first,
+    // it would pull the server's old settings back over the ones the owner
+    // just typed — a changed date silently reverting. The order is the fix,
+    // and this test is what holds it.
+    const { w, puts } = await mountView({})
+    // Both fields of this card moved: one ordinary setting and the
+    // language. Set through the bound state rather than through the
+    // Select's own menu — reka-ui reads an option's text once at mount
+    // (see the repository's note on `SelectValue`), and this test is
+    // about the order of two writes, not about the widget.
+    const vm = w.vm as unknown as {
+      settings: { date_format: string }
+      lang: string
+    }
+    vm.settings.date_format = 'year_month_day'
+    vm.lang = 'en'
+    await w.vm.$nextTick()
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+    const urls = puts.map((p) => p.url)
+    expect(urls.indexOf('/api/settings')).toBeLessThan(urls.indexOf('/api/locale'))
+  })
+
+  it('does not touch the locale route when the language was not changed', async () => {
+    // Otherwise every save of a date format would reload the whole state
+    // for nothing, and the page would flicker on an ordinary gesture.
+    const { w, puts } = await mountView({})
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+    expect(puts.map((p) => p.url)).not.toContain('/api/locale')
+  })
+
+  it('sends the settings then the language PUT, and reloads the catalog', async () => {
     // Changing the language reloads the catalogs instead of reloading the whole
     // page as the old UI did: it is `loadAll()` (and its `reload()`) that
     // replaces `location.reload()`. So the test checks that a second
-    // `GET /api/i18n` does follow the PUT.
+    // `GET /api/i18n` does follow the two PUTs.
     const { w, spy, puts } = await mountView()
     const before = spy.mock.calls.filter((c) => c[0] === '/api/i18n').length
     expect(before).toBeGreaterThan(0) // loaded at mount
 
     await w.findAllComponents(Select)[3]!.vm.$emit('update:modelValue', 'en')
-    await w.find('[data-lang-change]').trigger('click')
+    await w.find('[data-display-change]').trigger('click')
     await flushPromises()
 
-    expect(puts).toEqual([{ url: '/api/locale', body: { locale: 'en' } }])
-    // The catalog was re-read after the PUT — otherwise the UI would stay
+    expect(puts).toEqual([
+      {
+        url: '/api/settings',
+        body: {
+          volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
+          overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+          cover_cache_budget_mio: 50, cover_download_max_mio: 2,
+          cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
+          cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
+          update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
+          update_prereleases: false,
+        },
+      },
+      { url: '/api/locale', body: { locale: 'en' } },
+    ])
+    // The catalog was re-read after the PUTs — otherwise the UI would stay
     // displayed in the old language until the next manual reload.
     expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBeGreaterThan(before)
   })
@@ -799,7 +847,7 @@ describe('ConfigView — language', () => {
       audio_default_device: 'System default',
     }
     await w.findAllComponents(Select)[3]!.vm.$emit('update:modelValue', 'en')
-    await w.find('[data-lang-change]').trigger('click')
+    await w.find('[data-display-change]').trigger('click')
     await flushPromises()
 
     expect(w.get('[data-startup-select]').text()).toContain('on')
@@ -818,14 +866,20 @@ describe('ConfigView — language', () => {
     expect(texts).not.toContain('fr')
   })
 
-  it('a failed language PUT is reported and reloads nothing', async () => {
+  it('a failed settings PUT is reported and the locale route is never reached', async () => {
+    // Partial failure, exactly as `saveDisplay`'s doc comment describes it:
+    // the first error wins and the second write does not happen. The
+    // settings PUT is always first, so with every PUT failing alike (this
+    // harness's `putError` does not distinguish routes) it is the one that
+    // fails, and the locale route and the reload it would have triggered are
+    // never reached.
     const { w, spy } = await mountView({}, 'unknown language')
     const before = spy.mock.calls.filter((c) => c[0] === '/api/i18n').length
-    await w.find('[data-lang-change]').trigger('click')
+    await w.find('[data-display-change]').trigger('click')
     await flushPromises()
     expect(toast.error).toHaveBeenCalledWith('unknown language')
-    // No reload: the language did not change on the server side, re-reading
-    // the catalogs would only hide the failure behind an unchanged UI.
+    // No reload: the settings PUT never succeeded, re-reading the catalogs
+    // would only hide the failure behind an unchanged UI.
     expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBe(before)
   })
 })
@@ -1002,7 +1056,7 @@ describe('ConfigView — settings', () => {
     const { w, puts } = await mountView()
     await w.find('[data-hold-initial]').setValue('1500')
     await w.find('[data-hold-interval]').setValue('300')
-    await w.find('[data-hold-change]').trigger('click')
+    await w.find('[data-player-change]').trigger('click')
     await flushPromises()
     expect(puts).toEqual([
       {
@@ -1022,7 +1076,7 @@ describe('ConfigView — settings', () => {
 
   it('a refused settings PUT is reported by a toast', async () => {
     const { w } = await mountView({}, 'initial delay out of bounds (200-5000 ms)')
-    await w.find('[data-hold-change]').trigger('click')
+    await w.find('[data-player-change]').trigger('click')
     await flushPromises()
     expect(toast.error).toHaveBeenCalledWith('initial delay out of bounds (200-5000 ms)')
   })
@@ -1054,7 +1108,7 @@ describe('ConfigView — overlays', () => {
     const { w, puts } = await mountView()
     await w.find('[data-overlay-ms]').setValue('2000')
     await w.find('[data-tens-window-ms]').setValue('7000')
-    await w.find('[data-overlays-change]').trigger('click')
+    await w.find('[data-display-change]').trigger('click')
     await flushPromises()
     expect(puts).toEqual([
       {
@@ -1075,7 +1129,7 @@ describe('ConfigView — overlays', () => {
 
   it('an out-of-bounds PUT is reported by a toast', async () => {
     const { w } = await mountView({}, 'overlay out of bounds (1000-15000 ms)')
-    await w.find('[data-overlays-change]').trigger('click')
+    await w.find('[data-display-change]').trigger('click')
     await flushPromises()
     expect(toast.error).toHaveBeenCalledWith('overlay out of bounds (1000-15000 ms)')
   })
@@ -1087,7 +1141,7 @@ describe('ConfigView — seek', () => {
   it('sends the seek step', async () => {
     const { w, puts } = await mountView()
     await w.find('[data-seek-step-s]').setValue('30')
-    await w.find('[data-seek-change]').trigger('click')
+    await w.find('[data-player-change]').trigger('click')
     await flushPromises()
     const sentBody = puts[0]!.body as { seek_step_s: number }
     expect(sentBody.seek_step_s).toBe(30)
@@ -1552,7 +1606,7 @@ describe('ConfigView — update', () => {
       update_cadence_daily: 'daily (en)',
     }
     await w.findAllComponents(Select)[3]!.vm.$emit('update:modelValue', 'en')
-    await w.find('[data-lang-change]').trigger('click')
+    await w.find('[data-display-change]').trigger('click')
     await flushPromises()
 
     expect(w.get('[data-update-policy]').text()).toContain('off (en)')
@@ -1567,14 +1621,24 @@ describe('ConfigView — table of contents', () => {
     const { w } = await mountView()
     const links = w.findAll('[data-toc-link]')
     // No more "Dernières erreurs": the card moved to the System tab, and the
-    // table of contents must not keep an entry pointing at nothing.
+    // table of contents must not keep an entry pointing at nothing. Ten cards
+    // are seven here (task 4): "Langue et affichage" folds in the old
+    // "Langue", "Date et heure" and "Incrustations" entries, and "Lecteur"
+    // folds in "Volume maintenu" and "Déplacement".
     expect(links.map((l) => l.text())).toEqual([
-      'Mises à jour', 'Plugins', 'Sortie audio', 'Langue', 'Démarrage', 'Date et heure', 'Volume maintenu',
-      'Incrustations', 'Déplacement', "Pochettes d'album",
+      'Mises à jour', 'Plugins', 'Sortie audio', 'Langue et affichage', 'Démarrage', 'Lecteur',
+      "Pochettes d'album",
     ])
     // Hidden on small screens: the column follows the shell width, there is no
     // room for it on mobile.
     expect(w.find('[data-toc]').classes()).toContain('hidden')
+  })
+
+  it('lists one entry per card, not one per former card', async () => {
+    const { w } = await mountView({})
+    const entries = w.findAll('[data-toc-link]').map((l) => l.text())
+    expect(entries).toHaveLength(7)
+    expect(entries).not.toContain('Incrustations')
   })
 
   it('a click smoothly scrolls to the section and marks it active', async () => {
@@ -1595,16 +1659,16 @@ describe('ConfigView — table of contents', () => {
     // "Changer" in nine places. The owner asked for consistency, so the
     // word is theirs, not a new one.
     //
-    // **The count is a fact about the card layout, and task 4 changes
-    // it**: merging ten cards into seven merges three save buttons into
-    // one (language + date/time + overlays) and two into one (volume
-    // hold + seeking), so this number becomes **6** there. Update it
-    // when that task turns it red; do not delete the count — it is the
-    // only test proving all nine sites were renamed rather than most.
+    // **The count is a fact about the card layout, and task 4 changed
+    // it**: merging ten cards into seven merged three save buttons into
+    // one (language + date/time + overlays, now `saveDisplay`) and two
+    // into one (volume hold + seeking, now one `saveSettings` button), so
+    // nine becomes **six**. Do not delete the count — it is the only test
+    // proving every site was renamed rather than most.
     const { w } = await mountView({})
     const texts = w.findAll('button').map((b) => b.text())
     expect(texts).not.toContain('Changer')
-    expect(texts.filter((t) => t === 'Enregistrer')).toHaveLength(9)
+    expect(texts.filter((t) => t === 'Enregistrer')).toHaveLength(6)
   })
 
   it('says what the volume-hold delays actually govern', async () => {
@@ -1618,11 +1682,11 @@ describe('ConfigView — table of contents', () => {
   it('scrolling updates the active section (scrollspy)', async () => {
     const { w } = await mountView()
     expect(ioCallback).not.toBeNull()
-    ioCallback!([{ target: w.find('#language').element, isIntersecting: true }])
+    ioCallback!([{ target: w.find('#display').element, isIntersecting: true }])
     ioCallback!([{ target: w.find('#plugins').element, isIntersecting: false }])
     await w.vm.$nextTick()
     const activeLinks = w.findAll('[data-toc-link][aria-current="true"]')
     expect(activeLinks).toHaveLength(1)
-    expect(activeLinks[0]!.text()).toBe('Langue')
+    expect(activeLinks[0]!.text()).toBe('Langue et affichage')
   })
 })

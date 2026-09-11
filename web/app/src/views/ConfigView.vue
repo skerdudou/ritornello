@@ -24,6 +24,10 @@ const audio = ref<AudioPayload>({ devices: [], current: null })
 const locale = ref<LocalePayload>({ locales: [], current: null })
 const device = ref('')
 const lang = ref('')
+// The language `loadAll()` last read from the server, kept apart from `lang`
+// (the Select's own binding): `saveDisplay` compares the two to decide
+// whether the locale route needs a write at all.
+const loadedLocale = ref('')
 const audioUnavailable = ref(false)
 const settings = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
@@ -314,7 +318,7 @@ function onCadenceKindChange(kind: unknown) {
 
 async function loadAll() {
   // Needed here, not redundant: this is what reloads the catalog after a
-  // successful language change (see `changeLanguage` below), in place of the
+  // successful language change (see `saveDisplay` below), in place of the
   // old `location.reload()`.
   await reload()
   // Re-reads the plugin state **and** arms the watch over the "stalled" window
@@ -335,6 +339,7 @@ async function loadAll() {
   // discards the sound, at the top of `aplay -L`).
   device.value = audio.value.current ?? SYSTEM_DEFAULT
   lang.value = locale.value.current ?? 'en'
+  loadedLocale.value = lang.value
 }
 
 onMounted(loadAll)
@@ -713,8 +718,13 @@ async function changeOutput() {
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
 
-async function saveSettings() {
-  const err = await api.put('/api/settings', {
+/**
+ * The `/api/settings` body, shared by every card that writes it
+ * (`saveSettings` and `saveDisplay`): a single conversion list rather than
+ * two copies that would drift.
+ */
+function settingsPayload() {
+  return {
     ...settings.value,
     volume_repeat_initial_ms: Number(settings.value.volume_repeat_initial_ms),
     volume_repeat_interval_ms: Number(settings.value.volume_repeat_interval_ms),
@@ -739,7 +749,11 @@ async function saveSettings() {
     cover_passthrough_max_ko: Number(settings.value.cover_passthrough_max_ko),
     cover_max_pixels_mpx: Number(settings.value.cover_max_pixels_mpx),
     update_hour: Number(settings.value.update_hour),
-  })
+  }
+}
+
+async function saveSettings() {
+  const err = await api.put('/api/settings', settingsPayload())
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
 
@@ -804,12 +818,36 @@ async function onConfirmInstall(names: string[]) {
   await refreshUpdate()
 }
 
-// Changing the language reloads the catalogs instead of reloading the whole
-// page as the old UI did.
-async function changeLanguage() {
-  const err = await api.put('/api/locale', { locale: lang.value })
+/**
+ * Saves the "Language and display" card: the ordinary settings first, the
+ * language only if it moved.
+ *
+ * **The order is load-bearing.** `PUT /api/locale` is followed by a full
+ * reload of the page state (`loadAll`), which overwrites `settings` with what
+ * the server holds. Sent before the settings `PUT`, it would therefore
+ * discard every field of this card the owner had just edited — a date format
+ * quietly reverting, with no error anywhere. A test pins the order.
+ *
+ * The language `PUT` is skipped when the selection has not moved: otherwise
+ * saving a date format would reload the whole state for nothing, and the page
+ * would flicker on an ordinary gesture.
+ *
+ * Partial failure is a real state and is reported honestly: the first error
+ * wins and the second write does not happen.
+ */
+async function saveDisplay() {
+  const err = await api.put('/api/settings', settingsPayload())
   if (err) {
     toast.error(err)
+    return
+  }
+  if (lang.value === loadedLocale.value) {
+    toast.success(t.value('ok'))
+    return
+  }
+  const localeErr = await api.put('/api/locale', { locale: lang.value })
+  if (localeErr) {
+    toast.error(localeErr)
     return
   }
   await loadAll()
@@ -824,12 +862,9 @@ const SECTIONS = [
   { id: 'update', key: 'update_title' },
   { id: 'plugins', key: 'plugins_title' },
   { id: 'audio', key: 'audio_output' },
-  { id: 'language', key: 'language' },
+  { id: 'display', key: 'display_card_title' },
   { id: 'startup', key: 'startup_title' },
-  { id: 'clock', key: 'clock_title' },
-  { id: 'volume-hold', key: 'volume_hold_title' },
-  { id: 'overlays', key: 'overlays_title' },
-  { id: 'seek', key: 'seek_card_title' },
+  { id: 'player', key: 'player_card_title' },
   { id: 'covers', key: 'cover_card_title' },
 ] as const
 
@@ -1243,21 +1278,76 @@ function goTo(id: string) {
         </Card>
       </section>
 
-      <section id="language" class="scroll-mt-6">
+      <!-- Language and display: the owner's own three pairings ("language
+           goes with date/time", "date/time is display", "overlays are
+           display") only resolve into distinct cards if read in isolation —
+           together they name one card, not two. One button, because the two
+           routes behind it interact: see `saveDisplay`. -->
+      <section id="display" class="scroll-mt-6">
         <Card>
-          <CardHeader><CardTitle>{{ t('language') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-center gap-2">
-            <Select v-model="lang">
-              <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue>{{ languageLabel }}</SelectValue></SelectTrigger>
-              <SelectContent>
-                <!-- Name of the language and not its code: "français" is read,
-                     "fr" is guessed. The code remains the value sent to the core. -->
-                <SelectItem v-for="l in locale.locales" :key="l" :value="l">
-                  {{ languageName(l) }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Button data-lang-change @click="changeLanguage">{{ t('save') }}</Button>
+          <CardHeader><CardTitle>{{ t('display_card_title') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-col gap-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <Select v-model="lang">
+                <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue>{{ languageLabel }}</SelectValue></SelectTrigger>
+                <SelectContent>
+                  <!-- Name of the language and not its code: "français" is read,
+                       "fr" is guessed. The code remains the value sent to the core. -->
+                  <SelectItem v-for="l in locale.locales" :key="l" :value="l">
+                    {{ languageName(l) }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <!-- Date and time. Two separate settings, at the owner's request: the
+                 order of a date and the 12/24 h format do not vary together from one
+                 country to another. No time zone setting — the display runs on the
+                 device, the page formats in the browser's time zone, and a third
+                 setting could only contradict one of the two. -->
+            <div class="flex flex-wrap items-end gap-4 border-t border-border pt-4">
+              <label class="grid gap-1 text-sm">
+                {{ t('clock_date_label') }}
+                <Select v-model="settings.date_format">
+                  <SelectTrigger class="min-w-36" data-date-format-select :aria-label="t('clock_date_label')"><SelectValue>{{ dateFormatLabel }}</SelectValue></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="day_month_year">{{ t('clock_date_dmy') }}</SelectItem>
+                    <SelectItem value="year_month_day">{{ t('clock_date_ymd') }}</SelectItem>
+                    <SelectItem value="month_day_year">{{ t('clock_date_mdy') }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <label class="grid gap-1 text-sm">
+                {{ t('clock_hours_label') }}
+                <!-- A boolean rendered as two named choices rather than a
+                     checkbox: "24 h" is not the absence of "12 h", and a checkbox
+                     labelled "24 h" would read badly when unchecked. -->
+                <Select :model-value="settings.clock_24h ? '24' : '12'"
+                        @update:model-value="(v) => (settings.clock_24h = v === '24')">
+                  <SelectTrigger class="min-w-36" data-clock-hours-select :aria-label="t('clock_hours_label')"><SelectValue>{{ clockHoursLabel }}</SelectValue></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="24">{{ t('clock_24h') }}</SelectItem>
+                    <SelectItem value="12">{{ t('clock_12h') }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <p class="w-full text-sm text-muted-foreground">{{ t('clock_hint') }}</p>
+            </div>
+
+            <div class="flex flex-wrap items-end gap-4 border-t border-border pt-4">
+              <label class="grid gap-1 text-sm">
+                {{ t('overlay_ms_label') }}
+                <Input type="number" min="1000" max="15000" step="500" class="w-28" data-overlay-ms
+                  v-model="settings.overlay_ms" />
+              </label>
+              <label class="grid gap-1 text-sm">
+                {{ t('tens_window_ms_label') }}
+                <Input type="number" min="1000" max="15000" step="500" class="w-28" data-tens-window-ms
+                  v-model="settings.tens_window_ms" />
+              </label>
+            </div>
+
+            <Button data-display-change @click="saveDisplay">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -1279,95 +1369,37 @@ function goTo(id: string) {
         </Card>
       </section>
 
-      <!-- Date and time. Two separate settings, at the owner's request: the
-           order of a date and the 12/24 h format do not vary together from one
-           country to another. No time zone setting — the display runs on the
-           device, the page formats in the browser's time zone, and a third
-           setting could only contradict one of the two. -->
-      <section id="clock" class="scroll-mt-6">
+      <!-- Player: the owner's own pairing, "volume hold and seeking are
+           player configuration". One button: both fields already share the
+           same route (`saveSettings`), so merging them costs nothing beyond
+           the card boundary. -->
+      <section id="player" class="scroll-mt-6">
         <Card>
-          <CardHeader><CardTitle>{{ t('clock_title') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-end gap-4">
-            <label class="grid gap-1 text-sm">
-              {{ t('clock_date_label') }}
-              <Select v-model="settings.date_format">
-                <SelectTrigger class="min-w-36" data-date-format-select :aria-label="t('clock_date_label')"><SelectValue>{{ dateFormatLabel }}</SelectValue></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="day_month_year">{{ t('clock_date_dmy') }}</SelectItem>
-                  <SelectItem value="year_month_day">{{ t('clock_date_ymd') }}</SelectItem>
-                  <SelectItem value="month_day_year">{{ t('clock_date_mdy') }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <label class="grid gap-1 text-sm">
-              {{ t('clock_hours_label') }}
-              <!-- A boolean rendered as two named choices rather than a
-                   checkbox: "24 h" is not the absence of "12 h", and a checkbox
-                   labelled "24 h" would read badly when unchecked. -->
-              <Select :model-value="settings.clock_24h ? '24' : '12'"
-                      @update:model-value="(v) => (settings.clock_24h = v === '24')">
-                <SelectTrigger class="min-w-36" data-clock-hours-select :aria-label="t('clock_hours_label')"><SelectValue>{{ clockHoursLabel }}</SelectValue></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="24">{{ t('clock_24h') }}</SelectItem>
-                  <SelectItem value="12">{{ t('clock_12h') }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <Button data-clock-change @click="saveSettings">{{ t('save') }}</Button>
-            <p class="w-full text-sm text-muted-foreground">{{ t('clock_hint') }}</p>
-          </CardContent>
-        </Card>
-      </section>
+          <CardHeader><CardTitle>{{ t('player_card_title') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-col gap-4">
+            <div class="flex flex-wrap items-end gap-4">
+              <label class="grid gap-1 text-sm">
+                {{ t('volume_hold_initial') }}
+                <Input type="number" min="200" max="5000" step="100" class="w-28" data-hold-initial
+                  v-model="settings.volume_repeat_initial_ms" />
+              </label>
+              <label class="grid gap-1 text-sm">
+                {{ t('volume_hold_interval') }}
+                <Input type="number" min="100" max="2000" step="50" class="w-28" data-hold-interval
+                  v-model="settings.volume_repeat_interval_ms" />
+              </label>
+              <p data-hold-hint class="w-full text-sm text-muted-foreground">{{ t('volume_hold_hint') }}</p>
+            </div>
 
-      <section id="volume-hold" class="scroll-mt-6">
-        <Card>
-          <CardHeader><CardTitle>{{ t('volume_hold_title') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-end gap-4">
-            <label class="grid gap-1 text-sm">
-              {{ t('volume_hold_initial') }}
-              <Input type="number" min="200" max="5000" step="100" class="w-28" data-hold-initial
-                v-model="settings.volume_repeat_initial_ms" />
-            </label>
-            <label class="grid gap-1 text-sm">
-              {{ t('volume_hold_interval') }}
-              <Input type="number" min="100" max="2000" step="50" class="w-28" data-hold-interval
-                v-model="settings.volume_repeat_interval_ms" />
-            </label>
-            <Button data-hold-change @click="saveSettings">{{ t('save') }}</Button>
-            <p data-hold-hint class="w-full text-sm text-muted-foreground">{{ t('volume_hold_hint') }}</p>
-          </CardContent>
-        </Card>
-      </section>
+            <div class="flex flex-wrap items-end gap-4 border-t border-border pt-4">
+              <label class="grid gap-1 text-sm">
+                {{ t('seek_step_label') }}
+                <Input type="number" min="1" max="120" class="w-28" data-seek-step-s
+                  v-model="settings.seek_step_s" />
+              </label>
+            </div>
 
-      <section id="overlays" class="scroll-mt-6">
-        <Card>
-          <CardHeader><CardTitle>{{ t('overlays_title') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-end gap-4">
-            <label class="grid gap-1 text-sm">
-              {{ t('overlay_ms_label') }}
-              <Input type="number" min="1000" max="15000" step="500" class="w-28" data-overlay-ms
-                v-model="settings.overlay_ms" />
-            </label>
-            <label class="grid gap-1 text-sm">
-              {{ t('tens_window_ms_label') }}
-              <Input type="number" min="1000" max="15000" step="500" class="w-28" data-tens-window-ms
-                v-model="settings.tens_window_ms" />
-            </label>
-            <Button data-overlays-change @click="saveSettings">{{ t('save') }}</Button>
-          </CardContent>
-        </Card>
-      </section>
-
-      <section id="seek" class="scroll-mt-6">
-        <Card>
-          <CardHeader><CardTitle>{{ t('seek_card_title') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-end gap-4">
-            <label class="grid gap-1 text-sm">
-              {{ t('seek_step_label') }}
-              <Input type="number" min="1" max="120" class="w-28" data-seek-step-s
-                v-model="settings.seek_step_s" />
-            </label>
-            <Button data-seek-change @click="saveSettings">{{ t('save') }}</Button>
+            <Button data-player-change @click="saveSettings">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>

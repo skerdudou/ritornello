@@ -87,7 +87,7 @@ test('navigation between the home page, the config and the plugin pages', async 
   // **in the document flow** -- a bare text at the bottom of the page, which
   // had to be scrolled to. Nothing but this journey can catch it: jsdom
   // computes no style, and the equivalent unit assertion would wrongly pass.
-  await page.locator('[data-seek-change]').click()
+  await page.locator('[data-player-change]').click()
   const notif = page.locator('[data-sonner-toast]').first()
   await expect(notif).toBeVisible()
   // `fixed`: this is the proof that the stylesheet is loaded. Without it, the
