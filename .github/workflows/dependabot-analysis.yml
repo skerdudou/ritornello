@@ -439,17 +439,37 @@ jobs:
           # steps around this one, is the layer that does not depend on
           # either the allow-list or this deny-list holding.
           #
-          # The three `Read` denies below close the other direction: bare
-          # `Read` in the allow-list reaches the whole filesystem, not only
-          # the workspace, and this job's own secrets live outside it -- the
-          # process environment readable through `/proc`, and whatever else
-          # the runner's home or `/etc` might hold. A **double** leading
+          # The `Read` denies below close the other direction: bare `Read` in
+          # the allow-list reaches the whole filesystem, not only the
+          # workspace, and this job's own secrets live outside it -- the
+          # process environment readable through `/proc`, and whatever `/etc`
+          # or the runner's own account might hold. A **double** leading
           # slash is what makes a Claude Code path rule filesystem-absolute;
           # a single leading slash means "relative to the directory
           # associated with the settings source" instead, so `Read(/proc/**)`
           # would silently deny nothing. Written as `Read(...)` because
           # `Read` and `Edit` are the only two tools whose path rules are
           # consulted at all.
+          #
+          # **Not `Read(//home/**)`.** On a GitHub-hosted Linux runner
+          # `github.workspace` -- what `actions/checkout` fills, and where
+          # `pr/` lives -- is `/home/runner/work/<repo>/<repo>`
+          # (https://docs.github.com/en/actions/learn-github-actions/contexts,
+          # `github` context, `github.workspace`), so a blanket deny on
+          # `/home/**` would have denied the analysis its own inputs: deny
+          # wins over allow, and the step would have read nothing at all --
+          # safe, because every path here still lands on `read-it`, but inert,
+          # and the whole point of this staged rollout is to measure whether
+          # the analysis works. What is actually sensitive under `/home` is
+          # narrower: `runner.temp`, the sibling of the workspace where the
+          # runner stages secrets and step data, is
+          # `/home/runner/work/_temp` (same page, `runner` context,
+          # `runner.temp`); and the runner account's own dotfiles --
+          # credential helpers and the like -- sit directly under
+          # `/home/runner`, never under `work/`. The two dotfile rules below
+          # match a path segment starting with a literal `.` (`.*` is a glob,
+          # not a regex, so it never matches `work`), which is why they do not
+          # need to name `work/` to exclude it.
           settings: |
             {
               "permissions": {
@@ -458,7 +478,9 @@ jobs:
                   "Edit(.git/**)",
                   "Read(//proc/**)",
                   "Read(//etc/**)",
-                  "Read(//home/**)"
+                  "Read(//home/runner/work/_temp/**)",
+                  "Read(//home/runner/.*/**)",
+                  "Read(//home/runner/.*)"
                 ]
               }
             }
