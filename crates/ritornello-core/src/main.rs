@@ -6,6 +6,7 @@ mod i18n;
 mod metadata;
 mod docs_map;
 mod packaging_manifest;
+mod plugin_catalogue_declaration;
 mod version_coherence;
 mod placeholder;
 mod player;
