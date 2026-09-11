@@ -708,6 +708,11 @@ struct HotPlugChildren {
     admin_assets: Arc<admin::AssetCache>,
     /// Same sharing rule as `admin_assets`, for the plugin catalogs.
     admin_catalogs: Arc<admin::CatalogCache>,
+    /// **The same** `Arc` as the HTTP `AppState`'s and the core's — see
+    /// `crate::i18n::Shared`'s doc. `hotplug` grows it with a late
+    /// announcement's layers; `forget_page` (below and in `hot_unplug`)
+    /// shrinks it when the plugin disconnects.
+    registry: crate::i18n::Shared,
     /// How a closing socket makes itself known to the main loop.
     ///
     /// **This is the only path through which the death of an unsupervised
@@ -813,7 +818,7 @@ async fn hotplug<P: player::Player>(
         // to reverse elsewhere. Without it, `/api/admin/<name>` and
         // `/plugins/<name>/` would burn the request's whole timeout budget
         // against a dead backend instead of answering 404 right away.
-        admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, &name).await;
+        admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, &children.registry, &name).await;
         // Nothing is persisted: this is a refusal to run, not the `disabled`
         // switch. `enabled = false` written here would keep the plugin off
         // even after a matching binary was installed, and the fix would look
@@ -1092,7 +1097,14 @@ async fn hotplug<P: player::Player>(
     // Assets go with the backend: a re-announcement is the end of one process
     // followed by the start of another, and the new one may carry a rebuilt
     // `ui.js`. Keeping them served the old one until the core restarted.
-    admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, &name).await;
+    admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, &children.registry, &name).await;
+    // Re-inserted only if this announcement actually carries a catalogue:
+    // `None` (a binary predating the field) leaves the module absent from
+    // the registry rather than inventing an empty one — see
+    // `Announcement.catalog`'s doc on why the two must not be conflated.
+    if let Some(catalog) = &announcement.catalog {
+        children.registry.write().await.insert_announced(name.clone(), i18n::module_layers_from_catalog(&name, catalog));
+    }
     let mut admin_connected = false;
     if announcement.admin {
         let path = ritornello_plugin_sdk::admin_socket(&prefix);
@@ -1290,7 +1302,7 @@ async fn hot_unplug<P: player::Player>(
     // Removed, otherwise `/plugins/<name>/` would wait out the request's
     // timeout budget before ending in error, where a plain 404 says right
     // away that there is nothing at this address.
-    admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, name).await;
+    admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, &children.registry, name).await;
     let mut statuses = children.status_state.write().await;
     status::replace_plugin_lines(&mut statuses, name, vec![PluginStatus::disabled(name)], false);
     statuses.active_source = core.active_source().to_string();
@@ -1674,12 +1686,18 @@ async fn main() -> Result<()> {
     let persisted = state::load(&state_path);
 
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
+    // The one registry for the whole process: swept from disk once here,
+    // seeded with the core's own module and `common`'s, then grown by one
+    // `insert_announced` per plugin announcement (initial wiring loop and
+    // `hotplug`, below) and shrunk by `forget` (`admin::forget_page`) as
+    // plugins disconnect — see `crate::i18n::Shared`'s doc.
+    let registry: i18n::Shared = Arc::new(RwLock::new(i18n::seeded_registry(locales_root.clone())));
     // "en" stands in for the fallback language until a device has a real one
     // to pass (a later task's setting); see `i18n::core_catalog`'s doc.
     let catalog = Arc::new(RwLock::new(i18n::core_catalog(
+        &*registry.read().await,
         persisted.locale.as_deref().unwrap_or("en"),
         "en",
-        &locales_root,
     )));
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<InputMessage>(32);
@@ -1942,6 +1960,12 @@ async fn main() -> Result<()> {
         let Some(announcement) = gathered.announcements.get(name) else {
             continue;
         };
+        // `None` (a binary predating the field) leaves the module absent
+        // from the registry rather than inventing an empty one — see
+        // `Announcement.catalog`'s doc on why the two must not be conflated.
+        if let Some(catalog) = &announcement.catalog {
+            registry.write().await.insert_announced(name.clone(), i18n::module_layers_from_catalog(name, catalog));
+        }
         let prefix = sockets_dir.join(name);
 
         for kind in &announcement.kinds {
@@ -2307,6 +2331,7 @@ async fn main() -> Result<()> {
             audio_current: audio_current.clone(),
             audio_tx: audio_tx.clone(),
             catalog: catalog.clone(),
+            registry: registry.clone(),
             locale_current: locale_current.clone(),
             locale_tx: locale_tx.clone(),
             locales_root: locales_root.clone(),
@@ -2349,7 +2374,7 @@ async fn main() -> Result<()> {
                 persisted,
                 state_path,
                 catalog: catalog.clone(),
-                locales_root: locales_root.clone(),
+                registry: registry.clone(),
                 manifest_order: manifest_order.clone(),
                 metadata: MetadataWiring {
                     plugins: metadata_plugins,
@@ -2446,6 +2471,7 @@ async fn main() -> Result<()> {
         admin_backends: admin_backends.clone(),
         admin_assets: admin_assets.clone(),
         admin_catalogs: admin_catalogs.clone(),
+        registry: registry.clone(),
         unreachable_tx: unreachable_tx.clone(),
     };
 
@@ -2676,7 +2702,7 @@ async fn main() -> Result<()> {
                     // two other locks, and nesting them would make safety
                     // depend on an order never to reverse elsewhere.
                     drop(statuses);
-                    admin::forget_page(&admin_backends, &admin_assets, &admin_catalogs, &name).await;
+                    admin::forget_page(&admin_backends, &admin_assets, &admin_catalogs, &registry, &name).await;
                 }
             }
             Some((name, update)) = source_update_rx.recv() => {
@@ -3118,7 +3144,7 @@ async fn main() -> Result<()> {
                         // deaths must leave the same state, or behavior
                         // would depend on who launched the process.
                         drop(statuses);
-                        admin::forget_page(&admin_backends, &admin_assets, &admin_catalogs, &name).await;
+                        admin::forget_page(&admin_backends, &admin_assets, &admin_catalogs, &registry, &name).await;
                     }
                 }
             }
@@ -3331,8 +3357,8 @@ mod toggle_tests {
         gathered: register::Gathered,
         kill_triggers: HashMap<String, tokio::sync::oneshot::Sender<()>>,
         non_supervised: HashSet<String>,
-        /// Held until the end of the test: `state_path` and `locales_root`
-        /// depend on it.
+        /// Held until the end of the test: `state_path` and the registry's
+        /// pack root depend on it.
         _dir: tempfile::TempDir,
     }
 
@@ -3352,7 +3378,14 @@ mod toggle_tests {
         let (sources_catalog_tx, catalog_rx) = watch::channel(SourcesCatalog::default());
 
         let covers = Arc::new(CoverCache::new());
-        let catalog = Arc::new(RwLock::new(crate::i18n::core_catalog("en", "en", &root)));
+        // Built as a plain value first, and only wrapped in the shared
+        // `Arc<RwLock<_>>` afterwards: `bench()` is sync, and the
+        // tokio `RwLock` this crate uses elsewhere has no synchronous
+        // reader safe to call from inside a `#[tokio::test]`'s worker
+        // thread.
+        let registry_val = crate::i18n::seeded_registry(root.clone());
+        let catalog = Arc::new(RwLock::new(crate::i18n::core_catalog(&registry_val, "en", "en")));
+        let registry: crate::i18n::Shared = Arc::new(RwLock::new(registry_val));
 
         // The one declared name, shared by the core and the hot-plug
         // children: they must agree, and a test that changes it changes both.
@@ -3365,7 +3398,7 @@ mod toggle_tests {
                 persisted: Default::default(),
                 state_path: root.join("state.json"),
                 catalog,
-                locales_root: root.clone(),
+                registry: registry.clone(),
                 manifest_order: manifest_order.clone(),
                 sources_catalog: sources_catalog_tx,
                 metadata: MetadataWiring {
@@ -3401,6 +3434,7 @@ mod toggle_tests {
             admin_backends: Arc::new(RwLock::new(HashMap::new())),
             admin_assets: Arc::new(Default::default()),
             admin_catalogs: Arc::new(Default::default()),
+            registry,
         };
 
         let mut gathered = register::Gathered::default();
@@ -4635,6 +4669,76 @@ mod toggle_tests {
         let statuses = b.children.status_state.read().await;
         let line = statuses.plugins.iter().find(|l| l.name == "mpd").unwrap();
         assert!(!line.catalog_unknown, "an announced, empty catalog is a legitimate state");
+    }
+
+    /// From the announcement to the shared `Registry`: `hotplug` must
+    /// actually wire `Announcement.catalog` in, not just derive
+    /// `catalog_unknown` from it. Driven through the real event, as the
+    /// sibling tests above are — a test that called `insert_announced`
+    /// directly would prove the registry's own logic, never that `hotplug`
+    /// calls it.
+    #[tokio::test]
+    async fn hotplug_wires_the_announced_catalog_into_the_shared_registry() {
+        let mut b = bench();
+        let mut catalog = HashMap::new();
+        catalog.insert("en".to_string(), HashMap::from([("greeting".to_string(), "Hi there".to_string())]));
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: Some(catalog),
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        let registry = b.children.registry.read().await;
+        assert_eq!(registry.chain_for("mpd", "en", "en").get("greeting"), "Hi there");
+    }
+
+    /// The other half of the event-driven proof: `hot_unplug` must actually
+    /// forget the module from the shared registry (via `admin::forget_page`,
+    /// its single purge point), not just remove the status line.
+    #[tokio::test]
+    async fn hot_unplug_forgets_the_module_from_the_shared_registry() {
+        let mut b = bench();
+        // Supervised, like `a_supervised_plugin_turns_off_and_its_announcement_disappears`:
+        // without this, `hotplug` itself would classify "mpd" as
+        // `non_supervised` (a manually relaunched plugin), and `turn_off`
+        // below would correctly refuse — a fact about liveness, not about
+        // what this test means to exercise.
+        b.kill_triggers.insert("mpd".to_string(), tokio::sync::oneshot::channel::<()>().0);
+        let mut catalog = HashMap::new();
+        catalog.insert("en".to_string(), HashMap::from([("greeting".to_string(), "Hi there".to_string())]));
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: Some(catalog),
+        };
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+        assert_eq!(
+            b.children.registry.read().await.chain_for("mpd", "en", "en").get("greeting"),
+            "Hi there",
+            "the rig must actually carry the announced layer before disabling proves anything"
+        );
+
+        assert!(turn_off(&mut b).await, "disabling a wired plugin must succeed");
+
+        assert_eq!(
+            b.children.registry.read().await.chain_for("mpd", "en", "en").get("greeting"),
+            "greeting",
+            "the announced layer must be gone once the plugin is disabled"
+        );
     }
 
     #[test]

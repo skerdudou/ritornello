@@ -93,15 +93,18 @@ pub type AssetCache = tokio::sync::RwLock<
 /// the plugin — see `admin_i18n`'s doc.
 pub type CatalogCache = tokio::sync::RwLock<std::collections::HashMap<(String, String), serde_json::Value>>;
 
-/// Forgets everything the core keeps of the admin page of `name`: its backend
-/// and its cached assets and catalogs.
+/// Forgets everything the core keeps of the admin page of `name`: its backend,
+/// its cached assets and catalogs, and its announced translation layers.
 ///
 /// **A single purge point, called everywhere the plugin's process stops** —
 /// death observed by supervision, death inferred from the sockets closing,
 /// requested shutdown, and re-announcement (which is the end of one process
 /// followed by the start of another). It is deliberately a function and not
-/// two copied lines: both registries must fall *together*, and an invariant
-/// whose correctness depends on four purge sites ends up lying at one of them.
+/// four copied lines: every one of these registries must fall *together*, and
+/// an invariant whose correctness depends on remembering to purge it at
+/// several call sites ends up lying at one of them (the lesson `main.rs`
+/// already records for `kill_triggers`, applied here by never letting that
+/// choice exist in the first place).
 ///
 /// What removing the backend buys: `/api/admin/<name>` answers a frank 404 —
 /// "unknown plugin" — instead of an IPC round trip on a closed socket. The
@@ -110,13 +113,26 @@ pub type CatalogCache = tokio::sync::RwLock<std::collections::HashMap<(String, S
 /// the write enters the buffer before the close is processed, the answer never
 /// arrives and the request's whole budget elapses. The real gain is telling the
 /// truth.
-pub async fn forget_page(backends: &AdminBackends, assets: &AssetCache, catalogs: &CatalogCache, name: &str) {
+///
+/// The registry's `forget` is unconditional here, even on a path that will
+/// `insert_announced` again right afterwards (`hotplug`'s re-announcement):
+/// forgetting first and re-inserting only if the new announcement actually
+/// carries a catalogue is what keeps a plugin that regressed to an older
+/// binary (`catalog: None`) from keeping a stale, no-longer-true layer.
+pub async fn forget_page(
+    backends: &AdminBackends,
+    assets: &AssetCache,
+    catalogs: &CatalogCache,
+    registry: &crate::i18n::Shared,
+    name: &str,
+) {
     backends.write().await.remove(name);
     // `retain` and not `remove`: the key carries the asset path (resp. the
     // language), so a plugin has as many entries as files it served (resp.
     // languages it was asked in).
     assets.write().await.retain(|(plugin, _), _| plugin != name);
     catalogs.write().await.retain(|(plugin, _), _| plugin != name);
+    registry.write().await.forget(name);
 }
 
 fn etag_of(body: &str) -> String {
@@ -435,6 +451,9 @@ mod tests {
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(
+                std::path::PathBuf::from("/nonexistent"),
+            ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             locales_root,
@@ -517,14 +536,14 @@ mod tests {
         //    carries `(plugin, path)`, so the purge goes through a `retain`:
         //    getting the wrong half of the key would have emptied the whole
         //    cache.
-        forget_page(&state.admin_backends, &state.admin_assets, &state.admin_catalogs, "autre").await;
+        forget_page(&state.admin_backends, &state.admin_assets, &state.admin_catalogs, &state.registry, "autre").await;
         assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "still cached");
 
         // 2. Once the plugin is forgotten, the route says frankly that there is
         //    nothing there — that is the half of the fix that removes the dead
         //    page from the menu instead of returning an IPC error.
-        forget_page(&state.admin_backends, &state.admin_assets, &state.admin_catalogs, "radio").await;
+        forget_page(&state.admin_backends, &state.admin_assets, &state.admin_catalogs, &state.registry, "radio").await;
         assert_eq!(get(app.clone()).await.status(), StatusCode::NOT_FOUND);
 
         // 3. And a re-announcement really re-reads: that is the `hotplug`
@@ -780,7 +799,7 @@ mod tests {
         assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "cached");
 
-        forget_page(&state.admin_backends, &state.admin_assets, &state.admin_catalogs, "radio").await;
+        forget_page(&state.admin_backends, &state.admin_assets, &state.admin_catalogs, &state.registry, "radio").await;
         state
             .admin_backends
             .write()

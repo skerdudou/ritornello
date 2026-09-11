@@ -3,6 +3,14 @@
 use super::*;
 use std::sync::Mutex;
 
+/// A `Registry` swept from `root`, shared like production wiring expects.
+/// Every rig below that used to build only a `Catalog` for `Wiring.catalog`
+/// now needs this too, for `Wiring.registry` — kept in one place so a
+/// change to how a test registry is built happens once.
+pub(super) fn test_registry(root: &std::path::Path) -> crate::i18n::Shared {
+    Arc::new(RwLock::new(crate::i18n::Registry::sweep(root.to_path_buf())))
+}
+
 #[derive(Default)]
 pub(super) struct FakePlayer {
     pub(super) calls: Arc<Mutex<Vec<String>>>,
@@ -254,7 +262,7 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
             persisted,
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring {
@@ -296,7 +304,7 @@ pub(super) fn setup_metadata(
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring { plugins, now_playing: np_tx, state: state_tx },
@@ -355,7 +363,7 @@ pub(super) fn test_core_with_extraction() -> (
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
@@ -410,7 +418,7 @@ pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<Playe
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring {
@@ -642,7 +650,7 @@ pub(super) fn test_core_with_cover_channel() -> (
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
@@ -897,7 +905,7 @@ fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> Archivin
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring {

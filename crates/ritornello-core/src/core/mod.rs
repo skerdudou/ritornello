@@ -75,15 +75,18 @@ pub enum EventOutcome {
 /// persisted state, its output channels.
 ///
 /// A named struct rather than a long list of positional parameters: at eight
-/// elements, a call's argument order can no longer be checked by eye, and two
-/// neighboring `PathBuf`s (`state_path`, `locales_root`) would swap without
-/// the compiler objecting.
+/// elements, a call's argument order can no longer be checked by eye.
 pub struct Wiring {
     pub sources: HashMap<String, Arc<dyn Source>>,
     pub persisted: PersistedState,
     pub state_path: PathBuf,
     pub catalog: Arc<RwLock<Catalog>>,
-    pub locales_root: PathBuf,
+    /// The shared registry `catalog` is resolved from — see
+    /// `crate::i18n::Shared`'s doc. The same `Arc` as the HTTP `AppState`'s.
+    /// Also where the pack root lives now (captured once at
+    /// `Registry::sweep`): `Wiring` carries no separate `locales_root` any
+    /// more, `Core` never needed a second copy of it.
+    pub registry: crate::i18n::Shared,
     /// The declared plugin names, **in file order**. Only the names that also
     /// appear in `sources` end up in the cycle — the manifest declares
     /// displays and inputs too, and a display's name in the cycle would give
@@ -282,8 +285,8 @@ pub struct Core<P: Player> {
     pending_tens: u8,
     state_path: PathBuf,
     catalog: Arc<RwLock<Catalog>>,
+    registry: crate::i18n::Shared,
     locale: Option<String>,
-    locales_root: PathBuf,
     theme: Option<String>,
     mode: Option<String>,
     /// Track metadata: identity of what is playing, ICY title, and plugin
@@ -413,7 +416,7 @@ impl<P: Player> Core<P> {
             persisted,
             state_path,
             catalog,
-            locales_root,
+            registry,
             manifest_order,
             metadata,
             sources_catalog,
@@ -486,8 +489,8 @@ impl<P: Player> Core<P> {
             pending_tens: 0,
             state_path,
             catalog,
+            registry,
             locale: persisted.locale.clone(),
-            locales_root,
             theme: persisted.theme.clone(),
             mode: persisted.mode.clone(),
             metadata: Metadata::new(metadata.plugins),
@@ -1294,7 +1297,7 @@ mod tests {
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(root))),
             manifest_order: vec![],
             metadata: silent_wiring(vec![]),
             sources_catalog: watch::channel(SourcesCatalog::default()).0,

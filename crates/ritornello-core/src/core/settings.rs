@@ -37,9 +37,16 @@ impl<P: Player> Core<P> {
     /// for the fallback language until a device has a real one to pass
     /// (a later task's setting); until then it coincides with the
     /// structural `en` block, which is harmless — see `Registry::chain_for`.
+    ///
+    /// A real locale change is also the registry's refresh gesture: the
+    /// registry's disk tier is swept once (at startup) and never re-read on
+    /// its own, so `resweep` here is what lets an operator who edited a pack
+    /// on disk see it without restarting the service — they only have to
+    /// pick a language (even the same one again) for it to take effect.
     pub async fn set_locale(&mut self, locale: String) -> Result<()> {
         self.locale = Some(locale.clone());
-        let new_catalog = crate::i18n::core_catalog(&locale, "en", &self.locales_root);
+        self.registry.write().await.resweep();
+        let new_catalog = crate::i18n::core_catalog(&*self.registry.read().await, &locale, "en");
         self.standby_status = Some(resolve_standby_status(&new_catalog));
         *self.catalog.write().await = new_catalog;
         self.persist();
@@ -144,7 +151,7 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, locales_root: root, manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"audio_device bluealsa:DEV=XX".to_string()));
     }
@@ -200,7 +207,7 @@ mod tests {
         };
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("VEILLE"));
@@ -230,7 +237,7 @@ mod tests {
         };
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("STANDBY"));

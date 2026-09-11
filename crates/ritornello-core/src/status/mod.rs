@@ -59,15 +59,32 @@ pub struct AppState {
     /// (task 4) wrapped back into `Catalog` for compatibility with every
     /// existing reader of this field.
     ///
-    /// **Stated limitation, unchanged by the registry**: this is a snapshot,
-    /// rebuilt only when something calls `Core::set_locale` (a real locale
-    /// change) — not on every read. An operator can still edit a pack on
-    /// disk without recompiling anything, and the gesture that refreshes
-    /// this field for that language is a restart of the service (or picking
-    /// the language again), exactly as before `Registry` existed:
-    /// `Registry::chain_for` itself reads the disk fresh on every call, but
-    /// nothing re-invokes it just because a file changed underneath it.
+    /// **Stated limitation, unchanged in kind by the registry**: this is a
+    /// snapshot, rebuilt only when something calls `Core::set_locale` (a
+    /// real locale change) — not on every read. `Registry::chain_for`
+    /// itself performs no I/O at all (its disk tier is swept once, see
+    /// `Registry`'s doc), so an operator editing a pack on disk is picked
+    /// up by the next `resweep` — a real locale change — rather than by
+    /// every read of this field, and, as before, by a restart of the
+    /// service.
     pub catalog: Arc<RwLock<ritornello_i18n::Catalog>>,
+    /// Every module's translation layers — the core's own, `common`'s, and
+    /// each plugin's announced catalogue — swept from disk once at startup
+    /// and kept current by `Registry::resweep`/`insert_announced`/`forget`
+    /// as plugins announce themselves, disconnect, or a locale changes.
+    ///
+    /// **The same `Arc`** as the one `Core` holds (see `core::Wiring`): the
+    /// core seeds it and resolves its own catalog from it, the HTTP layer
+    /// reads it for the plugin catalog routes (task 5) — one registry, not
+    /// two copies that could drift.
+    ///
+    /// No HTTP route reads this field yet — task 5 wires `/api/i18n` and
+    /// `/plugins/<name>/api/i18n` to it — so it is dead code by this crate's
+    /// own lint (`ritornello-core` has no `lib` target) even though it is
+    /// already load-bearing: it is what `hotplug`/`declare_plugin`/
+    /// `admin::forget_page` grow and shrink as plugins come and go.
+    #[allow(dead_code)]
+    pub registry: crate::i18n::Shared,
     pub locale_current: Arc<RwLock<Option<String>>>,
     pub locale_tx: mpsc::Sender<String>,
     pub locales_root: std::path::PathBuf,
@@ -463,6 +480,9 @@ pub(crate) mod tests_support {
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(
+                std::path::PathBuf::from("/nonexistent"),
+            ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             locales_root: std::path::PathBuf::from("/nonexistent"),
@@ -505,6 +525,9 @@ pub(crate) mod tests_support {
                 "en",
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
+            ))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(
+                std::path::PathBuf::from("/nonexistent"),
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
@@ -550,6 +573,9 @@ pub(crate) mod tests_support {
                 "en",
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
+            ))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(
+                std::path::PathBuf::from("/nonexistent"),
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
@@ -604,6 +630,7 @@ pub(crate) mod tests_support {
                 dir.path(),
                 crate::i18n::EN,
             ))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(dir.path().to_path_buf()))),
             locale_current: Arc::new(tokio::sync::RwLock::new(Some("fr".to_string()))),
             locale_tx,
             locales_root: dir.path().to_path_buf(),
