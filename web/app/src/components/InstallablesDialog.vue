@@ -28,11 +28,30 @@ const rows = computed(() =>
     .map((c) => ({ offer: c, entry: catalogue.value?.[c.name] ?? null })),
 )
 
-/** The release published no catalogue at all — distinguished from "this
- *  device has everything", which is `rows.length === 0`. */
-const noCatalogue = computed(
-  () => asked.value && Object.keys(catalogue.value ?? {}).length === 0 && rows.value.length > 0,
-)
+/**
+ * The release published no catalogue at all — distinguished from "this
+ * device has everything", which is `rows.length === 0`.
+ *
+ * The original form of this predicate also carried `rows.value.length > 0`
+ * and `asked.value` as conjuncts. Both are dropped here, having been proven
+ * structurally redundant rather than merely convenient — proof, not
+ * assumption, since this plan has repeatedly hit predicates credited with
+ * coverage a fixture could never actually exercise:
+ * - `rows.value.length > 0`: this computed is read from exactly one
+ *   template site, nested in `<template v-else>` — the sibling of
+ *   `v-if="rows.length === 0"` — so `rows.length > 0` already holds by
+ *   construction at the only place this value is ever read.
+ * - `asked.value`: read from that same single site, which is only in the
+ *   DOM at all while `open` is true — `DialogContent` does not render its
+ *   slot while closed (confirmed by mounting closed: an empty teleport and
+ *   zero calls to `/api/update/catalogue`). The `watch` below sets
+ *   `asked.value = true` synchronously, before its first `await`, in the
+ *   same pre-render flush Vue runs watchers in — so by the time any render
+ *   showing this dialog open can happen, `asked` already holds. `asked`
+ *   itself is not removed: it still guards the `watch`'s own re-fetch below,
+ *   an unrelated role from the one it played here.
+ */
+const noCatalogue = computed(() => Object.keys(catalogue.value ?? {}).length === 0)
 
 // Generation counter, as `PluginRoute.vue` does for a plugin catalogue: the
 // request is asynchronous, and a dialog closed and reopened must not have a

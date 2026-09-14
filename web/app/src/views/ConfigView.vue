@@ -310,15 +310,9 @@ interface PluginRow {
   /** A binary on disk that nothing declares — the twin of `missing_binary`. */
   undeclared_binary: boolean
   /**
-   * Fabricated from `/api/update` alone, never from `/api/status`: the
-   * release offers this plugin and nothing on this device — no declaration,
-   * no binary — knows it yet. It has no kind, because it has never run.
-   */
-  not_installed: boolean
-  /**
    * Is this row's move index meaningful? Only a name `plugins.toml` actually
-   * declares can be reordered — `undeclared_binary` and `not_installed` rows
-   * have no line in that file for `move_entry` to act on.
+   * declares can be reordered — an `undeclared_binary` row has no line in
+   * that file for `move_entry` to act on.
    */
   declared: boolean
   /**
@@ -423,9 +417,7 @@ const plugins = computed<PluginRow[]>(() => {
     // order of the lines.
     //
     // A row whose every received kind is "unknown" reads "—", not the word
-    // "unknown": that word never announced anything real, and it used to be
-    // one of two different spellings this table gave to "no kind" — a
-    // `not_installed` row (below) already spells it "—". Both the ordinary
+    // "unknown": that word never announced anything real. Both the ordinary
     // "not yet announced" rows and an `undeclared_binary` line get the same
     // dash (review of task 18, M6).
     const realKinds = acc.receivedKinds.filter((k) => k !== 'unknown')
@@ -447,7 +439,6 @@ const plugins = computed<PluginRow[]>(() => {
       incompatible: acc.incompatible,
       missing_binary: acc.missing_binary,
       undeclared_binary: acc.undeclared_binary,
-      not_installed: false,
       // Only a name `plugins.toml` truly declares can be reordered.
       // `undeclared_binary` is the one flag among these rows that means
       // "not declared" — everything else here (including `missing_binary`)
@@ -467,7 +458,11 @@ const plugins = computed<PluginRow[]>(() => {
   // is a different question from managing what it runs, and mixing the two
   // in one table is what the owner objected to. `update.components` is
   // passed to the dialog directly, and its own `rows` computed does the
-  // `not_installed` filtering — this table renders declared rows alone.
+  // `not_installed` filtering — this table renders declared rows alone, and
+  // `PluginRow` no longer carries a `not_installed` field at all: every row
+  // this computed can ever produce is `declared`-or-`undeclared_binary`, so
+  // a third, always-false flag would have been dead weight kept only for a
+  // row shape that can no longer reach this table.
   //
   // The guard this used to carry — `!availableNames.has(c.name)`, excluding
   // a `not_installed` component already present as a declared row — is gone
@@ -481,9 +476,8 @@ const plugins = computed<PluginRow[]>(() => {
 })
 
 /** Position of every row that `plugins.toml` actually declares, among
- * themselves only: an `undeclared_binary` or `not_installed` row never
- * carries an arrow, so it must not count when deciding which declared row
- * sits at either end. */
+ * themselves only: an `undeclared_binary` row never carries an arrow, so it
+ * must not count when deciding which declared row sits at either end. */
 const declaredOrder = computed(() => plugins.value.filter((p) => p.declared).map((p) => p.name))
 const isFirstDeclared = (name: string) => declaredOrder.value[0] === name
 const isLastDeclared = (name: string) =>
@@ -908,19 +902,17 @@ function goTo(id: string) {
                             ? 'outline'
                             : p.undeclared_binary
                               ? 'outline'
-                              : p.not_installed
+                              : p.disabled
                                 ? 'outline'
-                                : p.disabled
+                                : p.busy
                                   ? 'outline'
-                                  : p.busy
-                                    ? 'outline'
-                                    : p.connected
+                                  : p.connected
+                                    ? 'secondary'
+                                    : p.starting
                                       ? 'secondary'
-                                      : p.starting
-                                        ? 'secondary'
-                                        : p.stalled
-                                          ? 'outline'
-                                          : 'destructive'
+                                      : p.stalled
+                                        ? 'outline'
+                                        : 'destructive'
                       "
                     >
                       <!-- "Incompatible" comes **first**: a refused plugin is
@@ -931,9 +923,7 @@ function goTo(id: string) {
                            declaration) come next, **before** "connected": both
                            are more precise than a bare "not connected", and
                            must not be confused with each other — they license
-                           opposite gestures. `not_installed` (the release
-                           offers it, nothing here knows it yet) sits beside
-                           them for the same reason. "Busy" comes **before**
+                           opposite gestures. "Busy" comes **before**
                            "connected": a busy plugin is reachable, and that is
                            precisely why "connected" says nothing useful.
                            "Starting" comes **before** "stalled": both say the
@@ -949,12 +939,12 @@ function goTo(id: string) {
                            The accumulator already takes that care with `??`;
                            testing `p.incompatible` here would undo it.
 
-                           `update_binary_missing`/`update_undeclared`/
-                           `update_not_installed` are the same catalog keys
-                           `/api/update`'s own card would use for the matching
-                           `Availability` — one wording per condition, never
-                           reinvented here, so the table and the update card
-                           can never disagree about what to call it. -->
+                           `update_binary_missing`/`update_undeclared` are the
+                           same catalog keys `/api/update`'s own card would use
+                           for the matching `Availability` — one wording per
+                           condition, never reinvented here, so the table and
+                           the update card can never disagree about what to
+                           call it. -->
                       {{
                         p.incompatible !== undefined
                           ? t('plugin_incompatible', { found: p.incompatible, expected: protocol })
@@ -962,19 +952,17 @@ function goTo(id: string) {
                             ? t('update_binary_missing')
                             : p.undeclared_binary
                               ? t(p.removal_pending ? 'update_removal_pending' : 'update_undeclared')
-                              : p.not_installed
-                                ? t('update_not_installed')
-                                : p.disabled
-                                  ? t('disabled')
-                                  : p.busy
-                                    ? t('busy')
-                                    : p.connected
-                                      ? t('connected')
-                                    : p.starting
-                                      ? t('starting')
-                                      : p.stalled
-                                        ? t('stalled')
-                                        : t('unavailable')
+                              : p.disabled
+                                ? t('disabled')
+                                : p.busy
+                                  ? t('busy')
+                                  : p.connected
+                                    ? t('connected')
+                                  : p.starting
+                                    ? t('starting')
+                                    : p.stalled
+                                      ? t('stalled')
+                                      : t('unavailable')
                       }}
                     </Badge>
                   </td>
@@ -988,8 +976,8 @@ function goTo(id: string) {
                     <!-- No confirmation: the action is reversible from this
                          same row, and the notification says what happened.
                          Only a declared row has anything to enable or
-                         disable: `not_installed` and `undeclared_binary` rows
-                         carry no manifest entry for the switch to flip. -->
+                         disable: an `undeclared_binary` row carries no
+                         manifest entry for the switch to flip. -->
                     <Switch
                       v-if="p.declared"
                       data-plugin-toggle
@@ -1024,15 +1012,17 @@ function goTo(id: string) {
                     <span v-else>-</span>
                   </td>
                   <td data-plugin-actions>
-                    <!-- Four states, two gestures each, and never the same
+                    <!-- Two states carry two gestures each, and never the same
                          pair twice (Ruling 13/65): `missing_binary` (declared,
                          no binary) installs or uninstalls; `undeclared_binary`
                          (binary, no declaration) declares or removes the
-                         binary; `not_installed` (neither, offered by the
-                         release) only installs — there is no declaration to
-                         remove and no binary to erase; every other row already
-                         has its binary and its declaration, so only
-                         uninstalling applies. -->
+                         binary. Every other row already has its binary and
+                         its declaration, so only uninstalling applies. A
+                         `not_installed` row (neither binary nor declaration,
+                         offered by the release) used to be a third state
+                         here with only Install to offer; that row shape now
+                         lives in `InstallablesDialog.vue` instead, so this
+                         table never renders it any more. -->
                     <!-- Ruling 88, applied here for the same reason it
                          applies to `UpdateDialog`'s switch: `offered ===
                          null` (never `kind`) is the guard, and it is
@@ -1042,7 +1032,7 @@ function goTo(id: string) {
                          from, must not offer a button that can only fail. -->
                     <div class="flex gap-1">
                       <Button
-                        v-if="p.missing_binary || p.not_installed"
+                        v-if="p.missing_binary"
                         variant="outline" size="xs" data-plugin-install
                         :disabled="p.offered === null || inProgress.has(p.name)"
                         @click="installPlugin(p.name)"
@@ -1064,7 +1054,7 @@ function goTo(id: string) {
                         @click="removeBinaryTarget = p.binary_file ?? p.name"
                       >{{ t('plugin_remove_binary') }}</Button>
                       <Button
-                        v-if="!p.undeclared_binary && !p.not_installed"
+                        v-if="!p.undeclared_binary"
                         variant="outline" size="xs" data-plugin-uninstall
                         @click="uninstallTarget = p.name"
                       >{{ t('plugin_uninstall') }}</Button>
