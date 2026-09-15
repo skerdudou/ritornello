@@ -678,7 +678,20 @@ pub(super) async fn plugin_binary_delete(
 
 #[derive(Deserialize)]
 pub(super) struct PluginMoveReq {
-    delta: i32,
+    /// Zero-based target position among the **declared** plugins.
+    ///
+    /// It replaces the `delta` of ±1 this route used to accept, and the
+    /// reason that guard gave for existing is what expired: "the only
+    /// gesture the page offers is an arrow" stopped being true the day the
+    /// table grew a drag handle. What the guard also pointed at —
+    /// `move_entry`'s uniform re-spacing pass, never exercised over more
+    /// than one place — is now covered by a test of its own in
+    /// `plugins::edit`.
+    ///
+    /// Signed on purpose: a page sending `-1` must meet the same named
+    /// refusal as one sending a position past the end, rather than an
+    /// unsigned deserialization error with no sentence in it.
+    to: i32,
 }
 
 /// Moves a plugin one place in `plugins.toml`, **persistence first** — the
@@ -692,29 +705,23 @@ pub(super) struct PluginMoveReq {
 /// name for the log only, and `reorder_plugins` re-reads the file. Two copies
 /// of one order is what this whole feature exists to stop.
 ///
-/// **`delta` is ±1 and nothing else, refused with a bare 400.** The only
-/// gesture the page offers is an arrow, and accepting an arbitrary jump would
-/// be an interface nothing uses — with `move_entry`'s uniform re-spacing pass
-/// to re-validate over a distance no test covers. This one refusal carries no
-/// catalog message on purpose, and the precedent is `update_install_post`: it
-/// describes a request the page cannot make, so nobody can be looking at it.
+/// **`to` names a target position, not a step**, so a drag that crosses
+/// several ranks in one gesture is a single write rather than one per rank
+/// crossed. The table's arrows still work: they compute their own
+/// neighbouring position and send it like any other move.
 ///
-/// Out of range is the same 400 rather than a clamp — that is `move_entry`'s
-/// own choice, inherited here, and it is what lets the table disable an arrow
-/// at the end of the list instead of offering one that does nothing. **But it
-/// carries a catalog sentence**, because unlike the guard above it is
-/// reachable by an ordinary operator: a second tab that has not reloaded
-/// still shows the up-arrow on a row the first tab has already moved to the
-/// top. Pressing it must say what happened, not `HTTP 400`.
+/// Out of range is a 400 rather than a clamp — that is `move_entry`'s own
+/// choice, inherited here, and it is what lets the table disable an arrow at
+/// the end of the list instead of offering one that does nothing. **It
+/// carries a catalog sentence**, because it is reachable by an ordinary
+/// operator: a second tab that has not reloaded still shows the up-arrow on a
+/// row the first tab has already moved to the top. Pressing it must say what
+/// happened, not `HTTP 400`.
 pub(super) async fn plugin_move_post(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
     Json(req): Json<PluginMoveReq>,
 ) -> Response {
-    if req.delta != 1 && req.delta != -1 {
-        tracing::warn!("moving {name}: refusing a delta of {}: the only gesture is one step", req.delta);
-        return StatusCode::BAD_REQUEST.into_response();
-    }
     // Read rather than remembered, exactly as its two neighbours: a plugin
     // installed while the core was running must be movable at once, and the
     // file is the authority. Checked here so that an unknown name is a 404
@@ -747,10 +754,10 @@ pub(super) async fn plugin_move_post(
                 .into_response();
         }
     };
-    let updated = match crate::plugins::edit::move_entry(&text, &name, req.delta) {
+    let updated = match crate::plugins::edit::move_entry(&text, &name, req.to) {
         Ok(u) => u,
         Err(crate::plugins::edit::EditError::OutOfRange) => {
-            tracing::info!("moving {name} by {}: already at that end of the list", req.delta);
+            tracing::info!("moving {name} to {}: out of range for the declared plugins", req.to);
             let msg = state.catalog.read().await.get("plugin_already_at_end").replace("{name}", &name);
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg })))
                 .into_response();
@@ -890,17 +897,22 @@ mod tests {
     use tower::util::ServiceExt;
 
     /// Rig with a real temporary `plugins.toml` and the core's ear kept: the
-    /// two things the route touches.
+    /// two things the route touches. `names` is declared in that order, each
+    /// with a no-op `exec`: most existing tests only need the two the
+    /// fixture used to hardcode (`radio`, `cd`), but a target position needs
+    /// enough declared rows to make the far end of its guard reachable —
+    /// hence a parameter rather than a second, parallel helper.
     fn app_state_with_plugins(
+        names: &[&str],
     ) -> (AppState, tempfile::TempDir, tokio::sync::mpsc::Receiver<PluginOrder>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plugins.toml");
-        std::fs::write(
-            &path,
-            "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
-             [[plugin]]\nname = \"cd\"\nexec = \"/bin/true\"\n",
-        )
-        .unwrap();
+        let body = names
+            .iter()
+            .map(|name| format!("[[plugin]]\nname = \"{name}\"\nexec = \"/bin/true\"\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, body).unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let root = dir.path().to_path_buf();
         let state = AppState {
@@ -908,6 +920,20 @@ mod tests {
             ..app_state()
         };
         (state, dir, rx)
+    }
+
+    /// Drains a `PluginOrder` channel, acknowledging every order with `true`.
+    ///
+    /// Doubles as what keeps a surviving mutant a **failure** rather than a
+    /// hang: a request that got past a guard it should have been refused by
+    /// would send an order and then wait on an acknowledgment nobody is
+    /// there to give — this always gives one. `true` rather than `false`
+    /// because the same helper also rides along a request that is meant to
+    /// succeed, whose route only answers `204` once the core acknowledges.
+    async fn drain_orders(mut rx: tokio::sync::mpsc::Receiver<PluginOrder>) {
+        while let Some(order) = rx.recv().await {
+            let _ = order.ack.send(true);
+        }
     }
 
     /// Rig built directly on an already-written manifest, with the order
@@ -930,7 +956,7 @@ mod tests {
 
     #[tokio::test]
     async fn switching_off_persists_then_tells_the_core() {
-        let (state, dir, mut rx) = app_state_with_plugins();
+        let (state, dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
         let app = router(state.clone());
         // The core: it acknowledges receipt, like the main loop.
         let core = tokio::spawn(async move {
@@ -961,7 +987,7 @@ mod tests {
         // Switch-on without a binary at the `exec` path: the core answers
         // `false`, not a closed channel. The only branch of `ack_rx` that
         // remained uncovered.
-        let (state, _dir, mut rx) = app_state_with_plugins();
+        let (state, _dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
         let app = router(state);
         let core = tokio::spawn(async move {
             let order = rx.recv().await.unwrap();
@@ -988,7 +1014,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_undeclared_name_is_refused_without_writing_anything() {
-        let (state, dir, _rx) = app_state_with_plugins();
+        let (state, dir, _rx) = app_state_with_plugins(&["radio", "cd"]);
         let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
         let app = router(state);
 
@@ -1113,7 +1139,7 @@ mod tests {
     /// hitting a manifest that no longer declares the name.
     #[tokio::test]
     async fn an_undeclared_plugin_is_no_longer_relaunchable_unlike_a_disabled_one() {
-        let (state, dir, mut rx) = app_state_with_plugins();
+        let (state, dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
         let status = state.status.clone();
         let core = tokio::spawn(async move {
             let order = rx.recv().await.unwrap();
@@ -1164,7 +1190,7 @@ mod tests {
     /// reads it before removing the block rather than after.
     #[tokio::test]
     async fn a_successful_uninstall_queues_the_binarys_removal_by_its_exec_file_name() {
-        let (base, dir, mut rx) = app_state_with_plugins();
+        let (base, dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(4);
         let state = AppState { update_tx, ..base };
         let core = tokio::spawn(async move {
@@ -1204,7 +1230,7 @@ mod tests {
     async fn a_successful_uninstall_moves_the_stored_update_row_and_marks_the_erasure() {
         use crate::update::state::{Availability, ComponentKind, ComponentOffer, UpdateState};
 
-        let (base, _dir, mut rx) = app_state_with_plugins();
+        let (base, _dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
         let (update_tx, _update_rx) = tokio::sync::mpsc::channel(4);
         let update = std::sync::Arc::new(tokio::sync::RwLock::new(UpdateState {
             components: vec![ComponentOffer {
@@ -1331,7 +1357,7 @@ mod tests {
     /// even asked, and nothing is written.
     #[tokio::test]
     async fn deleting_an_undeclared_name_is_refused_without_writing_or_asking_the_core() {
-        let (state, dir, mut rx) = app_state_with_plugins();
+        let (state, dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
         let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
 
         let response = plugin_delete(
@@ -1350,7 +1376,7 @@ mod tests {
     /// binary's removal is never queued.
     #[tokio::test]
     async fn a_core_refusal_leaves_the_declaration_and_the_binary_alone() {
-        let (state, dir, mut rx) = app_state_with_plugins();
+        let (state, dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
         let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
         let core = tokio::spawn(async move {
             let order = rx.recv().await.unwrap();
@@ -1436,7 +1462,7 @@ mod tests {
             plugin_move_post(
                 axum::extract::State(state),
                 axum::extract::Path("cd".to_string()),
-                axum::Json(PluginMoveReq { delta: -1 }),
+                axum::Json(PluginMoveReq { to: 0 }),
             )
             .await
         });
@@ -1473,80 +1499,14 @@ mod tests {
         assert_eq!(route.await.unwrap().status(), StatusCode::NO_CONTENT);
     }
 
-    /// A `delta` the arrow cannot produce is refused, and refused **by the
-    /// route** — which is a different claim from "the file editor would have
-    /// refused it anyway", and it needs a fixture that can tell the two apart.
-    ///
-    /// Measured rather than assumed: with the two-entry fixture the other
-    /// tests use, every value below is out of range, so `move_entry` refuses
-    /// them all and the guard could be deleted with nothing going red. Hence
-    /// five entries and the **middle** one: `0`, `+2` and `-2` are all moves
-    /// the editor would happily make, so the only thing that can refuse them
-    /// is the guard — and the three fail different halves of it (`delta == 0`
-    /// lets ±2 through, `delta.abs() > 1` lets `0` through).
-    ///
-    /// The drain task is what keeps a surviving mutant a **failure** rather
-    /// than a hang: a delta that got past the guard would send an order and
-    /// then wait for an acknowledgment nobody was there to give.
-    #[tokio::test]
-    async fn a_delta_other_than_one_step_is_refused_without_writing_or_asking_the_core() {
-        for delta in [0, 2, -2] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("plugins.toml");
-            std::fs::write(
-                &path,
-                "[[plugin]]\nname = \"radio\"\nexec = \"/bin/true\"\n\n\
-                 [[plugin]]\nname = \"cd\"\nexec = \"/bin/true\"\n\n\
-                 [[plugin]]\nname = \"files\"\nexec = \"/bin/true\"\n\n\
-                 [[plugin]]\nname = \"mpd\"\nexec = \"/bin/true\"\n\n\
-                 [[plugin]]\nname = \"musicbrainz\"\nexec = \"/bin/true\"\n",
-            )
-            .unwrap();
-            let before = std::fs::read_to_string(&path).unwrap();
-            let (state, mut rx) = test_state_with_manifest(&path);
-
-            let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let flag = asked.clone();
-            let drain = tokio::spawn(async move {
-                while let Some(order) = rx.recv().await {
-                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    let _ = order.ack.send(false);
-                }
-            });
-
-            let app = router(state);
-            let resp = app
-                .oneshot(
-                    Request::post("/api/plugins/files/move")
-                        .header("content-type", "application/json")
-                        .body(Body::from(format!(r#"{{"delta":{delta}}}"#)))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            drain.await.unwrap();
-
-            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "delta {delta}");
-            assert!(
-                !asked.load(std::sync::atomic::Ordering::SeqCst),
-                "delta {delta}: the core must not be asked for a move the page cannot make"
-            );
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                before,
-                "delta {delta}: nothing was written"
-            );
-        }
-    }
-
     /// The end of the list: `move_entry` refuses rather than clamping, and the
     /// route passes that refusal on instead of answering "done" to a move that
     /// did not happen — which is what lets the table disable the arrow
     /// honestly.
     ///
     /// **This 400 is reachable by an ordinary operator** — a second tab whose
-    /// list is one gesture out of date — so unlike the `delta` guard's it must
-    /// carry a sentence. Resolved against the **embedded** catalog rather than
+    /// list is one gesture out of date — so it must carry a sentence.
+    /// Resolved against the **embedded** catalog rather than
     /// compared to a copy of the string: `Catalog::get` returns the key itself
     /// when it finds nothing, so a key misspelled in the code would put
     /// `plugin_already_at_end` on the operator's screen with no test
@@ -1554,7 +1514,7 @@ mod tests {
     /// at the code at all.
     #[tokio::test]
     async fn moving_the_first_plugin_up_is_refused_and_leaves_the_file_byte_for_byte() {
-        let (state, dir, mut rx) = app_state_with_plugins();
+        let (state, dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
         let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
         let app = router(state);
 
@@ -1562,7 +1522,7 @@ mod tests {
             .oneshot(
                 Request::post("/api/plugins/radio/move")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"delta":-1}"#))
+                    .body(Body::from(r#"{"to":-1}"#))
                     .unwrap(),
             )
             .await
@@ -1584,35 +1544,12 @@ mod tests {
         );
     }
 
-    /// The same doctrine as its two neighbours: a name the file does not
-    /// declare is refused before any write, and the core is never asked.
-    #[tokio::test]
-    async fn moving_an_undeclared_name_is_refused_without_writing_or_asking_the_core() {
-        let (state, dir, mut rx) = app_state_with_plugins();
-        let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
-        let app = router(state);
-
-        let resp = app
-            .oneshot(
-                Request::post("/api/plugins/never-seen/move")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"delta":1}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        assert!(rx.try_recv().is_err());
-        assert_eq!(std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(), before);
-    }
-
     /// A core that refuses — the only cause being a manifest it could not
     /// re-read — is reported, not swallowed. The file keeps the move: it is
     /// the authority, and the next start puts the two back into step.
     #[tokio::test]
     async fn a_core_refusal_after_a_move_is_reported_with_a_catalog_message() {
-        let (state, dir, mut rx) = app_state_with_plugins();
+        let (state, dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
         let app = router(state);
         let core = tokio::spawn(async move {
             let order = rx.recv().await.unwrap();
@@ -1623,7 +1560,7 @@ mod tests {
             .oneshot(
                 Request::post("/api/plugins/cd/move")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"delta":-1}"#))
+                    .body(Body::from(r#"{"to":0}"#))
                     .unwrap(),
             )
             .await
@@ -1637,6 +1574,108 @@ mod tests {
             Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         assert_eq!(v["error"], catalog.get("plugin_action_failed").replace("{name}", "cd"));
         assert_eq!(order_in(&dir), vec!["cd".to_string(), "radio".to_string()]);
+    }
+
+    /// A target position is accepted, and the file says so.
+    ///
+    /// Five entries and a move of three ranks: the point of the drag is a
+    /// jump no arrow could make, and `move_entry`'s uniform re-spacing pass
+    /// has never been exercised over more than one place. Measured against
+    /// the file, not against the answer: a 204 proves the route replied, the
+    /// order in `plugins.toml` proves it did the thing.
+    #[tokio::test]
+    async fn moving_a_plugin_to_a_target_position_writes_that_order() {
+        let (state, dir, rx) =
+            app_state_with_plugins(&["radio", "cd", "files", "mpd", "console"]);
+        let drain = tokio::spawn(drain_orders(rx));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/api/plugins/radio/move")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"to":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(order_in(&dir), ["cd", "files", "mpd", "radio", "console"]);
+        drop(drain);
+    }
+
+    /// Out of range is still refused rather than clamped, and still carries
+    /// its catalogue sentence: a second tab that has not reloaded is how an
+    /// ordinary operator reaches it, and `HTTP 400` is not a thing to show
+    /// them.
+    ///
+    /// **Both ends, separately.** One bound alone would let the other
+    /// through, and `edit.rs`'s own guard is the only thing standing
+    /// between a bad index and a panic inside `toml_edit` — so each half of
+    /// that predicate needs its own case. Five entries, so `5` is one past
+    /// the end rather than far past it.
+    #[tokio::test]
+    async fn a_target_past_either_end_is_refused_with_a_catalogue_sentence() {
+        for to in [-1i32, 5] {
+            let (state, dir, rx) =
+                app_state_with_plugins(&["radio", "cd", "files", "mpd", "console"]);
+            let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+            // The drain is what keeps a surviving mutant a **failure** rather
+            // than a hang: a target that got past the guard would send an
+            // order and wait for an acknowledgment nobody gives.
+            let drain = tokio::spawn(drain_orders(rx));
+            let app = router(state);
+            let resp = app
+                .oneshot(
+                    Request::post("/api/plugins/radio/move")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"to":{to}}}"#)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "to={to}");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                v["error"].as_str().unwrap().contains("radio"),
+                "to={to}: the refusal must name the plugin, not answer a bare 400"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(),
+                before,
+                "to={to}: a refused move wrote the file"
+            );
+            drop(drain);
+        }
+    }
+
+    /// An undeclared name is still a 404 with the catalogue's own sentence,
+    /// not a write failure it is not — and nothing is written and nobody is
+    /// asked. Replaces the old delta-shaped
+    /// `moving_an_undeclared_name_is_refused_without_writing_or_asking_the_core`:
+    /// same doctrine, the new wire shape.
+    #[tokio::test]
+    async fn moving_an_undeclared_name_to_a_position_is_refused_without_writing() {
+        let (state, dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
+        let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/api/plugins/nosuch/move")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"to":0}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(),
+            before
+        );
+        // The subject holds the only sender, so this is deterministic and
+        // waits on nothing: see the repository's note on negative tests.
+        assert!(rx.try_recv().is_err(), "the core was asked about an unknown name");
     }
 
     #[tokio::test]

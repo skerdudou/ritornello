@@ -519,15 +519,21 @@ async function togglePlugin(row: PluginRow) {
 }
 
 /**
- * One place a stale second tab can be told an arrow no longer applies:
- * `move_entry` refuses out of range rather than clamping, and unlike the
- * `delta` guard (which the page can never trigger, since it only ever sends
- * ±1) this refusal is reachable by an ordinary operator, and carries a
- * catalog sentence of its own (`plugin_already_at_end`). Surfaced exactly
- * like any other refusal here: read from the server's answer, never
- * reworded on this side.
+ * One place a stale second tab can be told an arrow — or a drag — no longer
+ * applies: `move_entry` refuses out of range rather than clamping, and this
+ * refusal is reachable by an ordinary operator, and carries a catalog
+ * sentence of its own (`plugin_already_at_end`). Surfaced exactly like any
+ * other refusal here: read from the server's answer, never reworded on this
+ * side.
+ *
+ * `to` is a target position among the **declared** plugins, not a step: a
+ * drag can cross several ranks in one gesture, so the route learned a
+ * position instead of the ±1 it used to accept. The arrows still call this
+ * with their own neighbouring position (see `declaredIndex`) — one write
+ * either way, immediate on drop rather than batched behind a save button,
+ * which is fewer writes than the one-per-arrow-press this table already had.
  */
-async function movePlugin(name: string, delta: 1 | -1) {
+async function movePlugin(name: string, to: number) {
   // Fix round 1, M2: `inProgress` already exists for `togglePlugin`, and
   // every gesture this table added shares its row's name with that same
   // marker — a plugin mid-move is not a plugin that should also be toggled
@@ -535,7 +541,7 @@ async function movePlugin(name: string, delta: 1 | -1) {
   if (inProgress.value.has(name)) return
   inProgress.value.add(name)
   try {
-    const err = await api.post(`/api/plugins/${encodeURIComponent(name)}/move`, { delta })
+    const err = await api.post(`/api/plugins/${encodeURIComponent(name)}/move`, { to })
     if (err) {
       toast.error(err)
       return
@@ -544,6 +550,39 @@ async function movePlugin(name: string, delta: 1 | -1) {
   } finally {
     inProgress.value.delete(name)
   }
+}
+
+/** This plugin's own position among the declared rows, or `-1` for a name
+ * `declaredOrder` no longer carries — a stale drop target disappearing
+ * mid-drag, say. Both the arrows and the drag handle compute a target
+ * position from this rather than from the row's index in the full table,
+ * which also lists rows nothing declares. */
+function declaredIndex(name: string): number {
+  return declaredOrder.value.indexOf(name)
+}
+
+/** Name of the plugin currently being dragged, or `null`: the row grays out
+ * from this, same idiom as `RadioAdmin.vue`'s station table. */
+const draggingPlugin = ref<string | null>(null)
+
+/**
+ * Drop handler for the plugins table's own drag handle.
+ *
+ * `to` is the row dropped onto's own position in `declaredOrder`, read
+ * **before** the drop takes effect — the same convention `move()` itself
+ * uses (splice the source out, then insert at `to` into what remains) and
+ * the one `move_entry` already implements server-side. There is nothing
+ * else to compute: this table has no local list to keep in step, since the
+ * write lands immediately and the next `/api/status` poll is what redraws
+ * the row order.
+ */
+async function dropPlugin(targetName: string) {
+  const from = draggingPlugin.value
+  draggingPlugin.value = null
+  if (!from || from === targetName) return
+  const to = declaredIndex(targetName)
+  if (to === -1) return
+  await movePlugin(from, to)
 }
 
 /**
@@ -889,8 +928,49 @@ function goTo(id: string) {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="p in plugins" :key="p.name" data-plugin-row class="border-t border-border">
-                  <td class="py-1" data-plugin-name>{{ p.name }}</td>
+                <!--
+                  Draggable rows: only a declared row has a `plugins.toml`
+                  position to drop into, so the handle and the drag
+                  attributes are conditional on `p.declared` — an
+                  `undeclared_binary` or `missing_binary` row's arrows are
+                  already hidden the same way. `dragover.prevent` is
+                  essential, or the browser refuses the drop. The handle
+                  lives inside the name cell rather than a column of its
+                  own, so the header count this table is locked to in the
+                  e2e journey does not change.
+                -->
+                <tr
+                  v-for="p in plugins"
+                  :key="p.name"
+                  data-plugin-row
+                  class="border-t border-border"
+                  :class="p.declared && draggingPlugin === p.name ? 'opacity-50' : ''"
+                  :draggable="p.declared"
+                  @dragstart="p.declared && (draggingPlugin = p.name)"
+                  @dragover.prevent
+                  @drop.prevent="p.declared && dropPlugin(p.name)"
+                  @dragend="draggingPlugin = null"
+                >
+                  <td class="py-1">
+                    <!-- The handle sits beside the name, not inside
+                         `[data-plugin-name]`: that attribute is the name's
+                         own text everywhere else it is queried, and must
+                         keep meaning only that. `aria-hidden` for the same
+                         reason at the accessibility layer: the cell's own
+                         accessible name (what the config journey looks the
+                         row up by) must stay the plugin's name alone —
+                         dragging is decorative and keyboard-inaccessible
+                         either way, the arrows are the real affordance for
+                         anyone not using a pointer. -->
+                    <span
+                      v-if="p.declared"
+                      class="cursor-grab select-none pr-1"
+                      :title="t('reorder_hint')"
+                      aria-hidden="true"
+                      data-plugin-drag-handle
+                    >⠿</span>
+                    <span data-plugin-name>{{ p.name }}</span>
+                  </td>
                   <td data-plugin-kind>{{ p.kinds }}</td>
                   <td data-plugin-version>{{ p.version ?? '—' }}</td>
                   <td data-plugin-state>
@@ -996,18 +1076,22 @@ function goTo(id: string) {
                          than clamping, and an arrow that can be pressed and
                          always fails is worse than a greyed one. -->
                     <div v-if="p.declared" class="flex gap-1">
+                      <!-- Alternative to the drag handle: neither the
+                           keyboard nor a touchscreen fares well with
+                           drag-and-drop, the same reasoning the radio
+                           station table already carries. -->
                       <Button
-                        variant="outline" size="icon-sm" data-plugin-up
+                        variant="ghost" size="icon" data-plugin-up
                         :disabled="isFirstDeclared(p.name) || inProgress.has(p.name)"
                         :aria-label="t('plugin_move_up')"
-                        @click="movePlugin(p.name, -1)"
-                      >↑</Button>
+                        @click="movePlugin(p.name, declaredIndex(p.name) - 1)"
+                      >▲</Button>
                       <Button
-                        variant="outline" size="icon-sm" data-plugin-down
+                        variant="ghost" size="icon" data-plugin-down
                         :disabled="isLastDeclared(p.name) || inProgress.has(p.name)"
                         :aria-label="t('plugin_move_down')"
-                        @click="movePlugin(p.name, 1)"
-                      >↓</Button>
+                        @click="movePlugin(p.name, declaredIndex(p.name) + 1)"
+                      >▼</Button>
                     </div>
                     <span v-else>-</span>
                   </td>

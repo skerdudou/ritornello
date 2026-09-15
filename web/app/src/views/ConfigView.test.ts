@@ -678,8 +678,10 @@ describe('ConfigView — plugin table', () => {
   })
 
   // I4 (fix round 1): the arrows must send the request ruling 77 §2 built a
-  // reader for, and that reader must actually show the toast.
-  it('sends delta -1 up and delta 1 down to the move route', async () => {
+  // reader for, and that reader must actually show the toast. The wire
+  // shape moved from a ±1 `delta` to an absolute `to`, but each arrow still
+  // computes its own neighbouring position — one write either way.
+  it('sends a target position up and down to the move route', async () => {
     const { w, posts } = await mountView({
       '/api/status': {
         plugins: [
@@ -691,14 +693,37 @@ describe('ConfigView — plugin table', () => {
     })
     await w.findAll('[data-plugin-row]')[1]!.get('[data-plugin-up]').trigger('click')
     await flushPromises()
-    expect(posts).toContainEqual({ url: '/api/plugins/cd/move', body: { delta: -1 } })
+    expect(posts).toContainEqual({ url: '/api/plugins/cd/move', body: { to: 0 } })
 
     // Re-queried rather than reused: the successful move above triggers a
     // reload, and a stale wrapper reference is not what this test means to
     // exercise.
     await w.findAll('[data-plugin-row]')[0]!.get('[data-plugin-down]').trigger('click')
     await flushPromises()
-    expect(posts).toContainEqual({ url: '/api/plugins/radio/move', body: { delta: 1 } })
+    expect(posts).toContainEqual({ url: '/api/plugins/radio/move', body: { to: 1 } })
+  })
+
+  // The drag handle: a gesture the arrows cannot make, since it can cross
+  // several ranks at once. `dragstart` on the first row then `drop` on the
+  // third sends the third row's own (pre-drop) position as `to` — the same
+  // convention `RadioAdmin.vue`'s station table already uses, and the one
+  // `move_entry` implements server-side.
+  it('dragging a row onto another sends its target position to the move route', async () => {
+    const { w, posts } = await mountView({
+      '/api/status': {
+        plugins: [
+          { name: 'radio', kind: 'source', connected: true, admin: false },
+          { name: 'cd', kind: 'source', connected: false, admin: false },
+          { name: 'files', kind: 'source', connected: false, admin: false },
+        ],
+        active_source: 'radio',
+      },
+    })
+    const rows = w.findAll('[data-plugin-row]')
+    await rows[0]!.trigger('dragstart')
+    await rows[2]!.trigger('drop')
+    await flushPromises()
+    expect(posts).toContainEqual({ url: '/api/plugins/radio/move', body: { to: 2 } })
   })
 
   it('toasts the server refusal when an arrow is pressed past the end of a stale list', async () => {

@@ -407,12 +407,18 @@ pub fn remove_entry(text: &str, name: &str) -> Result<String, EditError> {
     Ok(doc.to_string())
 }
 
-/// Moves one entry by `delta` positions. `-1` is up, `+1` is down.
+/// Moves one entry to the zero-based target position `to` among the
+/// declared plugins.
 ///
-/// Refused rather than clamped at either end: the page disables the arrow
-/// there, so a request that arrives anyway is a bug or a stale page, and
-/// answering "done" to it would be a lie.
-pub fn move_entry(text: &str, name: &str, delta: i32) -> Result<String, EditError> {
+/// `to` is an absolute position, not a step: a drag can cross several ranks
+/// in one gesture, and computing the target at the call site (rather than
+/// handing this function a distance to add) means there is exactly one place
+/// that turns a position into an edit, whatever gesture produced it.
+///
+/// Refused rather than clamped when `to` is out of range: the page disables
+/// the affordance at either end, so a request that arrives anyway is a bug
+/// or a stale page, and answering "done" to it would be a lie.
+pub fn move_entry(text: &str, name: &str, to: i32) -> Result<String, EditError> {
     let text = normalize(text);
     let mut doc = parse(&text)?;
     let blocks = doc
@@ -423,7 +429,6 @@ pub fn move_entry(text: &str, name: &str, delta: i32) -> Result<String, EditErro
         .iter()
         .position(|t| name_of(t).as_deref() == Some(name))
         .ok_or_else(|| EditError::NotDeclared(name.to_string()))?;
-    let to = i64::try_from(from).expect("a plugin count fits in i64") + i64::from(delta);
     // Not just a nicer error than a library panic: `ArrayOfTables::insert`
     // below panics if given an index past the end, so this guard is the only
     // thing standing between a caller's bad index and a panic inside
@@ -723,7 +728,7 @@ exec = \"/x\"
 
     #[test]
     fn a_plugin_with_its_own_comment_keeps_it_when_it_moves() {
-        let out = move_entry(&realistic(), "cd", -1).unwrap();
+        let out = move_entry(&realistic(), "cd", 0).unwrap();
         assert_eq!(names_in_order(&out).unwrap(), vec!["cd", "radio", "musicbrainz"]);
         let comment_at = out.find("arriving at this source").unwrap();
         let cd_at = out.find("name = \"cd\"").unwrap();
@@ -741,7 +746,7 @@ exec = \"/x\"
     fn moving_a_plugin_down_then_back_up_restores_the_file_byte_for_byte() {
         let doc = realistic();
         let down = move_entry(&doc, "radio", 1).unwrap();
-        let back = move_entry(&down, "radio", -1).unwrap();
+        let back = move_entry(&down, "radio", 0).unwrap();
         assert_eq!(back, doc, "the round trip did not restore the original file");
     }
 
@@ -758,7 +763,7 @@ exec = \"/x\"
     fn the_real_example_file_survives_a_move_down_then_back_up() {
         let doc = include_str!("../../../../deploy/plugins.example.toml").replace("\r\n", "\n");
         let down = move_entry(&doc, "radio", 1).unwrap();
-        let back = move_entry(&down, "radio", -1).unwrap();
+        let back = move_entry(&down, "radio", 0).unwrap();
         assert_eq!(back, doc, "the round trip did not restore deploy/plugins.example.toml");
     }
 
@@ -876,7 +881,7 @@ exec = \"/y\"
         // ends, so a request that arrives anyway is a bug or a stale page, and
         // answering "done" to it would be a lie.
         assert!(matches!(move_entry(&realistic(), "radio", -1), Err(EditError::OutOfRange)));
-        assert!(matches!(move_entry(&realistic(), "musicbrainz", 1), Err(EditError::OutOfRange)));
+        assert!(matches!(move_entry(&realistic(), "musicbrainz", 3), Err(EditError::OutOfRange)));
     }
 
     /// This checkout has `core.autocrlf=true`, and a CRLF tangle has already
@@ -960,7 +965,7 @@ exec = \"/y\"
             "name = \"cd\"",
             "name = \"cd\"\nenabled = false",
         );
-        let out = move_entry(&with_key, "cd", -1).unwrap();
+        let out = move_entry(&with_key, "cd", 0).unwrap();
         assert!(out.contains("enabled = false"), "the switch was lost:\n{out}");
     }
 
@@ -1027,7 +1032,7 @@ exec = \"/w\"
         // but the two-paragraph header — second hand-off, where the
         // regression fires: the header must arrive at z with BOTH
         // paragraphs, not just the first one.
-        let after_z = move_entry(&after_radio, "z", -2).unwrap();
+        let after_z = move_entry(&after_radio, "z", 0).unwrap();
         assert_eq!(names_in_order(&after_z).unwrap(), vec!["z", "cd", "radio"]);
         assert!(
             after_z.trim_start().starts_with("# File header, paragraph one."),
@@ -1076,7 +1081,7 @@ exec = \"/w\"
         let with_third =
             append_block(&with_newcomer, "[[plugin]]\nname = \"third\"\nexec = \"/c\"\n", "third").unwrap();
         assert_eq!(names_in_order(&with_third).unwrap(), vec!["newcomer", "third"]);
-        let up = move_entry(&with_third, "third", -1).unwrap();
+        let up = move_entry(&with_third, "third", 0).unwrap();
         assert_eq!(names_in_order(&up).unwrap(), vec!["third", "newcomer"]);
 
         // The property: newcomer's own comment must still be immediately
@@ -1110,11 +1115,11 @@ exec = \"/w\"
         let with_b = append_block(&with_a, "[[plugin]]\nname = \"b\"\nexec = \"/b\"\n", "b").unwrap();
         assert_eq!(names_in_order(&with_b).unwrap(), vec!["a", "b"]);
 
-        let step1 = move_entry(&with_b, "b", -1).unwrap();
+        let step1 = move_entry(&with_b, "b", 0).unwrap();
         assert_eq!(names_in_order(&step1).unwrap(), vec!["b", "a"]);
-        let step2 = move_entry(&step1, "a", -1).unwrap();
+        let step2 = move_entry(&step1, "a", 0).unwrap();
         assert_eq!(names_in_order(&step2).unwrap(), vec!["a", "b"]);
-        let step3 = move_entry(&step2, "b", -1).unwrap();
+        let step3 = move_entry(&step2, "b", 0).unwrap();
         assert_eq!(names_in_order(&step3).unwrap(), vec!["b", "a"]);
 
         // The property: a's own comment must still be immediately above a,
@@ -1166,14 +1171,14 @@ exec = \"/b\"
 
         // newcomer moves up, becoming first: its own two-paragraph comment
         // now occupies the same textual space as the file's header.
-        let up = move_entry(&with_third, "newcomer", -1).unwrap();
+        let up = move_entry(&with_third, "newcomer", 0).unwrap();
         assert_eq!(names_in_order(&up).unwrap(), vec!["newcomer", "solo", "third"]);
 
         // third (comment-less) displaces newcomer. TODAY's behaviour: only
         // the LAST paragraph of newcomer's own comment is recognised as
         // "its own" and travels with it — the first paragraph is read as
         // part of the file header and stays behind with third.
-        let displaced = move_entry(&up, "third", -2).unwrap();
+        let displaced = move_entry(&up, "third", 0).unwrap();
         assert_eq!(names_in_order(&displaced).unwrap(), vec!["third", "newcomer", "solo"]);
 
         let para1_at = displaced.find("Paragraph one").unwrap();
@@ -1278,5 +1283,54 @@ exec = \"/y\"
             "\n\n",
             "exactly one blank line between the header and cd's own comment, not two:\n{out:?}"
         );
+    }
+
+    /// A document carrying what an operator's file carries: a file header
+    /// glued to the first entry, a comment of its own on the second, a blank
+    /// line between every block, and a trailing comment after the last one.
+    /// One name per position, so a test can move any of them and still tell
+    /// every piece of decoration apart afterwards.
+    fn fixture_with_comments(names: &[&str]) -> String {
+        assert!(names.len() >= 2, "the second entry needs to exist to carry its own comment");
+        let mut out = String::from("# The operator's file header.\n");
+        for (i, name) in names.iter().enumerate() {
+            if i == 1 {
+                out.push_str("\n# the operator's own note\n");
+            } else if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(&format!("[[plugin]]\nname = \"{name}\"\nexec = \"/bin/true\"\n"));
+        }
+        out.push_str("\n# a trailing note after the last entry\n");
+        out
+    }
+
+    /// Re-spacing over a distance of more than one place.
+    ///
+    /// `move_entry` already accepted any target — only the route restricted
+    /// it to a one-step delta — so this is not new behaviour but behaviour
+    /// nothing covered: the doc of that guard names exactly this as the
+    /// reason it was not relaxed. Comments, blank lines and the operator's
+    /// own spacing must come back out recognisable across a three-rank move,
+    /// in both directions.
+    #[test]
+    fn moving_three_places_keeps_the_document_recognisable_in_both_directions() {
+        // A document carrying what an operator's file carries: a comment
+        // above a block, a blank line between blocks, and a trailing
+        // comment. Those are what "recognisable" means here — the editor
+        // works on the text as written, and this is the only test that
+        // reads it back over a distance.
+        let text = fixture_with_comments(&["radio", "cd", "files", "mpd", "console"]);
+        let down = move_entry(&text, "radio", 3).unwrap();
+        assert_eq!(
+            names_in_order(&down).unwrap(),
+            vec!["cd", "files", "mpd", "radio", "console"]
+        );
+        assert!(down.contains("# the operator's own note"), "a comment was lost");
+        assert!(down.contains("# a trailing note after the last entry"), "the trailing note was lost");
+        // Back where it started, and byte for byte: a re-spacing pass that
+        // drifts would show up here and nowhere else.
+        let back = move_entry(&down, "radio", 0).unwrap();
+        assert_eq!(back, text);
     }
 }

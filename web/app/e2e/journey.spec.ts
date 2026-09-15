@@ -490,9 +490,11 @@ test('an order arrow writes a real reorder, checked against the server, and is p
     // completed successfully — `order()` is read fresh rather than assumed.
     const current = await order();
     if (JSON.stringify(current) !== JSON.stringify(before)) {
-      const radioIndex = current.indexOf('radio')
-      const delta = radioIndex > before.indexOf('radio') ? -1 : 1
-      await request.post('/api/plugins/radio/move', { data: { delta } })
+      // The wire moved from a ±1 `delta` to an absolute `to`: radio's own
+      // original position among the declared plugins is the target, no
+      // direction to compute.
+      const to = before.indexOf('radio')
+      await request.post('/api/plugins/radio/move', { data: { to } })
       await expect.poll(order).toEqual(before)
     }
   }
