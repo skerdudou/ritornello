@@ -694,16 +694,26 @@ mod tests {
         // doc, before this task): nothing under a stamped plugin URL could
         // change within one session, because nothing read the registry's
         // disk tier for a plugin. Task 5 is precisely what broke that —
-        // `admin_i18n` reads `Registry::chain_for` directly, and
-        // `Registry::resweep` (what a real locale change already triggers,
-        // `Core::set_locale`) picks up an edited on-disk pack without the
-        // core's `session` stamp ever moving. The fix (this fix round) is
-        // not a longer key: the catalog route never claims `immutable` any
-        // more, at all — this test writes the sequence end to end (same URL,
-        // an on-disk edit, a resweep, two different answers) and asserts the
-        // *header*, which is the discriminating check: it must fail the
-        // moment `immutable` is restored on this route, even with `lang` and
-        // a stamp both present — the exact shape that used to trigger it.
+        // `admin_i18n` reads `Registry::chain_for` directly, and the
+        // registry's disk tier can change mid-session without the core's
+        // `session` stamp ever moving. This test writes out the case an
+        // operator triggers directly: an on-disk pack edited, then a real
+        // locale change (`Registry::resweep_async`, what `Core::set_locale`
+        // calls). `AppState::session`'s doc names a second case closed the
+        // same way, for the same reason, without a second test: a plugin
+        // that self-updates and re-announces mid-run
+        // (`hotplug`/`insert_announced`) used to leave a browser's
+        // `immutable`-cached catalogue stale until the *core* restarted,
+        // even though the registry itself had already moved on — both cases
+        // are exactly the same fact (the URL no longer determines the
+        // content) reached by two different writers of the same registry.
+        // The fix (this fix round) is not a longer key: the catalog route
+        // never claims `immutable` any more, at all — this test writes the
+        // on-disk-edit sequence end to end (same URL, an edit, a resweep,
+        // two different answers) and asserts the *header*, which is the
+        // discriminating check: it must fail the moment `immutable` is
+        // restored on this route, even with `lang` and a stamp both present
+        // — the exact shape that used to trigger it.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/en.toml"), "greeting = \"before\"\n").unwrap();
@@ -720,12 +730,12 @@ mod tests {
 
         // The operator edits the pack on disk, then the interface language
         // is switched — the only gesture, today, that calls
-        // `Registry::resweep` (`Core::set_locale`). Called directly here:
-        // this test is at the HTTP layer, with no `Core` to drive. Now that
-        // the route never promises `immutable`, this is no longer a broken
-        // promise — a revalidating caller is expected to see it.
+        // `Registry::resweep_async` (`Core::set_locale`). Called directly
+        // here: this test is at the HTTP layer, with no `Core` to drive. Now
+        // that the route never promises `immutable`, this is no longer a
+        // broken promise — a revalidating caller is expected to see it.
         std::fs::write(dir.path().join("radio/en.toml"), "greeting = \"after\"\n").unwrap();
-        state.registry.write().await.resweep();
+        crate::i18n::Registry::resweep_async(&state.registry).await;
 
         let second = app.oneshot(Request::get(url).body(Body::empty()).unwrap()).await.unwrap();
         let cc2 = second.headers().get(axum::http::header::CACHE_CONTROL).and_then(|v| v.to_str().ok()).unwrap_or("");

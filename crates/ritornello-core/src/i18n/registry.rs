@@ -60,12 +60,56 @@ impl Registry {
     /// untouched: it does not come from this root and a plugin's
     /// announcement is not re-read just because a locale changed.
     ///
-    /// Called wherever the code already rebuilds a resolution on a real
-    /// locale change (`Core::set_locale`) — the disk-edit-then-restart
-    /// gesture this crate documents keeps working, and gains "or pick the
-    /// language again" as an equivalent, cheaper trigger.
+    /// Synchronous, `&mut self`: fine for a plain, owned `Registry` — the
+    /// tests below use it that way — but **never** for one shared as
+    /// `crate::i18n::Shared` (`Arc<RwLock<Registry>>`). Called there as
+    /// `shared.write().await.resweep()`, as `Core::set_locale` briefly did,
+    /// the directory walk and TOML parse run while holding the write lock,
+    /// blocking whatever tokio worker thread executes it and every other
+    /// reader or writer of the same registry for the duration —
+    /// `admin::admin_i18n`'s read lock included, since task 5 gave it one
+    /// (the gap task 4's review named ahead of task 5, closed here).
+    /// [`Registry::resweep_async`] is the async, non-blocking equivalent
+    /// every caller going through `Shared` uses instead — `Core::set_locale`
+    /// included, which is why this method has no production caller left and
+    /// carries `#[allow(dead_code)]` for that reason alone.
+    #[allow(dead_code)]
     pub fn resweep(&mut self) {
         self.disk = sweep_disk(&self.root);
+    }
+
+    /// The async, non-blocking equivalent of [`Registry::resweep`] for a
+    /// registry shared as `crate::i18n::Shared` — what `Core::set_locale`
+    /// calls.
+    ///
+    /// The directory walk and TOML parse (`sweep_disk`) run in
+    /// `tokio::task::spawn_blocking`, off the async runtime's worker
+    /// threads and **before any lock on `shared` is taken at all**; the
+    /// write lock is then held only long enough to move the freshly swept
+    /// map into `disk` — a plain assignment, no I/O, nothing that can block.
+    /// A concurrent reader (`admin::admin_i18n`, or another `resweep_async`)
+    /// is therefore never made to wait on the walk itself, only ever on that
+    /// last, negligible assignment.
+    ///
+    /// Task 4's review named the blocking-under-lock gap this fixes, ahead
+    /// of task 5; it went unfixed because task 5 is what first put a second,
+    /// HTTP-reachable reader on the same write lock this blocks.
+    ///
+    /// If the blocking task panics (`JoinError`), the sweep is skipped and
+    /// the previous `disk` snapshot is left as is — the same "leave what was
+    /// there" posture `sweep_disk` already takes for a root that cannot be
+    /// read at all — rather than losing every plugin's disk-sourced text
+    /// over one bad sweep.
+    pub async fn resweep_async(shared: &crate::i18n::Shared) {
+        let root = shared.read().await.root.clone();
+        let disk = match tokio::task::spawn_blocking(move || sweep_disk(&root)).await {
+            Ok(disk) => disk,
+            Err(e) => {
+                tracing::warn!("registry resweep task failed: {e}");
+                return;
+            }
+        };
+        shared.write().await.disk = disk;
     }
 
     /// Records — or replaces — one module's announced layers.
@@ -417,5 +461,36 @@ mod tests {
         std::fs::remove_file(&pack).unwrap();
         registry.resweep();
         assert_eq!(registry.chain_for("radio", "nl", "en").get("play"), "play", "the removed pack must be gone");
+    }
+
+    /// Functional coverage for `resweep_async`: the same fact
+    /// `resweep_picks_up_a_pack_written_after_the_first_sweep` pins for the
+    /// synchronous method, through the async/`Shared` path `Core::set_locale`
+    /// actually uses. This does **not** prove the liveness property the fix
+    /// exists for (that a concurrent reader is never blocked behind the
+    /// disk walk) — see this module's own `resweep_async` doc for why, and
+    /// the fix round's report for why a deterministic, non-flaky proof of
+    /// that specific property was judged to need more test machinery than
+    /// this bounded-impact fix earns.
+    #[tokio::test]
+    async fn resweep_async_picks_up_a_pack_written_after_the_first_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        let shared: crate::i18n::Shared =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(dir.path().to_path_buf())));
+        assert_eq!(
+            shared.read().await.chain_for("radio", "nl", "en").get("play"),
+            "play",
+            "nothing on disk yet"
+        );
+
+        std::fs::write(dir.path().join("radio/nl.toml"), "play = \"Spelen\"\n").unwrap();
+        Registry::resweep_async(&shared).await;
+
+        assert_eq!(
+            shared.read().await.chain_for("radio", "nl", "en").get("play"),
+            "Spelen",
+            "picked up after an async resweep"
+        );
     }
 }

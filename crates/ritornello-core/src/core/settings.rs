@@ -40,12 +40,17 @@ impl<P: Player> Core<P> {
     ///
     /// A real locale change is also the registry's refresh gesture: the
     /// registry's disk tier is swept once (at startup) and never re-read on
-    /// its own, so `resweep` here is what lets an operator who edited a pack
-    /// on disk see it without restarting the service — they only have to
-    /// pick a language (even the same one again) for it to take effect.
+    /// its own, so resweeping here is what lets an operator who edited a
+    /// pack on disk see it without restarting the service — they only have
+    /// to pick a language (even the same one again) for it to take effect.
+    /// Through `Registry::resweep_async`, not the bare, synchronous
+    /// `resweep`: the directory walk and TOML parse run off the async
+    /// runtime and before any lock is taken, so this call never blocks a
+    /// concurrent reader of the registry (`admin::admin_i18n`, since task 5)
+    /// behind disk I/O — see `resweep_async`'s own doc.
     pub async fn set_locale(&mut self, locale: String) -> Result<()> {
         self.locale = Some(locale.clone());
-        self.registry.write().await.resweep();
+        crate::i18n::Registry::resweep_async(&self.registry).await;
         let new_catalog = crate::i18n::core_catalog(&*self.registry.read().await, &locale, "en");
         self.standby_status = Some(resolve_standby_status(&new_catalog));
         *self.catalog.write().await = new_catalog;
