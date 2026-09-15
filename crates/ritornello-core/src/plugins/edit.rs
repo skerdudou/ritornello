@@ -433,6 +433,18 @@ pub fn move_entry(text: &str, name: &str, to: i32) -> Result<String, EditError> 
     // below panics if given an index past the end, so this guard is the only
     // thing standing between a caller's bad index and a panic inside
     // `toml_edit` rather than the `OutOfRange` a caller can actually handle.
+    //
+    // `to < 0` is provably redundant against the second clause **today**,
+    // and a mutation test will tell you so: `to` is an `i32`, and casting any
+    // negative `i32` to `usize` lands far past `blocks.len()` on a 64-bit host
+    // and on this project's 32-bit armv7 target alike. Keep it anyway. On a
+    // 32-bit target `i64 as usize` **truncates** instead of sign-extending, so
+    // if `to` is ever widened back to `i64` — it was one until the route
+    // learned a target position — a sufficiently negative value such as
+    // `-(1i64 << 32)` truncates to a small, in-range `usize` and walks past
+    // the second clause alone. That failure exists only on the appliance,
+    // never on the machine the tests run on. Do not drop this clause because
+    // a mutation on x86_64 did not kill it.
     if to < 0 || to as usize >= blocks.len() {
         return Err(EditError::OutOfRange);
     }
