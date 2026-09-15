@@ -75,6 +75,12 @@ pub(super) async fn locale_put(State(state): State<AppState>, Json(req): Json<Lo
 }
 
 /// The core catalog in the current language, flattened, for the SPA's `t()`.
+///
+/// No I/O: `state.catalog` is a snapshot already resolved from the shared
+/// `Registry` (task 4) by `crate::i18n::core_catalog`, rebuilt only on a real
+/// locale change (`Core::set_locale`) — see `AppState.catalog`'s own doc.
+/// This route, like `admin::admin_i18n` (task 5), only ever reads memory
+/// that was already built before the request arrived.
 pub(super) async fn i18n_json(State(state): State<AppState>) -> Json<serde_json::Value> {
     let cat = state.catalog.read().await;
     Json(serde_json::json!(cat.entries()))

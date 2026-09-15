@@ -74,16 +74,9 @@ pub struct AppState {
     /// as plugins announce themselves, disconnect, or a locale changes.
     ///
     /// **The same `Arc`** as the one `Core` holds (see `core::Wiring`): the
-    /// core seeds it and resolves its own catalog from it, the HTTP layer
-    /// reads it for the plugin catalog routes (task 5) — one registry, not
-    /// two copies that could drift.
-    ///
-    /// No HTTP route reads this field yet — task 5 wires `/api/i18n` and
-    /// `/plugins/<name>/api/i18n` to it — so it is dead code by this crate's
-    /// own lint (`ritornello-core` has no `lib` target) even though it is
-    /// already load-bearing: it is what `hotplug`/`declare_plugin`/
-    /// `admin::forget_page` grow and shrink as plugins come and go.
-    #[allow(dead_code)]
+    /// core seeds it and resolves its own catalog from it, and the HTTP layer
+    /// reads it for the plugin catalog route (`admin::admin_i18n`, task 5) —
+    /// one registry, not two copies that could drift.
     pub registry: crate::i18n::Shared,
     pub locale_current: Arc<RwLock<Option<String>>>,
     pub locale_tx: mpsc::Sender<String>,
@@ -92,47 +85,52 @@ pub struct AppState {
     /// late must see its page appear without restarting the core.
     pub admin_backends: crate::admin::AdminBackends,
     pub admin_assets: Arc<crate::admin::AssetCache>,
-    /// Plugin catalogs already fetched, by `(plugin, lang)`. No entry for "no
-    /// language requested" — see `crate::admin::CatalogCache`'s doc for why
-    /// that case is never cached at all.
-    pub admin_catalogs: Arc<crate::admin::CatalogCache>,
     /// Identifier of this run of the core, used as the cache stamp of the
-    /// catalogs (`?v=<session>`).
+    /// plugin assets and catalogs (`?v=<session>`).
     ///
     /// Not a fingerprint of the content: getting one would mean already
     /// holding the catalog, whereas the stamp has to be written into the very
-    /// URL that asks for it. Not the plugin's fingerprint either — an
-    /// operator can edit **a plugin's** on-disk language pack
-    /// (`/etc/ritornello/locales/<component>/<lang>.toml`) without
-    /// recompiling anything, and the catalog would then stay frozen **for
-    /// ever** in `admin_catalogs`/`admin_assets`, which is the danger
-    /// `immutable` carries. Restarting the service is the only gesture that
-    /// refreshes *these two caches*: nothing here re-fetches a plugin's
-    /// catalog on a locale change, unlike the core's own — see `catalog`'s
-    /// doc, whose "or picking the language again" is not a new capability
-    /// this chantier added, but a fact about `Catalog::load` (and now
-    /// `Registry`) that already held before it: neither ever cached a disk
-    /// read for the core's own module, so calling `set_locale` — even to the
-    /// same locale — has always re-read it. The two doc comments describe
-    /// two different subsystems, not a disagreement: a plugin's admin
-    /// catalogue, fetched once over IPC and then cached indefinitely behind
-    /// an `immutable` URL, versus the core's own, resolved fresh on every
-    /// real locale change. The registry swept for task 4 does hold every
-    /// plugin's on-disk pack too (`Registry::sweep` walks the whole root),
-    /// but nothing reads that tier for a plugin yet — `admin_i18n` still
-    /// goes through the IPC path below, untouched by this field's own
-    /// `resweep`. So the premise `immutable` rests on is intact: nothing a
-    /// browser holds under a stamped plugin URL can change within one
-    /// session.
+    /// URL that asks for it.
     ///
-    /// **Stated limitation**: the stamp is the core's session alone, not the
-    /// plugin's. A plugin restarted *within* one core session, with a
-    /// rebuilt catalog, keeps this same `session` value, so a browser that
-    /// already cached the old catalog under `?v=<session>` goes on serving it
-    /// `immutable` until the core itself restarts. `admin::forget_page`
-    /// purges the core-side cache for exactly this case but cannot reach a
-    /// browser's copy. Accepted: a core restart clears it, and editing a
-    /// language pack ends in a service restart anyway.
+    /// **Holds for `admin_assets` (`ui.js`/`ui.css`), not any more for the
+    /// catalog route.** An asset is still fetched over IPC once and cached
+    /// indefinitely in `admin_assets`: an operator who rebuilds a plugin's
+    /// `ui.js` without recompiling the core sees the old one until the
+    /// service restarts (or `admin::forget_page` runs, on disconnect), which
+    /// is exactly the danger `immutable` carries and exactly why nothing but
+    /// a restart is supposed to move what a stamped asset URL answers.
+    ///
+    /// **The plugin catalog route no longer has that property, since task
+    /// 5.** `admin::admin_i18n` resolves a plugin's catalogue straight from
+    /// the shared `Registry` (task 4) instead of caching an IPC fetch, and
+    /// the registry's disk tier is re-swept by `Registry::resweep` on every
+    /// real locale change (`Core::set_locale`) — not only by a restart. So
+    /// the sequence that used to be impossible now works: an operator edits
+    /// a plugin's on-disk pack
+    /// (`/etc/ritornello/locales/<component>/<lang>.toml`), picks another
+    /// interface language and picks the original one back (or any two real
+    /// `PUT /api/locale` calls), and the very same stamped URL
+    /// (`?lang=<l>&v=<session>`) a browser already cached as `immutable`
+    /// now answers with the edited text — `session` never changed, because
+    /// nothing about a resweep touches it. See
+    /// `admin::tests::a_stamped_catalog_can_change_within_one_session_after_a_resweep`
+    /// for the sequence written out end to end.
+    ///
+    /// **This is a known, unresolved gap, not a fix applied here.** Closing
+    /// it means the catalog route's cache key must depend on more than the
+    /// core's session — content-derived, tied to `Registry`'s own generation,
+    /// or something else — and choosing among those is a design decision
+    /// deliberately left open rather than decided inside this task.
+    ///
+    /// **Stated limitation, still true**: the stamp is the core's session
+    /// alone, not the plugin's. A plugin restarted *within* one core
+    /// session, with a rebuilt catalog, keeps this same `session` value, so a
+    /// browser that already cached the old asset or catalog under
+    /// `?v=<session>` goes on serving it `immutable` until the core itself
+    /// restarts (or, for the catalog now, until a resweep changes what the
+    /// registry holds, per the gap above). `admin::forget_page` purges the
+    /// core-side state for exactly this case but cannot reach a browser's
+    /// copy.
     pub session: String,
     pub cmd_tx: mpsc::Sender<ritornello_proto::InputMessage>,
     pub theme_current: Arc<RwLock<crate::theme::ThemeState>>,
@@ -504,7 +502,6 @@ pub(crate) mod tests_support {
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
-            admin_catalogs: Arc::new(Default::default()),
             session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -550,7 +547,6 @@ pub(crate) mod tests_support {
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
-            admin_catalogs: Arc::new(Default::default()),
             session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -598,7 +594,6 @@ pub(crate) mod tests_support {
             locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
-            admin_catalogs: Arc::new(Default::default()),
             session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -652,7 +647,6 @@ pub(crate) mod tests_support {
             locales_root: dir.path().to_path_buf(),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
-            admin_catalogs: Arc::new(Default::default()),
             session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -867,7 +861,6 @@ mod tests {
     #[async_trait::async_trait]
     impl crate::admin::AdminBackend for FakeOccupe {
         async fn asset(&self, _: &str) -> anyhow::Result<Option<(String, String)>> { Ok(None) }
-        async fn catalog(&self, _lang: Option<&str>) -> anyhow::Result<serde_json::Value> { Ok(serde_json::json!({})) }
         async fn get_data(&self) -> anyhow::Result<serde_json::Value> { Ok(serde_json::json!({})) }
         async fn set_data(&self, _: serde_json::Value) -> anyhow::Result<Result<(), String>> { Ok(Ok(())) }
         async fn ping(&self) -> anyhow::Result<()> { Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }

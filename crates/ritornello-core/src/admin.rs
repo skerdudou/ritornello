@@ -8,12 +8,18 @@ use serde::Deserialize;
 
 /// Abstraction of the admin operations the core's routes need.
 /// Implemented by `AdminClient` (real IPC); a fake implements it in tests.
+///
+/// **No `catalog` method.** Until task 5, `admin_i18n` fetched a plugin's
+/// catalogue through this trait, over IPC. It now resolves the same
+/// catalogue from the shared `Registry` (task 4), purely in memory — see
+/// `admin_i18n`'s doc — so that operation no longer belongs to the set of
+/// admin calls this trait exists to abstract. `AdminClient::get_catalog`
+/// itself is untouched, in `ritornello-plugin-sdk`: the wire protocol still
+/// answers a `Catalog` request, this crate simply stopped being the one that
+/// asks.
 #[async_trait::async_trait]
 pub trait AdminBackend: Send + Sync {
     async fn asset(&self, path: &str) -> Result<Option<(String, String)>>;
-    /// `lang = None`: the plugin's current language. `Some(l)`: that language
-    /// explicitly, rebuilt by the plugin regardless of its current one.
-    async fn catalog(&self, lang: Option<&str>) -> Result<serde_json::Value>;
     async fn get_data(&self) -> Result<serde_json::Value>;
     async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), String>>;
     /// Probe at 500 ms, without a lock on the plugin side: `Err(Timeout)` =
@@ -28,9 +34,6 @@ impl AdminBackend for ritornello_plugin_sdk::AdminClient {
     }
     async fn asset(&self, path: &str) -> Result<Option<(String, String)>> {
         self.get_asset(path).await
-    }
-    async fn catalog(&self, lang: Option<&str>) -> Result<serde_json::Value> {
-        ritornello_plugin_sdk::AdminClient::get_catalog(self, lang).await
     }
     async fn get_data(&self) -> Result<serde_json::Value> {
         ritornello_plugin_sdk::AdminClient::get_data(self).await
@@ -66,45 +69,30 @@ pub type AssetCache = tokio::sync::RwLock<
     std::collections::HashMap<(String, String), (String, String, String)>,
 >;
 
-/// Plugin catalogs already fetched, by `(plugin, lang)`. Values are the
-/// flattened JSON catalog, exactly as the plugin returned it: no ETag, no
-/// mime, unlike `AssetCache` — the whole response is small JSON,
-/// re-serializing it costs nothing worth caching separately.
-///
-/// Keyed by language and not merely by plugin, on purpose: the whole point of
-/// serving these under `immutable` is that the URL fully determines the
-/// content, and a URL that names `fr` must never answer with what was
-/// fetched for `en`.
-///
-/// **No entry for "no language requested".** That request means "whatever
-/// language the plugin is currently in", and that is mutable within a run —
-/// `Core::set_locale` pushes `SetLocale` to every plugin. Caching it here,
-/// under some placeholder key, would freeze a stale language until the
-/// plugin's process restarts, with nothing in this cache able to invalidate
-/// it. Every entry that *does* exist here is therefore for a `lang` the
-/// caller named explicitly, which is exactly the case where the answer truly
-/// cannot change during this run.
-///
-/// Bounded by construction: `admin_i18n` only ever inserts a `lang` that
-/// passed `list_locales` (the installed packs), so the key space is a
-/// handful of entries per plugin — `valid_locale`'s charset alone (16
-/// characters from a 64-character alphabet) would otherwise admit far more
-/// than that, each a potential cache entry and a potential IPC round trip to
-/// the plugin — see `admin_i18n`'s doc.
-pub type CatalogCache = tokio::sync::RwLock<std::collections::HashMap<(String, String), serde_json::Value>>;
-
-/// Forgets everything the core keeps of the admin page of `name`: its backend,
-/// its cached assets and catalogs, and its announced translation layers.
+/// Forgets everything the core keeps of the admin page of `name`: its
+/// backend, its cached assets, and its announced translation layers.
 ///
 /// **A single purge point, called everywhere the plugin's process stops** —
 /// death observed by supervision, death inferred from the sockets closing,
 /// requested shutdown, and re-announcement (which is the end of one process
 /// followed by the start of another). It is deliberately a function and not
-/// four copied lines: every one of these registries must fall *together*, and
-/// an invariant whose correctness depends on remembering to purge it at
+/// three copied lines: every one of these registries must fall *together*,
+/// and an invariant whose correctness depends on remembering to purge it at
 /// several call sites ends up lying at one of them (the lesson `main.rs`
 /// already records for `kill_triggers`, applied here by never letting that
 /// choice exist in the first place).
+///
+/// **No plugin catalog cache to purge here any more.** Until task 5, this
+/// function also emptied `CatalogCache`, a store of already-fetched plugin
+/// catalogues keyed by `(plugin, lang)` and deliberately bounded — each entry
+/// was a potential IPC round trip to the plugin, and an unauthenticated
+/// caller on the LAN could otherwise grow the core's memory without bound
+/// and monopolize a plugin's admin socket by naming `lang` values from
+/// `valid_locale`'s own alphabet. `admin_i18n` no longer fetches a catalogue
+/// over IPC at all — it resolves one from the shared `Registry` (task 4),
+/// which this function already keeps current via `registry.forget` below —
+/// so that risk, and the cache built to bound it, are both gone. See
+/// `admin_i18n`'s own doc for the replacement.
 ///
 /// What removing the backend buys: `/api/admin/<name>` answers a frank 404 —
 /// "unknown plugin" — instead of an IPC round trip on a closed socket. The
@@ -122,16 +110,13 @@ pub type CatalogCache = tokio::sync::RwLock<std::collections::HashMap<(String, S
 pub async fn forget_page(
     backends: &AdminBackends,
     assets: &AssetCache,
-    catalogs: &CatalogCache,
     registry: &crate::i18n::Shared,
     name: &str,
 ) {
     backends.write().await.remove(name);
-    // `retain` and not `remove`: the key carries the asset path (resp. the
-    // language), so a plugin has as many entries as files it served (resp.
-    // languages it was asked in).
+    // `retain` and not `remove`: the key carries the asset path, so a plugin
+    // has as many entries as files it served.
     assets.write().await.retain(|(plugin, _), _| plugin != name);
-    catalogs.write().await.retain(|(plugin, _), _| plugin != name);
     registry.write().await.forget(name);
 }
 
@@ -225,11 +210,11 @@ pub async fn admin_asset(
 
 #[derive(Deserialize)]
 pub struct CatalogQuery {
-    /// The plugin's current language when absent — same convention as
-    /// `AdminBackend::catalog`. Validated against **two** gates before it is
-    /// trusted for anything (see `admin_i18n`): `valid_locale`, the same
-    /// charset/length rule `PUT /api/locale` already enforces, and membership
-    /// in `list_locales`, the installed packs.
+    /// The core's current interface language when absent (`AppState.locale_current`,
+    /// falling back to `en`) — see `admin_i18n`. Still validated by
+    /// `valid_locale` before use: the value is a query parameter, and
+    /// refusing early what is not a language code stays right even though
+    /// nothing here can grow unboundedly any more (see `admin_i18n`'s doc).
     lang: Option<String>,
     /// Presence, together with `lang`'s, is what matters: like `admin_asset`'s
     /// own `v`, it says the URL was stamped by a caller who can name a fresh
@@ -240,82 +225,63 @@ pub struct CatalogQuery {
 
 /// `GET /plugins/<name>/api/i18n[?lang=<l>][&v=<stamp>]`.
 ///
-/// Cached by `(name, lang)`, but **only when `lang` is present** — see
-/// `CatalogCache`'s doc for why the plugin's ambient "current language" must
-/// never be cached. Marked `immutable` only when **both** `lang` and `v` are
-/// present: `immutable` is a promise that can never be withdrawn, so it may
-/// only be made about a response the URL fully determines — `v` alone still
-/// leaves "whichever language the plugin happens to be in right now"
-/// unresolved. The historic, unversioned URL (neither parameter) must remain
-/// usable by a client that has not been updated, and must never be told it
-/// can cache the answer forever.
+/// **Resolved from the shared `Registry` (task 4), with no IPC and no
+/// cache.** Until this task, an absent `lang` meant an IPC round trip asking
+/// the plugin its own current language, and a named `lang` meant a round
+/// trip cached in `CatalogCache` — bounded on purpose, because each entry was
+/// a potential IPC call: an unauthenticated caller on the LAN could
+/// otherwise grow the core's memory without bound and monopolize a plugin's
+/// admin socket by naming `lang` values from `valid_locale`'s own alphabet.
+/// `Registry::chain_for` performs no I/O and holds nothing extra per call —
+/// it reads tiers the registry already keeps in memory (see its own doc) —
+/// so there is nothing left to bound: any well-shaped `lang` costs one
+/// `HashMap` lookup, not a socket round trip, and membership in
+/// `list_locales` (the installed packs) is therefore no longer checked here
+/// either — it only ever existed to bound the cache this route no longer
+/// has. `chain_for` already answers gracefully, falling through to `en`,
+/// for a language nobody installed.
 ///
-/// `lang` is refused with `400` **before** touching the plugin or the cache
-/// unless it passes both:
-/// - `valid_locale` (`crate::status::valid_locale`) — the same rule
-///   `PUT /api/locale` already enforces, reused rather than reinvented: a
-///   stricter, purpose-built "plain locale" grammar tried here first was
-///   *wrong* — it rejected `pt-BR`-shaped codes that are legitimate
-///   selectable languages, which would have silently stripped a plugin page
-///   of its translations the moment the shell requested one.
-/// - membership in `list_locales(&st.locales_root)` — the operator-facing
-///   list of what is actually installed. This is what bounds `CatalogCache`:
-///   `valid_locale`'s charset alone (16 characters from a 64-character
-///   alphabet) admits far more distinct strings than that, each a potential
-///   cache entry and a potential IPC round trip to the plugin — an
-///   unauthenticated caller on the LAN could otherwise grow the core's memory
-///   without bound and monopolize a plugin's admin socket. Restricting to
-///   installed packs shrinks the key space to a handful per plugin, and
-///   guarantees the core never refuses a language it advertises through
-///   `/api/status`'s own `locale` field.
+/// `lang` absent means the core's own current interface language
+/// (`AppState.locale_current`, defaulting to `en` exactly like
+/// `status_json`'s own `locale` field) rather than "whatever the plugin
+/// happens to be running in": now that resolution never asks the plugin,
+/// this is the only language the core can name, and it is also the one
+/// `Core::set_locale` already pushes to every plugin via `SetLocale`.
 ///
-/// Refusing outright (rather than falling back to `None` as the SDK's own
-/// boundary does, `ritornello_plugin_sdk::is_plain_locale`) costs nothing
-/// here: a well-formed, installed `lang` is the shell's own doing, never
-/// typed by a person, so anything else only ever means a caller bug or a
-/// stale/tampered URL, neither of which deserves a cached answer.
+/// Marked `immutable` only when **both** `lang` and `v` are present:
+/// `immutable` is a promise that can never be withdrawn, so it may only be
+/// made about a response the URL fully determines — `v` alone still leaves
+/// "the core's current language" unresolved. The historic, unversioned URL
+/// (neither parameter) must remain usable by a client that has not been
+/// updated, and must never be told it can cache the answer forever.
+///
+/// `lang`, when present, is refused with `400` before it is used for
+/// anything unless it passes `valid_locale` (`crate::status::valid_locale`)
+/// — the same rule `PUT /api/locale` already enforces, reused rather than
+/// reinvented: a stricter, purpose-built "plain locale" grammar tried here
+/// first was *wrong* — it rejected `pt-BR`-shaped codes that are legitimate
+/// selectable languages, which would have silently stripped a plugin page of
+/// its translations the moment the shell requested one.
 pub async fn admin_i18n(
     State(st): State<AppState>,
     Path(name): Path<String>,
     Query(q): Query<CatalogQuery>,
 ) -> Response {
     if let Some(lang) = &q.lang
-        && (!crate::status::valid_locale(lang) || !crate::status::list_locales(&st.locales_root).iter().any(|l| l == lang))
+        && !crate::status::valid_locale(lang)
     {
-        return (StatusCode::BAD_REQUEST, "invalid or uninstalled language").into_response();
+        return (StatusCode::BAD_REQUEST, "invalid language").into_response();
     }
-    // The lock is released **before** the IPC round trip: a temporary in the
-    // scrutinee of a `match` would live until the end of the match, hence
-    // during the call to the plugin.
-    let backend = st.admin_backends.read().await.get(&name).cloned();
-    let Some(backend) = backend else {
+    if st.admin_backends.read().await.get(&name).is_none() {
         return (StatusCode::NOT_FOUND, "unknown plugin").into_response();
+    }
+    let chosen = match &q.lang {
+        Some(lang) => lang.clone(),
+        None => st.locale_current.read().await.clone().unwrap_or_else(|| "en".to_string()),
     };
-    let value = match &q.lang {
-        // Named language: cacheable, since it cannot change underneath the
-        // key — the plugin rebuilds it fresh for exactly this language on
-        // every miss, regardless of what it is currently running in.
-        Some(lang) => {
-            let key = (name.clone(), lang.clone());
-            let cached = st.admin_catalogs.read().await.get(&key).cloned();
-            match cached {
-                Some(v) => v,
-                None => match backend.catalog(Some(lang.as_str())).await {
-                    Ok(v) => {
-                        st.admin_catalogs.write().await.insert(key, v.clone());
-                        v
-                    }
-                    Err(e) => return plugin_refusal(&st, &name, "catalog", &e).await,
-                },
-            }
-        }
-        // No language named: "whatever the plugin is currently in", which
-        // `Core::set_locale` can change mid-run. Never cached — see
-        // `CatalogCache`'s doc.
-        None => match backend.catalog(None).await {
-            Ok(v) => v,
-            Err(e) => return plugin_refusal(&st, &name, "catalog", &e).await,
-        },
+    let value = {
+        let registry = st.registry.read().await;
+        serde_json::json!(registry.chain_for(&name, &chosen, "en").entries())
     };
     // `immutable` only when the URL names *both* the language and a stamp:
     // either alone still leaves part of the answer undetermined by the URL.
@@ -378,13 +344,19 @@ mod tests {
         /// The plugin answers, but beyond the 5 s cap. Distinct from `down`
         /// precisely because the returned message must be too.
         slow: bool,
+        /// Panics on **any** admin call. The observable proof that a route
+        /// never talks to the plugin at all — see
+        /// `the_plugin_catalog_route_serves_from_the_registry_without_any_ipc`,
+        /// which is the reason this exists: a test that only checked the
+        /// response body would still pass with the old IPC path in place.
+        panics: bool,
         asset_calls: Arc<std::sync::atomic::AtomicUsize>,
-        catalog_calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait::async_trait]
     impl AdminBackend for Fake {
         async fn asset(&self, path: &str) -> Result<Option<(String, String)>> {
+            if self.panics { panic!("admin backend called: asset({path})") }
             if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
             self.asset_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -393,27 +365,20 @@ mod tests {
                 _ => None,
             })
         }
-        async fn catalog(&self, lang: Option<&str>) -> Result<serde_json::Value> {
-            if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
-            if self.down { anyhow::bail!("down") }
-            self.catalog_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            // `lang` carried along (rather than only "Enregistrer"): a test
-            // proving the cache is keyed by language needs the plugin's
-            // answer to actually depend on it, or a defect that serves the
-            // wrong entry under the right key would go unnoticed.
-            Ok(serde_json::json!({ "btn_save": "Enregistrer", "lang": lang }))
-        }
         async fn get_data(&self) -> Result<serde_json::Value> {
+            if self.panics { panic!("admin backend called: get_data()") }
             if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
             Ok(serde_json::json!({ "stations": [] }))
         }
         async fn set_data(&self, _data: serde_json::Value) -> Result<Result<(), String>> {
+            if self.panics { panic!("admin backend called: set_data()") }
             if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
             Ok(if self.reject { Err("duplicate preset".into()) } else { Ok(()) })
         }
         async fn ping(&self) -> Result<()> {
+            if self.panics { panic!("admin backend called: ping()") }
             if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
             Ok(())
@@ -428,8 +393,14 @@ mod tests {
     }
 
     /// Variant with a chosen `locales_root`, for the tests that need more
-    /// than the always-present `en` to be "installed" — see
-    /// `two_languages_are_two_entries`.
+    /// than the always-present `en` to be "installed", or a real on-disk
+    /// pack for a plugin module — see `two_languages_are_two_entries`.
+    ///
+    /// The registry is swept from this same `locales_root`, exactly as
+    /// `main.rs` wires it (one `Arc<RwLock<Registry>>` built from the very
+    /// root `AppState.locales_root` also names): a plugin's on-disk pack
+    /// lives at `<locales_root>/<plugin>/<lang>.toml`, in the same tree as
+    /// `<locales_root>/core`.
     fn state_with_locales_root(fake: Fake, locales_root: std::path::PathBuf) -> AppState {
         let (audio_tx, _rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
@@ -451,15 +422,12 @@ mod tests {
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(
-                std::path::PathBuf::from("/nonexistent"),
-            ))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(locales_root.clone()))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             locales_root,
             admin_backends: Arc::new(tokio::sync::RwLock::new(backends)),
             admin_assets: Arc::new(Default::default()),
-            admin_catalogs: Arc::new(Default::default()),
             session: "test-session".to_string(),
             cmd_tx,
             player: crate::status::tests_support::inert_player(),
@@ -536,14 +504,14 @@ mod tests {
         //    carries `(plugin, path)`, so the purge goes through a `retain`:
         //    getting the wrong half of the key would have emptied the whole
         //    cache.
-        forget_page(&state.admin_backends, &state.admin_assets, &state.admin_catalogs, &state.registry, "autre").await;
+        forget_page(&state.admin_backends, &state.admin_assets, &state.registry, "autre").await;
         assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "still cached");
 
         // 2. Once the plugin is forgotten, the route says frankly that there is
         //    nothing there — that is the half of the fix that removes the dead
         //    page from the menu instead of returning an IPC error.
-        forget_page(&state.admin_backends, &state.admin_assets, &state.admin_catalogs, &state.registry, "radio").await;
+        forget_page(&state.admin_backends, &state.admin_assets, &state.registry, "radio").await;
         assert_eq!(get(app.clone()).await.status(), StatusCode::NOT_FOUND);
 
         // 3. And a re-announcement really re-reads: that is the `hotplug`
@@ -605,16 +573,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_plugin_catalog_is_served_flat() {
-        let app = router(state_with(Fake::default()));
+    async fn the_plugin_catalog_route_never_calls_the_plugin_over_ipc() {
+        // The observable proof that `GET /plugins/<name>/api/i18n` no longer
+        // performs an IPC round trip: `Fake` panics on *any* admin call, and
+        // the plugin still needs to be "known" (present in `admin_backends`)
+        // for the route to serve it, so the 200 below can only come from the
+        // registry. A test that only checked the response body would also
+        // pass with the old IPC path in place — see task 5's brief.
+        let app = router(state_with(Fake { panics: true, ..Default::default() }));
         let resp = app
-            .oneshot(Request::get("/plugins/radio/api/i18n").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/plugins/radio/api/i18n?lang=en&v=abc").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_plugin_catalog_is_served_flat_from_the_registry() {
+        // No IPC any more: the plugin's announced catalogue is what the
+        // registry already holds (`main.rs`'s `hotplug` inserts it via
+        // `insert_announced`), and `admin_i18n` resolves it the same way the
+        // core's own `/api/i18n` resolves its.
+        let state = state_with(Fake::default());
+        let mut layers = ritornello_i18n::ModuleLayers::new("radio");
+        layers.insert(
+            "en",
+            ritornello_i18n::Layer::from_map([("btn_save".to_string(), "Save".to_string())].into()),
+        );
+        state.registry.write().await.insert_announced("radio", layers);
+        let app = router(state);
+        let resp = app
+            .oneshot(Request::get("/plugins/radio/api/i18n?lang=en").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["btn_save"], "Enregistrer");
+        assert_eq!(v["btn_save"], "Save");
     }
 
     #[tokio::test]
@@ -647,8 +642,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_stamp_without_a_language_is_still_not_immutable() {
-        // Ruling (f): `?v=x` alone still leaves "whatever language the
-        // plugin is currently in" unresolved by the URL — `immutable` is a
+        // Ruling (f): `?v=x` alone still leaves "the core's current
+        // interface language" unresolved by the URL — `immutable` is a
         // promise that can never be withdrawn, so it must not be made about
         // an answer only partly determined by the query string.
         let app = router(state_with(Fake::default()));
@@ -662,65 +657,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unspecified_language_is_never_cached() {
-        // Ruling (e), a regression this task's first cut introduced: with no
-        // `lang`, the answer means "whatever language the plugin is
-        // currently in", which `Core::set_locale` can change mid-run by
-        // pushing `SetLocale` to it. Caching that under a placeholder key,
-        // with nothing here able to invalidate it, would leave a plugin page
-        // stuck in the old language after a switch until its process
-        // restarted — strictly worse than before this task, which always
-        // asked the plugin.
-        let fake = Fake::default();
-        let calls = fake.catalog_calls.clone();
-        let app = router(state_with(fake));
-        for _ in 0..2 {
-            let resp = app
-                .clone()
-                .oneshot(Request::get("/plugins/radio/api/i18n").body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-        }
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "the plugin's current language can change between two calls; caching it would risk serving a stale one"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_catalog_asked_twice_hits_the_plugin_once() {
-        // The measured waste: every visit to a plugin page cost a full round
-        // trip to its process for a catalog that never changes within a
-        // session.
-        let fake = Fake::default();
-        let calls = fake.catalog_calls.clone();
-        let app = router(state_with(fake));
-        for _ in 0..2 {
-            let resp = app
-                .clone()
-                .oneshot(Request::get("/plugins/radio/api/i18n?lang=en&v=abc").body(Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-        }
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn two_languages_are_two_entries() {
-        // The cache is keyed by `(plugin, language)`: serving French under
-        // the English URL is exactly the lie `immutable` must never tell.
-        // `fr` needs an actual installed pack (ruling (b)): the default
-        // fixture only advertises `en`.
+    async fn an_unspecified_language_follows_the_core_s_current_interface_language() {
+        // `lang` absent used to mean "whatever the plugin is currently
+        // running in", asked over IPC. It now means the core's own
+        // `locale_current` — the same field `status_json`'s `locale` reads,
+        // and the one `Core::set_locale` already pushes to every plugin via
+        // `SetLocale` — resolved from the registry like every other case.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("core")).unwrap();
-        std::fs::write(dir.path().join("core/fr.toml"), "").unwrap();
-        let fake = Fake::default();
-        let calls = fake.catalog_calls.clone();
-        let app = router(state_with_locales_root(fake, dir.path().to_path_buf()));
-        for lang in ["fr", "en"] {
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/fr.toml"), "greeting = \"Bonjour\"\n").unwrap();
+        let state = state_with_locales_root(Fake::default(), dir.path().to_path_buf());
+        *state.locale_current.write().await = Some("fr".to_string());
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/plugins/radio/api/i18n").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["greeting"], "Bonjour");
+    }
+
+    #[tokio::test]
+    async fn two_languages_serve_two_different_disk_packs() {
+        // What `immutable` must never lie about: serving French under the
+        // English URL. The registry (task 4), not a cache keyed by
+        // `(plugin, lang)`, is what keeps the two apart now — each language
+        // is its own on-disk pack under `<locales_root>/radio/<lang>.toml`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/en.toml"), "marker = \"en-value\"\n").unwrap();
+        std::fs::write(dir.path().join("radio/fr.toml"), "marker = \"fr-value\"\n").unwrap();
+        let app = router(state_with_locales_root(Fake::default(), dir.path().to_path_buf()));
+        for (lang, expected) in [("fr", "fr-value"), ("en", "en-value")] {
             let resp = app
                 .clone()
                 .oneshot(
@@ -733,23 +700,54 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
             let body = resp.into_body().collect().await.unwrap().to_bytes();
             let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            // Not just the call count: a cache handing back `fr`'s value
-            // under the `en` key (or vice versa) once both are populated
-            // would still pass a count-only assertion.
-            assert_eq!(v["lang"], lang, "served the wrong language's entry for ?lang={lang}");
+            assert_eq!(v["marker"], expected, "served the wrong language's entry for ?lang={lang}");
         }
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_stamped_catalog_can_change_within_one_session_after_a_resweep() {
+        // The premise `immutable` used to rest on (see `AppState::session`'s
+        // doc, before this task): nothing under a stamped plugin URL could
+        // change within one session, because nothing read the registry's
+        // disk tier for a plugin. This task is precisely what breaks that —
+        // `admin_i18n` now reads `Registry::chain_for` directly, and
+        // `Registry::resweep` (what a real locale change already triggers,
+        // `Core::set_locale`) picks up an edited on-disk pack. This test
+        // writes the sequence end to end: same stamped URL, two different
+        // answers, no core restart in between.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/en.toml"), "greeting = \"before\"\n").unwrap();
+        let state = state_with_locales_root(Fake::default(), dir.path().to_path_buf());
+        let app = router(state.clone());
+        let url = "/plugins/radio/api/i18n?lang=en&v=abc";
+
+        let first = app.clone().oneshot(Request::get(url).body(Body::empty()).unwrap()).await.unwrap();
+        let cc = first.headers()[axum::http::header::CACHE_CONTROL].to_str().unwrap().to_string();
+        assert!(cc.contains("immutable"), "{cc}");
+        let v1: serde_json::Value =
+            serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(v1["greeting"], "before");
+
+        // The operator edits the pack on disk, then the interface language
+        // is switched — the only gesture, today, that calls
+        // `Registry::resweep` (`Core::set_locale`). Called directly here:
+        // this test is at the HTTP layer, with no `Core` to drive.
+        std::fs::write(dir.path().join("radio/en.toml"), "greeting = \"after\"\n").unwrap();
+        state.registry.write().await.resweep();
+
+        let second = app.oneshot(Request::get(url).body(Body::empty()).unwrap()).await.unwrap();
+        let v2: serde_json::Value =
+            serde_json::from_slice(&second.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(v2["greeting"], "after", "the same stamped URL answered differently within one session");
     }
 
     #[tokio::test]
     async fn a_malformed_language_is_refused_and_never_marked_immutable() {
         // Charset/length violation (`valid_locale`'s own rule, reused rather
-        // than a bespoke grammar) — refused outright, before ever touching
-        // the plugin, regardless of whether anything is installed under that
-        // name.
-        let fake = Fake::default();
-        let calls = fake.catalog_calls.clone();
-        let app = router(state_with(fake));
+        // than a bespoke grammar) — refused outright, before the registry is
+        // ever consulted.
+        let app = router(state_with(Fake::default()));
         let resp = app
             .oneshot(Request::get("/plugins/radio/api/i18n?lang=..&v=abc").body(Body::empty()).unwrap())
             .await
@@ -757,60 +755,50 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let cc = resp.headers().get(axum::http::header::CACHE_CONTROL).and_then(|v| v.to_str().ok()).unwrap_or("");
         assert!(!cc.contains("immutable"), "{cc}");
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "the plugin must never see a bad language");
     }
 
     #[tokio::test]
-    async fn a_locale_outside_the_installed_set_is_refused() {
-        // Ruling (b): well-shaped (`pt-BR`-like codes pass `valid_locale`
-        // fine) but not among what the operator actually installed — refused
-        // just the same, and for the same reason the bound on `CatalogCache`
-        // depends on: an unauthenticated LAN caller must not be able to grow
-        // the cache, or hammer a plugin's admin socket, with an unbounded set
-        // of "valid-shaped" language strings. The default fixture only
-        // advertises `en`.
-        let fake = Fake::default();
-        let calls = fake.catalog_calls.clone();
-        let app = router(state_with(fake));
+    async fn a_locale_outside_the_installed_set_is_still_served_from_the_registry() {
+        // Deliberate behavior change (see `admin_i18n`'s doc): membership in
+        // `list_locales` existed only to bound `CatalogCache`, which is gone.
+        // A well-shaped but uninstalled language is no longer refused — it
+        // is resolved like any other, and `chain_for` falls through to `en`
+        // (then the key itself) for a module or language it knows nothing
+        // about, exactly as it already does for the core's own catalog.
+        let app = router(state_with(Fake::default()));
         let resp = app
             .oneshot(Request::get("/plugins/radio/api/i18n?lang=fr&v=abc").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "the plugin must never see an uninstalled language");
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn forget_page_also_purges_the_catalog_cache() {
-        // Same defect as the one `forget_page` already fixed for assets: a
-        // plugin that dies and comes back with a different catalog must not
-        // keep serving the old one from the core's cache.
-        let fake = Fake::default();
-        let calls = fake.catalog_calls.clone();
-        let state = state_with(fake);
+    async fn forget_page_purges_the_announced_layer_the_route_reads_too() {
+        // Same invariant `main.rs`'s own registry tests pin at the `Registry`
+        // level, checked here through the actual HTTP route: a plugin that
+        // disconnects must not go on serving its old announced translations.
+        let state = state_with(Fake::default());
+        let mut layers = ritornello_i18n::ModuleLayers::new("radio");
+        layers.insert("en", ritornello_i18n::Layer::from_map([("greeting".to_string(), "Hi".to_string())].into()));
+        state.registry.write().await.insert_announced("radio", layers);
         let app = router(state.clone());
 
         let get = |app: axum::Router| async move {
-            app.oneshot(Request::get("/plugins/radio/api/i18n?lang=en&v=abc").body(Body::empty()).unwrap())
-                .await
-                .unwrap()
+            app.oneshot(Request::get("/plugins/radio/api/i18n?lang=en").body(Body::empty()).unwrap()).await.unwrap()
         };
 
-        assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "cached");
+        let before = get(app.clone()).await;
+        let v: serde_json::Value = serde_json::from_slice(&before.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(v["greeting"], "Hi");
 
-        forget_page(&state.admin_backends, &state.admin_assets, &state.admin_catalogs, &state.registry, "radio").await;
-        state
-            .admin_backends
-            .write()
-            .await
-            .insert("radio".into(), Arc::new(Fake { catalog_calls: calls.clone(), ..Default::default() }));
-        assert_eq!(get(app.clone()).await.status(), StatusCode::OK);
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "the new process must be re-read, not served from the old one's cache"
-        );
+        forget_page(&state.admin_backends, &state.admin_assets, &state.registry, "radio").await;
+        state.admin_backends.write().await.insert("radio".into(), Arc::new(Fake::default()));
+        let after = get(app.clone()).await;
+        let v: serde_json::Value = serde_json::from_slice(&after.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        // `entries()` (unlike `Chain::get`) never invents a key: a module
+        // with nothing left in the registry serves an empty map.
+        assert!(v.get("greeting").is_none(), "the forgotten announcement must no longer be served: {v}");
     }
 
     #[tokio::test]
