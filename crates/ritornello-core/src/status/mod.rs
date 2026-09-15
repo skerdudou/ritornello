@@ -86,51 +86,62 @@ pub struct AppState {
     pub admin_backends: crate::admin::AdminBackends,
     pub admin_assets: Arc<crate::admin::AssetCache>,
     /// Identifier of this run of the core, used as the cache stamp of the
-    /// plugin assets and catalogs (`?v=<session>`).
+    /// plugin **assets** (`?v=<session>` on `admin::admin_asset`).
     ///
     /// Not a fingerprint of the content: getting one would mean already
-    /// holding the catalog, whereas the stamp has to be written into the very
+    /// holding the asset, whereas the stamp has to be written into the very
     /// URL that asks for it.
     ///
-    /// **Holds for `admin_assets` (`ui.js`/`ui.css`), not any more for the
-    /// catalog route.** An asset is still fetched over IPC once and cached
-    /// indefinitely in `admin_assets`: an operator who rebuilds a plugin's
-    /// `ui.js` without recompiling the core sees the old one until the
-    /// service restarts (or `admin::forget_page` runs, on disconnect), which
-    /// is exactly the danger `immutable` carries and exactly why nothing but
-    /// a restart is supposed to move what a stamped asset URL answers.
+    /// **No longer used by the plugin catalog route.** Until task 5's fix
+    /// round, `admin::admin_i18n` accepted the same `?v=<session>` stamp and
+    /// marked its response `immutable` whenever both `lang` and `v` were
+    /// present — a promise carried over unexamined from the asset route,
+    /// where it is earned. It does not hold for the catalog: `admin_i18n`
+    /// resolves straight from the shared `Registry` (task 4), and the
+    /// registry's disk tier is re-swept by `Registry::resweep` on every real
+    /// locale change (`Core::set_locale`) — not only by a restart, and never
+    /// by moving `session`. So the same stamped URL could start answering
+    /// differently mid-session: an operator edits a plugin's on-disk pack
+    /// (`/etc/ritornello/locales/<component>/<lang>.toml`) and picks the
+    /// interface language twice (any two real `PUT /api/locale` calls), and
+    /// a browser already holding the old text under `?lang=<l>&v=<session>`
+    /// as `immutable` would never ask again. Proven end to end by
+    /// `admin::tests::the_plugin_catalog_route_is_never_marked_immutable_unlike_the_asset_route`.
     ///
-    /// **The plugin catalog route no longer has that property, since task
-    /// 5.** `admin::admin_i18n` resolves a plugin's catalogue straight from
-    /// the shared `Registry` (task 4) instead of caching an IPC fetch, and
-    /// the registry's disk tier is re-swept by `Registry::resweep` on every
-    /// real locale change (`Core::set_locale`) — not only by a restart. So
-    /// the sequence that used to be impossible now works: an operator edits
-    /// a plugin's on-disk pack
-    /// (`/etc/ritornello/locales/<component>/<lang>.toml`), picks another
-    /// interface language and picks the original one back (or any two real
-    /// `PUT /api/locale` calls), and the very same stamped URL
-    /// (`?lang=<l>&v=<session>`) a browser already cached as `immutable`
-    /// now answers with the edited text — `session` never changed, because
-    /// nothing about a resweep touches it. See
-    /// `admin::tests::a_stamped_catalog_can_change_within_one_session_after_a_resweep`
-    /// for the sequence written out end to end.
+    /// **The fix is not a longer key.** `admin_i18n` now answers `no-cache`
+    /// unconditionally — reversible, not "immutable with a bigger key" — for
+    /// two reasons together, not one: the IPC round trip that used to make
+    /// re-fetching a plugin's catalogue costly is exactly what task 5
+    /// removed (a `Registry` lookup is a memory read), so paying
+    /// revalidation on every admin-page visit is close to free; and this
+    /// project's own recorded lesson is that when a URL stops determining
+    /// its content, the fix is to make the promise reversible, not to keep
+    /// making it under a longer key. This also closes, incidentally, a
+    /// staleness this stamp already had before this chantier and that this
+    /// task did not introduce: `session` is drawn once per run of the core
+    /// (`main.rs`), so a plugin that self-updates and re-announces mid-run
+    /// (`insert_announced` refreshes the registry immediately) used to leave
+    /// a browser's `immutable`-cached catalogue stale until the *core*
+    /// restarted, even though the core itself had moved on. A revalidating
+    /// route has no such gap: it asks again.
     ///
-    /// **This is a known, unresolved gap, not a fix applied here.** Closing
-    /// it means the catalog route's cache key must depend on more than the
-    /// core's session — content-derived, tied to `Registry`'s own generation,
-    /// or something else — and choosing among those is a design decision
-    /// deliberately left open rather than decided inside this task.
+    /// **`admin_assets` keeps the promise, unchanged.** A `ui.js`/`ui.css`
+    /// bundle is still fetched over IPC once and cached indefinitely in
+    /// `admin_assets`: an operator who rebuilds a plugin's `ui.js` without
+    /// recompiling the core sees the old one until the service restarts (or
+    /// `admin::forget_page` runs, on disconnect) — genuinely nothing else
+    /// moves it, so `immutable` stays an honest promise there. A future
+    /// reader who "unifies" the two routes onto the same header logic would
+    /// reintroduce exactly the gap this comment describes: the two are
+    /// treated differently on purpose, not by oversight.
     ///
-    /// **Stated limitation, still true**: the stamp is the core's session
-    /// alone, not the plugin's. A plugin restarted *within* one core
-    /// session, with a rebuilt catalog, keeps this same `session` value, so a
-    /// browser that already cached the old asset or catalog under
-    /// `?v=<session>` goes on serving it `immutable` until the core itself
-    /// restarts (or, for the catalog now, until a resweep changes what the
-    /// registry holds, per the gap above). `admin::forget_page` purges the
-    /// core-side state for exactly this case but cannot reach a browser's
-    /// copy.
+    /// **Stated limitation, still true, for `admin_assets` only**: the stamp
+    /// is the core's session alone, not the plugin's. A plugin restarted
+    /// *within* one core session, with a rebuilt asset bundle, keeps this
+    /// same `session` value, so a browser that already cached the old asset
+    /// under `?v=<session>` goes on serving it `immutable` until the core
+    /// itself restarts. `admin::forget_page` purges the core-side cache for
+    /// exactly this case but cannot reach a browser's copy.
     pub session: String,
     pub cmd_tx: mpsc::Sender<ritornello_proto::InputMessage>,
     pub theme_current: Arc<RwLock<crate::theme::ThemeState>>,

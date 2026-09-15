@@ -216,17 +216,12 @@ pub struct CatalogQuery {
     /// refusing early what is not a language code stays right even though
     /// nothing here can grow unboundedly any more (see `admin_i18n`'s doc).
     lang: Option<String>,
-    /// Presence, together with `lang`'s, is what matters: like `admin_asset`'s
-    /// own `v`, it says the URL was stamped by a caller who can name a fresh
-    /// one when the content changes, so this exact URL never needs
-    /// revalidating. But `v` alone does not: see `admin_i18n`.
-    v: Option<String>,
 }
 
-/// `GET /plugins/<name>/api/i18n[?lang=<l>][&v=<stamp>]`.
+/// `GET /plugins/<name>/api/i18n[?lang=<l>]`.
 ///
 /// **Resolved from the shared `Registry` (task 4), with no IPC and no
-/// cache.** Until this task, an absent `lang` meant an IPC round trip asking
+/// cache.** Until task 5, an absent `lang` meant an IPC round trip asking
 /// the plugin its own current language, and a named `lang` meant a round
 /// trip cached in `CatalogCache` — bounded on purpose, because each entry was
 /// a potential IPC call: an unauthenticated caller on the LAN could
@@ -248,12 +243,22 @@ pub struct CatalogQuery {
 /// this is the only language the core can name, and it is also the one
 /// `Core::set_locale` already pushes to every plugin via `SetLocale`.
 ///
-/// Marked `immutable` only when **both** `lang` and `v` are present:
-/// `immutable` is a promise that can never be withdrawn, so it may only be
-/// made about a response the URL fully determines — `v` alone still leaves
-/// "the core's current language" unresolved. The historic, unversioned URL
-/// (neither parameter) must remain usable by a client that has not been
-/// updated, and must never be told it can cache the answer forever.
+/// **Never `immutable`, unlike `admin_asset`.** Until task 5's fix round this
+/// route was marked `immutable` when both `lang` and a `v` stamp were
+/// present — a promise it could not actually keep: `chain_for` reads the
+/// registry's `disk` tier, and `Registry::resweep` (triggered by every real
+/// locale change) can replace what that tier holds without the core's
+/// `session` stamp ever moving, so the same stamped URL could start
+/// answering differently mid-session. The fix is not a longer key: the IPC
+/// round trip that once made re-fetching this route costly is gone (see
+/// above), so paying `no-cache`'s revalidation on every admin-page visit is
+/// close to free, and `no-cache` is honest about what the URL actually
+/// determines — nothing invented, nothing withdrawn. `admin_asset` keeps
+/// `immutable` because its own justification is untouched: a `ui.js`/`ui.css`
+/// bundle is still fetched over IPC once and held in `admin_assets` for the
+/// plugin process's whole lifetime, so a versioned asset URL genuinely never
+/// changes until that process restarts. See `AppState::session`'s doc for the
+/// fuller account.
 ///
 /// `lang`, when present, is refused with `400` before it is used for
 /// anything unless it passes `valid_locale` (`crate::status::valid_locale`)
@@ -283,14 +288,8 @@ pub async fn admin_i18n(
         let registry = st.registry.read().await;
         serde_json::json!(registry.chain_for(&name, &chosen, "en").entries())
     };
-    // `immutable` only when the URL names *both* the language and a stamp:
-    // either alone still leaves part of the answer undetermined by the URL.
-    let cache_control = if q.lang.is_some() && q.v.is_some() {
-        crate::web::IMMUTABLE_CACHE_CONTROL
-    } else {
-        "no-cache"
-    };
-    ([(axum::http::header::CACHE_CONTROL, cache_control)], Json(value)).into_response()
+    // Always revalidated, never `immutable` — see this function's own doc.
+    ([(axum::http::header::CACHE_CONTROL, "no-cache")], Json(value)).into_response()
 }
 
 pub async fn admin_get_data(State(st): State<AppState>, Path(name): Path<String>) -> Response {
@@ -613,21 +612,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_catalog_asked_in_a_language_is_served_immutable() {
-        // The URL fully determines the content — that is what `immutable`
-        // claims. `en` is always "installed" (see `list_locales`), so this
-        // needs no extra fixture.
-        let app = router(state_with(Fake::default()));
-        let resp = app
-            .oneshot(Request::get("/plugins/radio/api/i18n?lang=en&v=abc").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let cc = resp.headers()[axum::http::header::CACHE_CONTROL].to_str().unwrap();
-        assert!(cc.contains("immutable"), "{cc}");
-    }
-
-    #[tokio::test]
     async fn a_catalog_without_a_language_is_not_frozen() {
         // Historic URL, still reachable: no version, so no `immutable` — a
         // client that has not been updated must not be stuck for good.
@@ -705,16 +689,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stamped_catalog_can_change_within_one_session_after_a_resweep() {
+    async fn the_plugin_catalog_route_is_never_marked_immutable_unlike_the_asset_route() {
         // The premise `immutable` used to rest on (see `AppState::session`'s
         // doc, before this task): nothing under a stamped plugin URL could
         // change within one session, because nothing read the registry's
-        // disk tier for a plugin. This task is precisely what breaks that —
-        // `admin_i18n` now reads `Registry::chain_for` directly, and
+        // disk tier for a plugin. Task 5 is precisely what broke that —
+        // `admin_i18n` reads `Registry::chain_for` directly, and
         // `Registry::resweep` (what a real locale change already triggers,
-        // `Core::set_locale`) picks up an edited on-disk pack. This test
-        // writes the sequence end to end: same stamped URL, two different
-        // answers, no core restart in between.
+        // `Core::set_locale`) picks up an edited on-disk pack without the
+        // core's `session` stamp ever moving. The fix (this fix round) is
+        // not a longer key: the catalog route never claims `immutable` any
+        // more, at all — this test writes the sequence end to end (same URL,
+        // an on-disk edit, a resweep, two different answers) and asserts the
+        // *header*, which is the discriminating check: it must fail the
+        // moment `immutable` is restored on this route, even with `lang` and
+        // a stamp both present — the exact shape that used to trigger it.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/en.toml"), "greeting = \"before\"\n").unwrap();
@@ -723,8 +712,8 @@ mod tests {
         let url = "/plugins/radio/api/i18n?lang=en&v=abc";
 
         let first = app.clone().oneshot(Request::get(url).body(Body::empty()).unwrap()).await.unwrap();
-        let cc = first.headers()[axum::http::header::CACHE_CONTROL].to_str().unwrap().to_string();
-        assert!(cc.contains("immutable"), "{cc}");
+        let cc1 = first.headers().get(axum::http::header::CACHE_CONTROL).and_then(|v| v.to_str().ok()).unwrap_or("");
+        assert!(!cc1.contains("immutable"), "{cc1}");
         let v1: serde_json::Value =
             serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
         assert_eq!(v1["greeting"], "before");
@@ -732,14 +721,28 @@ mod tests {
         // The operator edits the pack on disk, then the interface language
         // is switched — the only gesture, today, that calls
         // `Registry::resweep` (`Core::set_locale`). Called directly here:
-        // this test is at the HTTP layer, with no `Core` to drive.
+        // this test is at the HTTP layer, with no `Core` to drive. Now that
+        // the route never promises `immutable`, this is no longer a broken
+        // promise — a revalidating caller is expected to see it.
         std::fs::write(dir.path().join("radio/en.toml"), "greeting = \"after\"\n").unwrap();
         state.registry.write().await.resweep();
 
         let second = app.oneshot(Request::get(url).body(Body::empty()).unwrap()).await.unwrap();
+        let cc2 = second.headers().get(axum::http::header::CACHE_CONTROL).and_then(|v| v.to_str().ok()).unwrap_or("");
+        assert!(!cc2.contains("immutable"), "{cc2}");
         let v2: serde_json::Value =
             serde_json::from_slice(&second.into_body().collect().await.unwrap().to_bytes()).unwrap();
-        assert_eq!(v2["greeting"], "after", "the same stamped URL answered differently within one session");
+        assert_eq!(v2["greeting"], "after");
+
+        // Contrast, in the same test: `admin_asset` keeps `immutable`, since
+        // its own justification (one IPC fetch per plugin process, held for
+        // that process's whole lifetime) is untouched by this task.
+        let asset_resp = router(state_with(Fake::default()))
+            .oneshot(Request::get("/plugins/radio/ui.js?v=cafe").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let asset_cc = asset_resp.headers()[axum::http::header::CACHE_CONTROL].to_str().unwrap();
+        assert!(asset_cc.contains("immutable"), "{asset_cc}");
     }
 
     #[tokio::test]
