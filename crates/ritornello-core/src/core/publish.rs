@@ -119,10 +119,15 @@ impl<P: Player> Core<P> {
             // `standby_status`, by contrast, is a key the core owns and
             // already resolves eagerly on every locale change (see its own
             // field doc): nothing to do here for that half of the branch.
+            //
+            // `and_then`, not `map`: `resolve_text` answers `None` on a
+            // registry lock miss, and that must collapse into "no status"
+            // here rather than `Some(None)`-shaped nonsense — see its own
+            // doc for why a miss is not allowed to show the raw key.
             status: if self.standby {
                 self.standby_status.clone()
             } else {
-                self.source_status.as_ref().map(|t| self.resolve_text(t, &self.active_source))
+                self.source_status.as_ref().and_then(|t| self.resolve_text(t, &self.active_source))
             },
             overlay: self.overlay.as_ref().map(|(o, deadline)| {
                 let remaining = deadline.saturating_duration_since(Instant::now()).as_millis();
@@ -438,6 +443,49 @@ mod tests {
             state_rx.borrow_and_update().status.as_deref(),
             Some("PAS DE DISQUE"),
             "the remembered status must retranslate on its own, without a second frame"
+        );
+    }
+
+    /// I-1 (task 7 review): a registry lock miss during publication must
+    /// read as **no status**, never the raw key. `resolve_text` used to
+    /// fall back to the key, reasoning it mirrored `Chain::get`'s own
+    /// safety net for an unknown key — review rejected that comparison on
+    /// reading it: that fallback is a *successful* read finding nothing to
+    /// translate, this is a *failed* read finding nothing at all, and the
+    /// raw key on a twenty-column display (`no_disc`) is the exact outcome
+    /// this chantier exists to prevent.
+    ///
+    /// The miss is forced deterministically — no timing, no retry loop — by
+    /// holding the registry's write lock across the call: `registry` and
+    /// `player_state` are both accessible from here, so three lines force
+    /// the same contention `resolve_text`'s `try_read` would meet in
+    /// production during a real `resweep_async`.
+    #[tokio::test]
+    async fn a_registry_lock_miss_during_publication_reads_as_no_status() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                status_text: Some(ritornello_proto::Text::Keyed {
+                    key: "no_disc".into(),
+                    params: std::collections::HashMap::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        // Sanity: the lock is free and the registry has nothing to translate
+        // `"no_disc"` with, so a *successful* read falls back to the raw
+        // key — `Chain::get`'s own, different, safety net. This is the
+        // baseline the held-lock assertion below must differ from, or the
+        // two cases would be indistinguishable and this test would prove
+        // nothing.
+        assert_eq!(core.player_state().status.as_deref(), Some("no_disc"));
+
+        let _held = core.registry.write().await;
+        assert_eq!(
+            core.player_state().status,
+            None,
+            "a lock miss must read as no status, never the raw key"
         );
     }
 }

@@ -768,6 +768,135 @@ mod tests {
         }
     }
 
+    /// Every `.rs` file under `dir`, recursively. This repository's plugin
+    /// crates only ever nest `.rs` under `src/` and `src/bin/` today (see
+    /// e.g. `plugin-files`'s `media-mount.rs`), never deeper, but the walk
+    /// does not assume that: a plugin that grows a submodule directory
+    /// tomorrow must stay covered automatically, the same "derived, not
+    /// assumed" discipline the guard below applies to the plugin list
+    /// itself.
+    fn rust_sources(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else { return out };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(rust_sources(&path));
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// I-4 (task 7 review, language-packs chantier): `Text::Verbatim` has
+    /// **exactly one** sanctioned producer across the whole plugin fleet —
+    /// the unknown `NT_STATUS` path in `plugin-files`'s `smb.rs`
+    /// (`SmbError::Other`), which is the one real case `Text::Verbatim`
+    /// exists for at all (see its own doc in `ritornello-proto`: "an
+    /// unrecognised `NT_STATUS` word coming back from SMB"). Every other
+    /// status a shipped plugin ever shows is expected to resolve through a
+    /// key, never a string it made up on the spot — that is the entire
+    /// point of this chantier — so a `Text::Verbatim` construction found
+    /// anywhere else in the fleet is exactly the "verbatim as the path of
+    /// least resistance" regression `Core::verbatim_status_counts` (task 7)
+    /// polices at runtime. This is that policy's static twin.
+    ///
+    /// **Why a static guard and not another `#[ignore]`d core test.** A
+    /// first draft of this barrier lived as a `ritornello-core` unit test,
+    /// feeding frames the way today's shipped plugins are documented to
+    /// send them and asserting a verbatim counter was zero. Review found
+    /// three faults in that shape: it exercised the legacy `status` field,
+    /// which tasks 8-10 never touch; rewritten against `status_text` it
+    /// would only have duplicated
+    /// `a_status_counts_as_verbatim_only_when_it_actually_is_one`; and at
+    /// task 11, once `status`/`error` are removed, it would not even
+    /// compile. The root cause is structural, not a wording problem:
+    /// `ritornello-core` does not link any plugin binary, so no test living
+    /// in that crate can observe what a plugin actually constructs. This
+    /// guard reads the plugins' own committed source instead — the same
+    /// move `every_plugin_with_an_embedded_english_pack_announces_it` above
+    /// already makes, for the same reason — which is why it is **true
+    /// today** (nothing constructs `Text::Verbatim` yet, sanctioned site
+    /// included) and **stays meaningful** once tasks 8-10 land: it needs no
+    /// `#[ignore]` and no future owner to un-ignore it.
+    ///
+    /// Same two disciplines as the guard above:
+    /// - **The plugin list is derived, not hardcoded** — every sibling
+    ///   directory of this crate whose name starts with
+    ///   `ritornello-plugin-`, **except this crate itself**: scanning this
+    ///   file's own source would be self-referential in a way that actually
+    ///   bites, since this guard's own doc comments (this one included)
+    ///   discuss the very substrings it searches for. Measured, not
+    ///   guessed — see the exclusion's own comment where the list is built.
+    /// - **Only the production half of each file counts.** Each source is
+    ///   truncated at its own last `#[cfg(test)]` before scanning, so a
+    ///   `Verbatim(` surviving only inside a test module cannot trip this
+    ///   guard — the exact false failure the truncation exists to prevent,
+    ///   mirrored from the guard above.
+    ///
+    /// **[MUTATION]**: add a `Text::Verbatim(...)` construction, outside a
+    /// test module, to any plugin crate other than `plugin-files` — this
+    /// test fails and names the offending file and line.
+    #[test]
+    fn verbatim_has_no_producer_outside_the_files_plugin() {
+        let sdk_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crates_dir = sdk_manifest_dir.join("..");
+        let mut plugin_dirs: Vec<String> = std::fs::read_dir(&crates_dir)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", crates_dir.display()))
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_type().unwrap().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("ritornello-plugin-"))
+            // Not a plugin: this crate itself. Scanning it would be
+            // self-referential in a way that actually bites — this very
+            // guard's own source discusses `Verbatim(` and `` `#[cfg(test)]` ``
+            // in prose, in doc comments that live inside its own test
+            // module, and `rfind` would find *those* mentions and mis-place
+            // the truncation point, producing a false failure against this
+            // file's own guard code. Measured, not guessed: an earlier
+            // version of this test included `ritornello-plugin-sdk` and
+            // failed against itself for exactly this reason.
+            .filter(|name| name != "ritornello-plugin-sdk")
+            .collect();
+        plugin_dirs.sort();
+        assert!(!plugin_dirs.is_empty(), "{} must list at least one plugin crate", crates_dir.display());
+
+        // The one sanctioned producer: see this test's own doc for why.
+        const SANCTIONED_CRATE: &str = "ritornello-plugin-files";
+        const SANCTIONED_FILE: &str = "smb.rs";
+
+        let mut offenders = Vec::new();
+        for plugin_dir in &plugin_dirs {
+            let src_dir = crates_dir.join(plugin_dir).join("src");
+            for path in rust_sources(&src_dir) {
+                let is_sanctioned = plugin_dir == SANCTIONED_CRATE
+                    && path.file_name().map(|f| f == SANCTIONED_FILE).unwrap_or(false);
+                if is_sanctioned {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+                // Truncated at the file's own test module, same reasoning
+                // and same CRLF-safe match on the bare attribute as the
+                // guard above.
+                let production = match source.rfind("#[cfg(test)]") {
+                    Some(idx) => &source[..idx],
+                    None => &source[..],
+                };
+                for (n, line) in production.lines().enumerate() {
+                    if line.contains("Verbatim(") {
+                        offenders.push(format!("{}:{}", path.display(), n + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "Text::Verbatim must have no producer outside {SANCTIONED_CRATE}'s {SANCTIONED_FILE}, found: {offenders:?}"
+        );
+    }
+
     /// **[MUTATION]** Barrier 6 of the spec: a plugin declaring text whose
     /// English pack is not even valid TOML must be refused at build time,
     /// before a socket is bound — not left to fail silently on screen.
