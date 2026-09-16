@@ -53,7 +53,7 @@ jobs:
         # (the only case that fails on its own). Those are counts of what was
         # left, not the size of what went missing -- a rewrite of this comment
         # once read them the other way round and made it contradict itself.
-        # The list is six files now, 85 tests of which 6 skip off Linux, and
+        # The list is seven files now, 137 tests of which 6 skip off Linux, and
         # the shape of the failure is the same: a one-file rename is the
         # realistic mistake, and it reproduces exactly the silent-green that naming the
         # files was supposed to prevent. So this step does not trust
@@ -84,6 +84,7 @@ jobs:
             .github/scripts/classify-round.test.mjs
             .github/scripts/hash-git-dir.test.mjs
             .github/scripts/read-bump-metadata.test.mjs
+            .github/scripts/review-verdict.test.mjs
           )
           for f in "${tests[@]}"; do
             [ -f "$f" ] || { echo "Missing test file: $f" >&2; exit 1; }
