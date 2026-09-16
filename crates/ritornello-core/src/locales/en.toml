@@ -272,6 +272,7 @@ plugin_already_at_end = "'{name}' is already at that end of the list; the page w
 update_no_release = "No release published yet"
 update_only_prereleases = "Only prereleases are published; tick “Offer beta versions” below to be offered them"
 update_never_checked = "Never checked"
+update_last_check_failed = "The last check failed"
 update_checking = "Checking…"
 update_check_failed = "Could not reach GitHub: {detail}"
 update_aligned = "Up to date"

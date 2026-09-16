@@ -33,6 +33,13 @@ const outOfStep = computed(() =>
  * `unknown`: a count would then be a statement about a device that has not
  * looked, and "Up to date" would be a lie. `installed` is deliberately absent
  * — it is a transient report shown alongside the summary, not instead of it.
+ *
+ * `failed` used to fall through to `default` and, from there, straight to
+ * the counting line below — `outOfStep` is empty on a device that has never
+ * succeeded, so it read "Up to date", in bold, one line above the red
+ * "Impossible de joindre GitHub" error. A failed check is not up to date: it
+ * is unknown, same as a device that has never looked, and the spec says so in
+ * as many words.
  */
 const outcomeSentence = computed(() => {
   switch (props.update.outcome.kind) {
@@ -42,6 +49,8 @@ const outcomeSentence = computed(() => {
       return t.value('update_only_prereleases')
     case 'never_checked':
       return t.value('update_never_checked')
+    case 'failed':
+      return t.value('update_last_check_failed')
     default:
       return null
   }

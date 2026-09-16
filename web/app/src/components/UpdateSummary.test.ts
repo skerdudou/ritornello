@@ -17,6 +17,7 @@ const CATALOG = {
   update_only_prereleases:
     'Seules des préversions sont publiées ; cochez « Proposer les préversions » ci-dessous pour qu\'elles vous soient proposées',
   update_never_checked: 'Jamais vérifié',
+  update_last_check_failed: 'La dernière vérification a échoué',
   update_detail: 'Détail',
 }
 
@@ -107,10 +108,19 @@ describe('UpdateSummary', () => {
   it('keeps the sentence of an outcome that counts nothing', () => {
     // Never checked, nothing published, only prereleases, last check failed:
     // each rebuilt every row against an empty offer, so a count would be a
-    // claim about a device that has not looked.
-    for (const kind of ['never_checked', 'no_release', 'only_prereleases'] as const) {
-      const w = mount(UpdateSummary, { props: { update: payload({ outcome: { kind } }) } })
-      expect(w.find('[data-update-summary]').text()).not.toContain('composants')
+    // claim about a device that has not looked. Positive assertions
+    // (`toBe`), not `not.toContain('composants')`: the weaker form let
+    // `failed` fall through to "À jour" — itself the word "composants"
+    // never appears in either sentence — and pass unnoticed (Major D).
+    const cases: Array<[UpdatePayload['outcome'], string]> = [
+      [{ kind: 'never_checked' }, CATALOG.update_never_checked],
+      [{ kind: 'no_release' }, CATALOG.update_no_release],
+      [{ kind: 'only_prereleases' }, CATALOG.update_only_prereleases],
+      [{ kind: 'failed', detail: 'GitHub unreachable' }, CATALOG.update_last_check_failed],
+    ]
+    for (const [outcome, expected] of cases) {
+      const w = mount(UpdateSummary, { props: { update: payload({ outcome }) } })
+      expect(w.find('[data-update-summary]').text()).toBe(expected)
     }
   })
 
