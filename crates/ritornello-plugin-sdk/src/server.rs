@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use ritornello_proto::{
     SourcesCatalog, Cover, DisplayFrame, Enrichment, IdentityUpdate, NowPlaying, PlayerState, Preset,
-    SourceAction, SourceMessage, SourceReq, SourceRequest,
+    SourceAction, SourceMessage, SourceReq, SourceRequest, Text,
 };
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -27,6 +27,14 @@ pub struct SourceOutcome {
     pub preset_name: Option<String>,
     /// See `SourceMessage::status`.
     pub status: Option<String>,
+    /// See `SourceMessage::status_text`.
+    ///
+    /// A producer that has migrated fills this and leaves `status` above
+    /// `None`: the core prefers this field when present (see
+    /// `Core::decide_status_text`), so there is nothing to gain from
+    /// resolving both — and a migrated plugin has nothing left to resolve
+    /// `status` with, once its own `Catalog` is gone.
+    pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
     pub presets: Option<Vec<Preset>>,
 }
@@ -42,6 +50,7 @@ impl SourceOutcome {
             preset_count: None,
             preset_name: None,
             status: None,
+            status_text: None,
             presets: None,
         }
     }
@@ -82,6 +91,14 @@ impl SourceOutcome {
     /// Declares the source's own state word (see `SourceMessage::status`).
     pub fn status(mut self, word: impl Into<String>) -> Self {
         self.status = Some(word.into());
+        self
+    }
+
+    /// Declares the source's own state, **unresolved** (see
+    /// `SourceMessage::status_text`): a key into the plugin's own
+    /// translation layer and its parameters, or explicit verbatim text.
+    pub fn status_text(mut self, text: Text) -> Self {
+        self.status_text = Some(text);
         self
     }
 
@@ -132,6 +149,8 @@ pub struct Notification {
     pub preset_name: Option<String>,
     /// See `SourceMessage::status`.
     pub status: Option<String>,
+    /// See `SourceOutcome::status_text`.
+    pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
     pub presets: Option<Vec<Preset>>,
     /// See `SourceMessage::cover`.
@@ -169,6 +188,12 @@ impl Notification {
     /// Declares the source's own state word (see `SourceMessage::status`).
     pub fn status(mut self, word: impl Into<String>) -> Self {
         self.status = Some(word.into());
+        self
+    }
+
+    /// See `SourceOutcome::status_text`.
+    pub fn status_text(mut self, text: Text) -> Self {
+        self.status_text = Some(text);
         self
     }
 
@@ -476,10 +501,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     preset_count: outcome.preset_count,
                     preset_name: outcome.preset_name,
                     status: outcome.status,
-                    // `SourceOutcome` does not carry a `Text` yet (it is not
-                    // touched by this task): always absent here until a
-                    // later task widens it and a plugin migrates to it.
-                    status_text: None,
+                    status_text: outcome.status_text,
                     // Stamped here, once, rather than by a constructor call on
                     // each of a plugin's ten declaration paths: a capability
                     // forgotten on a single path would give a button that
@@ -516,10 +538,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             preset_count: n.preset_count,
                             preset_name: n.preset_name,
                             status: n.status,
-                            // `Notification` does not carry a `Text` yet
-                            // either, for the same reason as the reply path
-                            // above.
-                            status_text: None,
+                            status_text: n.status_text,
                             can_eject: Some(plugin.can_eject()),
                             // Same reason as the reply path above: stamped on
                             // **every** frame, so the spontaneous notification
@@ -903,7 +922,15 @@ pub trait AdminPlugin: Send + Sync + 'static {
     /// Typically `ui.js` and `ui.css`, embedded via `include_str!`.
     fn asset(&self, path: &str) -> Option<(String, String)>;
     async fn get_data(&self) -> serde_json::Value;
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String>;
+    /// `Err` carries the refusal **unresolved** (see
+    /// `ritornello_proto::AdminResult::Set::error_text`): every plugin that
+    /// implements this trait has, by the time this signature widened
+    /// (language-packs chantier, tasks 8-10), migrated off a `Catalog` of
+    /// its own — there is no longer anything here to resolve a finished
+    /// `String` with. `AdminClient::set_data`, on the core side, is where an
+    /// unresolved `Text` is turned back into the legacy `error` string, the
+    /// same way `Core::decide_status_text` does for a source's status.
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text>;
 }
 
 /// Binds an admin plugin's socket, without serving yet.
@@ -1055,7 +1082,14 @@ async fn handle_admin<P: AdminPlugin>(
         AdminReq::GetData => AdminResult::Data(plugin.read().await.get_data().await),
         AdminReq::SetData(data) => match plugin.write().await.set_data(data).await {
             Ok(()) => AdminResult::Set { ok: true, error: None, error_text: None },
-            Err(msg) => AdminResult::Set { ok: false, error: Some(msg), error_text: None },
+            // `error` stays absent: every implementor of `AdminPlugin` now
+            // hands back an unresolved `Text` (see that trait method's own
+            // doc), and a plugin with no `Catalog` left has nothing to
+            // resolve a legacy string with. `error_text` alone carries the
+            // refusal from here on — the core-side resolver
+            // (`AdminClient::set_data`) is what a caller still expecting
+            // `error` falls back to.
+            Err(text) => AdminResult::Set { ok: false, error: None, error_text: Some(text) },
         },
     }
 }
@@ -1091,10 +1125,10 @@ mod admin_server_tests {
         async fn get_data(&self) -> serde_json::Value {
             self.data.clone()
         }
-        async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
+        async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
             tokio::time::sleep(self.set_delay).await;
             if data.get("bad").is_some() {
-                return Err("refused".into());
+                return Err(Text::Keyed { key: "refused".into(), params: HashMap::new() });
             }
             self.data = data;
             Ok(())

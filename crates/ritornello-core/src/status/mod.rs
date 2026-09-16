@@ -873,7 +873,7 @@ mod tests {
     impl crate::admin::AdminBackend for FakeOccupe {
         async fn asset(&self, _: &str) -> anyhow::Result<Option<(String, String)>> { Ok(None) }
         async fn get_data(&self) -> anyhow::Result<serde_json::Value> { Ok(serde_json::json!({})) }
-        async fn set_data(&self, _: serde_json::Value) -> anyhow::Result<Result<(), String>> { Ok(Ok(())) }
+        async fn set_data(&self, _: serde_json::Value) -> anyhow::Result<Result<(), ritornello_proto::Text>> { Ok(Ok(())) }
         async fn ping(&self) -> anyhow::Result<()> { Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
     }
 

@@ -2,9 +2,10 @@
 //! arrived at.
 
 use crate::state::{self, OnArrival};
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::AdminPlugin;
+use ritornello_proto::Text;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -27,7 +28,6 @@ pub struct CdAdmin {
     /// obeyed must be what is saved, otherwise a setting applied but not
     /// persisted would silently revert at the next restart.
     pub on_arrival: Arc<RwLock<OnArrival>>,
-    pub catalog: Arc<RwLock<Catalog>>,
 }
 
 #[async_trait::async_trait]
@@ -51,9 +51,10 @@ impl AdminPlugin for CdAdmin {
         serde_json::json!({ "on_arrival": *self.on_arrival.read().unwrap() })
     }
 
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
-        let write: SettingWrite = serde_json::from_value(data).map_err(|e| {
-            self.catalog.read().unwrap().get("bad_request").replace("{detail}", &e.to_string())
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
+        let write: SettingWrite = serde_json::from_value(data).map_err(|e| Text::Keyed {
+            key: "bad_request".into(),
+            params: HashMap::from([("detail".to_string(), e.to_string())]),
         })?;
         // `update` and not `save`: the Source half writes the resume point
         // into this same file, and a state rebuilt here would erase it.
@@ -63,7 +64,7 @@ impl AdminPlugin for CdAdmin {
         // device would come back on a setting the owner had changed.
         state::update(&self.state_path, |s| s.on_arrival = write.on_arrival).map_err(|e| {
             tracing::warn!("persisting the arrival setting: {e}");
-            self.catalog.read().unwrap().get("save_failed").to_string()
+            Text::Keyed { key: "save_failed".into(), params: HashMap::new() }
         })?;
         *self.on_arrival.write().unwrap() = write.on_arrival;
         Ok(())
@@ -82,16 +83,7 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("plugin-cd.json");
-        let admin = CdAdmin {
-            state_path,
-            on_arrival: Arc::new(RwLock::new(OnArrival::default())),
-            catalog: Arc::new(RwLock::new(Catalog::load(
-                "cd",
-                "en",
-                std::path::Path::new("/nonexistent"),
-                crate::CD_EN,
-            ))),
-        };
+        let admin = CdAdmin { state_path, on_arrival: Arc::new(RwLock::new(OnArrival::default())) };
         Fixture { admin, _dir: dir }
     }
 
@@ -160,14 +152,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refusal_is_a_sentence_never_a_catalog_key() {
-        // The page displays this text as is (same convention as the other
-        // plugins): returning the bare key would put `bad_request` on screen.
+    async fn a_refusal_travels_as_a_key_and_its_parameters_not_a_sentence() {
+        // The plugin no longer resolves anything (no `Catalog` left): the
+        // core does, from the announced catalog, at `PUT /plugins/cd/api/data`
+        // (see `ritornello-core`'s `resolve_admin_text`). What this test
+        // owns is the shape the plugin still controls — the key and the
+        // `{detail}` parameter, unresolved.
         let mut f = fixture();
         let err = f.admin.set_data(serde_json::json!({ "on_arrival": 7 })).await.unwrap_err();
-        assert!(!err.is_empty());
-        assert_ne!(err, "bad_request", "the key must have been resolved");
-        assert!(!err.contains("{detail}"), "the placeholder must have been filled: {err}");
+        match err {
+            Text::Keyed { key, params } => {
+                assert_eq!(key, "bad_request");
+                assert!(params.get("detail").is_some_and(|d| !d.is_empty()), "{params:?}");
+            }
+            Text::Verbatim(s) => panic!("a bad request must be a key, not verbatim text: {s}"),
+        }
     }
 
     #[tokio::test]

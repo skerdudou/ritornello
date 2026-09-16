@@ -494,10 +494,25 @@ impl AdminClient {
         }
     }
 
-    pub async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), String>> {
+    /// `Err` carries the refusal **unresolved** — a key and its parameters,
+    /// or explicit verbatim text (see `ritornello_proto::Text`) — for the
+    /// caller to resolve against the plugin's registered catalog. Every
+    /// implementor of `AdminPlugin` has migrated off its own `Catalog` by
+    /// the time this signature widened (language-packs chantier, tasks
+    /// 8-10), so `error_text` is what actually carries the refusal;
+    /// `error` is only a fallback, wrapped as `Text::Verbatim` the same way
+    /// `Core::decide_status_text` falls back on a source's legacy `status`.
+    /// An admin socket speaking the current protocol never leaves both
+    /// absent, but that combination is not represented in this crate's
+    /// types — it is nonsensical, not merely unlikely — so an absent pair
+    /// is answered with an empty verbatim string rather than manufactured
+    /// as a panic on a socket the core does not control end to end.
+    pub async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), Text>> {
         match self.request(AdminReq::SetData(data)).await? {
             AdminResult::Set { ok: true, .. } => Ok(Ok(())),
-            AdminResult::Set { ok: false, error, .. } => Ok(Err(error.unwrap_or_default())),
+            AdminResult::Set { ok: false, error, error_text } => {
+                Ok(Err(error_text.or_else(|| error.map(Text::Verbatim)).unwrap_or(Text::Verbatim(String::new()))))
+            }
             other => bail!("unexpected admin response for SetData: {other:?}"),
         }
     }
@@ -1435,7 +1450,41 @@ mod tests {
         );
         assert_eq!(client.get_data().await.unwrap(), serde_json::json!({"btn_save": "Enregistrer"}));
         let verdict = client.set_data(serde_json::json!({})).await.unwrap();
-        assert_eq!(verdict, Err("nope".to_string()));
+        // No `error_text` on this raw frame (an unmigrated wire shape,
+        // exactly what a socket this crate does not control end to end may
+        // still send): the legacy `error` string is wrapped as verbatim,
+        // same fallback idiom as `Core::decide_status_text`.
+        assert_eq!(verdict, Err(Text::Verbatim("nope".to_string())));
+    }
+
+    /// **[MUTATION]**: swap `error_text.or_else(|| error.map(Text::Verbatim))`
+    /// for `error.map(Text::Verbatim).or(error_text)` in `set_data` — this
+    /// test fails, because it feeds both fields with **different** content
+    /// and only `error_text` winning tells the two branches apart. Mirrors
+    /// `status_text_wins_over_status_when_both_are_present` in
+    /// `ritornello-core`, on the admin side of the same precedence rule.
+    #[tokio::test]
+    async fn set_data_error_text_wins_over_the_legacy_error_when_both_are_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("admin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let _ = lines.next_line().await.unwrap().unwrap();
+            write
+                .write_all(
+                    b"{\"id\":1,\"result\":{\"kind\":\"Set\",\"data\":{\"ok\":false,\"error\":\"stale\",\
+                      \"error_text\":{\"kind\":\"Keyed\",\"data\":{\"key\":\"bad_request\"}}}}}\n",
+                )
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = AdminClient::connect(&socket).await.unwrap();
+        let verdict = client.set_data(serde_json::json!({})).await.unwrap();
+        assert_eq!(verdict, Err(Text::Keyed { key: "bad_request".into(), params: HashMap::new() }));
     }
 
     #[test]

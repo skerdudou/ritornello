@@ -4,6 +4,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use ritornello_proto::Text;
 use serde::Deserialize;
 
 /// Abstraction of the admin operations the core's routes need.
@@ -22,7 +23,12 @@ use serde::Deserialize;
 pub trait AdminBackend: Send + Sync {
     async fn asset(&self, path: &str) -> Result<Option<(String, String)>>;
     async fn get_data(&self) -> Result<serde_json::Value>;
-    async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), String>>;
+    /// `Err` carries the refusal **unresolved** — see
+    /// `ritornello_plugin_sdk::AdminClient::set_data`'s own doc for what
+    /// that means and why. `admin_put_data` is what resolves it, the same
+    /// way `admin_i18n` resolves a plugin's whole catalog: both read
+    /// `AppState.registry`, neither performs any IPC to do it.
+    async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), Text>>;
     /// Probe at 500 ms, without a lock on the plugin side: `Err(Timeout)` =
     /// busy, `Err(Closed)` = dead.
     async fn ping(&self) -> Result<()>;
@@ -39,8 +45,35 @@ impl AdminBackend for ritornello_plugin_sdk::AdminClient {
     async fn get_data(&self) -> Result<serde_json::Value> {
         ritornello_plugin_sdk::AdminClient::get_data(self).await
     }
-    async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), String>> {
+    async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), Text>> {
         ritornello_plugin_sdk::AdminClient::set_data(self, data).await
+    }
+}
+
+/// Resolves an admin refusal's `Text` into the finished string the browser's
+/// `PUT` caller still expects in `{"error": ...}` (see `web/kit/src/api.ts`,
+/// which reads that field and nothing else).
+///
+/// **Why server-side and not left to the browser, unlike `FilesAdmin.vue`'s
+/// stored explore error (task 9).** `AdminResult::Set.error_text` is a
+/// **structured** field on the wire the core already parses — unlike
+/// `GetData`'s payload, which the core relays as opaque JSON because it does
+/// not know a plugin's own data shape. Resolving here costs one registry
+/// lookup, the same one `admin_i18n` already performs for a plugin's whole
+/// catalog, and keeps the browser-facing contract of this route completely
+/// unchanged: no plugin admin page needed touching for its *save* path to
+/// keep working across a language change.
+async fn resolve_admin_text(st: &AppState, module: &str, text: &Text) -> String {
+    match text {
+        Text::Verbatim(s) => s.clone(),
+        Text::Keyed { key, params } => {
+            let locale = st.locale_current.read().await.clone().unwrap_or_else(|| "en".to_string());
+            let resolved = {
+                let registry = st.registry.read().await;
+                registry.chain_for(module, &locale, "en").get(key).to_string()
+            };
+            params.iter().fold(resolved, |acc, (name, value)| acc.replace(&format!("{{{name}}}"), value))
+        }
     }
 }
 
@@ -320,7 +353,10 @@ pub async fn admin_put_data(
         None => (StatusCode::NOT_FOUND, "unknown plugin").into_response(),
         Some(backend) => match backend.set_data(data).await {
             Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
-            Ok(Err(msg)) => (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg }))).into_response(),
+            Ok(Err(text)) => {
+                let msg = resolve_admin_text(&st, &name, &text).await;
+                (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg }))).into_response()
+            }
             Err(e) => plugin_refusal(&st, &name, "set_data", &e).await,
         },
     }
@@ -371,11 +407,11 @@ mod tests {
             if self.down { anyhow::bail!("down") }
             Ok(serde_json::json!({ "stations": [] }))
         }
-        async fn set_data(&self, _data: serde_json::Value) -> Result<Result<(), String>> {
+        async fn set_data(&self, _data: serde_json::Value) -> Result<Result<(), Text>> {
             if self.panics { panic!("admin backend called: set_data()") }
             if self.slow { return Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
             if self.down { anyhow::bail!("down") }
-            Ok(if self.reject { Err("duplicate preset".into()) } else { Ok(()) })
+            Ok(if self.reject { Err(Text::Verbatim("duplicate preset".into())) } else { Ok(()) })
         }
         async fn ping(&self) -> Result<()> {
             if self.panics { panic!("admin backend called: ping()") }
@@ -876,6 +912,69 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"], "duplicate preset");
+    }
+
+    /// Companion to `invalid_put_data_returns_422_with_a_message`, proving
+    /// the other half of `AdminResult::Set.error_text`: a **keyed** refusal
+    /// (what every migrated plugin now sends, `error_text` being all it has
+    /// left to hand back — see `AdminPlugin::set_data`'s own doc) resolves
+    /// through the registry, exactly as `admin_i18n` resolves a whole
+    /// catalog, and the browser still reads a finished sentence out of
+    /// `{"error": ...}` without knowing any of this changed.
+    ///
+    /// **[MUTATION]**: change `resolve_admin_text` to return the bare `key`
+    /// instead of resolving it through `registry.chain_for(...)` — this
+    /// test fails, asserting `"bad_request"` instead of the resolved
+    /// sentence. Also fires if the `{detail}` substitution is dropped.
+    #[tokio::test]
+    async fn a_keyed_refusal_resolves_through_the_registry() {
+        let state = state_with(Fake { reject: true, ..Default::default() });
+        let mut layers = ritornello_i18n::ModuleLayers::new("radio");
+        layers.insert(
+            "en",
+            ritornello_i18n::Layer::from_map(
+                [("bad_request".to_string(), "Bad request: {detail}".to_string())].into(),
+            ),
+        );
+        state.registry.write().await.insert_announced("radio", layers);
+        // Overrides the plain-`Fake` reject path above with a keyed one:
+        // `state_with` already wired a `Fake { reject: true, .. }` under
+        // "radio", but that one answers `Text::Verbatim("duplicate
+        // preset")` — this test needs the **keyed** shape instead, so it
+        // re-registers its own backend under the same name.
+        struct Keyed;
+        #[async_trait::async_trait]
+        impl AdminBackend for Keyed {
+            async fn asset(&self, _path: &str) -> Result<Option<(String, String)>> {
+                Ok(None)
+            }
+            async fn get_data(&self) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+            async fn set_data(&self, _data: serde_json::Value) -> Result<Result<(), Text>> {
+                let mut params = std::collections::HashMap::new();
+                params.insert("detail".to_string(), "missing field `stations`".to_string());
+                Ok(Err(Text::Keyed { key: "bad_request".into(), params }))
+            }
+            async fn ping(&self) -> Result<()> {
+                Ok(())
+            }
+        }
+        state.admin_backends.write().await.insert("radio".into(), Arc::new(Keyed));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/plugins/radio/api/data")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "Bad request: missing field `stations`");
     }
 
     // Since Task 10, an unknown plugin name on the *asset* route

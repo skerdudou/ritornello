@@ -617,7 +617,7 @@ mod tests {
             async fn get_data(&self) -> serde_json::Value {
                 serde_json::json!({})
             }
-            async fn set_data(&mut self, _: serde_json::Value) -> Result<(), String> {
+            async fn set_data(&mut self, _: serde_json::Value) -> Result<(), ritornello_proto::Text> {
                 Ok(())
             }
         }
