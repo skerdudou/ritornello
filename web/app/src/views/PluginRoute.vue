@@ -37,10 +37,13 @@ const statusPending = computed(() => !settled.value)
  *
  * That emptiness used to be the ordinary case on a hard reload — the watch
  * below ran before `/api/status` had answered — and it costs more than a cache
- * miss: without `lang`, the core hands back the plugin's **ambient** language
- * (see `admin_i18n`), which is English on a fresh core because `SetLocale`
- * only ever reaches source plugins. The watch now waits for that answer, so
- * this stays empty in one case only: `/api/status` itself failed.
+ * miss: without `lang`, the core falls back to its own current interface
+ * language (`AppState.locale_current`, see `admin_i18n`) rather than failing,
+ * so the catalog itself was never wrong — but the URL stayed unstamped, and
+ * an unstamped catalog URL is answered `no-cache` and refetched on every
+ * visit instead of being cached for the session. The watch now waits for
+ * `/api/status`, so this stays empty in one case only: `/api/status` itself
+ * failed.
  */
 function catalogQuery(locale: string, session: string): string {
   if (!locale || !session) return ''
@@ -94,11 +97,25 @@ watch(
   // **`settled` and `locale` are sources, not just readings**, and that is a
   // fix. Watching the route name alone, the immediate run fired before
   // `/api/status` had answered: `catalogQuery` then had no language to put in
-  // the URL, and the plugin replied in whatever language it happens to hold —
-  // English on a fresh core, since `SetLocale` reaches source plugins only.
-  // Nothing re-ran the request afterwards, the language not being watched, so
-  // a hard reload on a plugin page stayed in English until the reader
-  // navigated away and back. Reported from use, on every plugin page.
+  // the URL, so the request left unstamped. At the time this was reported —
+  // before the core's admin_i18n resolved every language from its own shared
+  // registry (task 4/5 of the language-packs chantier) — an unstamped request
+  // meant an IPC round trip asking the plugin its own current language, and a
+  // plugin that had never been told one (an admin-only plugin, or any plugin
+  // before its first `SetLocale`) answered in whatever default it held,
+  // typically English. Nothing re-ran the request afterwards, the language
+  // not being watched, so a hard reload on a plugin page stayed in English
+  // until the reader navigated away and back. Reported from use, on every
+  // plugin page.
+  //
+  // Neither half of that mechanism exists any more: `admin_i18n` resolves
+  // `lang` from the registry with no IPC at all, and falls back — absent
+  // `lang` — to the core's own current interface language
+  // (`AppState.locale_current`), never to a plugin's; no plugin has held a
+  // language of its own since `SourceReq::SetLocale` was retired (task 11).
+  // An unstamped request is honest today, just uncacheable (`no-cache`, see
+  // `admin_i18n`'s own doc) — which is why this watch is still worth having:
+  // waiting for `locale` lets the very first request leave already stamped.
   //
   // `session` joins them for the same reason it is in the URL: a core that
   // restarted invalidates the stamp, and the answer must be fetched again.
@@ -112,11 +129,11 @@ watch(
     // catalog.
     catalogPending.value = true
     // Nothing leaves before `/api/status` has settled: that answer carries the
-    // language, and asking without it gets the plugin's ambient one. Waiting
-    // cannot hang — `settled` is raised on failure as much as on success (see
-    // `usePlugins.reload`), and the request then goes out unstamped, which is
-    // the honest degradation: `/api/status` is down, so nobody knows the
-    // language.
+    // language, and asking without it gets an unstamped, uncacheable request
+    // instead. Waiting cannot hang — `settled` is raised on failure as much as
+    // on success (see `usePlugins.reload`), and the request then goes out
+    // unstamped, which is the honest degradation: `/api/status` is down, so
+    // nobody knows the language.
     if (!settled.value) return
     const localGeneration = ++generation
     // An unreachable catalog must not prevent the UI from showing: `t()` then

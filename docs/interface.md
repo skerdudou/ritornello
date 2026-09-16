@@ -1467,11 +1467,13 @@ TOML packs**, decentralized per component:
   `deploy/deploy.sh`.
 - **A plugin page's catalog is asked for in an explicit language**, and the
   request waits for `/api/status` — the answer that carries the selected
-  language. Asked without it, the core falls back to `en`: no plugin process
-  ever holds a language of its own to fall back on instead — resolution is
-  the core's own registry lookup, by locale, on every request. The bare,
-  unstamped URL remains the fallback for the one case where nobody knows the
-  language: `/api/status` itself failed.
+  language. Asked without it, the core falls back to its own current
+  interface language (`AppState.locale_current`, defaulting to `en` only
+  when nothing has ever been selected): no plugin process ever holds a
+  language of its own to fall back on instead — resolution is the core's
+  own registry lookup, by locale, on every request. The bare, unstamped URL
+  remains the fallback for the one case where nobody knows the language:
+  `/api/status` itself failed.
 - **A routed view is not rendered before the catalog has come back.** Not a
   matter of polish: a view mounted without a catalog renders translation
   keys, and while most labels recover on the next render, a dropdown does

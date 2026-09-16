@@ -1,9 +1,10 @@
 //! Stacking layers into one answer.
 //!
 //! A `Chain` is an ordered list of `Layer`s: the first layer that defines a
-//! key wins, and an unknown key resolves to itself. `Chain::load` builds the
-//! resolution actually used at runtime — a `Chain` of exactly four layers,
-//! see its own doc.
+//! key wins, and an unknown key resolves to itself. `Chain::load_for_tests`
+//! builds a single-language, four-layer `Chain` — a test fixture helper, not
+//! the resolution production uses (`ritornello_core::i18n::Registry::
+//! chain_for` is); see that constructor's own doc for the difference.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,13 +12,13 @@ use std::path::Path;
 use crate::layer::Layer;
 
 /// Common English vocabulary embedded in the crate — the last layer of
-/// every `Chain::load`, the floor beneath even a component's own embedded
-/// English.
+/// every `Chain::load_for_tests`, the floor beneath even a component's own
+/// embedded English.
 pub(crate) const COMMON_EN: &str = include_str!("locales/common_en.toml");
 
 /// The `common` module's embedded English, parsed once.
 ///
-/// The exact content `Chain::load` already uses as its own fourth layer,
+/// The exact content `Chain::load_for_tests` already uses as its own fourth layer,
 /// exposed here because `ritornello_core::i18n::Registry` (task 4) needs to
 /// place it explicitly within its own language-segregated stack — the
 /// registry treats `common` like any other module, and its embedded layer
@@ -42,18 +43,32 @@ impl Chain {
         Chain(layers)
     }
 
-    /// Builds the resolution actually used at runtime: `own` (the
-    /// component) then `common`, each itself a disk pack over the embedded
-    /// English — four layers, in priority order:
+    /// **Test-only fixture helper — not the resolution production uses.**
+    /// `ritornello_core::i18n::Registry::chain_for` is: it stacks *three*
+    /// languages (the chosen one, a device fallback, then English), each
+    /// contributing up to four layers (disk pack and announced plugin text,
+    /// for both the component and `common`) — twelve layers, at most, in
+    /// strict language-then-tier order. This builds a `Chain` for **one**
+    /// language only, four layers, in priority order:
     /// 1. disk pack for the component, at `<root>/<component>/<locale>.toml`
     /// 2. the component's embedded English (`own_en`)
     /// 3. disk pack for `common`, at `<root>/common/<locale>.toml`
     /// 4. `common`'s embedded English (this crate's `locales/common_en.toml`)
     ///
+    /// It has **no fallback-locale tier at all**, and no `announced` tier
+    /// (a plugin's own confided catalog, `Registry`'s exclusive concern) —
+    /// a fixture built with this constructor cannot exercise, and will
+    /// silently disagree with production about, a key that only a device's
+    /// fallback language or an announced layer defines. It exists because a
+    /// great many core-side tests need *a* plausible catalog to construct a
+    /// `Wiring`/`AppState` without caring about resolution subtleties; reach
+    /// for `Registry::chain_for` instead whenever a test's own point *is*
+    /// resolution order, precedence, or a fallback language.
+    ///
     /// Never panics: an absent or invalid disk pack simply leaves that layer
     /// out, and an invalid embedded pack becomes an empty layer — either way,
     /// resolution falls through to the next layer.
-    pub fn load(component: &str, locale: &str, root: &Path, own_en: &str) -> Chain {
+    pub fn load_for_tests(component: &str, locale: &str, root: &Path, own_en: &str) -> Chain {
         let embedded_own = match Layer::parse(own_en) {
             Ok(l) => l,
             Err(e) => {

@@ -1036,7 +1036,10 @@ Variables: `RITORNELLO_FILES_ROOTS`, `RITORNELLO_FILES_CREDENTIALS` and
 outside the service's environment), `RITORNELLO_FILES_STATE`,
 `RITORNELLO_FILES_MPV_PLAYLIST`, `RITORNELLO_FILES_PLAYLISTS` (where
 playlists saved "internally" live, as opposed to those written onto a
-root) and `RITORNELLO_LOCALES` (read by the plugin).
+root). `RITORNELLO_LOCALES` is read by the **core**, not this plugin —
+the core sweeps that root itself and layers what it finds over the
+plugin's confided English (see "A plugin's UI", below, and
+[development.md](development.md)).
 
 **Saving onto a share needs one extra word.** Shares are mounted `ro`, so
 saving a playlist onto one is refused with a message rather than a kernel

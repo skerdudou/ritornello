@@ -197,10 +197,15 @@ describe('PluginRoute', () => {
     // French, and returned to French only after navigating away and back.
     //
     // The request used to leave on the immediate run of the watch, before
-    // `/api/status` had answered. With no language to put in the URL, the core
-    // hands back the plugin's *ambient* language — English on a fresh core,
-    // `SetLocale` reaching source plugins only — and nothing re-ran the
-    // request afterwards, the language not being watched.
+    // `/api/status` had answered. With no language to put in the URL, the
+    // core of that era answered via an IPC round trip asking the plugin its
+    // own current language — an admin-only plugin, never told one, answered
+    // in English — and nothing re-ran the request afterwards, the language
+    // not being watched. Neither half of that mechanism exists any more
+    // (`admin_i18n` resolves from the shared registry with no IPC at all, and
+    // `SourceReq::SetLocale` is gone, language-packs chantier task 11), but
+    // an unstamped request is still uncacheable, which is what this watch
+    // still avoids.
     await statusPending()
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
     const PluginRoute = (await import('./PluginRoute.vue')).default
@@ -222,10 +227,10 @@ describe('PluginRoute', () => {
 
   it('falls back to a bare URL when /api/status itself failed', async () => {
     // `settled` is raised on failure as much as on success, so the wait above
-    // cannot hang. Nobody then knows the language, and asking for the
-    // plugin's ambient one is the honest degradation — a URL carrying an
-    // empty `v=` would be cached forever under a false stamp, so the fallback
-    // is no query at all, not a half-stamped one.
+    // cannot hang. Nobody then knows the language, and an unstamped request
+    // is the honest degradation — a URL carrying an empty `v=` would be
+    // cached forever under a false stamp, so the fallback is no query at
+    // all, not a half-stamped one.
     const { usePlugins } = await import('../composables/usePlugins')
     const p = usePlugins()
     p.state.value = { plugins: [], active_source: '', protocol: 0, session: '', locale: '' }

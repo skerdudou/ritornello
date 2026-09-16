@@ -118,6 +118,40 @@ mod tests {
         assert_eq!(cat.get("standby"), "VEILLE");
     }
 
+    /// **The divergence a fixture helper must not paper over.** `Registry::
+    /// chain_for` stacks *three* languages (chosen, a device fallback, then
+    /// English); `ritornello_i18n::Chain::load_for_tests` — reached for by
+    /// many of this crate's own fixtures, never by production — stacks
+    /// exactly *one*. A key that only a device's fallback language defines
+    /// is therefore resolvable through the real path and invisible through
+    /// the fixture one: proof that the two are not interchangeable, not
+    /// merely two names for the same shape.
+    #[test]
+    fn load_for_tests_cannot_see_a_fallback_locale_the_registry_does() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        // Only the fallback language ("de") defines this key on disk;
+        // neither the chosen one ("fr") nor English (embedded or disk) do.
+        std::fs::write(dir.path().join("core/de.toml"), "only_de = \"nur Deutsch\"\n").unwrap();
+
+        let registry = seeded_registry(dir.path().to_path_buf());
+        let via_registry = registry.chain_for("core", "fr", "de");
+        assert_eq!(
+            via_registry.get("only_de"),
+            "nur Deutsch",
+            "production resolves the fallback tier"
+        );
+
+        let via_fixture =
+            ritornello_i18n::Chain::load_for_tests("core", "fr", dir.path(), EN);
+        assert_eq!(
+            via_fixture.get("only_de"),
+            "only_de",
+            "the test-only single-locale loader has no fallback tier to consult, \
+             and must not silently agree with production by accident"
+        );
+    }
+
     #[test]
     fn module_layers_from_catalog_turns_every_language_into_a_layer() {
         let mut catalog = HashMap::new();

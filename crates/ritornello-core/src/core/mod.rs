@@ -1612,7 +1612,7 @@ mod tests {
     fn the_core_and_the_appstate_really_share_the_same_arc() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let wiring = Wiring {
             sources: HashMap::new(),
             persisted: PersistedState::default(),

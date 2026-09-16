@@ -1511,7 +1511,7 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let catalog =
-            Chain::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+            Chain::load_for_tests("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         let message = v["error"].as_str().expect("a refusal an operator can reach needs a sentence");
         assert_eq!(message, catalog.get("plugin_already_at_end").replace("{name}", "radio"));
         assert!(
@@ -1570,7 +1570,7 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let catalog =
-            Chain::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+            Chain::load_for_tests("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         assert_eq!(v["error"], catalog.get("plugin_action_failed").replace("{name}", "cd"));
         assert_eq!(order_in(&dir), vec!["cd".to_string(), "radio".to_string()]);
     }
@@ -1622,7 +1622,7 @@ mod tests {
         // the string in `en.toml`: a typo in the key written in the code
         // would make this fail (raw key, or a different message) instead of
         // silently matching a copy-pasted expectation.
-        let catalog = Chain::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        let catalog = Chain::load_for_tests("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         assert_eq!(v["error"], catalog.get("plugin_manifest_unreadable"));
     }
 
@@ -1640,7 +1640,7 @@ mod tests {
     /// actually embedded**, and refuses a message equal to its own key.
     #[test]
     fn every_refusal_resolves_against_the_embedded_catalog() {
-        let catalog = Chain::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        let catalog = Chain::load_for_tests("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         // A missing key is recognized by the message **being** the key: no
         // space, and the prefix it was given.
         let messages = [

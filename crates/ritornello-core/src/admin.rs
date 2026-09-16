@@ -452,7 +452,7 @@ mod tests {
             logs: Arc::new(LogBuffer::new(10)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),

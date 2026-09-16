@@ -513,7 +513,7 @@ mod tests {
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: calls.clone(), ..Default::default() }));
         sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls, ..Default::default() }));
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let core = Core::new(
             FakePlayer::default(),
@@ -1239,7 +1239,7 @@ mod tests {
         sources.insert("cd".into(), Arc::new(EmptySource));
         let (state_tx, state_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let metadata = MetadataWiring {
             plugins: vec![],
             now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
@@ -1271,7 +1271,7 @@ mod tests {
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
         sources.insert("cd".into(), Arc::new(FailingSource));
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
         let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);

@@ -7,12 +7,13 @@
 //!   a floor of its own would shadow whatever pack sits below it.
 //! - `Chain` (see `chain`): an ordered stack of layers. The first layer to
 //!   define a key wins; the stacking is what produces the floor, never a
-//!   layer by itself. `Chain::load` builds the resolution actually used at
-//!   runtime — a `Chain` of exactly four layers, built once per (component,
-//!   locale) pair: the component's disk pack, the component's embedded
-//!   English, `common`'s disk pack, `common`'s embedded English. A
-//!   `Registry` (`ritornello_core::i18n`) builds the same shape from
-//!   announced and swept layers instead, through `Chain::new`.
+//!   layer by itself. `Chain::load_for_tests` builds one, single-language,
+//!   four layers — a **test fixture helper**, not the resolution production
+//!   uses: `ritornello_core::i18n::Registry::chain_for` is, stacking *three*
+//!   languages (chosen, a device fallback, then English) through `Chain::
+//!   new`, up to twelve layers, and consulting an `announced` tier (a
+//!   plugin's own confided catalog) `Chain::load_for_tests` has no concept
+//!   of at all. See that constructor's own doc for exactly what it omits.
 //!
 //! `ModuleLayers` (see `layer`) groups one module's layers by language; it
 //! is data, not resolution, kept alongside `Layer` for the callers that
@@ -55,7 +56,7 @@ mod tests {
     fn own_takes_priority_over_common() {
         let dir = tempfile::tempdir().unwrap();
         // own_en defines "error", common has it too: own must win.
-        let cat = Chain::load("core", "en", dir.path(), "error = \"own-error\"\n");
+        let cat = Chain::load_for_tests("core", "en", dir.path(), "error = \"own-error\"\n");
         assert_eq!(cat.get("error"), "own-error");
     }
 
@@ -63,7 +64,7 @@ mod tests {
     fn an_external_pack_overrides_the_embedded_own() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "core", "fr.toml", "standby = \"VEILLE\"\n");
-        let cat = Chain::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
+        let cat = Chain::load_for_tests("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         assert_eq!(cat.get("standby"), "VEILLE");
     }
 
@@ -71,14 +72,14 @@ mod tests {
     fn an_external_pack_overrides_the_embedded_common() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "common", "fr.toml", "error = \"Erreur\"\n");
-        let cat = Chain::load("core", "fr", dir.path(), "");
+        let cat = Chain::load_for_tests("core", "fr", dir.path(), "");
         assert_eq!(cat.get("error"), "Erreur");
     }
 
     #[test]
     fn a_missing_key_falls_back_to_english_then_to_the_key_itself() {
         let dir = tempfile::tempdir().unwrap();
-        let cat = Chain::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
+        let cat = Chain::load_for_tests("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         // no fr pack: the embedded English is kept
         assert_eq!(cat.get("standby"), "STANDBY");
         // unknown key: the key itself is returned
@@ -89,7 +90,7 @@ mod tests {
     fn invalid_toml_is_ignored_without_panicking() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "core", "fr.toml", "this = is not valid");
-        let cat = Chain::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
+        let cat = Chain::load_for_tests("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         assert_eq!(cat.get("standby"), "STANDBY"); // fallback to English, no panic
     }
 
@@ -108,7 +109,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // `error` exists in the embedded common: `own` must take priority, as
         // in `get`.
-        let cat = Chain::load("core", "en", dir.path(), "error = \"own-error\"\nother = \"x\"\n");
+        let cat = Chain::load_for_tests("core", "en", dir.path(), "error = \"own-error\"\nother = \"x\"\n");
         let e = cat.entries();
         assert_eq!(e.get("error").copied(), Some("own-error"));
         assert_eq!(e.get("other").copied(), Some("x"));
@@ -154,7 +155,7 @@ mod tests {
         // `plugin_unavailable_cause` joined the list: it's the variant that
         // names the cause of the refusal, and it's shown in exactly the same
         // case — an unreachable plugin, hence an empty plugin catalog.
-        let cat = Chain::load("radio", "en", dir.path(), "");
+        let cat = Chain::load_for_tests("radio", "en", dir.path(), "");
         for key in [
             "loading",
             "plugin_unavailable",
@@ -172,7 +173,7 @@ mod tests {
     fn entries_reflects_external_overrides() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "core", "fr.toml", "standby = \"VEILLE\"\n");
-        let cat = Chain::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
+        let cat = Chain::load_for_tests("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         assert_eq!(cat.entries().get("standby").copied(), Some("VEILLE"));
     }
 

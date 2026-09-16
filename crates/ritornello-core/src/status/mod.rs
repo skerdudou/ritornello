@@ -298,8 +298,8 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
     // removed after being selected, or restored as-is from `state.json`).
     // `admin_i18n`'s doc claims the core never refuses a language it
     // advertises here — enforcing it here is what makes that true rather than
-    // merely asserted. Content-identical: `Chain::load` already falls back
-    // to embedded English for an uninstalled language.
+    // merely asserted. Content-identical: `Registry::chain_for` already
+    // falls back to embedded English for an uninstalled language.
     let installed = list_locales(&state.locales_root);
     let locale = state
         .locale_current
@@ -499,7 +499,7 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
@@ -544,7 +544,7 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(Some("default".to_string()))),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
@@ -591,7 +591,7 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
@@ -646,7 +646,7 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "fr",
                 dir.path(),
@@ -938,10 +938,10 @@ mod tests {
     /// uninstalled language (a pack removed after being selected, say) would
     /// then be echoed here and refused by every plugin catalog request naming
     /// it — every plugin page rendering raw translation keys next to a
-    /// refusal banner. Clamping here is content-identical: `Chain::load`
-    /// already falls back to embedded English for an uninstalled language, so
-    /// nothing a user sees changes except that the URL this locale ends up
-    /// in now works.
+    /// refusal banner. Clamping here is content-identical: `Registry::
+    /// chain_for` already falls back to embedded English for an uninstalled
+    /// language, so nothing a user sees changes except that the URL this
+    /// locale ends up in now works.
     #[tokio::test]
     async fn api_status_clamps_an_uninstalled_locale_to_en() {
         let (state, _rx, _dir) = tests_support::app_state_fr();
@@ -1267,7 +1267,7 @@ mod tests {
             "audio_output_name_empty = \"nom de sortie vide\"\n",
         )
         .unwrap();
-        let cat = ritornello_i18n::Chain::load("core", "fr", dir.path(), crate::i18n::EN);
+        let cat = ritornello_i18n::Chain::load_for_tests("core", "fr", dir.path(), crate::i18n::EN);
         assert_eq!(AudioOutputError::EmptyName.message(&cat), "nom de sortie vide");
     }
 

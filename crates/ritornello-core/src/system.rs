@@ -964,9 +964,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(dir.path().join("core/fr.toml"), keys).unwrap();
-        // `Chain::load` copies everything into memory, so the temporary
-        // root can be thrown away at the end of the function.
-        ritornello_i18n::Chain::load("core", "fr", dir.path(), crate::i18n::EN)
+        // `Chain::load_for_tests` copies everything into memory, so the
+        // temporary root can be thrown away at the end of the function.
+        ritornello_i18n::Chain::load_for_tests("core", "fr", dir.path(), crate::i18n::EN)
     }
 
     #[test]

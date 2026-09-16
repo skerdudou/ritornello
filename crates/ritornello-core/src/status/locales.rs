@@ -48,9 +48,9 @@ pub(super) struct LocaleRequest {
 /// the packs produce (`fr`, `en`, `pt-BR`…).
 ///
 /// The value ends up in file paths (`<root>/<component>/<lang>.toml`, swept
-/// by `Registry` and resolved by `Chain::load`) and in `state.json`: same
-/// rigor as for the theme and the audio output, which are validated — an
-/// arbitrary string opened a path traversal (`{"locale":"../../whatever"}`)
+/// by `Registry` and resolved by `Registry::chain_for`) and in `state.json`:
+/// same rigor as for the theme and the audio output, which are validated —
+/// an arbitrary string opened a path traversal (`{"locale":"../../whatever"}`)
 /// on an unauthenticated API.
 ///
 /// `pub(crate)`, not `pub(super)`: `admin.rs` reuses this exact rule to

@@ -252,7 +252,7 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
     sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone(), ..Default::default() }));
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
     let (covers, cover_tx) = test_covers();
     let manifest_order = declared_order(&sources);
     let core = Core::new(
@@ -294,7 +294,7 @@ pub(super) fn setup_metadata(
     let (np_tx, np_rx) = watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
     let (covers, cover_tx) = test_covers();
     let manifest_order = declared_order(&sources);
     let core = Core::new(
@@ -352,7 +352,7 @@ pub(super) fn test_core_with_extraction() -> (
         watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
     let (covers, cover_tx) = test_covers();
     let (extraction_tx, extraction_rx) = mpsc::channel(4);
     let manifest_order = declared_order(&sources);
@@ -400,7 +400,7 @@ impl Core<FakePlayer> {
 pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<PlayerState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
         "core",
         "en",
         &root,
@@ -634,7 +634,7 @@ pub(super) fn test_core_with_cover_channel() -> (
         watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
         "core",
         "en",
         &root,
@@ -887,7 +887,7 @@ fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> Archivin
         }),
     );
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
         "core",
         "en",
         &root,

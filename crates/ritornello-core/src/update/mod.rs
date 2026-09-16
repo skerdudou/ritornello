@@ -3022,7 +3022,7 @@ mod tests {
     /// screen would actually receive.
     fn french() -> Chain {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
-        Chain::load("core", "fr", &root, crate::i18n::EN)
+        Chain::load_for_tests("core", "fr", &root, crate::i18n::EN)
     }
 
     /// **Every refusal reaches the page as a translated sentence.** A
@@ -3037,7 +3037,7 @@ mod tests {
     /// particular, and the parity test only compares key *sets*.
     #[test]
     fn every_refusal_is_a_translated_sentence_with_its_parameters_filled_in() {
-        let english = Chain::load(
+        let english = Chain::load_for_tests(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
@@ -3088,7 +3088,7 @@ mod tests {
     #[test]
     fn refusal_message_does_not_let_the_component_name_rewrite_the_detail_token() {
         let english =
-            Chain::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+            Chain::load_for_tests("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         let message = refusal_message(
             &english,
             "radio {detail}",
@@ -3130,7 +3130,7 @@ mod tests {
         .unwrap();
         Worker {
             state: Arc::new(RwLock::new(UpdateState::initial("0.2.0", &[]))),
-            catalog: Arc::new(RwLock::new(Chain::load("core", "en", root, crate::i18n::EN))),
+            catalog: Arc::new(RwLock::new(Chain::load_for_tests("core", "en", root, crate::i18n::EN))),
             status,
             manifest,
             plugins_tx: mpsc::channel(1).0,
@@ -3351,7 +3351,7 @@ mod tests {
                 // comparison it reddens (`state.outcome` carries
                 // `update_nothing_published` filled with the file name
                 // instead of `update_digest_mismatch` filled with `mpd`).
-                let catalog = Chain::load("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+                let catalog = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
                 let expected = refusal_message(&catalog, "mpd", &Refusal::DigestMismatch);
                 assert_eq!(message, &expected, "the refusal must name exactly the component `mpd`");
             }
@@ -4160,7 +4160,7 @@ mod tests {
     /// nothing leaves the check's own answer alone.
     #[test]
     fn a_failed_component_never_lets_a_pass_read_as_a_clean_install() {
-        let english = Chain::load(
+        let english = Chain::load_for_tests(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
@@ -4218,7 +4218,7 @@ mod tests {
     /// `.replace()`.
     #[test]
     fn install_report_does_not_let_the_component_name_rewrite_the_version_token() {
-        let english = Chain::load(
+        let english = Chain::load_for_tests(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
