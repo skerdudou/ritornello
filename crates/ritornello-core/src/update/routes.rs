@@ -44,9 +44,21 @@ pub async fn update_catalogue_json(State(state): State<AppState>) -> Response {
     {
         return Json(cached.1.clone()).into_response();
     }
-    let fresh = fetch_catalogue(&url).await.unwrap_or_default();
-    *state.update_catalogue_cache.write().await = Some((url, fresh.clone()));
-    Json(fresh).into_response()
+    // Cache on success only. A failure here — no client, a transport error, a
+    // GitHub rate-limit page, an unreadable body — must leave the cache
+    // untouched: writing the empty default under `url` would memorise a
+    // transient outage as "this release publishes nothing" for the life of
+    // the core session, which `catalogue::parse`'s own test says is a
+    // different fact from an empty catalogue. Answering the same honest
+    // empty default on failure, without caching it, keeps the page's
+    // fallback identical while leaving the next request free to retry.
+    match fetch_catalogue(&url).await {
+        Some(fresh) => {
+            *state.update_catalogue_cache.write().await = Some((url, fresh.clone()));
+            Json(fresh).into_response()
+        }
+        None => Json(Catalogue::default()).into_response(),
+    }
 }
 
 /// The network half, kept apart from the route so a failure of any kind —
@@ -234,6 +246,78 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["components"]["radio"]["description"], "Stations");
+    }
+
+    /// A minimal HTTP/1.1 200 response wrapping `body`, for the raw TCP rig
+    /// below — same idiom as `download.rs`'s own test server.
+    fn http_ok_json(body: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// Closes the first connection at once, without writing a byte — the
+    /// client sees a transport error, exactly `fetch_catalogue`'s "no client,
+    /// a transport error, a non-200, an unreadable body" collapse — then
+    /// answers `response` for real on the second. Proves Major A: a first,
+    /// failing fetch must not poison the one that follows it.
+    async fn serve_fail_then_ok(response: Vec<u8>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            if let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut ignored = [0u8; 4096];
+                let _ = socket.read(&mut ignored).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://127.0.0.1:{port}/catalogue.json")
+    }
+
+    /// The failing test for Major A: before the fix, the first (failing)
+    /// answer was written into `update_catalogue_cache` under the URL, so the
+    /// second request — same URL, server now healthy — kept reading the
+    /// cached empty catalogue instead of asking again.
+    #[tokio::test]
+    async fn a_failed_fetch_does_not_poison_a_later_successful_one() {
+        let body = br#"{"components":{"radio":{"kinds":["source"],"description":"Stations"}}}"#;
+        let url = serve_fail_then_ok(http_ok_json(body)).await;
+        let (state, _rx) = state_with_queue(4);
+        state.update.write().await.catalogue_url = Some(url);
+        let cache = state.update_catalogue_cache.clone();
+        let app = router(state);
+
+        // First request: the transport fails, the page gets the honest empty
+        // fallback, and — this is the assertion the old code fails — the
+        // cache must stay untouched.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/api/update/catalogue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body1 = resp.into_body().collect().await.unwrap().to_bytes();
+        let v1: serde_json::Value = serde_json::from_slice(&body1).unwrap();
+        assert_eq!(v1, serde_json::json!({"components": {}}));
+        assert!(cache.read().await.is_none(), "a failed fetch must not be cached");
+
+        // Second request, same URL: the server answers for real this time,
+        // and nothing stale stands in the way of it.
+        let resp = app
+            .oneshot(Request::get("/api/update/catalogue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body2 = resp.into_body().collect().await.unwrap().to_bytes();
+        let v2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+        assert_eq!(v2["components"]["radio"]["description"], "Stations");
     }
 
     #[tokio::test]
