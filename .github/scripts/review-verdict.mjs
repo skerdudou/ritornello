@@ -77,12 +77,17 @@ export function decide(messages, postedComments, { workflowChanged = false } = {
     return failed('the run produced no `result` record, so it did not finish')
   }
 
+  // `byTool` is reported and never judged. It is what turns "the review said
+  // nothing" into an answer -- whether it read the diff, whether it tried to
+  // comment -- without exposing a line of the model's output, which is why
+  // the action hides that output in the first place.
+  const byTool = toolHistogram(messages)
   const stats = {
     turns: numberOr(result.num_turns, 0),
     costUsd: numberOr(result.total_cost_usd, 0),
     denials: numberOr(result.permission_denials_count, 0),
-    toolCalls: countToolUses(messages),
-    subagents: countToolUses(messages, 'Task'),
+    toolCalls: Object.values(byTool).reduce((a, b) => a + b, 0),
+    byTool,
     postedComments,
   }
 
@@ -100,14 +105,24 @@ export function decide(messages, postedComments, { workflowChanged = false } = {
     return failed(`${stats.denials} tool call(s) were denied, so the review was prevented from reading the change`, stats)
   }
 
-  // **The one coupling to the plugin, and it is deliberately loose.** The
-  // plugin's procedure is subagents from its very first step onwards -- an
-  // eligibility check, a CLAUDE.md lookup, a summary, then five reviewers in
-  // parallel. Zero subagents means the procedure never started, which is
-  // precisely attempt 1 above. A legitimate early stop still launches the
-  // eligibility agent, so it lands above this line, not below it.
-  if (stats.subagents === 0) {
-    return failed('no review subagent was launched, so the review procedure never started', stats)
+  // **Nothing was examined.** An assistant that called no tool at all read no
+  // diff, no file and no history, whatever it then said -- that is true of
+  // any reviewer, under any plugin, and it is what attempt 1 looked like.
+  //
+  // This rule replaces a count of `Task` tool calls, which was wrong twice
+  // over and measured wrong on the first real run after it shipped: the
+  // subagent tool is named `Agent` in current versions, not `Task`, and a
+  // review that legitimately works without subagents at all is not a failed
+  // one. That run spent $1.60 over 9 turns across three models -- Sonnet,
+  // Haiku and Opus, so subagents plainly ran -- and was reported as never
+  // having started.
+  //
+  // The lesson is in the shape of the rule, not just its threshold: a guard
+  // keyed on the NAME of someone else's tool is keyed on something that
+  // changes without telling us. This one is keyed on the existence of any
+  // tool call at all. The per-tool breakdown below is reported, never judged.
+  if (stats.toolCalls === 0) {
+    return failed('the review called no tool at all, so it examined nothing', stats)
   }
 
   return {
@@ -128,22 +143,27 @@ function numberOr(value, fallback) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
-// Count `tool_use` blocks across assistant messages, optionally for one tool.
+// Count `tool_use` blocks per tool name across assistant messages.
+//
 // Written defensively: a message whose `content` is a bare string rather than
 // an array is valid SDK output and must not throw here, because a crash in
-// this file would redden the job for a reason unrelated to the review.
-function countToolUses(messages, name = null) {
-  let count = 0
+// this file would redden the job for a reason unrelated to the review. A
+// nameless block is counted under `(unnamed)` rather than dropped -- a tool
+// call this cannot identify is still a tool call, and silently discarding it
+// is how `toolCalls === 0` would become wrong.
+function toolHistogram(messages) {
+  const counts = {}
   for (const message of messages) {
     if (!message || typeof message !== 'object' || message.type !== 'assistant') { continue }
     const content = message.message?.content
     if (!Array.isArray(content)) { continue }
     for (const block of content) {
       if (!block || typeof block !== 'object' || block.type !== 'tool_use') { continue }
-      if (name === null || block.name === name) { count += 1 }
+      const name = typeof block.name === 'string' && block.name ? block.name : '(unnamed)'
+      counts[name] = (counts[name] ?? 0) + 1
     }
   }
-  return count
+  return counts
 }
 
 /** The Markdown the workflow posts on the pull request, one per verdict. */
@@ -165,11 +185,27 @@ export function comment(decision) {
   if (decision.stats) {
     lines.push('')
     lines.push(
-      `<sub>${decision.stats.turns} turns, ${decision.stats.subagents} subagents, `
+      `<sub>${decision.stats.turns} turns, ${decision.stats.toolCalls} tool calls, `
         + `$${decision.stats.costUsd.toFixed(2)}.</sub>`,
     )
   }
   return lines.join('\n')
+}
+
+/**
+ * The per-tool breakdown, for the job summary rather than the pull request.
+ *
+ * It answers the question the hidden model output otherwise leaves open --
+ * did the review read the diff, did it try to comment -- and it is what would
+ * have caught the `Task`/`Agent` naming mistake before it shipped instead of
+ * on the first real run. Sorted by count so the shape is readable at a
+ * glance, and it names no file and quotes no output.
+ */
+export function toolBreakdown(decision) {
+  if (!decision.stats) { return 'No execution log, so no tool calls to report.' }
+  const entries = Object.entries(decision.stats.byTool).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  if (entries.length === 0) { return 'The review called no tool at all.' }
+  return ['| Tool | Calls |', '| --- | --- |', ...entries.map(([name, n]) => `| \`${name}\` | ${n} |`)].join('\n')
 }
 
 // CLI: `node review-verdict.mjs <execution-file> <posted-comment-count>`.
@@ -204,6 +240,16 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   if (process.env.GITHUB_OUTPUT) {
     appendFileSync(process.env.GITHUB_OUTPUT, `verdict=${decision.verdict}\n`)
     appendFileSync(process.env.GITHUB_OUTPUT, `reason=${decision.reason}\n`)
+  }
+  // The breakdown goes to the run summary and not to the pull request: it is
+  // for whoever is asking why a verdict reads the way it does, which is not
+  // every reader of every pull request. Written here rather than in the YAML
+  // so that what it contains is covered by this file's tests.
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      `${comment(decision)}\n\n<details><summary>Tool calls</summary>\n\n${toolBreakdown(decision)}\n</details>\n`,
+    )
   }
   process.exit(decision.verdict === 'failed' ? 1 : 0)
 }

@@ -5,7 +5,7 @@ import { writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { decide, comment } from './review-verdict.mjs'
+import { decide, comment, toolBreakdown } from './review-verdict.mjs'
 
 const SCRIPT = fileURLToPath(new URL('./review-verdict.mjs', import.meta.url))
 
@@ -14,14 +14,27 @@ const SCRIPT = fileURLToPath(new URL('./review-verdict.mjs', import.meta.url))
 // than a quieter green. The healthy log is asserted first, or the whole file
 // could pass by rejecting everything.
 
-/** A log shaped like the action's `execution_file` for a review that worked. */
-function healthyLog({ turns = 54, denials = 0, subagents = 3, subtype = 'success', isError = false } = {}) {
+/**
+ * A log shaped like the action's `execution_file` for a review that worked.
+ *
+ * `tools` names the calls it made. The default deliberately mixes an `Agent`
+ * and a `Bash`: the rule under test must not care which, and the previous
+ * version of it counted only `Task` and so reported a real, working review as
+ * one that never started.
+ */
+function healthyLog({
+  turns = 54,
+  denials = 0,
+  tools = ['Agent', 'Bash', 'Read'],
+  subtype = 'success',
+  isError = false,
+} = {}) {
   const messages = [{ type: 'system', subtype: 'init', message: 'Claude Code initialized' }]
 
-  for (let i = 0; i < subagents; i += 1) {
+  for (const name of tools) {
     messages.push({
       type: 'assistant',
-      message: { content: [{ type: 'tool_use', name: 'Task', input: { prompt: 'review something' } }] },
+      message: { content: [{ type: 'tool_use', name, input: { prompt: 'review something' } }] },
     })
     messages.push({ type: 'user', message: { content: [{ type: 'tool_result', content: 'done' }] } })
   }
@@ -40,7 +53,8 @@ function healthyLog({ turns = 54, denials = 0, subagents = 3, subtype = 'success
 test('the healthy log is healthy, or nothing below is discriminating', () => {
   const d = decide(healthyLog(), 0)
   assert.equal(d.verdict, 'clean', d.reason)
-  assert.equal(d.stats.subagents, 3)
+  assert.equal(d.stats.toolCalls, 3)
+  assert.deepEqual(d.stats.byTool, { Agent: 1, Bash: 1, Read: 1 })
   assert.equal(d.stats.turns, 54)
   assert.equal(d.stats.denials, 0)
 })
@@ -119,34 +133,53 @@ test('one denial is enough; the threshold is not "a few are fine"', () => {
   assert.equal(decide(healthyLog({ denials: 1 }), 0).verdict, 'failed')
 })
 
-test('a run that launched no subagent fails', () => {
-  // PR #35 attempt 1: 3 turns, no denials, nothing posted, green. The
-  // plugin's procedure is subagents from its first step, so zero means it
-  // never started.
-  const d = decide(healthyLog({ subagents: 0, turns: 3 }), 0)
+test('a run that called no tool at all fails', () => {
+  // PR #35 attempt 1: 3 turns, no denials, nothing posted, green. Whatever it
+  // said, it read no diff and no file, so it reviewed nothing.
+  const d = decide(healthyLog({ tools: [], turns: 3 }), 0)
   assert.equal(d.verdict, 'failed')
-  assert.match(d.reason, /never started/)
+  assert.match(d.reason, /examined nothing/)
 })
 
-test('a single subagent is enough, because a legitimate early stop uses one', () => {
-  // The plugin stops on a closed, draft, or already-reviewed pull request
-  // after its eligibility agent. That is not a failure and must not redden
-  // the job -- the reason the turn count is not a criterion at all.
-  assert.equal(decide(healthyLog({ subagents: 1, turns: 4 }), 0).verdict, 'clean')
+test('a single tool call is enough, whatever the tool is called', () => {
+  // **The regression this rule is a repair of.** The previous version counted
+  // calls named `Task` and failed anything else. Measured on the first real
+  // run after it shipped -- 9 turns, $1.60, three models, zero denials, and a
+  // verdict of "the review procedure never started".
+  //
+  // The subagent tool is named `Agent` in current versions, and a review that
+  // works without subagents at all is not a failed one. So each of these, on
+  // its own, is a review that examined something:
+  for (const tool of ['Agent', 'Task', 'Bash', 'Read', 'Grep', 'mcp__github_inline_comment__create_inline_comment']) {
+    const d = decide(healthyLog({ tools: [tool], turns: 4 }), 0)
+    assert.equal(d.verdict, 'clean', `a lone \`${tool}\` call should not read as a failure: ${d.reason}`)
+  }
 })
 
-test('other tool calls do not count as subagents', () => {
-  // Without this, a run that only ever shelled out would satisfy the rule
-  // above and the failure it is meant to catch would pass.
-  const log = healthyLog({ subagents: 0 })
-  log.splice(1, 0, {
-    type: 'assistant',
-    message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'gh pr diff' } }] },
-  })
+test('a tool call with no usable name still counts as a tool call', () => {
+  // Dropping it would make `toolCalls === 0` wrong on a log this cannot fully
+  // parse, which is the one number the rule above is keyed on.
+  const log = healthyLog({ tools: [] })
+  log.splice(1, 0, { type: 'assistant', message: { content: [{ type: 'tool_use' }] } })
   const d = decide(log, 0)
-  assert.equal(d.verdict, 'failed')
-  assert.equal(d.stats.toolCalls, 1, 'the call was seen')
-  assert.equal(d.stats.subagents, 0, 'but not as a subagent')
+  assert.equal(d.verdict, 'clean')
+  assert.equal(d.stats.toolCalls, 1)
+  assert.deepEqual(d.stats.byTool, { '(unnamed)': 1 })
+})
+
+test('the breakdown counts each tool separately and is sorted by use', () => {
+  const d = decide(healthyLog({ tools: ['Bash', 'Read', 'Bash', 'Agent', 'Bash', 'Read'] }), 0)
+  assert.deepEqual(d.stats.byTool, { Bash: 3, Read: 2, Agent: 1 })
+  assert.equal(d.stats.toolCalls, 6)
+  const table = toolBreakdown(d)
+  assert.match(table, /\| `Bash` \| 3 \|/)
+  assert.ok(table.indexOf('`Bash`') < table.indexOf('`Read`'), 'sorted by count, most used first')
+  assert.ok(table.indexOf('`Read`') < table.indexOf('`Agent`'))
+})
+
+test('the breakdown says so plainly when there is nothing to break down', () => {
+  assert.match(toolBreakdown(decide(null, 0)), /No execution log/)
+  assert.match(toolBreakdown(decide(healthyLog({ tools: [] }), 0)), /called no tool at all/)
 })
 
 // --- Shapes that must not throw ---------------------------------------------
@@ -200,7 +233,7 @@ test('the skip cannot launder a review that ran badly', () => {
   // it did whatever the workflow diff says.
   const changed = { workflowChanged: true }
   assert.equal(decide(healthyLog({ denials: 4 }), 0, changed).verdict, 'failed')
-  assert.equal(decide(healthyLog({ subagents: 0 }), 0, changed).verdict, 'failed')
+  assert.equal(decide(healthyLog({ tools: [] }), 0, changed).verdict, 'failed')
   assert.equal(decide(healthyLog({ isError: true }), 0, changed).verdict, 'failed')
   assert.equal(decide(healthyLog().filter((m) => m.type !== 'result'), 0, changed).verdict, 'failed')
 })
@@ -237,7 +270,7 @@ function runCli(log, count, workflowChanged) {
 
 test('a clean review exits 0 and a broken one exits 1', () => {
   assert.equal(runCli(healthyLog(), 0).status, 0)
-  assert.equal(runCli(healthyLog({ subagents: 0 }), 0).status, 1)
+  assert.equal(runCli(healthyLog({ tools: [] }), 0).status, 1)
   assert.equal(runCli(null, 0).status, 1, 'a missing execution file reddens the job')
 })
 
@@ -295,9 +328,9 @@ test('the clean comment says the review happened, not merely that nothing was fo
 })
 
 test('the failed comment says plainly that the pull request is unreviewed', () => {
-  const body = comment(decide(healthyLog({ subagents: 0 }), 0))
+  const body = comment(decide(healthyLog({ tools: [] }), 0))
   assert.match(body, /has not been reviewed/)
-  assert.match(body, /never started/)
+  assert.match(body, /examined nothing/)
 })
 
 test('the findings comment points at the comments it left', () => {
