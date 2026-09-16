@@ -256,10 +256,12 @@ request, on Ubuntu, in five jobs — the last two only on a tag:
   `scripts/package-release.sh`, which produces that architecture's
   archives;
 - `publish` — also on a tag: keeps only the components whose own version
-  moved since the last **finished** release, checks the notes, writes one
-  `SHA256SUMS` for every asset, and creates the release as a **draft**. A
-  tag carrying a prerelease suffix (`v0.2.1-beta.1`) makes it a
-  prerelease.
+  moved since the last **finished** release, checks the notes, generates
+  `catalogue.json` (the kind and description of every installable
+  component, read by the update page's "Add a component" dialog), writes
+  one `SHA256SUMS` for every asset including it, and creates the release as
+  a **draft**. A tag carrying a prerelease suffix (`v0.2.1-beta.1`) makes it
+  a prerelease.
 
 Ubuntu and not Windows because the SDK tests open Unix sockets.
 `scripts/ci-local.sh [web|rust|e2e]` runs the same commands in the same

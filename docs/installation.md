@@ -59,8 +59,12 @@ release: the core's archive and each plugin's own archive carry **that
 component's own** version, which moves only when that component changes,
 while the all-plugins bundle carries the release's own number. There is
 nowhere else to look it up — read it where it already sits, in the name of
-the file attached to the release page. A single `SHA256SUMS` covers every
-archive of the release, whatever the architecture. This is an alternative to
+the file attached to the release page. The release also carries
+`catalogue.json`, a description (kind and one-line summary) of every
+installable component, read by the update page's "Add a component" dialog —
+not a per-architecture archive, so there is only one, whatever the
+architecture. A single `SHA256SUMS` covers every archive of the release plus
+`catalogue.json`, whatever the architecture. This is an alternative to
 `deploy.sh`, not a replacement for it: `deploy.sh` still builds from source
 over SSH and remains the development path (see [Deploying](#deploying)
 below); a release archive is for putting a specific tagged version onto a
