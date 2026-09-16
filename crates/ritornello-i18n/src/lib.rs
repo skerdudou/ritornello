@@ -19,6 +19,12 @@
 //! is data, not resolution, kept alongside `Layer` for the callers that
 //! need to reason about a module's coverage across languages.
 //!
+//! `coverage` (see `coverage`) is the arithmetic that reasoning runs on: the
+//! union of languages at least one module translates, and — for one
+//! candidate language — which modules are complete, partial or absent.
+//! Pure, key-set arithmetic over `ModuleLayers` already in memory; see its
+//! own module doc for the choices behind "complete".
+//!
 //! Resolution by key: `own` (component) → `common` → the key itself (safety
 //! net). Interpolation: the caller does `catalog.get(key)` then
 //! `interpolate::interpolate` to fill its `{name}` tokens (no template
@@ -27,10 +33,12 @@
 //! doc for why that mattered).
 
 mod chain;
+mod coverage;
 mod interpolate;
 mod layer;
 
 pub use chain::{common_embedded, Chain};
+pub use coverage::{coverage, union_of_languages, Coverage, ModuleCoverage};
 pub use interpolate::interpolate;
 pub use layer::{try_parse, Layer, ModuleLayers};
 

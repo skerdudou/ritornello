@@ -170,6 +170,91 @@ impl Registry {
         self.announced.get(module)
     }
 
+    /// Every module counted as "having text" — task 12's completeness
+    /// denominator — as one merged `ModuleLayers` per module, `common`'s
+    /// vocabulary folded into each one exactly as `chain_for` would resolve
+    /// it (own beats common, disk beats announced, within one language).
+    ///
+    /// **Membership** comes from the *announced* tier alone, never from a
+    /// disk sweep: a module qualifies only if `self.announced` holds an
+    /// entry for it with at least one language — the same test
+    /// `announced_module`'s own doc already draws between `None` (an old
+    /// binary, or a module nobody ever mentioned) and `Some(non-empty)` (a
+    /// plugin that actually confided text). A module whose announced entry
+    /// is `Some({})` — the four plugins with legitimately no text of their
+    /// own (`console`, `ouifm-metas`, `radiofrance-metas`, `nrj-metas` as
+    /// of this writing; the brief this shipped against said three, which
+    /// was already stale — see the task's own report) — is left out here
+    /// too, exactly like a module never announced at all: both are "no
+    /// text", and `ritornello_i18n::coverage` carries its own, second guard
+    /// against the same fact for a module that reached it some other way
+    /// (see that function's doc).
+    ///
+    /// **`common` never appears as an entry of its own.** It is vocabulary
+    /// every module already draws on through `chain_for`; folding it into
+    /// every module here is what makes a thin module — one whose own text
+    /// is a handful of keys and whose display strings are otherwise all
+    /// `common`'s ("Play", "Loading"…) — measure as translated once
+    /// `common` and the module's own layer between them cover its English,
+    /// rather than reading as untranslated because its own layer alone
+    /// does not.
+    ///
+    /// **A language present only on disk still shows up.** Both the
+    /// module's own disk pack and its announced layer are merged for every
+    /// language either one defines — an operator-supplied `<lang>.toml`
+    /// grows the count exactly as an announced language would, since a
+    /// user reading the completeness line cannot tell which tier a
+    /// translation came from and should not have to.
+    ///
+    /// Sorted by module name for a deterministic, testable order — see
+    /// `Coverage::modules`'s own doc for why no particular position is
+    /// promised beyond that.
+    pub fn modules_with_text(&self) -> Vec<ModuleLayers> {
+        let mut names: Vec<&str> = self
+            .announced
+            .iter()
+            .filter(|(name, layers)| name.as_str() != "common" && layers.languages().next().is_some())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort();
+        names.into_iter().map(|name| self.merge_with_common(name)).collect()
+    }
+
+    /// Builds one module's merged view: every language either its own
+    /// tiers or `common`'s define, each language's `Layer` built from up to
+    /// four sources in `chain_for`'s own priority (last write wins here:
+    /// common-announced, common-disk, own-announced, own-disk).
+    fn merge_with_common(&self, module: &str) -> ModuleLayers {
+        let mut out = ModuleLayers::new(module);
+        let mut langs: Vec<&str> = self
+            .announced
+            .get(module)
+            .into_iter()
+            .flat_map(|m| m.languages())
+            .chain(self.disk.get(module).into_iter().flat_map(|m| m.languages()))
+            .chain(self.announced.get("common").into_iter().flat_map(|m| m.languages()))
+            .chain(self.disk.get("common").into_iter().flat_map(|m| m.languages()))
+            .collect();
+        langs.sort_unstable();
+        langs.dedup();
+        for lang in langs {
+            let mut merged: HashMap<String, String> = HashMap::new();
+            for l in [
+                self.announced_layer("common", lang),
+                self.disk_layer("common", lang),
+                self.announced_layer(module, lang),
+                self.disk_layer(module, lang),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                merged.extend(l.as_map().clone());
+            }
+            out.insert(lang.to_string(), Layer::from_map(merged));
+        }
+        out
+    }
+
     /// Builds the resolution chain for `module`, in the fixed order the
     /// chantier turns on: the whole `chosen`-language block, then the
     /// whole `fallback`-language block, then the whole `en` block.
@@ -410,6 +495,98 @@ mod tests {
         let announced = registry.announced_module("console");
         assert!(announced.is_some(), "announced, even with nothing to say, must read Some");
         assert_eq!(announced.unwrap().languages().count(), 0, "and carry zero languages, not invent one");
+    }
+
+    // --- modules_with_text: task 12's denominator source ---
+
+    fn module_layers(name: &str, langs: &[(&str, &[(&str, &str)])]) -> ModuleLayers {
+        let mut m = ModuleLayers::new(name);
+        for (lang, pairs) in langs {
+            let source: String = pairs.iter().map(|(k, v)| format!("{k} = {v:?}\n")).collect();
+            m.insert(*lang, Layer::parse(&source).unwrap());
+        }
+        m
+    }
+
+    #[test]
+    fn modules_with_text_excludes_a_module_never_announced() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")])]));
+        // "console" is never mentioned at all: `announced_module("console")`
+        // would read `None`, exactly like an old binary.
+        let names: Vec<String> = registry.modules_with_text().into_iter().map(|m| m.name().to_string()).collect();
+        assert_eq!(names, vec!["radio".to_string()]);
+    }
+
+    #[test]
+    fn modules_with_text_excludes_a_module_announced_empty() {
+        // The `Some({})` half of the distinction: a plugin that connected
+        // and announced, but confided nothing (the four legitimately
+        // textless plugins), must not inflate the denominator either.
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")])]));
+        registry.insert_announced("console", ModuleLayers::new("console"));
+        let names: Vec<String> = registry.modules_with_text().into_iter().map(|m| m.name().to_string()).collect();
+        assert_eq!(names, vec!["radio".to_string()], "console announced Some({{}}) and must still be excluded");
+    }
+
+    #[test]
+    fn modules_with_text_never_lists_common_as_a_module_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")])]));
+        registry.insert_announced("common", module_layers("common", &[("en", &[("loading", "Loading")])]));
+        let names: Vec<String> = registry.modules_with_text().into_iter().map(|m| m.name().to_string()).collect();
+        assert_eq!(names, vec!["radio".to_string()], "common must never appear as an entry of its own");
+    }
+
+    #[test]
+    fn modules_with_text_folds_common_into_every_module_it_returns() {
+        // A module whose own French is silent but whose English is
+        // entirely covered by `common`'s vocabulary must still measure as
+        // translated once `common`'s French is folded in — see
+        // `merge_with_common`'s own doc for why this is not double
+        // counting.
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("loading", "Loading")])]));
+        registry.insert_announced("common", module_layers("common", &[("en", &[("loading", "Loading")]), ("fr", &[("loading", "Chargement")])]));
+        let radio = registry.modules_with_text().into_iter().find(|m| m.name() == "radio").unwrap();
+        assert_eq!(radio.layer("fr").and_then(|l| l.get("loading")), Some("Chargement"));
+    }
+
+    #[test]
+    fn modules_with_text_includes_a_language_that_exists_only_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/de.toml"), "play = \"Spielen\"\n").unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")])]));
+        let radio = registry.modules_with_text().into_iter().find(|m| m.name() == "radio").unwrap();
+        assert_eq!(radio.layer("de").and_then(|l| l.get("play")), Some("Spielen"));
+    }
+
+    #[test]
+    fn modules_with_text_own_layer_wins_over_common_within_one_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "own-play")])]));
+        registry.insert_announced("common", module_layers("common", &[("en", &[("play", "common-play")])]));
+        let radio = registry.modules_with_text().into_iter().find(|m| m.name() == "radio").unwrap();
+        assert_eq!(radio.layer("en").and_then(|l| l.get("play")), Some("own-play"));
+    }
+
+    #[test]
+    fn modules_with_text_is_sorted_by_module_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("k", "v")])]));
+        registry.insert_announced("cd", module_layers("cd", &[("en", &[("k", "v")])]));
+        registry.insert_announced("core", module_layers("core", &[("en", &[("k", "v")])]));
+        let names: Vec<String> = registry.modules_with_text().into_iter().map(|m| m.name().to_string()).collect();
+        assert_eq!(names, vec!["cd".to_string(), "core".to_string(), "radio".to_string()]);
     }
 
     #[test]

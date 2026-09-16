@@ -27,16 +27,72 @@ pub fn list_locales(root: &std::path::Path) -> Vec<String> {
     parse_available_locales(&names)
 }
 
+/// One candidate language's completeness, flattened from
+/// `ritornello_i18n::Coverage` for the wire: `complete` is the boolean the
+/// owner's display rule pivots on ("nothing shown for a complete language,
+/// just its name" — the SPA never has to compute `done == total` itself),
+/// `done`/`total` are the raw numbers task 14's phrase key needs
+/// (`{done}`/`{total}`, never a concatenated string — see the chantier's
+/// own rule against that).
+#[derive(Serialize)]
+pub(super) struct LanguageCompleteness {
+    language: String,
+    complete: bool,
+    done: usize,
+    total: usize,
+}
+
 #[derive(Serialize)]
 pub(super) struct LocaleResponse {
+    /// The **union** of every language at least one module — the core or a
+    /// connected plugin — translates (task 12), not only the core's own
+    /// packs `list_locales` reports. A language a single third-party
+    /// plugin ships is in here even if the core has never heard of it: the
+    /// origin defect this chantier was opened to fix.
     locales: Vec<String>,
     current: Option<String>,
+    /// Completeness for every language in `locales`, in the same order.
+    completeness: Vec<LanguageCompleteness>,
+    /// The device's current fallback language. Hardcoded to `"en"` for
+    /// now — there is no persisted fallback setting yet, that is task 13's
+    /// job — matching `Registry::chain_for`'s own doc: "typically fallback
+    /// is itself en until a device has a real fallback setting". Once task
+    /// 13 lands this reads the persisted value instead.
+    fallback_current: String,
+    /// Eligible fallback languages: the **core's own** installed set only
+    /// (`list_locales`), per the owner's arbitration — a fallback is
+    /// chosen among what is guaranteed to resolve everywhere, not among
+    /// every plugin's own languages. Never empty: `list_locales` always
+    /// includes `"en"`.
+    fallback_candidates: Vec<String>,
 }
 
 pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleResponse> {
-    let locales = list_locales(&state.locales_root);
+    let registry = state.registry.read().await;
+    let modules = registry.modules_with_text();
+    let locales = ritornello_i18n::union_of_languages(&modules);
+    let completeness = locales
+        .iter()
+        .map(|lang| {
+            let c = ritornello_i18n::coverage(&modules, lang);
+            LanguageCompleteness {
+                language: lang.clone(),
+                complete: c.is_complete(),
+                done: c.complete_count(),
+                total: c.total(),
+            }
+        })
+        .collect();
+    drop(registry);
+    let fallback_candidates = list_locales(&state.locales_root);
     let current = state.locale_current.read().await.clone();
-    Json(LocaleResponse { locales, current })
+    Json(LocaleResponse {
+        locales,
+        current,
+        completeness,
+        fallback_current: "en".to_string(),
+        fallback_candidates,
+    })
 }
 
 #[derive(Deserialize)]
@@ -166,6 +222,93 @@ mod tests {
         for ko in ["", "..", "../fr", "fr/..", "fr toml", "a".repeat(17).as_str()] {
             assert!(!valid_locale(ko), "{ko:?} should be refused");
         }
+    }
+
+    fn layers(pairs: &[(&str, &[(&str, &str)])]) -> ritornello_i18n::ModuleLayers {
+        let mut m = ritornello_i18n::ModuleLayers::new("test");
+        for (lang, kv) in pairs {
+            let source: String = kv.iter().map(|(k, v)| format!("{k} = {v:?}\n")).collect();
+            m.insert(*lang, ritornello_i18n::Layer::parse(&source).unwrap());
+        }
+        m
+    }
+
+    /// The regression this task was opened to fix: a language only a
+    /// connected plugin translates must be in `locales` (the union), even
+    /// though the core's own `core/` directory has never heard of it —
+    /// `list_locales` alone (the pre-task-12 shape of this route) would
+    /// have missed it entirely.
+    #[tokio::test]
+    async fn get_locale_lists_a_language_only_a_plugin_translates() {
+        let (state, _rx, _dir) = app_state_fr();
+        state.registry.write().await.insert_announced(
+            "radio",
+            layers(&[("en", &[("play", "Play")]), ("de", &[("play", "Spielen")])]),
+        );
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let locales: Vec<String> = serde_json::from_value(v["locales"].clone()).unwrap();
+        assert!(locales.contains(&"de".to_string()), "de must be in the union: {locales:?}");
+    }
+
+    /// A language a plugin translates only partially must be reported as
+    /// such — `done`/`total`, not `complete: true` — rather than the route
+    /// declaring victory because the language exists at all.
+    #[tokio::test]
+    async fn get_locale_completeness_reports_a_partial_language_honestly() {
+        let (state, _rx, _dir) = app_state_fr();
+        // The core (seeded by `app_state_fr`) is the only module with
+        // text, and its French disk pack (`core/fr.toml`, written by the
+        // fixture) defines only 2 of the core's many embedded English
+        // keys — a real partial, not a contrived one.
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let completeness: Vec<serde_json::Value> = serde_json::from_value(v["completeness"].clone()).unwrap();
+        let fr = completeness.iter().find(|c| c["language"] == "fr").expect("fr must be reported");
+        assert_eq!(fr["complete"], false, "fr covers only 2 of the core's keys, not every one");
+        assert_eq!(fr["total"], 1, "only the core has text in this rig");
+        assert_eq!(fr["done"], 0);
+    }
+
+    /// The mirror case: a language every counted module covers completely
+    /// must read `complete: true`, so the SPA (task 14) never has to
+    /// compare `done` to `total` itself.
+    #[tokio::test]
+    async fn get_locale_completeness_reports_a_complete_language_as_complete() {
+        let (state, _rx, _dir) = app_state_fr();
+        // English is always complete against itself.
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let completeness: Vec<serde_json::Value> = serde_json::from_value(v["completeness"].clone()).unwrap();
+        let en = completeness.iter().find(|c| c["language"] == "en").expect("en must be reported");
+        assert_eq!(en["complete"], true);
+        assert_eq!(en["done"], en["total"]);
+    }
+
+    /// The eligible fallback list stays the **core's own** languages even
+    /// when a plugin translates a language the core does not — the owner's
+    /// arbitration: a fallback must be guaranteed to resolve everywhere.
+    #[tokio::test]
+    async fn get_locale_fallback_candidates_stay_core_only() {
+        let (state, _rx, _dir) = app_state_fr();
+        state.registry.write().await.insert_announced(
+            "radio",
+            layers(&[("en", &[("play", "Play")]), ("de", &[("play", "Spielen")])]),
+        );
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let fallback_candidates: Vec<String> = serde_json::from_value(v["fallback_candidates"].clone()).unwrap();
+        assert_eq!(fallback_candidates, vec!["en".to_string(), "fr".to_string()]);
+        assert!(!fallback_candidates.contains(&"de".to_string()), "de is a plugin language, not a core one");
+        assert_eq!(v["fallback_current"], "en", "hardcoded until task 13 wires a real setting");
     }
 
     #[tokio::test]

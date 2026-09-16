@@ -505,7 +505,11 @@ pub(crate) mod tests_support {
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(
+            // `seeded_registry`, not a bare `Registry::sweep`: production
+            // always seeds `core`/`common` with their embedded English
+            // first, and `locale_json` (task 12) needs that seed to find
+            // "core" through `Registry::modules_with_text` at all.
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
                 std::path::PathBuf::from("/nonexistent"),
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
@@ -550,7 +554,11 @@ pub(crate) mod tests_support {
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(
+            // `seeded_registry`, not a bare `Registry::sweep`: production
+            // always seeds `core`/`common` with their embedded English
+            // first, and `locale_json` (task 12) needs that seed to find
+            // "core" through `Registry::modules_with_text` at all.
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
                 std::path::PathBuf::from("/nonexistent"),
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
@@ -597,7 +605,11 @@ pub(crate) mod tests_support {
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(
+            // `seeded_registry`, not a bare `Registry::sweep`: production
+            // always seeds `core`/`common` with their embedded English
+            // first, and `locale_json` (task 12) needs that seed to find
+            // "core" through `Registry::modules_with_text` at all.
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
                 std::path::PathBuf::from("/nonexistent"),
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
@@ -652,7 +664,9 @@ pub(crate) mod tests_support {
                 dir.path(),
                 crate::i18n::EN,
             ))),
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(dir.path().to_path_buf()))),
+            // Same reasoning as the other rigs above: seed core/common so
+            // `Registry::modules_with_text` finds "core".
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(dir.path().to_path_buf()))),
             locale_current: Arc::new(tokio::sync::RwLock::new(Some("fr".to_string()))),
             locale_tx,
             locales_root: dir.path().to_path_buf(),

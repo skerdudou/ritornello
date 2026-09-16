@@ -81,6 +81,14 @@ impl ModuleLayers {
         ModuleLayers { module: module.into(), layers: HashMap::new() }
     }
 
+    /// The module's own name (`"core"`, `"radio"`, `"common"`…). Added for
+    /// task 12's completeness count, which reports **per module** and needs
+    /// to name each one — the field already existed, it just had no reader
+    /// outside this file until now.
+    pub fn name(&self) -> &str {
+        &self.module
+    }
+
     pub fn insert(&mut self, lang: impl Into<String>, layer: Layer) {
         self.layers.insert(lang.into(), layer);
     }
@@ -161,6 +169,12 @@ mod tests {
         let l = Layer::parse("play = \"Play\"\n").unwrap();
         let rebuilt = Layer::from_map(l.as_map().clone());
         assert_eq!(rebuilt, l);
+    }
+
+    #[test]
+    fn module_layers_exposes_its_own_name() {
+        let m = ModuleLayers::new("radio");
+        assert_eq!(m.name(), "radio");
     }
 
     #[test]
