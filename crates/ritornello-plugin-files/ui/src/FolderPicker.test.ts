@@ -64,11 +64,15 @@ describe('FolderPicker', () => {
     expect(w.get('[data-picker-go-up]').attributes('disabled')).toBeDefined()
   })
 
-  it('a refusal displays in place of the tree', () => {
+  it('a refusal displays in place of the tree, resolved from its key', () => {
     // Displaying an empty tree under an error message would suggest the
-    // folder exists and is empty.
-    const w = mountPicker({ error: 'host unreachable' })
-    expect(w.get('[data-picker-error]').text()).toContain('host unreachable')
+    // folder exists and is empty. The plugin no longer resolves this itself
+    // (no `Catalog` left — language-packs chantier, task 9): the page does,
+    // through `resolveStoredText`.
+    const w = mountPicker({
+      error: { kind: 'Keyed', data: { key: 'smb_unreachable', params: { host: 'nas' } } },
+    })
+    expect(w.get('[data-picker-error]').text()).toContain('nas')
     expect(w.findAll('[data-picker-folder]')).toHaveLength(0)
     expect(w.find('[data-picker-empty]').exists()).toBe(false)
   })

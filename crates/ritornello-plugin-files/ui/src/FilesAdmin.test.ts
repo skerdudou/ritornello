@@ -280,14 +280,26 @@ describe('FilesAdmin, the page', () => {
     expect(gets()).toBe(3)
   })
 
-  it('shows the incident of the last scan, which survives its end', async () => {
+  it('shows the incident of the last scan, resolved from its key, which survives its end', async () => {
     // Encoded regression: `add_dir` returns **before** the end of the recursive
     // walk, so its acknowledgement says nothing about its outcome. If the page
     // did not display `scan.error`, an addition that failed would pass for an
     // addition that simply found nothing.
-    const refusal = 'this folder holds more than 10000 tracks: narrow it down'
-    const { w } = await mountAdmin({ scan: { running: false, found: 0, dir: '', error: refusal } })
-    expect(w.find('[data-scan-error]').element.textContent).toBe(refusal)
+    //
+    // The plugin no longer resolves it (no `Catalog` left — language-packs
+    // chantier, task 9): it travels as a key and its parameters, and the
+    // page resolves it through its own catalog (`resolveStoredText`).
+    const { w } = await mountAdmin({
+      scan: {
+        running: false,
+        found: 0,
+        dir: '',
+        error: { kind: 'Keyed', data: { key: 'too_many_tracks', params: { cap: '10000' } } },
+      },
+    })
+    expect(w.find('[data-scan-error]').element.textContent).toBe(
+      'this folder holds more than 10000 tracks: narrow it down',
+    )
     expect(w.find('[data-scan]').exists()).toBe(false)
   })
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Button } from '@ritornello/ui'
 import { computed } from 'vue'
-import { truncateStart, type Exploration, type T } from './data'
+import { resolveStoredText, truncateStart, type Exploration, type T } from './data'
 
 /**
  * The picker tree shared by both wizards.
@@ -67,7 +67,7 @@ const shortPath = computed(() => truncateStart(props.path))
     <!-- The refusal replaces the tree: displaying it empty underneath
          would suggest the folder exists and is empty. -->
     <p v-if="exploration.error" class="min-w-0 break-words text-sm text-destructive" data-picker-error>
-      {{ exploration.error }}
+      {{ resolveStoredText(t, exploration.error) }}
     </p>
 
     <template v-else>

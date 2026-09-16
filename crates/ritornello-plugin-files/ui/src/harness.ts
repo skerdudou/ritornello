@@ -25,9 +25,10 @@ export const CATALOG: Record<string, string> = {
   // Inherited from the common vocabulary (`common_en.toml`) by every plugin
   // catalog, exactly as the real merged catalog delivers it.
   loading: 'Loading…',
-  load_error_1: 'Error: ',
-  load_error_2: '',
+  load_error: 'Error: {cause}',
   scan_progress: 'Scanning {dir} — {found} tracks found so far',
+  too_many_tracks: 'this folder holds more than {cap} tracks: narrow it down',
+  smb_unreachable: 'Host {host} did not answer.',
 
   ph_host: 'server',
   ph_share: 'share name',
@@ -132,7 +133,7 @@ export interface ServerState {
   roots?: unknown[]
   playlist?: unknown[]
   index?: number
-  scan?: { running: boolean; found: number; dir: string; error?: string }
+  scan?: { running: boolean; found: number; dir: string; error?: unknown }
   saved?: unknown[]
   unresolved?: string[]
   browse?: Navigate
@@ -161,7 +162,9 @@ export interface Explore {
   dirs?: string[]
   audio_count?: number
   busy?: boolean
-  error?: string | null
+  /** Raw wire shape (see `StoredText` in `data.ts`), unresolved: this
+   * interface mirrors the server's JSON before `normalizeData` runs. */
+  error?: unknown
 }
 
 /** Wizard closed: the resting state, that of a page that has just loaded. */

@@ -12,7 +12,7 @@ import {
   type Catalog,
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { normalizeData, type Data } from './data'
+import { normalizeData, resolveStoredText, type Data } from './data'
 import PlaylistPane from './PlaylistPane.vue'
 import BrowsePane from './BrowsePane.vue'
 import SourcesPane from './SourcesPane.vue'
@@ -127,7 +127,13 @@ async function reload(): Promise<void> {
     // The load message does not overwrite a refusal already displayed if there
     // is one: both tell the same incident, and the first is the more precise
     // (it comes from the server's catalog).
-    message.value = t.value('load_error_1') + (e as Error).message + t.value('load_error_2')
+    //
+    // A single whole-sentence key with `{cause}`, not a concatenation of two
+    // catalog entries around the raw exception message: the same trap as a
+    // number glued to a label (see `AGENTS.md`), just with a string in place
+    // of the number. `load_error_1`/`load_error_2` used to bracket
+    // `(e as Error).message` by string concatenation.
+    message.value = t.value('load_error', { cause: (e as Error).message })
     if (data.value === null) loadFailed.value = true
     stopProbe()
   } finally {
@@ -296,7 +302,7 @@ async function send(payload: Record<string, unknown>): Promise<Data | null> {
 }
 
 const scan = computed(
-  () => data.value?.scan ?? { running: false, found: 0, dir: '', error: '' },
+  () => data.value?.scan ?? { running: false, found: 0, dir: '', error: null },
 )
 </script>
 
@@ -335,16 +341,18 @@ const scan = computed(
       }}
     </p>
 
-    <!-- Incident of the **last** scan, already translated by the plugin and
-         displayed verbatim. It survives the end of the scan, and it is the only
-         place where the page can learn that an addition failed: `add_dir`
-         returns long before the end of the recursive walk, so its
-         acknowledgement says nothing about its outcome. -->
+    <!-- Incident of the **last** scan, resolved against this page's catalog
+         (see `resolveStoredText`) — the plugin stores it as a key, not a
+         finished sentence, since language-packs chantier task 9. It survives
+         the end of the scan, and it is the only place where the page can
+         learn that an addition failed: `add_dir` returns long before the end
+         of the recursive walk, so its acknowledgement says nothing about its
+         outcome. -->
     <pre
       v-if="scan.error"
       data-scan-error
       class="whitespace-pre-wrap rounded-md border border-destructive p-2 font-mono text-sm"
-      >{{ scan.error }}</pre
+      >{{ resolveStoredText(t, scan.error) }}</pre
     >
 
     <!-- Three tabs rather than three panes end to end: the page required a

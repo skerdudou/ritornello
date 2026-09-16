@@ -1,8 +1,8 @@
 //! Recursive walk of a directory: extension filter, guard against symbolic
 //! link loops, cap.
 
-use ritornello_i18n::Catalog;
-use std::collections::HashSet;
+use ritornello_proto::Text;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -328,12 +328,16 @@ fn walk_dir(
 }
 
 impl ScanError {
-    pub fn message(&self, catalog: &Catalog) -> String {
+    /// Unresolved refusal: the core resolves it against this plugin's
+    /// announced catalog (language-packs chantier, task 9).
+    pub fn text(&self) -> Text {
         match self {
             ScanError::TooMany { cap } => {
-                catalog.get("too_many_tracks").replace("{cap}", &cap.to_string())
+                Text::Keyed { key: "too_many_tracks".into(), params: HashMap::from([("cap".to_string(), cap.to_string())]) }
             }
-            ScanError::Io { path } => catalog.get("scan_io_error").replace("{path}", path),
+            ScanError::Io { path } => {
+                Text::Keyed { key: "scan_io_error".into(), params: HashMap::from([("path".to_string(), path.clone())]) }
+            }
         }
     }
 }
@@ -588,16 +592,25 @@ mod tests {
     }
 
     #[test]
-    fn every_refusal_resolves_against_the_embedded_catalog() {
-        let catalog = Catalog::load("files", "en", Path::new("/inexistant"), crate::FILES_EN);
-        for m in [
-            ScanError::TooMany { cap: 2000 }.message(&catalog),
-            ScanError::Io { path: "/mnt/ritornello/nas".into() }.message(&catalog),
+    fn every_refusal_names_a_key_that_exists_in_the_embedded_catalog() {
+        // The plugin no longer resolves (no `Catalog` left — language-packs
+        // chantier, task 9): what this test still owns is that the key
+        // exists, and that the interpolation parameter travels unresolved.
+        let known = ritornello_i18n::try_parse(crate::FILES_EN).unwrap();
+        for t in [
+            ScanError::TooMany { cap: 2000 }.text(),
+            ScanError::Io { path: "/mnt/ritornello/nas".into() }.text(),
         ] {
-            assert!(m.contains(' '), "message reduced to a raw key: {m:?}");
+            match t {
+                Text::Keyed { key, .. } => assert!(known.contains_key(&key), "unknown key: {key}"),
+                Text::Verbatim(s) => panic!("a scan refusal must be a key, not verbatim text: {s}"),
+            }
         }
-        let capped = ScanError::TooMany { cap: 2000 }.message(&catalog);
-        assert!(capped.contains("2000"), "cap not interpolated: {capped:?}");
-        assert!(!capped.contains("{cap}"), "token left as is: {capped:?}");
+        match (ScanError::TooMany { cap: 2000 }).text() {
+            Text::Keyed { params, .. } => {
+                assert_eq!(params.get("cap").map(String::as_str), Some("2000"), "cap not carried: {params:?}");
+            }
+            Text::Verbatim(_) => panic!("expected a keyed text"),
+        }
     }
 }

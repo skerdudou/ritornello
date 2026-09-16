@@ -12,12 +12,12 @@
 
 use crate::smb::{self, Credentials};
 use crate::{scan, volumes};
-use ritornello_i18n::Catalog;
+use ritornello_proto::Text;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Cap on one `smbclient` call. Generous — a NAS waking up takes its time —
@@ -47,7 +47,18 @@ pub struct View {
     pub dirs: Vec<String>,
     pub audio_count: usize,
     pub busy: bool,
-    pub error: Option<String>,
+    /// **Unresolved** — a key and its parameters, or explicit verbatim text
+    /// (see [`Text`]), resolved by the page against this plugin's announced
+    /// catalog rather than stored finished.
+    ///
+    /// **The defect this chantier was written against** (language-packs
+    /// chantier, task 9): this field used to store `e.message(&catalog,
+    /// &host)` — a *finished* string — re-served unchanged at every
+    /// `get_data` until the next `connect`/`browse`. Changing the interface
+    /// language left this line in the old one, permanently rather than
+    /// merely persistently: nothing ever re-resolved it, because there was
+    /// nothing left to resolve.
+    pub error: Option<Text>,
 }
 
 pub struct Browser {
@@ -58,7 +69,6 @@ pub struct Browser {
     /// made the wizard fail in development with a "Permission denied" that
     /// seemed to blame SMB.
     work_dir: PathBuf,
-    catalog: Arc<RwLock<Catalog>>,
     smb_ok: Arc<AtomicBool>,
     view: Arc<Mutex<View>>,
     /// Credentials of the current dialog, indexed by host.
@@ -75,15 +85,9 @@ pub struct Browser {
 }
 
 impl Browser {
-    pub fn new(
-        work_dir: PathBuf,
-        catalog: Arc<RwLock<Catalog>>,
-        smb_ok: Arc<AtomicBool>,
-        health: Arc<crate::health::Health>,
-    ) -> Self {
+    pub fn new(work_dir: PathBuf, smb_ok: Arc<AtomicBool>, health: Arc<crate::health::Health>) -> Self {
         Self {
             work_dir,
-            catalog,
             smb_ok,
             health,
             view: Arc::new(Mutex::new(View::default())),
@@ -92,8 +96,9 @@ impl Browser {
         }
     }
 
-    fn phrase(&self, key: &str) -> String {
-        self.catalog.read().unwrap().get(key).to_string()
+    /// A key with a single named parameter.
+    fn text_with(&self, key: &str, param: &str, value: &str) -> Text {
+        Text::Keyed { key: key.to_string(), params: HashMap::from([(param.to_string(), value.to_string())]) }
     }
 
     pub fn open(&mut self, kind: Kind) {
@@ -136,7 +141,7 @@ impl Browser {
     /// Synchronous: a local file system answers well within the core's cap,
     /// and making this asynchronous would only add a polling round trip
     /// between each opened level.
-    pub async fn local(&mut self, path: &str) -> Result<(), String> {
+    pub async fn local(&mut self, path: &str) -> Result<(), Text> {
         let path_buf = std::path::PathBuf::from(path);
         let mounts = volumes::read_proc_mounts();
         // Canonicalization **and** listing under a single circuit breaker:
@@ -151,15 +156,15 @@ impl Browser {
             })
             .await
         else {
-            return Err(self.phrase("root_unresponsive").replace("{path}", path));
+            return Err(self.text_with("root_unresponsive", "path", path));
         };
         let Some((canon, contents)) = read else {
-            return Err(self.phrase("bad_local_path").replace("{path}", path));
+            return Err(self.text_with("bad_local_path", "path", path));
         };
         if !volumes::browsable(&mounts, &canon) {
-            return Err(self.phrase("bad_local_path").replace("{path}", path));
+            return Err(self.text_with("bad_local_path", "path", path));
         }
-        let contents = contents.map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+        let contents = contents.map_err(|e| e.text())?;
         let mut v = self.view.lock().unwrap();
         v.path = canon.display().to_string();
         v.dirs = contents.dirs;
@@ -195,7 +200,6 @@ impl Browser {
         let creds = self.credentials(&host);
         let dir = self.work_dir.clone();
         let view = self.view.clone();
-        let catalog = self.catalog.clone();
         self.task = Some(tokio::spawn(async move {
             let r = smb::list_shares(&host, creds.as_ref(), &dir, SMB_TIMEOUT).await;
             let mut v = view.lock().unwrap();
@@ -207,7 +211,7 @@ impl Browser {
                 }
                 Err(e) => {
                     tracing::warn!("listing shares of {host}: {e}");
-                    v.error = Some(e.message(&catalog.read().unwrap(), &host));
+                    v.error = Some(e.text(&host));
                 }
             }
         }));
@@ -253,7 +257,6 @@ impl Browser {
         let creds = self.credentials(&host);
         let dir = self.work_dir.clone();
         let view = self.view.clone();
-        let catalog = self.catalog.clone();
         self.task = Some(tokio::spawn(async move {
             let r = smb::list_dir(&host, &share, &path, creds.as_ref(), &dir, SMB_TIMEOUT).await;
             let mut v = view.lock().unwrap();
@@ -269,7 +272,7 @@ impl Browser {
                 }
                 Err(e) => {
                     tracing::warn!("listing //{host}/{share}/{path}: {e}");
-                    v.error = Some(e.message(&catalog.read().unwrap(), &host));
+                    v.error = Some(e.text(&host));
                 }
             }
         }));
@@ -278,7 +281,7 @@ impl Browser {
     fn failure(&self, e: smb::SmbError, host: &str) {
         let mut v = self.view.lock().unwrap();
         v.busy = false;
-        v.error = Some(e.message(&self.catalog.read().unwrap(), host));
+        v.error = Some(e.text(host));
     }
 
     pub fn view(&self) -> serde_json::Value {
@@ -293,17 +296,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     fn browser(dir: &std::path::Path) -> Browser {
-        Browser::new(
-            dir.join("creds"),
-            Arc::new(std::sync::RwLock::new(Catalog::load(
-                "files",
-                "en",
-                std::path::Path::new("/inexistant"),
-                crate::FILES_EN,
-            ))),
-            Arc::new(AtomicBool::new(true)),
-            Arc::new(crate::health::Health::new()),
-        )
+        Browser::new(dir.join("creds"), Arc::new(AtomicBool::new(true)), Arc::new(crate::health::Health::new()))
     }
 
     #[tokio::test]
@@ -342,7 +335,34 @@ mod tests {
         let mut e = browser(dir.path());
         e.open(Kind::Local);
         let err = e.local("/proc/self").await.unwrap_err();
-        assert!(err.contains(' '), "raw key: {err}");
+        match err {
+            Text::Keyed { .. } => {}
+            Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+        }
+    }
+
+    /// **Step 1's barrier (language-packs chantier, task 9).** The present
+    /// defect this task removes: `View.error` used to store
+    /// `e.message(&catalog, &host)` — a *finished* string — re-served
+    /// unchanged at every `get_data` until the next `connect`/`browse`.
+    /// Changing the interface language left this line in the old one,
+    /// permanently, because nothing ever re-resolved it once stored. Fed
+    /// from the event (a `connect` while `smb_ok` is false), not through a
+    /// direct call to a private method: this is the frame the page's
+    /// `get_data` actually re-serves, not merely the logic that builds it.
+    #[tokio::test]
+    async fn a_failed_connect_stores_a_key_not_a_resolved_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = browser(dir.path());
+        e.smb_ok.store(false, Ordering::Relaxed);
+        e.open(Kind::Smb);
+        e.connect("nas".into(), String::new(), String::new(), String::new());
+        let view = e.view();
+        assert_eq!(
+            view["error"],
+            serde_json::json!({ "kind": "Keyed", "data": { "key": "smb_not_installed" } }),
+            "the stored refusal must be a key, not a finished sentence: {view}"
+        );
     }
 
     #[tokio::test]

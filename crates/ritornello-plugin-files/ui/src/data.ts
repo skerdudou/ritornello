@@ -56,14 +56,15 @@ export interface Scan {
   found: number
   dir: string
   /**
-   * Refusal or incident of the **last** scan, already translated by the plugin.
+   * Refusal or incident of the **last** scan, **unresolved** (see
+   * `StoredText`): resolve with `resolveStoredText` before display.
    *
    * It survives the end of the scan, and that is deliberate on the plugin side:
    * `add_dir` returns long before the recursive walk finishes, so this is the
-   * only place where the page can learn that an addition failed. The empty
-   * string means "nothing to report".
+   * only place where the page can learn that an addition failed. `null` means
+   * "nothing to report".
    */
-  error: string
+  error: StoredText | null
 }
 
 export interface Saved {
@@ -153,7 +154,9 @@ export interface Exploration {
   /** Audio files of the open level: this is what says we are in the right place. */
   audioCount: number
   busy: boolean
-  error: string | null
+  /** **Unresolved** (see `StoredText`): resolve with `resolveStoredText`
+   * before display. */
+  error: StoredText | null
 }
 
 const EMPTY_EXPLORATION: Exploration = {
@@ -226,6 +229,53 @@ export const INTERNAL = 'internal'
  * for all in a child would freeze that empty state.
  */
 export type T = (key: string, params?: Record<string, string | number>) => string
+
+/**
+ * A key and its parameters, or explicit verbatim text — the **unresolved**
+ * shape a stored refusal now travels in on the wire (mirrors
+ * `ritornello_proto::Text`; see `resolveStoredText`).
+ *
+ * Replaces a plain `string` that used to arrive already translated by the
+ * plugin (`scan.error`, `explore.error`): that string was resolved **once**,
+ * at the moment the plugin's own state changed, and re-served unchanged
+ * afterwards — a language change left it in the old language for good,
+ * because nothing ever re-resolved it (language-packs chantier, task 9).
+ * This shape is resolved by the page, on every render, against whichever
+ * catalog it currently holds.
+ */
+export type StoredText =
+  | { kind: 'Keyed'; data: { key: string; params?: Record<string, string> } }
+  | { kind: 'Verbatim'; data: string }
+
+/**
+ * Resolves a `StoredText` against the page's catalog — the browser-side twin
+ * of `Core::resolve_text`: a `Keyed` value looks up its key through `t` and
+ * lets `t` substitute the named parameters, `Verbatim` passes through
+ * exactly as sent. `null` (nothing stored) resolves to the empty string.
+ */
+export function resolveStoredText(t: T, text: StoredText | null): string {
+  if (text === null) return ''
+  if (text.kind === 'Verbatim') return text.data
+  return t(text.data.key, text.data.params)
+}
+
+function normalizeStoredText(raw: unknown): StoredText | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  if (o.kind === 'Verbatim' && typeof o.data === 'string') {
+    return { kind: 'Verbatim', data: o.data }
+  }
+  if (o.kind === 'Keyed' && typeof o.data === 'object' && o.data !== null) {
+    const d = o.data as Record<string, unknown>
+    if (typeof d.key === 'string') {
+      const rawParams = (d.params ?? {}) as Record<string, unknown>
+      const params: Record<string, string> = {}
+      for (const [name, value] of Object.entries(rawParams)) params[name] = string_(value)
+      return { kind: 'Keyed', data: { key: d.key, params } }
+    }
+  }
+  return null
+}
 
 /**
  * Operation emitter, provided by the page to the panes.
@@ -348,7 +398,7 @@ export function normalizeExploration(raw: unknown): Exploration {
     dirs: array(o.dirs).map(string_),
     audioCount: number_(o.audio_count),
     busy: o.busy === true,
-    error: typeof o.error === 'string' && o.error ? o.error : null,
+    error: normalizeStoredText(o.error),
   }
 }
 
@@ -411,7 +461,7 @@ export function normalizeData(raw: unknown): Data {
       running: scan.running === true,
       found: number_(scan.found),
       dir: string_(scan.dir),
-      error: string_(scan.error),
+      error: normalizeStoredText(scan.error),
     },
     saved: array(o.saved).map((s) => {
       const e = (s ?? {}) as Record<string, unknown>

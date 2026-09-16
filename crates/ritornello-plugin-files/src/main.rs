@@ -16,15 +16,15 @@ mod state;
 
 use anyhow::Result;
 use rand::seq::SliceRandom;
-use ritornello_i18n::Catalog;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::roots::{RootKind, Roots};
 use ritornello_plugin_files::FILES_EN;
 use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
-use ritornello_proto::{Preset, SourceAction};
+use ritornello_proto::{Preset, SourceAction, Text};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock as AsyncRwLock;
 
 fn env_or(key: &str, default: &str) -> String {
@@ -186,8 +186,6 @@ struct FilesSource {
     state_path: PathBuf,
     /// The **generated** m3u that mpv receives. Decoupled from any user playlist.
     mpv_playlist_path: PathBuf,
-    catalog: Arc<RwLock<Catalog>>,
-    locales_root: PathBuf,
     /// Preset count announced by the Admin half after every modification of
     /// the playlist.
     ///
@@ -331,18 +329,22 @@ impl FilesSource {
         &self.order
     }
 
-    fn phrase(&self, key: &str) -> String {
-        self.catalog.read().unwrap().get(key).to_string()
+    /// A bare key, no parameters — the common case among this source's own
+    /// statuses.
+    fn keyed(&self, key: &str) -> Text {
+        Text::Keyed { key: key.to_string(), params: HashMap::new() }
     }
 
-    /// Permanent status of the source.
+    /// Permanent status of the source, **unresolved** — the core resolves it
+    /// against this plugin's announced catalog (language-packs chantier,
+    /// task 9).
     ///
-    /// **Redeclared on every meaningful frame**: `status` has the opposite
-    /// convention to `preset`, absence meaning "no status" and not "keep the
-    /// previous one". A Source that omitted it would see its display erase
-    /// itself at the next frame.
-    fn status(&self) -> String {
-        self.phrase("status_files")
+    /// **Redeclared on every meaningful frame**: `status_text` has the
+    /// opposite convention to `preset`, absence meaning "no status" and not
+    /// "keep the previous one". A Source that omitted it would see its
+    /// display erase itself at the next frame.
+    fn status_text(&self) -> Text {
+        self.keyed("status_files")
     }
 
     async fn persist(&self) {
@@ -464,7 +466,7 @@ impl FilesSource {
         let Some(entry) = playlist.current().cloned() else {
             self.plays.store(false, std::sync::atomic::Ordering::Relaxed);
             return SourceOutcome::new(SourceAction::Noop)
-                .status(self.phrase("no_playlist"))
+                .status_text(self.keyed("no_playlist"))
                 .preset_count(0)
                 .plays_nothing();
         };
@@ -502,7 +504,7 @@ impl FilesSource {
             .plays(Self::identity(&entry.path))
             .preset_name(entry.display_name())
             .preset_count(count)
-            .status(self.status());
+            .status_text(self.status_text());
         if let Some(n) = preset {
             outcome = outcome.preset(n);
         }
@@ -577,7 +579,7 @@ impl FilesSource {
         let playlist = self.playlist.read().await;
         let mut outcome = SourceOutcome::new(SourceAction::Noop)
             .preset_count(playlist.preset_count())
-            .status(self.status());
+            .status_text(self.status_text());
         let mut file = None;
         if let Some(entry) = playlist.current() {
             outcome = outcome.plays(Self::identity(&entry.path)).preset_name(entry.display_name());
@@ -627,7 +629,7 @@ impl SourcePlugin for FilesSource {
 
     async fn deactivate(&mut self) -> SourceOutcome {
         self.plays.store(false, std::sync::atomic::Ordering::Relaxed);
-        SourceOutcome::new(SourceAction::Stop).plays_nothing().status(self.status())
+        SourceOutcome::new(SourceAction::Stop).plays_nothing().status_text(self.status_text())
     }
 
     async fn select(&mut self, n: u8) -> SourceOutcome {
@@ -641,7 +643,7 @@ impl SourcePlugin for FilesSource {
         // would blank the displayed title while the sound goes on.
         let count = self.playlist.read().await.preset_count();
         SourceOutcome::new(SourceAction::Noop)
-            .status(self.phrase("empty_track"))
+            .status_text(self.keyed("empty_track"))
             .transient()
             .preset_count(count)
     }
@@ -656,19 +658,19 @@ impl SourcePlugin for FilesSource {
         // Otherwise mpv walks its own list; it is mpv that will tell us where
         // it landed, through `player_track`. Nothing to resync here, on pain
         // of doing it twice and contradicting ourselves.
-        SourceOutcome::new(SourceAction::PlayerNext).status(self.status())
+        SourceOutcome::new(SourceAction::PlayerNext).status_text(self.status_text())
     }
 
     async fn prev(&mut self) -> SourceOutcome {
         if let Some(outcome) = self.reload_if_changed(-1).await {
             return outcome;
         }
-        SourceOutcome::new(SourceAction::PlayerPrev).status(self.status())
+        SourceOutcome::new(SourceAction::PlayerPrev).status_text(self.status_text())
     }
 
     async fn eject(&mut self) -> SourceOutcome {
         // Nothing to eject: no removable media here.
-        SourceOutcome::new(SourceAction::Noop).status(self.status())
+        SourceOutcome::new(SourceAction::Noop).status_text(self.status_text())
     }
 
     async fn player_track(&mut self, n: i64) -> SourceOutcome {
@@ -725,7 +727,7 @@ impl SourcePlugin for FilesSource {
         if playlist.entries.is_empty() {
             return SourceOutcome::new(SourceAction::Noop)
                 .plays_nothing()
-                .status(self.phrase("no_playlist"))
+                .status_text(self.keyed("no_playlist"))
                 .preset_count(0);
         }
         // **Stopped, but a track armed.** The old frame only announced a
@@ -735,7 +737,7 @@ impl SourcePlugin for FilesSource {
         // state — nothing is playing, and here is what will restart.
         let mut outcome = SourceOutcome::new(SourceAction::Noop)
             .plays_nothing()
-            .status(self.status())
+            .status_text(self.status_text())
             .preset_count(playlist.preset_count());
         if let Some(entry) = playlist.current() {
             outcome = outcome.preset_name(entry.display_name());
@@ -941,11 +943,6 @@ impl SourcePlugin for FilesSource {
             self.playlist.write().await.index = entry;
         }
         self.play().await
-    }
-
-    async fn set_locale(&mut self, locale: String) {
-        *self.catalog.write().unwrap() =
-            Catalog::load("files", &locale, &self.locales_root, FILES_EN);
     }
 
     /// The named presets, for the home page grid and for the sources_catalog
@@ -1170,7 +1167,6 @@ async fn main() -> Result<()> {
     // Same default and same variable as the core (`RITORNELLO_RUNTIME_DIR`), so
     // that `docs/development.md` stays true from one binary to the other.
     let runtime_dir = PathBuf::from(env_or("RITORNELLO_RUNTIME_DIR", "/run/ritornello"));
-    let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
 
     let state = state::load(&state_path);
     let entries: Vec<Entry> = state.playlist.iter().map(Entry::from).collect();
@@ -1192,7 +1188,6 @@ async fn main() -> Result<()> {
         tracing::warn!("no usable media-roots.toml ({e}): starting with no root");
         Roots::default()
     });
-    let catalog = Arc::new(RwLock::new(Catalog::load("files", "en", &locales_root, FILES_EN)));
     // Captured before the move below: the Source's initial `order` is the
     // identity permutation of this same length (see its construction).
     let entries_len = entries.len();
@@ -1231,8 +1226,6 @@ async fn main() -> Result<()> {
         mode_changed: false,
         state_path: state_path.clone(),
         mpv_playlist_path,
-        catalog: catalog.clone(),
-        locales_root: locales_root.clone(),
         preset_count_rx: Some(preset_count_rx),
         cover_in_flight: None,
         cover_by_dir: Arc::new(Mutex::new(None)),
@@ -1258,7 +1251,6 @@ async fn main() -> Result<()> {
     let admin = admin::FilesAdmin {
         explore: ritornello_plugin_files::explore::Browser::new(
             runtime_dir.clone(),
-            catalog.clone(),
             smb_ok.clone(),
             health.clone(),
         ),
@@ -1275,7 +1267,6 @@ async fn main() -> Result<()> {
         state_path,
         roots,
         playlist,
-        catalog,
         scan: Arc::new(Mutex::new(admin::ScanProgress::default())),
         scan_task: None,
         unresolved: Arc::new(Mutex::new(Vec::new())),
@@ -1458,8 +1449,6 @@ mod tests {
             mode_changed: false,
             state_path: root.join("plugin-files.json"),
             mpv_playlist_path: root.join("plugin-files.m3u"),
-            catalog: Arc::new(RwLock::new(Catalog::load("files", "en", &root, FILES_EN))),
-            locales_root: root,
             preset_count_rx: None,
             cover_in_flight: None,
             cover_by_dir: Arc::new(Mutex::new(None)),
@@ -1557,7 +1546,7 @@ mod tests {
         let out = s.activate().await;
         assert!(matches!(out.action, SourceAction::Noop));
         assert_eq!(out.preset_count, Some(0));
-        assert!(out.status.is_some(), "the status must say why nothing is playing");
+        assert!(out.status_text.is_some(), "the status must say why nothing is playing");
         assert_eq!(out.identity, Some(IdentityUpdate::Nothing));
     }
 
@@ -1608,7 +1597,7 @@ mod tests {
             ("prev", s.prev().await),
             ("stop", s.stop().await),
         ] {
-            assert!(out.status.is_some(), "status omitted on {name}: the screen would go blank");
+            assert!(out.status_text.is_some(), "status omitted on {name}: the screen would go blank");
         }
     }
 
@@ -2008,14 +1997,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_status_follows_the_catalog_after_set_locale() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("files")).unwrap();
-        std::fs::write(dir.path().join("files/fr.toml"), "status_files = \"FICHIERS\"\n").unwrap();
-        let mut s = test_source(playlist_of(2));
-        s.locales_root = dir.path().to_path_buf();
-        s.set_locale("fr".into()).await;
-        assert_eq!(s.activate().await.status.as_deref(), Some("FICHIERS"));
+    async fn an_empty_playlist_activation_carries_a_key_not_a_resolved_text() {
+        // The present defect this task removes (language-packs chantier,
+        // task 9): the plugin used to resolve its own status into a
+        // finished string through a `Catalog` it kept in step with
+        // `set_locale` — a method that never re-emitted anything on its
+        // own. Fed from the event (activating an empty playlist), not
+        // through a direct call to a private method.
+        let mut s = test_source(Playlist::default());
+        let out = s.activate().await;
+        assert_eq!(
+            out.status_text,
+            Some(Text::Keyed { key: "no_playlist".into(), params: HashMap::new() }),
+            "the frame must carry a key for the core to resolve, not a finished string"
+        );
+        assert_eq!(out.status, None, "nothing is left here to resolve the legacy field with");
     }
 
     #[tokio::test]
@@ -2025,8 +2021,9 @@ mod tests {
         // once — and that frame overwrote the message with a generic status.
         // The user could not learn that their playlist was empty.
         let mut s = test_source(Playlist::default());
-        assert_eq!(s.activate().await.status.as_deref(), Some("NO PLAYLIST"));
-        assert_eq!(s.stop().await.status.as_deref(), Some("NO PLAYLIST"));
+        let no_playlist = Text::Keyed { key: "no_playlist".into(), params: HashMap::new() };
+        assert_eq!(s.activate().await.status_text, Some(no_playlist.clone()));
+        assert_eq!(s.stop().await.status_text, Some(no_playlist));
     }
 
     #[tokio::test]
@@ -2035,7 +2032,10 @@ mod tests {
         // there is really nothing to play.
         let mut s = test_source(playlist_of(3));
         s.activate().await;
-        assert_eq!(s.stop().await.status.as_deref(), Some("FILES"));
+        assert_eq!(
+            s.stop().await.status_text,
+            Some(Text::Keyed { key: "status_files".into(), params: HashMap::new() })
+        );
     }
 
     #[tokio::test]
@@ -2061,7 +2061,10 @@ mod tests {
         // does not exist.
         let mut s = test_source(Playlist::default());
         let outcome = s.stop().await;
-        assert_eq!(outcome.status.as_deref(), Some("NO PLAYLIST"));
+        assert_eq!(
+            outcome.status_text,
+            Some(Text::Keyed { key: "no_playlist".into(), params: HashMap::new() })
+        );
         assert!(outcome.preset.is_none());
         assert_eq!(outcome.preset_count, Some(0));
     }
@@ -2187,7 +2190,10 @@ mod tests {
         let mut s = test_source(Playlist::default());
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
         let outcome = s.next().await;
-        assert_eq!(outcome.status.as_deref(), Some("NO PLAYLIST"));
+        assert_eq!(
+            outcome.status_text,
+            Some(Text::Keyed { key: "no_playlist".into(), params: HashMap::new() })
+        );
         assert!(matches!(outcome.action, SourceAction::Noop));
     }
 

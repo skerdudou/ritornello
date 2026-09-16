@@ -10,7 +10,6 @@
 
 use crate::state;
 use anyhow::Result;
-use ritornello_i18n::Catalog;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::roots::{Root, RootKind, Roots};
@@ -19,10 +18,12 @@ use ritornello_plugin_files::store::{self, Location};
 use ritornello_plugin_files::volumes;
 use ritornello_plugin_files::{mount, scan};
 use ritornello_plugin_sdk::AdminPlugin;
+use ritornello_proto::Text;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock as AsyncRwLock;
 
 /// Progress of the running scan, as the page reads it.
@@ -31,10 +32,14 @@ pub struct ScanProgress {
     pub running: bool,
     pub found: usize,
     pub dir: String,
-    /// Refusal or incident of the **last** scan. Kept after the end: it is
-    /// the only way for the page to learn that an addition failed, the
-    /// `add_dir` call having returned long before.
-    pub error: Option<String>,
+    /// Refusal or incident of the **last** scan, **unresolved** — resolved
+    /// by the page against this plugin's announced catalog, not stored
+    /// finished: the same defect class `explore.rs`'s stored error is named
+    /// against (language-packs chantier, task 9), just reached through a
+    /// different field. Kept after the end: it is the only way for the page
+    /// to learn that an addition failed, the `add_dir` call having returned
+    /// long before.
+    pub error: Option<Text>,
 }
 
 /// Progress of the duration probing, as the page reads it.
@@ -59,7 +64,6 @@ pub struct FilesAdmin {
     pub state_path: PathBuf,
     pub roots: Arc<AsyncRwLock<Roots>>,
     pub playlist: Arc<AsyncRwLock<Playlist>>,
-    pub catalog: Arc<RwLock<Catalog>>,
     pub scan: Arc<Mutex<ScanProgress>>,
     /// Running scan task. Launching a new one **aborts** the previous one:
     /// two clicks must not leave two concurrent walks saturating a slow
@@ -200,8 +204,16 @@ pub enum Op {
 }
 
 impl FilesAdmin {
-    fn phrase(&self, key: &str) -> String {
-        self.catalog.read().unwrap().get(key).to_string()
+    /// A bare key, no parameters — unresolved, the core resolving it
+    /// against this plugin's announced catalog (language-packs chantier,
+    /// task 9).
+    fn text(&self, key: &str) -> Text {
+        Text::Keyed { key: key.to_string(), params: HashMap::new() }
+    }
+
+    /// A key with a single named parameter.
+    fn text_with(&self, key: &str, param: &str, value: &str) -> Text {
+        Text::Keyed { key: key.to_string(), params: HashMap::from([(param.to_string(), value.to_string())]) }
     }
 
     /// Resolves a **relative** path provided by the page against the named
@@ -211,11 +223,9 @@ impl FilesAdmin {
     /// validated by `Roots`, but `path` comes from the browser with every
     /// request. A `../../etc` there would browse — and add to a playback
     /// list — files outside any declared root.
-    async fn under_root(&self, root: &str, path: &str) -> Result<PathBuf, String> {
+    async fn under_root(&self, root: &str, path: &str) -> Result<PathBuf, Text> {
         let roots = self.roots.read().await;
-        let r = roots
-            .by_name(root)
-            .ok_or_else(|| self.phrase("unknown_root").replace("{name}", root))?;
+        let r = roots.by_name(root).ok_or_else(|| self.text_with("unknown_root", "name", root))?;
         let base = r.base_dir();
         let target = if path.is_empty() { base.clone() } else { base.join(path) };
         drop(roots);
@@ -231,15 +241,13 @@ impl FilesAdmin {
         let (b, c) = (base.clone(), target.clone());
         let Some(canon) = self.health.bounded(&target, move || Ok((b.canonicalize()?, c.canonicalize()?))).await
         else {
-            return Err(self
-                .phrase("root_unresponsive")
-                .replace("{path}", &target.display().to_string()));
+            return Err(self.text_with("root_unresponsive", "path", &target.display().to_string()));
         };
         let Ok::<(PathBuf, PathBuf), std::io::Error>((base_c, target_c)) = canon else {
-            return Err(self.phrase("scan_io_error").replace("{path}", &target.display().to_string()));
+            return Err(self.text_with("scan_io_error", "path", &target.display().to_string()));
         };
         if !target_c.starts_with(&base_c) {
-            return Err(self.phrase("scan_io_error").replace("{path}", path));
+            return Err(self.text_with("scan_io_error", "path", path));
         }
         Ok(target_c)
     }
@@ -269,12 +277,10 @@ impl FilesAdmin {
     }
 
     /// Adds tracks to the list, honouring the cap.
-    async fn add(&self, paths: Vec<PathBuf>) -> Result<(), String> {
+    async fn add(&self, paths: Vec<PathBuf>) -> Result<(), Text> {
         let mut list = self.playlist.write().await;
         if list.entries.len() + paths.len() > scan::MAX_TRACKS {
-            return Err(self
-                .phrase("too_many_tracks")
-                .replace("{cap}", &scan::MAX_TRACKS.to_string()));
+            return Err(self.text_with("too_many_tracks", "cap", &scan::MAX_TRACKS.to_string()));
         }
         list.entries.extend(
             paths.into_iter().map(|path| Entry { path, title: None, duration_s: None }),
@@ -476,16 +482,17 @@ impl FilesAdmin {
     /// The temporary file then the rename: a power cut in the middle of a
     /// direct write would leave a truncated table, which the next startup
     /// would refuse — hence no source at all.
-    fn write_table(&self, table: &Roots) -> Result<(), String> {
+    fn write_table(&self, table: &Roots) -> Result<(), Text> {
+        let path_str = self.roots_path.display().to_string();
         let text = toml::to_string_pretty(table).map_err(|e| {
             tracing::warn!("serialising the roots table: {e}");
-            self.phrase("store_io_error").replace("{path}", &self.roots_path.display().to_string())
+            self.text_with("store_io_error", "path", &path_str)
         })?;
         let tmp = self.roots_path.with_extension("toml.tmp");
         std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &self.roots_path)).map_err(
             |e| {
                 tracing::warn!("saving the roots table: {e}");
-                self.phrase("store_io_error").replace("{path}", &self.roots_path.display().to_string())
+                self.text_with("store_io_error", "path", &path_str)
             },
         )
     }
@@ -632,9 +639,9 @@ impl AdminPlugin for FilesAdmin {
         })
     }
 
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
         let op: Op = serde_json::from_value(data)
-            .map_err(|e| self.phrase("bad_request").replace("{detail}", &e.to_string()))?;
+            .map_err(|e| self.text_with("bad_request", "detail", &e.to_string()))?;
         match op {
             Op::AddSource {
                 kind,
@@ -661,7 +668,7 @@ impl AdminPlugin for FilesAdmin {
                         && r.path == path
                 });
                 if duplicate {
-                    return Err(self.phrase("duplicate_source"));
+                    return Err(self.text("duplicate_source"));
                 }
                 let taken: Vec<&str> = table.root.iter().map(|r| r.name.as_str()).collect();
                 let hint = match kind {
@@ -691,7 +698,7 @@ impl AdminPlugin for FilesAdmin {
                 // Validate **before** writing anything: a credentials file
                 // laid down for a source refused afterwards would remain
                 // orphaned on disk, with a passphrase inside.
-                table.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                table.validate().map_err(|e| e.text())?;
 
                 if kind == RootKind::Smb {
                     let r = table.by_name(&name).expect("just inserted");
@@ -705,8 +712,7 @@ impl AdminPlugin for FilesAdmin {
                     };
                     Self::write_credentials(&path, &user, &secret, &domain).map_err(|e| {
                         tracing::warn!("writing credentials for {name}: {e}");
-                        self.phrase("store_io_error")
-                            .replace("{path}", &path.display().to_string())
+                        self.text_with("store_io_error", "path", &path.display().to_string())
                     })?;
                 }
                 self.write_table(&table)?;
@@ -729,12 +735,19 @@ impl AdminPlugin for FilesAdmin {
                     && mount::state(table.by_name(&name).expect("just inserted"))
                         != mount::MountState::Mounted
                 {
-                    let detail = self
-                        .mount_error
-                        .lock()
-                        .unwrap()
-                        .clone()
-                        .unwrap_or_else(|| self.phrase("mount_silent_failure"));
+                    // The raw system detail, when there is one, travels as
+                    // this key's own `{detail}` parameter — untranslated
+                    // data, no different from a hostname or a path already
+                    // carried that way. Its **absence** is not "an empty
+                    // detail": it is a different, whole sentence, composed
+                    // once in each language rather than nesting a resolved
+                    // fallback inside another key's parameter (see
+                    // `share_not_declared_silent`'s own comment in
+                    // `locales/en.toml`).
+                    let text = match self.mount_error.lock().unwrap().clone() {
+                        Some(detail) => self.text_with("share_not_declared", "detail", &detail),
+                        None => self.text("share_not_declared_silent"),
+                    };
                     let i = table
                         .root
                         .iter()
@@ -756,7 +769,7 @@ impl AdminPlugin for FilesAdmin {
                     // mounted.
                     *self.mount_error.lock().unwrap() = None;
                     *self.roots.write().await = table;
-                    return Err(self.phrase("share_not_declared").replace("{detail}", &detail));
+                    return Err(text);
                 }
                 *self.roots.write().await = table;
                 Ok(())
@@ -765,7 +778,7 @@ impl AdminPlugin for FilesAdmin {
             Op::RemoveSource { name } => {
                 let mut table = self.roots.read().await.clone();
                 let Some(i) = table.root.iter().position(|r| r.name == name) else {
-                    return Err(self.phrase("unknown_source").replace("{name}", &name));
+                    return Err(self.text_with("unknown_source", "name", &name));
                 };
                 let removed = table.root.remove(i);
                 self.write_table(&table)?;
@@ -782,7 +795,7 @@ impl AdminPlugin for FilesAdmin {
             Op::SetWritable { name, writable } => {
                 let mut table = self.roots.read().await.clone();
                 let Some(r) = table.root.iter_mut().find(|r| r.name == name) else {
-                    return Err(self.phrase("unknown_source").replace("{name}", &name));
+                    return Err(self.text_with("unknown_source", "name", &name));
                 };
                 r.writable = writable;
                 self.write_table(&table)?;
@@ -798,7 +811,7 @@ impl AdminPlugin for FilesAdmin {
             Op::SetArchiveCovers { name, archive } => {
                 let mut table = self.roots.read().await.clone();
                 let Some(r) = table.root.iter_mut().find(|r| r.name == name) else {
-                    return Err(self.phrase("unknown_source").replace("{name}", &name));
+                    return Err(self.text_with("unknown_source", "name", &name));
                 };
                 r.archive_covers = archive;
                 self.write_table(&table)?;
@@ -839,15 +852,25 @@ impl AdminPlugin for FilesAdmin {
                 Ok(())
             }
 
-            Op::Mount => mount::reconcile(mount::UNIT).await,
+            // `mount::reconcile`'s error is systemd/`systemctl`'s own raw
+            // output — a polkit refusal is explicit and actionable there
+            // (see that function's own doc: "a home-made sentence would make
+            // it opaque"), and it is not known ahead of time, so a key alone
+            // could not carry it. Unlike `SmbError::Other`'s unknown
+            // `NT_STATUS`, this is not the sanctioned `Text::Verbatim` site
+            // (that guard is scoped to `smb.rs`): the raw detail instead
+            // travels as this key's own `{detail}` parameter, the same
+            // pattern already used for `mount_error` in `AddSource` above.
+            Op::Mount => mount::reconcile(mount::UNIT)
+                .await
+                .map_err(|detail| self.text_with("mount_retry_failed", "detail", &detail)),
 
             Op::Browse { root, path } => {
                 let dir = self.under_root(&root, &path).await?;
-                let cat = self.catalog.clone();
                 let content = tokio::task::spawn_blocking(move || scan::list_dir(&dir))
                     .await
-                    .map_err(|e| format!("browse task: {e}"))?
-                    .map_err(|e| e.message(&cat.read().unwrap()))?;
+                    .map_err(|e| self.text_with("internal_task_error", "detail", &e.to_string()))?
+                    .map_err(|e| e.text())?;
                 *self.browse.lock().unwrap() = serde_json::json!({
                     "root": root,
                     "path": path,
@@ -872,14 +895,13 @@ impl AdminPlugin for FilesAdmin {
                 // subfolder, which an `add_file` would resolve elsewhere.
                 let dir = self.under_root(&root, &path).await?;
                 let base = self.under_root(&root, "").await?;
-                let cat = self.catalog.clone();
                 let pattern = query.clone();
                 let (found, end) = tokio::task::spawn_blocking(move || {
                     scan::search(&dir, &pattern, 200, scan::MAX_VISITS, scan::SEARCH_TIMEOUT)
                 })
                 .await
-                .map_err(|e| format!("search task: {e}"))?
-                .map_err(|e| e.message(&cat.read().unwrap()))?;
+                .map_err(|e| self.text_with("internal_task_error", "detail", &e.to_string()))?
+                .map_err(|e| e.text())?;
                 // Paths **relative to the root**: that is what the page
                 // sends back later in an `add_file`, and an absolute path
                 // there would be refused by the escape guard.
@@ -926,7 +948,6 @@ impl AdminPlugin for FilesAdmin {
                 };
                 let progress = self.scan.clone();
                 let playlist = self.playlist.clone();
-                let catalog = self.catalog.clone();
                 let state = self.scan.clone();
                 let counter = Arc::new(AtomicUsize::new(0));
                 let tx = self.preset_count_tx.clone();
@@ -953,11 +974,13 @@ impl AdminPlugin for FilesAdmin {
                         Ok(Ok(paths)) => {
                             let mut list = playlist.write().await;
                             if list.entries.len() + paths.len() > scan::MAX_TRACKS {
-                                Err(catalog
-                                    .read()
-                                    .unwrap()
-                                    .get("too_many_tracks")
-                                    .replace("{cap}", &scan::MAX_TRACKS.to_string()))
+                                Err(Text::Keyed {
+                                    key: "too_many_tracks".into(),
+                                    params: HashMap::from([(
+                                        "cap".to_string(),
+                                        scan::MAX_TRACKS.to_string(),
+                                    )]),
+                                })
                             } else {
                                 list.entries.extend(paths.into_iter().map(|path| Entry {
                                     path,
@@ -995,8 +1018,11 @@ impl AdminPlugin for FilesAdmin {
                                 Ok(())
                             }
                         }
-                        Ok(Err(e)) => Err(e.message(&catalog.read().unwrap())),
-                        Err(e) => Err(format!("scan task: {e}")),
+                        Ok(Err(e)) => Err(e.text()),
+                        Err(e) => Err(Text::Keyed {
+                            key: "internal_task_error".into(),
+                            params: HashMap::from([("detail".to_string(), e.to_string())]),
+                        }),
                     };
                     if let Ok(mut g) = state.lock() {
                         g.running = false;
@@ -1017,7 +1043,7 @@ impl AdminPlugin for FilesAdmin {
             Op::Remove { index } => {
                 let mut list = self.playlist.write().await;
                 if index >= list.entries.len() {
-                    return Err(self.phrase("bad_request").replace("{detail}", "index"));
+                    return Err(self.text_with("bad_request", "detail", "index"));
                 }
                 let was_current = list.index == index;
                 list.entries.remove(index);
@@ -1045,7 +1071,7 @@ impl AdminPlugin for FilesAdmin {
             Op::Move { from, to } => {
                 let mut list = self.playlist.write().await;
                 if from >= list.entries.len() || to >= list.entries.len() {
-                    return Err(self.phrase("bad_request").replace("{detail}", "index"));
+                    return Err(self.text_with("bad_request", "detail", "index"));
                 }
                 let e = list.entries.remove(from);
                 list.entries.insert(to, e);
@@ -1093,7 +1119,7 @@ impl AdminPlugin for FilesAdmin {
                 let roots = self.roots.read().await;
                 let list = self.playlist.read().await;
                 store::save(&list.entries, &name, &dest, &self.internal_playlists, &roots)
-                    .map_err(|e| e.message(&self.catalog.read().unwrap()))
+                    .map_err(|e| e.text())
             }
 
             Op::LoadPlaylist { name, r#where } => {
@@ -1104,7 +1130,7 @@ impl AdminPlugin for FilesAdmin {
                 };
                 let roots = self.roots.read().await;
                 let loaded = store::load(&name, &from, &self.internal_playlists, &roots)
-                    .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                    .map_err(|e| e.text())?;
                 drop(roots);
                 *self.unresolved.lock().unwrap() = loaded.unresolved;
                 let mut list = self.playlist.write().await;
@@ -1123,11 +1149,11 @@ impl AdminPlugin for FilesAdmin {
                 // by its path, so the escape guard applies.
                 let file = self.under_root(&root, &path).await?;
                 if !scan::is_playlist(&file) {
-                    return Err(self.phrase("not_a_playlist").replace("{path}", &path));
+                    return Err(self.text_with("not_a_playlist", "path", &path));
                 }
                 let text = std::fs::read_to_string(&file).map_err(|e| {
                     tracing::warn!("reading {}: {e}", file.display());
-                    self.phrase("store_io_error").replace("{path}", &path)
+                    self.text_with("store_io_error", "path", &path)
                 })?;
                 // Relative paths resolve first against the directory **of
                 // the m3u**, as the format dictates; the root only serves
@@ -1140,9 +1166,7 @@ impl AdminPlugin for FilesAdmin {
                 };
                 let loaded = ritornello_plugin_files::m3u::parse(&text, &folder, &base);
                 if loaded.entries.len() > scan::MAX_TRACKS {
-                    return Err(self
-                        .phrase("too_many_tracks")
-                        .replace("{cap}", &scan::MAX_TRACKS.to_string()));
+                    return Err(self.text_with("too_many_tracks", "cap", &scan::MAX_TRACKS.to_string()));
                 }
                 // Reported, never dropped silently: a list shorter than its
                 // file is a defect that takes months to attribute.
@@ -1174,12 +1198,6 @@ mod tests {
         std::mem::forget(dir);
         std::fs::create_dir_all(root_dir.join("media")).unwrap();
         let (tx, _rx) = tokio::sync::watch::channel(0u8);
-        let sources_catalog = Arc::new(RwLock::new(Catalog::load(
-            "files",
-            "en",
-            &root_dir,
-            ritornello_plugin_files::FILES_EN,
-        )));
         let smb_ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let health = Arc::new(ritornello_plugin_files::health::Health::new());
         let admin = FilesAdmin {
@@ -1189,7 +1207,6 @@ mod tests {
             state_path: root_dir.join("plugin-files.json"),
             roots: Arc::new(AsyncRwLock::new(Roots::default())),
             playlist: Arc::new(AsyncRwLock::new(Playlist::default())),
-            catalog: sources_catalog.clone(),
             scan: Arc::new(Mutex::new(ScanProgress::default())),
             scan_task: None,
             unresolved: Arc::new(Mutex::new(Vec::new())),
@@ -1201,7 +1218,6 @@ mod tests {
             durations_task: None,
             explore: ritornello_plugin_files::explore::Browser::new(
                 root_dir.join("creds"),
-                sources_catalog.clone(),
                 smb_ok.clone(),
                 health.clone(),
             ),
@@ -1292,7 +1308,7 @@ mod tests {
         );
         admin.set_data(add_share("p")).await.unwrap();
         let err = admin.set_data(add_share("p")).await.unwrap_err();
-        assert!(err.contains(' '), "raw key: {err}");
+        assert_eq!(err, Text::Keyed { key: "duplicate_source".into(), params: HashMap::new() });
     }
 
     #[tokio::test]
@@ -1385,7 +1401,13 @@ mod tests {
         let (mut admin, root_dir) = test_admin();
         let _guard = divert_proc_mounts(&root_dir, "proc /proc proc rw 0 0\n");
         let err = admin.set_data(add_share("p")).await.unwrap_err();
-        assert!(err.contains(' '), "raw key sent back to the screen: {err}");
+        match &err {
+            Text::Keyed { key, .. } => assert!(
+                key == "share_not_declared" || key == "share_not_declared_silent",
+                "unexpected key: {key}"
+            ),
+            Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+        }
         assert!(
             admin.roots.read().await.root.is_empty(),
             "the source stayed declared despite the mount failure"
@@ -1416,7 +1438,13 @@ mod tests {
         second["share"] = serde_json::json!("absent");
         second["subpath"] = serde_json::json!("Rien");
         let err = admin.set_data(second).await.unwrap_err();
-        assert!(err.contains(' '), "raw key sent back to the screen: {err}");
+        match &err {
+            Text::Keyed { key, .. } => assert!(
+                key == "share_not_declared" || key == "share_not_declared_silent",
+                "unexpected key: {key}"
+            ),
+            Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+        }
 
         assert_eq!(
             admin.roots.read().await.root.len(),
@@ -1538,7 +1566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archiving_an_unknown_source_is_refused_by_a_sentence() {
+    async fn archiving_an_unknown_source_is_refused_by_a_key_naming_it() {
         let (mut admin, _root_dir) = test_admin();
         let err = admin
             .set_data(serde_json::json!({
@@ -1546,10 +1574,12 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        // A key reaching the screen is a defect: the refusal must be resolved
-        // prose, not `unknown_source`.
-        assert!(err.contains("absente"), "{err}");
-        assert!(!err.contains("unknown_source"), "{err}");
+        // The plugin no longer resolves (no `Catalog` left): what it still
+        // owns is the key and the culprit's name, unresolved.
+        assert_eq!(
+            err,
+            Text::Keyed { key: "unknown_source".into(), params: HashMap::from([("name".to_string(), "absente".to_string())]) }
+        );
     }
 
     #[tokio::test]
@@ -1639,8 +1669,10 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert!(err.contains(' '), "raw key sent back to the screen: {err}");
-        assert!(err.contains("nas,uid=0"), "the refusal must name what is wrong: {err}");
+        assert_eq!(
+            err,
+            Text::Keyed { key: "bad_host".into(), params: HashMap::from([("host".to_string(), "nas,uid=0".to_string())]) }
+        );
     }
 
     #[tokio::test]
@@ -1988,8 +2020,10 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert!(err.contains(' '), "raw key sent back to the screen: {err}");
-        assert!(err.contains("piste.mp3"), "the refusal must name the culprit: {err}");
+        assert_eq!(
+            err,
+            Text::Keyed { key: "not_a_playlist".into(), params: HashMap::from([("path".to_string(), "piste.mp3".to_string())]) }
+        );
     }
 
     #[tokio::test]
@@ -2005,7 +2039,10 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert!(err.contains(' '), "raw key: {err}");
+        match &err {
+            Text::Keyed { .. } => {}
+            Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+        }
         assert!(admin.playlist.read().await.entries.is_empty());
     }
 
@@ -2043,7 +2080,10 @@ mod tests {
             .set_data(serde_json::json!({"op": "browse", "root": "local", "path": "../.."}))
             .await
             .unwrap_err();
-        assert!(err.contains(' '), "raw key: {err}");
+        match err {
+            Text::Keyed { .. } => {}
+            Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+        }
     }
 
     #[tokio::test]

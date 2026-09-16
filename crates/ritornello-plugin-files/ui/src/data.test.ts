@@ -6,8 +6,44 @@ import {
   normalizeBrowse,
   normalizeData,
   normalizeRoot,
+  resolveStoredText,
   truncateStart,
 } from './data'
+
+describe('resolveStoredText', () => {
+  it('changing the catalog retranslates a stored refusal, without a new exploration', () => {
+    // Step 1's barrier (language-packs chantier, task 9): the page's own
+    // pendant to `changing_the_language_retranslates_the_remembered_status`
+    // (task 7, `ritornello-core`). The stored value never changes — only
+    // the catalog handed to the resolver does — which is exactly what
+    // proves the language follows without asking the plugin for anything.
+    const stored = { kind: 'Keyed' as const, data: { key: 'smb_not_installed', params: {} } }
+    const en = (key: string) => (key === 'smb_not_installed' ? 'smbclient is not installed' : key)
+    const fr = (key: string) => (key === 'smb_not_installed' ? "smbclient n'est pas installé" : key)
+    expect(resolveStoredText(en, stored)).toBe('smbclient is not installed')
+    expect(resolveStoredText(fr, stored)).toBe("smbclient n'est pas installé")
+  })
+
+  it('resolves a keyed value with its parameters', () => {
+    const stored = { kind: 'Keyed' as const, data: { key: 'smb_unreachable', params: { host: 'nas' } } }
+    const t = (key: string, params?: Record<string, string | number>) =>
+      key === 'smb_unreachable' ? `Host ${params?.host} did not answer.` : key
+    expect(resolveStoredText(t, stored)).toBe('Host nas did not answer.')
+  })
+
+  it('passes verbatim text through unchanged, whatever the catalog says', () => {
+    // The one legitimate case (`SmbError::Other`, an unrecognised
+    // `NT_STATUS`): resolving it through any catalog would be wrong, since
+    // it is not a key at all.
+    const stored = { kind: 'Verbatim' as const, data: 'NT_STATUS_LOGON_FAILURE' }
+    const t = () => 'anything the catalog would have said'
+    expect(resolveStoredText(t, stored)).toBe('NT_STATUS_LOGON_FAILURE')
+  })
+
+  it('resolves nothing stored to the empty string', () => {
+    expect(resolveStoredText(() => 'unused', null)).toBe('')
+  })
+})
 
 describe('root normalization', () => {
   it('fills in fields the plugin omits when they are empty', () => {
@@ -123,17 +159,27 @@ describe('full payload normalization', () => {
     const d = normalizeData({})
     expect(d.roots).toEqual([])
     expect(d.playlist).toEqual([])
-    expect(d.scan).toEqual({ running: false, found: 0, dir: '', error: '' })
+    expect(d.scan).toEqual({ running: false, found: 0, dir: '', error: null })
     expect(d.unresolved).toEqual([])
   })
 
-  it('carries over the last scan incident, which survives its own end', () => {
+  it('carries over the last scan incident, which survives its own end, unresolved', () => {
     // `add_dir` returns well before the recursive walk finishes: it is the
-    // only place where the page can learn that an addition failed.
+    // only place where the page can learn that an addition failed. The
+    // plugin no longer resolves it (no `Catalog` left — language-packs
+    // chantier, task 9): it travels as a key and its parameters.
     const d = normalizeData({
-      scan: { running: false, found: 0, dir: '', error: 'could not read "Albums"' },
+      scan: {
+        running: false,
+        found: 0,
+        dir: '',
+        error: { kind: 'Keyed', data: { key: 'scan_io_error', params: { path: 'Albums' } } },
+      },
     })
-    expect(d.scan.error).toBe('could not read "Albums"')
+    expect(d.scan.error).toEqual({
+      kind: 'Keyed',
+      data: { key: 'scan_io_error', params: { path: 'Albums' } },
+    })
   })
 
   it('falls a nameless track back to the last segment of its path', () => {

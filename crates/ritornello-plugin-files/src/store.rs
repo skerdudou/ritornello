@@ -12,7 +12,8 @@
 
 use crate::m3u::{self, Entry};
 use crate::roots::Roots;
-use ritornello_i18n::Catalog;
+use ritornello_proto::Text;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Where a saved playlist lives.
@@ -195,19 +196,28 @@ pub fn in_dir(dir: &Path, loc: Location) -> Vec<Saved> {
 }
 
 impl StoreError {
-    /// Localized message handed to the user (body of the HTTP refusal).
-    pub fn message(&self, catalog: &Catalog) -> String {
+    /// Unresolved refusal handed to the user (body of the HTTP refusal),
+    /// resolved by the core against this plugin's announced catalog
+    /// (language-packs chantier, task 9).
+    pub fn text(&self) -> Text {
+        // `{name}` even for `ReadOnlyRoot`'s `root` field: the embedded
+        // pack's template names its placeholder `{name}` for that key too
+        // (see `locales/en.toml`), and the wire parameter name must match
+        // what the resolved sentence actually interpolates.
         match self {
-            StoreError::BadPlaylistName { name } => {
-                catalog.get("bad_playlist_name").replace("{name}", name)
+            StoreError::BadPlaylistName { name } => keyed("bad_playlist_name", name),
+            StoreError::ReadOnlyRoot { root } => keyed("read_only_root", root),
+            StoreError::UnknownRoot { name } => keyed("unknown_root", name),
+            StoreError::Io { path } => {
+                Text::Keyed { key: "store_io_error".into(), params: HashMap::from([("path".to_string(), path.clone())]) }
             }
-            StoreError::ReadOnlyRoot { root } => {
-                catalog.get("read_only_root").replace("{name}", root)
-            }
-            StoreError::UnknownRoot { name } => catalog.get("unknown_root").replace("{name}", name),
-            StoreError::Io { path } => catalog.get("store_io_error").replace("{path}", path),
         }
     }
+}
+
+/// Every `StoreError` variant but `Io` interpolates a single `{name}`.
+fn keyed(key: &str, name: &str) -> Text {
+    Text::Keyed { key: key.to_string(), params: HashMap::from([("name".to_string(), name.to_string())]) }
 }
 
 impl std::fmt::Display for StoreError {
@@ -435,25 +445,30 @@ mod tests {
     }
 
     #[test]
-    fn every_store_refusal_resolves_against_the_embedded_catalog() {
-        // `Catalog::get` returns the key when it cannot find it: without this
-        // test, a typo would display "read_only_root" on screen without
-        // anything complaining. So we resolve against the catalog actually
-        // embedded, and refuse a message reduced to its own key.
-        let catalog =
-            Catalog::load("files", "en", std::path::Path::new("/inexistant"), crate::FILES_EN);
-        let messages = [
-            StoreError::BadPlaylistName { name: "../x".into() }.message(&catalog),
-            StoreError::ReadOnlyRoot { root: "nas".into() }.message(&catalog),
-            StoreError::UnknownRoot { name: "absent".into() }.message(&catalog),
-            StoreError::Io { path: "/x".into() }.message(&catalog),
+    fn every_store_refusal_names_a_key_that_exists_in_the_embedded_catalog() {
+        // The plugin no longer resolves (no `Catalog` left — language-packs
+        // chantier, task 9): what this test still owns is that the key is
+        // not a typo, and that the interpolation parameter travels.
+        let known = ritornello_i18n::try_parse(crate::FILES_EN).unwrap();
+        let texts = [
+            StoreError::BadPlaylistName { name: "../x".into() }.text(),
+            StoreError::ReadOnlyRoot { root: "nas".into() }.text(),
+            StoreError::UnknownRoot { name: "absent".into() }.text(),
+            StoreError::Io { path: "/x".into() }.text(),
         ];
-        for m in &messages {
-            assert!(m.contains(' '), "message reduced to a raw key: {m:?}");
+        for t in &texts {
+            match t {
+                Text::Keyed { key, .. } => assert!(known.contains_key(key), "unknown key: {key}"),
+                Text::Verbatim(s) => panic!("a store refusal must be a key, not verbatim text: {s}"),
+            }
         }
-        // And the interpolation goes through: no token left as is.
-        let interpolated = StoreError::ReadOnlyRoot { root: "nas".into() }.message(&catalog);
-        assert!(interpolated.contains("nas"), "the refusal must name the root: {interpolated:?}");
-        assert!(!interpolated.contains("{name}"), "token left as is: {interpolated:?}");
+        // The root's own value travels under the `{name}` parameter — the
+        // pack's own placeholder name for this key, not the field's.
+        match (StoreError::ReadOnlyRoot { root: "nas".into() }).text() {
+            Text::Keyed { params, .. } => {
+                assert_eq!(params.get("name").map(String::as_str), Some("nas"));
+            }
+            Text::Verbatim(_) => panic!("expected a keyed text"),
+        }
     }
 }

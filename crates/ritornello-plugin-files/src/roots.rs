@@ -7,9 +7,17 @@
 //! This module's validation is **read by a root binary**. It is therefore
 //! strict, and refuses on principle anything it cannot prove harmless.
 
-use ritornello_i18n::Catalog;
+use ritornello_proto::Text;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// One named parameter, the shape every `RootError` variant needs: a single
+/// interpolated value, never a concatenation (see `AGENTS.md`'s rule against
+/// a number glued to a label — the same trap for a path or a name).
+fn keyed(key: &str, param: &str, value: &str) -> Text {
+    Text::Keyed { key: key.to_string(), params: HashMap::from([(param.to_string(), value.to_string())]) }
+}
 
 /// Root of the mount points. Constant, **never read from the configuration**:
 /// a free mount point would be a path to validate, and root is who would use
@@ -62,7 +70,8 @@ pub struct Roots {
 }
 
 /// Typed validation error: the user-facing text is produced at the boundary
-/// via `message(&Catalog)`. `Display` provides an English version for internal
+/// via `text()`, unresolved — the core resolves it against this plugin's
+/// announced catalog. `Display` provides an English version for internal
 /// logs, outside the i18n scope.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RootError {
@@ -232,21 +241,17 @@ impl Root {
 }
 
 impl RootError {
-    /// Localized message surfaced to the user (body of the admin-side refusal).
-    pub fn message(&self, catalog: &Catalog) -> String {
+    /// Unresolved refusal surfaced to the user (body of the admin-side
+    /// refusal), resolved by the core against this plugin's announced
+    /// catalog — not here any more (language-packs chantier, task 9).
+    pub fn text(&self) -> Text {
         match self {
-            RootError::BadName { name } => catalog.get("bad_root_name").replace("{name}", name),
-            RootError::BadHost { host } => catalog.get("bad_host").replace("{host}", host),
-            RootError::BadShare { share } => catalog.get("bad_share").replace("{share}", share),
-            RootError::BadSubpath { subpath } => {
-                catalog.get("bad_subpath").replace("{path}", subpath)
-            }
-            RootError::DuplicateName { name } => {
-                catalog.get("duplicate_root").replace("{name}", name)
-            }
-            RootError::RelativeLocalPath { path } => {
-                catalog.get("relative_local_path").replace("{path}", path)
-            }
+            RootError::BadName { name } => keyed("bad_root_name", "name", name),
+            RootError::BadHost { host } => keyed("bad_host", "host", host),
+            RootError::BadShare { share } => keyed("bad_share", "share", share),
+            RootError::BadSubpath { subpath } => keyed("bad_subpath", "path", subpath),
+            RootError::DuplicateName { name } => keyed("duplicate_root", "name", name),
+            RootError::RelativeLocalPath { path } => keyed("relative_local_path", "path", path),
         }
     }
 }
@@ -522,28 +527,37 @@ mod tests {
     }
 
     #[test]
-    fn every_refusal_resolves_against_the_embedded_catalog() {
-        // `Catalog::get` returns the key when it cannot find it: without this
-        // test, a typo would display "bad_share" on screen without anything
-        // complaining. So we resolve against the catalog actually embedded,
-        // and refuse a message reduced to its own key.
-        let catalog =
-            Catalog::load("files", "en", Path::new("/inexistant"), crate::FILES_EN);
-        let messages = [
-            RootError::BadName { name: "x/y".into() }.message(&catalog),
-            RootError::BadHost { host: "a,b".into() }.message(&catalog),
-            RootError::BadShare { share: "a,b".into() }.message(&catalog),
-            RootError::BadSubpath { subpath: "..".into() }.message(&catalog),
-            RootError::DuplicateName { name: "nas".into() }.message(&catalog),
-            RootError::RelativeLocalPath { path: "media/usb".into() }.message(&catalog),
+    fn every_refusal_names_a_key_that_exists_in_the_embedded_catalog() {
+        // The plugin no longer resolves its own refusals (no `Catalog` left
+        // — language-packs chantier, task 9): resolution moved to the core.
+        // What this test still owns is that the key named here is not a
+        // typo. `Catalog::get` used to fall back silently on an unknown key,
+        // which is exactly the failure this test caught before there was
+        // anything left here to resolve.
+        let known = ritornello_i18n::try_parse(crate::FILES_EN).unwrap();
+        let texts = [
+            RootError::BadName { name: "x/y".into() }.text(),
+            RootError::BadHost { host: "a,b".into() }.text(),
+            RootError::BadShare { share: "a,b".into() }.text(),
+            RootError::BadSubpath { subpath: "..".into() }.text(),
+            RootError::DuplicateName { name: "nas".into() }.text(),
+            RootError::RelativeLocalPath { path: "media/usb".into() }.text(),
         ];
-        for m in &messages {
-            assert!(m.contains(' '), "message reduced to a raw key: {m:?}");
+        for t in &texts {
+            match t {
+                Text::Keyed { key, .. } => assert!(known.contains_key(key), "unknown key: {key}"),
+                Text::Verbatim(s) => panic!("a root refusal must be a key, not verbatim text: {s}"),
+            }
         }
-        // And the interpolation goes through: no placeholder left as is.
-        let host_message = RootError::BadHost { host: "nas,uid=0".into() }.message(&catalog);
-        assert!(host_message.contains("nas,uid=0"), "the refusal must name what is wrong: {host_message:?}");
-        assert!(!host_message.contains("{host}"), "placeholder left as is: {host_message:?}");
+        // And the interpolation parameter travels, ready for the core to
+        // substitute — never a collage of strings here (the trap `AGENTS.md`
+        // names for a number glued to a label, the same trap for a value).
+        match (RootError::BadHost { host: "nas,uid=0".into() }).text() {
+            Text::Keyed { params, .. } => {
+                assert_eq!(params.get("host").map(String::as_str), Some("nas,uid=0"));
+            }
+            Text::Verbatim(_) => panic!("expected a keyed text"),
+        }
     }
 
     fn smb(share: &str) -> Root {
