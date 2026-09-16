@@ -1214,6 +1214,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_text_wins_over_status_when_both_are_present() {
+        // The precedence itself: `status_text.clone().or_else(|| status...)`
+        // is an `Option::or_else`, not something the type system enforces on
+        // its own. No shipped plugin sends both today, but a mixed
+        // deployment (a partially-updated fleet, or a plugin mid-migration)
+        // could, and `status_text` must win when it does.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                status: Some("legacy string".into()),
+                status_text: Some(Text::Verbatim("preferred".into())),
+                ..Default::default()
+            },
+        );
+        assert_eq!(core.player_state().status.as_deref(), Some("preferred"));
+    }
+
+    #[tokio::test]
     async fn a_status_counts_as_verbatim_only_when_it_actually_is_one() {
         // [MUTATION] barrier 4 of task 7: one branch per operand of the
         // discriminating condition (`matches!(self.source_status,
