@@ -43,14 +43,17 @@ impl ValidationError {
     /// `bad_url_carries_the_name_unmodified_even_when_it_contains_the_url_placeholder_text`,
     /// below in this file. This hand-written chain is gone — both parameters
     /// now travel in one map, resolved by `ritornello_core::resolve_text`.
-    /// **That resolver still substitutes params one `.replace()` at a time**
-    /// (over a `HashMap`, so in an unspecified order), so the same class of
-    /// collision is still reachable in principle if one parameter's value
-    /// contains another parameter's literal `{name}` token — it is just no
-    /// longer *this crate's* hand-rolled chain doing it, and no longer
-    /// deterministic. Left as a residual concern for the reviewer: fixing
-    /// it belongs to `ritornello_core::resolve_text`, shared by every
-    /// producer, not to one plugin's call site.
+    /// **The residual concern this comment used to leave for the reviewer —
+    /// that resolver still substituting one `.replace()` per parameter, over
+    /// an unordered `HashMap` — is closed** (language-packs chantier, task
+    /// 10b): `resolve_text` now calls `ritornello_i18n::interpolate`, a
+    /// single left-to-right pass over the template that never rescans text
+    /// it has already emitted, so no parameter's value can be rewritten by
+    /// another parameter's substitution regardless of map iteration order.
+    /// The same fix landed at every other producer of this class of text —
+    /// `resolve_admin_text` and the two chains in `update/mod.rs` on the
+    /// Rust side, `web/kit/src/i18n.ts`'s `createT` on the browser side —
+    /// see `ritornello_i18n::interpolate`'s module doc.
     pub fn text(&self) -> Text {
         match self {
             ValidationError::PresetOutOfRange { preset, name } => Text::Keyed {

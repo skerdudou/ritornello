@@ -917,7 +917,10 @@ impl<P: Player> Core<P> {
                         return None;
                     }
                 };
-                Some(params.iter().fold(resolved, |acc, (name, value)| acc.replace(&format!("{{{name}}}"), value)))
+                Some(ritornello_i18n::interpolate(
+                    &resolved,
+                    params.iter().map(|(name, value)| (name.as_str(), value.as_str())),
+                ))
             }
         }
     }

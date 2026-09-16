@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createT } from './i18n'
+import { createT, interpolate } from './i18n'
 
 describe('createT', () => {
   it('resolves a present key', () => {
@@ -30,5 +30,42 @@ describe('createT', () => {
     // character is dangerous.
     const t = createT({ hint: "you haven't picked a device yet" })
     expect(t('hint')).toBe("you haven't picked a device yet")
+  })
+})
+
+describe('interpolate', () => {
+  it('leaves a template with no tokens untouched', () => {
+    expect(interpolate('no tokens here', {})).toBe('no tokens here')
+  })
+
+  it('leaves an unmatched open brace as is', () => {
+    expect(interpolate('broken {token', { token: 'x' })).toBe('broken {token')
+  })
+
+  it('never rescans a value for further tokens', () => {
+    // A value is data, not a second template: a station literally named
+    // "{url}" must reach the output unexamined.
+    expect(interpolate('{name}', { name: '{url}' })).toBe('{url}')
+  })
+
+  /// The barrier this task exists to build: `"{a} and {b}"` with
+  /// `a = "{b}"` and `b = "{a}"`. The correct answer is `"{b} and {a}"`.
+  /// A chained `.replaceAll()` fold gets this wrong under **either**
+  /// visiting order:
+  /// - `a` first: `"{a} and {b}"` → `"{b} and {b}"` → (the `b` pass
+  ///   rewrites both) → `"{a} and {a}"`
+  /// - `b` first: `"{a} and {b}"` → `"{a} and {a}"` → (the `a` pass
+  ///   rewrites both) → `"{b} and {b}"`
+  ///
+  /// `Object.entries` on a plain object is insertion-ordered in JS, so this
+  /// does not depend on an engine's hash-map iteration order — it is a
+  /// deterministic proof, not a coin flip.
+  ///
+  /// [MUTATION]: replace the body of `interpolate` with
+  /// `Object.entries(params).reduce((acc, [name, value]) =>
+  /// acc.replaceAll(`{${name}}`, String(value)), template)` — this test
+  /// fails regardless of key order, for the reason above.
+  it('is not affected by parameter order (chained replaceAll gets this wrong either way)', () => {
+    expect(interpolate('{a} and {b}', { a: '{b}', b: '{a}' })).toBe('{b} and {a}')
   })
 })

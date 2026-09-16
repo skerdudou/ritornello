@@ -595,11 +595,11 @@ fn refusal_message(catalog: &Catalog, component: &str, why: &Refusal) -> String 
         Refusal::Privileged(d) => ("update_privileged_failed", Some(d)),
         Refusal::NothingPublished => ("update_nothing_published", None),
     };
-    let text = catalog.get(key).replace("{component}", component);
-    match detail {
-        Some(d) => text.replace("{detail}", d),
-        None => text,
+    let mut params: Vec<(&str, &str)> = vec![("component", component)];
+    if let Some(d) = detail {
+        params.push(("detail", d.as_str()));
     }
+    ritornello_i18n::interpolate(catalog.get(key), params)
 }
 
 /// Is every one of these lines describing a plugin that has finished having
@@ -819,12 +819,15 @@ fn install_report(
     // for a first installation names no version, because there is no version
     // it moved from. The row beside it already carries the one it now has.
     let text = if last.fresh {
-        catalog.get("update_installed_new").replace("{component}", &last.component)
+        ritornello_i18n::interpolate(
+            catalog.get("update_installed_new"),
+            [("component", last.component.as_str())],
+        )
     } else {
-        catalog
-            .get("update_installed")
-            .replace("{component}", &last.component)
-            .replace("{version}", &last.version)
+        ritornello_i18n::interpolate(
+            catalog.get("update_installed"),
+            [("component", last.component.as_str()), ("version", last.version.as_str())],
+        )
     };
     Some(CheckOutcome::Installed(text))
 }
@@ -1985,10 +1988,13 @@ impl Worker {
     /// card's own gesture, and an uninstall is not one.
     async fn removal_failed(&self, name: &str, detail: String) {
         tracing::warn!("update: erasing {name}'s binary: {detail}");
-        let message = self
-            .message_for("update_removal_failed", name)
-            .await
-            .replace("{detail}", &detail);
+        // Both parameters together, not `message_for`'s single-token
+        // substitution followed by a further `.replace()`: that composition
+        // is itself the chained-replace defect (task 10b) — a `name` that
+        // happened to contain the literal text `{detail}` would be rewritten
+        // by the second call.
+        let template = self.message("update_removal_failed").await;
+        let message = ritornello_i18n::interpolate(&template, [("component", name), ("detail", detail.as_str())]);
         self.publish_failure(message).await;
     }
 }
@@ -3057,6 +3063,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **[MUTATION target — see `ritornello_i18n::interpolate`'s own
+    /// `parameter_order_cannot_change_the_result`]**: `refusal_message`
+    /// composes exactly two parameters, `component` then (conditionally)
+    /// `detail`, and used to fold them with chained `.replace()` calls in
+    /// that order — so a `component` that happened to contain the literal
+    /// text `{detail}` got rewritten a second time by the `detail` pass,
+    /// indistinguishable from the template's own placeholder. `component`
+    /// here is a plugin name the core itself names, not user text, but the
+    /// mechanism must hold regardless of who supplies the string: `detail`
+    /// carries raw `systemctl`/tokio output, which is exactly the
+    /// unconstrained kind of text this whole task exists to protect against.
+    #[test]
+    fn refusal_message_does_not_let_the_component_name_rewrite_the_detail_token() {
+        let english =
+            Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        let message = refusal_message(
+            &english,
+            "radio {detail}",
+            &Refusal::Download("connection reset by peer".to_string()),
+        );
+        assert_eq!(message, "Could not download radio {detail}: connection reset by peer");
     }
 
     // ---- The worker, against a temporary root ---------------------------
@@ -4170,6 +4199,27 @@ mod tests {
         let Some(CheckOutcome::Installed(message)) = french else { panic!("{french:?}") };
         assert!(!message.contains('{'), "{message}");
         assert!(message.contains("mpd") && message.contains("0.3.1"), "{message}");
+    }
+
+    /// Same defect as `refusal_message_does_not_let_the_component_name_rewrite_the_detail_token`,
+    /// at `install_report`'s own two-parameter template
+    /// (`"{component} updated to {version}"`): a `component` that happens to
+    /// contain the literal text `{version}` must not be rewritten by the
+    /// `version` substitution that used to follow it in a chained
+    /// `.replace()`.
+    #[test]
+    fn install_report_does_not_let_the_component_name_rewrite_the_version_token() {
+        let english = Catalog::load(
+            "core",
+            "en",
+            std::path::Path::new("/nonexistent"),
+            crate::i18n::EN,
+        );
+        let placed = [replaced("mpd {version}", "0.3.1")];
+        assert_eq!(
+            install_report(&english, &placed, None),
+            Some(CheckOutcome::Installed("mpd {version} updated to 0.3.1".to_string())),
+        );
     }
 
     /// **A plugin the device does not declare, whose archive carries no block,

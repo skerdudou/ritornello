@@ -19,12 +19,17 @@
 //!
 //! Resolution by key: `own` (component) → `common` → the key itself (safety
 //! net). Interpolation: the caller does `catalog.get(key)` then
-//! `str::replace("{n}", &n.to_string())` (no template engine).
+//! `interpolate::interpolate` to fill its `{name}` tokens (no template
+//! engine) — a single left-to-right pass, not the chained `str::replace`
+//! folds that used to live at each call site (see `interpolate`'s module
+//! doc for why that mattered).
 
 mod chain;
+mod interpolate;
 mod layer;
 
 pub use chain::{common_embedded, Catalog, Chain};
+pub use interpolate::interpolate;
 pub use layer::{try_parse, Layer, ModuleLayers};
 
 // Only the crate's own tests (unmodified below) reach for the embedded

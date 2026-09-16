@@ -72,7 +72,7 @@ async fn resolve_admin_text(st: &AppState, module: &str, text: &Text) -> String 
                 let registry = st.registry.read().await;
                 registry.chain_for(module, &locale, "en").get(key).to_string()
             };
-            params.iter().fold(resolved, |acc, (name, value)| acc.replace(&format!("{{{name}}}"), value))
+            ritornello_i18n::interpolate(&resolved, params.iter().map(|(name, value)| (name.as_str(), value.as_str())))
         }
     }
 }
