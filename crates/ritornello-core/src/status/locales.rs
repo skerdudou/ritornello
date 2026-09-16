@@ -28,11 +28,10 @@ pub(super) struct LocaleResponse {
     current: Option<String>,
     /// Completeness for every language in `locales`, in the same order.
     completeness: Vec<LanguageCompleteness>,
-    /// The device's current fallback language. Hardcoded to `"en"` for
-    /// now — there is no persisted fallback setting yet, that is task 13's
-    /// job — matching `Registry::chain_for`'s own doc: "typically fallback
-    /// is itself en until a device has a real fallback setting". Once task
-    /// 13 lands this reads the persisted value instead.
+    /// The device's persisted fallback language (task 13), or `"en"` on a
+    /// device that has never set one — matching `Registry::chain_for`'s own
+    /// doc: "typically fallback is itself en until a device has a real
+    /// fallback setting", now that this is exactly that setting.
     fallback_current: String,
     /// Eligible fallback languages: the **core's own** installed set only
     /// (`Registry::core_languages`), per the owner's arbitration — a
@@ -74,11 +73,12 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
     let fallback_candidates = registry.core_languages();
     drop(registry);
     let current = state.locale_current.read().await.clone();
+    let fallback_current = state.fallback_current.read().await.clone().unwrap_or_else(|| "en".to_string());
     Json(LocaleResponse {
         locales,
         current,
         completeness,
-        fallback_current: "en".to_string(),
+        fallback_current,
         fallback_candidates,
     })
 }
@@ -86,6 +86,16 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
 #[derive(Deserialize)]
 pub(super) struct LocaleRequest {
     locale: String,
+    /// The fallback language (task 13), optional: present only when the
+    /// settings page's own fallback control is visible (the chosen language
+    /// is incomplete — the owner's rule, "nothing offered for what needs no
+    /// second choice") and submits a value. A plain `{"locale": ...}` body —
+    /// the shape every earlier client and every pre-task-13 test already
+    /// sends — leaves the persisted fallback exactly as it was: the control
+    /// disappearing while the chosen language happens to be complete must
+    /// not clear a fallback stored for later.
+    #[serde(default)]
+    fallback: Option<String>,
 }
 
 /// Shape of an acceptable language code: what the `<lang>.toml` file names of
@@ -100,18 +110,48 @@ pub(super) struct LocaleRequest {
 /// `pub(crate)`, not `pub(super)`: `admin.rs` reuses this exact rule to
 /// validate the `lang` query parameter of `/plugins/<name>/api/i18n`, rather
 /// than inventing a second grammar that could drift from this one — see
-/// `admin::admin_i18n`.
+/// `admin::admin_i18n`. `locale_put` (task 13) reuses it a second time, for
+/// the optional `fallback` field of the very same request: one grammar for
+/// every language code this route accepts, not two that could drift.
 pub(crate) fn valid_locale(locale: &str) -> bool {
     !locale.is_empty()
         && locale.len() <= 16
         && locale.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Sets the chosen language and, optionally, the fallback — in one request,
+/// since the settings page's fallback control lives right next to the
+/// language selector and is submitted alongside it.
+///
+/// **Both are validated by shape before either is written.** A `fallback`
+/// that fails `valid_locale` refuses the request with `BAD_REQUEST` before
+/// `req.locale` is persisted either — the same "refused before any update"
+/// rule the path-traversal regression test already pins for `locale` alone,
+/// extended here so a malformed fallback can never smuggle in a locale
+/// change as a side effect.
+///
+/// **No rejection for `fallback == locale`.** The owner's rule: a fallback
+/// equal to the chosen language is accepted and stored, exactly as
+/// submitted — refusing it would be indistinguishable, from the settings
+/// page, from silently clearing a fallback the moment the chosen language
+/// happens to catch up to it, which is precisely the loss the "memorized
+/// value" rule exists to prevent.
 pub(super) async fn locale_put(State(state): State<AppState>, Json(req): Json<LocaleRequest>) -> StatusCode {
     if !valid_locale(&req.locale) {
         return StatusCode::BAD_REQUEST;
     }
+    if let Some(fallback) = &req.fallback
+        && !valid_locale(fallback)
+    {
+        return StatusCode::BAD_REQUEST;
+    }
     *state.locale_current.write().await = Some(req.locale.clone());
+    if let Some(fallback) = req.fallback {
+        *state.fallback_current.write().await = Some(fallback.clone());
+        if state.fallback_tx.send(fallback).await.is_err() {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
     if state.locale_tx.send(req.locale).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
@@ -141,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_locale_lists_en_and_the_core_packs() {
-        let (state, _rx, _dir) = app_state_fr();
+        let (state, _rx, _frx, _dir) = app_state_fr();
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -155,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_locale_notifies_and_updates_the_selection() {
-        let (state, mut locale_rx, _dir) = app_state_fr();
+        let (state, mut locale_rx, _frx, _dir) = app_state_fr();
         let locale_current = state.locale_current.clone();
         let app = router(state);
         let resp = app
@@ -178,7 +218,7 @@ mod tests {
         // state.json and in an environment variable of the plugins; `../../x`
         // must be refused **before** any update, as the theme and the audio
         // output already do for their fields.
-        let (state, mut locale_rx, _dir) = app_state_fr();
+        let (state, mut locale_rx, _frx, _dir) = app_state_fr();
         let locale_current = state.locale_current.clone();
         let app = router(state);
         let resp = app
@@ -194,6 +234,114 @@ mod tests {
         // Neither notified nor kept as the current selection.
         assert!(locale_rx.try_recv().is_err());
         assert_eq!(locale_current.read().await.as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn put_locale_with_a_fallback_notifies_both_and_persists_both() {
+        let (state, mut locale_rx, mut fallback_rx, _dir) = app_state_fr();
+        let locale_current = state.locale_current.clone();
+        let fallback_current = state.fallback_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/locale")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"locale":"de","fallback":"nl"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(locale_rx.recv().await.unwrap(), "de");
+        assert_eq!(fallback_rx.recv().await.unwrap(), "nl");
+        assert_eq!(locale_current.read().await.as_deref(), Some("de"));
+        assert_eq!(fallback_current.read().await.as_deref(), Some("nl"));
+    }
+
+    /// The rule the memorized-value scenario depends on at the HTTP layer:
+    /// a plain `{"locale": ...}` body — no `fallback` field at all, exactly
+    /// what the settings page sends once the fallback control is hidden
+    /// because the newly chosen language is complete — must leave whatever
+    /// fallback was persisted before untouched, neither cleared nor
+    /// notified again.
+    #[tokio::test]
+    async fn put_locale_without_a_fallback_field_leaves_the_persisted_fallback_untouched() {
+        let (state, _rx, mut fallback_rx, _dir) = app_state_fr();
+        *state.fallback_current.write().await = Some("nl".to_string());
+        let fallback_current = state.fallback_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/locale")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"locale":"en"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(fallback_rx.try_recv().is_err(), "no fallback field means no fallback event");
+        assert_eq!(fallback_current.read().await.as_deref(), Some("nl"), "the stored fallback must survive");
+    }
+
+    /// The owner's rule that a fallback equal to the chosen language must be
+    /// accepted, not refused — refusing it would look, from the settings
+    /// page, exactly like the loss the test above guards against.
+    #[tokio::test]
+    async fn put_locale_accepts_a_fallback_equal_to_the_chosen_locale() {
+        let (state, _rx, mut fallback_rx, _dir) = app_state_fr();
+        let fallback_current = state.fallback_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/locale")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"locale":"fr","fallback":"fr"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(fallback_rx.recv().await.unwrap(), "fr");
+        assert_eq!(fallback_current.read().await.as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn put_locale_refuses_a_fallback_that_is_not_a_language_code() {
+        // Same regression model as `put_locale_refuses_a_value_that_is_not_
+        // a_language_code`, for the `fallback` field: a shape-invalid value
+        // must be refused **before** any update — including the otherwise
+        // valid `locale` field of the very same request, which must not be
+        // written as a side effect of a request that is refused overall.
+        let (state, mut locale_rx, mut fallback_rx, _dir) = app_state_fr();
+        let locale_current = state.locale_current.clone();
+        let fallback_current = state.fallback_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/locale")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"locale":"de","fallback":"../../var/lib/whatever"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(locale_rx.try_recv().is_err(), "an invalid fallback must block the locale event too");
+        assert!(fallback_rx.try_recv().is_err());
+        assert_eq!(locale_current.read().await.as_deref(), Some("fr"), "the locale field must not have been written either");
+        assert_eq!(fallback_current.read().await.as_deref(), None);
+    }
+
+    #[tokio::test]
+    async fn get_locale_reports_the_persisted_fallback() {
+        let (state, _rx, _frx, _dir) = app_state_fr();
+        *state.fallback_current.write().await = Some("nl".to_string());
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["fallback_current"], "nl");
     }
 
     #[test]
@@ -222,7 +370,7 @@ mod tests {
     /// missed it entirely.
     #[tokio::test]
     async fn get_locale_lists_a_language_only_a_plugin_translates() {
-        let (state, _rx, _dir) = app_state_fr();
+        let (state, _rx, _frx, _dir) = app_state_fr();
         state.registry.write().await.insert_announced(
             "radio",
             layers(&[("en", &[("play", "Play")]), ("de", &[("play", "Spielen")])]),
@@ -240,7 +388,7 @@ mod tests {
     /// declaring victory because the language exists at all.
     #[tokio::test]
     async fn get_locale_completeness_reports_a_partial_language_honestly() {
-        let (state, _rx, _dir) = app_state_fr();
+        let (state, _rx, _frx, _dir) = app_state_fr();
         // The core (seeded by `app_state_fr`) is the only module with
         // text, and its French disk pack (`core/fr.toml`, written by the
         // fixture) defines only 2 of the core's many embedded English
@@ -261,7 +409,7 @@ mod tests {
     /// compare `done` to `total` itself.
     #[tokio::test]
     async fn get_locale_completeness_reports_a_complete_language_as_complete() {
-        let (state, _rx, _dir) = app_state_fr();
+        let (state, _rx, _frx, _dir) = app_state_fr();
         // English is always complete against itself.
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
@@ -278,7 +426,7 @@ mod tests {
     /// arbitration: a fallback must be guaranteed to resolve everywhere.
     #[tokio::test]
     async fn get_locale_fallback_candidates_stay_core_only() {
-        let (state, _rx, _dir) = app_state_fr();
+        let (state, _rx, _frx, _dir) = app_state_fr();
         state.registry.write().await.insert_announced(
             "radio",
             layers(&[("en", &[("play", "Play")]), ("de", &[("play", "Spielen")])]),
@@ -290,7 +438,7 @@ mod tests {
         let fallback_candidates: Vec<String> = serde_json::from_value(v["fallback_candidates"].clone()).unwrap();
         assert_eq!(fallback_candidates, vec!["en".to_string(), "fr".to_string()]);
         assert!(!fallback_candidates.contains(&"de".to_string()), "de is a plugin language, not a core one");
-        assert_eq!(v["fallback_current"], "en", "hardcoded until task 13 wires a real setting");
+        assert_eq!(v["fallback_current"], "en", "no fallback persisted yet on this rig, so the default applies");
     }
 
     #[tokio::test]
@@ -307,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_i18n_follows_the_current_language() {
-        let (state, _rx, _dir) = tests_support::app_state_fr();
+        let (state, _rx, _frx, _dir) = tests_support::app_state_fr();
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/i18n").body(Body::empty()).unwrap()).await.unwrap();
         let body = resp.into_body().collect().await.unwrap().to_bytes();

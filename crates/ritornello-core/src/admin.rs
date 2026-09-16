@@ -465,6 +465,8 @@ mod tests {
             registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(locales_root))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
+            fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
+            fallback_tx: tokio::sync::mpsc::channel(4).0,
             admin_backends: Arc::new(tokio::sync::RwLock::new(backends)),
             admin_assets: Arc::new(Default::default()),
             session: "test-session".to_string(),

@@ -320,6 +320,24 @@ pub struct PersistedState {
     pub audio_device: Option<String>,
     #[serde(default)]
     pub locale: Option<String>,
+    /// The device's fallback language, chosen among the core's own installed
+    /// languages (`Registry::core_languages`) — the second level of the
+    /// chosen → fallback → English → key resolution order, offered by the
+    /// settings page only while the chosen language is incomplete.
+    ///
+    /// **Permissive at load, deliberately**: this repo measured that a value
+    /// `serde_json` cannot even parse into the field's own type resets
+    /// *every* persisted setting to its default (`state::load`'s
+    /// `.ok().unwrap_or_default()`), while a field merely absent is ignored.
+    /// A plain `Option<String>` is what keeps a stray or hand-edited value —
+    /// wrong shape, unknown language, even a path-traversal-looking string —
+    /// from ever taking that path: it always parses, and is validated only
+    /// where it is used, at the `PUT /api/locale` route (`valid_locale`) and
+    /// nowhere in this module. `skip_serializing_if`, like
+    /// `update_last_run_day`: an absent fallback should read back absent,
+    /// not `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
     /// Chosen theme preset (opaque name for the core: the preset list lives in
     /// the SPA). Absent = `theme::DEFAULT_THEME`.
     #[serde(default)]
@@ -351,6 +369,7 @@ impl Default for PersistedState {
             standby: false,
             audio_device: None,
             locale: None,
+            fallback: None,
             theme: None,
             mode: None,
             settings: Settings::default(),
@@ -402,6 +421,7 @@ mod tests {
             standby: false,
             audio_device: Some("bluealsa:DEV=XX".into()),
             locale: None,
+            fallback: None,
             theme: None,
             mode: None,
             settings: Settings::default(),
@@ -432,6 +452,7 @@ mod tests {
             standby: false,
             audio_device: None,
             locale: Some("fr".into()),
+            fallback: None,
             theme: None,
             mode: None,
             settings: Settings::default(),
@@ -455,6 +476,7 @@ mod tests {
             standby: false,
             audio_device: None,
             locale: None,
+            fallback: None,
             theme: Some("cyberpunk".into()),
             mode: Some("dark".into()),
             settings: Settings::default(),
@@ -464,6 +486,61 @@ mod tests {
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
+    }
+
+    #[test]
+    fn fallback_absent_by_default_and_roundtrip() {
+        assert_eq!(PersistedState::default().fallback, None);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let st = PersistedState { fallback: Some("nl".into()), ..PersistedState::default() };
+        save(&path, &st).unwrap();
+        assert_eq!(load(&path), st);
+    }
+
+    #[test]
+    fn an_unparseable_fallback_in_state_json_does_not_reset_the_other_settings() {
+        // The tall-or-nothing failure this repo measured (`state::load`'s
+        // `.ok().unwrap_or_default()`): a value `serde_json` cannot parse
+        // into the field's own type fails the *whole* struct, resetting
+        // every setting to its default. `fallback` stays a plain
+        // `Option<String>`, never a stricter type, precisely so that any
+        // string — including one `valid_locale` would refuse — still
+        // parses and leaves every other field alone. Validation happens
+        // only where the value is used (`locales.rs`'s `locale_put`), never
+        // here.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"active_source":"radio","volume":42,"audio_device":null,"locale":"fr","fallback":"../../not a language code!!"}"#,
+        )
+        .unwrap();
+        let st = load(&path);
+        assert_eq!(st.volume, 42, "a doubtful fallback string must not reset the other settings");
+        assert_eq!(st.active_source, "radio");
+        assert_eq!(st.locale.as_deref(), Some("fr"));
+        assert_eq!(
+            st.fallback.as_deref(),
+            Some("../../not a language code!!"),
+            "loaded verbatim: only its *use* validates it, never the load"
+        );
+    }
+
+    #[test]
+    fn a_fallback_of_the_wrong_json_type_does_reset_every_setting() {
+        // The mirror case, proving the two failure modes really are
+        // different: a value `serde_json` cannot even coerce into
+        // `Option<String>` (a number, here) fails to deserialize the whole
+        // struct, and `load` falls back to `PersistedState::default()` —
+        // exactly the tall-or-nothing behavior `fallback`'s permissive
+        // `Option<String>` shape is chosen to avoid for any ordinary
+        // string, however invalid its content.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"active_source":"cd","volume":7,"fallback":42}"#).unwrap();
+        let st = load(&path);
+        assert_eq!(st, PersistedState::default(), "an unparseable field resets everything, not just itself");
     }
 
     #[test]

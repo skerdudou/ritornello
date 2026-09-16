@@ -1692,12 +1692,12 @@ async fn main() -> Result<()> {
     // core_languages` — task 12) instead of a second, independent disk
     // read, so this is now its last use.
     let registry: i18n::Shared = Arc::new(RwLock::new(i18n::seeded_registry(locales_root)));
-    // "en" stands in for the fallback language until a device has a real one
-    // to pass (a later task's setting); see `i18n::core_catalog`'s doc.
+    // The device's own persisted fallback (task 13), or "en" on a device
+    // that has never set one — see `i18n::core_catalog`'s doc.
     let catalog = Arc::new(RwLock::new(i18n::core_catalog(
         &*registry.read().await,
         persisted.locale.as_deref().unwrap_or("en"),
-        "en",
+        persisted.fallback.as_deref().unwrap_or("en"),
     )));
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<InputMessage>(32);
@@ -1732,6 +1732,7 @@ async fn main() -> Result<()> {
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
+    let (fallback_tx, mut fallback_rx) = mpsc::channel::<String>(4);
     let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
     let (settings_tx, mut settings_rx) = mpsc::channel::<state::Settings>(4);
     let (plugin_order_tx, mut plugin_order_rx) = mpsc::channel::<status::PluginOrder>(4);
@@ -2160,6 +2161,7 @@ async fn main() -> Result<()> {
     }));
     let audio_current = Arc::new(RwLock::new(persisted.audio_device.clone()));
     let locale_current = Arc::new(RwLock::new(persisted.locale.clone()));
+    let fallback_current = Arc::new(RwLock::new(persisted.fallback.clone()));
     // `state.json` is reread with no guarantee: `theme_put` validates the
     // HTTP path, but a corrupted or hand-edited state file can carry
     // anything. An unknown theme name makes `applyTheme` on the SPA side
@@ -2326,6 +2328,8 @@ async fn main() -> Result<()> {
             registry: registry.clone(),
             locale_current: locale_current.clone(),
             locale_tx: locale_tx.clone(),
+            fallback_current: fallback_current.clone(),
+            fallback_tx: fallback_tx.clone(),
             admin_backends: admin_backends.clone(),
             admin_assets: admin_assets.clone(),
             session: session.clone(),
@@ -2723,6 +2727,11 @@ async fn main() -> Result<()> {
             Some(locale) = locale_rx.recv() => {
                 if let Err(e) = core.set_locale(locale).await {
                     tracing::warn!("locale change: {e}");
+                }
+            }
+            Some(fallback) = fallback_rx.recv() => {
+                if let Err(e) = core.set_fallback(fallback).await {
+                    tracing::warn!("fallback change: {e}");
                 }
             }
             Some(t) = theme_rx.recv() => {

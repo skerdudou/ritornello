@@ -39,10 +39,11 @@ impl<P: Player> Core<P> {
     /// The catalog is rebuilt through `crate::i18n::core_catalog`, which
     /// stacks the full chain a `Registry` produces (task 4) — same
     /// construction as the core's own startup, so a locale change and a
-    /// fresh boot never resolve a key two different ways. `"en"` stands in
-    /// for the fallback language until a device has a real one to pass
-    /// (a later task's setting); until then it coincides with the
-    /// structural `en` block, which is harmless — see `Registry::chain_for`.
+    /// fresh boot never resolve a key two different ways. The device's own
+    /// fallback (`self.fallback`, task 13's setting; `"en"` if none is set
+    /// yet) is passed as the second language; until a fallback is chosen it
+    /// coincides with the structural `en` block, which is harmless — see
+    /// `Registry::chain_for`.
     ///
     /// A real locale change is also the registry's refresh gesture: the
     /// registry's disk tier is swept once (at startup) and never re-read on
@@ -57,7 +58,45 @@ impl<P: Player> Core<P> {
     pub async fn set_locale(&mut self, locale: String) -> Result<()> {
         self.locale = Some(locale.clone());
         crate::i18n::Registry::resweep_async(&self.registry).await;
-        let new_catalog = crate::i18n::core_catalog(&*self.registry.read().await, &locale, "en");
+        let fallback = self.fallback.clone().unwrap_or_else(|| "en".to_string());
+        let new_catalog = crate::i18n::core_catalog(&*self.registry.read().await, &locale, &fallback);
+        self.standby_status = Some(resolve_standby_status(&new_catalog));
+        *self.catalog.write().await = new_catalog;
+        self.persist();
+        self.publish_state();
+        Ok(())
+    }
+
+    /// Changes the device's fallback language — the setting behind the
+    /// chosen → fallback → English → key resolution order (`Registry::
+    /// chain_for`) — and retranslates and republishes at once, exactly like
+    /// `set_locale` does for the chosen language.
+    ///
+    /// Called from the `select!` loop of `main` on reception from the
+    /// `fallback_rx` channel, itself fed by `PUT /api/locale`'s optional
+    /// `fallback` field.
+    ///
+    /// **Republishing here, without waiting for a new frame from any
+    /// plugin, is the point.** A standing status resolved through the old
+    /// fallback must retranslate the moment the setting changes — the exact
+    /// defect (a status stuck in the old language until the next unrelated
+    /// event) this whole chantier exists to fix, now for the fallback
+    /// setting too, not only for the chosen language `set_locale` already
+    /// covers.
+    ///
+    /// **Accepted whatever its relationship to the chosen language.** A
+    /// fallback equal to `self.locale` is stored and simply has no visible
+    /// effect — `Registry::chain_for` tries the chosen block first and only
+    /// falls through to the fallback block on a miss, so a coinciding
+    /// fallback changes nothing observable — by the owner's own rule:
+    /// switching language must never invalidate a fallback already stored,
+    /// and refusing "fallback == locale" would be indistinguishable, from
+    /// the caller's side, from that same invalidation.
+    pub async fn set_fallback(&mut self, fallback: String) -> Result<()> {
+        self.fallback = Some(fallback.clone());
+        crate::i18n::Registry::resweep_async(&self.registry).await;
+        let locale = self.locale.clone().unwrap_or_else(|| "en".to_string());
+        let new_catalog = crate::i18n::core_catalog(&*self.registry.read().await, &locale, &fallback);
         self.standby_status = Some(resolve_standby_status(&new_catalog));
         *self.catalog.write().await = new_catalog;
         self.persist();
@@ -112,6 +151,7 @@ impl<P: Player> Core<P> {
             standby: self.standby,
             audio_device: self.audio_device.clone(),
             locale: self.locale.clone(),
+            fallback: self.fallback.clone(),
             theme: self.theme.clone(),
             mode: self.mode.clone(),
             settings: self.settings.clone(),
@@ -144,6 +184,7 @@ mod tests {
             standby: false,
             audio_device: Some("bluealsa:DEV=XX".into()),
             locale: None,
+            fallback: None,
             theme: None,
             mode: None,
             settings: crate::state::Settings::default(),
@@ -194,6 +235,102 @@ mod tests {
         );
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.locale.as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn set_fallback_persists_and_reaches_no_source() {
+        // Same guarantee as `set_locale`: the fallback never crosses the
+        // Source wire, since resolution is entirely the core's own.
+        let (mut core, _pc, source_calls, _rx, dir) = setup();
+        core.set_fallback("fr".into()).await.unwrap();
+        assert!(
+            source_calls.lock().unwrap().is_empty(),
+            "a fallback change must not send anything to a Source plugin"
+        );
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.fallback.as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn a_fallback_survives_a_later_locale_change_to_a_different_language() {
+        // The owner's rule: the settings page's fallback control is shown
+        // only while the chosen language is incomplete, so it disappears
+        // and reappears as the chosen language changes — and must not lose
+        // its value in between. Someone who picks a fallback for an
+        // incomplete language, moves to a different (here, complete)
+        // language and back must find the same fallback still stored.
+        let (mut core, _pc, _sc, _rx, dir) = setup();
+        core.set_locale("de".into()).await.unwrap();
+        core.set_fallback("fr".into()).await.unwrap();
+        core.set_locale("en".into()).await.unwrap();
+        core.set_locale("de".into()).await.unwrap();
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(
+            st.fallback.as_deref(),
+            Some("fr"),
+            "an unrelated locale change must not clear the stored fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fallback_equal_to_the_chosen_locale_is_accepted_and_stored() {
+        // The owner's other rule: a fallback that happens to equal the
+        // chosen language is accepted and stored, not refused — refusing it
+        // would be indistinguishable, from the caller, from clearing a
+        // stored fallback the moment the chosen language catches up to it.
+        let (mut core, _pc, _sc, _rx, dir) = setup();
+        core.set_locale("fr".into()).await.unwrap();
+        core.set_fallback("fr".into()).await.unwrap();
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.locale.as_deref(), Some("fr"));
+        assert_eq!(st.fallback.as_deref(), Some("fr"));
+    }
+
+    #[tokio::test]
+    async fn set_fallback_retranslates_a_standing_status_with_no_new_frame_from_any_plugin() {
+        // Partner regression to `changing_language_in_standby_republishes_
+        // the_standby_word_at_once`, for the fallback setting: a standing
+        // status resolved through the old fallback must retranslate the
+        // moment the setting changes, not wait for the next `Command::Power`
+        // cycle or any other event from a Source. The word here comes from
+        // neither the chosen language ("fr", which never defines it) nor a
+        // hardcoded "en" — only from the fallback tier `set_fallback` wires
+        // in, proving the chain actually reaches it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(dir.path().join("core/nl.toml"), "standby = \"SLAAP\"\n").unwrap();
+        let player = FakePlayer::default();
+        let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+        sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
+        let (state_tx, mut state_rx) = watch::channel(PlayerState::default());
+        let root = dir.path().to_path_buf();
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
+        let metadata = MetadataWiring {
+            plugins: vec![],
+            now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
+            state: state_tx,
+        };
+        let (covers, cover_tx) = test_covers();
+        let manifest_order = declared_order(&sources);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        core.resume().await.unwrap();
+        // No `core/fr.toml` on disk, and this rig's registry is a bare
+        // sweep (no embedded English seed) — so before any fallback is set,
+        // nothing in the chain defines "standby" and `Chain::get` falls
+        // back to the raw key, its own documented safety net.
+        core.set_locale("fr".into()).await.unwrap();
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(
+            state_rx.borrow_and_update().status.as_deref(),
+            Some("standby"),
+            "neither the chosen language nor a hardcoded en resolves the key in this rig"
+        );
+        core.set_fallback("nl".into()).await.unwrap();
+        assert_eq!(
+            state_rx.borrow_and_update().status.as_deref(),
+            Some("SLAAP"),
+            "set_fallback must republish the retranslated standby word at once, with no new frame from any plugin"
+        );
     }
 
     #[tokio::test]

@@ -323,6 +323,13 @@ pub struct Core<P: Player> {
     catalog: Arc<RwLock<Chain>>,
     registry: crate::i18n::Shared,
     locale: Option<String>,
+    /// The device's fallback language: the second level of the chosen →
+    /// fallback → English → key order `Registry::chain_for` resolves,
+    /// applied by `set_locale`/`set_fallback` alike. `None` (a fresh
+    /// install, or a device that has never set one) resolves as `"en"`,
+    /// exactly the constant every call site used before this field existed
+    /// — see `Registry::chain_for`'s own doc on the two coinciding.
+    fallback: Option<String>,
     theme: Option<String>,
     mode: Option<String>,
     /// Track metadata: identity of what is playing, ICY title, and plugin
@@ -528,6 +535,7 @@ impl<P: Player> Core<P> {
             catalog,
             registry,
             locale: persisted.locale.clone(),
+            fallback: persisted.fallback.clone(),
             theme: persisted.theme.clone(),
             mode: persisted.mode.clone(),
             metadata: Metadata::new(metadata.plugins),
@@ -854,9 +862,10 @@ impl<P: Player> Core<P> {
     }
 
     /// Resolves `text` through `module`'s own chain in the registry, at the
-    /// current locale with `"en"` as fallback — the same pair of languages
-    /// `crate::i18n::core_catalog`/`Core::set_locale` already use for the
-    /// core's own catalog. `Text::Verbatim` needs none of this: the text is
+    /// current locale with the device's own fallback (`"en"` if none is
+    /// set) — the same pair of languages `crate::i18n::core_catalog`/
+    /// `Core::set_locale`/`Core::set_fallback` already use for the core's
+    /// own catalog. `Text::Verbatim` needs none of this: the text is
     /// returned exactly as carried, and always as `Some`.
     ///
     /// A `try_read`, not `.read().await`: this is reached from synchronous
@@ -888,9 +897,10 @@ impl<P: Player> Core<P> {
             Text::Verbatim(s) => Some(s.clone()),
             Text::Keyed { key, params } => {
                 let locale = self.locale.as_deref().unwrap_or("en");
+                let fallback = self.fallback.as_deref().unwrap_or("en");
                 let resolved = match self.registry.try_read() {
                     Ok(registry) => {
-                        let chain = registry.chain_for(module, locale, "en");
+                        let chain = registry.chain_for(module, locale, fallback);
                         chain.get(key).to_string()
                     }
                     Err(_) => {

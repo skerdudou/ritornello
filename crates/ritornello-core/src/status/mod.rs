@@ -82,6 +82,15 @@ pub struct AppState {
     pub registry: crate::i18n::Shared,
     pub locale_current: Arc<RwLock<Option<String>>>,
     pub locale_tx: mpsc::Sender<String>,
+    /// The device's persisted fallback language (task 13), mirroring
+    /// `locale_current`/`locale_tx`: read back as `LocaleResponse::
+    /// fallback_current`, written by `locale_put`'s optional `fallback`
+    /// field, and pushed to `Core::set_fallback` — a separate channel from
+    /// `locale_tx` so a request that changes only the fallback, leaving
+    /// `locale` untouched, still reaches the `select!` loop as its own
+    /// event.
+    pub fallback_current: Arc<RwLock<Option<String>>>,
+    pub fallback_tx: mpsc::Sender<String>,
     /// Reachable admin pages. Under a lock: a plugin that announces itself
     /// late must see its page appear without restarting the core.
     pub admin_backends: crate::admin::AdminBackends,
@@ -500,6 +509,7 @@ pub(crate) mod tests_support {
     pub(crate) fn app_state() -> AppState {
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
+        let (fallback_tx, _fallback_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
@@ -521,6 +531,8 @@ pub(crate) mod tests_support {
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
+            fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
+            fallback_tx,
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             session: "test-session".to_string(),
@@ -548,6 +560,7 @@ pub(crate) mod tests_support {
     pub(crate) fn app_state_with_audio() -> (AppState, tokio::sync::mpsc::Receiver<Option<String>>) {
         let (audio_tx, audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
+        let (fallback_tx, _fallback_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
@@ -569,6 +582,8 @@ pub(crate) mod tests_support {
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
+            fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
+            fallback_tx,
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             session: "test-session".to_string(),
@@ -598,6 +613,7 @@ pub(crate) mod tests_support {
     pub(crate) fn app_state_with_cmd() -> (AppState, tokio::sync::mpsc::Receiver<ritornello_proto::InputMessage>) {
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
+        let (fallback_tx, _fallback_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
@@ -619,6 +635,8 @@ pub(crate) mod tests_support {
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
+            fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
+            fallback_tx,
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             session: "test-session".to_string(),
@@ -644,9 +662,15 @@ pub(crate) mod tests_support {
         (state, cmd_rx)
     }
 
-    /// Variant with an observable `locale_tx` and a catalog loaded in `fr`
-    /// from a temporary root (the TempDir is returned so it stays alive).
-    pub(crate) fn app_state_fr() -> (AppState, tokio::sync::mpsc::Receiver<String>, tempfile::TempDir) {
+    /// Variant with an observable `locale_tx`/`fallback_tx` and a catalog
+    /// loaded in `fr` from a temporary root (the TempDir is returned so it
+    /// stays alive).
+    pub(crate) fn app_state_fr() -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<String>,
+        tokio::sync::mpsc::Receiver<String>,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(
@@ -656,6 +680,7 @@ pub(crate) mod tests_support {
         .unwrap();
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, locale_rx) = tokio::sync::mpsc::channel(4);
+        let (fallback_tx, fallback_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
@@ -673,6 +698,8 @@ pub(crate) mod tests_support {
             registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(dir.path().to_path_buf()))),
             locale_current: Arc::new(tokio::sync::RwLock::new(Some("fr".to_string()))),
             locale_tx,
+            fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
+            fallback_tx,
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             session: "test-session".to_string(),
@@ -695,7 +722,7 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
         };
-        (state, locale_rx, dir)
+        (state, locale_rx, fallback_rx, dir)
     }
 }
 
@@ -927,7 +954,7 @@ mod tests {
     /// here rather than a separate `/api/locale` round trip.
     #[tokio::test]
     async fn api_status_carries_the_session_and_the_current_locale() {
-        let (state, _rx, _dir) = tests_support::app_state_fr();
+        let (state, _rx, _frx, _dir) = tests_support::app_state_fr();
         let session = state.session.clone();
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
@@ -961,7 +988,7 @@ mod tests {
     /// locale ends up in now works.
     #[tokio::test]
     async fn api_status_clamps_an_uninstalled_locale_to_en() {
-        let (state, _rx, _dir) = tests_support::app_state_fr();
+        let (state, _rx, _frx, _dir) = tests_support::app_state_fr();
         *state.locale_current.write().await = Some("de".to_string()); // valid_locale, not installed
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
