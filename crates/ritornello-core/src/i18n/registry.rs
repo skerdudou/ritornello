@@ -82,34 +82,46 @@ impl Registry {
     /// registry shared as `crate::i18n::Shared` — what `Core::set_locale`
     /// calls.
     ///
-    /// The directory walk and TOML parse (`sweep_disk`) run in
-    /// `tokio::task::spawn_blocking`, off the async runtime's worker
-    /// threads and **before any lock on `shared` is taken at all**; the
-    /// write lock is then held only long enough to move the freshly swept
-    /// map into `disk` — a plain assignment, no I/O, nothing that can block.
-    /// A concurrent reader (`admin::admin_i18n`, or another `resweep_async`)
-    /// is therefore never made to wait on the walk itself, only ever on that
-    /// last, negligible assignment.
+    /// Two phases, deliberately kept as two calls rather than inlined: the
+    /// walk ([`Registry::walk`]) never touches `shared` for anything but a
+    /// brief read of `root`, and the write lock is then taken only long
+    /// enough to move the freshly swept map into `disk` — a plain
+    /// assignment, no I/O, nothing that can block. A concurrent reader
+    /// (`admin::admin_i18n`, or another `resweep_async`) is therefore never
+    /// made to wait on the walk itself, only ever on that last, negligible
+    /// assignment. The split is what
+    /// `tests::walk_completes_while_a_reader_holds_the_registry` calls
+    /// directly to prove that structurally, rather than by timing.
     ///
     /// Task 4's review named the blocking-under-lock gap this fixes, ahead
     /// of task 5; it went unfixed because task 5 is what first put a second,
     /// HTTP-reachable reader on the same write lock this blocks.
-    ///
-    /// If the blocking task panics (`JoinError`), the sweep is skipped and
-    /// the previous `disk` snapshot is left as is — the same "leave what was
-    /// there" posture `sweep_disk` already takes for a root that cannot be
-    /// read at all — rather than losing every plugin's disk-sourced text
-    /// over one bad sweep.
     pub async fn resweep_async(shared: &crate::i18n::Shared) {
+        if let Some(disk) = Self::walk(shared).await {
+            shared.write().await.disk = disk;
+        }
+    }
+
+    /// The walk half of [`Registry::resweep_async`]: reads `root` (the only
+    /// touch of `shared`, and only ever a read — it coexists with any
+    /// number of concurrent readers, never with a writer holding exclusive
+    /// access) and then does the directory walk and TOML parse
+    /// (`sweep_disk`) in `tokio::task::spawn_blocking`, off the async
+    /// runtime's worker threads. Returns `None` if the blocking task
+    /// panicked (`JoinError`) rather than returning a fresh, empty map: the
+    /// caller then skips the swap and leaves the previous `disk` snapshot as
+    /// is — the same "leave what was there" posture `sweep_disk` already
+    /// takes for a root that cannot be read at all — rather than losing
+    /// every plugin's disk-sourced text over one bad sweep.
+    async fn walk(shared: &crate::i18n::Shared) -> Option<HashMap<String, ModuleLayers>> {
         let root = shared.read().await.root.clone();
-        let disk = match tokio::task::spawn_blocking(move || sweep_disk(&root)).await {
-            Ok(disk) => disk,
+        match tokio::task::spawn_blocking(move || sweep_disk(&root)).await {
+            Ok(disk) => Some(disk),
             Err(e) => {
                 tracing::warn!("registry resweep task failed: {e}");
-                return;
+                None
             }
-        };
-        shared.write().await.disk = disk;
+        }
     }
 
     /// Records — or replaces — one module's announced layers.
@@ -466,12 +478,9 @@ mod tests {
     /// Functional coverage for `resweep_async`: the same fact
     /// `resweep_picks_up_a_pack_written_after_the_first_sweep` pins for the
     /// synchronous method, through the async/`Shared` path `Core::set_locale`
-    /// actually uses. This does **not** prove the liveness property the fix
-    /// exists for (that a concurrent reader is never blocked behind the
-    /// disk walk) — see this module's own `resweep_async` doc for why, and
-    /// the fix round's report for why a deterministic, non-flaky proof of
-    /// that specific property was judged to need more test machinery than
-    /// this bounded-impact fix earns.
+    /// actually uses. Correctness of the *result*, not of the locking
+    /// discipline — see `walk_completes_while_a_reader_holds_the_registry`,
+    /// below, for the structural proof of that.
     #[tokio::test]
     async fn resweep_async_picks_up_a_pack_written_after_the_first_sweep() {
         let dir = tempfile::tempdir().unwrap();
@@ -491,6 +500,47 @@ mod tests {
             shared.read().await.chain_for("radio", "nl", "en").get("play"),
             "Spelen",
             "picked up after an async resweep"
+        );
+    }
+
+    /// The structural property `resweep_async`'s fix rests on, proved
+    /// deterministically rather than by timing: `Registry::walk` never
+    /// needs exclusive access to `shared`, only ever a read (to learn
+    /// `root`), so it must complete even while a reader holds the registry
+    /// for the whole test — a read guard taken here and never dropped until
+    /// the function returns. No sleep, no poll loop: either `walk` asks for
+    /// the write lock at some point, in which case this deadlocks (turned
+    /// into a clean failure by the `timeout` below, a safety net against a
+    /// hung test run, not a timing assertion), or it does not, in which case
+    /// it returns regardless of how long the held guard lives.
+    ///
+    /// This is what discriminates against the regression task 4's review
+    /// named and task 5 made reachable: moving the walk back under the
+    /// write lock (fold `walk` and `resweep_async` back into the one
+    /// `shared.write().await.resweep()` call `Core::set_locale` used to
+    /// make) is exactly what would make this test hang instead of return.
+    #[tokio::test]
+    async fn walk_completes_while_a_reader_holds_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/nl.toml"), "play = \"Spelen\"\n").unwrap();
+        let shared: crate::i18n::Shared =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(dir.path().to_path_buf())));
+
+        // Held for the rest of the test: a real writer (the swap half of
+        // `resweep_async`) could never be granted the lock while this is
+        // alive. The walk must not care.
+        let _read_guard = shared.read().await;
+
+        let disk = tokio::time::timeout(std::time::Duration::from_secs(5), Registry::walk(&shared))
+            .await
+            .expect("the walk must never need to wait on a guard the test itself holds")
+            .expect("the blocking task must not panic on a readable root");
+
+        assert_eq!(
+            disk.get("radio").and_then(|m| m.layer("nl")).and_then(|l| l.get("play")),
+            Some("Spelen"),
+            "the walk must still have read the real pack, not a stand-in"
         );
     }
 }
