@@ -68,9 +68,14 @@ async fn resolve_admin_text(st: &AppState, module: &str, text: &Text) -> String 
         Text::Verbatim(s) => s.clone(),
         Text::Keyed { key, params } => {
             let locale = st.locale_current.read().await.clone().unwrap_or_else(|| "en".to_string());
+            // The device's own fallback (task 13), not a hardcoded "en": a
+            // plugin's save error must honour the same setting the core's
+            // own status line and the plugin's admin catalog (`admin_i18n`,
+            // below) already do — see `AppState.fallback_current`'s doc.
+            let fallback = st.fallback_current.read().await.clone().unwrap_or_else(|| "en".to_string());
             let resolved = {
                 let registry = st.registry.read().await;
-                registry.chain_for(module, &locale, "en").get(key).to_string()
+                registry.chain_for(module, &locale, &fallback).get(key).to_string()
             };
             ritornello_i18n::interpolate(&resolved, params.iter().map(|(name, value)| (name.as_str(), value.as_str())))
         }
@@ -318,9 +323,14 @@ pub async fn admin_i18n(
         Some(lang) => lang.clone(),
         None => st.locale_current.read().await.clone().unwrap_or_else(|| "en".to_string()),
     };
+    // The device's own fallback (task 13), not a hardcoded "en" — a plugin's
+    // whole admin catalog must resolve through the same chosen → fallback →
+    // English chain the core's own UI does, whether `chosen` came from the
+    // query or from `locale_current`.
+    let fallback = st.fallback_current.read().await.clone().unwrap_or_else(|| "en".to_string());
     let value = {
         let registry = st.registry.read().await;
-        serde_json::json!(registry.chain_for(&name, &chosen, "en").entries())
+        serde_json::json!(registry.chain_for(&name, &chosen, &fallback).entries())
     };
     // Always revalidated, never `immutable` — see this function's own doc.
     ([(axum::http::header::CACHE_CONTROL, "no-cache")], Json(value)).into_response()
@@ -701,6 +711,32 @@ mod tests {
         assert_eq!(v["greeting"], "Bonjour");
     }
 
+    /// Task 13 fix round, F-1: `admin_i18n` used to pass a hardcoded `"en"`
+    /// as `chain_for`'s fallback tier, so a plugin's whole admin catalog
+    /// ignored the device's own fallback setting even though the core's own
+    /// `/api/i18n` already honoured it. The key here is defined **only** in
+    /// the fallback language ("fr"), never in the chosen one ("de") nor in
+    /// English, so a resolution through anything but the real fallback tier
+    /// misses it.
+    ///
+    /// **[MUTATION]**: revert `admin_i18n` to pass a hardcoded `"en"` — this
+    /// test fails, the key never appearing in the served catalog at all.
+    #[tokio::test]
+    async fn admin_i18n_resolves_through_the_devices_fallback_not_a_hardcoded_en() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/fr.toml"), "greeting = \"Bonjour\"\n").unwrap();
+        let state = state_with_locales_root(Fake::default(), dir.path().to_path_buf());
+        *state.locale_current.write().await = Some("de".to_string());
+        *state.fallback_current.write().await = Some("fr".to_string());
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/plugins/radio/api/i18n").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["greeting"], "Bonjour", "neither the chosen language nor a hardcoded en carries this key");
+    }
+
     #[tokio::test]
     async fn two_languages_serve_two_different_disk_packs() {
         // What `immutable` must never lie about: serving French under the
@@ -979,6 +1015,66 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"], "Bad request: missing field `stations`");
+    }
+
+    /// Task 13 fix round, F-1: `resolve_admin_text` used to pass a hardcoded
+    /// `"en"` as `chain_for`'s fallback tier, so a plugin's save error never
+    /// honoured the device's own fallback setting even though the core's own
+    /// status line and every Source status text already did. The key here is
+    /// defined **only** in the fallback language ("fr"), never in the chosen
+    /// one ("de") nor in English — neither a disk pack (there is none) nor a
+    /// hardcoded one — so a resolution through anything but the real
+    /// fallback tier falls through to the raw key instead.
+    ///
+    /// **[MUTATION]**: revert `resolve_admin_text` to pass a hardcoded `"en"`
+    /// — this test fails, asserting the raw key `"bad_request"` instead of
+    /// the resolved French sentence.
+    #[tokio::test]
+    async fn a_keyed_refusal_resolves_through_the_devices_fallback_not_a_hardcoded_en() {
+        let state = state_with(Fake { reject: true, ..Default::default() });
+        *state.locale_current.write().await = Some("de".to_string());
+        *state.fallback_current.write().await = Some("fr".to_string());
+        let mut layers = ritornello_i18n::ModuleLayers::new("radio");
+        layers.insert(
+            "fr",
+            ritornello_i18n::Layer::from_map(
+                [("bad_request".to_string(), "Mauvaise requête : {detail}".to_string())].into(),
+            ),
+        );
+        state.registry.write().await.insert_announced("radio", layers);
+        struct Keyed;
+        #[async_trait::async_trait]
+        impl AdminBackend for Keyed {
+            async fn asset(&self, _path: &str) -> Result<Option<(String, String)>> {
+                Ok(None)
+            }
+            async fn get_data(&self) -> Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+            async fn set_data(&self, _data: serde_json::Value) -> Result<Result<(), Text>> {
+                let mut params = std::collections::HashMap::new();
+                params.insert("detail".to_string(), "missing field `stations`".to_string());
+                Ok(Err(Text::Keyed { key: "bad_request".into(), params }))
+            }
+            async fn ping(&self) -> Result<()> {
+                Ok(())
+            }
+        }
+        state.admin_backends.write().await.insert("radio".into(), Arc::new(Keyed));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/plugins/radio/api/data")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "Mauvaise requête : missing field `stations`");
     }
 
     // Since Task 10, an unknown plugin name on the *asset* route
