@@ -1,3 +1,4 @@
+use crate::Text;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -35,7 +36,20 @@ pub enum AdminResult {
     /// extension.
     Asset { mime: String, body: Option<String> },
     Data(serde_json::Value),
-    Set { ok: bool, error: Option<String> },
+    Set {
+        ok: bool,
+        error: Option<String>,
+        /// The same error as `error`, above, but **not yet resolved** —
+        /// `crate::source::Text`'s twin field on `SourceMessage::status_text`
+        /// carries the identical rationale: added **alongside** `error`,
+        /// not in its place, so the workspace keeps compiling while every
+        /// producer of this variant migrates one at a time. Absent for the
+        /// same reason it is absent everywhere else in this module today:
+        /// nothing produces it yet, `AdminPlugin::set_data` still answering
+        /// with a plain `Result<(), String>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_text: Option<Text>,
+    },
     Pong,
     /// The plugin **is alive** but did not meet the budget (processing or
     /// waiting for the lock). Distinct from no answer at all: here it is the
@@ -87,11 +101,47 @@ mod tests {
 
     #[test]
     fn response_set_roundtrip() {
-        let r = AdminResponse { id: 4, result: AdminResult::Set { ok: false, error: Some("nope".into()) } };
+        let r = AdminResponse {
+            id: 4,
+            result: AdminResult::Set { ok: false, error: Some("nope".into()), error_text: None },
+        };
         let json = serde_json::to_string(&r).unwrap();
+        // Unchanged shape: `error_text` absent by default must not add a
+        // single byte to a frame no producer has migrated yet.
         assert_eq!(json, r#"{"id":4,"result":{"kind":"Set","data":{"ok":false,"error":"nope"}}}"#);
         let back: AdminResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.result, AdminResult::Set { ok: false, error: Some("nope".into()) });
+        assert_eq!(
+            back.result,
+            AdminResult::Set { ok: false, error: Some("nope".into()), error_text: None }
+        );
+    }
+
+    #[test]
+    fn error_text_travels_beside_error_and_stays_absent_by_default() {
+        // Twin of `response_set_roundtrip`, but exercising the new field:
+        // added alongside `error`, not in its place, and carrying the same
+        // additive promise as every other field in this crate.
+        let r = AdminResponse {
+            id: 5,
+            result: AdminResult::Set {
+                ok: false,
+                error: None,
+                error_text: Some(crate::Text::Keyed { key: "bad_request".into(), params: Default::default() }),
+            },
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""error_text":{"kind":"Keyed","data":{"key":"bad_request"}}"#), "{json}");
+        let back: AdminResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.result, r.result);
+
+        // A frame from before this field existed reads back with nothing
+        // declared.
+        let old: AdminResponse =
+            serde_json::from_str(r#"{"id":5,"result":{"kind":"Set","data":{"ok":true}}}"#).unwrap();
+        assert_eq!(
+            old.result,
+            AdminResult::Set { ok: true, error: None, error_text: None }
+        );
     }
 
     #[test]

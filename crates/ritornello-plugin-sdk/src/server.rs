@@ -476,6 +476,10 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     preset_count: outcome.preset_count,
                     preset_name: outcome.preset_name,
                     status: outcome.status,
+                    // `SourceOutcome` does not carry a `Text` yet (it is not
+                    // touched by this task): always absent here until a
+                    // later task widens it and a plugin migrates to it.
+                    status_text: None,
                     // Stamped here, once, rather than by a constructor call on
                     // each of a plugin's ten declaration paths: a capability
                     // forgotten on a single path would give a button that
@@ -512,6 +516,10 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             preset_count: n.preset_count,
                             preset_name: n.preset_name,
                             status: n.status,
+                            // `Notification` does not carry a `Text` yet
+                            // either, for the same reason as the reply path
+                            // above.
+                            status_text: None,
                             can_eject: Some(plugin.can_eject()),
                             // Same reason as the reply path above: stamped on
                             // **every** frame, so the spontaneous notification
@@ -1046,8 +1054,8 @@ async fn handle_admin<P: AdminPlugin>(
         }
         AdminReq::GetData => AdminResult::Data(plugin.read().await.get_data().await),
         AdminReq::SetData(data) => match plugin.write().await.set_data(data).await {
-            Ok(()) => AdminResult::Set { ok: true, error: None },
-            Err(msg) => AdminResult::Set { ok: false, error: Some(msg) },
+            Ok(()) => AdminResult::Set { ok: true, error: None, error_text: None },
+            Err(msg) => AdminResult::Set { ok: false, error: Some(msg), error_text: None },
         },
     }
 }
@@ -1132,7 +1140,7 @@ mod admin_server_tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(1), "{:?}", start.elapsed());
         let second = line(&mut r).await;
         assert_eq!(second.id, 1);
-        assert_eq!(second.result, AdminResult::Set { ok: true, error: None });
+        assert_eq!(second.result, AdminResult::Set { ok: true, error: None, error_text: None });
     }
 
     #[tokio::test]

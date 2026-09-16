@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use ritornello_proto::{
     AdminReq, AdminRequest, AdminResponse, AdminResult, SourcesCatalog, Cover, CoverRef, DisplayFrame,
     Enrichment, IdentityUpdate, InputMessage, NowPlaying, PlayerState, Preset, SourceAction,
-    SourceMessage, SourceReq, SourceRequest,
+    SourceMessage, SourceReq, SourceRequest, Text,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -34,6 +34,11 @@ pub struct SourceUpdate {
     pub preset_name: Option<String>,
     /// See `SourceMessage::status`.
     pub status: Option<String>,
+    /// See `SourceMessage::status_text`. Not yet consumed on its own here —
+    /// it rides the same field literal and the same relayable-frame
+    /// predicate as `status` (both by derivation, `SourceUpdate` deriving
+    /// `PartialEq`/`Default`) — the core is what decides between the two.
+    pub status_text: Option<Text>,
     /// See `SourceMessage::can_eject`. Absent = nothing declared, keep the
     /// current value. The **only** field that does not arm the relayable-frame
     /// predicate by itself, because it is the only one the SDK stamps on
@@ -175,6 +180,7 @@ impl SourceClient {
                     preset_count: msg.preset_count,
                     preset_name: msg.preset_name,
                     status: msg.status,
+                    status_text: msg.status_text,
                     can_eject: msg.can_eject,
                     has_finite_list: msg.has_finite_list,
                     presets: msg.presets,
@@ -491,7 +497,7 @@ impl AdminClient {
     pub async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), String>> {
         match self.request(AdminReq::SetData(data)).await? {
             AdminResult::Set { ok: true, .. } => Ok(Ok(())),
-            AdminResult::Set { ok: false, error } => Ok(Err(error.unwrap_or_default())),
+            AdminResult::Set { ok: false, error, .. } => Ok(Err(error.unwrap_or_default())),
             other => bail!("unexpected admin response for SetData: {other:?}"),
         }
     }

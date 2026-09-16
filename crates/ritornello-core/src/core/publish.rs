@@ -110,7 +110,20 @@ impl<P: Player> Core<P> {
             preset_count: self.preset_count,
             // Standby wins over the source status: the device sleeps, what
             // the source says no longer applies.
-            status: if self.standby { self.standby_status.clone() } else { self.source_status.clone() },
+            //
+            // Resolved **here**, at every publication, rather than at
+            // receipt: `source_status` is stored as a `Text` precisely so
+            // that a language change (`Core::set_locale`) retranslates it
+            // without the Source having sent anything new — the defect
+            // task 7 of the language-packs chantier removes.
+            // `standby_status`, by contrast, is a key the core owns and
+            // already resolves eagerly on every locale change (see its own
+            // field doc): nothing to do here for that half of the branch.
+            status: if self.standby {
+                self.standby_status.clone()
+            } else {
+                self.source_status.as_ref().map(|t| self.resolve_text(t, &self.active_source))
+            },
             overlay: self.overlay.as_ref().map(|(o, deadline)| {
                 let remaining = deadline.saturating_duration_since(Instant::now()).as_millis();
                 // The stored `remaining_ms` is never read: it is rewritten
@@ -367,6 +380,64 @@ mod tests {
             core.player_state().status,
             None,
             "waking must not make a status reappear that the source has not redeclared"
+        );
+    }
+
+    /// The present defect this chantier removes, proven from the event
+    /// rather than from the method: `Core::set_locale` already re-resolves
+    /// `standby_status` on every locale change — a key the core owns,
+    /// resolved eagerly, see its field doc for why — but until task 7,
+    /// `source_status` was a finished string received from the plugin, so
+    /// changing the language left the source's status line in the old
+    /// language until the next frame from the player: forever, on a disc
+    /// sitting still.
+    ///
+    /// `source_status` now stores a `Text` and `player_state` resolves it at
+    /// **every** publication (see the comment above `status:` in
+    /// `player_state`), which is what this test proves by feeding one frame,
+    /// changing the language, and observing the published state without
+    /// sending anything new. A test that called a resolve method directly
+    /// would prove the logic and never that it actually runs at publication.
+    #[tokio::test]
+    async fn changing_the_language_retranslates_the_remembered_status() {
+        let (mut core, _pc, _sc, mut state_rx, _d) = setup();
+        {
+            // The active source's own module, exactly as `Registry::chain_for`
+            // expects it to be announced (task 4): a real plugin would have
+            // confided this through its `Announcement.catalog`, but the test
+            // registry starts empty, so the pack is planted by hand.
+            let mut registry = core.registry.write().await;
+            let mut layers = ritornello_i18n::ModuleLayers::new("radio");
+            layers.insert("en", ritornello_i18n::Layer::from_map(
+                [("no_disc".to_string(), "NO DISC".to_string())].into(),
+            ));
+            layers.insert("fr", ritornello_i18n::Layer::from_map(
+                [("no_disc".to_string(), "PAS DE DISQUE".to_string())].into(),
+            ));
+            registry.insert_announced("radio", layers);
+        }
+        let _ = state_rx.borrow_and_update();
+
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                status_text: Some(ritornello_proto::Text::Keyed {
+                    key: "no_disc".into(),
+                    params: std::collections::HashMap::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("NO DISC"));
+
+        // The one event of this test besides the frame above: a language
+        // change, with the Source sending nothing new.
+        core.set_locale("fr".into()).await.unwrap();
+
+        assert_eq!(
+            state_rx.borrow_and_update().status.as_deref(),
+            Some("PAS DE DISQUE"),
+            "the remembered status must retranslate on its own, without a second frame"
         );
     }
 }

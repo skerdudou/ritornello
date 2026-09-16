@@ -1,5 +1,6 @@
 use crate::metadata::IdentityUpdate;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "req", content = "arg")]
@@ -233,6 +234,55 @@ impl SourceAction {
     }
 }
 
+/// A status or an error that has not been resolved to a finished string yet:
+/// either a **key** into the resolution chain of the module that sends it,
+/// with named parameters for interpolation, or text that must reach the
+/// screen **exactly as sent**.
+///
+/// This is the payload `SourceMessage::status_text` and
+/// `crate::AdminResult::Set::error_text` carry instead of a finished
+/// `String`: the core stores it as received and resolves it **at
+/// publication** (see `ritornello_core`'s `Core::player_state`), so a
+/// language change retranslates it without the plugin sending anything new.
+///
+/// **Adjacently tagged, in the idiom of [`SourceReq`] and
+/// [`crate::AdminResult`]**, both of which are enums a plugin or the core
+/// exchange on the wire and both of which tag their variants the same way.
+///
+/// **Explicit, never implicit.** An earlier design let a bare JSON string
+/// double as `Verbatim`, for compatibility with plugins that had not
+/// migrated yet — the owner ruled out that compatibility, so the reason
+/// falls away, and the explicit form is better on its own merits: a
+/// producer must name `Verbatim` to get it, so an unmigrated producer can
+/// never *look* migrated by accident. See the `core`'s verbatim counter
+/// (task 7 of the language-packs chantier) for what this buys: it can count
+/// every `Verbatim` it resolves, and that count would mean nothing if a
+/// plain string could turn into one without anybody asking for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum Text {
+    /// A key into the sending module's own resolution chain, with named
+    /// parameters substituted at resolution (`{name}` replaced by its
+    /// value — no template engine, see `ritornello_i18n`'s module doc).
+    Keyed {
+        key: String,
+        /// Absent and empty are the same fact on the wire — a key with
+        /// nothing to interpolate — so an empty map is skipped rather than
+        /// sent as `"params":{}` on every status that has none.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        params: HashMap<String, String>,
+    },
+    /// Text that must reach the screen **exactly as sent**, resolved
+    /// through no catalog at all.
+    ///
+    /// Reserved for the one case that cannot be translated because it is
+    /// not known ahead of time — an unrecognised `NT_STATUS` word coming
+    /// back from SMB is the real case this chantier was written against.
+    /// A producer must ask for this explicitly; there is no path from a
+    /// bare string to this variant (see this type's own doc).
+    Verbatim(String),
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SourceMessage {
     /// `Some(id)` = reply correlated to a request; `None` = spontaneous notification.
@@ -313,6 +363,25 @@ pub struct SourceMessage {
     /// overlay and leaves the remembered status untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// The same status as `status`, above, but **not yet resolved**: a key
+    /// into this module's own catalog and its parameters, or explicit
+    /// verbatim text (see [`Text`]).
+    ///
+    /// Added **alongside** `status`, not in its place: `status` is produced
+    /// by six crates, and changing its type in one step would leave the
+    /// workspace broken for as long as those producers take to migrate.
+    /// The core prefers this field when present and falls back to `status`
+    /// otherwise (wrapping it as `Text::Verbatim`, which is what "not
+    /// migrated yet" means in practice — see the core's verbatim counter).
+    /// Both twins carry the **same convention as `status`**: absent means
+    /// *no status*, not "keep the previous one" — do not uniformize this
+    /// with `preset`'s neighbouring convention.
+    ///
+    /// `status` itself is retired once every producer has migrated to this
+    /// field (task 11 of the language-packs chantier): its disappearance is
+    /// what proves no producer is left behind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_text: Option<Text>,
     /// Whether this source has a tray to open at all — a **capability of the
     /// source**, not of what is loaded: an empty tray still ejects. It is what
     /// lets the web remote grey out its Eject button on a source that has
@@ -438,6 +507,7 @@ mod tests {
             preset_count: None,
             preset_name: None,
             status: None,
+            status_text: None,
             can_eject: None,
             has_finite_list: None,
             presets: None,
@@ -895,5 +965,73 @@ mod tests {
         // status) reads back without error, the field falling back to `None`.
         let old: SourceMessage = serde_json::from_str(r#"{"id":3}"#).unwrap();
         assert_eq!(old.status, None);
+    }
+
+    #[test]
+    fn a_keyed_text_round_trips_with_its_parameters() {
+        let t = Text::Keyed {
+            key: "no_disc".into(),
+            params: HashMap::from([("count".to_string(), "3".to_string())]),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(json, r#"{"kind":"Keyed","data":{"key":"no_disc","params":{"count":"3"}}}"#);
+        assert_eq!(serde_json::from_str::<Text>(&json).unwrap(), t);
+    }
+
+    #[test]
+    fn a_keyed_text_without_parameters_omits_the_empty_map() {
+        // Nearly every key carries no parameters: weighing every one of them
+        // down with `"params":{}` would be noise on a link meant to be
+        // readable by eye, the same reasoning as every other absent-field
+        // convention in this module.
+        let t = Text::Keyed { key: "no_disc".into(), params: HashMap::new() };
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(json, r#"{"kind":"Keyed","data":{"key":"no_disc"}}"#);
+        let back: Text = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn a_verbatim_text_round_trips() {
+        let t = Text::Verbatim("NT_STATUS_LOGON_FAILURE".into());
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(json, r#"{"kind":"Verbatim","data":"NT_STATUS_LOGON_FAILURE"}"#);
+        assert_eq!(serde_json::from_str::<Text>(&json).unwrap(), t);
+    }
+
+    #[test]
+    fn a_bare_string_is_not_a_valid_text() {
+        // The whole point of tagging `Text` explicitly rather than letting a
+        // bare string mean `Verbatim`: a producer that has not migrated
+        // cannot look migrated by sending a plain JSON string where a `Text`
+        // is expected. Without the explicit tag, this would parse as
+        // `Verbatim("no_disc")` instead of failing.
+        assert!(serde_json::from_str::<Text>("\"no_disc\"").is_err());
+    }
+
+    #[test]
+    fn status_text_round_trips_and_stays_absent_by_default() {
+        // Same convention as `status`, which it travels beside: absence
+        // means "no status", not "keep the previous one" (see the field's
+        // own doc for why that must not be uniformized with `preset`'s).
+        let m = SourceMessage {
+            id: Some(3),
+            action: Some(SourceAction::Noop),
+            status_text: Some(Text::Keyed { key: "no_disc".into(), params: HashMap::new() }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains(r#""status_text":{"kind":"Keyed","data":{"key":"no_disc"}}"#), "{json}");
+        let back: SourceMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status_text, m.status_text);
+        // Absent by default, and silent on the wire — a plugin that has not
+        // migrated yet must not grow a `"status_text":null` on every frame.
+        let silent = SourceMessage::default();
+        assert_eq!(silent.status_text, None);
+        assert!(!serde_json::to_string(&silent).unwrap().contains("status_text"));
+        // A frame from a plugin that predates this field reads back with
+        // nothing declared, exactly like every other additive field here.
+        let old: SourceMessage = serde_json::from_str(r#"{"id":3}"#).unwrap();
+        assert_eq!(old.status_text, None);
     }
 }

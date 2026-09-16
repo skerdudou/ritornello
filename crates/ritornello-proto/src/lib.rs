@@ -29,4 +29,4 @@ pub use metadata::{
     NowPlaying, Overlay, Playback, PlayerState, Provenance,
 };
 pub use register::{Announcement, PluginKind, ANNOUNCEMENT_MAX_BYTES};
-pub use source::{Preset, SourceAction, SourceMessage, SourceReq, SourceRequest};
+pub use source::{Preset, SourceAction, SourceMessage, SourceReq, SourceRequest, Text};
