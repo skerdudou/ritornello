@@ -951,8 +951,18 @@ impl<P: Player> Core<P> {
         self.verbatim_status_counts.get(module).copied().unwrap_or(0)
     }
 
-    /// The sum of every module's verbatim count — what the barrier test and
-    /// its `#[ignore]`d twin, below, watch.
+    /// The sum of every module's verbatim count — what the barrier test
+    /// below watches.
+    ///
+    /// It once had an `#[ignore]`d twin meant to assert that our own plugins
+    /// never speak verbatim. That test was deleted rather than repaired: a
+    /// unit test here cannot observe plugins this crate does not link, so it
+    /// could only ever watch a field the plugins were about to stop writing.
+    /// The promise it was reaching for lives in
+    /// `ritornello-plugin-sdk`'s `verbatim_has_no_producer_outside_the_files_plugin`,
+    /// which reads the plugins' own sources and is live, not ignored —
+    /// `Verbatim` has exactly one sanctioned producer, the unknown
+    /// `NT_STATUS` path in `files`.
     #[cfg(test)]
     fn total_verbatim_status_count(&self) -> u64 {
         self.verbatim_status_counts.values().sum()
