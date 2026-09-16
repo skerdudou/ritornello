@@ -22,7 +22,7 @@ use crate::player::Player;
 use crate::state::{self, PersistedState, StartupPower};
 use crate::types::Event;
 use anyhow::Result;
-use ritornello_i18n::Catalog;
+use ritornello_i18n::Chain;
 use ritornello_plugin_sdk::SourceUpdate;
 use ritornello_proto::{
     SourcesCatalog, Command, Enrichment, IdentityUpdate, InputMessage, NowPlaying, Overlay, Playback,
@@ -80,7 +80,7 @@ pub struct Wiring {
     pub sources: HashMap<String, Arc<dyn Source>>,
     pub persisted: PersistedState,
     pub state_path: PathBuf,
-    pub catalog: Arc<RwLock<Catalog>>,
+    pub catalog: Arc<RwLock<Chain>>,
     /// The shared registry `catalog` is resolved from — see
     /// `crate::i18n::Shared`'s doc. The same `Arc` as the HTTP `AppState`'s.
     /// Also where the pack root lives now (captured once at
@@ -217,18 +217,17 @@ pub struct Core<P: Player> {
     /// this single point already covers them.
     preset_name: Option<String>,
     /// Permanent status declared by the active Source, **not yet
-    /// resolved** (see `SourceMessage::status`/`status_text`). Replaced by
-    /// every non-transient frame, including by its absence — see the
-    /// convention test: absent means *no status*, not "keep the previous
-    /// one" — the same convention `status` itself already documents, and it
-    /// must not be uniformized with `preset`'s neighbouring one.
+    /// resolved** (see `SourceMessage::status_text`). Replaced by every
+    /// non-transient frame, including by its absence — see the convention
+    /// test: absent means *no status*, not "keep the previous one", the
+    /// same convention that must not be uniformized with `preset`'s
+    /// neighbouring one.
     ///
     /// Stored **unresolved** and resolved again at every publication
     /// (`player_state`, in `publish.rs`), not at receipt: that is what lets
     /// a language change retranslate this field on its own, without the
-    /// Source having sent anything new — the defect this chantier's task 7
-    /// removes (`Core::set_locale` already did this for `standby_status`,
-    /// below, but not for this field).
+    /// Source having sent anything new (`Core::set_locale` does the same
+    /// for `standby_status`, below).
     source_status: Option<Text>,
     /// Resolved standby label, memoized at construction and on every
     /// `set_locale` — never at the moment standby is entered: the
@@ -249,25 +248,25 @@ pub struct Core<P: Player> {
     /// publication, which would count the same remembered status again on
     /// every unrelated command.
     ///
-    /// **What this exists for.** A status arrives verbatim two ways: a
-    /// producer asked for it explicitly (the one legitimate case — an
-    /// unrecognised `NT_STATUS` word), or a producer has simply not
-    /// migrated to `status_text` yet, so the core falls back to wrapping
-    /// its bare `status` string. This counter cannot tell the two apart by
-    /// itself; what it buys is a **runtime regression net**, complementing
-    /// (not duplicating) the static one: `ritornello-plugin-sdk`'s
+    /// **What this exists for.** A status arrives verbatim when a producer
+    /// asks for it explicitly — the one legitimate case, an unrecognised
+    /// `NT_STATUS` word — and that is the only way it can arrive verbatim
+    /// any more: `SourceMessage::status`, the plain, already-resolved
+    /// string this used to also fall back on, is gone as of task 11. This
+    /// field is a **runtime regression net**, complementing (not
+    /// duplicating) the static one: `ritornello-plugin-sdk`'s
     /// `verbatim_has_no_producer_outside_the_files_plugin` reads the shipped
     /// plugins' own source and refuses a `Text::Verbatim` construction
     /// anywhere but the one sanctioned site, which is what a core-level
     /// unit test cannot do — this crate links no plugin binary, so it can
     /// only ever observe what a plugin *sends*, never what it *would*
     /// construct. This field is that runtime observation: without it,
-    /// nothing on a running device would ever say which module's status is
-    /// still arriving unresolved. Both branches must feed it, or the branch
-    /// left out becomes a permanent blind spot — the transient branch was
-    /// exactly that blind spot before task 7's review found it (I-5):
-    /// "EMPTY PRESET", the one transient status this fleet actually ships,
-    /// could have stayed un-migrated forever, unseen.
+    /// nothing on a running device would ever say which module is still
+    /// sending unrecognised text instead of a resolvable key. Both branches
+    /// must feed it, or the branch left out becomes a permanent blind spot —
+    /// the transient branch was exactly that blind spot before task 7's
+    /// review found it (I-5): "EMPTY PRESET", the one transient status this
+    /// fleet actually ships, could have stayed unseen.
     verbatim_status_counts: HashMap<String, u64>,
     /// How many numbered presets the active source offers (stations,
     /// tracks), as last declared. Forgotten on source change and standby —
@@ -321,7 +320,7 @@ pub struct Core<P: Player> {
     /// longer means it.
     pending_tens: u8,
     state_path: PathBuf,
-    catalog: Arc<RwLock<Catalog>>,
+    catalog: Arc<RwLock<Chain>>,
     registry: crate::i18n::Shared,
     locale: Option<String>,
     theme: Option<String>,
@@ -436,7 +435,7 @@ pub struct Core<P: Player> {
 /// sources_catalog read via `try_read`, before `self` exists) and
 /// `set_locale` (the sources_catalog just loaded, before it replaces the
 /// core's), so neither needs to go through the async lock a second time.
-fn resolve_standby_status(catalog: &Catalog) -> String {
+fn resolve_standby_status(catalog: &Chain) -> String {
     catalog.get("standby").to_string()
 }
 
@@ -643,7 +642,6 @@ impl<P: Player> Core<P> {
             preset,
             preset_count,
             preset_name,
-            status,
             status_text,
             can_eject,
             has_finite_list,
@@ -738,14 +736,7 @@ impl<P: Player> Core<P> {
         // `cover_thumb` and `cover_archivable` attest nothing: all of them
         // follow the "absent = keep" convention, so none can prove the frame
         // describes the whole view.
-        //
-        // `status_text` joins `status` here for the same reason `cover_thumb`
-        // had to join `cover`: a frame carrying only the new, not-yet-resolved
-        // form of the status must still be treated as recomposing the view,
-        // or it would fall through to `apply_declared_facts` and reach
-        // neither exit — silently dropped exactly like `cover` once was.
-        let recomposes_the_view =
-            transient || identity.is_some() || status.is_some() || status_text.is_some();
+        let recomposes_the_view = transient || identity.is_some() || status_text.is_some();
         // **`cover_thumb` is in this disjunction, and leaving it out would
         // repeat the defect recorded above word for word.** A frame carrying
         // only a thumbnail would reach neither exit: not guarded, it would be
@@ -789,16 +780,12 @@ impl<P: Player> Core<P> {
         // transient frame, on the other hand, does not touch the remembered
         // status: its word goes into the overlay below, not here.
         //
-        // `status_text` wins when the frame carries it; otherwise `status`
-        // is wrapped as `Text::Verbatim` — which is exactly what "this
-        // producer has not migrated yet" means in practice, and why
-        // `decide_status_text` counts it as such regardless of which of the
-        // two paths produced it. `.clone()`d here (not moved) because the
-        // `transient` branch just below still needs its own copy — the two
-        // `if`s are not an `if`/`else`, so the borrow checker cannot see
-        // they are mutually exclusive at runtime.
+        // `.clone()`d here (not moved) because the `transient` branch just
+        // below still needs its own copy — the two `if`s are not an
+        // `if`/`else`, so the borrow checker cannot see they are mutually
+        // exclusive at runtime.
         if !transient {
-            self.source_status = self.decide_status_text(name, status_text.clone(), status.clone());
+            self.source_status = self.decide_status_text(name, status_text.clone());
         }
         if transient {
             // Transient message ("empty preset"): it borrows the slot and
@@ -819,16 +806,13 @@ impl<P: Player> Core<P> {
             self.pending_tens = 0;
             // Resolved **now**, unlike the permanent status: an overlay
             // message is shown once, for a few seconds, and never
-            // retranslated while it is up — the same posture the plain
-            // `status` string it replaces already had. `status_text` wins
-            // when present, the same precedence as the permanent path, and
-            // goes through the same `decide_status_text` — so a transient
-            // message that falls back to verbatim (or asks for it
-            // explicitly) is counted exactly like a permanent one. Without
-            // this, "EMPTY PRESET" — the one transient status this fleet
-            // actually ships — could stay un-migrated forever, unseen by
-            // the counter (task 7 review, I-5).
-            let text = self.decide_status_text(name, status_text, status);
+            // retranslated while it is up. It goes through the same
+            // `decide_status_text` as the permanent path, so an explicit
+            // `Text::Verbatim` is counted exactly like a permanent one.
+            // Without this, "EMPTY PRESET" — the one transient status this
+            // fleet actually ships — could stay unseen by the counter
+            // (task 7 review, I-5).
+            let text = self.decide_status_text(name, status_text);
             let message = text.and_then(|t| self.resolve_text(&t, name));
             if let Some(message) = message {
                 let deadline = Instant::now() + Duration::from_millis(self.settings.overlay_ms.into());
@@ -891,9 +875,9 @@ impl<P: Player> Core<P> {
     /// that found nothing at all, and showing `no_disc` on the twenty-column
     /// display is the single outcome this whole chantier exists to prevent.
     /// `None` here reads, at the call site, exactly like
-    /// `SourceMessage::status`'s own documented convention for absence — "no
-    /// status" — which is honest where the raw key would have been a lie
-    /// dressed as a translation. Logged, unlike the precedent this method
+    /// `SourceMessage::status_text`'s own documented convention for absence
+    /// — "no status" — which is honest where the raw key would have been a
+    /// lie dressed as a translation. Logged, unlike the precedent this method
     /// used to cite (`Core::new`'s `catalog.try_read()` for
     /// `standby_status`): that call runs **once**, before any writer exists,
     /// and carries its own unreachability proof in the surrounding comment;
@@ -925,26 +909,20 @@ impl<P: Player> Core<P> {
         }
     }
 
-    /// Decides the `Text` a frame's status resolves to — `status_text` when
-    /// the frame carries it, `status` wrapped as `Text::Verbatim` otherwise
-    /// — and counts the fallback, or an explicit `Verbatim`, against
-    /// `module` either way: both mean the same thing to this counter, a
-    /// status this producer is not handing over as a resolvable key (see
-    /// `verbatim_status_counts`'s own doc for why the two are not told
-    /// apart).
+    /// Passes `status_text` through, counting an explicit `Text::Verbatim`
+    /// against `module` (see `verbatim_status_counts`'s own doc for what
+    /// this buys).
     ///
     /// Called on **both** branches of `handle_source_update` — permanent
     /// and transient — so neither can sit outside the counter's sight. The
     /// transient branch used to compute this inline, and did not count it
     /// at all: "EMPTY PRESET", the one transient status this fleet actually
-    /// ships, could have stayed un-migrated forever, unseen (task 7 review,
-    /// I-5).
-    fn decide_status_text(&mut self, module: &str, status_text: Option<Text>, status: Option<String>) -> Option<Text> {
-        let text = status_text.or_else(|| status.map(Text::Verbatim));
-        if matches!(text, Some(Text::Verbatim(_))) {
+    /// ships, could have stayed unseen (task 7 review, I-5).
+    fn decide_status_text(&mut self, module: &str, status_text: Option<Text>) -> Option<Text> {
+        if matches!(status_text, Some(Text::Verbatim(_))) {
             *self.verbatim_status_counts.entry(module.to_string()).or_default() += 1;
         }
-        text
+        status_text
     }
 
     /// How many times `module`'s status has resolved to `Text::Verbatim`
@@ -1073,7 +1051,7 @@ mod tests {
         let (mut core, _pc, _sc, mut state_rx, _d) = setup();
         core.resume().await.unwrap();
         let mut update = bare_update();
-        update.status = Some("no disc".into());
+        update.status_text = Some(Text::Verbatim("no disc".into()));
         core.handle_source_update("radio", update);
         assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("no disc"));
         core.handle_command(Command::Power).await.unwrap(); // standby
@@ -1236,17 +1214,17 @@ mod tests {
         let id = serde_json::json!({"url": "un"});
         core.handle_source_update("radio", plays(id.clone()));
         let mut permanent = bare_update();
-        permanent.status = Some("FIP".into());
+        permanent.status_text = Some(Text::Verbatim("FIP".into()));
         core.handle_source_update("radio", permanent);
         core.handle_enrichment("ouifm", enrichment(id, "Miles Davis", "So What"));
         assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("FIP"));
 
         let mut ephemeral = bare_update();
         ephemeral.transient = true;
-        // The displayed word comes from `status`, never from a composed
-        // view (see Task 3): this is how the radio plugin actually
+        // The displayed word comes from `status_text`, never from a
+        // composed view (see Task 3): this is how the radio plugin actually
         // declares it on the "empty preset" branch.
-        ephemeral.status = Some("empty preset".into());
+        ephemeral.status_text = Some(Text::Verbatim("empty preset".into()));
         core.handle_source_update("radio", ephemeral);
         let during = state_rx.borrow_and_update().clone();
         assert!(matches!(during.overlay, Some(Overlay::Message { .. })), "the message must display");
@@ -1263,39 +1241,20 @@ mod tests {
     #[tokio::test]
     async fn a_source_status_is_published_then_replaced() {
         // Convention **different** from `preset`'s: within a frame, an
-        // absent `status` means "no status", not "keep the previous one".
-        // This is what reproduces the current behavior — a source
+        // absent `status_text` means "no status", not "keep the previous
+        // one". This is what reproduces the current behavior — a source
         // recomposes its whole view on every frame — and the only
         // convention that allows clearing a status: otherwise "NO DISC"
         // would stay displayed after a disc is inserted, with no way to
         // cancel it.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let mut update = bare_update();
-        update.status = Some("NO DISC".into());
+        update.status_text = Some(Text::Verbatim("NO DISC".into()));
         core.handle_source_update("radio", update);
         assert_eq!(core.player_state().status.as_deref(), Some("NO DISC"));
 
         core.handle_source_update("radio", bare_update());
         assert_eq!(core.player_state().status, None, "absent means cleared, not kept");
-    }
-
-    #[tokio::test]
-    async fn status_text_wins_over_status_when_both_are_present() {
-        // The precedence itself: `status_text.clone().or_else(|| status...)`
-        // is an `Option::or_else`, not something the type system enforces on
-        // its own. No shipped plugin sends both today, but a mixed
-        // deployment (a partially-updated fleet, or a plugin mid-migration)
-        // could, and `status_text` must win when it does.
-        let (mut core, _pc, _sc, _rx, _d) = setup();
-        core.handle_source_update(
-            "radio",
-            SourceUpdate {
-                status: Some("legacy string".into()),
-                status_text: Some(Text::Verbatim("preferred".into())),
-                ..Default::default()
-            },
-        );
-        assert_eq!(core.player_state().status.as_deref(), Some("preferred"));
     }
 
     #[tokio::test]
@@ -1321,7 +1280,7 @@ mod tests {
             registry.insert_announced("radio", layers);
         }
         let mut permanent = bare_update();
-        permanent.status = Some("FIP".into());
+        permanent.status_text = Some(Text::Verbatim("FIP".into()));
         core.handle_source_update("radio", permanent);
         assert_eq!(core.player_state().status.as_deref(), Some("FIP"));
 
@@ -1345,20 +1304,24 @@ mod tests {
     async fn a_transient_status_is_counted_as_verbatim_too() {
         // I-5 (task 7 review): the counter used to increment only under
         // `if !transient`, so a transient verbatim status — "EMPTY PRESET",
-        // the one this fleet actually ships — could stay un-migrated
-        // forever without the counter ever seeing it. `decide_status_text`
-        // is now called from both branches; this proves the transient one
-        // actually counts, isolated from `a_status_counts_as_verbatim_only_
-        // when_it_actually_is_one`, which only ever sends permanent frames.
+        // the one this fleet actually ships — could stay unseen by it
+        // forever. `decide_status_text` is now called from both branches;
+        // this proves the transient one actually counts, isolated from
+        // `a_status_counts_as_verbatim_only_when_it_actually_is_one`, which
+        // only ever sends permanent frames.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         core.handle_source_update(
             "radio",
-            SourceUpdate { transient: true, status: Some("EMPTY PRESET".into()), ..Default::default() },
+            SourceUpdate {
+                transient: true,
+                status_text: Some(Text::Verbatim("EMPTY PRESET".into())),
+                ..Default::default()
+            },
         );
         assert_eq!(
             core.verbatim_status_count("radio"),
             1,
-            "a transient status falling back to verbatim must count, exactly like a permanent one"
+            "an explicit transient verbatim status must count, exactly like a permanent one"
         );
     }
 
@@ -1399,11 +1362,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_status_counts_as_verbatim_only_when_it_actually_is_one() {
-        // [MUTATION] barrier 4 of task 7: one branch per operand of the
-        // discriminating condition (`matches!(self.source_status,
-        // Some(Text::Verbatim(_)))`) — a `Keyed` status must not count, and
-        // both roads that produce a `Verbatim` one (the legacy `status`
-        // fallback, and a producer asking for it explicitly) must.
+        // [MUTATION] barrier 4 of task 7, updated for task 11's removal of
+        // the legacy `status` fallback: one branch per operand of the
+        // discriminating condition (`matches!(status_text,
+        // Some(Text::Verbatim(_)))`) — a `Keyed` status must not count, an
+        // explicit `Verbatim` one must.
         let (mut core, _pc, _sc, _rx, _d) = setup();
 
         core.handle_source_update(
@@ -1414,15 +1377,6 @@ mod tests {
             },
         );
         assert_eq!(core.verbatim_status_count("radio"), 0, "a keyed status is not verbatim");
-
-        let mut legacy = bare_update();
-        legacy.status = Some("NO DISC".into());
-        core.handle_source_update("radio", legacy);
-        assert_eq!(
-            core.verbatim_status_count("radio"),
-            1,
-            "a producer that has not migrated yet falls back to verbatim"
-        );
 
         core.handle_source_update(
             "cd",
@@ -1444,8 +1398,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(core.verbatim_status_count("cd"), 1, "an explicit verbatim status counts too");
-        assert_eq!(core.total_verbatim_status_count(), 2);
+        assert_eq!(core.verbatim_status_count("cd"), 1, "an explicit verbatim status counts");
+        assert_eq!(core.total_verbatim_status_count(), 1);
     }
 
     #[tokio::test]
@@ -1458,11 +1412,12 @@ mod tests {
         //
         // So the production change that would make this fail is taking
         // `cover_thumb` out of `carries_a_fact`: the frame would fall through
-        // the guard, reach `self.source_status = status.clone()` with
-        // `status` at `None`, and blank "NO DISC" off the console and the
-        // SPA until the next command. That is the historical defect the early
-        // return was installed to fix, for `preset_count` then for `presets`,
-        // and it is observable here without a network or a cover in sight.
+        // the guard, reach `self.source_status = self.decide_status_text(...)`
+        // with `status_text` at `None`, and blank "NO DISC" off the console
+        // and the SPA until the next command. That is the historical defect
+        // the early return was installed to fix, for `preset_count` then for
+        // `presets`, and it is observable here without a network or a cover
+        // in sight.
         //
         // A lone thumbnail is applied to nothing (`apply_source_cover` needs
         // the cover it describes), which is exactly why this test is written
@@ -1470,7 +1425,7 @@ mod tests {
         // to keep the frame from doing damage on its way to being ignored.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let mut permanent = bare_update();
-        permanent.status = Some("NO DISC".into());
+        permanent.status_text = Some(Text::Verbatim("NO DISC".into()));
         core.handle_source_update("radio", permanent);
         assert_eq!(core.player_state().status.as_deref(), Some("NO DISC"));
 
@@ -1493,11 +1448,11 @@ mod tests {
         // status must reappear once the deadline passes.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let mut permanent = bare_update();
-        permanent.status = Some("FIP".into());
+        permanent.status_text = Some(Text::Verbatim("FIP".into()));
         core.handle_source_update("radio", permanent);
 
         let mut ephemeral = bare_update();
-        ephemeral.status = Some("EMPTY PRESET".into());
+        ephemeral.status_text = Some(Text::Verbatim("EMPTY PRESET".into()));
         ephemeral.transient = true;
         core.handle_source_update("radio", ephemeral);
         assert_eq!(
@@ -1525,7 +1480,7 @@ mod tests {
         // would have cleared it for lack of one.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let mut permanent = bare_update();
-        permanent.status = Some("6 FILES".into());
+        permanent.status_text = Some(Text::Verbatim("6 FILES".into()));
         core.handle_source_update("radio", permanent);
         assert_eq!(core.player_state().status.as_deref(), Some("6 FILES"));
 
@@ -1579,7 +1534,7 @@ mod tests {
         // nor status. Three merged fields, no view recomposition.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let mut permanent = bare_update();
-        permanent.status = Some("6 FILES".into());
+        permanent.status_text = Some(Text::Verbatim("6 FILES".into()));
         core.handle_source_update("radio", permanent);
 
         let mut notice = bare_update();
@@ -1601,7 +1556,7 @@ mod tests {
         // asking a source for its sources_catalog would blank its status.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let mut permanent = bare_update();
-        permanent.status = Some("NO DISC".into());
+        permanent.status_text = Some(Text::Verbatim("NO DISC".into()));
         core.handle_source_update("radio", permanent);
 
         core.handle_source_update("radio", with_presets(vec![preset_of(1, "FIP")]));
@@ -1657,7 +1612,7 @@ mod tests {
     fn the_core_and_the_appstate_really_share_the_same_arc() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
         let wiring = Wiring {
             sources: HashMap::new(),
             persisted: PersistedState::default(),

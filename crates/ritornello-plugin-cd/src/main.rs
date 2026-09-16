@@ -1183,7 +1183,6 @@ impl CdSource {
             // The cd plugin never names a preset (see `SourceMessage::preset_name`).
             preset_name: issue.preset_name,
             // Same status logic as any other frame: presence flips it.
-            status: issue.status,
             status_text: issue.status_text,
             // The cd never enumerates named presets: a track has no name
             // without a database. `list_presets` keeps the default empty list,
@@ -2396,11 +2395,11 @@ mod tests {
         // task 8): the plugin used to resolve its own status into a
         // finished string through a `Catalog` it kept in step with
         // `set_locale` — a method that never re-emitted anything on its
-        // own, which is the exact "NO DISC" trap `core::sources`'s
-        // `current_locale` comment names as already fallen into. Fed from
-        // the event (a disc presence change on `presence_rx`), not through
-        // a direct call to `issue()`: this is the frame the core actually
-        // receives, not merely the logic that builds it.
+        // own, the exact "NO DISC" trap a relaunched plugin used to fall
+        // into for lack of a language. Fed from the event (a disc presence
+        // change on `presence_rx`), not through a direct call to `issue()`:
+        // this is the frame the core actually receives, not merely the
+        // logic that builds it.
         let (mut source, presence_tx, _toc_tx) = source_with_channels();
         source.present = false;
         presence_tx.send(true).await.unwrap();
@@ -2410,7 +2409,6 @@ mod tests {
             Some(Text::Keyed { key: "cd_audio".into(), params: HashMap::new() }),
             "the frame must carry a key for the core to resolve, not a finished string"
         );
-        assert_eq!(n.status, None, "nothing is left here to resolve the legacy field with");
     }
 
     #[tokio::test]

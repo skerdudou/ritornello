@@ -362,7 +362,7 @@ mod tests {
         // if it keeps (in practice it does not) declaring one.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let mut update = bare_update();
-        update.status = Some("FIP".into());
+        update.status_text = Some(Text::Verbatim("FIP".into()));
         core.handle_source_update("radio", update);
         assert_eq!(core.player_state().status.as_deref(), Some("FIP"));
 

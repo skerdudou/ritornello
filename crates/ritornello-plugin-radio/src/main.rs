@@ -329,7 +329,6 @@ mod tests {
             Some(Text::Keyed { key: "empty_preset".into(), params: HashMap::new() }),
             "the frame must carry a key for the core to resolve, not a finished string"
         );
-        assert_eq!(outcome.status, None, "nothing is left here to resolve the legacy field with");
     }
 
     #[test]

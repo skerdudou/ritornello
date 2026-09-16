@@ -1680,7 +1680,7 @@ mod tests {
         assert_eq!(n.preset, Some(2), "the number must follow the track being listened to");
         assert!(n.preset_name.is_some(), "and the name with it");
         assert!(n.identity.is_none(), "what is playing must not be redeclared");
-        assert!(n.status.is_none(), "nor the status touched");
+        assert!(n.status_text.is_none(), "nor the status touched");
         // The names travel with the count: without them, the grid would keep
         // the previous titles under the new numbers — worse than no title.
         assert_eq!(
@@ -2011,7 +2011,6 @@ mod tests {
             Some(Text::Keyed { key: "no_playlist".into(), params: HashMap::new() }),
             "the frame must carry a key for the core to resolve, not a finished string"
         );
-        assert_eq!(out.status, None, "nothing is left here to resolve the legacy field with");
     }
 
     #[tokio::test]
