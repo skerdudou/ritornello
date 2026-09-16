@@ -38,11 +38,37 @@ import { pathToFileURL } from 'node:url'
  * Every rule below is instead something that cannot be true of a review that
  * did its job.
  */
-export function decide(messages, postedComments) {
+export function decide(messages, postedComments, { workflowChanged = false } = {}) {
+  const usable = Array.isArray(messages) && messages.length > 0
+
+  // **The one refusal that is not a failure.** `claude-code-action` validates
+  // server-side that the running workflow file is byte-identical to the
+  // default branch's copy, and skips without invoking a model when it is not
+  // -- so a pull request that edits this very workflow can never be reviewed
+  // by it. Measured on PR #36, the one that introduced this file:
+  // "Skipping action due to workflow validation".
+  //
+  // Reddening that would be the guard crying wolf on the one case where the
+  // refusal is expected, documented and unavoidable, and a guard that cries
+  // wolf gets switched off. It is still reported -- silence is what this file
+  // exists to end -- but it does not claim a fault.
+  //
+  // It is deliberately narrow: only when there is no usable log at all. A
+  // review that DID run is judged on what it did, whatever the workflow diff
+  // says, so this cannot become a way to land an unreviewed change by
+  // touching the file.
+  if (workflowChanged && !usable) {
+    return {
+      verdict: 'skipped',
+      reason: 'this pull request changes the review workflow itself, which the action refuses to run; it will be reviewed once this lands on the default branch',
+      stats: null,
+    }
+  }
+
   // Fail closed on a shape this does not recognise. An unreadable log is not
   // evidence of success, and treating it as one would restore exactly the
   // silence this file was written to end.
-  if (!Array.isArray(messages) || messages.length === 0) {
+  if (!usable) {
     return failed('the execution log is missing, empty, or not the array of SDK messages this reads')
   }
 
@@ -127,6 +153,10 @@ export function comment(decision) {
     lines.push('Reviewed this change and found nothing to raise.')
   } else if (decision.verdict === 'findings') {
     lines.push(`Reviewed this change and left ${decision.stats.postedComments} comment(s) above.`)
+  } else if (decision.verdict === 'skipped') {
+    lines.push('Not reviewed: this pull request changes the review workflow itself.')
+    lines.push('')
+    lines.push('The action refuses to run a workflow file that differs from the default branch, so no review is possible here. It will run again on the next pull request once this lands.')
   } else {
     lines.push('**This review did not run to completion, so this pull request has not been reviewed.**')
     lines.push('')
@@ -146,7 +176,7 @@ export function comment(decision) {
 // Prints the comment body on stdout, writes `verdict` and `reason` to
 // GITHUB_OUTPUT, and exits 1 only on `failed` -- which is what reddens the job.
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  const [file, countArg] = process.argv.slice(2)
+  const [file, countArg, workflowChangedArg] = process.argv.slice(2)
 
   let messages = null
   try {
@@ -165,7 +195,11 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     process.exit(2)
   }
 
-  const decision = decide(messages, count)
+  // Only the literal `true` enables the skip. Anything else -- an empty
+  // argument, a typo, a shell that expanded nothing -- must leave the strict
+  // path in force, because this flag is the one input that can turn a red
+  // verdict green.
+  const decision = decide(messages, count, { workflowChanged: workflowChangedArg === 'true' })
   console.log(comment(decision))
   if (process.env.GITHUB_OUTPUT) {
     appendFileSync(process.env.GITHUB_OUTPUT, `verdict=${decision.verdict}\n`)

@@ -63,6 +63,32 @@ jobs:
           set -euo pipefail
           echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
+      # **Does this pull request edit the workflow the action is about to
+      # validate?** The action compares the running file against the default
+      # branch's copy byte for byte and skips when they differ -- so a pull
+      # request touching this file can never be reviewed, and reddening it
+      # would be a permanent false alarm on exactly the changes that need
+      # care. Measured on PR #36: "Skipping action due to workflow
+      # validation", no model invoked.
+      #
+      # Computed here rather than read out of the action's log: a warning
+      # string is not an interface, and `git diff` against the default branch
+      # is the same question the server asks.
+      - name: Does this pull request change the review workflow itself?
+        id: selfchange
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$DEFAULT_BRANCH"
+          if git diff --quiet FETCH_HEAD -- .github/workflows/claude-code-review.yml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "This pull request edits the review workflow, so the action will refuse to run."
+          fi
+
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
@@ -107,6 +133,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           SINCE: ${{ steps.since.outputs.at }}
           EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
+          WORKFLOW_CHANGED: ${{ steps.selfchange.outputs.changed }}
         run: |
           set -euo pipefail
 
@@ -143,7 +170,7 @@ jobs:
           # Posting the verdict is the whole point; reddening the job comes
           # after it, never instead of it.
           status=0
-          node .github/scripts/review-verdict.mjs "${EXECUTION_FILE:-}" "$count" > verdict.md || status=$?
+          node .github/scripts/review-verdict.mjs "${EXECUTION_FILE:-}" "$count" "${WORKFLOW_CHANGED:-false}" > verdict.md || status=$?
 
           # Exit 2 is a usage error: the script wrote its complaint to stderr
           # and nothing to stdout. An empty body is a 422 from the comments

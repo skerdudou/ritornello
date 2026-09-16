@@ -1,6 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { writeFileSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { decide, comment } from './review-verdict.mjs'
+
+const SCRIPT = fileURLToPath(new URL('./review-verdict.mjs', import.meta.url))
 
 // Every assertion below is written against ONE mutation of a log that is
 // otherwise healthy, so a rule that stops applying is a failure here rather
@@ -165,6 +172,106 @@ test('missing numeric totals read as zero rather than NaN', () => {
   assert.equal(d.stats.turns, 0)
   assert.equal(d.stats.costUsd, 0)
   assert.equal(d.verdict, 'clean', 'absent totals are not themselves a failure')
+})
+
+// --- The one refusal that is not a failure ----------------------------------
+
+test('a pull request that edits the review workflow is skipped, not failed', () => {
+  // The action validates the workflow file against the default branch and
+  // skips without invoking a model, so there is no log at all. Measured on
+  // PR #36.
+  const d = decide(null, 0, { workflowChanged: true })
+  assert.equal(d.verdict, 'skipped')
+  assert.match(d.reason, /changes the review workflow itself/)
+})
+
+test('the same pull request without the flag still fails', () => {
+  // The pair that proves the flag is what does the work, and not the empty
+  // log reading as benign on its own.
+  assert.equal(decide(null, 0).verdict, 'failed')
+  assert.equal(decide(null, 0, { workflowChanged: false }).verdict, 'failed')
+})
+
+test('the skip cannot launder a review that ran badly', () => {
+  // **The escape hatch this must not become.** If touching the workflow file
+  // excused any verdict, an unreviewed change would land green by editing one
+  // comment in the YAML. The skip is narrow on purpose: it applies only when
+  // there is no usable log, so a run that DID produce one is judged on what
+  // it did whatever the workflow diff says.
+  const changed = { workflowChanged: true }
+  assert.equal(decide(healthyLog({ denials: 4 }), 0, changed).verdict, 'failed')
+  assert.equal(decide(healthyLog({ subagents: 0 }), 0, changed).verdict, 'failed')
+  assert.equal(decide(healthyLog({ isError: true }), 0, changed).verdict, 'failed')
+  assert.equal(decide(healthyLog().filter((m) => m.type !== 'result'), 0, changed).verdict, 'failed')
+})
+
+test('a skip is not a review, and says so rather than claiming a clean bill', () => {
+  const body = comment(decide(null, 0, { workflowChanged: true }))
+  assert.match(body, /Not reviewed/)
+  assert.doesNotMatch(body, /found nothing to raise/)
+  assert.doesNotMatch(body, /undefined/)
+})
+
+// --- The command line, because the exit code is what reddens the job --------
+//
+// `decide` being right is not enough: the workflow reads an exit code and a
+// file, and the argument that turns a red verdict green is a shell variable
+// that can arrive empty.
+
+/** Run the script as the workflow does. Returns `{ status, stdout }`. */
+function runCli(log, count, workflowChanged) {
+  const dir = mkdtempSync(join(tmpdir(), 'review-verdict-'))
+  let file = ''
+  if (log !== null) {
+    file = join(dir, 'execution.json')
+    writeFileSync(file, JSON.stringify(log))
+  }
+  const args = [SCRIPT, file, String(count)]
+  if (workflowChanged !== undefined) args.push(workflowChanged)
+  try {
+    return { status: 0, stdout: execFileSync('node', args, { encoding: 'utf8' }) }
+  } catch (error) {
+    return { status: error.status, stdout: error.stdout ?? '' }
+  }
+}
+
+test('a clean review exits 0 and a broken one exits 1', () => {
+  assert.equal(runCli(healthyLog(), 0).status, 0)
+  assert.equal(runCli(healthyLog({ subagents: 0 }), 0).status, 1)
+  assert.equal(runCli(null, 0).status, 1, 'a missing execution file reddens the job')
+})
+
+test('only the literal "true" enables the workflow-change skip', () => {
+  // The flag reaches the script as `"${WORKFLOW_CHANGED:-false}"`, and an
+  // unset step output, a typo or a shell that expanded nothing must all leave
+  // the strict path in force. A loose test here -- `!== 'false'`, or a
+  // truthiness check -- would turn every one of those into a green job on an
+  // unreviewed pull request.
+  assert.equal(runCli(null, 0, 'true').status, 0, 'the real skip is green')
+  for (const value of ['false', '', 'TRUE', 'True', '1', 'yes', 'null', undefined]) {
+    assert.equal(runCli(null, 0, value).status, 1, `\`${value}\` must not enable the skip`)
+  }
+})
+
+test('the command prints the comment body it is asked for', () => {
+  assert.match(runCli(healthyLog(), 0).stdout, /Reviewed this change and found nothing to raise/)
+  assert.match(runCli(null, 0, 'true').stdout, /Not reviewed/)
+})
+
+test('a missing comment count is a usage error, not a silent zero', () => {
+  // `Number('')` is 0, a trap this repository has recorded before. An absent
+  // count reading as "no comments" would report a clean review it never
+  // measured.
+  const dir = mkdtempSync(join(tmpdir(), 'review-verdict-'))
+  const file = join(dir, 'execution.json')
+  writeFileSync(file, JSON.stringify(healthyLog()))
+  let status = 0
+  try {
+    execFileSync('node', [SCRIPT, file, ''], { encoding: 'utf8', stdio: 'pipe' })
+  } catch (error) {
+    status = error.status
+  }
+  assert.equal(status, 2)
 })
 
 // --- The comment ------------------------------------------------------------
