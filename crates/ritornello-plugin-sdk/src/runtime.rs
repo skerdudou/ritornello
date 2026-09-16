@@ -897,6 +897,166 @@ mod tests {
         );
     }
 
+    /// The string right after `marker`, if it starts (after leading
+    /// whitespace) with a `"`-delimited literal — the text between that
+    /// quote and the next one. `None` for anything else immediately
+    /// following `marker`: a variable, a closing paren, another
+    /// expression. This is what tells `self.text_with("cap", n)`'s real
+    /// key apart from `self.text_with(computed_key, n)`'s — the latter
+    /// has nothing for a static scan to check.
+    fn quoted_literal(s: &str) -> Option<&str> {
+        let s = s.trim_start().strip_prefix('"')?;
+        let end = s.find('"')?;
+        Some(&s[..end])
+    }
+
+    /// A catalog-key candidate on one **production** line of a migrated
+    /// plugin's source, or `None`.
+    ///
+    /// Tried against a fixed set of markers this chantier's own producers
+    /// actually use, in order, the first successful match winning:
+    /// - `key:` — `Text::Keyed { key: "…".into(), .. }`'s own field,
+    ///   covering every direct struct literal regardless of which line of
+    ///   a (commonly multi-line) literal the field sits on.
+    /// - `.text(`, `.text_with(`, `.keyed(`, `keyed(` — the small
+    ///   `fn text(&self, key: &str)` / `fn text_with(&self, key: &str,
+    ///   param: &str, value: &str)` / `fn keyed(&self, key: &str)` helpers
+    ///   (as a method, `.text(`/`.text_with(`/`.keyed(`) and free
+    ///   functions of the same shape (`roots.rs`'s and `store.rs`'s own
+    ///   `keyed(key, ..)`, no receiver) that every migrated plugin's
+    ///   `admin.rs` (or the error type it delegates to) uses to build a
+    ///   `Text::Keyed` without repeating the struct literal at each call
+    ///   site.
+    /// - `Err(`, `|_| ` — `plugin-mpd`'s `Config::validate`/`save`
+    ///   (`config.rs`) return a bare catalog key as `Result<(), String>`,
+    ///   one level below where `admin.rs` ever constructs a `Text`: `Err(
+    ///   "listen_empty".into())` and `.map_err(|_| "save_failed"
+    ///   .to_string())`.
+    ///
+    /// A match on a marker with nothing quoted immediately after it (a
+    /// variable, a closing paren, a second parameter that happens to be a
+    /// string too, reached only past the intended key) is not a match:
+    /// `quoted_literal` requires the `"` to be the very next thing, so
+    /// `self.text_with("too_many_tracks", "cap", …)`'s **second** string
+    /// (`"cap"`, a parameter *name*, never a catalog key) is never read —
+    /// the scan stops at the first closing quote of the first one.
+    fn key_literal_on_line(line: &str) -> Option<&str> {
+        const MARKERS: &[&str] =
+            &["key:", ".text(", ".text_with(", ".keyed(", "keyed(", "Err(", "|_| "];
+        for marker in MARKERS {
+            if let Some(pos) = line.find(marker)
+                && let Some(key) = quoted_literal(&line[pos + marker.len()..])
+                // A plausible catalog key only: lowercase snake_case. Guards
+                // against a marker match whose quoted text is not a key at
+                // all — cheap insurance, no such case is known to exist
+                // today, but a scan this generic should not trust its own
+                // markers blindly.
+                && !key.is_empty()
+                && key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                && key.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            {
+                return Some(key);
+            }
+        }
+        None
+    }
+
+    /// I-2 (task 8-10 review, language-packs chantier): roughly thirty
+    /// bare key strings are scattered across the six migrated plugins'
+    /// production code — `Text::Keyed { key: "…", .. }` struct literals,
+    /// the `text`/`text_with`/`keyed` helpers built to avoid repeating
+    /// that literal, and `plugin-mpd`'s `Config::save`/`validate`, which
+    /// hand back a catalog key as a bare `String`. None of that was
+    /// guarded: `resolve_admin_text` (`ritornello-core`) and
+    /// `Core::resolve_text` both fall back to the bare key when the
+    /// registry has nothing registered under it — a typo in any of those
+    /// thirty reaches the browser raw, with nothing failing. That is
+    /// exactly the failure this whole chantier exists to end, arriving
+    /// back through the door tasks 8-10 just built.
+    ///
+    /// This is the static counterpart to the per-error-enum
+    /// `every_refusal_names_a_key_that_exists_in_the_embedded_catalog`-style
+    /// tests each migrated plugin already carries: those prove one enum's
+    /// `.text()` resolves to known keys by **calling** it: they cannot
+    /// see a literal that no code path in the current test suite happens
+    /// to exercise. This one reads every migrated plugin's committed
+    /// source instead, the same move `verbatim_has_no_producer_outside_the_files_plugin`
+    /// above already makes and for the same reason: nothing here links
+    /// any plugin binary, so no test can observe what a plugin actually
+    /// constructs by running it — only by reading what it says.
+    ///
+    /// **The plugin list and each plugin's known keys are derived, not
+    /// hardcoded.** The six migrated plugins are exactly the sibling
+    /// directories of `deploy/locales` other than `core` and `common` —
+    /// the same source `every_plugin_with_an_embedded_english_pack_announces_it`
+    /// above already reads, for the same "one directory listing, not two
+    /// lists that can drift" reason. Each plugin's known keys are parsed
+    /// straight from its own embedded `src/locales/en.toml` with
+    /// `ritornello_i18n::try_parse` — the exact same parse
+    /// `Registry::insert_announced` performs on the real announcement at
+    /// runtime, so a key this test accepts is a key the running core
+    /// would actually resolve.
+    ///
+    /// **Only the production half of each source counts.** Every `.rs`
+    /// file under a plugin's `src/` (not just `main.rs`: the error types
+    /// this task's `.text()` methods live on are as often in `config.rs`,
+    /// `bindings.rs`, `presets.rs`, `roots.rs`, `scan.rs`, `store.rs`,
+    /// `smb.rs`) is truncated at its own last `#[cfg(test)]` before
+    /// scanning, mirroring the guard above: a key literal surviving only
+    /// inside a test module — including a deliberately wrong one used to
+    /// prove a mismatch fails — must not be able to satisfy or trip this
+    /// test.
+    ///
+    /// **[MUTATION]**: misspell one key literal in one plugin's
+    /// production source (e.g. `"cd_audi"` for `"cd_audio"` in
+    /// `plugin-cd/src/main.rs`) — this test fails and names that file,
+    /// that line and that key.
+    #[test]
+    fn every_key_literal_names_a_key_that_exists_in_its_plugins_catalog() {
+        let sdk_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let locales_dir = sdk_manifest_dir.join("../../deploy/locales");
+        let mut plugins: Vec<String> = std::fs::read_dir(&locales_dir)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", locales_dir.display()))
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_type().unwrap().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "core" && name != "common")
+            .collect();
+        plugins.sort();
+        assert!(!plugins.is_empty(), "{} must list at least one plugin pack", locales_dir.display());
+
+        let mut offenders = Vec::new();
+        for plugin in plugins {
+            let plugin_crate = format!("ritornello-plugin-{plugin}");
+            let crate_dir = sdk_manifest_dir.join("..").join(&plugin_crate);
+            let en_path = crate_dir.join("src/locales/en.toml");
+            let en_source = std::fs::read_to_string(&en_path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", en_path.display()));
+            let known = ritornello_i18n::try_parse(&en_source)
+                .unwrap_or_else(|e| panic!("{}: invalid TOML: {e}", en_path.display()));
+
+            for path in rust_sources(&crate_dir.join("src")) {
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+                let production = match source.rfind("#[cfg(test)]") {
+                    Some(idx) => &source[..idx],
+                    None => &source[..],
+                };
+                for (n, line) in production.lines().enumerate() {
+                    if let Some(key) = key_literal_on_line(line)
+                        && !known.contains_key(key)
+                    {
+                        offenders.push(format!("{}:{}: {key:?}", path.display(), n + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a key literal names no entry in its plugin's embedded English catalog: {offenders:?}"
+        );
+    }
+
     /// **[MUTATION]** Barrier 6 of the spec: a plugin declaring text whose
     /// English pack is not even valid TOML must be refused at build time,
     /// before a socket is bound — not left to fail silently on screen.

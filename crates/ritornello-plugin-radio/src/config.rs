@@ -37,9 +37,11 @@ impl ValidationError {
     /// first, `{url}` second — so a station **name** that happened to
     /// contain the literal text `{url}` got rewritten by the second call,
     /// which cannot tell "a `{url}` the template put there" from "a `{url}`
-    /// that arrived inside `name`" (verified: see
-    /// `bad_url_names_the_station_and_the_url_even_when_the_name_contains_the_literal_placeholder`,
-    /// task 9's report). This hand-written chain is gone — both parameters
+    /// that arrived inside `name`". Verified by feeding exactly that name
+    /// (`"my station {url}"`) through this method and asserting the `name`
+    /// parameter comes back unmodified — see
+    /// `bad_url_carries_the_name_unmodified_even_when_it_contains_the_url_placeholder_text`,
+    /// below in this file. This hand-written chain is gone — both parameters
     /// now travel in one map, resolved by `ritornello_core::resolve_text`.
     /// **That resolver still substitutes params one `.replace()` at a time**
     /// (over a `HashMap`, so in an unspecified order), so the same class of
