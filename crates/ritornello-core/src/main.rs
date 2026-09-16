@@ -1686,8 +1686,12 @@ async fn main() -> Result<()> {
     // seeded with the core's own module and `common`'s, then grown by one
     // `insert_announced` per plugin announcement (initial wiring loop and
     // `hotplug`, below) and shrunk by `forget` (`admin::forget_page`) as
-    // plugins disconnect — see `crate::i18n::Shared`'s doc.
-    let registry: i18n::Shared = Arc::new(RwLock::new(i18n::seeded_registry(locales_root.clone())));
+    // plugins disconnect — see `crate::i18n::Shared`'s doc. `locales_root`'s
+    // only other reader, `AppState.locales_root`, was removed once every
+    // route that used it moved onto this same registry (`Registry::
+    // core_languages` — task 12) instead of a second, independent disk
+    // read, so this is now its last use.
+    let registry: i18n::Shared = Arc::new(RwLock::new(i18n::seeded_registry(locales_root)));
     // "en" stands in for the fallback language until a device has a real one
     // to pass (a later task's setting); see `i18n::core_catalog`'s doc.
     let catalog = Arc::new(RwLock::new(i18n::core_catalog(
@@ -2322,7 +2326,6 @@ async fn main() -> Result<()> {
             registry: registry.clone(),
             locale_current: locale_current.clone(),
             locale_tx: locale_tx.clone(),
-            locales_root: locales_root.clone(),
             admin_backends: admin_backends.clone(),
             admin_assets: admin_assets.clone(),
             session: session.clone(),

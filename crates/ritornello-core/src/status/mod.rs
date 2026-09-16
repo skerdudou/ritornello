@@ -20,10 +20,12 @@ mod logs;
 mod locales;
 use locales::{i18n_json, locale_json, locale_put};
 // Re-exported for `admin.rs`: the authority on an acceptable language code
-// (`valid_locale`) and on what is actually installed (`list_locales`) lives
-// here, next to `/api/locale` which they already gate — `admin_i18n` reuses
-// both rather than inventing a second grammar.
-pub(crate) use locales::{list_locales, valid_locale};
+// lives here, next to `/api/locale` which it already gates — `admin_i18n`
+// reuses it rather than inventing a second grammar. What is actually
+// installed is `Registry::core_languages` (task 12): a registry accessor,
+// not a `locales` function, since the answer must come from the same
+// swept snapshot `chain_for` resolves against — see that method's own doc.
+pub(crate) use locales::valid_locale;
 use plugin_status::{plugin_binary_delete, plugin_delete, plugin_enabled_put, plugin_move_post};
 pub use plugin_status::{
     mark_plugin_disconnected, replace_plugin_lines, resequence_plugin_lines, PluginAction,
@@ -80,7 +82,6 @@ pub struct AppState {
     pub registry: crate::i18n::Shared,
     pub locale_current: Arc<RwLock<Option<String>>>,
     pub locale_tx: mpsc::Sender<String>,
-    pub locales_root: std::path::PathBuf,
     /// Reachable admin pages. Under a lock: a plugin that announces itself
     /// late must see its page appear without restarting the core.
     pub admin_backends: crate::admin::AdminBackends,
@@ -300,7 +301,13 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
     // advertises here — enforcing it here is what makes that true rather than
     // merely asserted. Content-identical: `Registry::chain_for` already
     // falls back to embedded English for an uninstalled language.
-    let installed = list_locales(&state.locales_root);
+    //
+    // Read from the registry's already-swept snapshot
+    // (`Registry::core_languages`), not a live `read_dir` — task 12's review
+    // ("F-2") named this as the second of two sites disagreeing with
+    // `chain_for` about which languages exist; `locale_json` (task 12) had
+    // the same defect and was fixed the same way.
+    let installed = state.registry.read().await.core_languages();
     let locale = state
         .locale_current
         .read()
@@ -514,7 +521,6 @@ pub(crate) mod tests_support {
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
-            locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             session: "test-session".to_string(),
@@ -563,7 +569,6 @@ pub(crate) mod tests_support {
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
-            locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             session: "test-session".to_string(),
@@ -614,7 +619,6 @@ pub(crate) mod tests_support {
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
-            locales_root: std::path::PathBuf::from("/nonexistent"),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             session: "test-session".to_string(),
@@ -669,7 +673,6 @@ pub(crate) mod tests_support {
             registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(dir.path().to_path_buf()))),
             locale_current: Arc::new(tokio::sync::RwLock::new(Some("fr".to_string()))),
             locale_tx,
-            locales_root: dir.path().to_path_buf(),
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
             session: "test-session".to_string(),

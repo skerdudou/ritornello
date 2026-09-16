@@ -160,11 +160,17 @@ impl Registry {
     /// leaving it out because nothing was ever confided (see
     /// `Announcement.catalog`'s own doc, in `ritornello-proto`).
     ///
-    /// Unread by this crate's own production code today —
-    /// `ritornello-core` has no `lib` target, so a method only its tests
-    /// call reads as dead code — ahead of its production consumer (Task
-    /// 12's completeness count), the same situation `Registry::forget` was
-    /// in before this fix round wired it into `admin::forget_page`.
+    /// Unread by this crate's own production code — `ritornello-core` has
+    /// no `lib` target, so a method only its tests call reads as dead code.
+    /// **Not** the accessor task 12's completeness count ended up using:
+    /// `Registry::modules_with_text` needed the same `None`-vs-`Some({})`
+    /// distinction this method draws, but reads `self.announced` directly
+    /// rather than calling through here, one entry at a time, while
+    /// filtering by name — so this stayed a test-only accessor rather than
+    /// gaining the production caller an earlier version of this doc
+    /// predicted. Kept for what it still proves in `tests` (see
+    /// `announced_module_distinguishes_never_inserted_from_inserted_empty`),
+    /// not for a caller that does not exist.
     #[allow(dead_code)]
     pub fn announced_module(&self, module: &str) -> Option<&ModuleLayers> {
         self.announced.get(module)
@@ -251,6 +257,43 @@ impl Registry {
                 merged.extend(l.as_map().clone());
             }
             out.insert(lang.to_string(), Layer::from_map(merged));
+        }
+        out
+    }
+
+    /// The core's own installed languages — `en` (always) plus every
+    /// language `core`'s **already-swept** disk tier carries — for the
+    /// fallback candidate list (`status::locales::LocaleResponse::
+    /// fallback_candidates`): the owner's arbitration reserves a fallback
+    /// to what is guaranteed to resolve everywhere, never a plugin-only
+    /// language, which is exactly the narrower set `modules_with_text`'s
+    /// union is not.
+    ///
+    /// Reads `self.disk` — the snapshot `Registry::sweep`/`resweep` already
+    /// built — rather than a live `std::fs::read_dir` of the pack root.
+    /// This replaced a route that read the two answers from two different
+    /// places: `locale_json` used to call a live, disk-reading
+    /// `list_locales` for `fallback_candidates` in the very same response
+    /// that built `locales`/`completeness` from this registry's swept
+    /// snapshot. The live read was not actually fresher in any way that
+    /// mattered — `Registry::chain_for`, what a chosen fallback would
+    /// *actually* resolve through, only ever sees post-sweep state — so the
+    /// two could disagree, and a device could be offered a fallback
+    /// candidate that silently did not resolve until the next sweep. Task
+    /// 12's review named this and its sibling call site in
+    /// `status::status_json` (task 12's own report, "F-1"/"F-2"); both now
+    /// read this one method instead.
+    ///
+    /// Only `core`'s module directory is consulted — never `common`'s, and
+    /// never the announced tier, which for `core` only ever contributes
+    /// `en` in the first place (`crate::i18n::core_module_layers`), already
+    /// covered by the unconditional prefix below.
+    pub fn core_languages(&self) -> Vec<String> {
+        let mut out = vec!["en".to_string()];
+        if let Some(core) = self.disk.get("core") {
+            let mut rest: Vec<&str> = core.languages().filter(|l| *l != "en").collect();
+            rest.sort_unstable();
+            out.extend(rest.into_iter().map(str::to_string));
         }
         out
     }
@@ -578,6 +621,26 @@ mod tests {
         assert_eq!(radio.layer("en").and_then(|l| l.get("play")), Some("own-play"));
     }
 
+    /// [MUTATION] The other half of `merge_with_common`'s documented
+    /// priority ("disk beats announced, within one language"), which
+    /// `modules_with_text_own_layer_wins_over_common_within_one_language`
+    /// above does not touch — that test only ever exercises the
+    /// own-vs-common axis, with both sides on the *announced* tier. A
+    /// silent reordering of the four-source array (`merge_with_common`'s
+    /// `for l in [...]`) that swapped `own_announced` and `own_disk` would
+    /// pass every other test in this file and still be caught by nothing
+    /// without this one.
+    #[test]
+    fn modules_with_text_own_disk_beats_own_announced_within_one_language() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/en.toml"), "play = \"disk-play\"\n").unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "announced-play")])]));
+        let radio = registry.modules_with_text().into_iter().find(|m| m.name() == "radio").unwrap();
+        assert_eq!(radio.layer("en").and_then(|l| l.get("play")), Some("disk-play"));
+    }
+
     #[test]
     fn modules_with_text_is_sorted_by_module_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -587,6 +650,55 @@ mod tests {
         registry.insert_announced("core", module_layers("core", &[("en", &[("k", "v")])]));
         let names: Vec<String> = registry.modules_with_text().into_iter().map(|m| m.name().to_string()).collect();
         assert_eq!(names, vec!["cd".to_string(), "core".to_string(), "radio".to_string()]);
+    }
+
+    // --- core_languages: the fallback candidate list (task 12's F-1/F-2) ---
+
+    #[test]
+    fn core_languages_always_includes_en_even_with_nothing_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::sweep(dir.path().to_path_buf());
+        assert_eq!(registry.core_languages(), vec!["en".to_string()]);
+    }
+
+    #[test]
+    fn core_languages_picks_up_a_swept_disk_pack_sorted_after_en() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(dir.path().join("core/nl.toml"), "play = \"Spelen\"\n").unwrap();
+        std::fs::write(dir.path().join("core/fr.toml"), "play = \"Lecture\"\n").unwrap();
+        let registry = Registry::sweep(dir.path().to_path_buf());
+        assert_eq!(registry.core_languages(), vec!["en".to_string(), "fr".to_string(), "nl".to_string()]);
+    }
+
+    #[test]
+    fn core_languages_ignores_a_plugin_only_language() {
+        // The narrower half of the union/fallback split: a language only
+        // "radio" translates must not leak into the fallback candidates,
+        // which the owner reserves to what the core itself ships.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/de.toml"), "play = \"Spielen\"\n").unwrap();
+        let registry = Registry::sweep(dir.path().to_path_buf());
+        assert_eq!(registry.core_languages(), vec!["en".to_string()]);
+    }
+
+    #[test]
+    fn core_languages_reads_the_swept_snapshot_not_a_live_directory() {
+        // Discriminating proof for the reason this method exists at all:
+        // a pack written to disk *after* the sweep must stay invisible
+        // until a resweep, exactly like `chain_for`'s own no-I/O guarantee
+        // — a fallback candidate list built from a live read could
+        // otherwise offer a language `chain_for` cannot resolve yet.
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::sweep(dir.path().to_path_buf());
+        std::fs::create_dir_all(dir.path().join("core")).unwrap();
+        std::fs::write(dir.path().join("core/de.toml"), "play = \"Spielen\"\n").unwrap();
+        assert_eq!(
+            registry.core_languages(),
+            vec!["en".to_string()],
+            "a pack written after the sweep must not appear before a resweep"
+        );
     }
 
     #[test]

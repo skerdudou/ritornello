@@ -2,31 +2,6 @@
 
 use super::*;
 
-/// Names of the available languages, from the file names of a `core/`
-/// directory: `en` (always) + each `<lang>.toml`. Pure function, testable,
-/// separated from disk access (like `audio_output::parse_device_list`).
-pub fn parse_available_locales(filenames: &[String]) -> Vec<String> {
-    let mut out = vec!["en".to_string()];
-    for f in filenames {
-        if let Some(stem) = f.strip_suffix(".toml")
-            && stem != "en" && !out.iter().any(|x| x == stem)
-        {
-            out.push(stem.to_string());
-        }
-    }
-    out
-}
-
-/// Core languages = `en` + the `<root>/core/*.toml` packs present.
-pub fn list_locales(root: &std::path::Path) -> Vec<String> {
-    let names: Vec<String> = std::fs::read_dir(root.join("core"))
-        .map(|rd| {
-            rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned())).collect()
-        })
-        .unwrap_or_default();
-    parse_available_locales(&names)
-}
-
 /// One candidate language's completeness, flattened from
 /// `ritornello_i18n::Coverage` for the wire: `complete` is the boolean the
 /// owner's display rule pivots on ("nothing shown for a complete language,
@@ -46,9 +21,9 @@ pub(super) struct LanguageCompleteness {
 pub(super) struct LocaleResponse {
     /// The **union** of every language at least one module — the core or a
     /// connected plugin — translates (task 12), not only the core's own
-    /// packs `list_locales` reports. A language a single third-party
-    /// plugin ships is in here even if the core has never heard of it: the
-    /// origin defect this chantier was opened to fix.
+    /// packs. A language a single third-party plugin ships is in here even
+    /// if the core has never heard of it: the origin defect this chantier
+    /// was opened to fix.
     locales: Vec<String>,
     current: Option<String>,
     /// Completeness for every language in `locales`, in the same order.
@@ -60,13 +35,26 @@ pub(super) struct LocaleResponse {
     /// 13 lands this reads the persisted value instead.
     fallback_current: String,
     /// Eligible fallback languages: the **core's own** installed set only
-    /// (`list_locales`), per the owner's arbitration — a fallback is
-    /// chosen among what is guaranteed to resolve everywhere, not among
-    /// every plugin's own languages. Never empty: `list_locales` always
-    /// includes `"en"`.
+    /// (`Registry::core_languages`), per the owner's arbitration — a
+    /// fallback is chosen among what is guaranteed to resolve everywhere,
+    /// not among every plugin's own languages. Never empty:
+    /// `core_languages` always includes `"en"`.
     fallback_candidates: Vec<String>,
 }
 
+/// Builds every field of `LocaleResponse` from **one** registry read guard,
+/// deliberately: `locales`/`completeness` and `fallback_candidates` used to
+/// be sourced from two different places — the registry's swept snapshot for
+/// the first two, a live `std::fs::read_dir` of the pack root for the third
+/// (`list_locales`, removed in the same change that added this comment —
+/// see task 12's review, "F-1"; `AppState.locales_root`, its only remaining
+/// reader, was removed with it). The live read was not actually more
+/// current in any way that mattered: `Registry::chain_for` — what a chosen
+/// fallback would *actually* resolve through — only ever sees post-sweep
+/// state, so a device could be offered a fallback candidate the registry
+/// could not yet resolve. `Registry::core_languages` answers from the same
+/// snapshot `modules_with_text` already reads here, so the three fields can
+/// never disagree about which languages exist.
 pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleResponse> {
     let registry = state.registry.read().await;
     let modules = registry.modules_with_text();
@@ -83,8 +71,8 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
             }
         })
         .collect();
+    let fallback_candidates = registry.core_languages();
     drop(registry);
-    let fallback_candidates = list_locales(&state.locales_root);
     let current = state.locale_current.read().await.clone();
     Json(LocaleResponse {
         locales,
@@ -150,12 +138,6 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::util::ServiceExt;
-
-    #[test]
-    fn parse_available_locales_prefixes_en_and_deduplicates() {
-        let names = vec!["fr.toml".to_string(), "en.toml".to_string(), "README.md".to_string()];
-        assert_eq!(parse_available_locales(&names), vec!["en".to_string(), "fr".to_string()]);
-    }
 
     #[tokio::test]
     async fn get_locale_lists_en_and_the_core_packs() {
@@ -236,8 +218,8 @@ mod tests {
     /// The regression this task was opened to fix: a language only a
     /// connected plugin translates must be in `locales` (the union), even
     /// though the core's own `core/` directory has never heard of it —
-    /// `list_locales` alone (the pre-task-12 shape of this route) would
-    /// have missed it entirely.
+    /// the core-only list this route reported before task 12 would have
+    /// missed it entirely.
     #[tokio::test]
     async fn get_locale_lists_a_language_only_a_plugin_translates() {
         let (state, _rx, _dir) = app_state_fr();

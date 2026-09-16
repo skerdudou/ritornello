@@ -264,11 +264,11 @@ pub struct CatalogQuery {
 /// `Registry::chain_for` performs no I/O and holds nothing extra per call —
 /// it reads tiers the registry already keeps in memory (see its own doc) —
 /// so there is nothing left to bound: any well-shaped `lang` costs one
-/// `HashMap` lookup, not a socket round trip, and membership in
-/// `list_locales` (the installed packs) is therefore no longer checked here
-/// either — it only ever existed to bound the cache this route no longer
-/// has. `chain_for` already answers gracefully, falling through to `en`,
-/// for a language nobody installed.
+/// `HashMap` lookup, not a socket round trip, and membership in the
+/// installed set is therefore no longer checked here either — it only ever
+/// existed to bound the cache this route no longer has. `chain_for` already
+/// answers gracefully, falling through to `en`, for a language nobody
+/// installed.
 ///
 /// `lang` absent means the core's own current interface language
 /// (`AppState.locale_current`, defaulting to `en` exactly like
@@ -421,9 +421,10 @@ mod tests {
         }
     }
 
-    /// Default rig: only `en` is "installed" (see `list_locales`'s fallback
-    /// on an absent `core/` directory), which is enough for every test that
-    /// does not itself exercise the installed-language bound.
+    /// Default rig: only `en` is "installed" (see
+    /// `Registry::core_languages`'s fallback on an absent `core/`
+    /// directory), which is enough for every test that does not itself
+    /// exercise the installed-language bound.
     fn state_with(fake: Fake) -> AppState {
         state_with_locales_root(fake, std::path::PathBuf::from("/nonexistent"))
     }
@@ -432,11 +433,14 @@ mod tests {
     /// than the always-present `en` to be "installed", or a real on-disk
     /// pack for a plugin module — see `two_languages_are_two_entries`.
     ///
-    /// The registry is swept from this same `locales_root`, exactly as
-    /// `main.rs` wires it (one `Arc<RwLock<Registry>>` built from the very
-    /// root `AppState.locales_root` also names): a plugin's on-disk pack
-    /// lives at `<locales_root>/<plugin>/<lang>.toml`, in the same tree as
-    /// `<locales_root>/core`.
+    /// The registry is swept from this root, exactly as `main.rs` wires it
+    /// (one `Arc<RwLock<Registry>>` built from the same root the process's
+    /// own `RITORNELLO_LOCALES` names): a plugin's on-disk pack lives at
+    /// `<locales_root>/<plugin>/<lang>.toml`, in the same tree as
+    /// `<locales_root>/core`. `AppState` itself no longer carries this path
+    /// separately — task 12 removed `AppState.locales_root`, its last
+    /// reader replaced by `Registry::core_languages`, which answers from
+    /// the swept snapshot instead of a second, independent disk read.
     fn state_with_locales_root(fake: Fake, locales_root: std::path::PathBuf) -> AppState {
         let (audio_tx, _rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
@@ -458,10 +462,9 @@ mod tests {
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(locales_root.clone()))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(locales_root))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
-            locales_root,
             admin_backends: Arc::new(tokio::sync::RwLock::new(backends)),
             admin_assets: Arc::new(Default::default()),
             session: "test-session".to_string(),
@@ -809,7 +812,7 @@ mod tests {
     #[tokio::test]
     async fn a_locale_outside_the_installed_set_is_still_served_from_the_registry() {
         // Deliberate behavior change (see `admin_i18n`'s doc): membership in
-        // `list_locales` existed only to bound `CatalogCache`, which is gone.
+        // the installed set existed only to bound `CatalogCache`, which is gone.
         // A well-shaped but uninstalled language is no longer refused — it
         // is resolved like any other, and `chain_for` falls through to `en`
         // (then the key itself) for a module or language it knows nothing
