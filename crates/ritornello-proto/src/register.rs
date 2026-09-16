@@ -381,7 +381,8 @@ mod tests {
 
     /// `None` and `Some({})` are two different facts and the wire must keep them
     /// apart: `None` is a binary predating this field, `Some({})` a component
-    /// that has no text at all (three plugins are in that case). Conflating them
+    /// that has no text at all (four plugins are in that case: `console`,
+    /// `nrj-metas`, `ouifm-metas`, `radiofrance-metas`). Conflating them
     /// would make the completeness denominator wrong and would rob the core of
     /// its only way to name an outdated binary.
     #[test]

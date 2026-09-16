@@ -666,42 +666,103 @@ mod tests {
     /// exists: `Runtime::texts` only refuses an empty or unparseable English
     /// layer for a plugin that *calls* it — a plugin that never calls it at
     /// all announces `Some({})` and passes every check above without a
-    /// complaint. That was this workspace's actual state right up to this
-    /// commit: all six plugins holding an embedded English pack (`cd`,
-    /// `files`, `generic-input`, `mpd`, `musicbrainz`, `radio`) built a
-    /// `Runtime` and never handed it their own `_EN` constant, so the core's
-    /// registry held no English layer for any of them and every key on
-    /// every one of their admin pages rendered as itself — `no_disc`, never
-    /// "No disc" — the moment task 5 started serving catalogues from the
-    /// registry instead of over IPC.
+    /// complaint. That was this workspace's actual state right up to task
+    /// 6's own commit: all six plugins holding an embedded English pack
+    /// (`cd`, `files`, `generic-input`, `mpd`, `musicbrainz`, `radio`) built
+    /// a `Runtime` and never handed it their own `_EN` constant, so the
+    /// core's registry held no English layer for any of them and every key
+    /// on every one of their admin pages rendered as itself — `no_disc`,
+    /// never "No disc" — the moment task 5 started serving catalogues from
+    /// the registry instead of over IPC.
     ///
     /// So this reads each shipped plugin's real, committed `main.rs` — the
     /// only place that fact lives — rather than asking the plugin anything:
     /// a plugin that regressed would still answer every question this SDK
-    /// could put to it.
+    /// could put to it. It cannot instead spawn the plugin's binary and
+    /// inspect what it announces over the register socket: `main()` binds
+    /// real resources (`cd` opens `/dev/sr0`, `mpd` binds TCP 6600, every
+    /// admin half binds a Unix socket) and blocks forever serving once
+    /// bound, and even a plugin willing to run as a subprocess cannot be
+    /// launched from here — `CARGO_BIN_EXE_*` is only ever set for the
+    /// *owning* crate's own integration tests, never for a sibling crate,
+    /// so there is no path from this SDK to "run `ritornello-plugin-cd` and
+    /// see what it announces". The alternative is six process-spawning
+    /// tests, one per plugin crate, each against a real socket and whatever
+    /// hardware `main()` touches before it gets to `Runtime::texts` — this
+    /// reads source instead.
+    ///
+    /// Two things keep that reading honest:
+    /// - **The plugin list is derived, not hardcoded.** It comes from
+    ///   `deploy/locales/*` (minus `core` and `common`, which are not
+    ///   plugins) — the same source of truth the four-textless-plugin guard
+    ///   (`packaging_manifest.rs::a_plugin_without_locales_is_normal`) reads.
+    ///   A hardcoded list here could silently drift from that one exactly
+    ///   the way the "three plugins have no text" claim drifted from it in
+    ///   three doc comments before this commit; deriving both from the same
+    ///   directory listing makes that drift structurally impossible, and a
+    ///   new plugin that ships a pack is covered automatically instead of
+    ///   silently escaping the guard.
+    /// - **Only the production half of the source counts.** A plugin's
+    ///   `main.rs` is truncated at the last `#[cfg(test)]` attribute in the
+    ///   file before scanning — the one that opens `mod tests`, never the
+    ///   earlier, unrelated `#[cfg(test)] mod placeholder;` gate some
+    ///   plugins also carry — so a `.texts(` surviving only inside that
+    ///   plugin's test module cannot satisfy the guard. That is not a
+    ///   theoretical tightening: it is a false pass on exactly the
+    ///   regression this test exists to catch — the real call deleted from
+    ///   `main()` while a test elsewhere in the file keeps the string alive.
     ///
     /// **[MUTATION]**: delete one plugin's `.texts([("en", …)])?` call from
-    /// its `main()` and this test fails for that plugin alone.
+    /// its `main()` and this test fails for that plugin alone. **[MUTATION]**:
+    /// put that same call inside the plugin's `#[cfg(test)] mod tests` block
+    /// instead of `main()` and the test must still fail — a call kept alive
+    /// only by the test module is not a call `main()` makes.
     #[test]
     fn every_plugin_with_an_embedded_english_pack_announces_it() {
         let sdk_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        // (sibling crate directory, the exact call its `main()` must contain)
-        for (plugin_crate, call) in [
-            ("ritornello-plugin-cd", "\"en\", CD_EN"),
-            ("ritornello-plugin-files", "\"en\", FILES_EN"),
-            ("ritornello-plugin-generic-input", "\"en\", GENERIC_INPUT_EN"),
-            ("ritornello-plugin-mpd", "\"en\", MPD_EN"),
-            ("ritornello-plugin-musicbrainz", "\"en\", MUSICBRAINZ_EN"),
-            ("ritornello-plugin-radio", "\"en\", RADIO_EN"),
-        ] {
-            let main_rs = sdk_manifest_dir.join("..").join(plugin_crate).join("src/main.rs");
+        let locales_dir = sdk_manifest_dir.join("../../deploy/locales");
+        let mut plugins: Vec<String> = std::fs::read_dir(&locales_dir)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", locales_dir.display()))
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_type().unwrap().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            // Not plugins: `core`'s own packs, and the layer shared by all of
+            // them (`ritornello-i18n`'s own doc names it `common`).
+            .filter(|name| name != "core" && name != "common")
+            .collect();
+        plugins.sort();
+        assert!(!plugins.is_empty(), "{} must list at least one plugin pack", locales_dir.display());
+
+        for plugin in plugins {
+            let plugin_crate = format!("ritornello-plugin-{plugin}");
+            // The naming convention every shipped plugin follows today
+            // (`CD_EN`, `GENERIC_INPUT_EN`, …): the pack's directory name,
+            // upper-cased, `-` turned into `_`, suffixed `_EN`.
+            let const_name = format!("{}_EN", plugin.to_uppercase().replace('-', "_"));
+            let call = format!("\"en\", {const_name}");
+
+            let main_rs = sdk_manifest_dir.join("..").join(&plugin_crate).join("src/main.rs");
             let source = std::fs::read_to_string(&main_rs)
                 .unwrap_or_else(|e| panic!("reading {}: {e}", main_rs.display()));
-            let announces = source.lines().any(|l| l.contains(".texts(") && l.contains(call));
+            // Truncated at the plugin's own test module: a `.texts(` call
+            // that only survives in `#[cfg(test)]` code must not satisfy
+            // this guard (see this test's own doc). The **last** occurrence
+            // of the attribute, not the first: several plugins also carry an
+            // earlier, unrelated `#[cfg(test)] mod placeholder;` gate (see
+            // e.g. `generic-input`'s own comment on it), and truncating
+            // there would cut away `main()` itself. Matched on the bare
+            // attribute rather than `"#[cfg(test)]\nmod tests"` because this
+            // repository's `.rs` files carry CRLF line endings, which a
+            // literal `\n` does not cross.
+            let production = match source.rfind("#[cfg(test)]") {
+                Some(idx) => &source[..idx],
+                None => panic!("{}: no `#[cfg(test)]` found to truncate at", main_rs.display()),
+            };
+            let announces = production.lines().any(|l| l.contains(".texts(") && l.contains(&call));
             assert!(
                 announces,
                 "{plugin_crate}'s main() must hand its embedded English to Runtime::texts(...): \
-                 no line contains both `.texts(` and `{call}` in {}",
+                 no line outside its test module contains both `.texts(` and `{call}` in {}",
                 main_rs.display()
             );
         }

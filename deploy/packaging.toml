@@ -4,8 +4,8 @@
 #   - the set of plugins comes from plugins.example.toml (same source as
 #     deploy.sh, so the two cannot diverge);
 #   - a plugin's locale directory is deploy/locales/<name>/, when it exists.
-#     Three plugins have none (ouifm-metas, radiofrance-metas, console); that
-#     is normal, not an omission.
+#     Four plugins have none (ouifm-metas, radiofrance-metas, nrj-metas,
+#     console); that is normal, not an omission.
 #
 # `tree` entries land in the archive under the path they will have on the
 # device, so installing is one `tar -C /`. `examples` entries land beside the

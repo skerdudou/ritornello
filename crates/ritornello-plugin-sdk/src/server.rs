@@ -1005,6 +1005,21 @@ pub async fn serve_admin(listener: UnixListener, plugin: impl AdminPlugin) -> Re
     Ok(())
 }
 
+/// No language ever crosses this dispatch any more, and that is why the
+/// `is_plain_locale` path-safety guard that used to sit right here — sanitizing
+/// `AdminReq::GetCatalog`'s `lang` before it reached `AdminPlugin::catalog`,
+/// which built a filesystem path out of it — was removed alongside that
+/// request rather than kept for a future use. A language string can still
+/// reach a plugin (a `Source` half's `SetLocale` frame, over its own
+/// socket, handled by the plugin's own `set_locale` and still turned into a
+/// `Catalog::load` call by the six plugins that keep their `catalog` field
+/// until task 11 removes it) — but that frame is written only by the core
+/// itself, already past `valid_locale` at the HTTP boundary
+/// (`PUT /api/locale`), never by anything this SDK hands a browser-supplied
+/// value to. If a future admin request ever lets a language travel from an
+/// untrusted caller into this crate again, it needs its own guard: this
+/// comment is the record that its absence here is deliberate, not an
+/// oversight.
 async fn handle_admin<P: AdminPlugin>(
     plugin: std::sync::Arc<tokio::sync::RwLock<P>>,
     assets: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
