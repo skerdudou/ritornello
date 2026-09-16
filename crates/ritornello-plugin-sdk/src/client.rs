@@ -32,12 +32,7 @@ pub struct SourceUpdate {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
-    /// See `SourceMessage::status`.
-    pub status: Option<String>,
-    /// See `SourceMessage::status_text`. Not yet consumed on its own here —
-    /// it rides the same field literal and the same relayable-frame
-    /// predicate as `status` (both by derivation, `SourceUpdate` deriving
-    /// `PartialEq`/`Default`) — the core is what decides between the two.
+    /// See `SourceMessage::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::can_eject`. Absent = nothing declared, keep the
     /// current value. The **only** field that does not arm the relayable-frame
@@ -59,12 +54,11 @@ pub struct SourceUpdate {
     /// **Danger, for the core's attention.** A frame carrying only presets
     /// declares **neither identity nor status**, and a permanent frame without
     /// a status means *erasure* of the memorized status
-    /// (`Core::handle_source_update`: `if !update.transient { self.source_status
-    /// = update.status.clone(); }`). That is the exact reason why `can_eject`
-    /// alone leaves a frame inert — waking those frames would erase
-    /// "PAS DE DISQUE" from the screen — and why this field breaks the
-    /// invariant that made that choice safe ("every path of a real source
-    /// declares an identity or a status").
+    /// (`Core::handle_source_update`, through `decide_status_text`). That is
+    /// the exact reason why `can_eject` alone leaves a frame inert — waking
+    /// those frames would erase "PAS DE DISQUE" from the screen — and why
+    /// this field breaks the invariant that made that choice safe ("every
+    /// path of a real source declares an identity or a status").
     ///
     /// The core therefore handles presets **and returns before** the status
     /// handling when the frame declares neither identity nor status
@@ -179,7 +173,6 @@ impl SourceClient {
                     preset: msg.preset,
                     preset_count: msg.preset_count,
                     preset_name: msg.preset_name,
-                    status: msg.status,
                     status_text: msg.status_text,
                     can_eject: msg.can_eject,
                     has_finite_list: msg.has_finite_list,
@@ -497,21 +490,18 @@ impl AdminClient {
     /// `Err` carries the refusal **unresolved** — a key and its parameters,
     /// or explicit verbatim text (see `ritornello_proto::Text`) — for the
     /// caller to resolve against the plugin's registered catalog. Every
-    /// implementor of `AdminPlugin` has migrated off its own `Catalog` by
-    /// the time this signature widened (language-packs chantier, tasks
-    /// 8-10), so `error_text` is what actually carries the refusal;
-    /// `error` is only a fallback, wrapped as `Text::Verbatim` the same way
-    /// `Core::decide_status_text` falls back on a source's legacy `status`.
-    /// An admin socket speaking the current protocol never leaves both
-    /// absent, but that combination is not represented in this crate's
-    /// types — it is nonsensical, not merely unlikely — so an absent pair
-    /// is answered with an empty verbatim string rather than manufactured
-    /// as a panic on a socket the core does not control end to end.
+    /// implementor of `AdminPlugin` hands one back (language-packs chantier,
+    /// tasks 8-10): `error_text` is the only carrier left. An admin socket
+    /// speaking the current protocol never leaves it absent on a refusal,
+    /// but that combination is not ruled out by this crate's types — it is
+    /// nonsensical, not merely unlikely — so an absent value is answered
+    /// with an empty verbatim string rather than manufactured as a panic on
+    /// a socket the core does not control end to end.
     pub async fn set_data(&self, data: serde_json::Value) -> Result<Result<(), Text>> {
         match self.request(AdminReq::SetData(data)).await? {
             AdminResult::Set { ok: true, .. } => Ok(Ok(())),
-            AdminResult::Set { ok: false, error, error_text } => {
-                Ok(Err(error_text.or_else(|| error.map(Text::Verbatim)).unwrap_or(Text::Verbatim(String::new()))))
+            AdminResult::Set { ok: false, error_text } => {
+                Ok(Err(error_text.unwrap_or(Text::Verbatim(String::new()))))
             }
             other => bail!("unexpected admin response for SetData: {other:?}"),
         }
@@ -776,7 +766,7 @@ mod tests {
             let dressed = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                status: Some("AUDIO CD".into()),
+                status_text: Some(Text::Verbatim("AUDIO CD".into())),
                 can_eject: Some(true),
                 ..Default::default()
             };
@@ -793,7 +783,11 @@ mod tests {
         // status, and the assertion below would fall.
         let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "cd");
-        assert_eq!(update.status.as_deref(), Some("AUDIO CD"), "the bare frame should not have been relayed");
+        assert_eq!(
+            update.status_text,
+            Some(Text::Verbatim("AUDIO CD".into())),
+            "the bare frame should not have been relayed"
+        );
         assert_eq!(update.can_eject, Some(true), "the capability travels with the frame that counts");
     }
 
@@ -840,7 +834,7 @@ mod tests {
             let dressed = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                status: Some("AUDIO CD".into()),
+                status_text: Some(Text::Verbatim("AUDIO CD".into())),
                 has_finite_list: Some(true),
                 ..Default::default()
             };
@@ -854,7 +848,11 @@ mod tests {
         client.request(SourceReq::Activate).await.unwrap();
         let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "cd");
-        assert_eq!(update.status.as_deref(), Some("AUDIO CD"), "the bare frame should not have been relayed");
+        assert_eq!(
+            update.status_text,
+            Some(Text::Verbatim("AUDIO CD".into())),
+            "the bare frame should not have been relayed"
+        );
         assert_eq!(update.has_finite_list, Some(true), "the capability travels with the frame that counts");
     }
 
@@ -894,9 +892,9 @@ mod tests {
     #[tokio::test]
     async fn a_frame_carrying_only_the_status_is_relayed() {
         // The same trap as for `preset_name` (see the brief): a frame
-        // carrying only `status` (with no view, identity, preset, count or
-        // name) must pass the condition deciding a frame is "interesting", or
-        // it would be dropped silently.
+        // carrying only `status_text` (with no view, identity, preset, count
+        // or name) must pass the condition deciding a frame is "interesting",
+        // or it would be dropped silently.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("plugin.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -909,7 +907,7 @@ mod tests {
             let msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                status: Some("PAS DE DISQUE".into()),
+                status_text: Some(Text::Verbatim("PAS DE DISQUE".into())),
                 ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
@@ -921,7 +919,7 @@ mod tests {
         client.request(SourceReq::Activate).await.unwrap();
         let (name, update) = update_rx.recv().await.unwrap();
         assert_eq!(name, "radio");
-        assert_eq!(update.status.as_deref(), Some("PAS DE DISQUE"));
+        assert_eq!(update.status_text, Some(Text::Verbatim("PAS DE DISQUE".into())));
     }
 
     #[tokio::test]
@@ -959,7 +957,7 @@ mod tests {
             let status_msg = ritornello_proto::SourceMessage {
                 id: Some(req.id),
                 action: Some(SourceAction::Noop),
-                status: Some("RADIO".into()),
+                status_text: Some(Text::Verbatim("RADIO".into())),
                 ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&status_msg).unwrap()).as_bytes()).await.unwrap();
@@ -981,7 +979,7 @@ mod tests {
         );
         // The second follows, and it is the status: the order is the wire's.
         let (_, next_update) = update_rx.recv().await.unwrap();
-        assert_eq!(next_update.status.as_deref(), Some("RADIO"));
+        assert_eq!(next_update.status_text, Some(Text::Verbatim("RADIO".into())));
     }
 
     #[tokio::test]
@@ -1173,8 +1171,9 @@ mod tests {
 
     #[tokio::test]
     async fn source_client_relays_nothing_when_the_frame_carries_neither_view_nor_identity() {
-        // A SetLocale response, for instance: no point in waking the core's
-        // loop for a frame that says nothing about the display.
+        // A bare `Noop` reply, for instance (`SetPlayMode`'s correlated
+        // answer is exactly this shape): no point in waking the core's loop
+        // for a frame that says nothing about the display.
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("plugin.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -1195,7 +1194,7 @@ mod tests {
 
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
         let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
-        client.request(SourceReq::SetLocale("fr".into())).await.unwrap();
+        client.request(SourceReq::SetPlayMode { random: true, repeat_all: false }).await.unwrap();
         assert!(update_rx.try_recv().is_err(), "no update must be relayed");
     }
 
@@ -1436,7 +1435,10 @@ mod tests {
             // 3rd request (set_data, id=3)
             let _ = lines.next_line().await.unwrap().unwrap();
             write
-                .write_all(b"{\"id\":3,\"result\":{\"kind\":\"Set\",\"data\":{\"ok\":false,\"error\":\"nope\"}}}\n")
+                .write_all(
+                    b"{\"id\":3,\"result\":{\"kind\":\"Set\",\"data\":{\"ok\":false,\
+                      \"error_text\":{\"kind\":\"Verbatim\",\"data\":\"nope\"}}}}\n",
+                )
                 .await
                 .unwrap();
             let _ = &write; // keeps the write half alive
@@ -1450,21 +1452,16 @@ mod tests {
         );
         assert_eq!(client.get_data().await.unwrap(), serde_json::json!({"btn_save": "Enregistrer"}));
         let verdict = client.set_data(serde_json::json!({})).await.unwrap();
-        // No `error_text` on this raw frame (an unmigrated wire shape,
-        // exactly what a socket this crate does not control end to end may
-        // still send): the legacy `error` string is wrapped as verbatim,
-        // same fallback idiom as `Core::decide_status_text`.
         assert_eq!(verdict, Err(Text::Verbatim("nope".to_string())));
     }
 
-    /// **[MUTATION]**: swap `error_text.or_else(|| error.map(Text::Verbatim))`
-    /// for `error.map(Text::Verbatim).or(error_text)` in `set_data` — this
-    /// test fails, because it feeds both fields with **different** content
-    /// and only `error_text` winning tells the two branches apart. Mirrors
-    /// `status_text_wins_over_status_when_both_are_present` in
-    /// `ritornello-core`, on the admin side of the same precedence rule.
+    /// The defensive fallback in `set_data`: a refusal (`ok: false`) that
+    /// somehow carries no `error_text` at all is "nonsensical, not merely
+    /// unlikely" (see that method's own doc) on a socket this crate does not
+    /// control end to end. Answered with an empty verbatim string rather
+    /// than a panic.
     #[tokio::test]
-    async fn set_data_error_text_wins_over_the_legacy_error_when_both_are_present() {
+    async fn set_data_without_error_text_answers_an_empty_verbatim_rather_than_panicking() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("admin.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -1474,17 +1471,14 @@ mod tests {
             let mut lines = BufReader::new(read).lines();
             let _ = lines.next_line().await.unwrap().unwrap();
             write
-                .write_all(
-                    b"{\"id\":1,\"result\":{\"kind\":\"Set\",\"data\":{\"ok\":false,\"error\":\"stale\",\
-                      \"error_text\":{\"kind\":\"Keyed\",\"data\":{\"key\":\"bad_request\"}}}}}\n",
-                )
+                .write_all(b"{\"id\":1,\"result\":{\"kind\":\"Set\",\"data\":{\"ok\":false}}}\n")
                 .await
                 .unwrap();
             std::future::pending::<()>().await;
         });
         let client = AdminClient::connect(&socket).await.unwrap();
         let verdict = client.set_data(serde_json::json!({})).await.unwrap();
-        assert_eq!(verdict, Err(Text::Keyed { key: "bad_request".into(), params: HashMap::new() }));
+        assert_eq!(verdict, Err(Text::Verbatim(String::new())));
     }
 
     #[test]

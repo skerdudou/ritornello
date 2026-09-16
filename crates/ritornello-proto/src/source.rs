@@ -31,7 +31,6 @@ pub enum SourceReq {
     Next,
     Prev,
     Eject,
-    SetLocale(String),
     /// Enumerate the named presets of this source.
     ///
     /// The correlated reply is a `Noop`: nothing in this pipe carries a list,
@@ -352,34 +351,25 @@ pub struct SourceMessage {
     /// is cleared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_name: Option<String>,
-    /// The source's own word about its state, **already translated** by its
-    /// catalog ("NO DISC", "AUDIO CD", "EMPTY PRESET").
+    /// The source's own word about its state, **unresolved**: a key into
+    /// this module's own catalog and its parameters, or explicit verbatim
+    /// text (see [`Text`]).
     ///
     /// Unlike `preset`, absent means **"no status"**, not "keep the previous
     /// one": a source restates it on every frame, and this is the only
-    /// convention that lets a status be cleared at all.
+    /// convention that lets a status be cleared at all — do not uniformize
+    /// this with `preset`'s neighbouring convention.
     ///
     /// With `transient` set, the status is an ephemeral message: it feeds the
     /// overlay and leaves the remembered status untouched.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// The same status as `status`, above, but **not yet resolved**: a key
-    /// into this module's own catalog and its parameters, or explicit
-    /// verbatim text (see [`Text`]).
     ///
-    /// Added **alongside** `status`, not in its place: `status` is produced
-    /// by six crates, and changing its type in one step would leave the
-    /// workspace broken for as long as those producers take to migrate.
-    /// The core prefers this field when present and falls back to `status`
-    /// otherwise (wrapping it as `Text::Verbatim`, which is what "not
-    /// migrated yet" means in practice — see the core's verbatim counter).
-    /// Both twins carry the **same convention as `status`**: absent means
-    /// *no status*, not "keep the previous one" — do not uniformize this
-    /// with `preset`'s neighbouring convention.
-    ///
-    /// `status` itself is retired once every producer has migrated to this
-    /// field (task 11 of the language-packs chantier): its disappearance is
-    /// what proves no producer is left behind.
+    /// Was preceded by a plain, already-resolved `status: Option<String>`,
+    /// produced by six crates; the two fields travelled side by side while
+    /// those producers migrated one at a time (see the core's verbatim
+    /// counter for what a `Text::Verbatim` costs). `status` is retired as of
+    /// task 11 of the language-packs chantier: its disappearance is what
+    /// proves no producer was left behind — the compiler, not a review,
+    /// found the last one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_text: Option<Text>,
     /// Whether this source has a tray to open at all — a **capability of the
@@ -506,7 +496,6 @@ mod tests {
             preset: None,
             preset_count: None,
             preset_name: None,
-            status: None,
             status_text: None,
             can_eject: None,
             has_finite_list: None,
@@ -602,16 +591,6 @@ mod tests {
         assert!(json.contains("\"req\":\"Wake\""));
         let back: SourceRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.req, SourceReq::Wake);
-    }
-
-    #[test]
-    fn set_locale_roundtrip() {
-        let r = SourceRequest { id: 9, req: SourceReq::SetLocale("fr".into()) };
-        let json = serde_json::to_string(&r).unwrap();
-        assert!(json.contains("\"req\":\"SetLocale\""));
-        assert!(json.contains("\"arg\":\"fr\""));
-        let back: SourceRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.req, SourceReq::SetLocale("fr".into()));
     }
 
     #[test]
@@ -734,7 +713,7 @@ mod tests {
 
     #[test]
     fn absent_identity_is_not_serialized() {
-        // Most frames say nothing about the identity (SetLocale, Deactivate…):
+        // Most frames say nothing about the identity (Deactivate, Stop…):
         // weighing them down with an `"identity":null` would be noise on a
         // link deliberately readable by eye.
         let m = SourceMessage { id: Some(2), ..Default::default() };
@@ -946,28 +925,6 @@ mod tests {
     }
 
     #[test]
-    fn the_status_round_trips_and_stays_absent_by_default() {
-        // Different convention from `preset`/`preset_name`: here absence is
-        // tested on a frame that explicitly declares `status: None` (a Source
-        // that has nothing more to say about its state), not on a frame from
-        // an earlier plugin — see `Core::handle_source_update` for the reason.
-        let m = SourceMessage {
-            id: Some(3),
-            action: Some(SourceAction::Noop),
-            status: Some("NO DISC".into()),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&m).unwrap();
-        assert!(json.contains("\"status\":\"NO DISC\""));
-        let back: SourceMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.status.as_deref(), Some("NO DISC"));
-        // A frame from an earlier plugin (or one that says nothing about the
-        // status) reads back without error, the field falling back to `None`.
-        let old: SourceMessage = serde_json::from_str(r#"{"id":3}"#).unwrap();
-        assert_eq!(old.status, None);
-    }
-
-    #[test]
     fn a_keyed_text_round_trips_with_its_parameters() {
         let t = Text::Keyed {
             key: "no_disc".into(),
@@ -1011,9 +968,9 @@ mod tests {
 
     #[test]
     fn status_text_round_trips_and_stays_absent_by_default() {
-        // Same convention as `status`, which it travels beside: absence
-        // means "no status", not "keep the previous one" (see the field's
-        // own doc for why that must not be uniformized with `preset`'s).
+        // Absence means "no status", not "keep the previous one" (see the
+        // field's own doc for why that must not be uniformized with
+        // `preset`'s).
         let m = SourceMessage {
             id: Some(3),
             action: Some(SourceAction::Noop),

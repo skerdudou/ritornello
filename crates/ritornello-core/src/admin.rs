@@ -273,9 +273,9 @@ pub struct CatalogQuery {
 /// `lang` absent means the core's own current interface language
 /// (`AppState.locale_current`, defaulting to `en` exactly like
 /// `status_json`'s own `locale` field) rather than "whatever the plugin
-/// happens to be running in": now that resolution never asks the plugin,
-/// this is the only language the core can name, and it is also the one
-/// `Core::set_locale` already pushes to every plugin via `SetLocale`.
+/// happens to be running in": a language never crosses the Source wire at
+/// all (task 11 of the language-packs chantier retired
+/// `SourceReq::SetLocale`), so this is the only language the core can name.
 ///
 /// **Never `immutable`, unlike `admin_asset`.** Until task 5's fix round this
 /// route was marked `immutable` when both `lang` and a `v` stamp were
@@ -452,7 +452,7 @@ mod tests {
             logs: Arc::new(LogBuffer::new(10)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
@@ -681,9 +681,8 @@ mod tests {
     async fn an_unspecified_language_follows_the_core_s_current_interface_language() {
         // `lang` absent used to mean "whatever the plugin is currently
         // running in", asked over IPC. It now means the core's own
-        // `locale_current` — the same field `status_json`'s `locale` reads,
-        // and the one `Core::set_locale` already pushes to every plugin via
-        // `SetLocale` — resolved from the registry like every other case.
+        // `locale_current` — the same field `status_json`'s `locale` reads —
+        // resolved from the registry like every other case.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/fr.toml"), "greeting = \"Bonjour\"\n").unwrap();
@@ -1016,7 +1015,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
         let msg = json["error"].as_str().expect("error field");
         // A sentence, not a catalog key: the key-by-key fallback of
-        // `Catalog::get` is silent, and a bare key would be displayed as is.
+        // `Chain::get` is silent, and a bare key would be displayed as is.
         assert!(msg.contains(' '), "raw key returned to the screen: {msg}");
     }
 

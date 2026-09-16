@@ -8,19 +8,10 @@ impl<P: Player> Core<P> {
         if let Some(device) = self.audio_device.clone() {
             self.player.set_audio_device(&device).await?;
         }
-        if let Some(locale) = self.locale.clone() {
-            for name in self.source_order.clone() {
-                if let Some(src) = self.sources.get(&name)
-                    && let Err(e) = src.request(SourceReq::SetLocale(locale.clone())).await
-                {
-                    tracing::warn!("SetLocale to {name}: {e}");
-                }
-            }
-        }
-        // The play mode, like the language just above: every wired source is
-        // owed it at boot and at every wake, not only the active one — a
-        // source made active later by a switch would otherwise start from
-        // whatever default `set_play_mode` never corrected.
+        // Every wired source is owed the play mode at boot and at every
+        // wake, not only the active one — a source made active later by a
+        // switch would otherwise start from whatever default
+        // `set_play_mode` never corrected.
         self.push_play_mode().await;
         if let Some(action) = self.active_request(SourceReq::Wake).await? {
             self.apply(action).await?;
@@ -279,7 +270,7 @@ mod tests {
         sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
         let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
         let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
@@ -394,7 +385,7 @@ mod tests {
         sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone(), ..Default::default() }));
         let persisted = PersistedState { active_source: "cd".into(), ..PersistedState::default() };
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
         let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);

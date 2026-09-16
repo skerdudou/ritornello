@@ -1453,8 +1453,11 @@ TOML packs**, decentralized per component:
   `/etc/ritornello/locales`).
 - Language **picker** on the config page (`/config`): it lists `en` plus
   every `core/<lang>.toml` pack present, each language shown by its name
-  in its own language ("Français", "English"). The change is applied live,
-  pushed to the plugins, and persisted (`state.json`).
+  in its own language ("Français", "English"). The change is applied live
+  and persisted (`state.json`) — resolution moves entirely inside the core,
+  against its shared registry; **no plugin is ever notified of it**
+  (language-packs chantier, task 11 retired the `SourceReq::SetLocale`
+  frame that used to carry it to source plugins only).
 - **Adding a language**: copy the reference `en`, translate the values,
   drop it under `<root>/<component>/<lang>.toml`. A missing key or pack
   automatically falls back to English (per-key degradation, never an
@@ -1464,13 +1467,11 @@ TOML packs**, decentralized per component:
   `deploy/deploy.sh`.
 - **A plugin page's catalog is asked for in an explicit language**, and the
   request waits for `/api/status` — the answer that carries the selected
-  language. Asked without it, the core hands back the plugin's *ambient*
-  language, which is English on a fresh core: `SetLocale` only ever reaches
-  source plugins, so an admin-only plugin never learns the language at all.
-  That is what made a hard reload on a plugin page come back in English on an
-  appliance set to French, and return to French only after navigating away and
-  back. The bare, unstamped URL remains the fallback for the one case where
-  nobody knows the language: `/api/status` itself failed.
+  language. Asked without it, the core falls back to `en`: no plugin process
+  ever holds a language of its own to fall back on instead — resolution is
+  the core's own registry lookup, by locale, on every request. The bare,
+  unstamped URL remains the fallback for the one case where nobody knows the
+  language: `/api/status` itself failed.
 - **A routed view is not rendered before the catalog has come back.** Not a
   matter of polish: a view mounted without a catalog renders translation
   keys, and while most labels recover on the next render, a dropdown does

@@ -1335,11 +1335,10 @@ async fn relaunch(
     generation: u64,
     children: &HotPlugChildren,
     register_path: &Path,
-    locale: Option<&str>,
     kill_triggers: &mut HashMap<String, tokio::sync::oneshot::Sender<()>>,
 ) -> Option<PluginExit> {
     let prefix = children.sockets_dir.join(name);
-    match plugins::spawn(exec, register_path, name, &prefix, locale) {
+    match plugins::spawn(exec, register_path, name, &prefix) {
         Ok(child) => {
             tracing::info!("plugin {name} re-enabled, launched again");
             let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1490,7 +1489,6 @@ async fn declare_plugin<P: player::Player>(
                 generation,
                 children,
                 register_path,
-                core.current_locale().as_deref(),
                 kill_triggers,
             )
             .await;
@@ -1840,13 +1838,7 @@ async fn main() -> Result<()> {
             continue;
         }
         let prefix = sockets_dir.join(&p.name);
-        match plugins::spawn(
-            &p.exec,
-            &register_path,
-            &p.name,
-            &prefix,
-            persisted.locale.as_deref(),
-        ) {
+        match plugins::spawn(&p.exec, &register_path, &p.name, &prefix) {
             Ok(child) => {
                 let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
                 kill_triggers.insert(p.name.clone(), kill_tx);
@@ -2777,7 +2769,6 @@ async fn main() -> Result<()> {
                                             generation,
                                             &hot_children,
                                             &register_path,
-                                            core.current_locale().as_deref(),
                                             &mut kill_triggers,
                                         )
                                         .await
@@ -2871,7 +2862,6 @@ async fn main() -> Result<()> {
                                         generation,
                                         &hot_children,
                                         &register_path,
-                                        core.current_locale().as_deref(),
                                         &mut kill_triggers,
                                     )
                                     .await

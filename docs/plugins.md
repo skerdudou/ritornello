@@ -1252,7 +1252,7 @@ lets you learn the key — or the keys — of each action, load a bundled preset
 (`mce`, `keyboard`) and save; it also lets you import a preset from an
 uploaded `.toml` file and export the selected device's current bindings to
 such a file. Variables: `RITORNELLO_INPUT_BINDINGS`,
-`RITORNELLO_INPUT_PRESETS`, `RITORNELLO_LOCALE`.
+`RITORNELLO_INPUT_PRESETS`.
 
 Learning listens for thirty seconds, in a dialog naming the action and the
 device; the four ways out of that dialog — its "Cancel", the cross, Escape,
@@ -2114,13 +2114,17 @@ deliberately not a regular expression: a free-form pattern would make you debug
 regexes, and a bad one would break every title on that station. A hand-set
 pattern is persisted and marked manual, so re-learning leaves it alone.
 
-Two known limits. Mojibake — a station emitting latin-1 where UTF-8 is assumed,
+One known limit. Mojibake — a station emitting latin-1 where UTF-8 is assumed,
 or the reverse — never validates, and looks like a bad split when the split was
 right; the log names it separately so the search is not led astray, but nothing
-repairs it. And a `metadata` plugin never receives `SetLocale` (that frame
-exists only for sources), so this page's language is fixed at plugin launch and
-a language change shows up only after the plugin restarts — the same limit as
-the MPD plugin's page.
+repairs it.
+
+A limit that **used to** apply here no longer does: a `metadata` plugin never
+receives a language notification (no plugin ever does, since the language-packs
+chantier's task 11 — see `docs/interface.md`'s "Language" section), but this
+page's resolution moved entirely to the core: it resolves this plugin's
+announced catalog against the registry on every request the page makes, so a
+language change is reflected immediately, without a restart.
 
 ### The cover chain
 

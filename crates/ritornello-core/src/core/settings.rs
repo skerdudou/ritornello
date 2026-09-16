@@ -18,8 +18,7 @@ impl<P: Player> Core<P> {
     }
 
     /// Changes the current language: rebuilds the core's shared catalog
-    /// (read by the status page), persists the state, and pushes `SetLocale`
-    /// to every connected Source plugin (best-effort).
+    /// (read by the status page) and persists the state.
     ///
     /// Called from the `select!` loop of `main` on reception from the
     /// `locale_rx` channel, itself fed by the `PUT /api/locale` route.
@@ -29,9 +28,16 @@ impl<P: Player> Core<P> {
     /// the word displayed in the old language until the next
     /// `Command::Power` cycle (see the doc of `standby_status`).
     ///
+    /// **No message reaches a plugin here.** A language never crosses the
+    /// Source wire at all (task 11 of the language-packs chantier retired
+    /// `SourceReq::SetLocale`): a Source's `status_text` is resolved against
+    /// the registry at publication (see `Core::decide_status_text`), and a
+    /// plugin's own admin catalog is served on demand, by locale, straight
+    /// from the registry (`admin::admin_i18n`) — nothing a plugin process
+    /// holds ever goes stale, so there is nothing left here to notify it of.
+    ///
     /// The catalog is rebuilt through `crate::i18n::core_catalog`, which
-    /// stacks the full chain a `Registry` produces (task 4) rather than the
-    /// single-tier `Catalog::load` this used to call directly — same
+    /// stacks the full chain a `Registry` produces (task 4) — same
     /// construction as the core's own startup, so a locale change and a
     /// fresh boot never resolve a key two different ways. `"en"` stands in
     /// for the fallback language until a device has a real one to pass
@@ -55,13 +61,6 @@ impl<P: Player> Core<P> {
         self.standby_status = Some(resolve_standby_status(&new_catalog));
         *self.catalog.write().await = new_catalog;
         self.persist();
-        for name in self.source_order.clone() {
-            if let Some(src) = self.sources.get(&name)
-                && let Err(e) = src.request(SourceReq::SetLocale(locale.clone())).await
-            {
-                tracing::warn!("SetLocale to {name}: {e}");
-            }
-        }
         self.publish_state();
         Ok(())
     }
@@ -153,7 +152,7 @@ mod tests {
             update_last_run_day: None,
         };
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
         let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
@@ -183,13 +182,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_locale_persists_and_notifies_the_sources() {
+    async fn set_locale_persists_and_reaches_no_source() {
+        // No message reaches a plugin any more (task 11 of the
+        // language-packs chantier retired `SourceReq::SetLocale`):
+        // resolution is entirely the core's own, through the registry.
         let (mut core, _pc, source_calls, _rx, dir) = setup();
         core.set_locale("fr".into()).await.unwrap();
-        let calls = source_calls.lock().unwrap();
-        assert!(calls.iter().any(|c| c == "radio:SetLocale(\"fr\")"));
-        assert!(calls.iter().any(|c| c == "cd:SetLocale(\"fr\")"));
-        drop(calls);
+        assert!(
+            source_calls.lock().unwrap().is_empty(),
+            "a locale change must not send anything to a Source plugin"
+        );
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.locale.as_deref(), Some("fr"));
     }
@@ -204,7 +206,7 @@ mod tests {
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
         let (state_tx, mut state_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "fr", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "fr", &root, crate::i18n::EN)));
         let metadata = MetadataWiring {
             plugins: vec![],
             now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
@@ -234,7 +236,7 @@ mod tests {
         let (state_tx, mut state_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
         // Built in English: "STANDBY", the embedded value of the key.
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load("core", "en", &root, crate::i18n::EN)));
         let metadata = MetadataWiring {
             plugins: vec![],
             now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
