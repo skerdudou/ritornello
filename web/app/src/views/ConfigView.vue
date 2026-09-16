@@ -1162,6 +1162,7 @@ function goTo(id: string) {
         <InstallablesDialog
           :open="showInstallablesDialog"
           :components="update.components"
+          :outcome="update.outcome"
           @update:open="(v: boolean) => (showInstallablesDialog = v)"
           @install="installPlugin"
         />

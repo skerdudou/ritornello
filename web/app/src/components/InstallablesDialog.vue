@@ -4,9 +4,9 @@ import {
 } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
-import type { ComponentOffer } from '../types'
+import type { ComponentOffer, UpdatePayload } from '../types'
 
-const props = defineProps<{ open: boolean; components: ComponentOffer[] }>()
+const props = defineProps<{ open: boolean; components: ComponentOffer[]; outcome: UpdatePayload['outcome'] }>()
 const emit = defineEmits<{ 'update:open': [boolean]; install: [string] }>()
 const { t } = useCatalog()
 
@@ -53,6 +53,24 @@ const rows = computed(() =>
  */
 const noCatalogue = computed(() => Object.keys(catalogue.value ?? {}).length === 0)
 
+/**
+ * Whether the last check actually looked, and can therefore be trusted to
+ * mean "nothing to add" when `rows` comes back empty.
+ *
+ * `never_checked`, `no_release`, `only_prereleases` and `failed` all rebuild
+ * every component against an empty published list server-side
+ * (`component_offers` called with `&[]`, see `update/mod.rs`'s `check`), so
+ * every row resolves to `unknown` and `rows` is empty regardless of what the
+ * appliance actually has — an empty `rows` there is silence, not
+ * completeness. Only `ok` and `installed` (the transient report right after
+ * a successful install, still built from a real release) ever set a
+ * component to `not_installed`, so those are the only two outcomes an empty
+ * `rows` is allowed to read as "this device has everything".
+ */
+const hasUsableCheck = computed(
+  () => props.outcome.kind === 'ok' || props.outcome.kind === 'installed',
+)
+
 // Generation counter, as `PluginRoute.vue` does for a plugin catalogue: the
 // request is asynchronous, and a dialog closed and reopened must not have a
 // late answer land under it.
@@ -72,17 +90,23 @@ watch(
     // life of its session, keyed by release tag, and re-asking would
     // defeat that from this side.
     asked.value = true
-    const answer = await api
-      .get<{ components: Record<string, { kinds: string[]; description: string }> }>(
-        '/api/update/catalogue',
-      )
-      .catch((e: unknown) => {
-        // An unreachable catalogue must not close the dialog: names alone
-        // stay useful, and installing does not depend on a description.
-        console.warn('update catalogue unavailable', e)
-        return { components: {} }
-      })
-    if (localGeneration === generation) catalogue.value = answer.components
+    try {
+      const answer = await api.get<{
+        components: Record<string, { kinds: string[]; description: string }>
+      }>('/api/update/catalogue')
+      if (localGeneration === generation) catalogue.value = answer.components
+    } catch (e) {
+      // An unreachable catalogue must not close the dialog: names alone stay
+      // useful, and installing does not depend on a description. Nor must
+      // this attempt latch as final: `asked` goes back to `false` so the next
+      // opening retries instead of repeating this one failure — a request
+      // this page itself could not complete (the core unreachable, a route
+      // error) is not the same fact as "this release has no catalogue", and
+      // must not be remembered as long as the fetch that answered it was.
+      console.warn('update catalogue unavailable', e)
+      asked.value = false
+      if (localGeneration === generation) catalogue.value = {}
+    }
   },
   { immediate: true },
 )
@@ -96,7 +120,14 @@ watch(
         <DialogDescription>{{ t('installables_description') }}</DialogDescription>
       </DialogHeader>
 
-      <p v-if="rows.length === 0" data-installables-empty class="text-sm text-muted-foreground">
+      <p
+        v-if="rows.length === 0 && !hasUsableCheck"
+        data-installables-unknown
+        class="text-sm text-muted-foreground"
+      >
+        {{ t('installables_unknown') }}
+      </p>
+      <p v-else-if="rows.length === 0" data-installables-empty class="text-sm text-muted-foreground">
         {{ t('installables_empty') }}
       </p>
       <template v-else>
