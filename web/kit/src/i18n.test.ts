@@ -68,4 +68,21 @@ describe('interpolate', () => {
   it('is not affected by parameter order (chained replaceAll gets this wrong either way)', () => {
     expect(interpolate('{a} and {b}', { a: '{b}', b: '{a}' })).toBe('{b} and {a}')
   })
+
+  /// F-2 review round: `name in params` walks the **prototype chain**, so a
+  /// token named after an `Object.prototype` member (`toString`,
+  /// `constructor`, `valueOf`, `hasOwnProperty`, ...) resolved against that
+  /// inherited method instead of staying visible like any other unsupplied
+  /// token. No catalog key triggers this today, which is exactly why it
+  /// would have sat there undetected. `Object.hasOwn` only sees the
+  /// object's own keys, matching the Rust side's plain `HashMap` lookup
+  /// (no prototype at all).
+  ///
+  /// [MUTATION]: replace `Object.hasOwn(params, name)` with `name in
+  /// params` — this test fails, because `{}` still has `toString` through
+  /// `Object.prototype`.
+  it('leaves a token named after an Object.prototype member visible when unsupplied', () => {
+    expect(interpolate('hello {toString}', {})).toBe('hello {toString}')
+    expect(interpolate('{constructor} and {valueOf}', {})).toBe('{constructor} and {valueOf}')
+  })
 })

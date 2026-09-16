@@ -12,6 +12,16 @@ export type Catalog = Record<string, string>
 /// (`{missing}` stays `{missing}`) rather than becoming empty — a visibly
 /// wrong text is easier to diagnose than a silently missing one, the same
 /// contract as `createT`'s key fallback below.
+///
+/// Looks up each token with `Object.hasOwn`, never the `in` operator:
+/// `in` walks the prototype chain, so a token literally named `toString`,
+/// `constructor`, `valueOf` or any other `Object.prototype` member would
+/// resolve against that inherited method instead of staying visible — a
+/// divergence from the Rust side (a plain `HashMap` lookup, no prototype)
+/// that a review caught by actually running `interpolate('hello
+/// {toString}', {})`, which returned the function's own source text
+/// instead of `"hello {toString}"`. No catalog key triggers this today,
+/// which is exactly why it would otherwise have sat here.
 export function interpolate(template: string, params: Record<string, string | number>): string {
   let out = ''
   let rest = template
@@ -29,7 +39,7 @@ export function interpolate(template: string, params: Record<string, string | nu
       return out
     }
     const name = afterOpen.slice(0, close)
-    out += name in params ? String(params[name]) : `{${name}}`
+    out += Object.hasOwn(params, name) ? String(params[name]) : `{${name}}`
     rest = afterOpen.slice(close + 1)
   }
 }
