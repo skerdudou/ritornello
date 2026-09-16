@@ -187,9 +187,15 @@ jobs:
               echo 'See the job log for the error.'
             } > verdict.md
             status=1
+            # The script exited before it could write the summary, so this
+            # path writes its own -- an empty run summary next to a red job is
+            # the silence being replaced, in miniature.
+            cat verdict.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          cat verdict.md >> "$GITHUB_STEP_SUMMARY"
+          # Only to the log here. The run summary is written by the script
+          # itself, which appends the verdict AND the per-tool breakdown --
+          # having both places append would print the verdict twice.
           cat verdict.md
 
           # Sticky: edit the previous verdict rather than stack one per push.
