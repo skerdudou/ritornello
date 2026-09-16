@@ -1020,8 +1020,17 @@ impl Worker {
     /// A catalog message with its one named parameter filled in. Named and
     /// never concatenated: a number glued to a label is not translatable, a
     /// lesson already paid for here.
+    ///
+    /// **Single-parameter only, by contract.** A caller that needs a second
+    /// parameter must not chain a further `.replace()`/`interpolate()` call
+    /// onto this method's result — that composition is exactly the
+    /// chained-replace defect this crate spent task 10b removing, just
+    /// split across two call sites instead of one (`removal_failed` did
+    /// precisely this before that task). Reach for
+    /// `ritornello_i18n::interpolate` directly with every parameter in one
+    /// call instead.
     async fn message_for(&self, key: &str, component: &str) -> String {
-        self.message(key).await.replace("{component}", component)
+        ritornello_i18n::interpolate(&self.message(key).await, [("component", component)])
     }
 
     async fn set_busy(&self, busy: Option<String>) {
