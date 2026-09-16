@@ -446,6 +446,58 @@ mod tests {
         );
     }
 
+    /// Partner test for task 13's fallback setting, on the same model:
+    /// `resolve_text` used to pass a hardcoded `"en"` as the second language
+    /// to `Registry::chain_for`; it now passes `self.fallback`. The key here
+    /// is defined **only** in the fallback language ("nl"), never in the
+    /// chosen one ("fr") nor in English (neither the disk pack — there is
+    /// none in this rig — nor a hardcoded one), so a resolution through
+    /// anything but the real fallback tier falls through to the raw key
+    /// instead. Feeding one frame, then changing only the fallback with the
+    /// Source sending nothing new, is what proves this reaches through
+    /// publication and not merely through a direct call to `resolve_text`.
+    #[tokio::test]
+    async fn changing_the_fallback_retranslates_the_remembered_status() {
+        let (mut core, _pc, _sc, mut state_rx, _d) = setup();
+        {
+            let mut registry = core.registry.write().await;
+            let mut layers = ritornello_i18n::ModuleLayers::new("radio");
+            layers.insert(
+                "nl",
+                ritornello_i18n::Layer::from_map([("no_disc".to_string(), "GEEN SCHIJF".to_string())].into()),
+            );
+            registry.insert_announced("radio", layers);
+        }
+        core.set_locale("fr".into()).await.unwrap();
+        let _ = state_rx.borrow_and_update();
+
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                status_text: Some(ritornello_proto::Text::Keyed {
+                    key: "no_disc".into(),
+                    params: std::collections::HashMap::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            state_rx.borrow_and_update().status.as_deref(),
+            Some("no_disc"),
+            "neither the chosen language nor a hardcoded en resolves the key in this rig"
+        );
+
+        // The one event of this test besides the frame above: a fallback
+        // change, with the Source sending nothing new.
+        core.set_fallback("nl".into()).await.unwrap();
+
+        assert_eq!(
+            state_rx.borrow_and_update().status.as_deref(),
+            Some("GEEN SCHIJF"),
+            "the remembered status must retranslate through the new fallback, without a second frame"
+        );
+    }
+
     /// I-1 (task 7 review): a registry lock miss during publication must
     /// read as **no status**, never the raw key. `resolve_text` used to
     /// fall back to the key, reasoning it mirrored `Chain::get`'s own
