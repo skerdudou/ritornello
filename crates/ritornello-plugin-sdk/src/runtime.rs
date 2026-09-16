@@ -1007,10 +1007,29 @@ mod tests {
     /// prove a mismatch fails — must not be able to satisfy or trip this
     /// test.
     ///
+    /// **This extraction is a fixed set of markers against today's call
+    /// shapes, and that is a real, named risk, not a detail.** It proves
+    /// itself against what the six plugins write today; it says nothing
+    /// about a shape a future refactor might introduce that no marker
+    /// matches. A guard that quietly stops seeing anything is worse than
+    /// no guard at all, because it keeps supplying green while covering
+    /// less and less. So this test also asserts, per plugin, that the
+    /// extraction **found** at least one key literal — every plugin in
+    /// `plugins` ships a non-empty catalog (`deploy/locales` would not
+    /// list it otherwise), so zero extracted literals for one of them
+    /// can only mean the marker set has fallen behind, and that failure
+    /// is reported on its own, before the mismatch check below it, and
+    /// names the plugin.
+    ///
     /// **[MUTATION]**: misspell one key literal in one plugin's
     /// production source (e.g. `"cd_audi"` for `"cd_audio"` in
     /// `plugin-cd/src/main.rs`) — this test fails and names that file,
-    /// that line and that key.
+    /// that line and that key. **[MUTATION]**: remove one marker from
+    /// `MARKERS` in `key_literal_on_line` (e.g. `"key:"`, which every
+    /// plugin's `Text::Keyed{key: "…", ..}` literal depends on) — this
+    /// test fails on the coverage assertion instead, naming every plugin
+    /// whose sources no longer yield a single key literal under the
+    /// reduced set.
     #[test]
     fn every_key_literal_names_a_key_that_exists_in_its_plugins_catalog() {
         let sdk_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1026,6 +1045,11 @@ mod tests {
         assert!(!plugins.is_empty(), "{} must list at least one plugin pack", locales_dir.display());
 
         let mut offenders = Vec::new();
+        // Coverage of the extraction itself, per plugin: see this test's own
+        // doc for why a marker set that has quietly fallen behind is a
+        // worse failure than any single wrong key, and why it gets its own
+        // assertion rather than folding into `offenders` above.
+        let mut silent_plugins = Vec::new();
         for plugin in plugins {
             let plugin_crate = format!("ritornello-plugin-{plugin}");
             let crate_dir = sdk_manifest_dir.join("..").join(&plugin_crate);
@@ -1035,6 +1059,7 @@ mod tests {
             let known = ritornello_i18n::try_parse(&en_source)
                 .unwrap_or_else(|e| panic!("{}: invalid TOML: {e}", en_path.display()));
 
+            let mut found_for_plugin = 0usize;
             for path in rust_sources(&crate_dir.join("src")) {
                 let source = std::fs::read_to_string(&path)
                     .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
@@ -1043,14 +1068,26 @@ mod tests {
                     None => &source[..],
                 };
                 for (n, line) in production.lines().enumerate() {
-                    if let Some(key) = key_literal_on_line(line)
-                        && !known.contains_key(key)
-                    {
-                        offenders.push(format!("{}:{}: {key:?}", path.display(), n + 1));
+                    if let Some(key) = key_literal_on_line(line) {
+                        found_for_plugin += 1;
+                        if !known.contains_key(key) {
+                            offenders.push(format!("{}:{}: {key:?}", path.display(), n + 1));
+                        }
                     }
                 }
             }
+            if found_for_plugin == 0 {
+                silent_plugins.push(plugin_crate);
+            }
         }
+        assert!(
+            silent_plugins.is_empty(),
+            "key_literal_on_line's marker set found no key literal at all in: {silent_plugins:?} — \
+             every one of these plugins ships a non-empty catalog (it passed the earlier checks in \
+             this file), so this is not \"a plugin with nothing to say\": the marker set has almost \
+             certainly fallen behind how this plugin's production code now constructs a Text::Keyed, \
+             and everything below this assertion is only checking what it can still see"
+        );
         assert!(
             offenders.is_empty(),
             "a key literal names no entry in its plugin's embedded English catalog: {offenders:?}"
