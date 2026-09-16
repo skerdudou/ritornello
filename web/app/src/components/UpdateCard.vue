@@ -51,9 +51,10 @@ const errorDetail = computed(() =>
 
 /**
  * The transient report of a just-finished install (`CheckOutcome::Installed`,
- * Ruling 55). Shown alongside `summary`, never instead of it: the row itself
- * flipping to "up to date" is the durable signal, and this is only the
- * one-off sentence naming what just happened.
+ * Ruling 55). Shown alongside `UpdateSummary` (the summary line moved to its
+ * own component in Task 5), never instead of it: the row itself flipping to
+ * "up to date" is the durable signal, and this is only the one-off sentence
+ * naming what just happened.
  */
 const installedDetail = computed(() =>
   props.update.outcome.kind === 'installed' ? props.update.outcome.detail : null,

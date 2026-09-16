@@ -35,7 +35,7 @@ const CATALOG = {
   update_install: 'Install',
   // Task 6: the automatic-checks policy, folded into this card below a
   // separator, and the beta switch that sits above it.
-  update_policy_label: 'Policy',
+  update_policy_label: 'Automatic checks',
   update_policy_off: 'Off',
   update_policy_check: 'Check only',
   update_policy_check_and_install: 'Check and install',
@@ -330,10 +330,20 @@ describe('UpdateCard', () => {
     // act at once; below it, settings that wait. That is why merging does
     // not break the written decision refusing "two save paths behind one
     // title" — there is only one.
+    //
+    // m9: the original body only ever clicked Check, so half the claim
+    // ("the two action buttons") was unproven — a regression wiring Install
+    // to `save` instead of `install` would have passed this test unnoticed.
+    // `payload()`'s default component is `update_available`, so Install is
+    // not disabled here.
     const w = mount(UpdateCard, { props: { update: payload(), settings: settings() } })
     expect(w.findAll('[data-update-save]')).toHaveLength(1)
     await w.find('[data-update-check]').trigger('click')
     expect(w.emitted('save')).toBeUndefined()
+    expect(w.emitted('check')).toHaveLength(1)
+    await w.find('[data-update-install]').trigger('click')
+    expect(w.emitted('save')).toBeUndefined()
+    expect(w.emitted('install')).toHaveLength(1)
     await w.find('[data-update-save]').trigger('click')
     expect(w.emitted('save')).toHaveLength(1)
   })
@@ -341,8 +351,19 @@ describe('UpdateCard', () => {
   it('puts the beta switch and the automatic policy in one card, two lines apart', () => {
     // The argument for "Offer" rather than "Install" is now visible to the
     // eye: installing depends on the policy right below it.
+    //
+    // m9: existence alone (`.exists()`) does not prove either "two lines
+    // apart" or even an order between the two — a policy control rendered
+    // above the switch, or anywhere else on the page, would have passed.
+    // `compareDocumentPosition` proves the switch's line comes first.
     const w = mount(UpdateCard, { props: { update: payload(), settings: settings() } })
-    expect(w.find('[data-update-prereleases]').exists()).toBe(true)
-    expect(w.find('[data-update-policy]').exists()).toBe(true)
+    const prereleases = w.get('[data-update-prereleases]').element
+    const policy = w.get('[data-update-policy]').element
+    expect(prereleases.compareDocumentPosition(policy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // "Two lines apart": the switch's own line and the policy's own line are
+    // adjacent siblings under the same section, with nothing else rendered
+    // by this card between them.
+    const prereleasesLine = prereleases.closest('label')!
+    expect(prereleasesLine.nextElementSibling?.contains(policy)).toBe(true)
   })
 })

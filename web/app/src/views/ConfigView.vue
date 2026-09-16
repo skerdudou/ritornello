@@ -421,7 +421,22 @@ const plugins = computed<PluginRow[]>(() => {
     // "not yet announced" rows and an `undeclared_binary` line get the same
     // dash (review of task 18, M6).
     const realKinds = acc.receivedKinds.filter((k) => k !== 'unknown')
-    const kinds = realKinds.length > 0 ? realKinds.join(', ') : '—'
+    // Through the same `plugin_kind_*` catalog keys `InstallablesDialog.vue`
+    // uses for the same four words (m5): this column used to show the raw
+    // wire string (`source`, `display`…) while the dialog already translated
+    // it, the one surface in a French interface still speaking English.
+    // A template literal, not concatenation, for the same reason as there:
+    // `i18nKeysUsed.test.ts`'s literal-key scanner only recognises a quoted
+    // string immediately after `t(`, and the four keys are already on its
+    // explicit list.
+    //
+    // A kind outside the closed vocabulary still renders its raw
+    // `plugin_kind_<word>` catalog key here, exactly as it would in the
+    // dialog (F4): filtering it would need the same closed list hard-coded a
+    // fourth time (`plugin_catalogue_declaration.rs`, the scanner's
+    // allow-list, and the four locale keys already are three), which is F6's
+    // question to answer once, not this fix's to answer again here.
+    const kinds = realKinds.length > 0 ? realKinds.map((k) => t.value(`plugin_kind_${k}`)).join(', ') : '—'
     // Looked up by name rather than carried through the accumulator: the
     // offer lives on a wholly different payload (`/api/update`), read once
     // here rather than threaded through every accumulator field above.
@@ -522,7 +537,7 @@ async function togglePlugin(row: PluginRow) {
  * One place a stale second tab can be told an arrow — or a drag — no longer
  * applies: `move_entry` refuses out of range rather than clamping, and this
  * refusal is reachable by an ordinary operator, and carries a catalog
- * sentence of its own (`plugin_already_at_end`). Surfaced exactly like any
+ * sentence of its own (`plugin_move_out_of_range`). Surfaced exactly like any
  * other refusal here: read from the server's answer, never reworded on this
  * side.
  *
@@ -1163,6 +1178,8 @@ function goTo(id: string) {
           :open="showInstallablesDialog"
           :components="update.components"
           :outcome="update.outcome"
+          :last-check-unix-s="update.last_check_unix_s"
+          :busy="update.busy"
           @update:open="(v: boolean) => (showInstallablesDialog = v)"
           @install="installPlugin"
         />

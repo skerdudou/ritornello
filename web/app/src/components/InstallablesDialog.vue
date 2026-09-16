@@ -6,7 +6,17 @@ import { computed, ref, watch } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import type { ComponentOffer, UpdatePayload } from '../types'
 
-const props = defineProps<{ open: boolean; components: ComponentOffer[]; outcome: UpdatePayload['outcome'] }>()
+const props = defineProps<{
+  open: boolean
+  components: ComponentOffer[]
+  outcome: UpdatePayload['outcome']
+  /** `UpdatePayload.last_check_unix_s` — see `hasUsableCheck` below. */
+  lastCheckUnixS: number | null
+  /** `UpdatePayload.busy` — a job is running, so Install must not re-enqueue
+   *  a second one on the same component (m6, the update card's own Install
+   *  already does this). */
+  busy: string | null
+}>()
 const emit = defineEmits<{ 'update:open': [boolean]; install: [string] }>()
 const { t } = useCatalog()
 
@@ -57,18 +67,28 @@ const noCatalogue = computed(() => Object.keys(catalogue.value ?? {}).length ===
  * Whether the last check actually looked, and can therefore be trusted to
  * mean "nothing to add" when `rows` comes back empty.
  *
- * `never_checked`, `no_release`, `only_prereleases` and `failed` all rebuild
- * every component against an empty published list server-side
- * (`component_offers` called with `&[]`, see `update/mod.rs`'s `check`), so
- * every row resolves to `unknown` and `rows` is empty regardless of what the
- * appliance actually has — an empty `rows` there is silence, not
- * completeness. Only `ok` and `installed` (the transient report right after
- * a successful install, still built from a real release) ever set a
- * component to `not_installed`, so those are the only two outcomes an empty
- * `rows` is allowed to read as "this device has everything".
+ * `never_checked`, `no_release` and `only_prereleases` always rebuild every
+ * component against an empty published list server-side (`component_offers`
+ * called with `&[]`, see `update/mod.rs`'s `check`), so every row resolves to
+ * `unknown` and `rows` is empty regardless of what the appliance actually has
+ * — an empty `rows` there is silence, not completeness.
+ *
+ * `failed` is not always that kind of silence (N3). It is published both for
+ * a failed check (`publish_failure`, which leaves `components` exactly as an
+ * earlier successful check left them) and for a *refused install* that
+ * followed a successful check (`install_report`/`conclude_install`, which
+ * re-checks before installing) — in both cases the rows on screen, and this
+ * `lastCheckUnixS`, are still the real ones from that earlier success. Only a
+ * `failed` on a device that has genuinely **never** succeeded — `null` here —
+ * is the silent kind. `ok` and `installed` (the transient report right after
+ * a successful install, still built from a real release) are never silent
+ * either way.
  */
 const hasUsableCheck = computed(
-  () => props.outcome.kind === 'ok' || props.outcome.kind === 'installed',
+  () =>
+    props.outcome.kind === 'ok'
+    || props.outcome.kind === 'installed'
+    || (props.outcome.kind === 'failed' && props.lastCheckUnixS !== null),
 )
 
 // Generation counter, as `PluginRoute.vue` does for a plugin catalogue: the
@@ -87,8 +107,8 @@ watch(
     if (!open || asked.value) return
     const localGeneration = ++generation
     // Asked once per page, not once per opening: the core keeps it for the
-    // life of its session, keyed by release tag, and re-asking would
-    // defeat that from this side.
+    // life of its session, keyed by the tag-qualified URL, and re-asking
+    // would defeat that from this side.
     asked.value = true
     try {
       const answer = await api.get<{
@@ -161,9 +181,14 @@ watch(
               </span>
             </div>
             <!-- Never disabled for a missing description: installing does not
-                 depend on knowing how to describe the component. -->
+                 depend on knowing how to describe the component. Disabled
+                 while `busy` (m6): the update card's own Install button
+                 already does this, and without it a second press here
+                 re-enqueues a second `Job::Install` of a component whose
+                 first install has not finished yet. -->
             <Button
               variant="outline" size="xs" data-installable-install
+              :disabled="!!busy"
               @click="emit('install', row.offer.name)"
             >{{ t('installables_install') }}</Button>
           </li>

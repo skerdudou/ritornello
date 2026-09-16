@@ -27,11 +27,13 @@ pub async fn update_json(State(state): State<AppState>) -> Response {
 /// itself would meet cross-origin sharing on a release asset, which fails on
 /// some browsers only — the worst kind of outage.
 ///
-/// Kept for the life of the session, keyed by the release tag it came from,
-/// so a dialog opened twice asks nothing the second time.
+/// Kept for the life of the session, keyed by the tag-qualified URL it came
+/// from, so a dialog opened twice asks nothing the second time.
 ///
-/// An empty `components` is the honest answer for a release that publishes no
-/// catalogue, which is every release published before this chantier.
+/// An empty `components` (**200**) is the honest answer for a release that
+/// publishes no catalogue, which is every release published before this
+/// chantier. A fetch that **failed** is a different fact and answers
+/// **503**, not 200 — see below.
 pub async fn update_catalogue_json(State(state): State<AppState>) -> Response {
     let Some(url) = state.update.read().await.catalogue_url.clone() else {
         return Json(Catalogue::default()).into_response();
@@ -49,15 +51,24 @@ pub async fn update_catalogue_json(State(state): State<AppState>) -> Response {
     // untouched: writing the empty default under `url` would memorise a
     // transient outage as "this release publishes nothing" for the life of
     // the core session, which `catalogue::parse`'s own test says is a
-    // different fact from an empty catalogue. Answering the same honest
-    // empty default on failure, without caching it, keeps the page's
-    // fallback identical while leaving the next request free to retry.
+    // different fact from an empty catalogue.
+    //
+    // N2: a failure also answers a **different status** from the "no
+    // catalogue at all" branch above, rather than the same 200 empty body.
+    // Caching only on success (the fix above) stops the *core* from
+    // remembering the wrong fact, but the page has a latch of its own
+    // (`InstallablesDialog.vue`'s `asked`) that only resets in its `catch`
+    // path — a 200 never reaches it, so a byte-identical "no catalogue"
+    // answer would still freeze the failure for the page's life, cured only
+    // by a reload. 503 routes a transient failure through the retry
+    // machinery that already exists on the page, rather than through the
+    // one meant for "this release genuinely publishes nothing".
     match fetch_catalogue(&url).await {
         Some(fresh) => {
             *state.update_catalogue_cache.write().await = Some((url, fresh.clone()));
             Json(fresh).into_response()
         }
-        None => Json(Catalogue::default()).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
 
@@ -296,17 +307,17 @@ mod tests {
         let cache = state.update_catalogue_cache.clone();
         let app = router(state);
 
-        // First request: the transport fails, the page gets the honest empty
-        // fallback, and — this is the assertion the old code fails — the
-        // cache must stay untouched.
+        // First request: the transport fails, the page is told so distinctly
+        // (N2: 503, not the 200 empty body a genuine "no catalogue" release
+        // answers with — see `a_fetch_failure_answers_service_unavailable_
+        // not_the_no_catalogue_200`), and — this is the assertion the old
+        // code fails — the cache must stay untouched.
         let resp = app
             .clone()
             .oneshot(Request::get("/api/update/catalogue").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let body1 = resp.into_body().collect().await.unwrap().to_bytes();
-        let v1: serde_json::Value = serde_json::from_slice(&body1).unwrap();
-        assert_eq!(v1, serde_json::json!({"components": {}}));
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(cache.read().await.is_none(), "a failed fetch must not be cached");
 
         // Second request, same URL: the server answers for real this time,
@@ -318,6 +329,27 @@ mod tests {
         let body2 = resp.into_body().collect().await.unwrap().to_bytes();
         let v2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
         assert_eq!(v2["components"]["radio"]["description"], "Stations");
+    }
+
+    /// N2: before this fix, a fetch failure answered the same 200 empty body
+    /// as "this release genuinely publishes nothing", which is what let the
+    /// page's own `asked` latch (`InstallablesDialog.vue`) freeze the failure
+    /// for the rest of its life — cured only by a reload, never by a retry.
+    /// A distinct status is what the page's existing `catch` path needs to
+    /// tell the two facts apart on the wire, not only in the core's cache.
+    #[tokio::test]
+    async fn a_fetch_failure_answers_service_unavailable_not_the_no_catalogue_200() {
+        let (state, _rx) = state_with_queue(4);
+        // Nothing listens here: the connection is refused at once, the same
+        // shape of failure as a dropped Wi-Fi link or GitHub unreachable.
+        state.update.write().await.catalogue_url =
+            Some("http://127.0.0.1:1/catalogue.json".to_string());
+        let app = router(state);
+        let resp = app
+            .oneshot(Request::get("/api/update/catalogue").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

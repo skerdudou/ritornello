@@ -82,7 +82,7 @@ const CATALOGUE = {
   update_archive_notes: '{count} fichiers non installés',
   update_partial_failure_note: 'Seule la première cause est montrée',
   update_release_notes: 'Notes de version',
-  update_policy_label: 'Politique',
+  update_policy_label: 'Vérifications automatiques',
   update_policy_off: 'Désactivées',
   update_policy_check: 'Vérifier seulement',
   update_policy_check_and_install: 'Vérifier et installer',
@@ -93,6 +93,12 @@ const CATALOGUE = {
   update_cadence_day_label: 'Jour',
   update_prereleases_label: 'Proposer les versions beta',
   update_prereleases_help: 'Y compris quand vous vérifiez à la main.',
+  // m5: the plugin table's "Genre" column now runs the same wire kinds
+  // through this vocabulary, like the installables dialog already did.
+  plugin_kind_source: 'source',
+  plugin_kind_display: 'affichage',
+  plugin_kind_input: 'entrée',
+  plugin_kind_metadata: 'métadonnées',
 }
 
 /** Payloads served by the fake `fetch`, overridable per test. */
@@ -397,7 +403,9 @@ describe('ConfigView — plugin table', () => {
     })
     const rows = wrapper.findAll('[data-plugin-row]')
     expect(rows).toHaveLength(2)
-    expect(rows[0]!.find('[data-plugin-kind]').text()).toBe('source, metadata')
+    // Translated (m5), not the raw wire words: 'source, metadata' would pass
+    // a French reader by, silently, exactly the inconsistency this closes.
+    expect(rows[0]!.find('[data-plugin-kind]').text()).toBe('source, métadonnées')
   })
 
   it('toggles a plugin and reloads', async () => {

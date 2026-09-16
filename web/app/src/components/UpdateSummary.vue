@@ -40,6 +40,17 @@ const outOfStep = computed(() =>
  * "Impossible de joindre GitHub" error. A failed check is not up to date: it
  * is unknown, same as a device that has never looked, and the spec says so in
  * as many words.
+ *
+ * **`failed` is not only a failed check.** `install_report`
+ * (`update/mod.rs`) publishes the very same `CheckOutcome::Failed` when an
+ * install is *refused* after a check that succeeded — the enum is
+ * deliberately operation-agnostic (it serves §9's "compte rendu de la
+ * dernière tentative", the most recent thing that happened, whichever it
+ * was). `update_last_attempt_failed` is worded to stay true either way; the
+ * red `[data-update-error]` line right below already names which operation
+ * failed, so this headline does not have to. Naming the check specifically
+ * here (as an earlier wording did) was a regression: it read as a lie above
+ * a red line saying an *install* was refused.
  */
 const outcomeSentence = computed(() => {
   switch (props.update.outcome.kind) {
@@ -50,7 +61,7 @@ const outcomeSentence = computed(() => {
     case 'never_checked':
       return t.value('update_never_checked')
     case 'failed':
-      return t.value('update_last_check_failed')
+      return t.value('update_last_attempt_failed')
     default:
       return null
   }

@@ -758,7 +758,7 @@ pub(super) async fn plugin_move_post(
         Ok(u) => u,
         Err(crate::plugins::edit::EditError::OutOfRange) => {
             tracing::info!("moving {name} to {}: out of range for the declared plugins", req.to);
-            let msg = state.catalog.read().await.get("plugin_already_at_end").replace("{name}", &name);
+            let msg = state.catalog.read().await.get("plugin_move_out_of_range").replace("{name}", &name);
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg })))
                 .into_response();
         }
@@ -1509,7 +1509,7 @@ mod tests {
     /// Resolved against the **embedded** catalog rather than
     /// compared to a copy of the string: `Catalog::get` returns the key itself
     /// when it finds nothing, so a key misspelled in the code would put
-    /// `plugin_already_at_end` on the operator's screen with no test
+    /// `plugin_move_out_of_range` on the operator's screen with no test
     /// complaining, and the parity test between the two catalogs does not look
     /// at the code at all.
     #[tokio::test]
@@ -1537,7 +1537,7 @@ mod tests {
         let catalog =
             Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         let message = v["error"].as_str().expect("a refusal an operator can reach needs a sentence");
-        assert_eq!(message, catalog.get("plugin_already_at_end").replace("{name}", "radio"));
+        assert_eq!(message, catalog.get("plugin_move_out_of_range").replace("{name}", "radio"));
         assert!(
             message.contains(' ') && message.contains("radio"),
             "a raw key or an uninterpolated token reached the screen: {message:?}"

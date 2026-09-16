@@ -80,8 +80,13 @@ function offer(overrides: Partial<ComponentOffer> & { name: string }): Component
 function mountDialog(
   components: ComponentOffer[],
   outcome: UpdatePayload['outcome'] = { kind: 'ok' },
+  lastCheckUnixS: number | null = null,
+  busy: string | null = null,
 ) {
-  return mount(InstallablesDialog, { props: { open: true, components, outcome }, attachTo: document.body })
+  return mount(InstallablesDialog, {
+    props: { open: true, components, outcome, lastCheckUnixS, busy },
+    attachTo: document.body,
+  })
 }
 
 /** Mounts once, closes, then reopens with the same components — to check
@@ -146,6 +151,48 @@ describe('InstallablesDialog', () => {
       w.unmount()
       document.body.innerHTML = ''
     }
+  })
+
+  // N3: `failed` is published both for a failed check and for a refused
+  // install that followed a successful check (`install_report`, `update/mod.rs`)
+  // — in the second case the rows on screen are the real ones a check just
+  // built, and `last_check_unix_s` says so. Before this fix `hasUsableCheck`
+  // treated every `failed` as silence, so this state showed
+  // `installables_unknown` ("no usable check has run so far") on a device
+  // that had, in fact, just looked.
+  it('says nothing to add, not that it cannot know, when a failed outcome follows a real check', async () => {
+    mountDialog([], { kind: 'failed', detail: 'boom' }, 1_760_000_000)
+    await flushPromises()
+    expect(document.body.querySelector('[data-installables-empty]')).not.toBeNull()
+    expect(document.body.querySelector('[data-installables-unknown]')).toBeNull()
+  })
+
+  it('still says it cannot know when a failed outcome has never had a real check behind it', async () => {
+    // The `null` fixture default: a first check that fails on a fresh
+    // device, distinguished from the case above by `last_check_unix_s`
+    // alone. Kept as its own test so a mutant that ignores `lastCheckUnixS`
+    // entirely (always usable, or never) cannot survive either assertion.
+    mountDialog([], { kind: 'failed', detail: 'boom' }, null)
+    await flushPromises()
+    expect(document.body.querySelector('[data-installables-unknown]')).not.toBeNull()
+    expect(document.body.querySelector('[data-installables-empty]')).toBeNull()
+  })
+
+  // m6: the update card's own Install button already disables itself while
+  // `update.busy` is set; this dialog's did not, so a second press during an
+  // in-flight install re-enqueued a second `Job::Install` of the same
+  // component.
+  it('disables Install while a job is running', async () => {
+    mountDialog(
+      [offer({ name: 'console', availability: 'not_installed' })],
+      { kind: 'ok' },
+      null,
+      'Installing console…',
+    )
+    await flushPromises()
+    expect(
+      document.body.querySelector<HTMLButtonElement>('[data-installable-install]')?.disabled,
+    ).toBe(true)
   })
 
   it('stays usable when the release publishes no catalogue', async () => {
