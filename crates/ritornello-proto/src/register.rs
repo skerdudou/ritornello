@@ -184,10 +184,10 @@ pub struct Announcement {
     ///   (`PluginStatus::catalog_unknown`), rather than letting it degrade
     ///   in silence.
     /// - `Some({})` — a module that genuinely **has no text of its own**.
-    ///   Three plugins ship this way today (`console`, `ouifm-metas`,
-    ///   `radiofrance-metas`), and it is what a plugin built against this
-    ///   SDK but never calling the texts-registering method announces: an
-    ///   up-to-date binary with nothing to confide is not the same fact as
+    ///   Four plugins ship this way today (`console`, `nrj-metas`,
+    ///   `ouifm-metas`, `radiofrance-metas`), and it is what a plugin built
+    ///   against this SDK but never calling the texts-registering method
+    ///   announces: an up-to-date binary with nothing to confide is not the same fact as
     ///   an old one that was never asked, and an empty string (or an empty
     ///   table standing in for "unknown") would erase exactly that
     ///   distinction — the same reasoning `ui_version` and `repository`

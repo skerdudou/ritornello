@@ -894,11 +894,6 @@ pub trait AdminPlugin: Send + Sync + 'static {
     /// UI asset: `(mime, body)`, or `None` if the path is unknown.
     /// Typically `ui.js` and `ui.css`, embedded via `include_str!`.
     fn asset(&self, path: &str) -> Option<(String, String)>;
-    /// The plugin's i18n catalog, flattened.
-    ///
-    /// `lang = None`: the language the plugin was started in. `Some(l)`:
-    /// rebuild for `l` — cheap, `Catalog::load` only parses a TOML pack.
-    fn catalog(&self, lang: Option<&str>) -> serde_json::Value;
     async fn get_data(&self) -> serde_json::Value;
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String>;
 }
@@ -925,10 +920,10 @@ pub fn bind_admin(socket_path: &Path) -> Result<UnixListener> {
 /// Responses now leave in the order they complete; the `id` correlates them,
 /// not the order.
 ///
-/// The plugin sits behind an `RwLock`: `asset`, `catalog`, `get_data` read in
+/// The plugin sits behind an `RwLock`: `asset`, `get_data` read in
 /// parallel, `set_data` is exclusive — legitimately so, it is a write. The
 /// budget (`deadline_ms`) covers the **wait for the lock** as well as the
-/// processing: a `GetCatalog` stuck behind a 60 s `set_data` answers
+/// processing: a `GetAsset` stuck behind a 60 s `set_data` answers
 /// `Expired` at its deadline instead of staying silent.
 ///
 /// `Ping` takes no lock: that is what lets the core tell "busy" from "dead".
@@ -1010,33 +1005,6 @@ pub async fn serve_admin(listener: UnixListener, plugin: impl AdminPlugin) -> Re
     Ok(())
 }
 
-/// Is `s` a shape `GetCatalog`'s language may ever be let through as?
-///
-/// Accepted: non-empty, at most 16 characters, `[A-Za-z0-9_-]` only.
-/// Rejected — in particular a path-traversal payload such as
-/// `../../../../etc/passwd` — because every `AdminPlugin::catalog`
-/// implementation hands its `lang` straight to `Catalog::load`, which builds
-/// a filesystem path out of it.
-///
-/// **Deliberately the same rule as `valid_locale`**
-/// (`crates/ritornello-core/src/status/locales.rs`), which is the actual
-/// authority — it already gates `PUT /api/locale` and already accepts
-/// languages like `pt-BR` and `zh_Hant` that a stricter, hand-rolled "plain
-/// locale" grammar (this function's previous shape) would have refused. The
-/// two cannot share code — this crate does not depend on the core — but this
-/// guard must never be *stricter* than the core's: a value the core accepted
-/// and forwarded, then silently downgraded to `None` here, is the same class
-/// of bug as forwarding an unvalidated one, one layer down. If `valid_locale`
-/// ever changes, mirror the change here too.
-///
-/// This is only the path-safety net, not a check that the language is one
-/// the core actually installed — the core owns that stricter check (against
-/// `list_locales`) at its HTTP boundary, because only it knows what is
-/// installed.
-pub fn is_plain_locale(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 16 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
 async fn handle_admin<P: AdminPlugin>(
     plugin: std::sync::Arc<tokio::sync::RwLock<P>>,
     assets: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
@@ -1060,19 +1028,6 @@ async fn handle_admin<P: AdminPlugin>(
                 Some((mime, body)) => AdminResult::Asset { mime, body: Some(body) },
                 None => AdminResult::Asset { mime: "text/plain".to_string(), body: None },
             }
-        }
-        AdminReq::GetCatalog(lang) => {
-            // Sanitized **here**, before any plugin ever sees it: every one of
-            // them hands `lang` straight to `Catalog::load`, which builds a
-            // filesystem path from it (`root/component/{lang}.toml`). This is
-            // a trust boundary, not defensive habit — `lang` arrives over IPC
-            // (eventually from an HTTP query parameter) and a payload like
-            // `../../../../etc/passwd` would otherwise escape the locales
-            // root and get served to the browser as catalog entries. A single
-            // choke point here, rather than five plugins each having to
-            // remember to validate.
-            let lang = lang.filter(|l| is_plain_locale(l));
-            AdminResult::Catalog(plugin.read().await.catalog(lang.as_deref()))
         }
         AdminReq::GetData => AdminResult::Data(plugin.read().await.get_data().await),
         AdminReq::SetData(data) => match plugin.write().await.set_data(data).await {
@@ -1109,9 +1064,6 @@ mod admin_server_tests {
                 "ui.js" => Some(("text/javascript".into(), "export const contract = 1".into())),
                 _ => None,
             }
-        }
-        fn catalog(&self, _lang: Option<&str>) -> serde_json::Value {
-            serde_json::json!({ "btn_save": "Enregistrer" })
         }
         async fn get_data(&self) -> serde_json::Value {
             self.data.clone()
@@ -1190,19 +1142,7 @@ mod admin_server_tests {
     }
 
     #[tokio::test]
-    async fn get_catalog_waits_for_the_lock_within_its_budget_then_expires() {
-        // The catalog reads the plugin's state, so it waits for an ongoing
-        // `set_data` to finish; if the budget is shorter than that set, it is
-        // `Expired`, not a silence.
-        let (mut r, mut w) = connected_client(slow_fake(3)).await;
-        w.write_all(b"{\"id\":1,\"req\":\"SetData\",\"arg\":{}}\n").await.unwrap();
-        w.write_all(b"{\"id\":2,\"deadline_ms\":300,\"req\":\"GetCatalog\",\"arg\":null}\n").await.unwrap();
-        let resp = line(&mut r).await;
-        assert_eq!((resp.id, resp.result), (2, AdminResult::Expired));
-    }
-
-    #[tokio::test]
-    async fn getasset_getdata_setdata_getcatalog_dialogue() {
+    async fn getasset_getdata_setdata_dialogue() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("admin.sock");
         let socket_srv = socket.clone();
@@ -1245,97 +1185,6 @@ mod admin_server_tests {
         let l = lines.next_line().await.unwrap().unwrap();
         let r: AdminResponse = serde_json::from_str(&l).unwrap();
         assert!(matches!(r.result, AdminResult::Asset { body: None, .. }));
-
-        write.write_all(b"{\"id\":5,\"req\":\"GetCatalog\",\"arg\":null}\n").await.unwrap();
-        let l = lines.next_line().await.unwrap().unwrap();
-        let r: AdminResponse = serde_json::from_str(&l).unwrap();
-        assert!(matches!(r.result, AdminResult::Catalog(ref v) if v["btn_save"] == "Enregistrer"));
-    }
-
-    /// A test-only admin plugin whose catalog simply echoes the requested
-    /// language, so the wiring from the wire to `AdminPlugin::catalog` can be
-    /// observed without a real i18n pack.
-    struct LangEchoAdmin;
-
-    #[async_trait::async_trait]
-    impl AdminPlugin for LangEchoAdmin {
-        fn asset(&self, _path: &str) -> Option<(String, String)> {
-            None
-        }
-        fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
-            serde_json::json!({ "lang": lang })
-        }
-        async fn get_data(&self) -> serde_json::Value {
-            serde_json::json!({})
-        }
-        async fn set_data(&mut self, _data: serde_json::Value) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn a_catalog_request_carries_the_language_through_to_the_plugin() {
-        // The language must be **obeyed**, not merely used as a cache key: the
-        // URL that asks for `fr` is served `immutable` (Task 8), so it must
-        // contain French whatever the plugin's current locale is. Otherwise
-        // the promise lies.
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("admin.sock");
-        std::mem::forget(dir);
-        let listener = bind_admin(&socket).unwrap();
-        tokio::spawn(async move { serve_admin(listener, LangEchoAdmin).await.unwrap() });
-        let stream = UnixStream::connect(&socket).await.unwrap();
-        let (r, mut w) = stream.into_split();
-        let mut r = BufReader::new(r);
-        w.write_all(b"{\"id\":1,\"req\":\"GetCatalog\",\"arg\":\"fr\"}\n").await.unwrap();
-        let resp = line(&mut r).await;
-        let AdminResult::Catalog(v) = resp.result else { panic!("expected a Catalog result: {resp:?}") };
-        assert_eq!(v["lang"], "fr");
-    }
-
-    #[tokio::test]
-    async fn a_malformed_language_never_reaches_the_plugin_and_falls_back_to_none() {
-        // Trust boundary: `lang` arrives over IPC (and, once the core wires
-        // its HTTP query parameter through, ultimately from a browser), and a
-        // plugin hands it straight to `Catalog::load`, which builds a
-        // filesystem path from it (`root/component/{lang}.toml`). A
-        // path-traversal payload must never reach that call: it must produce
-        // exactly the same answer as `None`, not an error and not the
-        // requested file's contents.
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("admin.sock");
-        std::mem::forget(dir);
-        let listener = bind_admin(&socket).unwrap();
-        tokio::spawn(async move { serve_admin(listener, LangEchoAdmin).await.unwrap() });
-        let stream = UnixStream::connect(&socket).await.unwrap();
-        let (r, mut w) = stream.into_split();
-        let mut r = BufReader::new(r);
-
-        w.write_all(b"{\"id\":1,\"req\":\"GetCatalog\",\"arg\":\"../../../../etc/passwd\"}\n")
-            .await
-            .unwrap();
-        let malicious = line(&mut r).await;
-
-        w.write_all(b"{\"id\":2,\"req\":\"GetCatalog\",\"arg\":null}\n").await.unwrap();
-        let none = line(&mut r).await;
-
-        assert_eq!(malicious.result, none.result, "a malformed language must answer exactly like None");
-        let AdminResult::Catalog(v) = malicious.result else { panic!("expected a Catalog result") };
-        assert_eq!(v["lang"], serde_json::Value::Null, "the plugin must never see the raw payload");
-    }
-
-    #[test]
-    fn is_plain_locale_accepts_only_the_installable_shape() {
-        // Same bounds as `valid_locale`'s own test
-        // (`status::locales::tests::valid_locale_accepts_codes_and_refuses_the_rest`):
-        // this guard must accept everything that one does, or a value the
-        // core installed and forwarded would be silently downgraded here.
-        for ok in ["en", "fr", "pt-BR", "zh_Hant", "fr-CA"] {
-            assert!(is_plain_locale(ok), "{ok} should be accepted");
-        }
-        for bad in ["", "..", "../fr", "fr/..", "../../../../etc/passwd", "fr toml", &"a".repeat(17)] {
-            assert!(!is_plain_locale(bad), "{bad} should be rejected");
-        }
     }
 }
 

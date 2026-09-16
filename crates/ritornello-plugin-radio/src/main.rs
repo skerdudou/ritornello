@@ -307,13 +307,17 @@ async fn main() -> Result<()> {
         state_path,
         stations: stations_shared,
         catalog,
-        locales_root,
         directory: Arc::new(directory),
         search: RwLock::new(Vec::new()),
         countries: RwLock::new(Vec::new()),
         preset_count_tx,
     };
-    ritornello_plugin_sdk::declare_runtime!()?.source(source)?.admin(admin)?.run().await
+    ritornello_plugin_sdk::declare_runtime!()?
+        .texts([("en", RADIO_EN)])?
+        .source(source)?
+        .admin(admin)?
+        .run()
+        .await
 }
 
 #[cfg(test)]
@@ -627,7 +631,6 @@ mod tests {
             state_path: dir.path().join("plugin-radio.json"),
             stations: stations_shared.clone(),
             catalog: Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN))),
-            locales_root: dir.path().to_path_buf(),
             directory: Arc::new(crate::directory::HttpDirectory::from_env()),
             search: RwLock::new(Vec::new()),
             countries: RwLock::new(Vec::new()),

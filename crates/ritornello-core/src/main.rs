@@ -4639,9 +4639,9 @@ mod toggle_tests {
 
     /// The mirror case: a plugin that **does** announce a catalog — even an
     /// empty one, `Some({})`, exactly what a textless but up-to-date plugin
-    /// (`console`, `ouifm-metas`, `radiofrance-metas`) writes — must not be
-    /// named as predating the field. Conflating the two would make every
-    /// legitimately textless plugin look like a lagging binary.
+    /// (`console`, `nrj-metas`, `ouifm-metas`, `radiofrance-metas`) writes —
+    /// must not be named as predating the field. Conflating the two would
+    /// make every legitimately textless plugin look like a lagging binary.
     #[tokio::test]
     async fn a_wired_plugin_with_an_empty_but_present_catalog_is_not_named() {
         let mut b = bench();

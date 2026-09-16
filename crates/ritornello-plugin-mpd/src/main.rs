@@ -130,15 +130,11 @@ async fn main() -> Result<()> {
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
     let locale = env_or("RITORNELLO_LOCALE", "en");
     let catalog = Arc::new(RwLock::new(Catalog::load("mpd", &locale, &locales_root, MPD_EN)));
-    let admin = MpdAdmin {
-        config_path: path,
-        config: RwLock::new(config),
-        catalog,
-        locales_root,
-        rebind_tx: Some(rebind_tx),
-    };
+    let admin =
+        MpdAdmin { config_path: path, config: RwLock::new(config), catalog, rebind_tx: Some(rebind_tx) };
 
     ritornello_plugin_sdk::declare_runtime!()?
+        .texts([("en", MPD_EN)])?
         .input(MpdInput { rx: cmd_rx })?
         .display(MpdDisplay { state })?
         .admin(admin)?

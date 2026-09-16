@@ -28,10 +28,6 @@ pub struct CdAdmin {
     /// persisted would silently revert at the next restart.
     pub on_arrival: Arc<RwLock<OnArrival>>,
     pub catalog: Arc<RwLock<Catalog>>,
-    /// Root of the on-disk language packs, kept so a catalog can be rebuilt in
-    /// any requested language — `Catalog::load` only parses a TOML file, so
-    /// this costs nothing per request.
-    pub locales_root: PathBuf,
 }
 
 #[async_trait::async_trait]
@@ -45,22 +41,6 @@ impl AdminPlugin for CdAdmin {
                 Some(("text/css".to_string(), include_str!("../ui/dist/ui.css").to_string()))
             }
             _ => None,
-        }
-    }
-
-    fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
-        match lang {
-            // The language the plugin was started in: the catalog already
-            // built, no work at all.
-            None => serde_json::json!(self.catalog.read().unwrap().entries()),
-            // A language explicitly asked for. Rebuilt rather than translated
-            // from the current one: the on-disk pack is the authority, and
-            // only `Catalog::load` knows how to layer it over the embedded
-            // English.
-            Some(l) => {
-                let c = Catalog::load("cd", l, &self.locales_root, crate::CD_EN);
-                serde_json::json!(c.entries())
-            }
         }
     }
 
@@ -111,7 +91,6 @@ mod tests {
                 std::path::Path::new("/nonexistent"),
                 crate::CD_EN,
             ))),
-            locales_root: PathBuf::from("/nonexistent"),
         };
         Fixture { admin, _dir: dir }
     }

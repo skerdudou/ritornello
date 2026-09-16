@@ -399,13 +399,7 @@ pub fn budget(req: &AdminReq) -> std::time::Duration {
     use std::time::Duration;
     match req {
         AdminReq::Ping => Duration::from_millis(500),
-        // `GetCatalog` now does disk I/O when it carries a language (a
-        // `Catalog::load`, i.e. reading and parsing a small TOML pack), but it
-        // stays in `GetAsset`'s bucket: both are a couple of local reads of a
-        // similar size to what `GetAsset` already returns under this same
-        // cap, nothing like the `GetData`/`SetData` requests that may touch a
-        // network share.
-        AdminReq::GetAsset(_) | AdminReq::GetCatalog(_) => Duration::from_secs(1),
+        AdminReq::GetAsset(_) => Duration::from_secs(1),
         AdminReq::GetData => Duration::from_secs(5),
         AdminReq::SetData(_) => Duration::from_secs(30),
     }
@@ -484,17 +478,6 @@ impl AdminClient {
         match self.request(AdminReq::GetAsset(path.to_string())).await? {
             AdminResult::Asset { mime, body } => Ok(body.map(|b| (mime, b))),
             other => anyhow::bail!("unexpected response to GetAsset: {other:?}"),
-        }
-    }
-
-    /// `lang = None`: the plugin's current language. `Some(l)`: that language
-    /// explicitly, rebuilt by the plugin regardless of its current one — this
-    /// is what lets the HTTP layer serve the answer `immutable` under a
-    /// versioned URL (see `AdminReq::GetCatalog`).
-    pub async fn get_catalog(&self, lang: Option<&str>) -> Result<serde_json::Value> {
-        match self.request(AdminReq::GetCatalog(lang.map(str::to_string))).await? {
-            AdminResult::Catalog(v) => Ok(v),
-            other => anyhow::bail!("unexpected response to GetCatalog: {other:?}"),
         }
     }
 
@@ -1423,10 +1406,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            // 2nd request (get_catalog, id=2)
+            // 2nd request (get_data, id=2)
             let _ = lines.next_line().await.unwrap().unwrap();
             write
-                .write_all(b"{\"id\":2,\"result\":{\"kind\":\"Catalog\",\"data\":{\"btn_save\":\"Enregistrer\"}}}\n")
+                .write_all(b"{\"id\":2,\"result\":{\"kind\":\"Data\",\"data\":{\"btn_save\":\"Enregistrer\"}}}\n")
                 .await
                 .unwrap();
             // 3rd request (set_data, id=3)
@@ -1444,7 +1427,7 @@ mod tests {
             client.get_asset("ui.js").await.unwrap(),
             Some(("text/javascript".to_string(), "export default 1".to_string()))
         );
-        assert_eq!(client.get_catalog(None).await.unwrap(), serde_json::json!({"btn_save": "Enregistrer"}));
+        assert_eq!(client.get_data().await.unwrap(), serde_json::json!({"btn_save": "Enregistrer"}));
         let verdict = client.set_data(serde_json::json!({})).await.unwrap();
         assert_eq!(verdict, Err("nope".to_string()));
     }
@@ -1454,7 +1437,6 @@ mod tests {
         use std::time::Duration;
         assert_eq!(budget(&AdminReq::Ping), Duration::from_millis(500));
         assert_eq!(budget(&AdminReq::GetAsset("ui.js".into())), Duration::from_secs(1));
-        assert_eq!(budget(&AdminReq::GetCatalog(None)), Duration::from_secs(1));
         assert_eq!(budget(&AdminReq::GetData), Duration::from_secs(5));
         assert_eq!(budget(&AdminReq::SetData(serde_json::json!({}))), Duration::from_secs(30));
     }

@@ -1244,8 +1244,9 @@ async fn main() -> Result<()> {
     )));
 
     ritornello_plugin_sdk::declare_runtime!()?
+        .texts([("en", MUSICBRAINZ_EN)])?
         .metadata(MusicBrainzPlugin::new(store.clone(), state_path.clone()))?
-        .admin(admin::MusicBrainzAdmin::new(store, state_path, catalog, locales_root))?
+        .admin(admin::MusicBrainzAdmin::new(store, state_path, catalog))?
         .run()
         .await
 }

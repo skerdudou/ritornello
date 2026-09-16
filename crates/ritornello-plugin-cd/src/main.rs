@@ -1254,8 +1254,13 @@ async fn main() -> Result<()> {
         order: Vec::new(),
         cursor: 0,
     };
-    let admin = CdAdmin { state_path, on_arrival, catalog, locales_root };
-    ritornello_plugin_sdk::declare_runtime!()?.source(source)?.admin(admin)?.run().await
+    let admin = CdAdmin { state_path, on_arrival, catalog };
+    ritornello_plugin_sdk::declare_runtime!()?
+        .texts([("en", CD_EN)])?
+        .source(source)?
+        .admin(admin)?
+        .run()
+        .await
 }
 
 #[cfg(test)]

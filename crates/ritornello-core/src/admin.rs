@@ -13,10 +13,11 @@ use serde::Deserialize;
 /// catalogue through this trait, over IPC. It now resolves the same
 /// catalogue from the shared `Registry` (task 4), purely in memory — see
 /// `admin_i18n`'s doc — so that operation no longer belongs to the set of
-/// admin calls this trait exists to abstract. `AdminClient::get_catalog`
-/// itself is untouched, in `ritornello-plugin-sdk`: the wire protocol still
-/// answers a `Catalog` request, this crate simply stopped being the one that
-/// asks.
+/// admin calls this trait exists to abstract. Task 6 went further and
+/// removed the wire protocol itself: `AdminReq::GetCatalog`,
+/// `AdminClient::get_catalog` and `AdminPlugin::catalog`, in
+/// `ritornello-plugin-sdk`, no longer exist. A catalogue is now announced
+/// once (`Announcement.catalog`, task 3) and never requested.
 #[async_trait::async_trait]
 pub trait AdminBackend: Send + Sync {
     async fn asset(&self, path: &str) -> Result<Option<(String, String)>>;

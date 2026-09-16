@@ -1276,14 +1276,18 @@ async fn main() -> Result<()> {
         roots,
         playlist,
         catalog,
-        locales_root,
         scan: Arc::new(Mutex::new(admin::ScanProgress::default())),
         scan_task: None,
         unresolved: Arc::new(Mutex::new(Vec::new())),
         browse: Arc::new(Mutex::new(serde_json::json!({}))),
         preset_count_tx,
     };
-    ritornello_plugin_sdk::declare_runtime!()?.source(source)?.admin(admin)?.run().await
+    ritornello_plugin_sdk::declare_runtime!()?
+        .texts([("en", FILES_EN)])?
+        .source(source)?
+        .admin(admin)?
+        .run()
+        .await
 }
 
 #[cfg(test)]

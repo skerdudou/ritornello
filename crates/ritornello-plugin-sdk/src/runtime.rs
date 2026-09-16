@@ -614,9 +614,6 @@ mod tests {
                     _ => None,
                 }
             }
-            fn catalog(&self, _lang: Option<&str>) -> serde_json::Value {
-                serde_json::json!({})
-            }
             async fn get_data(&self) -> serde_json::Value {
                 serde_json::json!({})
             }
@@ -629,10 +626,11 @@ mod tests {
     }
 
     /// The consequence spelled out in `Announcement.catalog`'s own doc: a
-    /// plugin that never calls `.texts()` — `console`, `ouifm-metas` and
-    /// `radiofrance-metas` today — still announces `Some({})`, never
-    /// `None`. `None` is reserved for a binary that predates the field
-    /// entirely, and a plugin built against this SDK never is one.
+    /// plugin that never calls `.texts()` — `console`, `nrj-metas`,
+    /// `ouifm-metas` and `radiofrance-metas` today — still announces
+    /// `Some({})`, never `None`. `None` is reserved for a binary that
+    /// predates the field entirely, and a plugin built against this SDK
+    /// never is one.
     #[test]
     fn a_plugin_that_never_calls_texts_announces_an_empty_catalog_not_none() {
         let r = Runtime::new(
@@ -662,6 +660,51 @@ mod tests {
         let catalog = r.announcement().catalog.expect("a plugin that confided text must announce it");
         assert_eq!(catalog.get("en").and_then(|l| l.get("play")).map(String::as_str), Some("Play"));
         assert_eq!(catalog.get("fr").and_then(|l| l.get("play")).map(String::as_str), Some("Lecture"));
+    }
+
+    /// The barrier the tests above cannot provide, and the reason task 6
+    /// exists: `Runtime::texts` only refuses an empty or unparseable English
+    /// layer for a plugin that *calls* it — a plugin that never calls it at
+    /// all announces `Some({})` and passes every check above without a
+    /// complaint. That was this workspace's actual state right up to this
+    /// commit: all six plugins holding an embedded English pack (`cd`,
+    /// `files`, `generic-input`, `mpd`, `musicbrainz`, `radio`) built a
+    /// `Runtime` and never handed it their own `_EN` constant, so the core's
+    /// registry held no English layer for any of them and every key on
+    /// every one of their admin pages rendered as itself — `no_disc`, never
+    /// "No disc" — the moment task 5 started serving catalogues from the
+    /// registry instead of over IPC.
+    ///
+    /// So this reads each shipped plugin's real, committed `main.rs` — the
+    /// only place that fact lives — rather than asking the plugin anything:
+    /// a plugin that regressed would still answer every question this SDK
+    /// could put to it.
+    ///
+    /// **[MUTATION]**: delete one plugin's `.texts([("en", …)])?` call from
+    /// its `main()` and this test fails for that plugin alone.
+    #[test]
+    fn every_plugin_with_an_embedded_english_pack_announces_it() {
+        let sdk_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // (sibling crate directory, the exact call its `main()` must contain)
+        for (plugin_crate, call) in [
+            ("ritornello-plugin-cd", "\"en\", CD_EN"),
+            ("ritornello-plugin-files", "\"en\", FILES_EN"),
+            ("ritornello-plugin-generic-input", "\"en\", GENERIC_INPUT_EN"),
+            ("ritornello-plugin-mpd", "\"en\", MPD_EN"),
+            ("ritornello-plugin-musicbrainz", "\"en\", MUSICBRAINZ_EN"),
+            ("ritornello-plugin-radio", "\"en\", RADIO_EN"),
+        ] {
+            let main_rs = sdk_manifest_dir.join("..").join(plugin_crate).join("src/main.rs");
+            let source = std::fs::read_to_string(&main_rs)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", main_rs.display()));
+            let announces = source.lines().any(|l| l.contains(".texts(") && l.contains(call));
+            assert!(
+                announces,
+                "{plugin_crate}'s main() must hand its embedded English to Runtime::texts(...): \
+                 no line contains both `.texts(` and `{call}` in {}",
+                main_rs.display()
+            );
+        }
     }
 
     /// **[MUTATION]** Barrier 6 of the spec: a plugin declaring text whose

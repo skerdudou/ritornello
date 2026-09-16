@@ -73,15 +73,13 @@ async fn main() -> Result<()> {
     // remote. `Runtime::run` now holds both, each in its own task — the page
     // is no longer conditional, since the plugin itself announces that it
     // has one.
-    let admin = GenericInputAdmin {
-        bindings_path,
-        presets_root,
-        input_root,
-        hub,
-        catalog,
-        locales_root,
-    };
-    ritornello_plugin_sdk::declare_runtime!()?.input(EvdevInput { rx })?.admin(admin)?.run().await
+    let admin = GenericInputAdmin { bindings_path, presets_root, input_root, hub, catalog };
+    ritornello_plugin_sdk::declare_runtime!()?
+        .texts([("en", GENERIC_INPUT_EN)])?
+        .input(EvdevInput { rx })?
+        .admin(admin)?
+        .run()
+        .await
 }
 
 #[cfg(test)]
