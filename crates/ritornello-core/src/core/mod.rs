@@ -1386,6 +1386,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_frame_carrying_only_status_text_alongside_a_fact_still_recomposes_the_view() {
+        // Mirrors `count_alone_does_not_clear_the_source_status`, but for the
+        // new field: a frame declaring `preset_count` **and** `status_text`,
+        // with neither `status` nor an identity, must still be treated as
+        // recomposing the view — the exact defect `cover`/`presets` suffered
+        // before they were added to this same disjunction. Without
+        // `status_text.is_some()` in `recomposes_the_view`, this particular
+        // combination (a fact alongside a not-yet-resolved status) would
+        // still slip through `carries_a_fact && !recomposes_the_view`.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                preset_count: Some(6),
+                status_text: Some(Text::Keyed { key: "no_disc".into(), params: HashMap::new() }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            core.player_state().status.as_deref(),
+            Some("no_disc"),
+            "the status_text must be taken, not dropped by the early return"
+        );
+        assert_eq!(core.player_state().preset_count, Some(6));
+    }
+
+    #[tokio::test]
     async fn a_renumbering_notice_does_not_clear_the_status() {
         // The exact frame from `plugin-files` after a save from its admin
         // page: the count, **and** the number and name of the current
