@@ -3,19 +3,19 @@
 //! patterns (see `patterns.rs`) — the same store the `metadata` loop reads and
 //! writes to probe and split radio streams.
 //!
-//! A `metadata` plugin **never** receives a `SetLocale` frame: that frame only
-//! exists for `SourcePlugin` (see `ritornello_proto`). The catalog loaded here
-//! is therefore frozen to the language passed at the plugin's launch — a
-//! change of the device's language only shows on this page after a restart of
-//! the plugin. Same limit as the MPD plugin's page
-//! (`ritornello-plugin-mpd::admin`).
+//! Resolution used to be frozen at this plugin's launch — a `metadata`
+//! plugin never receives a `SetLocale` frame — which is exactly the limit
+//! the language-packs chantier removes: the plugin no longer resolves
+//! anything at all, the core does, from the announced catalog, at every
+//! request the page makes.
 
 use crate::patterns::{Store, Pattern};
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::AdminPlugin;
+use ritornello_proto::Text;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::RwLock as StoreLock;
 
 /// What the page sends. Dedicated structure and **mandatory** fields, like the
@@ -76,17 +76,18 @@ impl From<WrittenPattern> for Pattern {
 pub struct MusicBrainzAdmin {
     store: Arc<StoreLock<Store>>,
     state_path: PathBuf,
-    catalog: Arc<RwLock<Catalog>>,
 }
 
 impl MusicBrainzAdmin {
-    pub fn new(store: Arc<StoreLock<Store>>, state_path: PathBuf, catalog: Arc<RwLock<Catalog>>) -> Self {
-        Self { store, state_path, catalog }
+    pub fn new(store: Arc<StoreLock<Store>>, state_path: PathBuf) -> Self {
+        Self { store, state_path }
     }
 
-    /// Resolves a catalog key into the sentence of the current language.
-    fn translate(&self, key: &str) -> String {
-        self.catalog.read().unwrap().get(key).to_string()
+    /// A bare key, no parameters — unresolved, the core resolving it
+    /// against this plugin's announced catalog (language-packs chantier,
+    /// task 10).
+    fn keyed(&self, key: &str) -> Text {
+        Text::Keyed { key: key.to_string(), params: HashMap::new() }
     }
 }
 
@@ -122,20 +123,14 @@ impl AdminPlugin for MusicBrainzAdmin {
         })
     }
 
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
         // `Write`, not a type modeled on `Entry`: see the comment on the type.
         // A missing field or an unknown action must reject the request, not
         // get completed by a *loading* default.
-        let write: Write =
-            serde_json::from_value(data).map_err(|e| {
-                // Through the catalog, like every other refusal of this method:
-                // a hard-coded English string is not "a translated sentence",
-                // it is just a key in disguise — a user in French would see
-                // English. The plugin's catalog did not have this key (an
-                // omission of my brief), it was added on the exact model of the
-                // mpd plugin's.
-                self.catalog.read().unwrap().get("bad_request").replace("{detail}", &e.to_string())
-            })?;
+        let write: Write = serde_json::from_value(data).map_err(|e| Text::Keyed {
+            key: "bad_request".into(),
+            params: HashMap::from([("detail".to_string(), e.to_string())]),
+        })?;
 
         let mut store = self.store.write().await;
         match write {
@@ -151,10 +146,10 @@ impl AdminPlugin for MusicBrainzAdmin {
                     // space of the announced string. "Empty" is the right word
                     // for it: it carries nothing.
                     if separator.trim().is_empty() {
-                        return Err(self.translate("separator_empty"));
+                        return Err(self.keyed("separator_empty"));
                     }
                     if !(separator.starts_with(' ') && separator.ends_with(' ')) {
-                        return Err(self.translate("separator_no_space"));
+                        return Err(self.keyed("separator_no_space"));
                     }
                 }
                 store.set_manual(&url, pattern.into());
@@ -163,7 +158,7 @@ impl AdminPlugin for MusicBrainzAdmin {
                 // A refusal, not a silent success: the page would show "done"
                 // on a gesture with no effect.
                 if store.entry(&url).is_none() {
-                    return Err(self.translate("unknown_station"));
+                    return Err(self.keyed("unknown_station"));
                 }
                 store.remove(&url);
             }
@@ -184,7 +179,7 @@ impl AdminPlugin for MusicBrainzAdmin {
         // becomes persistent.
         store.save(&self.state_path).map_err(|e| {
             tracing::warn!("could not save ICY patterns: {e}");
-            self.translate("save_failed")
+            self.keyed("save_failed")
         })
     }
 }
@@ -203,18 +198,8 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("patterns.json");
-        let catalog = Arc::new(RwLock::new(Catalog::load(
-            "musicbrainz",
-            "en",
-            std::path::Path::new("/nonexistent"),
-            crate::MUSICBRAINZ_EN,
-        )));
         Fixture {
-            admin: MusicBrainzAdmin::new(
-                Arc::new(StoreLock::new(Store::default())),
-                state_path.clone(),
-                catalog,
-            ),
+            admin: MusicBrainzAdmin::new(Arc::new(StoreLock::new(Store::default())), state_path.clone()),
             state_path,
             _dir: dir,
         }
@@ -300,14 +285,16 @@ mod tests {
                 "pattern": { "split": { "separator": sep, "artist_first": true } }
             });
             let err = f.admin.set_data(op).await.expect_err("an empty separator must be refused");
-            assert!(!err.contains("separator_"), "never the raw key: {err}");
+            assert_eq!(err, Text::Keyed { key: "separator_empty".into(), params: HashMap::new() });
         }
     }
 
     #[tokio::test]
-    async fn a_separator_without_spaces_is_refused_by_a_sentence_not_a_key() {
+    async fn a_separator_without_spaces_is_refused_by_its_own_distinct_key() {
         // The SDK's contract, and the real rule: without surrounding spaces,
-        // `Jean-Michel Jarre` would get cut in two.
+        // `Jean-Michel Jarre` would get cut in two. The plugin no longer
+        // resolves (no `Catalog` left — language-packs chantier, task 10):
+        // what this test still owns is that the key is the distinct one.
         let mut f = fixture();
         let op = serde_json::json!({
             "action": "set",
@@ -315,14 +302,13 @@ mod tests {
             "pattern": { "split": { "separator": "-", "artist_first": true } }
         });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert!(err.contains("space"), "must be the catalog's sentence: {err}");
-        assert!(!err.contains("separator_no_space"), "never the raw key: {err}");
+        assert_eq!(err, Text::Keyed { key: "separator_no_space".into(), params: HashMap::new() });
         // Nothing should have been set.
         assert!(f.admin.get_data().await["stations"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn an_empty_separator_is_refused_by_a_distinct_sentence() {
+    async fn an_empty_separator_is_refused_by_a_distinct_key() {
         let mut f = fixture();
         let op = serde_json::json!({
             "action": "set",
@@ -330,8 +316,7 @@ mod tests {
             "pattern": { "split": { "separator": "", "artist_first": true } }
         });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert_eq!(err, "the separator cannot be empty");
-        assert_ne!(err, "separator_empty");
+        assert_eq!(err, Text::Keyed { key: "separator_empty".into(), params: HashMap::new() });
     }
 
     #[tokio::test]
@@ -339,8 +324,7 @@ mod tests {
         let mut f = fixture();
         let op = serde_json::json!({ "action": "remove", "url": "http://unknown" });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert_eq!(err, "no entry for that stream");
-        assert_ne!(err, "unknown_station");
+        assert_eq!(err, Text::Keyed { key: "unknown_station".into(), params: HashMap::new() });
     }
 
     #[tokio::test]
@@ -408,16 +392,7 @@ mod tests {
         });
         std::fs::write(&f.state_path, serde_json::to_string(&raw).unwrap()).unwrap();
         let store = Store::load(&f.state_path);
-        let admin = MusicBrainzAdmin::new(
-            Arc::new(StoreLock::new(store)),
-            f.state_path.clone(),
-            Arc::new(RwLock::new(Catalog::load(
-                "musicbrainz",
-                "en",
-                std::path::Path::new("/nonexistent"),
-                crate::MUSICBRAINZ_EN,
-            ))),
-        );
+        let admin = MusicBrainzAdmin::new(Arc::new(StoreLock::new(store)), f.state_path.clone());
 
         let data = admin.get_data().await;
         let urls: Vec<&str> = data["stations"].as_array().unwrap().iter().map(|s| s["url"].as_str().unwrap()).collect();
@@ -429,16 +404,16 @@ mod tests {
         // Missing field, unknown action: refusal, not a default applied.
         let mut f = fixture();
         let err = f.admin.set_data(serde_json::json!({ "action": "set", "pattern": "do_not_split" })).await.unwrap_err();
-        assert!(err.starts_with("Unexpected request:"), "unexpected message: {err}");
+        assert!(matches!(&err, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err:?}");
 
         let err = f.admin.set_data(serde_json::json!({ "action": "wipe_everything" })).await.unwrap_err();
-        assert!(err.starts_with("Unexpected request:"), "unexpected message: {err}");
+        assert!(matches!(&err, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err:?}");
 
         assert!(f.admin.get_data().await["stations"].as_array().unwrap().is_empty(), "nothing should have been applied");
     }
 
     #[tokio::test]
-    async fn a_write_failure_returns_a_catalog_sentence_not_the_io_detail() {
+    async fn a_write_failure_returns_the_save_failed_key_not_the_io_detail() {
         // Same regression as in mpd, generic-input and radio:
         // `save(...).map_err(|e| e.to_string())` would put the raw I/O detail
         // in the response body. `state_path` here points at an ordinary file
@@ -450,6 +425,6 @@ mod tests {
         f.admin.state_path = obstacle.join("patterns.json");
         let op = serde_json::json!({ "action": "set", "url": "http://f", "pattern": "do_not_split" });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert_eq!(err, "could not write the pattern file");
+        assert_eq!(err, Text::Keyed { key: "save_failed".into(), params: HashMap::new() });
     }
 }

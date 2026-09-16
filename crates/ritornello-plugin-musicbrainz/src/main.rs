@@ -30,7 +30,6 @@ mod placeholder;
 
 use anyhow::Result;
 use musicbrainz::DiscInfo;
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::MetadataPlugin;
 use ritornello_proto::{CoverRef, Enrichment, NowPlaying};
 use serde_json::Value;
@@ -41,8 +40,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 
 /// Embedded i18n catalog of the admin page (`admin.rs`). Named like `MPD_EN`
-/// on the mpd plugin side: this is the name `Catalog::load` embeds as a last
-/// resort when no external pack is present.
+/// on the mpd plugin side: this is the layer the core's `Runtime::texts`
+/// announces, and the fallback when no external pack is present.
 pub(crate) const MUSICBRAINZ_EN: &str = include_str!("locales/en.toml");
 
 /// **Consecutive** validation failures before reprobing an already known
@@ -1227,26 +1226,10 @@ async fn main() -> Result<()> {
     );
     let store = Arc::new(RwLock::new(patterns::Store::load(&state_path)));
 
-    // A `metadata` plugin receives no `SetLocale` frame (it only exists for
-    // `SourcePlugin`): the admin page's language thus comes from the
-    // environment at launch, as in generic-input and mpd — a change of the
-    // device's language only shows there after a plugin restart (see the doc
-    // of `admin::MusicBrainzAdmin`).
-    let locales_root = PathBuf::from(
-        std::env::var("RITORNELLO_LOCALES").unwrap_or_else(|_| "/etc/ritornello/locales".to_string()),
-    );
-    let locale = std::env::var("RITORNELLO_LOCALE").unwrap_or_else(|_| "en".to_string());
-    let catalog = Arc::new(std::sync::RwLock::new(Catalog::load(
-        "musicbrainz",
-        &locale,
-        &locales_root,
-        MUSICBRAINZ_EN,
-    )));
-
     ritornello_plugin_sdk::declare_runtime!()?
         .texts([("en", MUSICBRAINZ_EN)])?
         .metadata(MusicBrainzPlugin::new(store.clone(), state_path.clone()))?
-        .admin(admin::MusicBrainzAdmin::new(store, state_path, catalog))?
+        .admin(admin::MusicBrainzAdmin::new(store, state_path))?
         .run()
         .await
 }

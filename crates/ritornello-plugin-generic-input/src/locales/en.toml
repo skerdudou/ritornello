@@ -31,8 +31,8 @@ learn_append_label = "Add to the existing codes instead of replacing them"
 learn_timeout = "No key detected — cancelled"
 learn_countdown = "{s} s left"
 saved = "Saved ✓"
-save_error = "Error: "
-load_error = "Loading error: "
+save_error = "Error: {cause}"
+load_error = "Loading error: {cause}"
 no_device = "No input device detected"
 
 # les 23 actions

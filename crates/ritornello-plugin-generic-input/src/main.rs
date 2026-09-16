@@ -15,11 +15,9 @@ use crate::admin::GenericInputAdmin;
 use crate::bindings::Bindings;
 use crate::devices::Hub;
 use anyhow::Result;
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::InputPlugin;
 use ritornello_proto::InputMessage;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
 pub(crate) const GENERIC_INPUT_EN: &str = include_str!("locales/en.toml");
@@ -52,16 +50,6 @@ async fn main() -> Result<()> {
         PathBuf::from(env_or("RITORNELLO_INPUT_BINDINGS", "/etc/ritornello/input-bindings.toml"));
     let presets_root =
         PathBuf::from(env_or("RITORNELLO_INPUT_PRESETS", "/etc/ritornello/input-presets"));
-    let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
-    // An Input plugin does not receive a `SetLocale` (the protocol only
-    // provides it for sources): the page's language comes from the environment.
-    let locale = env_or("RITORNELLO_LOCALE", "en");
-    let catalog = Arc::new(RwLock::new(Catalog::load(
-        "generic-input",
-        &locale,
-        &locales_root,
-        GENERIC_INPUT_EN,
-    )));
 
     let (tx, rx) = mpsc::channel(32);
     let hub = Hub::new(Bindings::load(&bindings_path), tx);
@@ -73,7 +61,7 @@ async fn main() -> Result<()> {
     // remote. `Runtime::run` now holds both, each in its own task — the page
     // is no longer conditional, since the plugin itself announces that it
     // has one.
-    let admin = GenericInputAdmin { bindings_path, presets_root, input_root, hub, catalog };
+    let admin = GenericInputAdmin { bindings_path, presets_root, input_root, hub };
     ritornello_plugin_sdk::declare_runtime!()?
         .texts([("en", GENERIC_INPUT_EN)])?
         .input(EvdevInput { rx })?

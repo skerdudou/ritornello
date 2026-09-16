@@ -16,7 +16,6 @@ use admin::MpdAdmin;
 use anyhow::Result;
 use config::Config;
 use state::SharedState;
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{DisplayPlugin, InputPlugin};
 use ritornello_proto::{SourcesCatalog, Cover, InputMessage, PlayerState};
 use session::listen;
@@ -124,14 +123,8 @@ async fn main() -> Result<()> {
     let (rebind_tx, rebind_rx) = tokio::sync::watch::channel(config.clone());
     tokio::spawn(listen(listener, rebind_rx, state.clone(), cmd_tx));
 
-    // A Display/Input plugin receives no `SetLocale` (the protocol only
-    // provides it for sources): the page's language comes from the
-    // environment, as in generic-input.
-    let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
-    let locale = env_or("RITORNELLO_LOCALE", "en");
-    let catalog = Arc::new(RwLock::new(Catalog::load("mpd", &locale, &locales_root, MPD_EN)));
     let admin =
-        MpdAdmin { config_path: path, config: RwLock::new(config), catalog, rebind_tx: Some(rebind_tx) };
+        MpdAdmin { config_path: path, config: RwLock::new(config), rebind_tx: Some(rebind_tx) };
 
     ritornello_plugin_sdk::declare_runtime!()?
         .texts([("en", MPD_EN)])?

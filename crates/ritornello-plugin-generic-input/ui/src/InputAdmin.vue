@@ -119,7 +119,7 @@ async function reload() {
     fillCodes()
     message.value = device.value ? '' : t.value('no_device')
   } catch (e) {
-    message.value = t.value('load_error') + (e as Error).message
+    message.value = t.value('load_error', { cause: (e as Error).message })
   }
   try {
     // The catalogue the core already keeps for the displays
@@ -356,7 +356,9 @@ async function save() {
   const table = collect(data.value.bindings, device.value, rows.value, codes.value)
   const err = await api.put(url('api/data'), { op: 'save', bindings: table })
   if (err) {
-    message.value = t.value('save_error') + err
+    // A single whole-sentence key with `{cause}`, not a concatenation of the
+    // label and the server's own (already resolved) refusal.
+    message.value = t.value('save_error', { cause: err })
     return
   }
   data.value.bindings = table
@@ -423,7 +425,7 @@ async function import_(e: Event) {
     }
     await reload()
   } catch (err) {
-    message.value = t.value('load_error') + (err as Error).message
+    message.value = t.value('load_error', { cause: (err as Error).message })
   }
 }
 

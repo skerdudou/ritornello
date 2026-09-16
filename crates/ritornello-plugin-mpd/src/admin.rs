@@ -1,9 +1,10 @@
 use crate::config::Config;
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::AdminPlugin;
+use ritornello_proto::Text;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 /// Body of `SetData`, distinct from `Config`: both fields are **mandatory**
 /// here, with no `#[serde(default = ...)]`. Those defaults are right for
@@ -24,7 +25,6 @@ pub struct MpdAdmin {
     /// In-memory copy of the last successful save: `get_data` returns it
     /// without re-reading the disk on every request.
     pub config: RwLock<Config>,
-    pub catalog: Arc<RwLock<Catalog>>,
     /// How the new configuration reaches the network half, which then rebinds
     /// without a restart (see `session::listen`).
     ///
@@ -56,23 +56,24 @@ impl AdminPlugin for MpdAdmin {
         serde_json::json!({ "listen": c.listen, "port": c.port })
     }
 
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
         // `ConfigWrite`, not `Config`: see the comment on the type — a missing
         // field must reject the request (`bad_request`), not get completed by
         // a *loading* default.
-        let writer: ConfigWrite = serde_json::from_value(data).map_err(|e| {
-            self.catalog.read().unwrap().get("bad_request").replace("{detail}", &e.to_string())
+        let writer: ConfigWrite = serde_json::from_value(data).map_err(|e| Text::Keyed {
+            key: "bad_request".into(),
+            params: HashMap::from([("detail".to_string(), e.to_string())]),
         })?;
         let config = Config { listen: writer.listen, port: writer.port };
         // `save` validates then writes atomically; in both failure cases it
         // returns a catalog **key** (`listen_empty`, `port_zero`,
-        // `save_failed`), never a raw I/O detail. It is here, and only here,
-        // that the key becomes a sentence: the Vue page shows `error` as is,
-        // without re-translating it (see the UI half's report) — returning the
-        // bare key would make it appear literally on screen.
+        // `save_failed`), never a raw I/O detail — already the exact shape
+        // `Text::Keyed` wants, with no parameter to carry. The core resolves
+        // it against this plugin's announced catalog (language-packs
+        // chantier, task 10); the plugin itself no longer resolves anything.
         config
             .save(&self.config_path)
-            .map_err(|key| self.catalog.read().unwrap().get(&key).to_string())?;
+            .map_err(|key| Text::Keyed { key, params: HashMap::new() })?;
         *self.config.write().unwrap() = config.clone();
         // The network half rebinds on its own. `send` fails only if nobody is
         // listening any more — the plugin is stopping — and there is then
@@ -106,19 +107,8 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("mpd.toml");
-        let catalog = Arc::new(RwLock::new(Catalog::load(
-            "mpd",
-            "en",
-            std::path::Path::new("/nonexistent"),
-            crate::MPD_EN,
-        )));
         Fixture {
-            admin: MpdAdmin {
-                config_path,
-                config: RwLock::new(Config::default()),
-                catalog,
-                rebind_tx: None,
-            },
+            admin: MpdAdmin { config_path, config: RwLock::new(Config::default()), rebind_tx: None },
             _dir: dir,
         }
     }
@@ -195,34 +185,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_invalid_port_returns_a_catalog_sentence_not_the_raw_key() {
-        // The regression this test blocks: `admin.rs` propagates
-        // `Err("port_zero".into())` directly without resolving it through the
-        // catalog. The Vue page shows `error` as is (no client-side
-        // re-translation), so the user would literally read "port_zero" on
-        // screen instead of the sentence. Verified by making this test fail
-        // deliberately (resolution removed) before writing it for good: see
-        // the task report for the proof.
+    async fn an_invalid_port_returns_the_port_zero_key_not_a_resolved_sentence() {
+        // The plugin no longer resolves (no `Catalog` left — language-packs
+        // chantier, task 10): what this test still owns is the key
+        // `Config::save` names, unresolved, with no parameter to carry.
         let mut f = fixture();
         let op = serde_json::json!({ "listen": "0.0.0.0", "port": 0 });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert_eq!(err, "The port must be between 1 and 65535.");
-        assert_ne!(err, "port_zero");
+        assert_eq!(err, Text::Keyed { key: "port_zero".into(), params: HashMap::new() });
         // Nothing was written, and the in-memory copy did not move.
         assert!(!f.admin.config_path.exists());
         assert_eq!(f.admin.get_data().await["port"], 6600);
     }
 
     #[tokio::test]
-    async fn an_empty_address_returns_a_catalog_sentence() {
+    async fn an_empty_address_returns_the_listen_empty_key() {
         let mut f = fixture();
         let op = serde_json::json!({ "listen": "", "port": 6600 });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert_eq!(err, "The listen address cannot be empty.");
+        assert_eq!(err, Text::Keyed { key: "listen_empty".into(), params: HashMap::new() });
     }
 
     #[tokio::test]
-    async fn a_write_failure_returns_a_catalog_sentence_not_the_io_detail() {
+    async fn a_write_failure_returns_the_save_failed_key_not_the_io_detail() {
         // Same regression as in generic-input and radio:
         // `save(...).map_err(|e| e.to_string())` would put the raw I/O detail
         // in the response body. `config_path` here targets an ordinary file as
@@ -234,11 +219,11 @@ mod tests {
         f.admin.config_path = obstacle.join("mpd.toml");
         let op = serde_json::json!({ "listen": "0.0.0.0", "port": 6600 });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert_eq!(err, "Could not save the settings.");
+        assert_eq!(err, Text::Keyed { key: "save_failed".into(), params: HashMap::new() });
     }
 
     #[tokio::test]
-    async fn a_malformed_request_returns_a_translated_error() {
+    async fn a_malformed_request_returns_the_bad_request_key() {
         // `ConfigWrite` (the type of the `SetData` body, distinct from
         // `Config`) has no `#[serde(default = ...)]`: an incompatible field
         // type (here `port` as a string, not a number) makes
@@ -247,7 +232,7 @@ mod tests {
         let mut f = fixture();
         let err =
             f.admin.set_data(serde_json::json!({ "listen": "0.0.0.0", "port": "lots" })).await.unwrap_err();
-        assert!(err.starts_with("Unexpected request:"), "unexpected message: {err}");
+        assert!(matches!(&err, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err:?}");
     }
 
     #[tokio::test]
@@ -263,7 +248,7 @@ mod tests {
         let mut f = fixture();
         assert!(f.admin.set_data(serde_json::json!({ "listen": "192.168.1.10", "port": 6601 })).await.is_ok());
         let err = f.admin.set_data(serde_json::json!({ "port": 6601 })).await.unwrap_err();
-        assert!(err.starts_with("Unexpected request:"), "unexpected message: {err}");
+        assert!(matches!(&err, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err:?}");
         assert_eq!(f.admin.get_data().await["listen"], "192.168.1.10", "listen must not have moved");
     }
 }

@@ -1,8 +1,9 @@
 use crate::config::{Station, Stations};
 use crate::directory::{Directory, DirectoryCountry, DirectoryStation};
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::AdminPlugin;
+use ritornello_proto::Text;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
@@ -45,7 +46,6 @@ pub struct RadioAdmin {
     /// chosen country is retained, next to the preset.
     pub state_path: PathBuf,
     pub stations: Arc<AsyncRwLock<Stations>>,
-    pub catalog: Arc<RwLock<Catalog>>,
     /// Access to the directory behind a trait: tests inject results without
     /// ever touching the network.
     pub directory: Arc<dyn Directory>,
@@ -60,6 +60,20 @@ pub struct RadioAdmin {
     /// waiting for a preset to be played. See `RadioSource::poll_notification`
     /// on the Source side.
     pub preset_count_tx: tokio::sync::watch::Sender<u8>,
+}
+
+impl RadioAdmin {
+    /// A bare key, no parameters — unresolved, the core resolving it
+    /// against this plugin's announced catalog (language-packs chantier,
+    /// task 10).
+    fn text(&self, key: &str) -> Text {
+        Text::Keyed { key: key.to_string(), params: HashMap::new() }
+    }
+
+    /// A key with a single named parameter.
+    fn text_with(&self, key: &str, param: &str, value: &str) -> Text {
+        Text::Keyed { key: key.to_string(), params: HashMap::from([(param.to_string(), value.to_string())]) }
+    }
 }
 
 #[async_trait::async_trait]
@@ -96,26 +110,19 @@ impl AdminPlugin for RadioAdmin {
         })
     }
 
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
-        let op: Op = serde_json::from_value(data).map_err(|e| {
-            self.catalog
-                .read()
-                .unwrap()
-                .get("bad_request")
-                .replace("{detail}", &e.to_string())
-        })?;
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
+        let op: Op = serde_json::from_value(data)
+            .map_err(|e| self.text_with("bad_request", "detail", &e.to_string()))?;
         match op {
             Op::Save { stations } => {
                 let stations = Stations { stations };
-                stations
-                    .validate()
-                    .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                stations.validate().map_err(|e| e.text())?;
                 stations.save(&self.stations_path).map_err(|e| {
                     // The technical detail (path, I/O cause) stays in the log:
                     // a read-only `/var/lib` must remain diagnosable, but not
                     // at the price of serving that diagnosis as UI text.
                     tracing::warn!("failed to save stations: {e}");
-                    self.catalog.read().unwrap().get("save_failed").to_string()
+                    self.text("save_failed")
                 })?;
                 let count = stations.preset_count();
                 *self.stations.write().await = stations;
@@ -143,13 +150,7 @@ impl AdminPlugin for RadioAdmin {
                     .directory
                     .search(query.trim(), country.as_deref())
                     .await
-                    .map_err(|detail| {
-                        self.catalog
-                            .read()
-                            .unwrap()
-                            .get("search_error")
-                            .replace("{detail}", &detail)
-                    })?;
+                    .map_err(|detail| self.text_with("search_error", "detail", &detail))?;
                 *self.search.write().unwrap() = results;
                 // The country is only retained after a **successful** search: a
                 // failed search says nothing about the user's intent, and
@@ -164,13 +165,11 @@ impl AdminPlugin for RadioAdmin {
                 Ok(())
             }
             Op::Countries => {
-                let countries = self.directory.countries().await.map_err(|detail| {
-                    self.catalog
-                        .read()
-                        .unwrap()
-                        .get("search_error")
-                        .replace("{detail}", &detail)
-                })?;
+                let countries = self
+                    .directory
+                    .countries()
+                    .await
+                    .map_err(|detail| self.text_with("search_error", "detail", &detail))?;
                 *self.countries.write().unwrap() = countries;
                 Ok(())
             }
@@ -247,12 +246,6 @@ mod tests {
             stations_path: path,
             state_path: dir.join("plugin-radio.json"),
             stations: Arc::new(AsyncRwLock::new(stations)),
-            catalog: Arc::new(RwLock::new(Catalog::load(
-                "radio",
-                "en",
-                std::path::Path::new("/nonexistent"),
-                crate::RADIO_EN,
-            ))),
             directory,
             search: RwLock::new(Vec::new()),
             countries: RwLock::new(Vec::new()),
@@ -315,14 +308,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_write_failure_returns_a_catalog_sentence_not_the_io_detail() {
+    async fn a_write_failure_returns_the_save_failed_key_not_the_io_detail() {
         // `stations_path` targets an ordinary file as if it were a parent
         // directory: `create_dir_all` fails with an I/O error, without ever
         // touching the real stations on disk.
         // Targeted regression: `Stations::save(...).map_err(|e| e.to_string())`
         // put that raw error (paths included) in the response body — the text
-        // meant for the player must remain a sources_catalog sentence, the
-        // technical detail going to the log.
+        // meant for the player must remain a resolvable key, the technical
+        // detail going to the log. The plugin no longer resolves it itself
+        // (no `Catalog` left — language-packs chantier, task 10).
         let dir = tempfile::tempdir().unwrap();
         let obstacle = dir.path().join("obstacle");
         std::fs::write(&obstacle, b"not a directory").unwrap();
@@ -333,7 +327,7 @@ mod tests {
             "stations": [{ "name": "Inter", "url": "http://inter", "preset": 1 }]
         });
         let err = a.set_data(new).await.unwrap_err();
-        assert_eq!(err, "the save failed");
+        assert_eq!(err, Text::Keyed { key: "save_failed".into(), params: HashMap::new() });
     }
 
     #[tokio::test]
@@ -415,7 +409,13 @@ mod tests {
             .set_data(serde_json::json!({ "op": "save", "stations": stations }))
             .await
             .unwrap_err();
-        assert!(err.contains("100"), "unexpected message: {err}");
+        match err {
+            Text::Keyed { key, params } => {
+                assert_eq!(key, "preset_out_of_range");
+                assert_eq!(params.get("p").map(String::as_str), Some("100"), "{params:?}");
+            }
+            Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+        }
         assert!(!Stations::load(&a.stations_path).unwrap().stations.is_empty());
     }
 
@@ -468,7 +468,7 @@ mod tests {
             .set_data(serde_json::json!({ "op": "search", "query": "france", "country": "FR" }))
             .await
             .unwrap_err();
-        assert_eq!(err, "Directory search failed: timeout");
+        assert_eq!(err, Text::Keyed { key: "search_error".into(), params: HashMap::from([("detail".to_string(), "timeout".to_string())]) });
         assert_eq!(a.get_data().await["search"].as_array().unwrap().len(), 4);
         assert_eq!(a.stations.read().await.stations[0].name, "FIP");
     }
@@ -495,7 +495,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin_with(dir.path(), StubDirectory::err("timeout"));
         let err = a.set_data(serde_json::json!({ "op": "countries" })).await.unwrap_err();
-        assert_eq!(err, "Directory search failed: timeout");
+        assert_eq!(err, Text::Keyed { key: "search_error".into(), params: HashMap::from([("detail".to_string(), "timeout".to_string())]) });
         assert_eq!(a.get_data().await["countries"], serde_json::json!([]));
     }
 
@@ -544,12 +544,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin(dir.path());
         let err = a.set_data(serde_json::json!({ "op": "destroy" })).await.unwrap_err();
-        assert!(err.starts_with("invalid request:"), "unexpected message: {err}");
+        assert!(matches!(&err, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err:?}");
         let err2 = a
             .set_data(serde_json::json!({ "stations": [] }))
             .await
             .unwrap_err();
-        assert!(err2.starts_with("invalid request:"), "unexpected message: {err2}");
+        assert!(matches!(&err2, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err2:?}");
     }
 
     /// French pack shipped in the repository.

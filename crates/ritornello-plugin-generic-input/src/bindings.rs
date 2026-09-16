@@ -1,8 +1,7 @@
 use anyhow::Result;
-use ritornello_i18n::Catalog;
-use ritornello_proto::Command;
+use ritornello_proto::{Command, Text};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// A key bound to a command. The `cmd`/`arg` pair is exactly the serialized
@@ -50,8 +49,9 @@ pub struct Bindings {
 }
 
 /// Typed validation error: the user-facing text is produced at the boundary
-/// via `message(&Catalog)` (the radio plugin's model). `Display` provides an
-/// English version for internal logs.
+/// via `text()`, unresolved — the core resolves it against this plugin's
+/// announced catalog (language-packs chantier, task 10). `Display` provides
+/// an English version for internal logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
     DuplicateCode { device: String, code: u16 },
@@ -60,21 +60,30 @@ pub enum ValidationError {
 }
 
 impl ValidationError {
-    /// Localized message surfaced to the user (body of the admin-side 422).
-    pub fn message(&self, catalog: &Catalog) -> String {
+    /// Unresolved refusal surfaced to the user (body of the admin-side 422).
+    pub fn text(&self) -> Text {
         match self {
-            ValidationError::DuplicateCode { device, code } => catalog
-                .get("duplicate_code")
-                .replace("{code}", &code.to_string())
-                .replace("{device}", device),
-            ValidationError::SelectOutOfRange { device, arg } => catalog
-                .get("select_out_of_range")
-                .replace("{n}", &arg.to_string())
-                .replace("{device}", device),
-            ValidationError::UnknownCommand { device, code } => catalog
-                .get("unknown_command")
-                .replace("{code}", &code.to_string())
-                .replace("{device}", device),
+            ValidationError::DuplicateCode { device, code } => Text::Keyed {
+                key: "duplicate_code".into(),
+                params: HashMap::from([
+                    ("code".to_string(), code.to_string()),
+                    ("device".to_string(), device.clone()),
+                ]),
+            },
+            ValidationError::SelectOutOfRange { device, arg } => Text::Keyed {
+                key: "select_out_of_range".into(),
+                params: HashMap::from([
+                    ("n".to_string(), arg.to_string()),
+                    ("device".to_string(), device.clone()),
+                ]),
+            },
+            ValidationError::UnknownCommand { device, code } => Text::Keyed {
+                key: "unknown_command".into(),
+                params: HashMap::from([
+                    ("code".to_string(), code.to_string()),
+                    ("device".to_string(), device.clone()),
+                ]),
+            },
         }
     }
 }
@@ -336,18 +345,28 @@ mod tests {
     }
 
     #[test]
-    fn validation_message_uses_the_catalog() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("generic-input")).unwrap();
-        std::fs::write(
-            dir.path().join("generic-input/fr.toml"),
-            "duplicate_code = \"code {code} lie deux fois sur {device}\"\n",
-        )
-        .unwrap();
-        let cat =
-            Catalog::load("generic-input", "fr", dir.path(), crate::GENERIC_INPUT_EN);
-        let err = ValidationError::DuplicateCode { device: "X".into(), code: 42 };
-        assert_eq!(err.message(&cat), "code 42 lie deux fois sur X");
+    fn every_refusal_names_a_key_that_exists_in_the_embedded_catalog() {
+        // The plugin no longer resolves (no `Catalog` left — language-packs
+        // chantier, task 10): what this test still owns is that the key is
+        // not a typo, and that the parameters travel.
+        let known = ritornello_i18n::try_parse(crate::GENERIC_INPUT_EN).unwrap();
+        for t in [
+            ValidationError::DuplicateCode { device: "X".into(), code: 42 }.text(),
+            ValidationError::SelectOutOfRange { device: "X".into(), arg: 12 }.text(),
+            ValidationError::UnknownCommand { device: "X".into(), code: 3 }.text(),
+        ] {
+            match t {
+                Text::Keyed { key, .. } => assert!(known.contains_key(&key), "unknown key: {key}"),
+                Text::Verbatim(s) => panic!("a binding refusal must be a key, not verbatim: {s}"),
+            }
+        }
+        match (ValidationError::DuplicateCode { device: "X".into(), code: 42 }).text() {
+            Text::Keyed { params, .. } => {
+                assert_eq!(params.get("code").map(String::as_str), Some("42"));
+                assert_eq!(params.get("device").map(String::as_str), Some("X"));
+            }
+            Text::Verbatim(_) => panic!("expected a keyed text"),
+        }
     }
 
     #[test]

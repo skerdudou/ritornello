@@ -1,6 +1,7 @@
 use crate::bindings::Binding;
-use ritornello_i18n::Catalog;
+use ritornello_proto::Text;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// A preset is a simple list of bindings, with no device name.
@@ -16,8 +17,13 @@ struct Preset {
 pub struct UnknownPreset(pub String);
 
 impl UnknownPreset {
-    pub fn message(&self, catalog: &Catalog) -> String {
-        catalog.get("unknown_preset").replace("{preset}", &self.0)
+    /// Unresolved refusal: the core resolves it against this plugin's
+    /// announced catalog (language-packs chantier, task 10).
+    pub fn text(&self) -> Text {
+        Text::Keyed {
+            key: "unknown_preset".into(),
+            params: HashMap::from([("preset".to_string(), self.0.clone())]),
+        }
     }
 }
 
@@ -225,16 +231,19 @@ mod tests {
     }
 
     #[test]
-    fn unknown_preset_message_uses_the_catalog() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("generic-input")).unwrap();
-        std::fs::write(
-            dir.path().join("generic-input/fr.toml"),
-            "unknown_preset = \"preset inconnu : {preset}\"\n",
-        )
-        .unwrap();
-        let cat = Catalog::load("generic-input", "fr", dir.path(), crate::GENERIC_INPUT_EN);
-        assert_eq!(UnknownPreset("zzz".into()).message(&cat), "preset inconnu : zzz");
+    fn unknown_preset_names_the_key_and_carries_the_preset_name() {
+        // The plugin no longer resolves (no `Catalog` left — language-packs
+        // chantier, task 10): what this test still owns is the key and the
+        // `{preset}` parameter, unresolved.
+        let known = ritornello_i18n::try_parse(crate::GENERIC_INPUT_EN).unwrap();
+        match UnknownPreset("zzz".into()).text() {
+            Text::Keyed { key, params } => {
+                assert!(known.contains_key(&key), "unknown key: {key}");
+                assert_eq!(key, "unknown_preset");
+                assert_eq!(params.get("preset").map(String::as_str), Some("zzz"));
+            }
+            Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+        }
     }
 
     #[test]
