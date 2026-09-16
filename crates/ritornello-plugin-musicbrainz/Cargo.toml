@@ -9,6 +9,15 @@ license.workspace = true
 repository.workspace = true
 build = "build.rs"
 
+# What the release catalogue publishes about this plugin, so the installables
+# dialog can describe it before anything of it has ever run: the kinds it
+# serves, and one line an owner reads to choose. English here because this is
+# the only declaration guaranteed to exist — four plugins ship no locale pack
+# at all. A French translation is an addition in the plugin's own pack.
+[package.metadata.ritornello]
+kinds = ["metadata"]
+description = "Identifies CDs and finds cover art via the MusicBrainz database."
+
 [[bin]]
 name = "ritornello-plugin-musicbrainz"
 path = "src/main.rs"

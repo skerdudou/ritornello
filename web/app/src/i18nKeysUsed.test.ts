@@ -96,6 +96,16 @@ describe('i18n keys used by the shell', () => {
       // hard-coded in a `t(...)` call — the regex does not see them, this
       // explicit addition is what covers them.
       ...Object.values(LINK_LABEL),
+      // InstallablesDialog.vue and ConfigView.vue's plugin table (m5, same
+      // vocabulary on both surfaces since this fix): a component kind is
+      // rendered through `` t(`plugin_kind_${k}`) ``, a template literal —
+      // the regex's char class is `['"]` and never matches a backtick, so
+      // these four keys (the closed vocabulary `ComponentOffer`'s catalogue
+      // entries carry) are otherwise invisible to it. Without this explicit
+      // addition, a symmetric deletion of all four keys from both packs
+      // would pass this guard silently, exactly the failure mode it exists
+      // to catch.
+      ...['source', 'display', 'input', 'metadata'].map((k) => `plugin_kind_${k}`),
     ])
 
     const missing = [...used].filter((key) => !catalog.has(key)).sort()

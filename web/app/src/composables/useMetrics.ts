@@ -31,6 +31,29 @@ const state = ref<SystemPayload | null>(null)
 const unavailable = ref(false)
 
 /**
+ * The version of the core as this page first saw it, and whether it has
+ * changed since.
+ *
+ * Latched on purpose (`staleUi` never goes back down): once the core has
+ * restarted on a different version, the bundle this page is running is one
+ * version behind for good, and a flapping answer must not make the banner
+ * blink.
+ *
+ * Deliberately **not** keyed on `session` (a value that changes on *every*
+ * restart, version included or not — a plain "Redémarrer Ritornello", a
+ * crash-restart, a reboot of the Pi): that used to raise this same banner,
+ * "L'appareil a redémarré dans une nouvelle version", on a restart that
+ * served the exact same UI. `version` is the fact the sentence states, and it
+ * is the running binary's own `CARGO_PKG_VERSION` (`system.rs`), so a restart
+ * at the same version — which serves the same bundled assets — stays silent,
+ * and a rollback (which does change it) still raises the banner correctly.
+ *
+ * `''` until the first answer — an empty first sample is not a change.
+ */
+const firstVersion = ref('')
+const staleUi = ref(false)
+
+/**
  * Probing period, at module level like all the state of this file: it thus
  * lives as long as the page, and a choice made on the System tab is still
  * there when coming back to it — the opposite of the view-local version, which
@@ -193,6 +216,11 @@ async function probe() {
   try {
     const s = await api.get<SystemPayload>('/api/system', { signal: controller.signal })
     state.value = s
+    // The one place a version change is observable: this is the only route
+    // the app polls continuously (`/api/status` is read at boot and in
+    // bounded windows only, see `usePlugins`).
+    if (!firstVersion.value) firstVersion.value = s.version
+    else if (s.version && s.version !== firstVersion.value) staleUi.value = true
     unavailable.value = false
     // Re-arm the latch: the next outage will be entitled to its line.
     failureReported = false
@@ -406,6 +434,8 @@ export function resetMetrics(): void {
   periodMs.value = 5000
   previousJiffies.value = null
   currentCpuUsage.value = null
+  firstVersion.value = ''
+  staleUi.value = false
 }
 
 export function useMetrics() {
@@ -418,6 +448,7 @@ export function useMetrics() {
     periodMs,
     period,
     windowMinutes,
+    staleUi,
     start,
     pause,
     resume,

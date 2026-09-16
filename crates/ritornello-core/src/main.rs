@@ -6,6 +6,7 @@ mod i18n;
 mod metadata;
 mod docs_map;
 mod packaging_manifest;
+mod plugin_catalogue_declaration;
 mod version_coherence;
 mod placeholder;
 mod player;
@@ -2328,6 +2329,7 @@ async fn main() -> Result<()> {
             }),
             update: update_state.clone(),
             update_tx,
+            update_catalogue_cache: Arc::new(RwLock::new(None)),
         };
         let (app_state, core_engine) = assemble_covers_and_core(
             mpv_player,

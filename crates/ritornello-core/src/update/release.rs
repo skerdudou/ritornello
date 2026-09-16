@@ -22,6 +22,12 @@ use std::collections::BTreeMap;
 /// installed.
 pub const REPO: &str = "skerdudou/ritornello";
 
+/// The name the release-wide catalogue asset is published under.
+///
+/// Recognised by literal equality, exactly like `SHA256SUMS`: it is not an
+/// archive, and `classify_asset` must answer `None` for it.
+pub const CATALOGUE_ASSET: &str = "catalogue.json";
+
 /// The architecture label this binary's archives carry.
 ///
 /// Chosen by the compiler rather than probed at runtime: a binary that
@@ -221,6 +227,11 @@ pub struct Published {
     /// The `SHA256SUMS` of that same release, when it has one. The digest of
     /// an archive lives in the release that carries it.
     pub checksums_url: Option<String>,
+    /// The `catalogue.json` of that same release, when it has one — the same
+    /// shape and the same reason as `checksums_url` beside it: an optional
+    /// per-release asset, recognised by name, and `None` is a normal state
+    /// (every release published before this chantier has none).
+    pub catalogue_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +241,19 @@ pub enum ReleasesError {
     /// It parsed, and nothing in it is published. A state to display — "no
     /// release published" — and never a failure.
     NoRelease,
+    /// It parsed, something **is** published, and every published release is a
+    /// prerelease this device declined. A state to display, and a different
+    /// sentence from `NoRelease`, because the two are not the same fact and
+    /// only one of them has a switch that changes it.
+    ///
+    /// Worth a variant of its own because the confusion it removes is the
+    /// expensive kind: an owner who publishes a beta and reads "no release
+    /// published yet" has been told something false about the world, when
+    /// what the device meant was "none for the channel you chose". The
+    /// counterpart — only drafts — collapses into `NoRelease` and cannot be
+    /// distinguished from here anyway: GitHub lists drafts to a reader with
+    /// push access alone, and this core polls with no token.
+    OnlyPrereleases,
 }
 
 #[derive(Deserialize)]
@@ -296,12 +320,29 @@ impl Channel {
 /// but this filter separates it from a finished one: same assets, same
 /// checksums, same fold. Hence `Channel`, and hence a single place where the
 /// question is asked for our repository and for a stranger's alike.
+/// **Two ways of ending up with nothing, and they are told apart.** A body
+/// that listed releases of which every one was a prerelease this channel
+/// declines yields `OnlyPrereleases`, not `NoRelease`: the difference is a
+/// switch this owner owns, and reporting it as "nothing published" states a
+/// falsehood about the repository. The reason is counted while filtering
+/// rather than reconstructed after, because a dropped release no longer says
+/// why it went.
 pub fn parse_releases(body: &str, channel: Channel) -> Result<Vec<Release>, ReleasesError> {
     let wire: Vec<WireRelease> =
         serde_json::from_str(body).map_err(|_| ReleasesError::Unreadable)?;
+    let mut declined_prereleases = 0usize;
     let out: Vec<Release> = wire
         .into_iter()
-        .filter(|r| !r.draft && (!r.prerelease || channel == Channel::WithPrereleases))
+        .filter(|r| {
+            if r.draft {
+                return false;
+            }
+            if r.prerelease && channel != Channel::WithPrereleases {
+                declined_prereleases += 1;
+                return false;
+            }
+            true
+        })
         .map(|r| Release {
             tag: r.tag_name,
             published_at: r.published_at.unwrap_or_default(),
@@ -317,7 +358,11 @@ pub fn parse_releases(body: &str, channel: Channel) -> Result<Vec<Release>, Rele
         })
         .collect();
     if out.is_empty() {
-        return Err(ReleasesError::NoRelease);
+        return Err(if declined_prereleases > 0 {
+            ReleasesError::OnlyPrereleases
+        } else {
+            ReleasesError::NoRelease
+        });
     }
     Ok(out)
 }
@@ -350,6 +395,11 @@ pub fn fold(releases: &[Release], arch: &str) -> Vec<Published> {
             .iter()
             .find(|a| a.name == "SHA256SUMS")
             .map(|a| a.url.clone());
+        let catalogue = release
+            .assets
+            .iter()
+            .find(|a| a.name == CATALOGUE_ASSET)
+            .map(|a| a.url.clone());
         for asset in &release.assets {
             let Some((offer, version)) = classify_asset(&asset.name, arch) else {
                 continue;
@@ -366,10 +416,46 @@ pub fn fold(releases: &[Release], arch: &str) -> Vec<Published> {
                 size: asset.size,
                 release_tag: release.tag.clone(),
                 checksums_url: checksums.clone(),
+                catalogue_url: catalogue.clone(),
             });
         }
     }
     out
+}
+
+/// The most current catalogue available, independent of which component's
+/// archive its release happens to carry.
+///
+/// **Deliberately not `core.and_then(|p| p.catalogue_url.clone())`.** The
+/// installables dialog exists to describe components the device does not
+/// have — overwhelmingly, ones added recently — while the core's own
+/// *carrying* release (the one `release_url` is built from) can be many
+/// releases old: a repository where the core last moved at `v0.2.6` while
+/// `v0.2.7` shipped a new plugin cannot have its new plugin described by a
+/// catalogue read off `v0.2.6`. That degrades silently, too — the row would
+/// show a name with no description, indistinguishable from "this release
+/// publishes no catalogue at all".
+///
+/// `fold` pushes every release's entries **newest-first, in one pass**: it
+/// walks releases newest to oldest, and for a release it has not yet
+/// finished, every classifiable asset becomes a fresh entry (see `fold`'s own
+/// doc). So the first entry in `published` whose `catalogue_url` is `Some`
+/// names the newest release that published one, whatever component that
+/// entry itself happens to be — `find_map` over `published` in that order is
+/// exactly this rule.
+///
+/// This does assume the newest release contributes **at least one** entry to
+/// `published` — true in practice because the publish workflow keeps the
+/// all-plugins bundle in every release unconditionally (`fold` never filters
+/// `Offer::Bundle` out), so every real release names at least one component.
+/// A hypothetical release with no recognisable archive at all — not
+/// something this repository's own release job can produce — would be
+/// skipped by `find_map` in favour of the next release that does contribute
+/// one, which is the same "next best" behaviour `fold` already gives a
+/// component's own version when its own archive is absent from the newest
+/// release.
+pub fn newest_catalogue_url(published: &[Published]) -> Option<String> {
+    published.iter().find_map(|p| p.catalogue_url.clone())
 }
 
 /// Three dot-separated non-empty runs of digits, and nothing else.
@@ -746,6 +832,141 @@ mod tests {
         assert_eq!(published[0].checksums_url, None);
     }
 
+    /// The catalogue is recognised the way `SHA256SUMS` is: by literal name,
+    /// per release, outside the `classify_asset` loop. It is not an archive,
+    /// so `classify_asset` answers `None` for it — as it does for
+    /// `SHA256SUMS`, which a test already pins.
+    ///
+    /// One release only: the cheapest statement that the field exists and is
+    /// recognised by its literal name. It stays readable when the two-release
+    /// test below fails for an unrelated reason.
+    #[test]
+    fn the_catalogue_of_the_release_carrying_an_archive_travels_with_it() {
+        let text = body(&rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+            "ritornello-core-0.2.1-armv7.tar.gz",
+            "catalogue.json",
+        ]));
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        assert_eq!(published[0].catalogue_url.as_deref(), Some("https://x/v0.2.6/catalogue.json"));
+    }
+
+    /// **The property the single-release test above cannot prove.** With one
+    /// release, "the newest release" and "the release carrying the archive"
+    /// are the same object, so a fold that took the catalogue of the newest
+    /// release rather than the one carrying the archive would still pass it.
+    ///
+    /// Modelled on `the_newest_release_that_carries_a_component_wins`: a
+    /// NEWER release carries some other component's archive and its own
+    /// catalogue, an OLDER release carries the core's archive and its own
+    /// catalogue, and the core's `catalogue_url` must name the OLDER tag. A
+    /// catalogue read from the wrong release would describe components with
+    /// the wrong text, silently — the same failure `checksums_url` guards
+    /// against for a digest, and for the same reason: an asset lives in the
+    /// release that actually carries it, not in whichever release is newest.
+    #[test]
+    fn the_catalogue_of_the_release_carrying_the_archive_wins_over_the_newest_one() {
+        let text = body(&[
+            rel("v0.2.7", "2026-09-08T10:00:00Z", false, false, &[
+                "ritornello-plugin-radio-0.2.4-armv7.tar.gz",
+                "catalogue.json",
+            ]),
+            rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+                "ritornello-core-0.2.1-armv7.tar.gz",
+                "catalogue.json",
+            ]),
+        ]
+        .join(","));
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        let core = published.iter().find(|p| p.offer == Offer::Core).expect("core");
+        assert_eq!(core.release_tag, "v0.2.6");
+        assert_eq!(
+            core.catalogue_url.as_deref(),
+            Some("https://x/v0.2.6/catalogue.json"),
+            "a catalogue from the wrong release would describe the core with the wrong text"
+        );
+    }
+
+    /// A release published before this chantier has none, and that is a
+    /// normal state rather than an error: every release already published,
+    /// `v0.2.0-beta.1` included, is in that case.
+    #[test]
+    fn a_release_without_a_catalogue_offers_none() {
+        let text = body(&rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+            "ritornello-core-0.2.1-armv7.tar.gz",
+        ]));
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        assert_eq!(published[0].catalogue_url, None);
+    }
+
+    /// It is not an archive, and must not be mistaken for one.
+    #[test]
+    fn the_catalogue_is_not_a_component_archive() {
+        assert_eq!(classify_asset("catalogue.json", "armv7"), None);
+    }
+
+    /// **Equality, not a prefix.** Every fixture above names the asset
+    /// exactly `catalogue.json`, so a `fold` that recognised it with
+    /// `starts_with` instead of `==` would still pass every one of them —
+    /// none of them proves the distinction. Only an asset that shares the
+    /// prefix without being the file itself can: `catalogue.json.bak` must
+    /// not be offered as the catalogue.
+    #[test]
+    fn the_catalogue_is_recognised_by_its_exact_name_not_a_prefix_of_it() {
+        let text = body(&rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+            "ritornello-core-0.2.1-armv7.tar.gz",
+            "catalogue.json.bak",
+        ]));
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        assert_eq!(
+            published[0].catalogue_url, None,
+            "catalogue.json.bak is not the catalogue, and must not be offered as one"
+        );
+    }
+
+    /// **The property `newest_catalogue_url` exists for, and the mutation this
+    /// pins**: taking the core's own carrying release (`core.and_then(|p|
+    /// p.catalogue_url.clone())`) instead of the newest one available fails
+    /// this exact fixture — the core sits in the OLDER release here, so that
+    /// expression would answer the older catalogue while a newer one exists.
+    ///
+    /// Two releases, each with its OWN `catalogue.json` (tag-qualified, like
+    /// every asset URL `rel` builds, so the two are distinct addresses): a
+    /// NEWER release carrying `radio`'s archive, an OLDER one carrying the
+    /// core's. `newest_catalogue_url` must name the newer tag regardless of
+    /// which component's archive that release ships.
+    #[test]
+    fn newest_catalogue_url_names_the_newest_release_regardless_of_which_archive_it_carries() {
+        let text = body(&[
+            rel("v0.2.7", "2026-09-08T10:00:00Z", false, false, &[
+                "ritornello-plugin-radio-0.2.4-armv7.tar.gz",
+                "catalogue.json",
+            ]),
+            rel("v0.2.6", "2026-08-01T10:00:00Z", false, false, &[
+                "ritornello-core-0.2.1-armv7.tar.gz",
+                "catalogue.json",
+            ]),
+        ]
+        .join(","));
+        let published = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        let core = published.iter().find(|p| p.offer == Offer::Core).expect("core");
+        // The rejected expression, spelled out rather than merely described:
+        // `core.and_then(|p| p.catalogue_url.clone())` names the OLDER
+        // release here, because that is the one carrying the core's own
+        // archive. Asserted explicitly so this test would have failed
+        // against the code this replaces, not just against a description of
+        // it.
+        assert_eq!(
+            core.catalogue_url.as_deref(),
+            Some("https://x/v0.2.6/catalogue.json"),
+            "fixture sanity: the core sits in the older release, which is what makes the two expressions divergent"
+        );
+        assert_eq!(
+            newest_catalogue_url(&published).as_deref(),
+            Some("https://x/v0.2.7/catalogue.json"),
+            "the newest release's own catalogue, not the one that happens to carry the core"
+        );
+    }
+
     /// An undated release sorts last and can therefore win a component only
     /// when nothing else carries it. The opposite would be the worst outcome
     /// this module can produce: a device pinned to an old version by a release
@@ -828,6 +1049,44 @@ mod tests {
         // Only drafts is the same answer: nothing has been published.
         let text = body(&rel("v0.2.8", "2026-09-09T10:00:00Z", true, false, &[]));
         assert_eq!(parse_releases(&text, Channel::Stable), Err(ReleasesError::NoRelease));
+        // A draft that is **also** flagged prerelease is still `NoRelease`,
+        // which pins the order of the two halves of the filter: being a draft
+        // is checked first and counts as nothing, because no switch this
+        // owner can reach turns a draft into an offer. Read the other way —
+        // prerelease first — this body would claim a switch would help.
+        let text = body(&rel("v0.2.8", "", true, true, &[]));
+        assert_eq!(parse_releases(&text, Channel::Stable), Err(ReleasesError::NoRelease));
+    }
+
+    /// **A published prerelease this channel declines is not "nothing
+    /// published"**, and the regression this pins is one that happened: the
+    /// first beta of this project was tagged, built and published while the
+    /// switch was off, and the update card answered "no release published
+    /// yet" — a statement about the repository, and a false one, where the
+    /// true statement names a switch the reader owns.
+    #[test]
+    fn only_prereleases_is_told_apart_from_nothing_published() {
+        let text = body(&rel("v0.2.0-beta.1", "2026-09-10T08:07:25Z", false, true, &[
+            "ritornello-plugin-radio-0.2.0-beta.1-armv7.tar.gz",
+        ]));
+        assert_eq!(
+            parse_releases(&text, Channel::Stable),
+            Err(ReleasesError::OnlyPrereleases),
+            "something is published; this channel is what declined it"
+        );
+        // The very same body, on the channel that asked for them, is not an
+        // error at all — which is what makes the sentence actionable.
+        assert!(parse_releases(&text, Channel::WithPrereleases).is_ok());
+        // A draft sitting beside it changes nothing: the published prerelease
+        // is still what the reader has to hear about.
+        let mixed = body(
+            &[
+                rel("v0.2.1-beta.1", "", true, true, &[]),
+                rel("v0.2.0-beta.1", "2026-09-10T08:07:25Z", false, true, &[]),
+            ]
+            .join(","),
+        );
+        assert_eq!(parse_releases(&mixed, Channel::Stable), Err(ReleasesError::OnlyPrereleases));
     }
 
     #[test]

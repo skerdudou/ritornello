@@ -103,16 +103,29 @@ const admins = computed(() => [
 const session = computed(() => state.value.session)
 const locale = computed(() => state.value.locale)
 
-/** Is there a launched plugin that has not spoken yet?
+/** Is there a launched plugin that has not spoken yet, or a binary being erased?
  *
- * **Both states**, and that is the trap of this re-read: since a freshly
- * re-enabled plugin is reported "starting" and no longer "stalled", watching
- * only `stalled` would have disarmed the probing during exactly the window it
- * exists for — the one where the row is going to be replaced by the
+ * **Both of the first two states**, and that is the trap of this re-read: since
+ * a freshly re-enabled plugin is reported "starting" and no longer "stalled",
+ * watching only `stalled` would have disarmed the probing during exactly the
+ * window it exists for — the one where the row is going to be replaced by the
  * announcement. Re-enabling would have become invisible without F5 again, the
  * former defect.
+ *
+ * **`removal_pending` and not `undeclared_binary`**, which is the same trap
+ * once more and the reason this third state is worth a field of its own on the
+ * wire. An uninstall answers as soon as the erasure is queued, so the row comes
+ * straight back as "installed but not declared" and then never moves: nothing
+ * here was watching, and the operator had to press F5 to see the plugin
+ * finally go — which read as an uninstall that had not done its job. Watching
+ * `undeclared_binary` instead would have probed a state that is **stable by
+ * design** (a binary somebody dropped in the directory is not going anywhere),
+ * burning the whole attempt budget on every page load for a row that will
+ * never change. This flag is transient by construction: the worker clears it
+ * on every path out of the erasure.
  */
-const pending = () => state.value.plugins.some((p) => p.stalled || p.starting)
+const pending = () =>
+  state.value.plugins.some((p) => p.stalled || p.starting || p.removal_pending)
 
 /**
  * Re-reads `/api/status`. On failure, the previous state is **kept**: a

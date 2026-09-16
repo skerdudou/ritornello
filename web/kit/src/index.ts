@@ -13,6 +13,7 @@ export {
   type SkeletonOptions,
 } from './loading'
 export { onPlayer } from './player'
+export { move } from './order'
 export { cn } from './lib/utils'
 export {
   applyTheme,

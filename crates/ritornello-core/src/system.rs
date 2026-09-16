@@ -435,6 +435,14 @@ pub fn collect(info: &SystemInfo) -> Metrics {
 
 /// Metrics for the System tab. Read on demand, nothing cached: the page
 /// polls, and everything here costs a handful of pseudo-file reads.
+///
+/// Used to also carry `AppState::session`, flattened alongside `Metrics`, so
+/// the page could notice a core that restarted under it. That field is gone:
+/// `session` changes on *any* restart, version included or not, which made
+/// the reload banner claim a new version after a plain "Redémarrer
+/// Ritornello", a crash-restart or a reboot of the Pi. `version` (already
+/// part of `Metrics`, the running binary's own `CARGO_PKG_VERSION`) states
+/// the fact the banner actually needs — see `useMetrics.ts`'s `staleUi`.
 pub async fn system_json(State(state): State<crate::status::AppState>) -> Json<Metrics> {
     Json(collect(&state.system))
 }
