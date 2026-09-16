@@ -73,7 +73,22 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
     let fallback_candidates = registry.core_languages();
     drop(registry);
     let current = state.locale_current.read().await.clone();
-    let fallback_current = state.fallback_current.read().await.clone().unwrap_or_else(|| "en".to_string());
+    // Clamped to `fallback_candidates`, falling back to `en` — the same
+    // discipline `status_json` already applies to `locale_current` against
+    // `core_languages` (status/mod.rs), for the same reason: the stored
+    // value can name a pack removed after being selected, or restored as-is
+    // from a hand-edited `state.json` (permissive at load, by design — see
+    // `PersistedState.fallback`'s doc). Serving it unclamped would let
+    // `fallback_current` name a language absent from its own
+    // `fallback_candidates` list — the exact shape that renders empty in a
+    // reka-ui `Select` bound to it (task 14's SPA control).
+    let fallback_current = state
+        .fallback_current
+        .read()
+        .await
+        .clone()
+        .filter(|f| fallback_candidates.iter().any(|c| c == f))
+        .unwrap_or_else(|| "en".to_string());
     Json(LocaleResponse {
         locales,
         current,
@@ -145,15 +160,24 @@ pub(super) async fn locale_put(State(state): State<AppState>, Json(req): Json<Lo
     {
         return StatusCode::BAD_REQUEST;
     }
-    *state.locale_current.write().await = Some(req.locale.clone());
-    if let Some(fallback) = req.fallback {
-        *state.fallback_current.write().await = Some(fallback.clone());
-        if state.fallback_tx.send(fallback).await.is_err() {
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    }
-    if state.locale_tx.send(req.locale).await.is_err() {
+    // Both sends before either write (F-5, task 13 fix round): with the
+    // write first, a failed `fallback_tx.send` used to return 500 with
+    // `locale_current` already mutated and `locale_tx` never touched — the
+    // HTTP layer and the core would disagree about the chosen language
+    // until the next successful PUT. Sending first makes the route atomic
+    // for free: on any failure, neither `AppState` field is written, so a
+    // partial send never has a partial write sitting next to it.
+    if let Some(fallback) = &req.fallback
+        && state.fallback_tx.send(fallback.clone()).await.is_err()
+    {
         return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    if state.locale_tx.send(req.locale.clone()).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    *state.locale_current.write().await = Some(req.locale);
+    if let Some(fallback) = req.fallback {
+        *state.fallback_current.write().await = Some(fallback);
     }
     StatusCode::NO_CONTENT
 }
@@ -258,6 +282,40 @@ mod tests {
         assert_eq!(fallback_current.read().await.as_deref(), Some("nl"));
     }
 
+    /// F-5 (task 13 fix round): both channel sends must happen before either
+    /// `AppState` field is written, so a failed `fallback_tx.send` — here,
+    /// simulated by dropping its receiver, the shape the core's `select!`
+    /// loop takes once it is gone — leaves `locale_current` untouched and
+    /// never reaches `locale_tx` at all. Before this fix, `locale_current`
+    /// was written first: this same request would have left it at `"de"`
+    /// while `locale_tx` stayed silent, the HTTP layer and the core then
+    /// disagreeing about the chosen language.
+    ///
+    /// **[MUTATION]**: move the two `write().await` lines back above the two
+    /// sends — this test fails, `locale_current` reading `Some("de")`
+    /// instead of the original `Some("fr")`.
+    #[tokio::test]
+    async fn put_locale_writes_neither_field_when_the_fallback_send_fails() {
+        let (state, mut locale_rx, fallback_rx, _dir) = app_state_fr();
+        drop(fallback_rx);
+        let locale_current = state.locale_current.clone();
+        let fallback_current = state.fallback_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/locale")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"locale":"de","fallback":"nl"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(locale_rx.try_recv().is_err(), "locale_tx must never be reached once the fallback send has already failed");
+        assert_eq!(locale_current.read().await.as_deref(), Some("fr"), "app_state_fr's initial value, unchanged");
+        assert_eq!(fallback_current.read().await.as_deref(), None);
+    }
+
     /// The rule the memorized-value scenario depends on at the HTTP layer:
     /// a plain `{"locale": ...}` body — no `fallback` field at all, exactly
     /// what the settings page sends once the fallback control is hidden
@@ -335,13 +393,46 @@ mod tests {
 
     #[tokio::test]
     async fn get_locale_reports_the_persisted_fallback() {
+        // "fr", not "en": it must be the stored value read back, not the
+        // clamp's own default reappearing by coincidence. "fr" is installed
+        // in this rig's own `core/` (`app_state_fr` writes it), so this test
+        // stays clear of the clamp added below — that one has a test of its
+        // own, on an uninstalled language.
         let (state, _rx, _frx, _dir) = app_state_fr();
+        *state.fallback_current.write().await = Some("fr".to_string());
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["fallback_current"], "fr");
+    }
+
+    /// F-3 (task 13 fix round): a fallback stored while its pack was
+    /// installed must not be echoed once that pack is gone — the same
+    /// discipline `status_json` already applies to `locale_current` against
+    /// `core_languages` (`status/mod.rs`). Otherwise `/api/locale` reports a
+    /// `fallback_current` absent from its own `fallback_candidates`, which a
+    /// reka-ui `Select` bound to it renders empty.
+    ///
+    /// **[MUTATION]**: remove the `.filter(...)` clamp in `locale_json` —
+    /// this test fails, asserting `"nl"` (echoed verbatim) instead of `"en"`.
+    #[tokio::test]
+    async fn get_locale_clamps_an_uninstalled_fallback_to_en() {
+        let (state, _rx, _frx, _dir) = app_state_fr();
+        // "nl" is not among this rig's core languages (only "en" and "fr"
+        // — see `app_state_fr`'s own `core/fr.toml`): exactly the "pack
+        // removed after being selected" case the clamp exists for.
         *state.fallback_current.write().await = Some("nl".to_string());
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["fallback_current"], "nl");
+        assert_eq!(v["fallback_current"], "en");
+        let fallback_candidates: Vec<String> = serde_json::from_value(v["fallback_candidates"].clone()).unwrap();
+        assert!(
+            !fallback_candidates.contains(&"nl".to_string()),
+            "the clamp only matters because nl is genuinely absent from the candidate list"
+        );
     }
 
     #[test]
