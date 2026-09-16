@@ -1329,6 +1329,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_transient_status_is_counted_as_verbatim_too() {
+        // I-5 (task 7 review): the counter used to increment only under
+        // `if !transient`, so a transient verbatim status — "EMPTY PRESET",
+        // the one this fleet actually ships — could stay un-migrated
+        // forever without the counter ever seeing it. `decide_status_text`
+        // is now called from both branches; this proves the transient one
+        // actually counts, isolated from `a_status_counts_as_verbatim_only_
+        // when_it_actually_is_one`, which only ever sends permanent frames.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_source_update(
+            "radio",
+            SourceUpdate { transient: true, status: Some("EMPTY PRESET".into()), ..Default::default() },
+        );
+        assert_eq!(
+            core.verbatim_status_count("radio"),
+            1,
+            "a transient status falling back to verbatim must count, exactly like a permanent one"
+        );
+    }
+
+    #[tokio::test]
     async fn a_keyed_status_interpolates_its_named_parameters() {
         // I-3 (task 7 review): named-parameter interpolation (`{name}`
         // replaced, never concatenation) is the entire implementation of a
