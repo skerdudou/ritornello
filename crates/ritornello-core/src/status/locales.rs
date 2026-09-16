@@ -47,11 +47,11 @@ pub(super) struct LocaleRequest {
 /// Shape of an acceptable language code: what the `<lang>.toml` file names of
 /// the packs produce (`fr`, `en`, `pt-BR`…).
 ///
-/// The value ends up in file paths (`<root>/<component>/<lang>.toml` via
-/// `Catalog::load`), in `state.json` and in an environment variable of the
-/// plugins: same rigor as for the theme and the audio output, which are
-/// validated — an arbitrary string opened a path traversal
-/// (`{"locale":"../../whatever"}`) on an unauthenticated API.
+/// The value ends up in file paths (`<root>/<component>/<lang>.toml`, swept
+/// by `Registry` and resolved by `Chain::load`) and in `state.json`: same
+/// rigor as for the theme and the audio output, which are validated — an
+/// arbitrary string opened a path traversal (`{"locale":"../../whatever"}`)
+/// on an unauthenticated API.
 ///
 /// `pub(crate)`, not `pub(super)`: `admin.rs` reuses this exact rule to
 /// validate the `lang` query parameter of `/plugins/<name>/api/i18n`, rather

@@ -1483,7 +1483,7 @@ mod tests {
     /// **This 400 is reachable by an ordinary operator** — a second tab whose
     /// list is one gesture out of date — so unlike the `delta` guard's it must
     /// carry a sentence. Resolved against the **embedded** catalog rather than
-    /// compared to a copy of the string: `Catalog::get` returns the key itself
+    /// compared to a copy of the string: `Chain::get` returns the key itself
     /// when it finds nothing, so a key misspelled in the code would put
     /// `plugin_already_at_end` on the operator's screen with no test
     /// complaining, and the parity test between the two catalogs does not look
@@ -1511,7 +1511,7 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let catalog =
-            Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+            Chain::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         let message = v["error"].as_str().expect("a refusal an operator can reach needs a sentence");
         assert_eq!(message, catalog.get("plugin_already_at_end").replace("{name}", "radio"));
         assert!(
@@ -1570,7 +1570,7 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let catalog =
-            Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+            Chain::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         assert_eq!(v["error"], catalog.get("plugin_action_failed").replace("{name}", "cd"));
         assert_eq!(order_in(&dir), vec!["cd".to_string(), "radio".to_string()]);
     }
@@ -1622,7 +1622,7 @@ mod tests {
         // the string in `en.toml`: a typo in the key written in the code
         // would make this fail (raw key, or a different message) instead of
         // silently matching a copy-pasted expectation.
-        let catalog = Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        let catalog = Chain::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         assert_eq!(v["error"], catalog.get("plugin_manifest_unreadable"));
     }
 
@@ -1630,7 +1630,7 @@ mod tests {
     ///
     /// The `message()` tests resolve against an **ad hoc** catalog, which
     /// proves the interpolation but not that the key written in the code really
-    /// exists: `Catalog::get` returns the key when it does not find it, so a
+    /// exists: `Chain::get` returns the key when it does not find it, so a
     /// typo would produce a toast displaying
     /// "settings_initial_delay_out_of_range" without any test complaining. The
     /// parity test between catalogs does not see it either: it compares the two
@@ -1640,7 +1640,7 @@ mod tests {
     /// actually embedded**, and refuses a message equal to its own key.
     #[test]
     fn every_refusal_resolves_against_the_embedded_catalog() {
-        let catalog = Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        let catalog = Chain::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         // A missing key is recognized by the message **being** the key: no
         // space, and the prefix it was given.
         let messages = [

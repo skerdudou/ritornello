@@ -49,8 +49,8 @@ fn seed_core_and_common(registry: &mut Registry) {
 /// `Registry` — it performs no I/O of its own (see `Registry::chain_for`'s
 /// doc); the sweep happens once at startup and again wherever the caller
 /// already rebuilds on a real locale change.
-pub fn core_catalog(registry: &Registry, locale: &str, fallback: &str) -> ritornello_i18n::Catalog {
-    ritornello_i18n::Catalog::from_chain(registry.chain_for("core", locale, fallback))
+pub fn core_catalog(registry: &Registry, locale: &str, fallback: &str) -> ritornello_i18n::Chain {
+    registry.chain_for("core", locale, fallback)
 }
 
 /// The core's own embedded English, folded into the shape `Registry`

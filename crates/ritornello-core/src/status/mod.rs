@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use ritornello_i18n::Catalog;
+use ritornello_i18n::Chain;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -56,7 +56,7 @@ pub struct AppState {
     pub audio_tx: mpsc::Sender<Option<String>>,
     /// The core's own resolved catalog for the current locale, built by
     /// `crate::i18n::core_catalog` — itself a `Registry`-stacked `Chain`
-    /// (task 4) wrapped back into `Catalog` for compatibility with every
+    /// (task 4) wrapped back into `Chain` for compatibility with every
     /// existing reader of this field.
     ///
     /// **Stated limitation, unchanged in kind by the registry**: this is a
@@ -67,7 +67,7 @@ pub struct AppState {
     /// up by the next `resweep` — a real locale change — rather than by
     /// every read of this field, and, as before, by a restart of the
     /// service.
-    pub catalog: Arc<RwLock<ritornello_i18n::Catalog>>,
+    pub catalog: Arc<RwLock<ritornello_i18n::Chain>>,
     /// Every module's translation layers — the core's own, `common`'s, and
     /// each plugin's announced catalogue — swept from disk once at startup
     /// and kept current by `Registry::resweep`/`insert_announced`/`forget`
@@ -166,7 +166,7 @@ pub struct AppState {
     /// Enabled/disabled toggle of the plugins: the manifest to rewrite, the
     /// accepted names, and the core's ear.
     pub plugins: Arc<PluginsControl>,
-    /// Catalog of the sources and their named presets, as the core broadcasts
+    /// Chain of the sources and their named presets, as the core broadcasts
     /// it to the displays (`Core::sources_catalog`). The same `watch` as the
     /// Display plugins': the route reads the last value, nothing is probed on
     /// the core side, and the list only changes when a source announces
@@ -298,7 +298,7 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
     // removed after being selected, or restored as-is from `state.json`).
     // `admin_i18n`'s doc claims the core never refuses a language it
     // advertises here — enforcing it here is what makes that true rather than
-    // merely asserted. Content-identical: `Catalog::load` already falls back
+    // merely asserted. Content-identical: `Chain::load` already falls back
     // to embedded English for an uninstalled language.
     let installed = list_locales(&state.locales_root);
     let locale = state
@@ -360,7 +360,7 @@ struct AudioOutputRequest {
 
 /// Audio output validation error. Follows the model of `ValidationError`
 /// (`ritornello-plugin-radio/src/config.rs`): the user-facing text is
-/// produced at the boundary via `message(&Catalog)`, `Display` provides an
+/// produced at the boundary via `message(&Chain)`, `Display` provides an
 /// English version for the logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioOutputError {
@@ -368,7 +368,7 @@ pub enum AudioOutputError {
 }
 
 impl AudioOutputError {
-    pub fn message(&self, catalog: &Catalog) -> String {
+    pub fn message(&self, catalog: &Chain) -> String {
         match self {
             AudioOutputError::EmptyName => catalog.get("audio_output_name_empty").to_string(),
         }
@@ -499,7 +499,7 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
@@ -544,7 +544,7 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(Some("default".to_string()))),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
@@ -591,7 +591,7 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
@@ -646,7 +646,7 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load(
                 "core",
                 "fr",
                 dir.path(),
@@ -938,7 +938,7 @@ mod tests {
     /// uninstalled language (a pack removed after being selected, say) would
     /// then be echoed here and refused by every plugin catalog request naming
     /// it — every plugin page rendering raw translation keys next to a
-    /// refusal banner. Clamping here is content-identical: `Catalog::load`
+    /// refusal banner. Clamping here is content-identical: `Chain::load`
     /// already falls back to embedded English for an uninstalled language, so
     /// nothing a user sees changes except that the URL this locale ends up
     /// in now works.
@@ -1267,7 +1267,7 @@ mod tests {
             "audio_output_name_empty = \"nom de sortie vide\"\n",
         )
         .unwrap();
-        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN);
+        let cat = ritornello_i18n::Chain::load("core", "fr", dir.path(), crate::i18n::EN);
         assert_eq!(AudioOutputError::EmptyName.message(&cat), "nom de sortie vide");
     }
 

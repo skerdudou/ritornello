@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use ritornello_i18n::Catalog;
+use ritornello_i18n::Chain;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -449,13 +449,13 @@ pub enum PowerAction {
 
 /// Unknown power action. Follows the `ValidationError` model
 /// (`ritornello-plugin-radio/src/config.rs`): the user-facing text is
-/// produced at the boundary via `message(&Catalog)`, `Display` provides an
+/// produced at the boundary via `message(&Chain)`, `Display` provides an
 /// English version for the logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownPowerAction;
 
 impl UnknownPowerAction {
-    pub fn message(&self, catalog: &Catalog) -> String {
+    pub fn message(&self, catalog: &Chain) -> String {
         catalog.get("power_action_unknown").to_string()
     }
 }
@@ -493,7 +493,7 @@ pub struct SystemctlFailed {
 }
 
 impl SystemctlFailed {
-    pub fn message(&self, catalog: &Catalog) -> String {
+    pub fn message(&self, catalog: &Chain) -> String {
         catalog.get("systemctl_failed").replace("{code}", &self.code.to_string())
     }
 }
@@ -513,7 +513,7 @@ pub struct SystemctlUnreachable {
 }
 
 impl SystemctlUnreachable {
-    pub fn message(&self, catalog: &Catalog) -> String {
+    pub fn message(&self, catalog: &Chain) -> String {
         catalog.get("systemctl_unreachable").replace("{detail}", &self.detail)
     }
 }
@@ -960,13 +960,13 @@ mod tests {
 
     /// Minimal catalog loaded from a temporary directory, to test the
     /// interpolation without depending on the shipped packs.
-    fn test_catalog(keys: &str) -> ritornello_i18n::Catalog {
+    fn test_catalog(keys: &str) -> ritornello_i18n::Chain {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(dir.path().join("core/fr.toml"), keys).unwrap();
-        // `Catalog::load` copies everything into memory, so the temporary
+        // `Chain::load` copies everything into memory, so the temporary
         // root can be thrown away at the end of the function.
-        ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN)
+        ritornello_i18n::Chain::load("core", "fr", dir.path(), crate::i18n::EN)
     }
 
     #[test]

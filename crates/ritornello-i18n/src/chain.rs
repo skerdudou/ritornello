@@ -1,9 +1,9 @@
 //! Stacking layers into one answer.
 //!
 //! A `Chain` is an ordered list of `Layer`s: the first layer that defines a
-//! key wins, and an unknown key resolves to itself. `Catalog` is the
+//! key wins, and an unknown key resolves to itself. `Chain::load` builds the
 //! resolution actually used at runtime — a `Chain` of exactly four layers,
-//! see `Catalog::load`.
+//! see its own doc.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,13 +11,13 @@ use std::path::Path;
 use crate::layer::Layer;
 
 /// Common English vocabulary embedded in the crate — the last layer of
-/// every `Catalog`, the floor beneath even a component's own embedded
+/// every `Chain::load`, the floor beneath even a component's own embedded
 /// English.
 pub(crate) const COMMON_EN: &str = include_str!("locales/common_en.toml");
 
 /// The `common` module's embedded English, parsed once.
 ///
-/// The exact content `Catalog::load` already uses as its own fourth layer,
+/// The exact content `Chain::load` already uses as its own fourth layer,
 /// exposed here because `ritornello_core::i18n::Registry` (task 4) needs to
 /// place it explicitly within its own language-segregated stack — the
 /// registry treats `common` like any other module, and its embedded layer
@@ -39,6 +39,44 @@ pub struct Chain(Vec<Layer>);
 
 impl Chain {
     pub fn new(layers: Vec<Layer>) -> Chain {
+        Chain(layers)
+    }
+
+    /// Builds the resolution actually used at runtime: `own` (the
+    /// component) then `common`, each itself a disk pack over the embedded
+    /// English — four layers, in priority order:
+    /// 1. disk pack for the component, at `<root>/<component>/<locale>.toml`
+    /// 2. the component's embedded English (`own_en`)
+    /// 3. disk pack for `common`, at `<root>/common/<locale>.toml`
+    /// 4. `common`'s embedded English (this crate's `locales/common_en.toml`)
+    ///
+    /// Never panics: an absent or invalid disk pack simply leaves that layer
+    /// out, and an invalid embedded pack becomes an empty layer — either way,
+    /// resolution falls through to the next layer.
+    pub fn load(component: &str, locale: &str, root: &Path, own_en: &str) -> Chain {
+        let embedded_own = match Layer::parse(own_en) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("embedded pack {component} invalid: {e}");
+                Layer::default()
+            }
+        };
+        let embedded_common = match Layer::parse(COMMON_EN) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("embedded common pack invalid: {e}");
+                Layer::default()
+            }
+        };
+        let disk_own = Layer::from_disk(&root.join(component).join(format!("{locale}.toml")));
+        let disk_common = Layer::from_disk(&root.join("common").join(format!("{locale}.toml")));
+
+        let mut layers = Vec::with_capacity(4);
+        layers.extend(disk_own);
+        layers.push(embedded_own);
+        layers.extend(disk_common);
+        layers.push(embedded_common);
+
         Chain(layers)
     }
 
@@ -66,73 +104,6 @@ impl Chain {
             }
         }
         out
-    }
-}
-
-/// The resolution actually used at runtime: `own` (the component) then
-/// `common`, each itself a disk pack over the embedded English — four
-/// layers, in priority order:
-/// 1. disk pack for the component, at `<root>/<component>/<locale>.toml`
-/// 2. the component's embedded English (`own_en`)
-/// 3. disk pack for `common`, at `<root>/common/<locale>.toml`
-/// 4. `common`'s embedded English (this crate's `locales/common_en.toml`)
-pub struct Catalog {
-    chain: Chain,
-}
-
-impl Catalog {
-    /// Builds the catalog of a component for a given language. Never
-    /// panics: an absent or invalid disk pack simply leaves that layer out,
-    /// and an invalid embedded pack becomes an empty layer — either way,
-    /// resolution falls through to the next layer.
-    pub fn load(component: &str, locale: &str, root: &Path, own_en: &str) -> Catalog {
-        let embedded_own = match Layer::parse(own_en) {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!("embedded pack {component} invalid: {e}");
-                Layer::default()
-            }
-        };
-        let embedded_common = match Layer::parse(COMMON_EN) {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!("embedded common pack invalid: {e}");
-                Layer::default()
-            }
-        };
-        let disk_own = Layer::from_disk(&root.join(component).join(format!("{locale}.toml")));
-        let disk_common = Layer::from_disk(&root.join("common").join(format!("{locale}.toml")));
-
-        let mut layers = Vec::with_capacity(4);
-        layers.extend(disk_own);
-        layers.push(embedded_own);
-        layers.extend(disk_common);
-        layers.push(embedded_common);
-
-        Catalog { chain: Chain::new(layers) }
-    }
-
-    /// Wraps an already-built `Chain` as a `Catalog`.
-    ///
-    /// The seam that lets a `Registry`-produced chain (task 4,
-    /// `ritornello-core`) flow through the existing `Catalog` type without
-    /// every one of its consumers changing signature. `Catalog` is kept
-    /// deliberately through this chantier for exactly that compatibility
-    /// (see its module doc) and is expected to go away once nothing needs
-    /// it any more; this constructor exists only to bridge that transition.
-    pub fn from_chain(chain: Chain) -> Catalog {
-        Catalog { chain }
-    }
-
-    /// Resolves a key: `own` → `common` → the key itself.
-    pub fn get<'a>(&'a self, key: &'a str) -> &'a str {
-        self.chain.get(key)
-    }
-
-    /// Flat map of **all** known keys, `own` overriding `common` — the same
-    /// priority order as `get`, but exposed as one block.
-    pub fn entries(&self) -> HashMap<&str, &str> {
-        self.chain.entries()
     }
 }
 

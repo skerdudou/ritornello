@@ -25,15 +25,7 @@ pub struct SourceOutcome {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
-    /// See `SourceMessage::status`.
-    pub status: Option<String>,
     /// See `SourceMessage::status_text`.
-    ///
-    /// A producer that has migrated fills this and leaves `status` above
-    /// `None`: the core prefers this field when present (see
-    /// `Core::decide_status_text`), so there is nothing to gain from
-    /// resolving both — and a migrated plugin has nothing left to resolve
-    /// `status` with, once its own `Catalog` is gone.
     pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
     pub presets: Option<Vec<Preset>>,
@@ -49,7 +41,6 @@ impl SourceOutcome {
             preset: None,
             preset_count: None,
             preset_name: None,
-            status: None,
             status_text: None,
             presets: None,
         }
@@ -85,12 +76,6 @@ impl SourceOutcome {
     /// station's configured name.
     pub fn preset_name(mut self, name: impl Into<String>) -> Self {
         self.preset_name = Some(name.into());
-        self
-    }
-
-    /// Declares the source's own state word (see `SourceMessage::status`).
-    pub fn status(mut self, word: impl Into<String>) -> Self {
-        self.status = Some(word.into());
         self
     }
 
@@ -147,8 +132,6 @@ pub struct Notification {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
-    /// See `SourceMessage::status`.
-    pub status: Option<String>,
     /// See `SourceOutcome::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
@@ -182,12 +165,6 @@ impl Notification {
     /// See `SourceOutcome::preset_name`.
     pub fn preset_name(mut self, name: impl Into<String>) -> Self {
         self.preset_name = Some(name.into());
-        self
-    }
-
-    /// Declares the source's own state word (see `SourceMessage::status`).
-    pub fn status(mut self, word: impl Into<String>) -> Self {
-        self.status = Some(word.into());
         self
     }
 
@@ -376,12 +353,6 @@ pub trait SourcePlugin: Send + 'static {
         SourceOutcome::new(SourceAction::Noop)
     }
 
-    /// Changes the plugin's current language. Default implementation: no-op —
-    /// a plugin with no text of its own (console, mce) has nothing to do, and
-    /// cd/radio compile unchanged as long as they have not overridden this
-    /// method.
-    async fn set_locale(&mut self, _locale: String) {}
-
     /// The named presets, if this source knows how to enumerate them.
     /// Default: the empty list, which means "I only have numbers". The cd is
     /// in that case by nature — a track has no name without a database — and
@@ -461,15 +432,11 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     SourceReq::Eject => plugin.eject().await,
                     SourceReq::Stop => plugin.stop().await,
                     SourceReq::PlayerTrack(n) => plugin.player_track(n).await,
-                    SourceReq::SetLocale(locale) => {
-                        plugin.set_locale(locale).await;
-                        SourceOutcome::new(SourceAction::Noop)
-                    }
-                    // Same precedent as `SetLocale`: a method that does not
-                    // return a `SourceOutcome`. The `Noop` is not decorative —
-                    // it is what unties the `SourceClient`'s `oneshot`, which
-                    // requires `(Some(id), Some(action))`. Without an action,
-                    // the caller would wait out the 5 s timeout and then fail,
+                    // A method that does not return a `SourceOutcome`. The
+                    // `Noop` is not decorative — it is what unties the
+                    // `SourceClient`'s `oneshot`, which requires
+                    // `(Some(id), Some(action))`. Without an action, the
+                    // caller would wait out the 5 s timeout and then fail,
                     // while the list is already there, right next to it.
                     SourceReq::ListPresets => {
                         // No guard here anymore: `SourceOutcome::presets`
@@ -500,7 +467,6 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     preset: outcome.preset,
                     preset_count: outcome.preset_count,
                     preset_name: outcome.preset_name,
-                    status: outcome.status,
                     status_text: outcome.status_text,
                     // Stamped here, once, rather than by a constructor call on
                     // each of a plugin's ten declaration paths: a capability
@@ -537,7 +503,6 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             preset: n.preset,
                             preset_count: n.preset_count,
                             preset_name: n.preset_name,
-                            status: n.status,
                             status_text: n.status_text,
                             can_eject: Some(plugin.can_eject()),
                             // Same reason as the reply path above: stamped on
@@ -923,13 +888,12 @@ pub trait AdminPlugin: Send + Sync + 'static {
     fn asset(&self, path: &str) -> Option<(String, String)>;
     async fn get_data(&self) -> serde_json::Value;
     /// `Err` carries the refusal **unresolved** (see
-    /// `ritornello_proto::AdminResult::Set::error_text`): every plugin that
-    /// implements this trait has, by the time this signature widened
-    /// (language-packs chantier, tasks 8-10), migrated off a `Catalog` of
-    /// its own — there is no longer anything here to resolve a finished
-    /// `String` with. `AdminClient::set_data`, on the core side, is where an
-    /// unresolved `Text` is turned back into the legacy `error` string, the
-    /// same way `Core::decide_status_text` does for a source's status.
+    /// `ritornello_proto::AdminResult::Set::error_text`): a key into the
+    /// plugin's own translation layer and its parameters, or explicit
+    /// verbatim text. Every plugin that implements this trait has, by the
+    /// time this signature widened (language-packs chantier, tasks 8-10),
+    /// migrated off a `Catalog` of its own — there is no longer anything
+    /// here to resolve a finished `String` with.
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text>;
 }
 
@@ -1044,17 +1008,21 @@ pub async fn serve_admin(listener: UnixListener, plugin: impl AdminPlugin) -> Re
 /// `is_plain_locale` path-safety guard that used to sit right here — sanitizing
 /// `AdminReq::GetCatalog`'s `lang` before it reached `AdminPlugin::catalog`,
 /// which built a filesystem path out of it — was removed alongside that
-/// request rather than kept for a future use. A language string can still
-/// reach a plugin (a `Source` half's `SetLocale` frame, over its own
-/// socket, handled by the plugin's own `set_locale` and still turned into a
-/// `Catalog::load` call by the six plugins that keep their `catalog` field
-/// until task 11 removes it) — but that frame is written only by the core
-/// itself, already past `valid_locale` at the HTTP boundary
-/// (`PUT /api/locale`), never by anything this SDK hands a browser-supplied
-/// value to. If a future admin request ever lets a language travel from an
-/// untrusted caller into this crate again, it needs its own guard: this
-/// comment is the record that its absence here is deliberate, not an
-/// oversight.
+/// request rather than kept for a future use.
+///
+/// **The wider claim, as of task 11.** No language reaches a plugin at all
+/// any more, by either socket: `SourceReq::SetLocale` — the last request
+/// that ever carried one — is gone too, along with `SourcePlugin::set_locale`
+/// and every plugin's own `Catalog`. Resolution is entirely the core's own,
+/// against its shared `Registry`; a plugin's admin catalog is served on
+/// demand, by locale, straight from that registry (`admin::admin_i18n`, on
+/// the core side), never asked of the plugin over IPC. There is therefore
+/// nothing left in this crate that turns a language string into a path, on
+/// either socket — not a residual claim to keep re-verifying, but the reason
+/// no guard belongs here. If a future admin request ever lets a language
+/// travel from an untrusted caller into this crate again, it needs its own
+/// guard: this comment is the record that its absence here is deliberate,
+/// not an oversight.
 async fn handle_admin<P: AdminPlugin>(
     plugin: std::sync::Arc<tokio::sync::RwLock<P>>,
     assets: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
@@ -1081,15 +1049,8 @@ async fn handle_admin<P: AdminPlugin>(
         }
         AdminReq::GetData => AdminResult::Data(plugin.read().await.get_data().await),
         AdminReq::SetData(data) => match plugin.write().await.set_data(data).await {
-            Ok(()) => AdminResult::Set { ok: true, error: None, error_text: None },
-            // `error` stays absent: every implementor of `AdminPlugin` now
-            // hands back an unresolved `Text` (see that trait method's own
-            // doc), and a plugin with no `Catalog` left has nothing to
-            // resolve a legacy string with. `error_text` alone carries the
-            // refusal from here on — the core-side resolver
-            // (`AdminClient::set_data`) is what a caller still expecting
-            // `error` falls back to.
-            Err(text) => AdminResult::Set { ok: false, error: None, error_text: Some(text) },
+            Ok(()) => AdminResult::Set { ok: true, error_text: None },
+            Err(text) => AdminResult::Set { ok: false, error_text: Some(text) },
         },
     }
 }
@@ -1174,7 +1135,7 @@ mod admin_server_tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(1), "{:?}", start.elapsed());
         let second = line(&mut r).await;
         assert_eq!(second.id, 1);
-        assert_eq!(second.result, AdminResult::Set { ok: true, error: None, error_text: None });
+        assert_eq!(second.result, AdminResult::Set { ok: true, error_text: None });
     }
 
     #[tokio::test]
@@ -1310,16 +1271,17 @@ mod tests {
         );
         // The other fields do not move: that is the trap of a builder.
         assert_eq!(n.preset, None);
-        assert_eq!(n.status, None);
+        assert_eq!(n.status_text, None);
         assert!(!n.transient);
     }
 
     #[test]
-    fn the_builder_status_lands_in_the_frame() {
-        let o = SourceOutcome::new(SourceAction::Noop).status("PAS DE DISQUE");
-        assert_eq!(o.status.as_deref(), Some("PAS DE DISQUE"));
-        let n = Notification::new().status("FIP").preset_name("FIP");
-        assert_eq!(n.status.as_deref(), Some("FIP"));
+    fn the_builder_status_text_lands_in_the_frame() {
+        let key = Text::Keyed { key: "no_disc".into(), params: HashMap::new() };
+        let o = SourceOutcome::new(SourceAction::Noop).status_text(key.clone());
+        assert_eq!(o.status_text, Some(key.clone()));
+        let n = Notification::new().status_text(key.clone()).preset_name("FIP");
+        assert_eq!(n.status_text, Some(key));
         assert_eq!(n.preset_name.as_deref(), Some("FIP"));
     }
 
@@ -1483,7 +1445,7 @@ mod tests {
             "the notification under test must be the one that carries only a cover: {spont_line}"
         );
         assert!(
-            spontaneous.identity.is_none() && spontaneous.status.is_none(),
+            spontaneous.identity.is_none() && spontaneous.status_text.is_none(),
             "otherwise the frame would qualify by itself and the stamp would no longer be \
              load-bearing: {spont_line}"
         );
@@ -1561,7 +1523,7 @@ mod tests {
 
         let (spontaneous, spont_line) = spontaneous.expect("the spontaneous notification");
         assert!(
-            spontaneous.identity.is_none() && spontaneous.status.is_none(),
+            spontaneous.identity.is_none() && spontaneous.status_text.is_none(),
             "otherwise the frame would qualify by itself and the stamp would no longer be \
              load-bearing: {spont_line}"
         );
@@ -1601,8 +1563,9 @@ mod tests {
     async fn set_play_mode_is_dispatched_to_the_plugin() {
         // Symmetrical to `overridden_wake_is_dispatched`: proves the request
         // reaches the plugin with both flags, and that the correlation still
-        // releases on a `Noop` (see `SetLocale`'s precedent, right above the
-        // dispatch arm).
+        // releases on a `Noop` — a method that does not return a
+        // `SourceOutcome` still unties the `SourceClient`'s oneshot, exactly
+        // like `ArchiveCover` and `ListPresets` below.
         struct RecordingSource {
             seen: std::sync::Arc<std::sync::Mutex<Option<(bool, bool)>>>,
         }
@@ -1639,7 +1602,7 @@ mod tests {
             .unwrap();
         let line = lines.next_line().await.unwrap().unwrap();
         let msg: SourceMessage = serde_json::from_str(&line).unwrap();
-        assert_eq!(msg.id, Some(1), "the oneshot must be released, exactly like SetLocale");
+        assert_eq!(msg.id, Some(1), "the oneshot must be released even on a Noop");
         assert_eq!(msg.action, Some(SourceAction::Noop));
         assert_eq!(*seen.lock().unwrap(), Some((true, false)));
     }
@@ -1866,51 +1829,6 @@ mod tests {
         // play() dispatched, NOT activate() — which here plays nothing, the
         // very situation that made the Play key inert on the cd.
         assert_eq!(msg.action, Some(SourceAction::play("cdda://")));
-    }
-
-    #[tokio::test]
-    async fn set_locale_is_forwarded_to_the_plugin_and_answers_noop() {
-        use std::sync::{Arc, Mutex};
-        struct RecordingLocale {
-            seen: Arc<Mutex<Option<String>>>,
-        }
-        #[async_trait::async_trait]
-        impl SourcePlugin for RecordingLocale {
-            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn set_locale(&mut self, locale: String) {
-                *self.seen.lock().unwrap() = Some(locale);
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("plugin.sock");
-        let socket_for_server = socket.clone();
-        let seen = Arc::new(Mutex::new(None));
-        let seen_srv = seen.clone();
-        tokio::spawn(async move {
-            run_source_plugin(RecordingLocale { seen: seen_srv }, &socket_for_server).await.unwrap();
-        });
-        let mut client = None;
-        for _ in 0..50 {
-            if let Ok(s) = UnixStream::connect(&socket).await {
-                client = Some(s);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        let (read, mut write) = client.expect("plugin connection").into_split();
-        let mut lines = BufReader::new(read).lines();
-        write.write_all(b"{\"id\":1,\"req\":\"SetLocale\",\"arg\":\"fr\"}\n").await.unwrap();
-        let line = lines.next_line().await.unwrap().unwrap();
-        let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
-        assert_eq!(msg.id, Some(1));
-        assert_eq!(msg.action, Some(SourceAction::Noop));
-        assert_eq!(seen.lock().unwrap().as_deref(), Some("fr"));
     }
 
     #[tokio::test]

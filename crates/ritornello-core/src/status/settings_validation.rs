@@ -100,7 +100,7 @@ pub enum SettingsError {
 }
 
 impl SettingsError {
-    pub fn message(&self, catalog: &Catalog) -> String {
+    pub fn message(&self, catalog: &Chain) -> String {
         // Every arm below used to chain two `.replace()` calls
         // (`{min}` then `{max}`) directly on the resolved string — the same
         // shape task 10b removed from `core`, `admin` and `update`. `min`
@@ -406,7 +406,7 @@ mod tests {
             "settings_initial_delay_out_of_range = \"timeout hors bornes ({min}-{max})\"\n",
         )
         .unwrap();
-        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN);
+        let cat = ritornello_i18n::Chain::load("core", "fr", dir.path(), crate::i18n::EN);
         let err = SettingsError::InitialDelay { min: 200, max: 5000 };
         assert_eq!(err.message(&cat), "timeout hors bornes (200-5000)");
     }
@@ -418,7 +418,7 @@ mod tests {
     fn the_seek_step_refusal_quotes_its_bounds() {
         // Nonexistent path: the catalog falls back to the embedded English,
         // the very one the key must now contain.
-        let catalog = ritornello_i18n::Catalog::load(
+        let catalog = ritornello_i18n::Chain::load(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
@@ -438,7 +438,7 @@ mod tests {
     /// its own key or with an unfilled `{min}`/`{max}`/`{value}` token.
     #[test]
     fn every_settings_error_resolves_with_its_bounds_filled_in() {
-        let catalog = ritornello_i18n::Catalog::load(
+        let catalog = ritornello_i18n::Chain::load(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
@@ -473,7 +473,7 @@ mod tests {
     /// merely "some" substitution.
     #[test]
     fn interpolate_produces_the_exact_same_strings_the_chained_replace_did() {
-        let catalog = ritornello_i18n::Catalog::load(
+        let catalog = ritornello_i18n::Chain::load(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),

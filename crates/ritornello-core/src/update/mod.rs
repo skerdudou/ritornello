@@ -36,7 +36,7 @@ use crate::update::state::{
     component_offers, Availability, CheckOutcome, ComponentKind, ComponentOffer, Installed,
     ThirdPartyOffer, UpdateState,
 };
-use ritornello_i18n::Catalog;
+use ritornello_i18n::Chain;
 use ritornello_updater::request::{Action, Request, REQUEST_FORMAT};
 use ritornello_updater::target::plugins_dir;
 use std::path::{Path, PathBuf};
@@ -580,7 +580,7 @@ impl std::fmt::Display for Refusal {
 /// constraint (user-facing text through the catalog, named parameters, both
 /// languages) applies to this path as much as to any other, and a `format!`
 /// here would reach a French screen in English.
-fn refusal_message(catalog: &Catalog, component: &str, why: &Refusal) -> String {
+fn refusal_message(catalog: &Chain, component: &str, why: &Refusal) -> String {
     let (key, detail) = match why {
         Refusal::NoRoom => ("update_no_room", None),
         Refusal::NoDigest => ("update_no_digest", None),
@@ -807,7 +807,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// thing that happened. With one component installed, which is the ordinary
 /// gesture, there is nothing to choose between.
 fn install_report(
-    catalog: &Catalog,
+    catalog: &Chain,
     placed: &[Placement],
     failure: Option<String>,
 ) -> Option<CheckOutcome> {
@@ -966,7 +966,7 @@ pub struct Worker {
     pub state: Arc<RwLock<UpdateState>>,
     /// Every message this worker publishes goes through it: the page shows
     /// `busy` and `outcome` as they arrive, without a second lookup.
-    pub catalog: Arc<RwLock<Catalog>>,
+    pub catalog: Arc<RwLock<Chain>>,
     /// Where a plugin's announced version is read. The binary is the only
     /// thing that knows it, and it says so in its announcement.
     pub status: Arc<RwLock<StatusState>>,
@@ -1570,7 +1570,7 @@ impl Worker {
         //
         // Written **before** the unit runs, so a unit that then fails leaves
         // the new locale catalogs beside the old binary. Harmless as things
-        // stand — `Catalog::get` falls back to the embedded English and, past
+        // stand — `Chain::get` falls back to the embedded English and, past
         // that, to the key itself — and the alternative (placing them after)
         // would leave the new binary beside the old catalogs, which is the
         // same mismatch the other way round with no fallback at all.
@@ -3020,9 +3020,9 @@ mod tests {
     /// The French pack this repository ships, loaded as a real catalog rather
     /// than parsed as a table: what the test needs to know is what a French
     /// screen would actually receive.
-    fn french() -> Catalog {
+    fn french() -> Chain {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
-        Catalog::load("core", "fr", &root, crate::i18n::EN)
+        Chain::load("core", "fr", &root, crate::i18n::EN)
     }
 
     /// **Every refusal reaches the page as a translated sentence.** A
@@ -3037,7 +3037,7 @@ mod tests {
     /// particular, and the parity test only compares key *sets*.
     #[test]
     fn every_refusal_is_a_translated_sentence_with_its_parameters_filled_in() {
-        let english = Catalog::load(
+        let english = Chain::load(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
@@ -3060,7 +3060,7 @@ mod tests {
         for catalog in [&english, &french()] {
             for why in &all {
                 let message = refusal_message(catalog, "radio", why);
-                // `Catalog::get` answers the key itself when it knows none,
+                // `Chain::get` answers the key itself when it knows none,
                 // so a key missing from either pack shows up here.
                 assert!(
                     !message.starts_with("update_"),
@@ -3088,7 +3088,7 @@ mod tests {
     #[test]
     fn refusal_message_does_not_let_the_component_name_rewrite_the_detail_token() {
         let english =
-            Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+            Chain::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         let message = refusal_message(
             &english,
             "radio {detail}",
@@ -3130,7 +3130,7 @@ mod tests {
         .unwrap();
         Worker {
             state: Arc::new(RwLock::new(UpdateState::initial("0.2.0", &[]))),
-            catalog: Arc::new(RwLock::new(Catalog::load("core", "en", root, crate::i18n::EN))),
+            catalog: Arc::new(RwLock::new(Chain::load("core", "en", root, crate::i18n::EN))),
             status,
             manifest,
             plugins_tx: mpsc::channel(1).0,
@@ -3351,7 +3351,7 @@ mod tests {
                 // comparison it reddens (`state.outcome` carries
                 // `update_nothing_published` filled with the file name
                 // instead of `update_digest_mismatch` filled with `mpd`).
-                let catalog = Catalog::load("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+                let catalog = Chain::load("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
                 let expected = refusal_message(&catalog, "mpd", &Refusal::DigestMismatch);
                 assert_eq!(message, &expected, "the refusal must name exactly the component `mpd`");
             }
@@ -4160,7 +4160,7 @@ mod tests {
     /// nothing leaves the check's own answer alone.
     #[test]
     fn a_failed_component_never_lets_a_pass_read_as_a_clean_install() {
-        let english = Catalog::load(
+        let english = Chain::load(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
@@ -4218,7 +4218,7 @@ mod tests {
     /// `.replace()`.
     #[test]
     fn install_report_does_not_let_the_component_name_rewrite_the_version_token() {
-        let english = Catalog::load(
+        let english = Chain::load(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
