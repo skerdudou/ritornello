@@ -2492,10 +2492,25 @@ protocol:
   changes is that a plugin can no longer undo the shell's layout. A Playwright
   journey locks it, because the defect lives in the cascade of two really
   served sheets, which jsdom does not compute;
-- `GetCatalog` → its flat i18n catalog, which the view consumes through
-  `t()`;
 - `GetData` / `SetData` → the page's data, opaque JSON both ways;
 - `Ping` → `Pong`, without touching the plugin's state or taking any lock.
+
+A plugin never answers for its own i18n catalog: there is no admin
+request for it, and `AdminPlugin` carries no `catalog` method. A plugin
+that has UI text confides its **embedded English** once, at startup,
+through `Runtime::texts([("en", MY_EN)])?` (chained onto
+`declare_runtime!()?` before `.admin(...)?`, next to the crate's own
+`include_str!("locales/en.toml")` constant) — the SDK parses and
+validates it there, before a single socket is bound, so a broken pack
+is refused at build time rather than discovered on a screen. Any other
+shipped language is a plain `.toml` file under the deployment's packs
+root (see [installation.md](installation.md)), never confided by the
+plugin at all: the core sweeps that root itself (`RITORNELLO_LOCALES`,
+see [development.md](development.md) and [interface.md](interface.md))
+and layers what it finds over the confided English. The view then reads
+the resolved catalog from `GET /plugins/<name>/api/i18n[?lang=<l>]`, an
+ordinary core-served HTTP route backed by that layering — never a round
+trip to the plugin.
 
 **The protocol is concurrent.** `serve_admin` spawns one task per request
 and a single writer for the socket: responses leave in the order they
@@ -2503,14 +2518,14 @@ and a single writer for the socket: responses leave in the order they
 serial (read, await, write, read again), so a `set_data` mounting a
 sleeping network share held back `ui.js` — a plain `include_str!` — until
 the core gave up, and the admin page simply vanished. The plugin now sits
-behind an `RwLock`: `asset`, `catalog` and `get_data` read in parallel,
+behind an `RwLock`: `asset` and `get_data` read in parallel,
 `set_data` is exclusive (legitimately: it is a write). Assets are cached
 by the SDK the first time they are seen, and `ui.js`/`ui.css` are read
 before the socket accepts, so they never wait behind a write.
 
 **Each request carries a budget** (`deadline_ms`), decided by the core
 from the request's nature — an in-memory asset does not get the budget of
-a network mount: `Ping` 500 ms, `GetAsset`/`GetCatalog` 1 s, `GetData`
+a network mount: `Ping` 500 ms, `GetAsset` 1 s, `GetData`
 5 s, `SetData` 30 s. The SDK enforces it server-side, **lock wait
 included**, and answers `Expired` at the deadline instead of going silent;
 the core maps `Expired` and silence alike to `AdminIpcError::Timeout`,
@@ -2529,13 +2544,15 @@ the async thread and behind a circuit breaker
 The shell mounts the module's default component passing it **two props**,
 which are the entirety of the data-side contract:
 
-- `catalog`: the flat i18n catalog returned by `GetCatalog`, to be
-  consumed through `createT(catalog)`. **Guaranteed settled at mount**: the
-  shell does not build the module's component until this catalog has come
-  back, so a first render never sees an empty one. "Settled" means
-  answered *or* refused — a plugin whose `GetCatalog` fails still gets its
-  component mounted, with an empty catalog, because a page withheld
-  forever would be worse than one showing keys;
+- `catalog`: the flat i18n catalog the shell itself fetched from
+  `GET /plugins/<name>/api/i18n` (see above — never a request the plugin
+  answers), to be consumed through `createT(catalog)`.
+  **Guaranteed settled at mount**: the shell does not build the module's
+  component until this fetch has come back, so a first render never
+  sees an empty one. "Settled" means answered *or* refused — a plugin
+  whose catalog fetch fails still gets its component mounted, with an
+  empty catalog, because a page withheld forever would be worse than
+  one showing keys;
 - `base`: the **absolute** prefix under which the core serves this
   plugin's routes, trailing slash included (`/plugins/<name>/`). Every
   URL in the module is built from it — `api.get(`${base}api/data`)` — and
