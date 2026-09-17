@@ -1,5 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { SelectItem } from '@ritornello/ui'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LanguageCompleteness, LocalePayload } from '../types'
 
@@ -268,5 +270,33 @@ describe('LanguageCard — fix round 1 findings 5 and 7', () => {
     const w = await mountCard({ lang: 'de', fallback: 'en' })
     expect(w.find('[data-fallback-hint]').exists()).toBe(true)
     expect(w.find('[data-fallback-hint]').text().length).toBeGreaterThan(0)
+  })
+})
+
+describe('LanguageCard — the mandatory <SelectValue> override, structurally (fix round 3, finding H)', () => {
+  // Read as plain text, not mounted: `process.cwd()` rather than
+  // `import.meta.url` for the same reason `i18nKeysUsed.test.ts` uses it —
+  // under vitest/jsdom a relative URL that climbs out of the vite project
+  // root gets rewritten to `http://localhost/@fs/...`, which `fileURLToPath`
+  // then refuses.
+  //
+  // A structural check, deliberately, and only for the fallback select: its
+  // items are bare `languageName(c)`, a pure function of the code alone —
+  // never of `payload` or of the active catalog — so there is no
+  // behavioural difference left between the override and reka-ui's default
+  // for this select to catch (fix round 2 tried to manufacture one by
+  // giving these items a secondary code line; fix round 3 reverted that —
+  // a test must not reshape the product to become provable). The language
+  // select keeps its behavioural guard in `journey.spec.ts`, where the
+  // hazard is real: its items *do* carry `annotation(l)`, a `t()`-driven,
+  // payload-driven string that can go stale in the trigger between a
+  // remount. This test exists so the pattern stays applied on the fallback
+  // select as a project convention — cheap insurance against the day one of
+  // its items grows payload- or catalog-driven content of its own — without
+  // pretending a behavioural test could tell the two forms apart today.
+  it('both selects still write the override, not the reka-ui default', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/components/LanguageCard.vue'), 'utf8')
+    expect(source).toContain('<SelectValue>{{ languageLabel }}</SelectValue>')
+    expect(source).toContain('<SelectValue>{{ fallbackLabel }}</SelectValue>')
   })
 })

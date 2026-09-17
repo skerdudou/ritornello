@@ -160,6 +160,22 @@ const fallbackAnnotation = computed(() => {
   <div class="flex flex-col gap-2">
     <div class="flex flex-wrap items-center gap-2">
       <Select :model-value="lang" @update:model-value="(v) => emit('update:lang', String(v))">
+        <!-- The override is a live defence here, not a convention applied
+             on principle (fix round 3, task 14 re-review, finding G):
+             each item's rendered subtree — this name plus `annotation(l)`,
+             a `t()`-driven, payload-driven string — is snapshotted by
+             reka-ui's default `<SelectValue />` at that item's own mount
+             and never re-read except by a remount (reopening the list).
+             Measured stale by two independent routes: `total` moving
+             (e.g. a plugin toggle, `Registry::forget`) while the card
+             stays mounted, and — needing no plugin at all — the catalog
+             reload a language change itself performs, which is the one
+             thing this card exists to trigger. Either leaves the trigger
+             reading the picked item's *old* text (e.g. `Français0 module
+             /4`) after the true text has already moved, healed only by
+             reopening the list. `languageLabel` never carries the
+             annotation, so the override sidesteps the hazard entirely
+             rather than reproducing it correctly. -->
         <SelectTrigger class="min-w-32" data-language-select :aria-label="t('language')"><SelectValue>{{ languageLabel }}</SelectValue></SelectTrigger>
         <SelectContent>
           <!-- Name of the language and not its code: "français" is read,
@@ -180,20 +196,28 @@ const fallbackAnnotation = computed(() => {
         <label class="grid gap-1 text-sm">
           {{ t('locale_fallback_label') }}
           <Select :model-value="fallback" @update:model-value="(v) => emit('update:fallback', String(v))">
+            <!-- Here the override is convention, not a live defence (fix
+                 round 3, finding G/H): every item below is a bare
+                 `languageName(c)`, a pure function of its own code, never
+                 of `payload` or of the active catalog — so nothing in this
+                 select's items can go stale the way the language select's
+                 annotation can (see that trigger's own comment for the
+                 mechanism). The mandatory pattern is still applied, so a
+                 later change that puts payload- or catalog-driven content
+                 into one of these items does not have to remember to add
+                 it. `LanguageCard.test.ts` pins the pattern structurally,
+                 since there is no behavioural difference left to catch. -->
             <SelectTrigger class="min-w-32" data-fallback-select :aria-label="t('locale_fallback_label')"><SelectValue>{{ fallbackLabel }}</SelectValue></SelectTrigger>
             <SelectContent>
-              <!-- Readable name as primary, bare code as secondary — the
-                   same pattern the language select and the audio-device
-                   select already use (fix round 2, task 14 re-review,
-                   finding D: a bare-label item let a dropped `<SelectValue>`
-                   override go unguarded on this select specifically, since
-                   there was nothing beyond the label for the default to
-                   leak). -->
+              <!-- Bare name, deliberately: "français" is read, "fr" is
+                   guessed, same rule as the language select just above.
+                   (Fix round 2, task 14 re-review, finding H: a code was
+                   added here once to give an e2e assertion something to
+                   catch. Reverted — a test must not reshape the product to
+                   become provable. See `LanguageCard.test.ts`'s structural
+                   guard for why a bare item needs no behavioural one.) -->
               <SelectItem v-for="c in fallbackCandidates" :key="c" :value="c">
-                <div class="flex flex-col items-start">
-                  <span>{{ languageName(c) }}</span>
-                  <span class="text-xs text-muted-foreground">{{ c }}</span>
-                </div>
+                {{ languageName(c) }}
               </SelectItem>
             </SelectContent>
           </Select>
