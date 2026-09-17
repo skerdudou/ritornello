@@ -499,3 +499,81 @@ test('an order arrow writes a real reorder, checked against the server, and is p
     }
   }
 })
+
+
+/**
+ * The language card (task 14, language-packs chantier): the union of
+ * languages, an annotation on the one the harness ships incomplete, the
+ * fallback control it unlocks, and a real `PUT /api/locale` round trip —
+ * the exact arithmetic behind the annotation (`Math.max`, "remains in
+ * English") is unit-tested in `LanguageCard.test.ts` against fixtures built
+ * for that; this journey only has to prove the real core serves an
+ * incomplete language and the page reacts to it.
+ *
+ * `serve.mjs` ships a deliberately partial `fr` core pack (two keys of the
+ * ~320 the embedded English carries) under `RITORNELLO_LOCALES` — absent
+ * that, the selector would only ever offer `en`, and this journey would
+ * have nothing incomplete to select.
+ */
+test('the language card annotates an incomplete language and offers a fallback', async ({
+  page,
+  request,
+}) => {
+  await page.goto('/config')
+
+  const languageTrigger = page.locator('[data-language-select]')
+  await expect(languageTrigger).toBeVisible()
+  await languageTrigger.click()
+
+  // "English": nothing extra — the owner's rule, "nothing shown for a
+  // complete language, just its name". "Français": the phrase-key
+  // annotation, `{done}` of `{total}` translated — `0 of 4` here, since the
+  // fixture's French pack covers neither of `save`/`language` fully across
+  // every texted module (only `core`'s own two keys are French at all).
+  const englishOption = page.getByRole('option', { name: 'English' })
+  const frenchOption = page.getByRole('option', { name: 'Français' })
+  await expect(englishOption).toBeVisible()
+  await expect(frenchOption).toBeVisible()
+  await expect(englishOption).not.toContainText('translated')
+  await expect(frenchOption).toContainText('0 of 4 translated')
+
+  try {
+    await frenchOption.click()
+
+    // Choosing an incomplete language unlocks the fallback control — hidden
+    // a moment ago, while English (complete) was selected.
+    const fallbackRow = page.locator('[data-fallback-row]')
+    await expect(fallbackRow).toBeVisible()
+    // A fresh device has never set a fallback: `fallback_current` defaults
+    // to "en", the wire's own representable "none" (task 13).
+    await expect(page.locator('[data-fallback-select]')).toHaveText('English')
+
+    // A real fallback: only the core's own languages are offered
+    // (`fallback_candidates`), so "Français" is the only other choice this
+    // fixture has.
+    await page.locator('[data-fallback-select]').click()
+    await page.getByRole('option', { name: 'Français' }).click()
+
+    await page.locator('[data-display-change]').click()
+
+    // Checked against the real core, not only the page: both the chosen
+    // language and the fallback travelled in the same `PUT /api/locale`
+    // (task 13's combined wire shape).
+    await expect
+      .poll(async () => (await (await request.get('/api/locale')).json()).current)
+      .toBe('fr')
+    const locale = await (await request.get('/api/locale')).json()
+    expect(locale.fallback_current).toBe('fr')
+  } finally {
+    // Put back the way the harness started: `en` is complete, so a plain
+    // `{"locale":"en"}` is enough — the persisted fallback is left as `fr`
+    // (task 13's own "omitted fallback leaves it untouched" rule would
+    // apply on the page, but this direct API call has no reason to send
+    // one at all), which is harmless for every other journey since none of
+    // them ever selects an incomplete language again.
+    await request.put('/api/locale', { data: { locale: 'en' } })
+    await expect
+      .poll(async () => (await (await request.get('/api/locale')).json()).current)
+      .toBe('en')
+  }
+})

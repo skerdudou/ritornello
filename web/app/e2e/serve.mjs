@@ -208,6 +208,23 @@ name = "generic-input"
 exec = "${root}/target/debug/ritornello-plugin-generic-input"
 `,
 )
+// A deliberately partial French core pack, for the language-card journey
+// (task 14, language-packs chantier): two keys out of the ~320 the embedded
+// English carries, enough to make `fr` show up in the union (a module's
+// layer only needs to be non-empty) while staying `Partial`, never
+// `Complete` — the language card must annotate it and offer the fallback
+// control. Real end-to-end coverage of the completeness *arithmetic*
+// (`Math.max`, "remains in English") lives in `LanguageCard.test.ts`, with
+// fixtures crafted for that; this fixture only has to prove the real core
+// serves an incomplete language and the page reacts to it.
+const localesRootNative = join(configDirNative, 'locales')
+mkdirSync(join(localesRootNative, 'core'), { recursive: true })
+writeFileSync(
+  join(localesRootNative, 'core', 'fr.toml'),
+  'language = "Langue"\nsave = "Enregistrer"\n',
+)
+const localesRoot = `${configDir}/locales`
+
 writeFileSync(
   join(configDirNative, 'stations.toml'),
   '[[stations]]\nname = "FIP"\nurl = "http://icecast.radiofrance.fr/fip-midfi.mp3"\npreset = 1\n',
@@ -246,6 +263,11 @@ const env = {
   RITORNELLO_RADIO_STATE: `${execDir}/plugin-radio.json`,
   RITORNELLO_INPUT_BINDINGS: `${execDir}/input-bindings.toml`,
   RITORNELLO_INPUT_PRESETS: `${root}/deploy/input-presets`,
+  // The partial French core pack above — default is `/etc/ritornello/
+  // locales`, which does not exist on a developer machine either, so
+  // without this the language card journey would find only `en` and never
+  // see the annotation or the fallback control it exists to exercise.
+  RITORNELLO_LOCALES: localesRoot,
   // Every file the `files` plugin writes goes to the throwaway execution
   // directory. Its defaults are `/etc/ritornello` and `/var/lib/ritornello`:
   // left alone, a journey run on a machine where Ritornello is installed would
