@@ -528,25 +528,37 @@ test('the language card annotates an incomplete language and offers a fallback',
 
   // "English": nothing extra — the owner's rule, "nothing shown for a
   // complete language, just its name". "Français": the phrase-key
-  // annotation, named unit included ("0 /4" — the fixture's French pack
-  // covers neither `save` nor `language` on any of this harness's four
-  // texted modules, core included, so nothing counts as `Complete`).
+  // annotation, named unit included ("0 module /4" — fix round 2, finding
+  // E — the fixture's French pack covers neither `save` nor `language` on
+  // any of this harness's four texted modules, core included, so nothing
+  // counts as `Complete`).
   const englishOption = page.getByRole('option', { name: 'English' })
   const frenchOption = page.getByRole('option', { name: 'Français' })
   await expect(englishOption).toBeVisible()
   await expect(frenchOption).toBeVisible()
   await expect(englishOption).not.toContainText('/4')
-  await expect(frenchOption).toContainText('0 /4')
+  await expect(frenchOption).toContainText('0 module /4')
 
   try {
     await frenchOption.click()
 
     // The trigger reflects the pick immediately, without reopening the
-    // list — the guard `<SelectValue>{{ languageLabel }}</SelectValue>`
-    // exists for (fix round 1, finding 5): reka-ui hands an item's text to
-    // its `Select` once, at that item's own mount, and never re-reads it,
-    // so a trigger relying on that default would still read "English"
-    // here. A real browser is what can tell the difference; jsdom cannot.
+    // list, and reads **exactly** the language's name — the guard
+    // `<SelectValue>{{ languageLabel }}</SelectValue>` exists for (fix
+    // round 1, finding 5; fix round 2, finding D corrects what this
+    // actually detects). Measured (re-review, Q4): reka-ui's *default*
+    // `<SelectValue />` here is not stale — it tracks the selected item
+    // live — but it renders the item's **whole subtree text**, annotation
+    // included ("Français0 module /4"), because nothing tells it to read
+    // only the name. `toHaveText` is exact, not `toContainText`: an
+    // unguarded trigger would fail this same line by containing extra
+    // text, not by containing the wrong text. (These two selects' items
+    // are keyed on `Intl.DisplayNames` and a bare language code, neither
+    // of which the active UI catalog can make stale the way a `t()`-driven
+    // label can — see `journey.spec.ts`'s own "every dropdown follows a
+    // language change" test for that other mechanism — so the defect this
+    // guard actually catches is the leaked subtree, not a frozen-at-mount
+    // value; the comment used to claim the latter and was wrong.)
     await expect(languageTrigger).toHaveText('Français')
 
     // Choosing an incomplete language unlocks the fallback control — hidden
@@ -569,6 +581,16 @@ test('the language card annotates an incomplete language and offers a fallback',
     const germanOption = page.getByRole('option', { name: 'Deutsch' })
     await expect(germanOption).toBeVisible()
     await germanOption.click()
+    // The same guard as the language trigger, above, now exercised on the
+    // fallback select too (fix round 2, finding D: the first review's
+    // measurement found this select's own `<SelectValue>` completely
+    // unguarded — 22/22 still green with it removed — because its items
+    // used to carry nothing but the bare name, so the default and the
+    // override rendered identical text. Its items now show the bare code
+    // as secondary text (`LanguageCard.vue`), the same pattern the
+    // language select and the audio-device select already use, which is
+    // what gives this line something to catch: an unguarded trigger would
+    // read "Deutschde", not "Deutsch".
     await expect(fallbackTrigger).toHaveText('Deutsch')
 
     // A real, non-self fallback closes no gap here (both "fr" and "de"
