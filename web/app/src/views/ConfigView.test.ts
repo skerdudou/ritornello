@@ -119,7 +119,19 @@ function payloads() {
       ],
       current: 'hw:CARD=HDMI',
     } as unknown,
-    '/api/locale': { locales: ['en', 'fr'], current: 'fr' } as unknown,
+    '/api/locale': {
+      locales: ['en', 'fr'],
+      current: 'fr',
+      // Both complete: existing tests in this file assume the language card
+      // shows nothing but the plain selector (task 14 predates none of
+      // them, and the owner's rule is "nothing for a complete language").
+      completeness: [
+        { language: 'en', complete: true, done: 1, total: 1 },
+        { language: 'fr', complete: true, done: 1, total: 1 },
+      ],
+      fallback_current: 'en',
+      fallback_candidates: ['en'],
+    } as unknown,
     '/api/logs': { lines: ['WARN plugin radio unavailable'] } as unknown,
     '/api/settings': {
       volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',

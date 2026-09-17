@@ -57,6 +57,15 @@ overlay_ms_label = "Durée d'affichage (volume, messages) (ms)"
 tens_window_ms_label = "Fenêtre de saisie du cumul +10 (ms)"
 language = "Langue"
 display_card_title = "Langue et affichage"
+# Clés de phrase entière à paramètres nommés (tâche 14, chantier des packs de
+# langue) : un nombre collé à un libellé n'est pas traduisible — le piège que
+# le plan lui-même nomme (« cœur + 3 greffons sur 7 »). `locale_completeness`
+# annote une langue incomplète dans le sélecteur ; `locale_fallback_result`
+# est ce que montre le contrôle de repli une fois un vrai repli choisi —
+# « la seule façon de savoir si le repli a servi ».
+locale_completeness = "{done} sur {total} traduits"
+locale_fallback_label = "Repli"
+locale_fallback_result = "{done} sur {total}, {remaining} encore en anglais"
 player_card_title = "Lecteur"
 ok = "OK"
 remote_title = "Télécommande"

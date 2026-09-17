@@ -170,7 +170,36 @@ export interface UpdatePayload {
 
 export interface AudioDevice { name: string; description: string }
 export interface AudioPayload { devices: AudioDevice[]; current: string | null }
-export interface LocalePayload { locales: string[]; current: string | null }
+/**
+ * One candidate language's measured completeness, mirroring
+ * `crates/ritornello-core/src/status/locales.rs`'s `LanguageCompleteness`:
+ * `complete` is what the owner's display rule pivots on ("nothing shown for
+ * a complete language, just its name"), `done`/`total` are the raw numbers
+ * the phrase key needs (`{done}`/`{total}`, never a concatenated string).
+ */
+export interface LanguageCompleteness {
+  language: string
+  complete: boolean
+  done: number
+  total: number
+}
+/**
+ * Widened for task 14 of the language-packs chantier (task 12's own report:
+ * "task 14 will need to widen it to actually use completeness/
+ * fallback_current/fallback_candidates"). Leaving it at `{ locales, current
+ * }` compiles fine — a structural interface silently drops the extra JSON
+ * fields — but keeps every field task 12 built invisible to the SPA.
+ */
+export interface LocalePayload {
+  locales: string[]
+  current: string | null
+  /** Completeness for every language in `locales`, in the same order. */
+  completeness: LanguageCompleteness[]
+  /** The device's persisted fallback language, or `"en"` (never `null`). */
+  fallback_current: string
+  /** The core's own installed languages only — never the plugin union. */
+  fallback_candidates: string[]
+}
 export interface ThemePayload { theme: string; mode: Mode }
 export interface LogsPayload { lines: string[] }
 /** The three values of `settings.startup_power`, on the core side as on the UI side. */

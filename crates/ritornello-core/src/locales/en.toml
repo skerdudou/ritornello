@@ -57,6 +57,15 @@ overlay_ms_label = "Display duration (volume, messages) (ms)"
 tens_window_ms_label = "Entry window for the +10 offset (ms)"
 language = "Language"
 display_card_title = "Language and display"
+# Whole-sentence phrase keys with named parameters (task 14, language-packs
+# chantier): a number concatenated to a label is not translatable, and this
+# is the exact trap the chantier's own plan names ("cœur + 3 greffons sur
+# 7"). `locale_completeness` annotates one incomplete language in the
+# selector; `locale_fallback_result` is what the fallback control shows once
+# a real fallback is chosen — "the only way to know if the fallback served".
+locale_completeness = "{done} of {total} translated"
+locale_fallback_label = "Fallback"
+locale_fallback_result = "{done} of {total}, {remaining} still in English"
 player_card_title = "Player"
 ok = "OK"
 remote_title = "Remote control"

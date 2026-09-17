@@ -8,10 +8,10 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import CoverCacheDetails from '../components/CoverCacheDetails.vue'
 import InstallablesDialog from '../components/InstallablesDialog.vue'
+import LanguageCard from '../components/LanguageCard.vue'
 import UpdateCard from '../components/UpdateCard.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
 import { predictedThumbnailBytes } from '../composables/coverWeight'
-import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
 import type { AudioPayload, LocalePayload, SettingsPayload, UpdatePayload } from '../types'
@@ -22,13 +22,30 @@ const { t, reload } = useCatalog()
 // without a reload. See `usePlugins`.
 const { state: status, refresh: refreshPlugins } = usePlugins()
 const audio = ref<AudioPayload>({ devices: [], current: null })
-const locale = ref<LocalePayload>({ locales: [], current: null })
+// `completeness`/`fallback_candidates` default to a single, always-true "en"
+// entry rather than empty arrays: `LanguageCard`'s `showFallback` looks up
+// `current` in `completeness` before the first `GET /api/locale` answers,
+// and an empty array there would just as correctly read "unknown, hide the
+// control" — but `fallback_candidates` must never be empty even transiently
+// (a `Select` with an empty item list renders nothing to open), so both are
+// seeded consistently rather than asymmetrically.
+const locale = ref<LocalePayload>({
+  locales: [],
+  current: null,
+  completeness: [],
+  fallback_current: 'en',
+  fallback_candidates: ['en'],
+})
 const device = ref('')
 const lang = ref('')
 // The language `loadAll()` last read from the server, kept apart from `lang`
 // (the Select's own binding): `saveDisplay` compares the two to decide
 // whether the locale route needs a write at all.
 const loadedLocale = ref('')
+// Same convention as `lang`/`loadedLocale`, for the fallback: `fallback` is
+// `LanguageCard`'s v-model, `loadedFallback` is what the server last held.
+const fallback = ref('en')
+const loadedFallback = ref('en')
 const audioUnavailable = ref(false)
 const settings = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
@@ -238,8 +255,6 @@ const deviceLabel = computed(() => {
   return found?.description || found?.name || device.value
 })
 
-const languageLabel = computed(() => (lang.value ? languageName(lang.value) : ''))
-
 const startupLabel = computed(() => {
   switch (settings.value.startup_power) {
     case 'on':
@@ -290,6 +305,8 @@ async function loadAll() {
   device.value = audio.value.current ?? SYSTEM_DEFAULT
   lang.value = locale.value.current ?? 'en'
   loadedLocale.value = lang.value
+  fallback.value = locale.value.fallback_current
+  loadedFallback.value = fallback.value
 }
 
 onMounted(loadAll)
@@ -824,8 +841,20 @@ async function onConfirmInstall(names: string[]) {
 }
 
 /**
+ * Whether `code` is a language the payload's own `completeness` marks as
+ * incomplete — the same predicate `LanguageCard` uses to decide whether to
+ * show its fallback control, needed again here so `saveDisplay` submits
+ * `fallback` under the exact condition the control was visible under. An
+ * unknown code (no `completeness` entry at all) reads as complete: nothing
+ * to send, same as `LanguageCard`'s own default.
+ */
+function localeIsIncomplete(code: string): boolean {
+  return locale.value.completeness.some((c) => c.language === code && !c.complete)
+}
+
+/**
  * Saves the "Language and display" card: the ordinary settings first, the
- * language only if it moved.
+ * language (and, when it applies, the fallback) only if either moved.
  *
  * **The order is load-bearing.** `PUT /api/locale` is followed by a full
  * reload of the page state (`loadAll`), which overwrites `settings` with what
@@ -833,9 +862,19 @@ async function onConfirmInstall(names: string[]) {
  * discard every field of this card the owner had just edited — a date format
  * quietly reverting, with no error anywhere. A test pins the order.
  *
- * The language `PUT` is skipped when the selection has not moved: otherwise
- * saving a date format would reload the whole state for nothing, and the page
- * would flicker on an ordinary gesture.
+ * The language `PUT` is skipped when neither the language nor (for an
+ * incomplete language) the fallback has moved: otherwise saving a date
+ * format would reload the whole state for nothing, and the page would
+ * flicker on an ordinary gesture.
+ *
+ * **`fallback` is submitted only when the chosen language is currently
+ * incomplete** — exactly the condition under which `LanguageCard` shows the
+ * control that edits it. Submitting it unconditionally would let a stale
+ * value (kept around on purpose so the control does not forget it — see
+ * `LanguageCard`'s own doc) overwrite the persisted fallback from a request
+ * the owner never saw a control for; omitting the field on the wire leaves
+ * the stored fallback untouched (`LocaleRequest.fallback`'s own contract on
+ * the Rust side), which is exactly what "nothing to submit" must mean here.
  *
  * Partial failure is a real state and is reported honestly: the first error
  * wins and the second write does not happen.
@@ -846,11 +885,16 @@ async function saveDisplay() {
     toast.error(err)
     return
   }
-  if (lang.value === loadedLocale.value) {
+  const incomplete = localeIsIncomplete(lang.value)
+  const localeUnchanged =
+    lang.value === loadedLocale.value && (!incomplete || fallback.value === loadedFallback.value)
+  if (localeUnchanged) {
     toast.success(t.value('ok'))
     return
   }
-  const localeErr = await api.put('/api/locale', { locale: lang.value })
+  const body: { locale: string; fallback?: string } = { locale: lang.value }
+  if (incomplete) body.fallback = fallback.value
+  const localeErr = await api.put('/api/locale', body)
   if (localeErr) {
     toast.error(localeErr)
     return
@@ -1316,18 +1360,13 @@ function goTo(id: string) {
         <Card>
           <CardHeader><CardTitle>{{ t('display_card_title') }}</CardTitle></CardHeader>
           <CardContent class="flex flex-col gap-4">
-            <div class="flex flex-wrap items-center gap-2">
-              <Select v-model="lang">
-                <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue>{{ languageLabel }}</SelectValue></SelectTrigger>
-                <SelectContent>
-                  <!-- Name of the language and not its code: "français" is read,
-                       "fr" is guessed. The code remains the value sent to the core. -->
-                  <SelectItem v-for="l in locale.locales" :key="l" :value="l">
-                    {{ languageName(l) }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            <LanguageCard
+              :payload="locale"
+              :lang="lang"
+              :fallback="fallback"
+              @update:lang="(v) => (lang = v)"
+              @update:fallback="(v) => (fallback = v)"
+            />
 
             <!-- Date and time. Two separate settings, at the owner's request: the
                  order of a date and the 12/24 h format do not vary together from one
