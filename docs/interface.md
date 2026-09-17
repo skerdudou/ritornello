@@ -1499,6 +1499,27 @@ TOML packs**, decentralized per component:
   TOML) is ignored **with a trace in the logs**.
 - The initial French packs ship in `deploy/locales/` and are copied by
   `deploy/deploy.sh`.
+- **What an update does to a pack, and what it never touches.** A release
+  archive writes `etc/ritornello/locales/<component>/<lang>.toml`
+  unconditionally, for every language *that component ships* (`ETC_PREFIXES`
+  in `crates/ritornello-core/src/update/archive.rs`), the moment that
+  component updates — so a hand-edited `fr.toml` does not survive the next
+  update of its component. **A pack in a language no release ships for that
+  component is never written by an update at all**, because no archive
+  entry ever names that path: this is where a third-party translator's own
+  work — a language this project has never shipped for that component —
+  survives every update indefinitely. This was the question the whole
+  language-packs chantier started from, and the reason a disk pack, not an
+  embedded one, is where an operator's own translation belongs.
+- **What picks up an edited pack.** The registry sweeps the pack root once,
+  at startup, and again on every `Registry::resweep_async` — which
+  `Core::set_locale` and `Core::set_fallback` both call unconditionally,
+  even when the new value equals the old one. In practice this means two
+  gestures: `sudo systemctl restart ritornello`, or simply re-picking a
+  language (or its fallback) from the config page. There is no third one —
+  a pack edited by hand while the service keeps running, with nobody
+  touching the language or fallback setting, stays invisible until one of
+  the two happens.
 - **A plugin page's catalog is asked for in an explicit language**, and the
   request waits for `/api/status` — the answer that carries the selected
   language. Asked without it, the core falls back to its own current

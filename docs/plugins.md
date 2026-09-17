@@ -292,6 +292,50 @@ beyond that tie — a plugin that only fills in what is missing never
 competes with one that overwrites (see [Now-playing
 metadata](#now-playing-metadata-the-metadata-kind)).
 
+### Text, translations, and what a plugin owes the catalogue
+
+Every user-facing string a plugin hands to the core — `SourceMessage::
+status_text`, `AdminResult::Set::error_text` — travels as a `Text`, never a
+finished sentence. `Text::Keyed { key, params }` names a catalogue entry
+and its named parameters (`{done}`, never a concatenation); the core
+resolves it through its own registry, at the device's chosen language, at
+the moment the frame is **published** — not at the moment your plugin sent
+it, which is also what lets a language change retranslate a status your
+plugin has not repeated. `Text::Verbatim(String)` carries a string through
+untranslated; it exists for text that is nobody's to translate (raw system
+output, a path, an error a library raised in English) and has exactly one
+sanctioned producer among this project's own plugins — `files`'s unknown
+`NT_STATUS` path. Reach for `Keyed` first, and reserve `Verbatim` for what
+genuinely has no key: the cd plugin's own status, for instance, is
+`Text::Keyed { key: "no_disc", .. }` / `Text::Keyed { key: "cd_audio", .. }`,
+never the literal strings "no disc" / "audio CD" that used to travel on
+the wire before this chantier.
+
+**Your own keys travel inside your binary, never as a disk pack.** A
+third-party archive carries your plugin binary and nothing else (see point
+3 above) — no `locales/` directory ships with it. What you embed at compile
+time (the same `include_str!` every bundled plugin already builds with) is
+what you announce through `Announcement.catalog`, one map per language —
+the core folds it into the same registry as everyone else's. An operator
+can still drop `<lang>.toml` files of their own under
+`/etc/ritornello/locales/<your-name>/`, exactly as for a bundled plugin
+(see [interface.md](interface.md)); that path is simply never yours to
+populate from an archive.
+
+**The common vocabulary — "Play", "Loading", the generic error
+sentences — travels with the core, not with you.** Your own keys resolve
+against your own catalogue first, `common`'s next; but `common` itself
+belongs to the core, seeded from its own embedded English regardless of
+what any plugin announces. A device whose core carries no pack for a
+language still resolves *your* keys correctly if you shipped that
+language — your own announced catalogue answers before `common` is ever
+consulted — while every `common` key around them falls through to the
+core's fallback language, or to English. A user who picks a language
+neither the core nor most plugins ship will see your admin page's own
+sentences correctly translated, sitting next to buttons labelled in
+another language. That is not a defect in your plugin, and it is not one
+the core can paper over: it never invents a translation nobody handed it.
+
 ### Turning a plugin off
 
 A third key, `enabled`, is optional and absent by default — absence
@@ -394,10 +438,10 @@ Saving a new station list from the admin page announces the fresh
 (`SourcePlugin::poll_notification`) rather than waiting for a preset to be
 played — otherwise the web grid kept showing the old set of numbers until
 something was played on the radio. That notification carries only
-`preset_count`: `identity`, `preset`, `preset_name` and `status` are all
-left unset (the radio plugin never fills the last two on this particular
-frame), so it disturbs neither the display nor whatever is currently
-playing.
+`preset_count`: `identity`, `preset`, `preset_name` and `status_text` are
+all left unset (the radio plugin never fills the last two on this
+particular frame), so it disturbs neither the display nor whatever is
+currently playing.
 
 Playing a preset also declares its `preset_name`: the configured station
 name, alongside the `preset` number, in the same frame. The field exists
@@ -468,14 +512,15 @@ core's admin protocol, which gives a `GetData` 5 s, so a search
 that drags on is stopped on its own with an error message rather than
 ending in a timeout.
 
-Selecting an **empty** preset declares a **transient** `status` — "empty
-preset" — for a few seconds, then whatever was already showing (the
-station's own status, or nothing at all) returns on its own: nothing was
-started, so nothing stopped, and the message must not durably describe a
-state that does not exist. `transient` only ever qualifies `status`: it
-feeds a passing overlay message and leaves whatever a source has
-permanently declared untouched underneath, ready to reappear once the
-message's time is up.
+Selecting an **empty** preset declares a **transient** `status_text` —
+`Text::Keyed { key: "empty_preset", .. }`, resolved by the core into
+"empty preset" or its translation — for a few seconds, then whatever was
+already showing (the station's own status, or nothing at all) returns on
+its own: nothing was started, so nothing stopped, and the message must not
+durably describe a state that does not exist. `transient` only ever
+qualifies `status_text`: it feeds a passing overlay message and leaves
+whatever a source has permanently declared untouched underneath, ready to
+reappear once the message's time is up.
 
 Variables: `RITORNELLO_RADIO_STATIONS`, `RITORNELLO_RADIO_STATE`,
 `RITORNELLO_RADIO_DIRECTORY` (**pins** a directory server: it becomes the
@@ -567,19 +612,22 @@ default is **false**: not knowing means offering nothing, which is what leaves
 radio, files and generic-input compiling unchanged with a correctly greyed key.
 The field deliberately does **not** make a frame "interesting" enough to be
 forwarded to the core (see `SourceClient`): a frame carrying only a capability
-must stay inert, because a permanent frame without `status` *erases* the
+must stay inert, because a permanent frame without `status_text` *erases* the
 remembered status, so waking up frames that are dropped today would wipe "no
 disc" off the display. The capability rides the frames the core already
 listens to instead.
 
-What it declares instead is a `status`: "audio CD" whenever a disc sits in
-the tray, "no disc" otherwise. Unlike `preset` and `preset_count`, whose
-absence means "this frame says nothing, keep the previous value", an absent
-`status` means **no status at all** — and the cd plugin restates one on
-every frame it produces through its own status-issuing path (`activate`,
-`wake`, `select`, `next`/`prev` while playing, `player_track`, `eject`, and
-`stop`) precisely because of that convention: it is the only one that lets
-a status be cleared. Had absence meant "keep the previous one" instead,
+What it declares instead is a `status_text`: `Text::Keyed { key: "cd_audio",
+.. }` whenever a disc sits in the tray, `Text::Keyed { key: "no_disc", .. }`
+otherwise — resolved by the core into "audio CD" / "no disc" in English, and
+their translations elsewhere, never sent as those literal words on the wire.
+Unlike `preset` and `preset_count`, whose absence means "this frame says
+nothing, keep the previous value", an absent `status_text` means **no status
+at all** — and the cd plugin restates one on every frame it produces through
+its own status-issuing path (`activate`, `wake`, `select`, `next`/`prev`
+while playing, `player_track`, `eject`, and `stop`) precisely because of
+that convention: it is the only one that lets a status be cleared. Had
+absence meant "keep the previous one" instead,
 "no disc" would stay on screen forever after a disc was inserted, with no
 later frame able to cancel it. A display picks between this sentence and
 the album once a `metadata` plugin resolves one — see the plugin console's

@@ -781,6 +781,20 @@ wire break to refuse. The path is exercised by unit tests that fabricate a
 mismatched announcement, not by an actually incompatible plugin built
 against an older protocol.
 
+**The language-packs chantier has not been verified on real hardware,
+physical display included.** Fourteen tasks rebuilt how text is resolved —
+a plugin now emits only `(key, params)`, the core holds every language
+layer and resolves through chosen language → fallback → English → the key
+itself — and the whole rebuild is covered by the Rust and web test suites,
+plus a parity test proving the core's own resolver and the browser's agree
+on the same catalog. None of that has been watched happening on the
+Raspberry Pi this project targets. In particular, the twenty-column console
+display (`ritornello-plugin-console`) is exactly what an earlier defect
+report on this project described as broken, and nobody has yet watched its
+`NO DISC` become `PAS DE DISQUE` on the real screen after a language
+change — until that observation is made, this line stays, per this
+project's own rule against shrinking this section on faith.
+
 **Known edges and debts in the code, recorded here rather than fixed or
 dressed up as design:**
 
