@@ -342,10 +342,17 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
     // two sites disagreeing with `chain_for` about which languages exist;
     // `locale_json` (task 12) had the same defect and was fixed the same
     // way, before this fix round changed *which* set both sites clamp to.
-    let registry = state.registry.read().await;
-    let modules = registry.modules_with_text();
-    let installed = ritornello_i18n::union_of_languages(&modules);
-    drop(registry);
+    //
+    // `Registry::union_languages`, not `modules_with_text` +
+    // `union_of_languages` — fix round 3, finding I. This route only ever
+    // asks "is this one code among the union", never anything about a
+    // language's content, and `modules_with_text` was built for
+    // `locale_json`'s different question ("what does each language
+    // *contain*"), paying a merge — a clone of every key of every source
+    // layer — this route never uses. `union_languages` answers the same
+    // membership question this route needs, from the same registry read,
+    // without building a single merged `Layer`. See that method's own doc.
+    let installed = state.registry.read().await.union_languages();
     let locale = state
         .locale_current
         .read()

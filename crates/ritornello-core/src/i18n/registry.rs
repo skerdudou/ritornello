@@ -226,6 +226,72 @@ impl Registry {
         names.into_iter().map(|name| self.merge_with_common(name)).collect()
     }
 
+    /// The same union `ritornello_i18n::union_of_languages(&self
+    /// .modules_with_text())` computes — every language at least one
+    /// counted module (the same membership as `modules_with_text`, above)
+    /// actually translates — but **codes only**, without building a single
+    /// merged `Layer`.
+    ///
+    /// Added for `status_json`'s own clamp on `/api/status.locale` (fix
+    /// round 3, task 14 re-review, finding I): that route widened from
+    /// `core_languages` to the union in fix round 2 (finding B) to stop
+    /// silently narrowing a plugin-only chosen language back to `en`, but
+    /// the union it reached for was `modules_with_text`'s — which exists to
+    /// answer "what does each language *contain*" (`locale_json`'s own
+    /// need, one `Coverage` per language) and pays for that by cloning
+    /// every key of every source layer through `merge_with_common`'s
+    /// `merged.extend(l.as_map().clone())`, four times per language, per
+    /// module. `/api/status` never reads any of that content — it only
+    /// ever asks "is this one code among them" — so it was paying
+    /// `locale_json`'s own cost on the SPA's most-read route (`useMetrics
+    /// .ts`: boot and bounded windows; `usePlugins.ts`: up to twenty reads
+    /// after a single plugin toggle) for a question `core_languages` (the
+    /// method this exact pattern already exists for, three lines below)
+    /// answers by reading map keys alone.
+    ///
+    /// Mirrors `merge_with_common`'s own enumeration of where a
+    /// module + language's text can live — its own announced tier, its own
+    /// disk tier, `common`'s announced tier, `common`'s disk tier — and
+    /// counts the language the moment any one of those four is non-empty,
+    /// borrowed rather than cloned (`ModuleLayers::layer` returns `Option<&
+    /// Layer>`; `Layer::is_empty` reads its map's length, nothing more).
+    pub fn union_languages(&self) -> Vec<String> {
+        let mut set: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (module, own) in
+            self.announced.iter().filter(|(name, layers)| name.as_str() != "common" && layers.languages().next().is_some())
+        {
+            let module = module.as_str();
+            let own_disk = self.disk.get(module);
+            let common_announced = self.announced.get("common");
+            let common_disk = self.disk.get("common");
+            let mut langs: Vec<&str> = own
+                .languages()
+                .chain(own_disk.into_iter().flat_map(|m| m.languages()))
+                .chain(common_announced.into_iter().flat_map(|m| m.languages()))
+                .chain(common_disk.into_iter().flat_map(|m| m.languages()))
+                .collect();
+            langs.sort_unstable();
+            langs.dedup();
+            for lang in langs {
+                let has_text = [
+                    own.layer(lang),
+                    own_disk.and_then(|m| m.layer(lang)),
+                    common_announced.and_then(|m| m.layer(lang)),
+                    common_disk.and_then(|m| m.layer(lang)),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|l| !l.is_empty());
+                if has_text {
+                    set.insert(lang);
+                }
+            }
+        }
+        let mut out: Vec<String> = set.into_iter().map(str::to_string).collect();
+        out.sort();
+        out
+    }
+
     /// Builds one module's merged view: every language either its own
     /// tiers or `common`'s define, each language's `Layer` built from up to
     /// four sources in `chain_for`'s own priority (last write wins here:
@@ -699,6 +765,66 @@ mod tests {
             vec!["en".to_string()],
             "a pack written after the sweep must not appear before a resweep"
         );
+    }
+
+    // --- union_languages: the cheap union (fix round 3, finding I) ---
+
+    #[test]
+    fn union_languages_includes_a_plugin_only_language() {
+        // The exact case `core_languages` (just above) deliberately
+        // excludes — the narrower half of the union/fallback split. Proves
+        // this new accessor answers `locale_json`'s question
+        // (`status_json`'s clamp needs it too, since fix round 2), not
+        // `core_languages`'s.
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")]), ("de", &[("play", "Spielen")])]));
+        assert!(registry.union_languages().contains(&"de".to_string()));
+    }
+
+    #[test]
+    fn union_languages_excludes_a_module_never_announced() {
+        // Mirrors `modules_with_text_excludes_a_module_never_announced`:
+        // membership comes from the announced tier alone, same as the
+        // expensive path this accessor replaces.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("console")).unwrap();
+        std::fs::write(dir.path().join("console/de.toml"), "k = \"v\"\n").unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")])]));
+        // "console" has a disk pack but was never announced: `de` must not
+        // leak in through it.
+        assert!(!registry.union_languages().contains(&"de".to_string()));
+    }
+
+    #[test]
+    fn union_languages_matches_the_expensive_computation_it_replaces() {
+        // The equivalence this accessor exists to preserve, checked
+        // directly rather than only through the HTTP route: own tiers,
+        // disk tiers, and `common`'s own two tiers, all contributing
+        // distinct languages, core-only and plugin-only alike.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/nl.toml"), "play = \"Spelen\"\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("common")).unwrap();
+        std::fs::write(dir.path().join("common/it.toml"), "ok = \"Ok\"\n").unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        registry.insert_announced("core", module_layers("core", &[("en", &[("k", "v")])]));
+        registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")]), ("de", &[("play", "Spielen")])]));
+        registry.insert_announced("common", module_layers("common", &[("en", &[("ok", "Ok")]), ("es", &[("ok", "Vale")])]));
+
+        let cheap = registry.union_languages();
+        let expensive = ritornello_i18n::union_of_languages(&registry.modules_with_text());
+        assert_eq!(cheap, expensive);
+        // Not a vacuous match: every source tier contributed something the
+        // other three did not (nl from radio's disk pack, it from
+        // common's disk pack, es from common's announced tier, de from
+        // radio's announced tier), so an implementation that silently
+        // dropped one source would diverge from `expensive`, not merely
+        // return an empty list either side agrees on.
+        for lang in ["en", "de", "nl", "it", "es"] {
+            assert!(cheap.contains(&lang.to_string()), "{lang} missing from {cheap:?}");
+        }
     }
 
     #[test]
