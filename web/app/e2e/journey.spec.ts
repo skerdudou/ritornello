@@ -544,21 +544,37 @@ test('the language card annotates an incomplete language and offers a fallback',
 
     // The trigger reflects the pick immediately, without reopening the
     // list, and reads **exactly** the language's name — the guard
-    // `<SelectValue>{{ languageLabel }}</SelectValue>` exists for (fix
-    // round 1, finding 5; fix round 2, finding D corrects what this
-    // actually detects). Measured (re-review, Q4): reka-ui's *default*
-    // `<SelectValue />` here is not stale — it tracks the selected item
-    // live — but it renders the item's **whole subtree text**, annotation
-    // included ("Français0 module /4"), because nothing tells it to read
-    // only the name. `toHaveText` is exact, not `toContainText`: an
-    // unguarded trigger would fail this same line by containing extra
-    // text, not by containing the wrong text. (These two selects' items
-    // are keyed on `Intl.DisplayNames` and a bare language code, neither
-    // of which the active UI catalog can make stale the way a `t()`-driven
-    // label can — see `journey.spec.ts`'s own "every dropdown follows a
-    // language change" test for that other mechanism — so the defect this
-    // guard actually catches is the leaked subtree, not a frozen-at-mount
-    // value; the comment used to claim the latter and was wrong.)
+    // `<SelectValue>{{ languageLabel }}</SelectValue>` (`LanguageCard.vue`)
+    // exists for.
+    //
+    // **The mechanism (fix round 3, task 14 re-review, finding G — this
+    // comment's second rewrite; the first one was also wrong, in the
+    // opposite direction).** Read from reka-ui's own source
+    // (`SelectItemText.vue`): each item stores a plain snapshot of its
+    // rendered `textContent` when it mounts, and reka-ui's default
+    // `<SelectValue />` renders that stored snapshot — never the DOM live —
+    // until the item remounts (reopening the list, which registers the
+    // *newly* selected item's *current* text). This card's items render
+    // `languageName(l)` (stable, keyed only on the code) **plus
+    // `annotation(l)`**, which is not stable: it is both payload-driven
+    // (`completeness[].total`, `.complete_modules`) and `t()`-driven. Two
+    // independent, real routes reach it without ever touching this
+    // select's own DOM node:
+    //  1. `total` moves while the card stays mounted (a plugin disabled or
+    //     re-enabled changes how many modules are counted — `Registry::
+    //     forget`/`insert_announced`) — measured: the card's own
+    //     `[data-locale-completeness]` read `0 module /9`; a bare
+    //     `<SelectValue />` trigger stayed at `Français0 module /4`.
+    //  2. the catalog reloads — `useCatalog.reload()`, which `saveDisplay`
+    //     already calls on **every** locale change, i.e. the one action
+    //     this very test performs — measured the same way, with
+    //     `locale_completeness_none`'s own wording changed instead of
+    //     `total`.
+    // So the override is not defending a hazard that merely *could* exist
+    // in principle: `toHaveText` below is exact (not `toContainText`)
+    // because a bare `<SelectValue />` would fail it by holding a *frozen*
+    // extra fragment, not a live one — a distinction the previous version
+    // of this comment got backwards.
     await expect(languageTrigger).toHaveText('Français')
 
     // Choosing an incomplete language unlocks the fallback control — hidden
@@ -566,7 +582,18 @@ test('the language card annotates an incomplete language and offers a fallback',
     const fallbackRow = page.locator('[data-fallback-row]')
     await expect(fallbackRow).toBeVisible()
     // A fresh device has never set a fallback: `fallback_current` defaults
-    // to "en", the wire's own representable "none" (task 13).
+    // to "en", the wire's own representable "none" (task 13). This
+    // select's own items are a bare `{{ languageName(c) }}` — a pure
+    // function of the code alone, never of `payload` or of the active
+    // catalog (fix round 3, finding H: a secondary code line was added
+    // here once to give this exact assertion something to catch when its
+    // override was removed; reverted, since a test must not reshape the
+    // product to become provable). So unlike the language trigger just
+    // above, this line is a correctness check on the selection flow, not a
+    // defect guard — the hazard `annotation(l)` creates on the language
+    // select simply is not reachable on bare items, and
+    // `LanguageCard.test.ts` pins the override here structurally instead,
+    // as the project convention it is on this select.
     const fallbackTrigger = page.locator('[data-fallback-select]')
     await expect(fallbackTrigger).toHaveText('English')
     // The hint explaining what "English" means in this list (fix round 1,
@@ -581,16 +608,6 @@ test('the language card annotates an incomplete language and offers a fallback',
     const germanOption = page.getByRole('option', { name: 'Deutsch' })
     await expect(germanOption).toBeVisible()
     await germanOption.click()
-    // The same guard as the language trigger, above, now exercised on the
-    // fallback select too (fix round 2, finding D: the first review's
-    // measurement found this select's own `<SelectValue>` completely
-    // unguarded — 22/22 still green with it removed — because its items
-    // used to carry nothing but the bare name, so the default and the
-    // override rendered identical text. Its items now show the bare code
-    // as secondary text (`LanguageCard.vue`), the same pattern the
-    // language select and the audio-device select already use, which is
-    // what gives this line something to catch: an unguarded trigger would
-    // read "Deutschde", not "Deutsch".
     await expect(fallbackTrigger).toHaveText('Deutsch')
 
     // A real, non-self fallback closes no gap here (both "fr" and "de"
