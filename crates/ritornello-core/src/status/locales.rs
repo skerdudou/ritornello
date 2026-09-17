@@ -9,12 +9,31 @@ use super::*;
 /// `done`/`total` are the raw numbers task 14's phrase key needs
 /// (`{done}`/`{total}`, never a concatenated string — see the chantier's
 /// own rule against that).
+///
+/// `complete_modules` (fix round 1, task 14 review): the **names** of the
+/// modules `Complete` for this language — `Coverage::modules()` filtered to
+/// `ModuleCoverage::Complete`. Added because the SPA's fallback line used to
+/// approximate the combined chosen+fallback coverage with `Math.max(chosen
+/// .done, fallback.done)`, a bound that is exact only when one language's
+/// covered set contains the other's, and reachable as far off as "3 still
+/// in English" when the truth is 0 — the review's own worked example, with
+/// `chosen` covering `{radio, mpd, musicbrainz}` and `fallback` covering
+/// the *disjoint* `{core, files, generic-input, nrj-metas}`. The bound's
+/// own justification ("a per-module breakdown would mean a second HTTP
+/// round trip per keystroke") was false: `locale_json` already builds the
+/// full `Coverage` — module list included — for every language, under one
+/// registry read, in this very handler; publishing the names is a purely
+/// additive serde field on the same response, no new route, no new IPC.
+/// With this field the SPA computes the **true** `|A ∪ B|` (a set union of
+/// names, not an inequality) and also gets what the brief's own annotation
+/// names by module ("core + 3 plugins /7") — see `LanguageCard.vue`.
 #[derive(Serialize)]
 pub(super) struct LanguageCompleteness {
     language: String,
     complete: bool,
     done: usize,
     total: usize,
+    complete_modules: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -62,17 +81,44 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
         .iter()
         .map(|lang| {
             let c = ritornello_i18n::coverage(&modules, lang);
+            let complete_modules = c
+                .modules()
+                .iter()
+                .filter(|(_, status)| *status == ritornello_i18n::ModuleCoverage::Complete)
+                .map(|(name, _)| name.clone())
+                .collect();
             LanguageCompleteness {
                 language: lang.clone(),
                 complete: c.is_complete(),
                 done: c.complete_count(),
                 total: c.total(),
+                complete_modules,
             }
         })
         .collect();
     let fallback_candidates = registry.core_languages();
     drop(registry);
-    let current = state.locale_current.read().await.clone();
+    // Clamped to `locales` (the **union**, not `core_languages`), falling
+    // back to `None` — fix round 1, task 14 review, finding 3/R3. Before
+    // this, `current` was the one site of this exact clamp left unclamped:
+    // `status_json`'s own `locale` field already clamps `locale_current`
+    // (against `core_languages`, `status/mod.rs`) and, since task 12,
+    // `fallback_current` right below clamps too (against
+    // `fallback_candidates`). A device whose selected language's pack was
+    // removed served `current` as-is: the SPA then found no `completeness`
+    // entry for it, so `LanguageCard` rendered it as a *complete* language —
+    // the trigger showing the removed language's name, no annotation, no
+    // fallback control — while every word on the actual page was English.
+    //
+    // **`locales` on purpose, not `core_languages`.** `current` can
+    // legitimately name a language only a *plugin* ships (the origin defect
+    // this chantier fixes — see `LocaleResponse::locales`'s own doc);
+    // clamping against `core_languages` would silently re-narrow the
+    // selector back to core-only packs for exactly the case task 12 added
+    // the union to unlock. `locales` is the same list already computed
+    // above from this same registry read, so this can never disagree with
+    // what the selector itself offers.
+    let current = state.locale_current.read().await.clone().filter(|l| locales.iter().any(|x| x == l));
     // Clamped to `fallback_candidates`, falling back to `en` — the same
     // discipline `status_json` already applies to `locale_current` against
     // `core_languages` (status/mod.rs), for the same reason: the stored
@@ -510,6 +556,91 @@ mod tests {
         let en = completeness.iter().find(|c| c["language"] == "en").expect("en must be reported");
         assert_eq!(en["complete"], true);
         assert_eq!(en["done"], en["total"]);
+    }
+
+    /// `complete_modules` names the modules a language actually covers —
+    /// added (fix round 1, task 14 review, finding 1/R1) so the SPA can
+    /// compute a true set union between the chosen language and a
+    /// candidate fallback instead of approximating it with
+    /// `Math.max(chosen.done, fallback.done)`, a bound the review measured
+    /// as reachable up to "3 still in English" when the truth is 0.
+    #[tokio::test]
+    async fn get_locale_completeness_names_the_complete_modules() {
+        let (state, _rx, _frx, _dir) = app_state_fr();
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let completeness: Vec<serde_json::Value> = serde_json::from_value(v["completeness"].clone()).unwrap();
+        // English is complete against itself: its only counted module
+        // ("core", the only module with text in this rig) must be named.
+        let en = completeness.iter().find(|c| c["language"] == "en").expect("en must be reported");
+        let en_modules: Vec<String> = serde_json::from_value(en["complete_modules"].clone()).unwrap();
+        assert_eq!(en_modules, vec!["core".to_string()]);
+        // The mirror case: fr covers only 2 of the core's keys (a real
+        // `Partial`, never `Complete`), so its list must be empty — a
+        // caller must not have to subtract `done` from `total` itself to
+        // learn that nothing is covered.
+        let fr = completeness.iter().find(|c| c["language"] == "fr").expect("fr must be reported");
+        let fr_modules: Vec<String> = serde_json::from_value(fr["complete_modules"].clone()).unwrap();
+        assert_eq!(fr_modules, Vec::<String>::new());
+    }
+
+    /// Fix round 1 (task 14 review, finding 3/R3). Before this clamp,
+    /// `current` was the one site of this exact discipline left unclamped:
+    /// `status_json`'s own `locale` field already clamps `locale_current`
+    /// against `core_languages`, and `fallback_current` — see
+    /// `get_locale_clamps_an_uninstalled_fallback_to_en`, above — already
+    /// clamps against `fallback_candidates`. A selected language whose pack
+    /// was removed used to be echoed verbatim: the SPA then found no
+    /// `completeness` entry for it and rendered it as a *complete*
+    /// language — the trigger showing the removed name, no annotation, no
+    /// fallback control — while the rest of the page was in English.
+    ///
+    /// **[MUTATION]**: remove the `.filter(...)` clamp on `current` — this
+    /// test fails, asserting `"de"` instead of `null`.
+    #[tokio::test]
+    async fn get_locale_clamps_a_removed_current_language_to_none() {
+        let (state, _rx, _frx, _dir) = app_state_fr();
+        // "de" is not in this rig's union (only "en" and "fr" — see
+        // `app_state_fr`'s own `core/fr.toml`): exactly the "pack removed
+        // after being selected" case the clamp exists for.
+        *state.locale_current.write().await = Some("de".to_string());
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["current"], serde_json::Value::Null);
+        let locales: Vec<String> = serde_json::from_value(v["locales"].clone()).unwrap();
+        assert!(
+            !locales.contains(&"de".to_string()),
+            "the clamp only matters because de is genuinely absent from the union"
+        );
+    }
+
+    /// The clamp on `current` must use the **union** (`locales`), not the
+    /// core-only `fallback_candidates` list — a chosen language only a
+    /// plugin ships must survive it, or the clamp would silently
+    /// reintroduce the defect this chantier's union fixes (see
+    /// `LocaleResponse::locales`'s own doc): a plugin-only language
+    /// becoming unreachable again.
+    ///
+    /// **[MUTATION]**: clamp `current` against `fallback_candidates`
+    /// (core-only) instead of `locales` — this test fails, asserting
+    /// `null` instead of `"de"`.
+    #[tokio::test]
+    async fn get_locale_does_not_clamp_a_plugin_only_current_language() {
+        let (state, _rx, _frx, _dir) = app_state_fr();
+        state.registry.write().await.insert_announced(
+            "radio",
+            layers(&[("en", &[("play", "Play")]), ("de", &[("play", "Spielen")])]),
+        );
+        *state.locale_current.write().await = Some("de".to_string());
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["current"], "de");
     }
 
     /// The eligible fallback list stays the **core's own** languages even
