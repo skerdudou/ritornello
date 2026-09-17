@@ -125,21 +125,38 @@ mod tests {
         assert!(f.admin.asset("index.html").is_none());
     }
 
-    /// French pack shipped in the repository.
-    fn fr_pack() -> String {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales/mpd/fr.toml");
-        std::fs::read_to_string(p).expect("shipped fr pack")
-    }
-
+    /// **Generalized (task 15).** Was "en vs fr, key sets only" — a
+    /// hardcoded language that stops covering a second one the moment it
+    /// ships, and a comparison blind to a translation that renamed or
+    /// dropped a `{named}` parameter. `shipped_language_packs` derives the
+    /// language list from the tree; the `assert!(!shipped.is_empty(), ...)`
+    /// below is what keeps that derivation honest instead of vacuously
+    /// green on a broken discovery.
     #[test]
-    fn key_parity_between_the_embedded_en_and_the_fr_pack() {
+    fn key_and_param_parity_between_the_embedded_en_and_every_shipped_language() {
         let en = ritornello_i18n::try_parse(crate::MPD_EN).unwrap();
-        let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut en_keys: Vec<&String> = en.keys().collect();
-        let mut fr_keys: Vec<&String> = fr.keys().collect();
-        en_keys.sort();
-        fr_keys.sort();
-        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
+        let deploy_locales = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let shipped = ritornello_i18n::shipped_language_packs(&deploy_locales, "mpd");
+        assert!(!shipped.is_empty(), "no shipped language found for mpd under deploy/locales");
+        for (lang, content) in shipped {
+            let pack = ritornello_i18n::try_parse(&content)
+                .unwrap_or_else(|e| panic!("{lang} pack for mpd is invalid TOML: {e}"));
+            let mut en_keys: Vec<&String> = en.keys().collect();
+            let mut pack_keys: Vec<&String> = pack.keys().collect();
+            en_keys.sort();
+            pack_keys.sort();
+            assert_eq!(en_keys, pack_keys, "en/{lang} key sets diverge for mpd");
+
+            for (key, en_value) in &en {
+                if let Some(translated) = pack.get(key) {
+                    assert_eq!(
+                        ritornello_i18n::params_in(en_value),
+                        ritornello_i18n::params_in(translated),
+                        "key {key}: {lang} translation's named parameters diverge from English"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

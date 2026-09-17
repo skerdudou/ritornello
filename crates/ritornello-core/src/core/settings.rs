@@ -422,15 +422,41 @@ mod tests {
         assert!(!ritornello_i18n::try_parse(crate::i18n::EN).unwrap().is_empty());
     }
 
+    /// **Generalized (task 15).** Was "en vs fr, key sets only" — a
+    /// hardcoded language that stops covering a second one the moment it
+    /// ships, and a comparison blind to a translation that renamed or
+    /// dropped a `{named}` parameter — task 14 added several phrase keys
+    /// with more than one, so this is not theoretical. `shipped_language_
+    /// packs` derives the language list from the tree; the `assert!(!
+    /// shipped.is_empty(), ...)` below is what keeps that derivation honest
+    /// instead of vacuously green on a broken discovery. `fr_pack()` above
+    /// stays: two other tests in this file still want the shipped French
+    /// text specifically, not every shipped language.
     #[test]
-    fn key_parity_between_the_embedded_en_and_the_fr_pack() {
+    fn key_and_param_parity_between_the_embedded_en_and_every_shipped_language() {
         let en = ritornello_i18n::try_parse(crate::i18n::EN).unwrap();
-        let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut en_keys: Vec<&String> = en.keys().collect();
-        let mut fr_keys: Vec<&String> = fr.keys().collect();
-        en_keys.sort();
-        fr_keys.sort();
-        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
+        let deploy_locales = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let shipped = ritornello_i18n::shipped_language_packs(&deploy_locales, "core");
+        assert!(!shipped.is_empty(), "no shipped language found for core under deploy/locales");
+        for (lang, content) in shipped {
+            let pack = ritornello_i18n::try_parse(&content)
+                .unwrap_or_else(|e| panic!("{lang} pack for core is invalid TOML: {e}"));
+            let mut en_keys: Vec<&String> = en.keys().collect();
+            let mut pack_keys: Vec<&String> = pack.keys().collect();
+            en_keys.sort();
+            pack_keys.sort();
+            assert_eq!(en_keys, pack_keys, "en/{lang} key sets diverge for core");
+
+            for (key, en_value) in &en {
+                if let Some(translated) = pack.get(key) {
+                    assert_eq!(
+                        ritornello_i18n::params_in(en_value),
+                        ritornello_i18n::params_in(translated),
+                        "key {key}: {lang} translation's named parameters diverge from English"
+                    );
+                }
+            }
+        }
     }
 
     /// The sentence that tells an owner which switch to tick must name that

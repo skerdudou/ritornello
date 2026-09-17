@@ -86,3 +86,36 @@ describe('interpolate', () => {
     expect(interpolate('{constructor} and {valueOf}', {})).toBe('{constructor} and {valueOf}')
   })
 })
+
+// The couture task 15 exists to prove: the core (for status texts) and the
+// browser (for every page) are two consumers of one stacked chain, never
+// two independently-behaving chains. There is no way, in this repository's
+// toolchain, to invoke the Rust resolver from a vitest run or the reverse
+// (cargo lives only in WSL, node only outside it) — so the proof is a
+// literal, shared expectation asserted on both sides rather than a live
+// cross-call: `crates/ritornello-i18n/src/chain.rs`'s
+// `interpolation_after_entries_matches_interpolation_after_get` and
+// `an_unresolved_key_falls_back_to_itself_through_both_paths` use the exact
+// same catalog, key and params as the two tests below, and assert the
+// exact same expected string. If the two resolvers ever disagreed, at most
+// one side of each pair could stay green.
+describe('resolver parity with the Rust chain', () => {
+  it('agrees_with_the_rust_resolver_on_the_same_catalog_and_params', () => {
+    // `entries()` is exactly what the browser receives in production
+    // (`GET /api/i18n`): a flattened catalog, already resolved through the
+    // chosen/fallback/English stack — `createT` only ever does the second
+    // half, interpolation, which is the seam this test is about.
+    const catalog = { greeting: 'Bonjour {name}, {count} messages' }
+    const t = createT(catalog)
+    expect(t('greeting', { name: 'Alix', count: 3 })).toBe('Bonjour Alix, 3 messages')
+  })
+
+  it('falls_back_to_the_raw_key_exactly_like_the_rust_chain_does', () => {
+    // The other half of the affirmation: a key missing from the catalog —
+    // unresolved by every layer of the chain before it ever reached the
+    // browser — must render as the bare key, not as an empty string or an
+    // error, on both sides of the seam.
+    const t = createT({})
+    expect(t('never_announced')).toBe('never_announced')
+  })
+})

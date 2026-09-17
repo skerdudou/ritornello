@@ -39,8 +39,8 @@ mod layer;
 
 pub use chain::{common_embedded, Chain};
 pub use coverage::{coverage, union_of_languages, Coverage, ModuleCoverage};
-pub use interpolate::interpolate;
-pub use layer::{try_parse, Layer, ModuleLayers};
+pub use interpolate::{interpolate, params_in};
+pub use layer::{shipped_language_packs, try_parse, Layer, ModuleLayers};
 
 // Only the crate's own tests (unmodified below) reach for the embedded
 // common pack directly; outside `cfg(test)` nothing needs it by name.
@@ -127,25 +127,58 @@ mod tests {
         assert!(e.keys().any(|k| *k == "play"), "the common vocabulary must be included");
     }
 
-    /// French `common` pack shipped in the repo. Same parity invariant as
-    /// for each component (see `core::settings::key_parity_between_the_embedded_en_and_the_fr_pack`),
-    /// which was missing from the common layer: nothing flagged a key added
-    /// to `common_en.toml` that had no French translation.
-    fn common_fr_pack() -> String {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../deploy/locales/common/fr.toml");
-        std::fs::read_to_string(p).expect("common fr pack shipped")
+    /// **Generalized (task 15).** The pre-task-15 shape of this test named
+    /// `fr` and compared key sets alone; both were hazards this project has
+    /// already paid for once each (see `docs/plugins.md`'s language-packs
+    /// chantier notes): a hardcoded language stops covering a second one
+    /// the moment it ships **while still passing**, and a key-set-only
+    /// comparison cannot see a translation that renamed or dropped a
+    /// `{named}` parameter the English value still carries.
+    ///
+    /// `shipped_language_packs` derives the language list from
+    /// `deploy/locales/common/` itself, so a language added there is
+    /// covered automatically; the `assert!(!shipped.is_empty(), ...)` below
+    /// is what keeps that derivation honest — an empty discovery must fail
+    /// loudly, not be indistinguishable from "every language passed".
+    #[test]
+    fn key_and_param_parity_between_the_embedded_common_and_every_shipped_language() {
+        let en = try_parse(COMMON_EN).unwrap();
+        let deploy_locales =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let shipped = shipped_language_packs(&deploy_locales, "common");
+        assert!(!shipped.is_empty(), "no shipped language found for common under deploy/locales");
+        for (lang, content) in shipped {
+            let pack = try_parse(&content)
+                .unwrap_or_else(|e| panic!("{lang} pack for common is invalid TOML: {e}"));
+            let mut en_keys: Vec<&String> = en.keys().collect();
+            let mut pack_keys: Vec<&String> = pack.keys().collect();
+            en_keys.sort();
+            pack_keys.sort();
+            assert_eq!(en_keys, pack_keys, "common en/{lang} key sets diverge");
+
+            for (key, en_value) in &en {
+                if let Some(translated) = pack.get(key) {
+                    assert_eq!(
+                        params_in(en_value),
+                        params_in(translated),
+                        "common key {key}: {lang} translation's named parameters diverge from English"
+                    );
+                }
+            }
+        }
     }
 
+    /// Sanity for the generalization above: pins that this repository does
+    /// ship at least the second language the whole chantier was built
+    /// around, so `key_and_param_parity_between_the_embedded_common_and_every_shipped_language`
+    /// is not vacuously satisfied by a discovery that happens to find zero
+    /// languages in a differently-shaped tree.
     #[test]
-    fn key_parity_between_the_embedded_common_and_the_fr_pack() {
-        let en = try_parse(COMMON_EN).unwrap();
-        let fr = try_parse(&common_fr_pack()).unwrap();
-        let mut en_keys: Vec<&String> = en.keys().collect();
-        let mut fr_keys: Vec<&String> = fr.keys().collect();
-        en_keys.sort();
-        fr_keys.sort();
-        assert_eq!(en_keys, fr_keys, "common en/fr key sets diverge");
+    fn common_fr_pack_is_among_the_discovered_shipped_languages() {
+        let deploy_locales =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let shipped = shipped_language_packs(&deploy_locales, "common");
+        assert!(shipped.iter().any(|(lang, _)| lang == "fr"), "fr must be among the shipped languages");
     }
 
     #[test]

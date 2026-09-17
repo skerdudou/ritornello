@@ -68,6 +68,41 @@ pub fn interpolate<'a>(template: &str, params: impl IntoIterator<Item = (&'a str
     out
 }
 
+/// Names of every `{name}` token in `template`, with the exact same
+/// brace-scanning rule [`interpolate`] substitutes with — reused rather
+/// than re-implemented as a second, looser scan (a regex, say) that could
+/// silently disagree with it on an edge case (an unmatched `{`, a token
+/// containing another `{`).
+///
+/// Built for the generalized key-parity check (task 15): comparing two
+/// languages' **key sets** for a module was already an existing test per
+/// component, but it stopped at the key — a translation that dropped a
+/// `{remaining}` a sibling key kept, or renamed it, shipped green. Comparing
+/// the sets this returns for the English value and its translation of the
+/// same key closes that gap, key by key.
+///
+/// Order does not matter to a parity check (it compares two *sets*), hence
+/// `BTreeSet` over the token names rather than preserving position — and
+/// deduplicated, so a template using `{n}` twice does not count as two
+/// parameters to satisfy.
+pub fn params_in(template: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let after_open = &rest[open + 1..];
+        match after_open.find('}') {
+            Some(close) => {
+                out.insert(after_open[..close].to_string());
+                rest = &after_open[close + 1..];
+            }
+            // No matching `}`: nothing left to scan for a token, exactly
+            // like `interpolate`'s own handling of the same shape.
+            None => break,
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +174,47 @@ mod tests {
     fn parameter_order_cannot_change_the_result() {
         let out = interpolate("{a} and {b}", [("a", "{b}"), ("b", "{a}")]);
         assert_eq!(out, "{b} and {a}");
+    }
+
+    // --- params_in: the token-set extractor a generalized key-parity check
+    // reasons about (task 15) ---
+
+    #[test]
+    fn params_in_collects_every_distinct_token() {
+        let names: std::collections::BTreeSet<String> =
+            ["count", "name"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(params_in("{name} has {count} messages"), names);
+    }
+
+    #[test]
+    fn params_in_of_a_template_with_no_tokens_is_empty() {
+        assert!(params_in("no tokens here").is_empty());
+    }
+
+    #[test]
+    fn params_in_deduplicates_a_token_used_twice() {
+        let mut expected = std::collections::BTreeSet::new();
+        expected.insert("n".to_string());
+        assert_eq!(params_in("{n} of {n}"), expected);
+    }
+
+    /// Mirrors `interpolate`'s own handling of an unmatched `{`: nothing left
+    /// to scan for a token, so the dangling brace names none.
+    #[test]
+    fn params_in_ignores_an_unmatched_open_brace() {
+        assert!(params_in("broken {token").is_empty());
+    }
+
+    /// **[MUTATION]** barrier this extractor exists for, proven directly: a
+    /// translation that renamed `{done}` to `{finished}` — same shape, same
+    /// English fluency, silently missing the parameter the interpolation
+    /// call site actually supplies — must read as two different sets, not
+    /// as equal ones. A key-parity check comparing only key sets (the
+    /// pre-task-15 shape of every `key_parity_between_the_embedded_en_and_
+    /// the_fr_pack` test) cannot see this at all; this is the fact that
+    /// check now has to be built on.
+    #[test]
+    fn params_in_distinguishes_a_renamed_token_from_the_original() {
+        assert_ne!(params_in("{done} of {total}"), params_in("{finished} of {total}"));
     }
 }

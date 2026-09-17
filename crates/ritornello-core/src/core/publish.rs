@@ -540,4 +540,64 @@ mod tests {
             "a lock miss must read as no status, never the raw key"
         );
     }
+
+    /// **Task 15, step 3: the race to the finish line, proved rather than
+    /// read.** `handle_source_update`'s own guard doc makes an affirmation:
+    /// "the guard cannot refuse a legitimately early frame: at startup,
+    /// clients are wired before the loop drains the channel, and hotplug
+    /// wiring is awaited from the main loop, which therefore processes no
+    /// frame during that time" — in other words, no frame from a module the
+    /// core has never wired as a source can reach `handle_source_update` in
+    /// production; the announcement (the wiring, here) structurally
+    /// precedes any frame.
+    ///
+    /// `Core::new` can never construct the state this test needs —
+    /// `active_source` is always drawn from `sources.contains_key` (see its
+    /// own field doc) — so it is forced here, directly, on the private
+    /// fields this test module already has access to: `"radio"` is removed
+    /// from `sources`, standing in for "no announcement ever arrived for
+    /// this module", while `active_source` is left naming it, so that *if*
+    /// the guard at the top of `handle_source_update` were the only thing
+    /// stopping this frame, removing it would let the frame through to
+    /// resolution.
+    ///
+    /// This is deliberately a **different** case from the one
+    /// `a_registry_lock_miss_during_publication_reads_as_no_status` and
+    /// `changing_the_fallback_retranslates_the_remembered_status` already
+    /// accept: those are a module that **is** wired but was never announced
+    /// in the *i18n registry* — an honest resolution that finds nothing and
+    /// falls back to the raw key, by design. Here the module is not even a
+    /// known source at all — the frame must never be resolved into
+    /// anything, key included.
+    ///
+    /// **[MUTATION]**: delete the `if !self.sources.contains_key(name) {
+    /// tracing::debug!(...); return; }` guard at the very top of
+    /// `handle_source_update`. With it gone, this frame reaches
+    /// `resolve_text` — "radio" was never announced in the registry either
+    /// — and falls through to the raw key exactly like
+    /// `changing_the_fallback_retranslates_the_remembered_status` already
+    /// proves an unannounced module does; the assertion below then flips
+    /// from `None` to `Some("no_disc")` and the test fails.
+    #[tokio::test]
+    async fn a_status_for_a_source_never_wired_is_refused_before_any_resolution() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.sources.remove("radio");
+        core.active_source = "radio".to_string();
+
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                status_text: Some(Text::Keyed { key: "no_disc".into(), params: std::collections::HashMap::new() }),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            core.player_state().status,
+            None,
+            "a frame for a module the core never wired must be refused outright, before any \
+             resolution is even attempted — not even the honest raw-key fallback an unannounced \
+             but wired module gets elsewhere in this file"
+        );
+    }
 }
