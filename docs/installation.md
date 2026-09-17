@@ -782,7 +782,7 @@ mismatched announcement, not by an actually incompatible plugin built
 against an older protocol.
 
 **The language-packs chantier has not been verified on real hardware,
-physical display included.** Fourteen tasks rebuilt how text is resolved —
+physical display included.** Sixteen tasks rebuilt how text is resolved —
 a plugin now emits only `(key, params)`, the core holds every language
 layer and resolves through chosen language → fallback → English → the key
 itself — and the whole rebuild is covered by the Rust and web test suites,
@@ -791,7 +791,7 @@ on the same catalog. None of that has been watched happening on the
 Raspberry Pi this project targets. In particular, the twenty-column console
 display (`ritornello-plugin-console`) is exactly what an earlier defect
 report on this project described as broken, and nobody has yet watched its
-`NO DISC` become `PAS DE DISQUE` on the real screen after a language
+`no disc` become `pas de disque` on the real screen after a language
 change — until that observation is made, this line stays, per this
 project's own rule against shrinking this section on faith.
 

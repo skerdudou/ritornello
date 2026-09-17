@@ -321,8 +321,11 @@ ritornello_plugin_sdk::declare_runtime!()?
     .run()
     .await?;
 
-// Wherever you build a `SourceMessage`/`SourceUpdate`:
-status_text: Some(Text::Keyed { key: "no_disc".into(), params: HashMap::new() }),
+// Wherever your source declares what it is doing — the SDK hands you a
+// `SourceOutcome` (or a `Notification`), and `status_text` is a builder
+// call on it, not a field you fill in:
+SourceOutcome::new(SourceAction::Noop)
+    .status_text(Text::Keyed { key: "no_disc".into(), params: HashMap::new() })
 ```
 
 **`Runtime::texts(...)` is what turns your embedded packs into

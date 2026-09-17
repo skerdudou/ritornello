@@ -892,6 +892,17 @@ impl<P: Player> Core<P> {
     /// and carries its own unreachability proof in the surrounding comment;
     /// this one runs on **every** publication, forever, so a silent miss
     /// here would be a silent miss for as long as the contention lasts.
+    ///
+    /// **"Never the raw key" is about the lock miss, and only that.** The
+    /// other miss — the lock taken, the chain built, and no layer defining
+    /// the key — does resolve to the key and does publish it, by design and
+    /// as `Chain::get`'s own safety net: that is a *successful* read of a
+    /// module that announced nothing (or announced without this key), and
+    /// `publish.rs`'s own tests state and pin it. Every module shipped here
+    /// announces its catalogue, so the reachable shape is a third-party
+    /// plugin that announces none and sends `Text::Keyed` anyway — the
+    /// author `docs/plugins.md`'s third-party section addresses. The
+    /// absolute above must not be read as covering both misses.
     fn resolve_text(&self, text: &Text, module: &str) -> Option<String> {
         match text {
             Text::Verbatim(s) => Some(s.clone()),

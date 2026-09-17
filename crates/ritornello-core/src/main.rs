@@ -979,13 +979,20 @@ async fn hotplug<P: player::Player>(
                         // Cloned before `hotplug_source` takes it: the
                         // catalog request below addresses the same client.
                         let catalog_client = client.clone();
-                        // `hotplug_source` does the four things that
-                        // `add_source` alone does not: the current locale
-                        // (otherwise a manually restarted `cd` on a device in
-                        // French comes back displaying `NO DISC`), the
-                        // current play mode, the wake-up if it is the core's
-                        // **first** source (otherwise it is active and
-                        // silent), and publishing the state.
+                        // `hotplug_source` does the three things that
+                        // `add_source` alone does not: the current play mode,
+                        // the wake-up if it is the core's **first** source
+                        // (otherwise it is active and silent), and publishing
+                        // the state.
+                        //
+                        // It used to push the current locale as well, and a
+                        // manually restarted `cd` on a device in French came
+                        // back displaying its status in English when it did
+                        // not. That whole mechanism is gone: no language
+                        // crosses the Source wire any more, a status is
+                        // resolved at publication against the registry, so a
+                        // freshly wired source is in the right language with
+                        // nothing pushed to it.
                         //
                         // First wiring or rewiring: that is precisely the
                         // event sought by whoever is debugging a flapping

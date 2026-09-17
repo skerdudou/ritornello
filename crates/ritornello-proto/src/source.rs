@@ -388,9 +388,9 @@ pub struct SourceMessage {
     ///
     /// Deliberately **not** part of the "is this frame worth forwarding"
     /// predicate in `SourceClient`: a frame carrying only a capability must
-    /// stay inert, because a permanent frame without `status` *erases* the
-    /// remembered status (see `status` above), and waking up frames that are
-    /// dropped today would wipe "NO DISC" off the display. The capability
+    /// stay inert, because a permanent frame without `status_text` *erases*
+    /// the remembered status (see that field above), and waking up frames
+    /// that are dropped today would wipe the status off the display. The capability
     /// therefore rides the frames the core already listens to — every path of
     /// a real source (activate, wake, select, next, prev, track change)
     /// declares an identity or a status.

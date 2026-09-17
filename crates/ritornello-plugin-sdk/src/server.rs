@@ -299,7 +299,7 @@ pub trait SourcePlugin: Send + 'static {
     /// Default implementation: declare that nothing is playing anymore, which
     /// is true for every Source. Without a status, this frame **erases** the
     /// status memorized core-side (a permanent frame without a status means
-    /// erasure, see `SourceMessage::status`) — which is correct here, a
+    /// erasure, see `SourceMessage::status_text`) — which is correct here, a
     /// Source with no permanent status having nothing to lose. A Source that
     /// declares one on every frame (the cd) must override and go back through
     /// its own status logic, or watch it vanish on stop; a Source that also

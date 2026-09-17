@@ -199,11 +199,23 @@ pub(super) struct LocaleRequest {
 /// Shape of an acceptable language code: what the `<lang>.toml` file names of
 /// the packs produce (`fr`, `en`, `pt-BR`…).
 ///
-/// The value ends up in file paths (`<root>/<component>/<lang>.toml`, swept
-/// by `Registry` and resolved by `Registry::chain_for`) and in `state.json`:
-/// same rigor as for the theme and the audio output, which are validated —
-/// an arbitrary string opened a path traversal (`{"locale":"../../whatever"}`)
-/// on an unauthenticated API.
+/// **The rationale has changed and the guard has not** — deliberately, and
+/// this paragraph exists so the next reader does not mistake it for a
+/// leftover. The rule was written when the value ended up in a file path
+/// (`<root>/<component>/<lang>.toml`, built from the code and read on
+/// demand): an arbitrary string was a path traversal
+/// (`{"locale":"../../whatever"}`) on an unauthenticated API. Since task 4
+/// no path is ever built from it — `Registry::sweep_disk` enumerates real
+/// directory entries and a locale code is only ever a `HashMap` key — so
+/// that particular danger is gone.
+///
+/// What is left is worth the same six lines: the value is persisted in
+/// `state.json` and travels into the SPA's own URLs
+/// (`admin_i18n`'s `?lang=`), and the same rigor is applied to the theme and
+/// to the audio output. A shape check on the way in is what keeps a
+/// nonsensical value from being stored and read back for years; it is not
+/// load-bearing against traversal any more, and nothing downstream may start
+/// assuming it is.
 ///
 /// `pub(crate)`, not `pub(super)`: `admin.rs` reuses this exact rule to
 /// validate the `lang` query parameter of `/plugins/<name>/api/i18n`, rather
@@ -247,9 +259,28 @@ pub(super) async fn locale_put(State(state): State<AppState>, Json(req): Json<Lo
     // write first, a failed `fallback_tx.send` used to return 500 with
     // `locale_current` already mutated and `locale_tx` never touched — the
     // HTTP layer and the core would disagree about the chosen language
-    // until the next successful PUT. Sending first makes the route atomic
-    // for free: on any failure, neither `AppState` field is written, so a
-    // partial send never has a partial write sitting next to it.
+    // until the next successful PUT. Sending first makes the two `AppState`
+    // writes all-or-nothing for free: on any failure, neither field is
+    // written, so a partial send never has a partial write sitting next to
+    // it.
+    //
+    // **That is the whole of the claim, and "atomic" used to overclaim it**
+    // (task 13 parked this note; final whole-branch review, boundaries
+    // pass, finding 10, called it in). One residual survives by
+    // construction: a *successful* `fallback_tx.send` followed by a failing
+    // `locale_tx.send` leaves the core loop having already applied and
+    // republished the new fallback, while this route answers 500 and writes
+    // neither field. The two are then out of step until the next successful
+    // PUT — the HTTP layer saying "nothing happened" over a core where
+    // something did.
+    //
+    // Left as it is, deliberately. A send fails only when the receiver is
+    // gone, i.e. the core's `select!` loop has ended, and on this device
+    // that is the process on its way out; buying the missing half would mean
+    // an acknowledgement round trip on an HTTP route, which this project
+    // refuses for a good reason (no route may block). The honest fix if it
+    // ever matters is one message carrying both fields, not a second
+    // handshake.
     if let Some(fallback) = &req.fallback
         && state.fallback_tx.send(fallback.clone()).await.is_err()
     {
@@ -314,7 +345,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     #[tokio::test]
-    async fn get_locale_lists_en_and_the_core_packs() {
+    async fn get_locale_lists_the_union_of_every_translated_language() {
         let (state, _rx, _frx, _dir) = app_state_fr();
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
