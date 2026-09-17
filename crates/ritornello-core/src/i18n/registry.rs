@@ -10,8 +10,7 @@
 //! **The disk tier is swept once, not read per call.** `Registry::sweep`
 //! walks the pack root — one subdirectory per module, one `<lang>.toml` file
 //! per language — and keeps what it finds in memory; `resweep_async`
-//! repeats the
-//! walk and replaces that snapshot. `chain_for` itself therefore performs
+//! repeats the walk and replaces that snapshot. `chain_for` itself performs
 //! **no I/O at all**: every module it might be asked about has already been
 //! read once, at sweep time. This matters three times over — an HTTP route
 //! must never block on disk, only a real sweep (not a guessed path) can ever
@@ -34,8 +33,8 @@ use ritornello_i18n::{Chain, Layer, ModuleLayers};
 
 /// Registry of every module's translation layers.
 ///
-/// `disk` is populated by [`Registry::sweep`]/[`Registry::resweep_async`] — a walk
-/// of the pack root, kept in memory until the next sweep. `announced` is
+/// `disk` is populated by [`Registry::sweep`]/[`Registry::resweep_async`] —
+/// a walk of the pack root, kept in memory until the next sweep. `announced` is
 /// populated by `insert_announced` — called once per plugin announcement,
 /// and once for the core's own embedded text and for `common`'s, so that
 /// `chain_for` treats every module uniformly rather than special-casing the
@@ -853,12 +852,21 @@ mod tests {
         );
     }
 
-    /// Wholesale replacement, not a merge: a pack an operator deleted must
+    /// Wholesale replacement, not a merge: what an operator deleted must
     /// actually disappear, not linger from the previous sweep. The mirror
     /// of `resweep_async_picks_up_a_pack_written_after_the_first_sweep`
     /// just below, and both go through the real path — the synchronous
     /// `resweep` these two facts used to be pinned against was deleted for
     /// having no production caller.
+    ///
+    /// Two removals, because only the second one discriminates. Deleting
+    /// the *file* leaves the module's directory behind, so `sweep_disk`
+    /// still yields an entry for it and even a merging swap would overwrite
+    /// the stale one — measured: replacing the assignment with an `extend`
+    /// left the whole suite green when this test removed the file alone.
+    /// Deleting the module's *directory* is what a merge cannot survive:
+    /// the fresh map has no key at all for it, so a merge keeps the old
+    /// text forever.
     #[tokio::test]
     async fn resweep_async_forgets_a_pack_removed_from_disk() {
         let dir = tempfile::tempdir().unwrap();
@@ -868,12 +876,25 @@ mod tests {
         let shared: crate::i18n::Shared =
             std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(dir.path().to_path_buf())));
         assert_eq!(shared.read().await.chain_for("radio", "nl", "en").get("play"), "Spelen");
+
         std::fs::remove_file(&pack).unwrap();
         Registry::resweep_async(&shared).await;
         assert_eq!(
             shared.read().await.chain_for("radio", "nl", "en").get("play"),
             "play",
             "the removed pack must be gone"
+        );
+
+        // The module comes back, then its whole directory goes.
+        std::fs::write(&pack, "play = \"Spelen\"\n").unwrap();
+        Registry::resweep_async(&shared).await;
+        assert_eq!(shared.read().await.chain_for("radio", "nl", "en").get("play"), "Spelen");
+        std::fs::remove_dir_all(dir.path().join("radio")).unwrap();
+        Registry::resweep_async(&shared).await;
+        assert_eq!(
+            shared.read().await.chain_for("radio", "nl", "en").get("play"),
+            "play",
+            "a module whose directory is gone must be gone: the snapshot is replaced, not merged"
         );
     }
 
