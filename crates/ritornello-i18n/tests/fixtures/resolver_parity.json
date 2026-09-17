@@ -1,0 +1,58 @@
+[
+  {
+    "name": "named_parameters_interpolate",
+    "catalog": { "greeting": "Bonjour {name}, {count} messages" },
+    "key": "greeting",
+    "params": { "name": "Alix", "count": "3" },
+    "expected": "Bonjour Alix, 3 messages"
+  },
+  {
+    "name": "unknown_key_falls_back_to_the_bare_key",
+    "catalog": { "play": "Play" },
+    "key": "never_announced",
+    "params": {},
+    "expected": "never_announced"
+  },
+  {
+    "name": "a_parameter_value_carrying_braces_is_not_rescanned",
+    "catalog": { "station": "{name}" },
+    "key": "station",
+    "params": { "name": "Radio {url}" },
+    "expected": "Radio {url}"
+  },
+  {
+    "name": "an_unsupplied_prototype_member_token_stays_visible",
+    "catalog": { "hello": "hello {toString}" },
+    "key": "hello",
+    "params": {},
+    "expected": "hello {toString}"
+  },
+  {
+    "name": "a_prototype_member_named_parameter_is_substituted_when_supplied",
+    "catalog": { "greeting": "hi {toString}" },
+    "key": "greeting",
+    "params": { "toString": "world" },
+    "expected": "hi world"
+  },
+  {
+    "name": "an_unmatched_open_brace_is_copied_verbatim",
+    "catalog": { "broken": "broken {token" },
+    "key": "broken",
+    "params": { "token": "x" },
+    "expected": "broken {token"
+  },
+  {
+    "name": "a_key_named_like_a_prototype_member_falls_back_to_itself_when_absent",
+    "catalog": {},
+    "key": "toString",
+    "params": {},
+    "expected": "toString"
+  },
+  {
+    "name": "a_present_key_named_like_a_prototype_member_resolves_normally",
+    "catalog": { "toString": "Custom text" },
+    "key": "toString",
+    "params": {},
+    "expected": "Custom text"
+  }
+]

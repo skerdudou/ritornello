@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createT, interpolate } from './i18n'
 
 describe('createT', () => {
@@ -30,6 +33,29 @@ describe('createT', () => {
     // character is dangerous.
     const t = createT({ hint: "you haven't picked a device yet" })
     expect(t('hint')).toBe("you haven't picked a device yet")
+  })
+
+  /// A review round ran `createT({})('toString')` against the version of
+  /// `createT` that looked a key up with `catalog[key] ?? key` (bracket
+  /// access) and got the native `Object.prototype.toString` **function
+  /// object** back, not the key. `Chain::get("toString")` on the Rust side
+  /// has always returned `"toString"`, since a plain `HashMap` has no
+  /// prototype to walk — the exact divergence `interpolate`'s own
+  /// `Object.hasOwn` switch (see its doc, above) was already fixed against
+  /// one function up, and had sat unfixed here.
+  ///
+  /// [MUTATION]: replace `Object.hasOwn(catalog, key) ? catalog[key] : key`
+  /// with `catalog[key] ?? key` — this test fails, returning a function
+  /// instead of the string `"toString"`.
+  it('falls back to the bare key for a key named after an Object.prototype member', () => {
+    const t = createT({})
+    expect(t('toString')).toBe('toString')
+    expect(t('constructor')).toBe('constructor')
+  })
+
+  it('still resolves an own key that happens to share a name with a prototype member', () => {
+    const t = createT({ toString: 'Custom text' })
+    expect(t('toString')).toBe('Custom text')
   })
 })
 
@@ -91,31 +117,50 @@ describe('interpolate', () => {
 // browser (for every page) are two consumers of one stacked chain, never
 // two independently-behaving chains. There is no way, in this repository's
 // toolchain, to invoke the Rust resolver from a vitest run or the reverse
-// (cargo lives only in WSL, node only outside it) — so the proof is a
-// literal, shared expectation asserted on both sides rather than a live
-// cross-call: `crates/ritornello-i18n/src/chain.rs`'s
-// `interpolation_after_entries_matches_interpolation_after_get` and
-// `an_unresolved_key_falls_back_to_itself_through_both_paths` use the exact
-// same catalog, key and params as the two tests below, and assert the
-// exact same expected string. If the two resolvers ever disagreed, at most
-// one side of each pair could stay green.
+// (cargo lives only in WSL, node only outside it), so the proof runs
+// against a **shared fixture** on disk rather than a live cross-call:
+// `crates/ritornello-i18n/tests/fixtures/resolver_parity.json`, read here
+// exactly as `crates/ritornello-i18n/src/chain.rs`'s
+// `resolver_parity_fixture_agrees_between_get_plus_interpolate_and_the_browser`
+// reads it on the Rust side.
+//
+// A first version of this pair mirrored the fixture's cases by hand, one
+// literal catalog/key/params/expected per side, cross-referenced only in a
+// comment. A review round changed the Rust side's behaviour for an
+// unsupplied token and updated only the Rust expectation: both suites
+// stayed green while the two resolvers actually disagreed — a comment
+// naming the other file enforces nothing. Reading the **same file** from
+// both sides is what makes a one-sided edit visible: it either updates the
+// shared fixture (and the other side's run then judges the new
+// expectation too) or it does not, and the other side's run is against
+// the unedited case.
 describe('resolver parity with the Rust chain', () => {
-  it('agrees_with_the_rust_resolver_on_the_same_catalog_and_params', () => {
-    // `entries()` is exactly what the browser receives in production
-    // (`GET /api/i18n`): a flattened catalog, already resolved through the
-    // chosen/fallback/English stack — `createT` only ever does the second
-    // half, interpolation, which is the seam this test is about.
-    const catalog = { greeting: 'Bonjour {name}, {count} messages' }
-    const t = createT(catalog)
-    expect(t('greeting', { name: 'Alix', count: 3 })).toBe('Bonjour Alix, 3 messages')
+  interface ParityCase {
+    name: string
+    catalog: Record<string, string>
+    key: string
+    params: Record<string, string>
+    expected: string
+  }
+
+  const fixturePath = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../../crates/ritornello-i18n/tests/fixtures/resolver_parity.json',
+  )
+  const cases: ParityCase[] = JSON.parse(readFileSync(fixturePath, 'utf-8'))
+
+  it('loads the shared fixture, and it is not empty', () => {
+    // Mirrors the Rust side's own `assert!(cases.len() >= 6, ...)`: a
+    // fixture that failed to load or was emptied by accident must fail
+    // loudly here too, not read as "every case passed" because there was
+    // nothing to iterate.
+    expect(cases.length).toBeGreaterThanOrEqual(6)
   })
 
-  it('falls_back_to_the_raw_key_exactly_like_the_rust_chain_does', () => {
-    // The other half of the affirmation: a key missing from the catalog —
-    // unresolved by every layer of the chain before it ever reached the
-    // browser — must render as the bare key, not as an empty string or an
-    // error, on both sides of the seam.
-    const t = createT({})
-    expect(t('never_announced')).toBe('never_announced')
-  })
+  for (const c of cases) {
+    it(`matches the Rust chain: ${c.name}`, () => {
+      const t = createT(c.catalog)
+      expect(t(c.key, c.params)).toBe(c.expected)
+    })
+  }
 })

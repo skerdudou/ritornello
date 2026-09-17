@@ -311,16 +311,48 @@ genuinely has no key: the cd plugin's own status, for instance, is
 never the literal strings "no disc" / "audio CD" that used to travel on
 the wire before this chantier.
 
+```rust
+// A TOML pack, embedded like any other translation this project ships:
+const MY_EN: &str = include_str!("locales/en.toml"); // no_disc = "no disc"
+
+ritornello_plugin_sdk::declare_runtime!()?
+    .texts([("en", MY_EN)])? // confides the catalogue; see below for the rule this enforces
+    .source(MySource)?
+    .run()
+    .await?;
+
+// Wherever you build a `SourceMessage`/`SourceUpdate`:
+status_text: Some(Text::Keyed { key: "no_disc".into(), params: HashMap::new() }),
+```
+
+**`Runtime::texts(...)` is what turns your embedded packs into
+`Announcement.catalog` — you never fill that field yourself.** It is
+chained onto `declare_runtime!()?`, before `.source(...)?` / `.admin(...)?`
+/ whichever kind-specific method your plugin calls, and takes any number
+of `(lang, source)` pairs, `source` being the raw TOML text
+(`include_str!`, exactly as your crate already holds it). **The SDK
+refuses to start if the `en` entry is missing or empty**: a plugin that
+calls `texts(...)` is declaring it has real text, and the call itself
+parses and validates every language passed, so a broken pack fails at
+your plugin's own startup, not on somebody's screen. A plugin with
+genuinely nothing to translate simply never calls `texts(...)` at all —
+the SDK still announces `catalog: Some({})` for it, which the config page
+reads as "confided nothing", never as a broken announcement.
+
 **Your own keys travel inside your binary, never as a disk pack.** A
 third-party archive carries your plugin binary and nothing else (see point
 3 above) — no `locales/` directory ships with it. What you embed at compile
-time (the same `include_str!` every bundled plugin already builds with) is
-what you announce through `Announcement.catalog`, one map per language —
-the core folds it into the same registry as everyone else's. An operator
-can still drop `<lang>.toml` files of their own under
-`/etc/ritornello/locales/<your-name>/`, exactly as for a bundled plugin
-(see [interface.md](interface.md)); that path is simply never yours to
-populate from an archive.
+time is what you pass to `Runtime::texts(...)`, one map per language —
+the core folds it into the same registry as everyone else's, so **you are
+not limited to English**: `Runtime::texts([("en", MY_EN), ("nl", MY_NL)])?`
+confides both at once, unlike every bundled plugin today, which embeds
+English alone and leaves its other languages to disk packs shipped
+separately in `deploy/locales/` — a choice specific to how *this
+project's own* plugins are packaged, not a limit the SDK imposes on
+yours. An operator can still drop `<lang>.toml` files of
+their own under `/etc/ritornello/locales/<your-name>/`, exactly as for a
+bundled plugin (see [interface.md](interface.md)); that path is simply
+never yours to populate from an archive.
 
 **The common vocabulary — "Play", "Loading", the generic error
 sentences — travels with the core, not with you.** Your own keys resolve
@@ -2552,20 +2584,31 @@ protocol:
 
 A plugin never answers for its own i18n catalog: there is no admin
 request for it, and `AdminPlugin` carries no `catalog` method. A plugin
-that has UI text confides its **embedded English** once, at startup,
-through `Runtime::texts([("en", MY_EN)])?` (chained onto
-`declare_runtime!()?` before `.admin(...)?`, next to the crate's own
-`include_str!("locales/en.toml")` constant) — the SDK parses and
-validates it there, before a single socket is bound, so a broken pack
-is refused at build time rather than discovered on a screen. Any other
-shipped language is a plain `.toml` file under the deployment's packs
-root (see [installation.md](installation.md)), never confided by the
-plugin at all: the core sweeps that root itself (`RITORNELLO_LOCALES`,
-see [development.md](development.md) and [interface.md](interface.md))
-and layers what it finds over the confided English. The view then reads
-the resolved catalog from `GET /plugins/<name>/api/i18n[?lang=<l>]`, an
-ordinary core-served HTTP route backed by that layering — never a round
-trip to the plugin.
+that has UI text confides it once, at startup, through `Runtime::texts(...)`
+(chained onto `declare_runtime!()?` before `.admin(...)?`) — the SDK
+parses and validates every language passed this way there, before a
+single socket is bound, so a broken pack is refused at build time rather
+than discovered on a screen; the sole requirement is a non-empty `en`
+entry (see [Text, translations, and what a plugin owes the
+catalogue](#text-translations-and-what-a-plugin-owes-the-catalogue) for
+the full contract and a third-party author's obligations).
+
+**Every bundled plugin today confides only English this way** —
+`Runtime::texts([("en", MY_EN)])?`, next to the crate's own
+`include_str!("locales/en.toml")` constant — and leaves every other
+shipped language to a plain `.toml` file under the deployment's packs
+root (see [installation.md](installation.md)): the core sweeps that root
+itself (`RITORNELLO_LOCALES`, see [development.md](development.md) and
+[interface.md](interface.md)) and layers what it finds over the confided
+English. **That is this project's own arrangement, not a limit
+`Runtime::texts` imposes**: the method takes any number of `(lang,
+source)` pairs, so a plugin — including a third-party one, which cannot
+ship a disk pack of its own at all — may confide several languages at
+once, e.g. `Runtime::texts([("en", MY_EN), ("nl", MY_NL)])?`. The view
+then reads the resolved catalog from
+`GET /plugins/<name>/api/i18n[?lang=<l>]`, an ordinary core-served HTTP
+route backed by that layering — never a round trip to the plugin,
+whichever tier a given language came from.
 
 **The protocol is concurrent.** `serve_admin` spawns one task per request
 and a single writer for the socket: responses leave in the order they

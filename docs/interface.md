@@ -1485,18 +1485,49 @@ TOML packs**, decentralized per component:
 
 - Root configurable through `RITORNELLO_LOCALES` (default
   `/etc/ritornello/locales`).
+- **The resolution chain, per key: chosen language → the device's
+  fallback language → English → the key itself.** Each of the first three
+  is itself a small stack — a disk pack before the same module's embedded
+  text, and the module's own vocabulary before `common`'s — so up to
+  twelve layers can be consulted for one key, in that fixed order
+  (`Registry::chain_for`). **The chosen language wins over specificity,
+  deliberately**: a generic word `common` happens to carry in the chosen
+  language is preferred over a well-chosen, module-specific word from the
+  fallback language — someone who asked for a language gets that
+  language's vocabulary exhausted before any other language is even
+  tried. A missing key never errors: it degrades one language at a time,
+  down to showing the bare key as the last resort — a visibly wrong
+  string is easier to report than a silently blank one.
 - Language **picker** on the config page (`/config`): it lists `en` plus
-  every `core/<lang>.toml` pack present, each language shown by its name
-  in its own language ("Français", "English"). The change is applied live
-  and persisted (`state.json`) — resolution moves entirely inside the core,
-  against its shared registry; **no plugin is ever notified of it**
-  (language-packs chantier, task 11 retired the `SourceReq::SetLocale`
-  frame that used to carry it to source plugins only).
+  the **union of every language at least one module — the core or a
+  connected plugin — translates** (`GET /api/locale`'s `locales`,
+  `ritornello_i18n::union_of_languages` over every module's disk pack and
+  announced catalogue), each shown by its name in its own language
+  ("Français", "English"). This replaced an earlier version that listed
+  only the core's own `core/<lang>.toml` packs — the origin defect this
+  chantier was opened to fix: a plugin could ship a language the core had
+  never heard of, and nothing on the page offered it. The change is
+  applied live and persisted (`state.json`) — resolution moves entirely
+  inside the core, against its shared registry; **no plugin is ever
+  notified of it** (language-packs chantier, task 11 retired the
+  `SourceReq::SetLocale` frame that used to carry it to source plugins
+  only).
+- **Completeness and the fallback setting**, next to the picker
+  (`LanguageCard.vue`): a language whose union of modules is not fully
+  translated shows "core + *N* plugins /*total*" (a whole phrase key with
+  named parameters, never a number concatenated onto a label) and a
+  second control to pick that language's **fallback** — the device's own
+  setting (`PUT /api/locale`'s optional `fallback` field, `fallback_current`
+  in the response), offered only among the languages the *core itself*
+  ships (`fallback_candidates`, `Registry::core_languages`): the owner's
+  rule reserves a fallback to what is guaranteed to resolve everywhere,
+  never a plugin-only language. A complete language shows just its name —
+  nothing to annotate, nothing to offer a fallback for.
 - **Adding a language**: copy the reference `en`, translate the values,
   drop it under `<root>/<component>/<lang>.toml`. A missing key or pack
-  automatically falls back to English (per-key degradation, never an
-  error). A pack that is present but unreadable (permissions, invalid
-  TOML) is ignored **with a trace in the logs**.
+  automatically falls back through the chain above (per-key degradation,
+  never an error). A pack that is present but unreadable (permissions,
+  invalid TOML) is ignored **with a trace in the logs**.
 - The initial French packs ship in `deploy/locales/` and are copied by
   `deploy/deploy.sh`.
 - **What an update does to a pack, and what it never touches.** A release
@@ -1513,13 +1544,18 @@ TOML packs**, decentralized per component:
   embedded one, is where an operator's own translation belongs.
 - **What picks up an edited pack.** The registry sweeps the pack root once,
   at startup, and again on every `Registry::resweep_async` — which
-  `Core::set_locale` and `Core::set_fallback` both call unconditionally,
-  even when the new value equals the old one. In practice this means two
-  gestures: `sudo systemctl restart ritornello`, or simply re-picking a
-  language (or its fallback) from the config page. There is no third one —
-  a pack edited by hand while the service keeps running, with nobody
-  touching the language or fallback setting, stays invisible until one of
-  the two happens.
+  `Core::set_locale` and `Core::set_fallback` call. **The config page does
+  not call either just because it was saved**: `ConfigView.vue`'s
+  `saveDisplay` compares the picked language (and, only while it is
+  incomplete, the fallback) against what was last loaded and sends nothing
+  to `PUT /api/locale` when neither moved — an operator who edits a pack
+  and re-picks the language already selected sees a success toast and no
+  resweep at all. Two gestures actually resweep: `sudo systemctl restart
+  ritornello`, or an **actual** change of the interface language (or, for
+  an incomplete language, the fallback) — even briefly switching away and
+  back counts, since each direction is a real change the page does submit.
+  There is no third gesture, and re-selecting the language already in
+  force is not the second one.
 - **A plugin page's catalog is asked for in an explicit language**, and the
   request waits for `/api/status` — the answer that carries the selected
   language. Asked without it, the core falls back to its own current

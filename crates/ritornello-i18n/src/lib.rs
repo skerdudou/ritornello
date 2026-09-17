@@ -218,4 +218,55 @@ mod tests {
         assert_eq!(cat.entries().get("standby").copied(), Some("VEILLE"));
     }
 
+    /// **The component dimension of the generalized parity, closed.**
+    /// `key_and_param_parity_between_the_embedded_en_and_every_shipped_
+    /// language` exists once per component (this file for `common`,
+    /// `ritornello-core::core::settings` for `core`, and one `admin.rs`
+    /// per plugin crate), each with one hardcoded module name — the
+    /// **language** dimension derives from the tree (`shipped_language_
+    /// packs`), but nothing previously derived the *component* list
+    /// itself, so a ninth `deploy/locales/<x>/` directory could ship with
+    /// no parity test naming it and nothing would say so. Found and named
+    /// by review; this is the fix.
+    ///
+    /// One canonical list, updated by hand exactly once whenever a
+    /// component's locale directory is added or removed — the same
+    /// discipline `docs_map.rs` already enforces for `AGENTS.md`'s table
+    /// of documents ("every document under `docs/` is named there"),
+    /// applied to the same shape of decay here. Read `COVERED_COMPONENTS`'
+    /// own doc before adding a `deploy/locales/<x>/` directory: this test
+    /// is what refuses to let the two lists drift apart silently.
+    const COVERED_COMPONENTS: &[&str] =
+        &["common", "core", "cd", "files", "generic-input", "mpd", "musicbrainz", "radio"];
+
+    #[test]
+    fn every_deploy_locales_directory_has_a_named_parity_test() {
+        let deploy_locales =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&deploy_locales)
+            .unwrap_or_else(|e| panic!("{}: {e}", deploy_locales.display()))
+            .filter_map(|entry| {
+                let entry = entry.unwrap();
+                entry.file_type().unwrap().is_dir().then(|| entry.file_name().to_string_lossy().into_owned())
+            })
+            .collect();
+        on_disk.sort();
+        // A directory walk that returned nothing must not read as "every
+        // component is covered" — the exact hazard this test exists to
+        // close for the *language* dimension already, now for this one.
+        assert!(!on_disk.is_empty(), "no component directories found under deploy/locales — the walk is wrong");
+
+        let mut covered: Vec<&str> = COVERED_COMPONENTS.to_vec();
+        covered.sort_unstable();
+
+        assert_eq!(
+            on_disk.iter().map(String::as_str).collect::<Vec<_>>(),
+            covered,
+            "deploy/locales/ and COVERED_COMPONENTS (crates/ritornello-i18n/src/lib.rs) \
+             disagree — a directory was added or removed without updating the list, or \
+             vice versa. Every name in COVERED_COMPONENTS must have its own \
+             key_and_param_parity_between_the_embedded_en_and_every_shipped_language test \
+             somewhere in the workspace."
+        );
+    }
 }

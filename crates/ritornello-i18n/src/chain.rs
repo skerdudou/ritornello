@@ -172,52 +172,65 @@ mod tests {
     // --- The couture task 15 exists to prove: the core and the browser are
     // two consumers of one stacked chain, not two chains. `entries_agrees_
     // with_get_on_every_key` (above) already proves the flattening step
-    // agrees before interpolation; the tests below carry the resolved
-    // value through `interpolate` on the Rust side, and are mirrored,
-    // value for value, by `web/kit/src/i18n.test.ts`'s
-    // `describe('resolver parity with the Rust chain', ...)` block, which
-    // runs the exact same catalog through `createT`+`interpolate`. Neither
-    // side reasons about the other's runtime — there is no way to invoke
-    // one from the other in this repository's toolchain — so the proof is
-    // in the shared, literal expectation: if the core's `get`+`interpolate`
-    // and the browser's `createT`+`interpolate` ever disagreed on the same
-    // catalog, key and params, at most one of the two mirrored assertions
-    // could still hold; a change that keeps both green keeps them agreeing.
-
+    // agrees before interpolation; the test below carries the resolved
+    // value through `interpolate` on the Rust side, against a **shared
+    // fixture** — `tests/fixtures/resolver_parity.json` — that
+    // `web/kit/src/i18n.test.ts` reads and runs through `createT`+
+    // `interpolate` too.
+    //
+    // A first version of this test mirrored the fixture's cases by hand,
+    // one literal per side, cross-referenced only in a comment. A review
+    // round measured what that was actually worth: it changed this crate's
+    // `interpolate` to render an unsupplied `{token}` empty instead of
+    // leaving it visible, updated **only** the Rust-side expectation, and
+    // got both suites green while the two resolvers rendered the same
+    // input differently. A comment naming the other file is documentation;
+    // it enforces nothing a compiler or a test runner checks. A **shared
+    // fixture** does: one side's behaviour changing without the other's
+    // forces an edit to the one file both read, and that edit is what a
+    // reviewer — or a second implementer — actually sees.
+    //
+    // The eight cases cover the two shapes this chantier previously paid
+    // for in only one language each: a parameter value carrying `{braces}`
+    // of its own (`Radio {url}`, the interpolation defect this crate's own
+    // `interpolate` was rewritten to survive) and a key or parameter named
+    // after an `Object.prototype` member (`toString`, the defect a review
+    // round found live in `createT`'s bracket lookup) — plus the unknown-key
+    // and unmatched-brace safety nets, jointly asserted for the first time.
     #[test]
-    fn interpolation_after_entries_matches_interpolation_after_get() {
-        // What the core does directly for a status text (`Core::
-        // resolve_text`) versus what the browser does after receiving
-        // `entries()` (`createT`, `web/kit/src/i18n.ts`): both must produce
-        // the identical final string for a key carrying named parameters.
-        // Mirror: `i18n.test.ts`'s
-        // `agrees_with_the_rust_resolver_on_the_same_catalog_and_params`.
-        let chosen = Layer::parse("greeting = \"Bonjour {name}, {count} messages\"\n").unwrap();
-        let en = Layer::parse("greeting = \"Hello {name}, {count} messages\"\n").unwrap();
-        let chain = Chain::new(vec![chosen, en]);
+    fn resolver_parity_fixture_agrees_between_get_plus_interpolate_and_the_browser() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/resolver_parity.json"
+        ))
+        .expect("tests/fixtures/resolver_parity.json is valid JSON");
+        let cases = fixture.as_array().expect("the fixture is a JSON array");
+        // A fixture that failed to load, or was emptied by accident, must
+        // not read as "every case passed" — the exact hazard a hardcoded
+        // subject list has already produced twice on this branch
+        // (`shipped_language_packs`'s own doc).
+        assert!(cases.len() >= 6, "fixture has fewer cases than expected: {cases:?}");
 
-        let direct = crate::interpolate(chain.get("greeting"), [("name", "Alix"), ("count", "3")]);
-        assert_eq!(direct, "Bonjour Alix, 3 messages");
+        for case in cases {
+            let name = case["name"].as_str().expect("case.name is a string");
+            let catalog: HashMap<String, String> = case["catalog"]
+                .as_object()
+                .expect("case.catalog is an object")
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str().expect("catalog values are strings").to_string()))
+                .collect();
+            let key = case["key"].as_str().expect("case.key is a string");
+            let params: Vec<(String, String)> = case["params"]
+                .as_object()
+                .expect("case.params is an object")
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str().expect("param values are strings").to_string()))
+                .collect();
+            let expected = case["expected"].as_str().expect("case.expected is a string");
 
-        let entries = chain.entries();
-        let via_entries = crate::interpolate(entries["greeting"], [("name", "Alix"), ("count", "3")]);
-        assert_eq!(
-            via_entries, direct,
-            "the flattened path (what the browser resolves through) must interpolate \
-             identically to the direct one (what the core resolves through)"
-        );
-    }
-
-    #[test]
-    fn an_unresolved_key_falls_back_to_itself_through_both_paths() {
-        // The affirmation this whole task exists to prove is not only about
-        // a resolved value: a key **missing everywhere** must fall back to
-        // the bare key through `get` and through `entries()` alike — the
-        // one property `createT`'s own fallback (`catalog[key] ?? key`) is
-        // built to mirror. Mirror: `i18n.test.ts`'s
-        // `falls_back_to_the_raw_key_exactly_like_the_rust_chain_does`.
-        let chain = Chain::new(vec![Layer::parse("play = \"Play\"\n").unwrap()]);
-        assert_eq!(chain.get("never_announced"), "never_announced");
-        assert_eq!(chain.entries().get("never_announced"), None, "absent from entries(), exactly as createT's fallback expects");
+            let chain = Chain::new(vec![Layer::from_map(catalog)]);
+            let resolved = chain.get(key);
+            let out = crate::interpolate(resolved, params.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+            assert_eq!(out, expected, "fixture case {name:?} diverged on the Rust side");
+        }
     }
 }
