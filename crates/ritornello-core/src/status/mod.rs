@@ -319,20 +319,33 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
             }
         }
     }
-    // Clamped to the installed set, falling back to `en`: `locale_current` can
-    // carry a language `valid_locale` accepts but `admin_i18n` refuses (a pack
-    // removed after being selected, or restored as-is from `state.json`).
-    // `admin_i18n`'s doc claims the core never refuses a language it
-    // advertises here — enforcing it here is what makes that true rather than
-    // merely asserted. Content-identical: `Registry::chain_for` already
-    // falls back to embedded English for an uninstalled language.
+    // Clamped to the **union** (fix round 2, task 14 re-review, finding
+    // B) — the same rule `locale_json`'s own `current` field applies
+    // (`status/locales.rs`, "`locales` on purpose, not `core_languages`"),
+    // and for the same reason: `locale` is this route's only consumer's
+    // only source for a plugin's own catalog request
+    // (`web/app/src/composables/usePlugins.ts`'s `locale` →
+    // `PluginRoute.vue`'s `catalogQuery`, `?lang=<locale>`). Clamping to
+    // `core_languages` here — as this route did until this fix round —
+    // silently turned a plugin-only chosen language back into `en` at the
+    // one place a user would notice: a plugin's own admin page, rendered
+    // in English while its own pack sat installed and `admin_i18n` would
+    // have served it (that route stopped checking membership — see its own
+    // doc, `admin.rs`). The union `locale_json` already computes from this
+    // same kind of registry read is what `admin_i18n` actually resolves
+    // through (`Registry::chain_for` — no I/O, falls back to `en` for a
+    // language genuinely uninstalled anywhere), so clamping against it
+    // here can never offer a language `admin_i18n` would refuse.
     //
-    // Read from the registry's already-swept snapshot
-    // (`Registry::core_languages`), not a live `read_dir` — task 12's review
-    // ("F-2") named this as the second of two sites disagreeing with
-    // `chain_for` about which languages exist; `locale_json` (task 12) had
-    // the same defect and was fixed the same way.
-    let installed = state.registry.read().await.core_languages();
+    // Read from the registry's already-swept snapshot, not a live
+    // `read_dir` — task 12's review ("F-2") named this as the second of
+    // two sites disagreeing with `chain_for` about which languages exist;
+    // `locale_json` (task 12) had the same defect and was fixed the same
+    // way, before this fix round changed *which* set both sites clamp to.
+    let registry = state.registry.read().await;
+    let modules = registry.modules_with_text();
+    let installed = ritornello_i18n::union_of_languages(&modules);
+    drop(registry);
     let locale = state
         .locale_current
         .read()
@@ -1015,6 +1028,36 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["locale"], "en");
+    }
+
+    /// Fix round 2 (task 14 re-review, finding B): a language only a
+    /// connected plugin translates must survive this clamp, or its own
+    /// catalog request (`?lang=<locale>`, built from this very field —
+    /// `usePlugins.ts`'s `locale` → `PluginRoute.vue`'s `catalogQuery`)
+    /// silently sends `lang=en` instead, and the plugin's own installed
+    /// pack is never fetched — the one place a user would actually notice
+    /// the union this chantier exists to serve. Before this fix, clamping
+    /// against `core_languages` alone reintroduced exactly this: the
+    /// selector offers "de", the page even lets it be chosen and kept
+    /// (`/api/locale.current`, clamped against the union since fix round
+    /// 1), but `/api/status.locale` — this route — echoed `"en"` regardless,
+    /// so the German-only plugin's admin page rendered in English forever.
+    ///
+    /// **[MUTATION]**: clamp `locale` against `registry.core_languages()`
+    /// instead of the union — this test fails, asserting `"en"` instead of
+    /// `"de"`.
+    #[tokio::test]
+    async fn api_status_does_not_clamp_a_plugin_only_locale() {
+        let (state, _rx, _frx, _dir) = tests_support::app_state_fr();
+        let mut radio_de = ritornello_i18n::ModuleLayers::new("radio");
+        radio_de.insert("de", ritornello_i18n::Layer::parse("play = \"Spielen\"\n").unwrap());
+        state.registry.write().await.insert_announced("radio", radio_de);
+        *state.locale_current.write().await = Some("de".to_string());
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["locale"], "de");
     }
 
     /// The web remote tiles read the preset names here: the core already

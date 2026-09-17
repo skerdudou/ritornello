@@ -100,15 +100,12 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
     drop(registry);
     // Clamped to `locales` (the **union**, not `core_languages`), falling
     // back to `None` — fix round 1, task 14 review, finding 3/R3. Before
-    // this, `current` was the one site of this exact clamp left unclamped:
-    // `status_json`'s own `locale` field already clamps `locale_current`
-    // (against `core_languages`, `status/mod.rs`) and, since task 12,
-    // `fallback_current` right below clamps too (against
-    // `fallback_candidates`). A device whose selected language's pack was
-    // removed served `current` as-is: the SPA then found no `completeness`
-    // entry for it, so `LanguageCard` rendered it as a *complete* language —
-    // the trigger showing the removed language's name, no annotation, no
-    // fallback control — while every word on the actual page was English.
+    // this, `current` was the one site of this exact clamp left unclamped.
+    // A device whose selected language's pack was removed served `current`
+    // as-is: the SPA then found no `completeness` entry for it, so
+    // `LanguageCard` rendered it as a *complete* language — the trigger
+    // showing the removed language's name, no annotation, no fallback
+    // control — while every word on the actual page was English.
     //
     // **`locales` on purpose, not `core_languages`.** `current` can
     // legitimately name a language only a *plugin* ships (the origin defect
@@ -117,17 +114,30 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
     // selector back to core-only packs for exactly the case task 12 added
     // the union to unlock. `locales` is the same list already computed
     // above from this same registry read, so this can never disagree with
-    // what the selector itself offers.
+    // what the selector itself offers. `status_json`'s own `locale` field
+    // (`status/mod.rs`) clamps the same way, for the same reason, since fix
+    // round 2 — see that clamp's own comment for what depended on it
+    // (finding B: a plugin's own admin catalog request is built from that
+    // field, and used to silently fall back to `en` for exactly this case).
     let current = state.locale_current.read().await.clone().filter(|l| locales.iter().any(|x| x == l));
-    // Clamped to `fallback_candidates`, falling back to `en` — the same
-    // discipline `status_json` already applies to `locale_current` against
-    // `core_languages` (status/mod.rs), for the same reason: the stored
-    // value can name a pack removed after being selected, or restored as-is
-    // from a hand-edited `state.json` (permissive at load, by design — see
+    // Clamped to `fallback_candidates`, falling back to `en`, for the same
+    // reason `current` just above is clamped: the stored value can name a
+    // pack removed after being selected, or restored as-is from a
+    // hand-edited `state.json` (permissive at load, by design — see
     // `PersistedState.fallback`'s doc). Serving it unclamped would let
     // `fallback_current` name a language absent from its own
     // `fallback_candidates` list — the exact shape that renders empty in a
     // reka-ui `Select` bound to it (task 14's SPA control).
+    //
+    // **Core-only on purpose, unlike `current` just above (fix round 2,
+    // task 14 re-review, finding A).** This is not the same rule reapplied:
+    // a fallback is chosen among what is guaranteed to resolve everywhere
+    // (the owner's own arbitration — `LocaleResponse::fallback_candidates`'s
+    // doc), so its candidate set — and therefore what this field clamps
+    // against — stays `core_languages`, never the union. The two clamps in
+    // this function read two different lists on purpose; this comment and
+    // `current`'s, just above, are what makes that fact discoverable from
+    // either site without reading the other.
     let fallback_current = state
         .fallback_current
         .read()
