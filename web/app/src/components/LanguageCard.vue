@@ -205,8 +205,25 @@ const fallbackAnnotation = computed(() => {
                  mechanism). The mandatory pattern is still applied, so a
                  later change that puts payload- or catalog-driven content
                  into one of these items does not have to remember to add
-                 it. `LanguageCard.test.ts` pins the pattern structurally,
-                 since there is no behavioural difference left to catch. -->
+                 it. `LanguageCard.test.ts` pins the pattern structurally
+                 (deriving every `<SelectTrigger>` rather than naming these
+                 two, since fix round 4 — a hardcoded pair went 18/18 green
+                 against a third, unguarded select and against the pattern
+                 sitting only in a comment).
+
+                 One behavioural difference does survive, though it is not
+                 staleness: reasoned from reka-ui's own source, not measured
+                 in a browser (jsdom never opens the list, so `optionsSet`
+                 stays empty either way). The default renders `getOption
+                 (modelValue)?.textContent ?? placeholder`; if the selected
+                 fallback code ever leaves `fallbackCandidates` — pick "de"
+                 as the fallback, then pick "de" as the display language,
+                 which filters "de" out of its own candidate list — the
+                 default would render the placeholder (empty) while the
+                 override still renders "Deutsch". Absence, not a frozen old
+                 value; whether that absence is the *right* rendering is a
+                 product question the override does not settle either way,
+                 it only decides which of the two happens. -->
             <SelectTrigger class="min-w-32" data-fallback-select :aria-label="t('locale_fallback_label')"><SelectValue>{{ fallbackLabel }}</SelectValue></SelectTrigger>
             <SelectContent>
               <!-- Bare name, deliberately: "français" is read, "fr" is

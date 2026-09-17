@@ -273,7 +273,7 @@ describe('LanguageCard — fix round 1 findings 5 and 7', () => {
   })
 })
 
-describe('LanguageCard — the mandatory <SelectValue> override, structurally (fix round 3, finding H)', () => {
+describe('LanguageCard — the mandatory <SelectValue> override, structurally (fix round 3, finding H; hardened in fix round 4, finding J)', () => {
   // Read as plain text, not mounted: `process.cwd()` rather than
   // `import.meta.url` for the same reason `i18nKeysUsed.test.ts` uses it —
   // under vitest/jsdom a relative URL that climbs out of the vite project
@@ -283,20 +283,58 @@ describe('LanguageCard — the mandatory <SelectValue> override, structurally (f
   // A structural check, deliberately, and only for the fallback select: its
   // items are bare `languageName(c)`, a pure function of the code alone —
   // never of `payload` or of the active catalog — so there is no
-  // behavioural difference left between the override and reka-ui's default
-  // for this select to catch (fix round 2 tried to manufacture one by
-  // giving these items a secondary code line; fix round 3 reverted that —
-  // a test must not reshape the product to become provable). The language
-  // select keeps its behavioural guard in `journey.spec.ts`, where the
-  // hazard is real: its items *do* carry `annotation(l)`, a `t()`-driven,
-  // payload-driven string that can go stale in the trigger between a
-  // remount. This test exists so the pattern stays applied on the fallback
-  // select as a project convention — cheap insurance against the day one of
-  // its items grows payload- or catalog-driven content of its own — without
-  // pretending a behavioural test could tell the two forms apart today.
-  it('both selects still write the override, not the reka-ui default', () => {
-    const source = readFileSync(resolve(process.cwd(), 'src/components/LanguageCard.vue'), 'utf8')
-    expect(source).toContain('<SelectValue>{{ languageLabel }}</SelectValue>')
-    expect(source).toContain('<SelectValue>{{ fallbackLabel }}</SelectValue>')
+  // *staleness* left between the override and reka-ui's default for this
+  // select to catch (fix round 2 tried to manufacture one by giving these
+  // items a secondary code line; fix round 3 reverted that — a test must
+  // not reshape the product to become provable; `LanguageCard.vue`'s own
+  // comment on this select names the one behavioural difference that does
+  // remain, reasoned rather than measured). The language select keeps its
+  // behavioural guard in `journey.spec.ts`, where the hazard is real: its
+  // items *do* carry `annotation(l)`, a `t()`-driven, payload-driven string
+  // that can go stale in the trigger between a remount. This test exists so
+  // the pattern stays applied on the fallback select as a project
+  // convention — cheap insurance against the day one of its items grows
+  // payload- or catalog-driven content of its own — without pretending a
+  // behavioural test could tell the two forms apart today.
+  //
+  // **Fix round 4, finding J.** The first version of this test named the
+  // two computed properties directly (`toContain('<SelectValue>{{
+  // languageLabel }}</SelectValue>')`), which the re-review broke two ways,
+  // measured: a third `<Select>` added to the card, with a bare
+  // `<SelectValue />` and catalog-driven items, left it 18/18 green (the
+  // hardcoded pair never noticed a third subject exists); and putting both
+  // literals only inside this file's own top-of-file JSDoc, with both real
+  // overrides removed, also left it 18/18 green (a comment about the
+  // pattern satisfied a test for the pattern). `crates/ritornello-core/src
+  // /docs_map.rs::every_document_is_named_in_the_map` is this repository's
+  // own template for a source-text guard that does not decay this way:
+  // derive the subject list from the source itself rather than naming
+  // subjects, assert coverage per subject, and assert a minimum count so
+  // finding none — or fewer than before — is a loud failure. Applied here:
+  // every `<SelectTrigger>` in the template is a subject (a third select
+  // is automatically in scope, whatever it is called); comments are
+  // stripped before the match, so the pattern appearing only in prose —
+  // an HTML comment nested inside a trigger, or a `/** */` block anywhere
+  // in the file — cannot satisfy it; and each subject's own body, not the
+  // file as a whole, must carry a non-empty `<SelectValue>{{ … }}
+  // </SelectValue>`, so one guarded trigger cannot vouch for another.
+  it('every <SelectTrigger> writes the override, not the reka-ui default', () => {
+    const raw = readFileSync(resolve(process.cwd(), 'src/components/LanguageCard.vue'), 'utf8')
+    // Both comment forms this SFC can carry: `<!-- -->` in the template,
+    // `/* */` (including `/** */` JSDoc) in the script. `//` line comments
+    // are not stripped — they exist only inside `<script>`, which never
+    // contains a `<SelectTrigger>`, so they cannot reach a subject's body
+    // either way.
+    const source = raw.replace(/<!--[\s\S]*?-->/g, '').replace(/\/\*[\s\S]*?\*\//g, '')
+    const triggers = [...source.matchAll(/<SelectTrigger\b[^>]*>([\s\S]*?)<\/SelectTrigger>/g)]
+    // The walk itself must find something, and at least as many subjects
+    // as this card is known to have today — a regex that stopped matching
+    // (a typo, a renamed tag) must fail loudly rather than pass on zero.
+    expect(triggers.length).toBeGreaterThanOrEqual(2)
+    for (const [whole, body] of triggers) {
+      expect(body, `a <SelectTrigger> with no guarded <SelectValue>: ${whole}`).toMatch(
+        /<SelectValue>\{\{[\s\S]+?\}\}<\/SelectValue>/,
+      )
+    }
   })
 })
