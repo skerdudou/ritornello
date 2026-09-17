@@ -208,20 +208,27 @@ name = "generic-input"
 exec = "${root}/target/debug/ritornello-plugin-generic-input"
 `,
 )
-// A deliberately partial French core pack, for the language-card journey
-// (task 14, language-packs chantier): two keys out of the ~320 the embedded
-// English carries, enough to make `fr` show up in the union (a module's
+// Two deliberately partial core packs, for the language-card journey (task
+// 14, language-packs chantier; a second one added in fix round 1 so a real
+// fallback other than the chosen language itself exists — see finding
+// 7/R6, "nothing stops the chosen language being picked as its own
+// fallback"). Each covers two keys of the ~320 the embedded English
+// carries — enough to make the language show up in the union (a module's
 // layer only needs to be non-empty) while staying `Partial`, never
-// `Complete` — the language card must annotate it and offer the fallback
-// control. Real end-to-end coverage of the completeness *arithmetic*
-// (`Math.max`, "remains in English") lives in `LanguageCard.test.ts`, with
-// fixtures crafted for that; this fixture only has to prove the real core
-// serves an incomplete language and the page reacts to it.
+// `Complete`. Real end-to-end coverage of the completeness *arithmetic*
+// (the true set union, "still in English") lives in `LanguageCard.test.ts`,
+// with fixtures crafted for that; this fixture only has to prove the real
+// core serves two incomplete languages and the page reacts to them,
+// including the "still in English" figure computed from real server data.
 const localesRootNative = join(configDirNative, 'locales')
 mkdirSync(join(localesRootNative, 'core'), { recursive: true })
 writeFileSync(
   join(localesRootNative, 'core', 'fr.toml'),
   'language = "Langue"\nsave = "Enregistrer"\n',
+)
+writeFileSync(
+  join(localesRootNative, 'core', 'de.toml'),
+  'language = "Sprache"\nsave = "Speichern"\n',
 )
 const localesRoot = `${configDir}/locales`
 

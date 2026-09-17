@@ -500,20 +500,21 @@ test('an order arrow writes a real reorder, checked against the server, and is p
   }
 })
 
-
 /**
- * The language card (task 14, language-packs chantier): the union of
- * languages, an annotation on the one the harness ships incomplete, the
- * fallback control it unlocks, and a real `PUT /api/locale` round trip —
- * the exact arithmetic behind the annotation (`Math.max`, "remains in
- * English") is unit-tested in `LanguageCard.test.ts` against fixtures built
- * for that; this journey only has to prove the real core serves an
- * incomplete language and the page reacts to it.
+ * The language card (task 14, language-packs chantier; fix round 1
+ * addressed findings 1-8 of the review): the union of languages, an
+ * annotation on the two the harness ships incomplete, the fallback
+ * control, and a real `PUT /api/locale` round trip. The exact arithmetic
+ * behind the annotation (the true set union of `complete_modules`, "still
+ * in English") is unit-tested in `LanguageCard.test.ts` against fixtures
+ * built for that; this journey proves the real core serves two incomplete
+ * languages and the page reacts to them honestly, numbers included.
  *
- * `serve.mjs` ships a deliberately partial `fr` core pack (two keys of the
- * ~320 the embedded English carries) under `RITORNELLO_LOCALES` — absent
- * that, the selector would only ever offer `en`, and this journey would
- * have nothing incomplete to select.
+ * `serve.mjs` ships two deliberately partial core packs (`fr`, `de`, two
+ * keys each of the ~320 the embedded English carries) under
+ * `RITORNELLO_LOCALES` — a second one since fix round 1 (finding 7/R6): the
+ * chosen language is now excluded from its own fallback candidates, so a
+ * *different* real language is needed to exercise the control at all.
  */
 test('the language card annotates an incomplete language and offers a fallback', async ({
   page,
@@ -527,18 +528,26 @@ test('the language card annotates an incomplete language and offers a fallback',
 
   // "English": nothing extra — the owner's rule, "nothing shown for a
   // complete language, just its name". "Français": the phrase-key
-  // annotation, `{done}` of `{total}` translated — `0 of 4` here, since the
-  // fixture's French pack covers neither of `save`/`language` fully across
-  // every texted module (only `core`'s own two keys are French at all).
+  // annotation, named unit included ("0 /4" — the fixture's French pack
+  // covers neither `save` nor `language` on any of this harness's four
+  // texted modules, core included, so nothing counts as `Complete`).
   const englishOption = page.getByRole('option', { name: 'English' })
   const frenchOption = page.getByRole('option', { name: 'Français' })
   await expect(englishOption).toBeVisible()
   await expect(frenchOption).toBeVisible()
-  await expect(englishOption).not.toContainText('translated')
-  await expect(frenchOption).toContainText('0 of 4 translated')
+  await expect(englishOption).not.toContainText('/4')
+  await expect(frenchOption).toContainText('0 /4')
 
   try {
     await frenchOption.click()
+
+    // The trigger reflects the pick immediately, without reopening the
+    // list — the guard `<SelectValue>{{ languageLabel }}</SelectValue>`
+    // exists for (fix round 1, finding 5): reka-ui hands an item's text to
+    // its `Select` once, at that item's own mount, and never re-reads it,
+    // so a trigger relying on that default would still read "English"
+    // here. A real browser is what can tell the difference; jsdom cannot.
+    await expect(languageTrigger).toHaveText('Français')
 
     // Choosing an incomplete language unlocks the fallback control — hidden
     // a moment ago, while English (complete) was selected.
@@ -546,13 +555,28 @@ test('the language card annotates an incomplete language and offers a fallback',
     await expect(fallbackRow).toBeVisible()
     // A fresh device has never set a fallback: `fallback_current` defaults
     // to "en", the wire's own representable "none" (task 13).
-    await expect(page.locator('[data-fallback-select]')).toHaveText('English')
+    const fallbackTrigger = page.locator('[data-fallback-select]')
+    await expect(fallbackTrigger).toHaveText('English')
+    // The hint explaining what "English" means in this list (fix round 1,
+    // finding 5/R7).
+    await expect(page.locator('[data-fallback-hint]')).not.toHaveText('')
 
-    // A real fallback: only the core's own languages are offered
-    // (`fallback_candidates`), so "Français" is the only other choice this
-    // fixture has.
-    await page.locator('[data-fallback-select]').click()
-    await page.getByRole('option', { name: 'Français' }).click()
+    // The chosen language itself must not be offered as its own fallback
+    // (fix round 1, finding 7/R6): with only "fr" chosen, "de" and "en"
+    // are the only options.
+    await fallbackTrigger.click()
+    await expect(page.getByRole('option', { name: 'Français' })).toHaveCount(0)
+    const germanOption = page.getByRole('option', { name: 'Deutsch' })
+    await expect(germanOption).toBeVisible()
+    await germanOption.click()
+    await expect(fallbackTrigger).toHaveText('Deutsch')
+
+    // A real, non-self fallback closes no gap here (both "fr" and "de"
+    // leave every one of the four modules untranslated), so the line
+    // states that honestly — the number this control exists to report,
+    // now checked end to end and not only against `LanguageCard.test.ts`'s
+    // synthetic fixtures (fix round 1, finding 8).
+    await expect(page.locator('[data-fallback-result]')).toHaveText('0 /4, 4 modules still in English')
 
     await page.locator('[data-display-change]').click()
 
@@ -563,10 +587,10 @@ test('the language card annotates an incomplete language and offers a fallback',
       .poll(async () => (await (await request.get('/api/locale')).json()).current)
       .toBe('fr')
     const locale = await (await request.get('/api/locale')).json()
-    expect(locale.fallback_current).toBe('fr')
+    expect(locale.fallback_current).toBe('de')
   } finally {
     // Put back the way the harness started: `en` is complete, so a plain
-    // `{"locale":"en"}` is enough — the persisted fallback is left as `fr`
+    // `{"locale":"en"}` is enough — the persisted fallback is left as `de`
     // (task 13's own "omitted fallback leaves it untouched" rule would
     // apply on the page, but this direct API call has no reason to send
     // one at all), which is harmless for every other journey since none of
