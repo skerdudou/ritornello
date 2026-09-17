@@ -912,6 +912,55 @@ describe('ConfigView — language and display', () => {
     expect(puts.map((p) => p.url)).not.toContain('/api/locale')
   })
 
+  it('does not touch the locale route when nothing moved, even for an incomplete current language', async () => {
+    // Mutation check on `localeUnchanged`'s `!incomplete || fallback.value
+    // === loadedFallback.value`: with `incomplete` true, `!incomplete` is
+    // false, so only the OR's second half can still make the whole
+    // expression true. A `||` turned into `&&` here would send a redundant
+    // PUT even though neither the language nor the fallback moved — this is
+    // the one scenario (`incomplete` true, fallback genuinely unchanged)
+    // where the two operators actually disagree.
+    const { w, puts } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr'],
+        current: 'fr',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1 },
+          { language: 'fr', complete: false, done: 0, total: 1 },
+        ],
+        fallback_current: 'en',
+        fallback_candidates: ['en', 'fr'],
+      },
+    })
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+    expect(puts.map((p) => p.url)).not.toContain('/api/locale')
+  })
+
+  it('never sends a fallback while staying on a complete language, even if another language in the union is incomplete', async () => {
+    // Mutation check on `localeIsIncomplete`'s `c.language === code &&
+    // !c.complete`: dropping the language match would make *any* incomplete
+    // entry anywhere in the array mark every language "incomplete" — here
+    // `fr` is incomplete but the chosen (and unchanged) language is the
+    // complete `en`, so a correct implementation must still skip the whole
+    // locale PUT.
+    const { w, puts } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr'],
+        current: 'en',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1 },
+          { language: 'fr', complete: false, done: 0, total: 1 },
+        ],
+        fallback_current: 'en',
+        fallback_candidates: ['en', 'fr'],
+      },
+    })
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+    expect(puts.map((p) => p.url)).not.toContain('/api/locale')
+  })
+
   it('sends the settings then the language PUT, and reloads the catalog', async () => {
     // Changing the language reloads the catalogs instead of reloading the whole
     // page as the old UI did: it is `loadAll()` (and its `reload()`) that
@@ -943,6 +992,62 @@ describe('ConfigView — language and display', () => {
     // The catalog was re-read after the PUTs — otherwise the UI would stay
     // displayed in the old language until the next manual reload.
     expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBeGreaterThan(before)
+  })
+
+  it('sends the fallback alongside the locale once the chosen language is incomplete', async () => {
+    // Owner's rule (task 14): the fallback field only makes sense — and is
+    // only submitted — when `LanguageCard`'s own control was visible, i.e.
+    // the chosen language is incomplete. The test above (a complete "en")
+    // pins the opposite branch: no `fallback` field at all.
+    const { w, puts } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr'],
+        current: 'en',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1 },
+          { language: 'fr', complete: false, done: 0, total: 1 },
+        ],
+        fallback_current: 'en',
+        fallback_candidates: ['en', 'fr'],
+      },
+    })
+    const vm = w.vm as unknown as { lang: string; fallback: string }
+    vm.lang = 'fr'
+    vm.fallback = 'en'
+    await w.vm.$nextTick()
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+
+    const localePut = puts.find((p) => p.url === '/api/locale')
+    expect(localePut?.body).toEqual({ locale: 'fr', fallback: 'en' })
+  })
+
+  it('a fallback change alone, on an unchanged incomplete language, still reaches the locale route', async () => {
+    // Mutation check on the other half of `localeUnchanged`
+    // (`lang.value === loadedLocale.value && (!incomplete || fallback.value
+    // === loadedFallback.value)`): `lang` never moves in this test, so only
+    // the second half decides whether the PUT fires at all. Dropping it (or
+    // reading it backwards) would silently skip a real fallback edit.
+    const { w, puts } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr'],
+        current: 'fr',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1 },
+          { language: 'fr', complete: false, done: 0, total: 1 },
+        ],
+        fallback_current: 'en',
+        fallback_candidates: ['en', 'fr'],
+      },
+    })
+    const vm = w.vm as unknown as { lang: string; fallback: string }
+    vm.fallback = 'fr'
+    await w.vm.$nextTick()
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+
+    const localePut = puts.find((p) => p.url === '/api/locale')
+    expect(localePut?.body).toEqual({ locale: 'fr', fallback: 'fr' })
   })
 
   it('every dropdown follows a language change, without waiting to be opened', async () => {
