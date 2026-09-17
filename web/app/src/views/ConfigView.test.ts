@@ -1040,6 +1040,46 @@ describe('ConfigView — language and display', () => {
     // pins the opposite branch: no `fallback` field at all.
     const { w, puts } = await mountView({
       '/api/locale': {
+        locales: ['en', 'fr', 'de'],
+        current: 'en',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
+          { language: 'de', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+        ],
+        fallback_current: 'en',
+        fallback_candidates: ['en', 'fr', 'de'],
+      },
+    })
+    const vm = w.vm as unknown as { lang: string; fallback: string }
+    vm.lang = 'fr'
+    // Moved, not merely present: the field now travels only when the owner
+    // edited the control (see the test just below for why).
+    vm.fallback = 'de'
+    await w.vm.$nextTick()
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+
+    const localePut = puts.find((p) => p.url === '/api/locale')
+    expect(localePut?.body).toEqual({ locale: 'fr', fallback: 'de' })
+  })
+
+  it('does not write back a fallback the owner never touched', async () => {
+    // Final whole-branch review, device pass, finding 1. What this card
+    // holds in `fallback` is what `GET /api/locale` reported, and that
+    // response is clamped: a stored fallback equal to the chosen language
+    // comes back as `"en"`, because it resolves nothing. Submitting it
+    // unchanged — which is what a plain language change used to do — would
+    // write the clamp into `state.json` and destroy the fallback the owner
+    // had chosen, by the one door the "its value stays memorized" rule did
+    // not watch. Reading a value is not consenting to it.
+    //
+    // The language really does move here (so the PUT fires at all) and the
+    // chosen one really is incomplete (so the old code would have attached
+    // the field): those are the two conditions under which the loss
+    // happened.
+    const { w, puts } = await mountView({
+      '/api/locale': {
         locales: ['en', 'fr'],
         current: 'en',
         completeness: [
@@ -1050,15 +1090,15 @@ describe('ConfigView — language and display', () => {
         fallback_candidates: ['en', 'fr'],
       },
     })
-    const vm = w.vm as unknown as { lang: string; fallback: string }
+    const vm = w.vm as unknown as { lang: string }
     vm.lang = 'fr'
-    vm.fallback = 'en'
     await w.vm.$nextTick()
     await w.find('[data-display-change]').trigger('click')
     await flushPromises()
 
     const localePut = puts.find((p) => p.url === '/api/locale')
-    expect(localePut?.body).toEqual({ locale: 'fr', fallback: 'en' })
+    expect(localePut?.body).toEqual({ locale: 'fr' })
+    expect(localePut?.body).not.toHaveProperty('fallback')
   })
 
   it('a fallback change alone, on an unchanged incomplete language, still reaches the locale route', async () => {

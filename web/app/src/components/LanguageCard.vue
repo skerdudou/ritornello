@@ -223,7 +223,14 @@ const fallbackAnnotation = computed(() => {
                  override still renders "Deutsch". Absence, not a frozen old
                  value; whether that absence is the *right* rendering is a
                  product question the override does not settle either way,
-                 it only decides which of the two happens. -->
+                 it only decides which of the two happens.
+
+                 That product question has since been answered, and not
+                 here: `GET /api/locale` reports a stored fallback equal to
+                 the chosen language as `"en"` (see `locale_json`'s own
+                 comment on why a no-op fallback must not read as an acting
+                 one), so the server never hands this select a value outside
+                 its own candidates. One rule, one place. -->
             <SelectTrigger class="min-w-32" data-fallback-select :aria-label="t('locale_fallback_label')"><SelectValue>{{ fallbackLabel }}</SelectValue></SelectTrigger>
             <SelectContent>
               <!-- Bare name, deliberately: "français" is read, "fr" is

@@ -138,12 +138,39 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
     // this function read two different lists on purpose; this comment and
     // `current`'s, just above, are what makes that fact discoverable from
     // either site without reading the other.
+    //
+    // **And clamped a second time, against `current` itself** (final
+    // whole-branch review, device pass, finding 1). A fallback equal to the
+    // chosen language is *accepted and stored* — the owner's rule, see
+    // `locale_put`'s own doc, and it stays stored: this clamp changes what
+    // is *reported*, never `state.json` — but it resolves nothing:
+    // `chain_for` tries the chosen block first and only falls through on a
+    // miss, so a coinciding fallback is a no-op (`Core::set_fallback`'s own
+    // doc says as much). Served unclamped, the settings card rendered it as
+    // an *acting* fallback: "Repli : Deutsch" under a device set to
+    // Deutsch, with a result line repeating the chosen language's own
+    // completeness figure back at the reader — the "no-op presented as
+    // acting" that the candidate list already refuses to offer
+    // (`LanguageCard.vue`'s `fallbackCandidates` filters the chosen
+    // language out of the *choice*; nothing covered the *stored value*).
+    // One rule, applied where the other clamps of this response are
+    // applied. `"en"` is the wire's representable "no fallback", so that is
+    // what a no-op fallback reports as.
+    //
+    // Reached by a plain sequence, not a hand-edited file: pick an
+    // incomplete `fr`, set the fallback to `de`, later pick `de` as the
+    // language. The stored `de` survives this and comes back the moment the
+    // chosen language moves off it — `ConfigView.vue`'s `saveDisplay` omits
+    // the `fallback` field entirely when the owner did not touch the
+    // control, precisely so that reading a clamped value cannot write it
+    // back.
     let fallback_current = state
         .fallback_current
         .read()
         .await
         .clone()
         .filter(|f| fallback_candidates.iter().any(|c| c == f))
+        .filter(|f| Some(f.as_str()) != current.as_deref())
         .unwrap_or_else(|| "en".to_string());
     Json(LocaleResponse {
         locales,
@@ -454,7 +481,14 @@ mod tests {
         // in this rig's own `core/` (`app_state_fr` writes it), so this test
         // stays clear of the clamp added below — that one has a test of its
         // own, on an uninstalled language.
+        //
+        // The chosen language is moved to "en" first, to stay clear of the
+        // *second* clamp too: this rig chooses "fr", and a fallback equal to
+        // the chosen language is reported as "en" (see
+        // `get_locale_reports_a_fallback_equal_to_the_chosen_language_as_no_fallback`).
+        // Both clamps have their own test; this one is about neither.
         let (state, _rx, _frx, _dir) = app_state_fr();
+        *state.locale_current.write().await = Some("en".to_string());
         *state.fallback_current.write().await = Some("fr".to_string());
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
@@ -488,6 +522,46 @@ mod tests {
         assert!(
             !fallback_candidates.contains(&"nl".to_string()),
             "the clamp only matters because nl is genuinely absent from the candidate list"
+        );
+    }
+
+    /// Final whole-branch review, device pass, finding 1: a stored fallback
+    /// equal to the chosen language resolves nothing — `chain_for` tries the
+    /// chosen block first and only falls through on a miss — yet it was
+    /// reported verbatim, and the settings card then rendered it as an
+    /// *acting* fallback, with a result line repeating the chosen language's
+    /// own completeness figure back at the reader. Reported as `"en"`, the
+    /// wire's representable "no fallback", the card says nothing.
+    ///
+    /// Reached by choosing an incomplete language, setting a fallback, and
+    /// later choosing that fallback as the language.
+    ///
+    /// **The stored value is untouched**, and the test asserts it: this is a
+    /// clamp on what is *reported*, not on what is kept. The owner's rule is
+    /// that a fallback survives a language change (`locale_put`'s own doc),
+    /// and it does — `ConfigView.vue` only ever sends the field back when the
+    /// owner edited the control, so reading the clamp cannot write it.
+    ///
+    /// **[MUTATION]**: drop the `.filter(|f| Some(f.as_str()) != current
+    /// .as_deref())` line in `locale_json` — this test fails, asserting
+    /// `"fr"` where `"en"` is due.
+    #[tokio::test]
+    async fn get_locale_reports_a_fallback_equal_to_the_chosen_language_as_no_fallback() {
+        let (state, _rx, _frx, _dir) = app_state_fr();
+        // Both "fr": this rig's chosen language, and a fallback an earlier
+        // gesture stored while some other language was chosen.
+        *state.fallback_current.write().await = Some("fr".to_string());
+        let stored = state.fallback_current.clone();
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["current"], "fr", "the rig must really have fr chosen, or the clamp proves nothing");
+        assert_eq!(v["fallback_current"], "en");
+        assert_eq!(
+            stored.read().await.as_deref(),
+            Some("fr"),
+            "reporting a no-op fallback as none must not forget the value the owner chose"
         );
     }
 

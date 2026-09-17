@@ -876,6 +876,16 @@ function localeIsIncomplete(code: string): boolean {
  * the stored fallback untouched (`LocaleRequest.fallback`'s own contract on
  * the Rust side), which is exactly what "nothing to submit" must mean here.
  *
+ * **And only when it actually moved.** The value in hand is what the last
+ * `GET /api/locale` reported, and that response is *clamped*: a stored
+ * fallback equal to the chosen language is reported as `"en"`, since it
+ * resolves nothing (see `locale_json`'s own comment). Resubmitting an
+ * untouched value would write that clamp back into `state.json` and destroy
+ * a fallback the owner chose — exactly the loss the "its value stays
+ * memorized" rule exists to prevent, arriving by the one door the rule did
+ * not watch. Reading a value is not consenting to it: only a value the
+ * owner edited is sent.
+ *
  * Partial failure is a real state and is reported honestly: the first error
  * wins and the second write does not happen.
  */
@@ -893,7 +903,7 @@ async function saveDisplay() {
     return
   }
   const body: { locale: string; fallback?: string } = { locale: lang.value }
-  if (incomplete) body.fallback = fallback.value
+  if (incomplete && fallback.value !== loadedFallback.value) body.fallback = fallback.value
   const localeErr = await api.put('/api/locale', body)
   if (localeErr) {
     toast.error(localeErr)
