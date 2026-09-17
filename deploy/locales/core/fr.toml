@@ -63,23 +63,28 @@ display_card_title = "Langue et affichage"
 # que le plan lui-même nomme (« cœur + 3 greffons sur 7 »). Les six clés
 # `locale_completeness_*` annotent une langue incomplète dans le sélecteur,
 # nommant « cœur » quand il fait partie des modules couverts, et l'unité
-# (« greffons ») sinon — chaque combinaison de « cœur couvert ? » x « combien
-# d'autres, 0 / 1 / plusieurs » (le découpage 0/1, et non un simple suffixe
-# pluriel, est ce qui garde le français grammatical : voir
+# (« greffons », ou « module » pour le cas nul depuis la deuxième tournée —
+# voir le constat E) sinon — chaque combinaison de « cœur couvert ? » x
+# « combien d'autres, 0 / 1 / plusieurs » (le découpage 0/1, et non un simple
+# suffixe pluriel, est ce qui garde le français grammatical : voir
 # `locale_completeness_core_plugin` vs `_plugins`). `locale_fallback_result`/
-# `_one` sont ce que montre le contrôle de repli une fois un vrai repli
-# choisi — « la seule façon de savoir si le repli a servi » — avec le même
-# découpage singulier/pluriel, pour la même raison ; l'unité y est « modules »
-# et non « greffons », puisque l'ensemble encore non couvert peut inclure
-# le cœur lui-même.
+# `_one`/`_none` sont ce que montre le contrôle de repli une fois un vrai
+# repli choisi — « la seule façon de savoir si le repli a servi » — avec le
+# même découpage singulier/pluriel, pour la même raison ; l'unité y est
+# « modules » et non « greffons », puisque l'ensemble encore non couvert peut
+# inclure le cœur lui-même. `_none` (deuxième tournée, constat C) est le cas
+# de réussite, « plus rien en anglais » : avant son ajout, `remaining === 0`
+# faisait taire la ligne, indiscernable à l'écran d'un « aucun repli choisi »
+# — le silence, précisément dans le seul cas que la ligne existe pour dire.
 locale_completeness_core = "cœur /{total}"
 locale_completeness_core_plugin = "cœur + 1 greffon /{total}"
 locale_completeness_core_plugins = "cœur + {plugins} greffons /{total}"
-locale_completeness_none = "0 /{total}"
+locale_completeness_none = "0 module /{total}"
 locale_completeness_plugin = "1 greffon /{total}"
 locale_completeness_plugins = "{plugins} greffons /{total}"
 locale_fallback_label = "Repli"
 locale_fallback_hint = "L'anglais reste toujours en dessous : le choisir ici n'ajoute aucun repli."
+locale_fallback_result_none = "{done} /{total}, plus rien en anglais"
 locale_fallback_result_one = "{done} /{total}, 1 module reste en anglais"
 locale_fallback_result = "{done} /{total}, {remaining} modules restent en anglais"
 player_card_title = "Lecteur"

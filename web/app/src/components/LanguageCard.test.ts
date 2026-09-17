@@ -13,11 +13,12 @@ const CATALOGUE = {
   locale_completeness_core: 'core /{total}',
   locale_completeness_core_plugin: 'core + 1 plugin /{total}',
   locale_completeness_core_plugins: 'core + {plugins} plugins /{total}',
-  locale_completeness_none: '0 /{total}',
+  locale_completeness_none: '0 module /{total}',
   locale_completeness_plugin: '1 plugin /{total}',
   locale_completeness_plugins: '{plugins} plugins /{total}',
   locale_fallback_label: 'Fallback',
   locale_fallback_hint: 'English always underlies every choice — picking it here adds no extra fallback.',
+  locale_fallback_result_none: '{done} /{total}, nothing left in English',
   locale_fallback_result_one: '{done} /{total}, 1 module still in English',
   locale_fallback_result: '{done} /{total}, {remaining} modules still in English',
 }
@@ -111,10 +112,10 @@ describe('LanguageCard — the own-language annotation, all six combinations', (
     expect(w.find('[data-locale-completeness]').text()).toBe('1 plugin /7')
   })
 
-  it('nothing covered at all: "0 /{total}"', async () => {
+  it('nothing covered at all: "0 module /{total}" (fix round 2, finding E — the unit is named)', async () => {
     const p = payload([entry('en', true, EN_ALL), entry('fr', false, [])])
     const w = await mountCard({ lang: 'fr', fallback: 'en', payload: p })
-    expect(w.find('[data-locale-completeness]').text()).toBe('0 /7')
+    expect(w.find('[data-locale-completeness]').text()).toBe('0 module /7')
   })
 
   it('an unrecognised language code is treated as complete, not a crash', async () => {
@@ -171,14 +172,20 @@ describe('LanguageCard — the fallback result, a true set union (fix round 1)',
     expect(w.find('[data-fallback-result]').text()).toBe('6 /7, 1 module still in English')
   })
 
-  it('shows nothing once the union already closes every gap', async () => {
+  it('a positive line, not silence, once the union closes every gap (fix round 2, finding C)', async () => {
+    // Before fix round 2, `remaining === 0` suppressed the line entirely —
+    // indistinguishable on screen from `fallback === 'en'` ("nothing to
+    // report" reads the same as "the fallback worked perfectly"). The
+    // brief's own words for this line: "the only way to know if the
+    // fallback served" — silence in the one case it demonstrably did is
+    // exactly the failure mode that sentence warns against.
     const p = payload([
       entry('en', true, EN_ALL),
       entry('fr', false, ['core', 'cd', 'files', 'generic-input', 'mpd']),
       entry('de', false, ['musicbrainz', 'radio']),
     ])
     const w = await mountCard({ lang: 'fr', fallback: 'de', payload: p })
-    expect(w.find('[data-fallback-result]').exists()).toBe(false)
+    expect(w.find('[data-fallback-result]').text()).toBe('7 /7, nothing left in English')
   })
 
   it('the fallback control disappears on a complete language, but never resets the stored value', async () => {

@@ -131,6 +131,16 @@ const fallbackLabel = computed(() => (props.fallback ? languageName(props.fallba
  * annotation is, since a module set can span both and "N greffons" would
  * misname `core` if it were the one still uncovered) with the same
  * singular/plural key split as `annotation` uses, for the same reason.
+ *
+ * **`remaining === 0` renders a positive line, never silence** (fix round
+ * 2, task 14 re-review, finding C). Before this, a fallback that closed
+ * every gap suppressed the line entirely — indistinguishable, on screen,
+ * from "no fallback effect at all" (the exact same rendering `fallback ===
+ * 'en'` produces just above). The brief names this line's whole purpose as
+ * "the only way to know if the fallback served"; silence in the one case
+ * where it demonstrably did serve defeats that purpose, so success gets its
+ * own key rather than reusing the empty string that also means "nothing to
+ * report yet".
  */
 const fallbackAnnotation = computed(() => {
   if (!showFallback.value || props.fallback === 'en') return ''
@@ -140,7 +150,7 @@ const fallbackAnnotation = computed(() => {
   const total = chosen.total
   const done = new Set([...chosen.complete_modules, ...fb.complete_modules]).size
   const remaining = total - done
-  if (remaining <= 0) return ''
+  if (remaining <= 0) return t.value('locale_fallback_result_none', { done, total })
   if (remaining === 1) return t.value('locale_fallback_result_one', { done, total })
   return t.value('locale_fallback_result', { done, total, remaining })
 })
@@ -172,8 +182,18 @@ const fallbackAnnotation = computed(() => {
           <Select :model-value="fallback" @update:model-value="(v) => emit('update:fallback', String(v))">
             <SelectTrigger class="min-w-32" data-fallback-select :aria-label="t('locale_fallback_label')"><SelectValue>{{ fallbackLabel }}</SelectValue></SelectTrigger>
             <SelectContent>
+              <!-- Readable name as primary, bare code as secondary — the
+                   same pattern the language select and the audio-device
+                   select already use (fix round 2, task 14 re-review,
+                   finding D: a bare-label item let a dropped `<SelectValue>`
+                   override go unguarded on this select specifically, since
+                   there was nothing beyond the label for the default to
+                   leak). -->
               <SelectItem v-for="c in fallbackCandidates" :key="c" :value="c">
-                {{ languageName(c) }}
+                <div class="flex flex-col items-start">
+                  <span>{{ languageName(c) }}</span>
+                  <span class="text-xs text-muted-foreground">{{ c }}</span>
+                </div>
               </SelectItem>
             </SelectContent>
           </Select>
