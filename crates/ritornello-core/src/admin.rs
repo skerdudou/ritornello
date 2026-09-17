@@ -285,7 +285,7 @@ pub struct CatalogQuery {
 /// **Never `immutable`, unlike `admin_asset`.** Until task 5's fix round this
 /// route was marked `immutable` when both `lang` and a `v` stamp were
 /// present — a promise it could not actually keep: `chain_for` reads the
-/// registry's `disk` tier, and `Registry::resweep` (triggered by every real
+/// registry's `disk` tier, and `Registry::resweep_async` (triggered by every real
 /// locale change) can replace what that tier holds without the core's
 /// `session` stamp ever moving, so the same stamped URL could start
 /// answering differently mid-session. The fix is not a longer key: the IPC

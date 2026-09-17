@@ -66,7 +66,7 @@ pub struct AppState {
     /// real locale change) — not on every read. `Registry::chain_for`
     /// itself performs no I/O at all (its disk tier is swept once, see
     /// `Registry`'s doc), so an operator editing a pack on disk is picked
-    /// up by the next `resweep` — a real locale change — rather than by
+    /// up by the next `resweep_async` — a real locale change — rather than by
     /// every read of this field, and, as before, by a restart of the
     /// service.
     ///
@@ -80,7 +80,7 @@ pub struct AppState {
     pub catalog: Arc<RwLock<ritornello_i18n::Chain>>,
     /// Every module's translation layers — the core's own, `common`'s, and
     /// each plugin's announced catalogue — swept from disk once at startup
-    /// and kept current by `Registry::resweep`/`insert_announced`/`forget`
+    /// and kept current by `Registry::resweep_async`/`insert_announced`/`forget`
     /// as plugins announce themselves, disconnect, or a locale changes.
     ///
     /// **The same `Arc`** as the one `Core` holds (see `core::Wiring`): the
@@ -116,7 +116,7 @@ pub struct AppState {
     /// present — a promise carried over unexamined from the asset route,
     /// where it is earned. It does not hold for the catalog: `admin_i18n`
     /// resolves straight from the shared `Registry` (task 4), and the
-    /// registry's disk tier is re-swept by `Registry::resweep` on every real
+    /// registry's disk tier is re-swept by `Registry::resweep_async` on every real
     /// locale change (`Core::set_locale`) — not only by a restart, and never
     /// by moving `session`. So the same stamped URL could start answering
     /// differently mid-session: an operator edits a plugin's on-disk pack

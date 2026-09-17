@@ -9,7 +9,8 @@
 //!
 //! **The disk tier is swept once, not read per call.** `Registry::sweep`
 //! walks the pack root — one subdirectory per module, one `<lang>.toml` file
-//! per language — and keeps what it finds in memory; `resweep` repeats the
+//! per language — and keeps what it finds in memory; `resweep_async`
+//! repeats the
 //! walk and replaces that snapshot. `chain_for` itself therefore performs
 //! **no I/O at all**: every module it might be asked about has already been
 //! read once, at sweep time. This matters three times over — an HTTP route
@@ -23,7 +24,7 @@
 //! same split `status::locales::list_locales` already draws against
 //! `parse_available_locales` and `audio_output::list_devices` against
 //! `parse_device_list`: [`stack`] is pure and carries the tests below, and
-//! [`sweep_disk`] (wrapped by `Registry::sweep`/`resweep`) is the I/O
+//! [`sweep_disk`] (wrapped by `Registry::sweep`/`resweep_async`) is the I/O
 //! envelope.
 
 use std::collections::HashMap;
@@ -33,7 +34,7 @@ use ritornello_i18n::{Chain, Layer, ModuleLayers};
 
 /// Registry of every module's translation layers.
 ///
-/// `disk` is populated by [`Registry::sweep`]/[`Registry::resweep`] — a walk
+/// `disk` is populated by [`Registry::sweep`]/[`Registry::resweep_async`] — a walk
 /// of the pack root, kept in memory until the next sweep. `announced` is
 /// populated by `insert_announced` — called once per plugin announcement,
 /// and once for the core's own embedded text and for `common`'s, so that
@@ -57,30 +58,20 @@ impl Registry {
     /// Repeats the walk of the pack root and replaces the disk tier —
     /// wholesale, not merged, so a pack removed since the last sweep is
     /// actually forgotten rather than lingering. The announced tier is
-    /// untouched: it does not come from this root and a plugin's
-    /// announcement is not re-read just because a locale changed.
+    /// untouched: it does not come from this root, and a plugin's
+    /// announcement is not re-read just because a locale changed. What
+    /// `Core::set_locale` and `Core::set_fallback` call.
     ///
-    /// Synchronous, `&mut self`: fine for a plain, owned `Registry` — the
-    /// tests below use it that way — but **never** for one shared as
-    /// `crate::i18n::Shared` (`Arc<RwLock<Registry>>`). Called there as
-    /// `shared.write().await.resweep()`, as `Core::set_locale` briefly did,
-    /// the directory walk and TOML parse run while holding the write lock,
-    /// blocking whatever tokio worker thread executes it and every other
-    /// reader or writer of the same registry for the duration —
-    /// `admin::admin_i18n`'s read lock included, since task 5 gave it one
-    /// (the gap task 4's review named ahead of task 5, closed here).
-    /// [`Registry::resweep_async`] is the async, non-blocking equivalent
-    /// every caller going through `Shared` uses instead — `Core::set_locale`
-    /// included, which is why this method has no production caller left and
-    /// carries `#[allow(dead_code)]` for that reason alone.
-    #[allow(dead_code)]
-    pub fn resweep(&mut self) {
-        self.disk = sweep_disk(&self.root);
-    }
-
-    /// The async, non-blocking equivalent of [`Registry::resweep`] for a
-    /// registry shared as `crate::i18n::Shared` — what `Core::set_locale`
-    /// calls.
+    /// The only resweep there is, and async on purpose. A synchronous
+    /// `&mut self` twin existed until the final fix round of the
+    /// language-packs chantier: it had no production caller left —
+    /// `Core::set_locale` moved off it — and, called the way a shared
+    /// registry forces (`shared.write().await.resweep()`), it ran the
+    /// directory walk and the TOML parse while holding the write lock,
+    /// blocking the tokio worker thread and every other reader of the same
+    /// registry, `admin::admin_i18n`'s read lock included. Keeping a method
+    /// whose only correct number of callers is zero is how that gets done
+    /// twice, so it was deleted rather than annotated.
     ///
     /// Two phases, deliberately kept as two calls rather than inlined: the
     /// walk ([`Registry::walk`]) never touches `shared` for anything but a
@@ -160,18 +151,21 @@ impl Registry {
     /// leaving it out because nothing was ever confided (see
     /// `Announcement.catalog`'s own doc, in `ritornello-proto`).
     ///
-    /// Unread by this crate's own production code — `ritornello-core` has
-    /// no `lib` target, so a method only its tests call reads as dead code.
-    /// **Not** the accessor task 12's completeness count ended up using:
-    /// `Registry::modules_with_text` needed the same `None`-vs-`Some({})`
-    /// distinction this method draws, but reads `self.announced` directly
-    /// rather than calling through here, one entry at a time, while
-    /// filtering by name — so this stayed a test-only accessor rather than
-    /// gaining the production caller an earlier version of this doc
-    /// predicted. Kept for what it still proves in `tests` (see
-    /// `announced_module_distinguishes_never_inserted_from_inserted_empty`),
-    /// not for a caller that does not exist.
-    #[allow(dead_code)]
+    /// **`#[cfg(test)]`, and that is the whole of its status.** No
+    /// production code calls it: `Registry::modules_with_text` needs the
+    /// same `None`-vs-`Some({})` distinction but reads `self.announced`
+    /// directly, one entry at a time, while filtering by name. It used to
+    /// be a `pub` method carrying `#[allow(dead_code)]`, which is a dead
+    /// producer wearing a permission slip — the class the final fix round
+    /// of the language-packs chantier set out to remove, its other member
+    /// (`Registry::resweep`) deleted outright. This one is not deleted
+    /// because it is *not* dead: it is the only way to tell "never
+    /// announced" from "announced empty" from outside, and four guards on
+    /// real production paths depend on that distinction — `hotplug`'s and
+    /// the startup rendezvous' `if let Some(catalog)`, in both directions
+    /// (`main.rs`). Compiling it only for tests says what it is instead of
+    /// excusing what it is not.
+    #[cfg(test)]
     pub fn announced_module(&self, module: &str) -> Option<&ModuleLayers> {
         self.announced.get(module)
     }
@@ -335,7 +329,7 @@ impl Registry {
     /// language, which is exactly the narrower set `modules_with_text`'s
     /// union is not.
     ///
-    /// Reads `self.disk` — the snapshot `Registry::sweep`/`resweep` already
+    /// Reads `self.disk` — the snapshot `Registry::sweep`/`resweep_async` already
     /// built — rather than a live `std::fs::read_dir` of the pack root.
     /// This replaced a route that read the two answers from two different
     /// places: `locale_json` used to call a live, disk-reading
@@ -859,35 +853,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resweep_picks_up_a_pack_written_after_the_first_sweep() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
-        assert_eq!(registry.chain_for("radio", "nl", "en").get("play"), "play", "nothing on disk yet");
-        std::fs::write(dir.path().join("radio/nl.toml"), "play = \"Spelen\"\n").unwrap();
-        assert_eq!(
-            registry.chain_for("radio", "nl", "en").get("play"),
-            "play",
-            "the pack must stay invisible before a resweep"
-        );
-        registry.resweep();
-        assert_eq!(registry.chain_for("radio", "nl", "en").get("play"), "Spelen", "and appear right after one");
-    }
-
-    #[test]
-    fn resweep_forgets_a_pack_removed_from_disk() {
-        // Wholesale replacement, not a merge: a pack an operator deleted
-        // must actually disappear, not linger from the previous sweep.
+    /// Wholesale replacement, not a merge: a pack an operator deleted must
+    /// actually disappear, not linger from the previous sweep. The mirror
+    /// of `resweep_async_picks_up_a_pack_written_after_the_first_sweep`
+    /// just below, and both go through the real path — the synchronous
+    /// `resweep` these two facts used to be pinned against was deleted for
+    /// having no production caller.
+    #[tokio::test]
+    async fn resweep_async_forgets_a_pack_removed_from_disk() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         let pack = dir.path().join("radio/nl.toml");
         std::fs::write(&pack, "play = \"Spelen\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
-        assert_eq!(registry.chain_for("radio", "nl", "en").get("play"), "Spelen");
+        let shared: crate::i18n::Shared =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(dir.path().to_path_buf())));
+        assert_eq!(shared.read().await.chain_for("radio", "nl", "en").get("play"), "Spelen");
         std::fs::remove_file(&pack).unwrap();
-        registry.resweep();
-        assert_eq!(registry.chain_for("radio", "nl", "en").get("play"), "play", "the removed pack must be gone");
+        Registry::resweep_async(&shared).await;
+        assert_eq!(
+            shared.read().await.chain_for("radio", "nl", "en").get("play"),
+            "play",
+            "the removed pack must be gone"
+        );
     }
 
     /// Functional coverage for `resweep_async`: the same fact
@@ -932,7 +919,7 @@ mod tests {
     /// This is what discriminates against the regression task 4's review
     /// named and task 5 made reachable: moving the walk back under the
     /// write lock (fold `walk` and `resweep_async` back into the one
-    /// `shared.write().await.resweep()` call `Core::set_locale` used to
+    /// single write-locked call `Core::set_locale` used to
     /// make) is exactly what would make this test hang instead of return.
     #[tokio::test]
     async fn walk_completes_while_a_reader_holds_the_registry() {

@@ -58,12 +58,12 @@ impl<P: Player> Core<P> {
     /// version of this comment, and of `docs/interface.md`, claimed
     /// otherwise). The two gestures that do reach here: a service restart
     /// (which sweeps once at startup regardless), or an **actual** change
-    /// of the language or the fallback. Through `Registry::resweep_async`,
-    /// not the bare, synchronous
-    /// `resweep`: the directory walk and TOML parse run off the async
-    /// runtime and before any lock is taken, so this call never blocks a
-    /// concurrent reader of the registry (`admin::admin_i18n`, since task 5)
-    /// behind disk I/O — see `resweep_async`'s own doc.
+    /// of the language or the fallback. Through `Registry::resweep_async`:
+    /// the directory walk and TOML parse run off the async runtime and
+    /// before any lock is taken, so this call never blocks a concurrent
+    /// reader of the registry (`admin::admin_i18n`, since task 5) behind
+    /// disk I/O — see `resweep_async`'s own doc, which also records why the
+    /// synchronous twin it once had no longer exists.
     pub async fn set_locale(&mut self, locale: String) -> Result<()> {
         self.locale = Some(locale.clone());
         crate::i18n::Registry::resweep_async(&self.registry).await;
