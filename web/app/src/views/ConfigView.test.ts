@@ -126,8 +126,8 @@ function payloads() {
       // shows nothing but the plain selector (task 14 predates none of
       // them, and the owner's rule is "nothing for a complete language").
       completeness: [
-        { language: 'en', complete: true, done: 1, total: 1 },
-        { language: 'fr', complete: true, done: 1, total: 1 },
+        { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+        { language: 'fr', complete: true, done: 1, total: 1, complete_modules: ['core'] },
       ],
       fallback_current: 'en',
       fallback_candidates: ['en'],
@@ -903,6 +903,34 @@ describe('ConfigView — language and display', () => {
     expect(urls.indexOf('/api/settings')).toBeLessThan(urls.indexOf('/api/locale'))
   })
 
+  it('loads the persisted fallback rather than silently defaulting to en (fix round 1, finding 4/R4)', async () => {
+    // The review measured that every fixture in this file used
+    // `fallback_current: 'en'` — the same value `fallback`'s own default
+    // starts at — so replacing `fallback.value = locale.value
+    // .fallback_current` with a hardcoded `'en'` in `loadAll` left all 94
+    // tests in this file green. The real-world failure mode of that
+    // mutation: a device with a persisted fallback of `fr` would show
+    // English in the control, then submit `fallback: 'en'` on the next
+    // unrelated save — silently wiping the stored value. A fixture whose
+    // `fallback_current` is not `'en'` is the only way to tell the read
+    // from the default apart.
+    const { w } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr', 'de'],
+        current: 'fr',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
+          { language: 'de', complete: false, done: 0, total: 1, complete_modules: [] },
+        ],
+        fallback_current: 'de',
+        fallback_candidates: ['en', 'fr', 'de'],
+      },
+    })
+    const vm = w.vm as unknown as { fallback: string }
+    expect(vm.fallback).toBe('de')
+  })
+
   it('does not touch the locale route when the language was not changed', async () => {
     // Otherwise every save of a date format would reload the whole state
     // for nothing, and the page would flicker on an ordinary gesture.
@@ -925,8 +953,8 @@ describe('ConfigView — language and display', () => {
         locales: ['en', 'fr'],
         current: 'fr',
         completeness: [
-          { language: 'en', complete: true, done: 1, total: 1 },
-          { language: 'fr', complete: false, done: 0, total: 1 },
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
         ],
         fallback_current: 'en',
         fallback_candidates: ['en', 'fr'],
@@ -957,8 +985,8 @@ describe('ConfigView — language and display', () => {
         locales: ['en', 'fr'],
         current: 'en',
         completeness: [
-          { language: 'en', complete: true, done: 1, total: 1 },
-          { language: 'fr', complete: false, done: 0, total: 1 },
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
         ],
         fallback_current: 'en',
         fallback_candidates: ['en', 'fr'],
@@ -1015,8 +1043,8 @@ describe('ConfigView — language and display', () => {
         locales: ['en', 'fr'],
         current: 'en',
         completeness: [
-          { language: 'en', complete: true, done: 1, total: 1 },
-          { language: 'fr', complete: false, done: 0, total: 1 },
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
         ],
         fallback_current: 'en',
         fallback_candidates: ['en', 'fr'],
@@ -1044,8 +1072,8 @@ describe('ConfigView — language and display', () => {
         locales: ['en', 'fr'],
         current: 'fr',
         completeness: [
-          { language: 'en', complete: true, done: 1, total: 1 },
-          { language: 'fr', complete: false, done: 0, total: 1 },
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
         ],
         fallback_current: 'en',
         fallback_candidates: ['en', 'fr'],

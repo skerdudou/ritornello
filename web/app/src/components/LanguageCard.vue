@@ -32,18 +32,43 @@ function completenessOf(code: string) {
 }
 
 /**
+ * Splits a list of complete module names into "is `core` among them" and
+ * "how many others" — the decomposition the brief's own picture names
+ * ("cœur + 3 greffons /7"): `core` is singled out by name because it is the
+ * one module every device has, `plugins` counts everything else without
+ * naming them individually.
+ */
+function moduleSplit(names: readonly string[]): { core: boolean; plugins: number } {
+  const core = names.includes('core')
+  return { core, plugins: names.length - (core ? 1 : 0) }
+}
+
+/**
  * The annotation for one language line. Empty for a complete language (and
  * for a code the payload has no completeness entry for, which a caller
  * should treat exactly like "nothing to say" rather than crash on) — **the
  * owner's rule: nothing is displayed for a complete language, just its
- * name.** A whole-sentence catalog key with named `{done}`/`{total}`
- * parameters, never a concatenation — the trap this chantier has already
- * paid for once (`docs/`'s own account of "cœur + 3 greffons sur 7").
+ * name.** Six whole-sentence catalog keys, named parameters only, never a
+ * concatenation — the trap this chantier has already paid for once. Six
+ * and not one because the brief names the unit and singles out `core`
+ * ("cœur + 3 greffons /7", "2 greffons /7"): the six keys are every
+ * combination of "is `core` among the complete modules" × "how many others,
+ * bucketed 0 / 1 / many" (a bare count needs the singular/plural split this
+ * codebase already uses for `update_out_of_step`/`update_out_of_step_one`,
+ * so "1 greffon" never collides with the "0 greffons"/"{n} greffons" forms
+ * that would need a French verb or adjective to agree in number).
  */
 function annotation(code: string): string {
   const c = completenessOf(code)
   if (!c || c.complete) return ''
-  return t.value('locale_completeness', { done: c.done, total: c.total })
+  const { core, plugins } = moduleSplit(c.complete_modules)
+  const total = c.total
+  if (core && plugins === 0) return t.value('locale_completeness_core', { total })
+  if (core && plugins === 1) return t.value('locale_completeness_core_plugin', { total })
+  if (core) return t.value('locale_completeness_core_plugins', { plugins, total })
+  if (plugins === 0) return t.value('locale_completeness_none', { total })
+  if (plugins === 1) return t.value('locale_completeness_plugin', { total })
+  return t.value('locale_completeness_plugins', { plugins, total })
 }
 
 const languageLabel = computed(() => (props.lang ? languageName(props.lang) : ''))
@@ -63,6 +88,21 @@ const showFallback = computed(() => {
   return !!c && !c.complete
 })
 
+/**
+ * The candidates offered, **minus the chosen language itself** (fix round
+ * 1, task 14 review, finding 7/R6). `fallback_candidates` is core-language
+ * only, and the chosen language can legitimately be one of them (a core
+ * language can be incomplete too) — offering it as its own fallback let the
+ * card render a no-op ("Français", chosen and offered as its own repli) as
+ * if it had acted. If this ever leaves the list empty the honest answer is
+ * `["en"]`: the wire guarantees `"en"` is always among `fallback_candidates`
+ * (`LocaleResponse::fallback_candidates`'s own doc), and English is never
+ * the chosen language while this control shows (English is always
+ * `complete`, so `showFallback` would already be `false`) — meaning "en"
+ * can never be the value filtered out here.
+ */
+const fallbackCandidates = computed(() => props.payload.fallback_candidates.filter((c) => c !== props.lang))
+
 const fallbackLabel = computed(() => (props.fallback ? languageName(props.fallback) : ''))
 
 /**
@@ -73,21 +113,24 @@ const fallbackLabel = computed(() => (props.fallback ? languageName(props.fallba
  * nothing over the chosen language alone, so this line stays empty rather
  * than repeating `chosenAnnotation` right below it.
  *
- * **Why `Math.max`, not a true set union.** The wire (`GET /api/locale`,
- * task 12) serves one `done`/`total` pair *per language*, never a
- * per-module breakdown — `Coverage::modules()` exists on the Rust side but
- * was deliberately not put on the wire (task 12's own report: the
- * `LanguageCompleteness` struct carries only the aggregate numbers "task
- * 14's phrase key needs"). Recovering the true combined count (a module
- * resolved by *either* language) would need that per-module detail, and
- * fetching it would mean a second HTTP round trip per keystroke in the
- * fallback `Select` — exactly the kind of new IPC/route this chantier's own
- * constraints forbid re-introducing. `Math.max(chosenDone, fallbackDone)`
- * is the best lower bound the two aggregate numbers alone support
- * (`|A ∪ B| >= max(|A|, |B|)` always holds), so the displayed "still in
- * English" count is a safe upper bound on the truth — it can overstate how
- * much still needs English, never understate it, which is the direction
- * that does not mislead an owner into over-trusting a fallback.
+ * **A true set union, not a bound.** `complete_modules` (fix round 1, task
+ * 14 review, finding 1/R1) names which modules each language actually
+ * covers, so `done` here is `|chosen.complete_modules ∪ fallback
+ * .complete_modules|` — the real answer, not `Math.max(chosen.done,
+ * fallback.done)`, which the review measured as reachable up to "3 still in
+ * English" when the true remainder was 0 (chosen and fallback covering
+ * disjoint module sets — the case this feature exists for, since
+ * `fallback_candidates` is deliberately the core's own languages while the
+ * chosen language may come from a single plugin's pack). The server
+ * already builds this list in the same handler and the same registry read
+ * that produces `done`/`total`; publishing it cost one additive field, no
+ * new route.
+ *
+ * **The unit is named** ("modules", per the owner's ruling — the remaining
+ * count is not decomposed by `core`/plugin the way the own-language
+ * annotation is, since a module set can span both and "N greffons" would
+ * misname `core` if it were the one still uncovered) with the same
+ * singular/plural key split as `annotation` uses, for the same reason.
  */
 const fallbackAnnotation = computed(() => {
   if (!showFallback.value || props.fallback === 'en') return ''
@@ -95,9 +138,10 @@ const fallbackAnnotation = computed(() => {
   const fb = completenessOf(props.fallback)
   if (!chosen || !fb) return ''
   const total = chosen.total
-  const done = Math.max(chosen.done, fb.done)
+  const done = new Set([...chosen.complete_modules, ...fb.complete_modules]).size
   const remaining = total - done
   if (remaining <= 0) return ''
+  if (remaining === 1) return t.value('locale_fallback_result_one', { done, total })
   return t.value('locale_fallback_result', { done, total, remaining })
 })
 </script>
@@ -121,19 +165,27 @@ const fallbackAnnotation = computed(() => {
       <span v-if="chosenAnnotation" class="text-sm text-muted-foreground" data-locale-completeness>{{ chosenAnnotation }}</span>
     </div>
 
-    <div v-if="showFallback" class="flex flex-wrap items-center gap-2" data-fallback-row>
-      <label class="grid gap-1 text-sm">
-        {{ t('locale_fallback_label') }}
-        <Select :model-value="fallback" @update:model-value="(v) => emit('update:fallback', String(v))">
-          <SelectTrigger class="min-w-32" data-fallback-select :aria-label="t('locale_fallback_label')"><SelectValue>{{ fallbackLabel }}</SelectValue></SelectTrigger>
-          <SelectContent>
-            <SelectItem v-for="c in payload.fallback_candidates" :key="c" :value="c">
-              {{ languageName(c) }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-      </label>
-      <span v-if="fallbackAnnotation" class="text-sm text-muted-foreground" data-fallback-result>{{ fallbackAnnotation }}</span>
+    <div v-if="showFallback" class="flex flex-col gap-1" data-fallback-row>
+      <div class="flex flex-wrap items-center gap-2">
+        <label class="grid gap-1 text-sm">
+          {{ t('locale_fallback_label') }}
+          <Select :model-value="fallback" @update:model-value="(v) => emit('update:fallback', String(v))">
+            <SelectTrigger class="min-w-32" data-fallback-select :aria-label="t('locale_fallback_label')"><SelectValue>{{ fallbackLabel }}</SelectValue></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="c in fallbackCandidates" :key="c" :value="c">
+                {{ languageName(c) }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </label>
+        <span v-if="fallbackAnnotation" class="text-sm text-muted-foreground" data-fallback-result>{{ fallbackAnnotation }}</span>
+      </div>
+      <!-- The owner's rule: English is a non-removable third level, never
+           itself presented as removable — but sitting in this list as an
+           ordinary pick, nothing said that picking it here means "no
+           fallback", or that English remains underneath regardless (fix
+           round 1, task 14 review, finding 5/R7). -->
+      <p class="text-xs text-muted-foreground" data-fallback-hint>{{ t('locale_fallback_hint') }}</p>
     </div>
   </div>
 </template>

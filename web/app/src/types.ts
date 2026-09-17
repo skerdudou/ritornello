@@ -182,6 +182,16 @@ export interface LanguageCompleteness {
   complete: boolean
   done: number
   total: number
+  /**
+   * Names of the modules `Complete` for this language (fix round 1, task 14
+   * review). Lets the SPA compute the true set union between a chosen
+   * language and a candidate fallback, instead of `Math.max(chosen.done,
+   * fallback.done)` — a bound that was exact only when one language's
+   * covered set contained the other's, and reachable up to "N still in
+   * English" when the truth was 0, in the exact configuration this feature
+   * targets (a plugin-only chosen language, a core-language fallback).
+   */
+  complete_modules: string[]
 }
 /**
  * Widened for task 14 of the language-packs chantier (task 12's own report:

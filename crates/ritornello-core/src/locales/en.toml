@@ -58,14 +58,29 @@ tens_window_ms_label = "Entry window for the +10 offset (ms)"
 language = "Language"
 display_card_title = "Language and display"
 # Whole-sentence phrase keys with named parameters (task 14, language-packs
-# chantier): a number concatenated to a label is not translatable, and this
-# is the exact trap the chantier's own plan names ("cœur + 3 greffons sur
-# 7"). `locale_completeness` annotates one incomplete language in the
-# selector; `locale_fallback_result` is what the fallback control shows once
-# a real fallback is chosen — "the only way to know if the fallback served".
-locale_completeness = "{done} of {total} translated"
+# chantier; the six `locale_completeness_*` keys added in fix round 1): a
+# number concatenated to a label is not translatable, and this is the exact
+# trap the chantier's own plan names ("cœur + 3 greffons sur 7"). The six
+# `locale_completeness_*` keys annotate one incomplete language in the
+# selector, naming `core` when it is among the covered modules and the unit
+# ("plugins") otherwise — every combination of "core covered?" x "how many
+# others, 0 / 1 / many" (the 0/1 split, not a plural suffix, is what keeps
+# the French forms grammatical: see `locale_completeness_core_plugin` vs
+# `_plugins`). `locale_fallback_result`/`_one` are what the fallback control
+# shows once a real fallback is chosen — "the only way to know if the
+# fallback served" — with the same singular/plural split for the same
+# reason; the unit there is "modules" rather than "plugins", since the set
+# still uncovered can include `core` itself.
+locale_completeness_core = "core /{total}"
+locale_completeness_core_plugin = "core + 1 plugin /{total}"
+locale_completeness_core_plugins = "core + {plugins} plugins /{total}"
+locale_completeness_none = "0 /{total}"
+locale_completeness_plugin = "1 plugin /{total}"
+locale_completeness_plugins = "{plugins} plugins /{total}"
 locale_fallback_label = "Fallback"
-locale_fallback_result = "{done} of {total}, {remaining} still in English"
+locale_fallback_hint = "English always underlies every choice — picking it here adds no extra fallback."
+locale_fallback_result_one = "{done} /{total}, 1 module still in English"
+locale_fallback_result = "{done} /{total}, {remaining} modules still in English"
 player_card_title = "Player"
 ok = "OK"
 remote_title = "Remote control"
