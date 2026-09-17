@@ -2,7 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
 import { resetCatalog, useCatalog } from './composables/useCatalog'
-import { resetMetrics } from './composables/useMetrics'
+import { resetMetrics, useMetrics } from './composables/useMetrics'
 import { router } from './router'
 
 // The visual marker of the current page: the class `exact-active-class` adds
@@ -244,6 +244,18 @@ describe('shell navigation', () => {
     // delay this test does not run through.
     expect(w.find('router-view-stub').exists()).toBe(false)
     expect(w.find('header [data-connection]').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('offers a reload once the core has restarted, and not before', async () => {
+    // Offered and not forced: the settings cards only save on a button, so
+    // an automatic reload would discard what an owner is in the middle of
+    // typing.
+    const w = await mountAt('/')
+    expect(w.find('[data-ui-stale]').exists()).toBe(false)
+    useMetrics().staleUi.value = true
+    await w.vm.$nextTick()
+    expect(w.find('[data-ui-stale]').exists()).toBe(true)
     w.unmount()
   })
 })

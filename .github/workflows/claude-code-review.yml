@@ -1,14 +1,23 @@
 name: Claude Code Review
 
+# **A review that says nothing used to be indistinguishable from one that
+# never ran.** `claude-code-action` reports `outcome=success` whenever the SDK
+# returns, and the `code-review` plugin is silent by design on a clean pull
+# request ("if there are no issues that meet this criteria, do not proceed").
+# So a green check meant one of three things and named none of them. Measured
+# on this repository, all three green, none commented:
+#
+#   PR #35, attempt 1:  3 turns,  12.7s, $0.10,  0 denials -- never started
+#   PR #35, attempt 2: 24 turns,  95s,   $0.55, 11 denials -- prevented
+#   PR #22:            54 turns, 319s,   $2.07, 12 denials -- worked
+#
+# Two things were wrong and both are fixed below: the review could not run,
+# and nothing reported what it did. Across the whole repository only two runs
+# had ever produced a comment.
+
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
 
 jobs:
   claude-review:
@@ -17,13 +26,24 @@ jobs:
     # spends tokens to reach the conclusion the CI already proves. Keyed on
     # `user.type` rather than on a list of logins, so a bot added later is
     # covered without an edit here.
-    if: github.event.pull_request.user.type != 'Bot'
+    #
+    # **And none for a draft.** The plugin's own first step stops on one, so
+    # the review was being paid for and thrown away; `ready_for_review` is in
+    # the trigger list above, so the review happens when the draft opens. This
+    # also keeps the verdict below honest: the legitimate early stop it would
+    # otherwise have to tell apart from an abandoned run no longer reaches it.
+    if: github.event.pull_request.user.type != 'Bot' && !github.event.pull_request.draft
 
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
+      # `write`, both of them, and not the `read` this workflow shipped with:
+      # the review comments on the pull request and the verdict step below
+      # posts and edits its own comment. Inline review comments live under the
+      # pulls API and the verdict comment under the issues API, so both are
+      # needed and neither is spare.
+      pull-requests: write
+      issues: write
       id-token: write
 
     steps:
@@ -32,15 +52,168 @@ jobs:
         with:
           fetch-depth: 1
 
+      # The verdict step counts what Claude posted *during this run*. Taken
+      # before the action starts, so a comment left on an earlier push cannot
+      # be counted as this run's output -- which would report `findings` for a
+      # review that in fact said nothing this time.
+      - name: Mark where this run starts
+        id: since
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # **Does this pull request edit the workflow the action is about to
+      # validate?** The action compares the running file against the default
+      # branch's copy byte for byte and skips when they differ -- so a pull
+      # request touching this file can never be reviewed, and reddening it
+      # would be a permanent false alarm on exactly the changes that need
+      # care. Measured on PR #36: "Skipping action due to workflow
+      # validation", no model invoked.
+      #
+      # Computed here rather than read out of the action's log: a warning
+      # string is not an interface, and `git diff` against the default branch
+      # is the same question the server asks.
+      - name: Does this pull request change the review workflow itself?
+        id: selfchange
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$DEFAULT_BRANCH"
+          if git diff --quiet FETCH_HEAD -- .github/workflows/claude-code-review.yml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "This pull request edits the review workflow, so the action will refuse to run."
+          fi
+
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Unpinned, and that is a known cost rather than an oversight: the
+          # marketplace is cloned from `main` on every run, so the plugin can
+          # change under a workflow file that has not. Visible in this
+          # repository's own history -- PR #22's comment is an `h3` heading and
+          # PR #29's an `h2`, from two different versions of the same plugin.
+          # The action offers no version pin for a plugin; the verdict step
+          # below is what turns a behaviour change into a red job instead of a
+          # silent one.
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          claude_args: '--allowedTools "mcp__github_inline_comment__create_inline_comment"'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          # **`bypassPermissions`, not an allow-list.** This line used to read
+          # `--allowedTools "mcp__github_inline_comment__create_inline_comment"`
+          # -- one tool, while the plugin's procedure needs `gh pr diff`,
+          # `gh pr view`, `git blame`, `git log` and a dozen subagents. Every
+          # one of those was refused, which is what the 11 and 12 denials
+          # above are, and the agent gave up after 3 turns one time and 24 the
+          # next. An allow-list also cannot anticipate what the next version
+          # of an unpinned plugin will reach for, so it would silently rot.
+          #
+          # The trade is bounded: this is `pull_request`, not
+          # `pull_request_target`, and the action already restores `.claude/`,
+          # `CLAUDE.md` and the other sensitive paths from `origin/main`
+          # before running, treating the pull request head as untrusted. The
+          # token is read-only for contents.
+          claude_args: '--permission-mode bypassPermissions'
 
+      # **The step that ends the silence.** Runs whatever the review did,
+      # including when the action itself failed -- that case has no execution
+      # file at all, which `review-verdict.mjs` reports rather than skips.
+      - name: Say what the review did
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SINCE: ${{ steps.since.outputs.at }}
+          EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
+          WORKFLOW_CHANGED: ${{ steps.selfchange.outputs.changed }}
+        run: |
+          set -euo pipefail
+
+          # What Claude left on the pull request since this run began. Both
+          # APIs, because an inline finding and a summary comment live in
+          # different places and either one means the review spoke.
+          #
+          # The timestamps are GitHub's own ISO-8601 UTC, so a string
+          # comparison is a chronological one. `github-actions[bot]` -- the
+          # author of the verdict comment posted below -- is not `claude[bot]`
+          # and so cannot be counted as a finding by a later run.
+          # **Summed across pages, not read as one number.** `gh api
+          # --paginate` emits one JSON document PER PAGE and `--jq` runs
+          # against each separately ("Each page is a separate JSON array"), so
+          # a pull request past the 30-comment page size yields several lines
+          # and `$((a + b))` would fail on the lot. `awk` sums whatever
+          # arrives, one page or six, and prints 0 for none.
+          #
+          # **`pipefail` is load-bearing here, not decoration.** `awk` prints
+          # `0` and exits 0 whether the API returned an empty page or nothing
+          # at all, so without it a failed `gh` call reads as "Claude left no
+          # comments" -- a clean verdict on a review nobody measured, which is
+          # the exact silence this file replaces. Measured while writing it: a
+          # TLS timeout on the `gh` call printed `0` and returned success.
+          filter="[.[] | select(.user.login == \"claude[bot]\") | select(.created_at >= \"$SINCE\")] | length"
+          sum_pages() { gh api "$1" --paginate --jq "$filter" | awk '{ total += $1 } END { print total + 0 }'; }
+          inline=$(sum_pages "repos/$REPO/pulls/$PR/comments")
+          summary=$(sum_pages "repos/$REPO/issues/$PR/comments")
+          count=$((inline + summary))
+          echo "Claude left $inline inline comment(s) and $summary summary comment(s) during this run."
+
+          # The script exits 1 on `failed` and 2 on a usage error, so it is
+          # run without `set -e` killing the job before the comment is posted.
+          # Posting the verdict is the whole point; reddening the job comes
+          # after it, never instead of it.
+          status=0
+          node .github/scripts/review-verdict.mjs "${EXECUTION_FILE:-}" "$count" "${WORKFLOW_CHANGED:-false}" > verdict.md || status=$?
+
+          # Exit 2 is a usage error: the script wrote its complaint to stderr
+          # and nothing to stdout. An empty body is a 422 from the comments
+          # API, so posting it would redden this step with a message about
+          # JSON rather than about the review. Fail, but say why on the pull
+          # request like every other path here does.
+          if [ ! -s verdict.md ]; then
+            {
+              echo '<!-- claude-code-review-verdict -->'
+              echo '## Code review'
+              echo
+              echo '**The verdict step failed, so this pull request has not been reviewed.**'
+              echo
+              echo 'See the job log for the error.'
+            } > verdict.md
+            status=1
+            # The script exited before it could write the summary, so this
+            # path writes its own -- an empty run summary next to a red job is
+            # the silence being replaced, in miniature.
+            cat verdict.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Only to the log here. The run summary is written by the script
+          # itself, which appends the verdict AND the per-tool breakdown --
+          # having both places append would print the verdict twice.
+          cat verdict.md
+
+          # Sticky: edit the previous verdict rather than stack one per push.
+          # The marker is matched against the body rather than the author, so
+          # a repository with several bot commenters still finds it.
+          #
+          # Same per-page trap as above, handled the other way: the filter
+          # emits one id per line across every page and `tail -n 1` takes the
+          # most recent. A `last` inside the jq would pick the last of EACH
+          # page and hand several ids to the PATCH below.
+          existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.body | contains("<!-- claude-code-review-verdict -->")) | .id' | tail -n 1)
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" -F body=@verdict.md > /dev/null
+            echo "Updated verdict comment $existing."
+          else
+            gh api --method POST "repos/$REPO/issues/$PR/comments" -F body=@verdict.md > /dev/null
+            echo "Posted a new verdict comment."
+          fi
+
+          exit "$status"

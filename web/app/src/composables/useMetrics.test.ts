@@ -23,6 +23,14 @@ function ok(body: Record<string, unknown> = payload()) {
   return new Response(JSON.stringify(body), { status: 200 })
 }
 
+/** A successful `/api/system` response carrying a given version (and,
+ *  optionally, a `session` — kept as a wire-shape stress case, not as
+ *  something `staleUi` reads any more). Built on `payload`/`ok` rather than a
+ *  parallel harness. */
+function systemResponse(over: Record<string, unknown> = {}) {
+  return ok(payload(over))
+}
+
 /** Lets the probe's `await` chain settle. The probe is asynchronous even when
  *  `fetch` resolves at once, so a bare `advanceTimersByTime` returns before
  *  `unavailable` has been written. */
@@ -147,5 +155,81 @@ describe('useMetrics connection state', () => {
     await settle()
 
     expect(connection.value).toBe('online')
+  })
+})
+
+describe('useMetrics staleUi', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.unstubAllGlobals()
+    vi.useFakeTimers()
+  })
+
+  afterEach(async () => {
+    const { resetMetrics } = await import('./useMetrics')
+    resetMetrics()
+    vi.useRealTimers()
+  })
+
+  it('raises staleUi when the core answers with a different version', async () => {
+    // A core that restarted on a new version is a core whose assets may have
+    // moved: the page is still running the bundle of the previous version,
+    // and nothing reloads it. Two samples of the same version must NOT raise
+    // it — that would put the banner on screen on every ordinary poll.
+    const spy = vi
+      .fn()
+      .mockResolvedValueOnce(systemResponse({ version: '0.2.0' }))
+      .mockResolvedValueOnce(systemResponse({ version: '0.2.0' }))
+      .mockResolvedValue(systemResponse({ version: '0.2.1' }))
+    vi.stubGlobal('fetch', spy)
+    const { useMetrics } = await import('./useMetrics')
+    const { start, staleUi } = useMetrics()
+    start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(staleUi.value).toBe(false)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(staleUi.value).toBe(false)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(staleUi.value).toBe(true)
+  })
+
+  it('never lowers staleUi once raised', async () => {
+    // A flapping answer must not make the banner blink: the page's code is
+    // stale for good once the core has restarted on a new version, whatever
+    // comes next.
+    const spy = vi
+      .fn()
+      .mockResolvedValueOnce(systemResponse({ version: '0.2.0' }))
+      .mockResolvedValueOnce(systemResponse({ version: '0.2.1' }))
+      .mockResolvedValue(systemResponse({ version: '0.2.0' }))
+    vi.stubGlobal('fetch', spy)
+    const { useMetrics } = await import('./useMetrics')
+    const { start, staleUi } = useMetrics()
+    start()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(staleUi.value).toBe(true)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(staleUi.value).toBe(true)
+  })
+
+  it('does not raise staleUi on a plain restart that keeps the same version', async () => {
+    // Major B: `session` is minted fresh on *every* process start — a plain
+    // "Redémarrer Ritornello", a crash-restart, a reboot of the Pi — and none
+    // of those move the version or the bundled UI. Before the fix, the latch
+    // watched `session` and this scenario raised the banner on a restart that
+    // served the exact same assets, right next to the "Ritornello a
+    // redémarré" toast — an outright lie.
+    const spy = vi
+      .fn()
+      .mockResolvedValueOnce(systemResponse({ session: 'a', version: '0.2.0' }))
+      .mockResolvedValue(systemResponse({ session: 'b', version: '0.2.0' }))
+    vi.stubGlobal('fetch', spy)
+    const { useMetrics } = await import('./useMetrics')
+    const { start, staleUi } = useMetrics()
+    start()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(staleUi.value).toBe(false)
   })
 })

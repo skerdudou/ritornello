@@ -7,13 +7,14 @@ import {
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import CoverCacheDetails from '../components/CoverCacheDetails.vue'
+import InstallablesDialog from '../components/InstallablesDialog.vue'
 import UpdateCard from '../components/UpdateCard.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
 import { predictedThumbnailBytes } from '../composables/coverWeight'
 import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
-import type { AudioPayload, LocalePayload, SettingsPayload, UpdatePayload, Weekday } from '../types'
+import type { AudioPayload, LocalePayload, SettingsPayload, UpdatePayload } from '../types'
 
 const { t, reload } = useCatalog()
 // The plugin state comes from the module, not from a local `ref`: the top
@@ -24,6 +25,10 @@ const audio = ref<AudioPayload>({ devices: [], current: null })
 const locale = ref<LocalePayload>({ locales: [], current: null })
 const device = ref('')
 const lang = ref('')
+// The language `loadAll()` last read from the server, kept apart from `lang`
+// (the Select's own binding): `saveDisplay` compares the two to decide
+// whether the locale route needs a write at all.
+const loadedLocale = ref('')
 const audioUnavailable = ref(false)
 const settings = ref<SettingsPayload>({
   volume_repeat_initial_ms: 800,
@@ -63,10 +68,6 @@ const update = ref<UpdatePayload>({
   busy: null,
   last_rollback: null,
 })
-
-const WEEKDAYS: Weekday[] = [
-  'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
-]
 
 /**
  * The core's own internal cap on the number of cache entries
@@ -265,56 +266,9 @@ const clockHoursLabel = computed(() =>
   settings.value.clock_24h ? t.value('clock_24h') : t.value('clock_12h'),
 )
 
-const updatePolicyLabel = computed(() => {
-  switch (settings.value.update_policy) {
-    case 'check':
-      return t.value('update_policy_check')
-    case 'check_and_install':
-      return t.value('update_policy_check_and_install')
-    default:
-      return t.value('update_policy_off')
-  }
-})
-
-// `?.` guards a payload older than this setting (or a test fixture that
-// predates it): `/api/settings` is deserialized straight from JSON, so
-// nothing here enforces at runtime what the type says is never absent.
-const updateCadenceLabel = computed(() =>
-  settings.value.update_cadence?.kind === 'weekly'
-    ? t.value('update_cadence_weekly')
-    : t.value('update_cadence_daily'),
-)
-
-/**
- * The day of a weekly cadence, read and written through the same computed —
- * `Select` binds to it directly with `v-model`, same idiom as
- * `settings.startup_power` above. Reading falls back to Sunday only for the
- * trigger's own label while the cadence is `daily`, where the row is hidden
- * anyway; writing always produces a `weekly` cadence, since this select only
- * exists in the template while one is already selected.
- */
-const weeklyDay = computed<Weekday>({
-  get: () => (settings.value.update_cadence?.kind === 'weekly' ? settings.value.update_cadence.day : 'sunday'),
-  set: (day) => {
-    settings.value.update_cadence = { kind: 'weekly', day }
-  },
-})
-
-const weekdayLabel = computed(() => t.value(`weekday_${weeklyDay.value}`))
-
-/**
- * Switching cadence kind starts a fresh `weekly` at Sunday, or drops to
- * `daily`. `unknown`, not `string`: `Select`'s emitted value is typed for
- * reka-ui's whole `AcceptableValue` union (it also admits `null`), and every
- * value here but `'weekly'` means "daily" regardless of its type.
- */
-function onCadenceKindChange(kind: unknown) {
-  settings.value.update_cadence = kind === 'weekly' ? { kind: 'weekly', day: 'sunday' } : { kind: 'daily' }
-}
-
 async function loadAll() {
   // Needed here, not redundant: this is what reloads the catalog after a
-  // successful language change (see `changeLanguage` below), in place of the
+  // successful language change (see `saveDisplay` below), in place of the
   // old `location.reload()`.
   await reload()
   // Re-reads the plugin state **and** arms the watch over the "stalled" window
@@ -335,6 +289,7 @@ async function loadAll() {
   // discards the sound, at the top of `aplay -L`).
   device.value = audio.value.current ?? SYSTEM_DEFAULT
   lang.value = locale.value.current ?? 'en'
+  loadedLocale.value = lang.value
 }
 
 onMounted(loadAll)
@@ -360,15 +315,9 @@ interface PluginRow {
   /** A binary on disk that nothing declares — the twin of `missing_binary`. */
   undeclared_binary: boolean
   /**
-   * Fabricated from `/api/update` alone, never from `/api/status`: the
-   * release offers this plugin and nothing on this device — no declaration,
-   * no binary — knows it yet. It has no kind, because it has never run.
-   */
-  not_installed: boolean
-  /**
    * Is this row's move index meaningful? Only a name `plugins.toml` actually
-   * declares can be reordered — `undeclared_binary` and `not_installed` rows
-   * have no line in that file for `move_entry` to act on.
+   * declares can be reordered — an `undeclared_binary` row has no line in
+   * that file for `move_entry` to act on.
    */
   declared: boolean
   /**
@@ -387,6 +336,14 @@ interface PluginRow {
    * `undeclared_binary` is true. Never the same string as `name` once the
    * release's own convention applies to it (`ritornello-plugin-<name>`). */
   binary_file?: string
+  /**
+   * This row's binary is already being erased: an uninstall queued it, or
+   * "Remove the binary" was pressed. It replaces both of the gestures an
+   * `undeclared_binary` row licenses, because both would ask for something
+   * already in flight — which is what made an ordinary uninstall read as a
+   * job left half done.
+   */
+  removal_pending: boolean
 }
 
 /** Intermediate accumulator: the raw kinds, before we decide what must stay in
@@ -407,6 +364,7 @@ interface PluginAccumulator {
   missing_binary: boolean
   undeclared_binary: boolean
   binary_file?: string
+  removal_pending: boolean
 }
 
 /**
@@ -437,6 +395,7 @@ const plugins = computed<PluginRow[]>(() => {
         missing_binary: !!p.missing_binary,
         undeclared_binary: !!p.undeclared_binary,
         binary_file: p.binary_file,
+        removal_pending: !!p.removal_pending,
       })
       continue
     }
@@ -460,6 +419,7 @@ const plugins = computed<PluginRow[]>(() => {
     acc.missing_binary = acc.missing_binary || !!p.missing_binary
     acc.undeclared_binary = acc.undeclared_binary || !!p.undeclared_binary
     acc.binary_file = acc.binary_file ?? p.binary_file
+    acc.removal_pending = acc.removal_pending || !!p.removal_pending
   }
   const declaredRows: PluginRow[] = [...byName.values()].map((acc) => {
     // "unknown" is never shown next to a real kind: we only keep it when it is
@@ -469,13 +429,26 @@ const plugins = computed<PluginRow[]>(() => {
     // order of the lines.
     //
     // A row whose every received kind is "unknown" reads "—", not the word
-    // "unknown": that word never announced anything real, and it used to be
-    // one of two different spellings this table gave to "no kind" — a
-    // `not_installed` row (below) already spells it "—". Both the ordinary
+    // "unknown": that word never announced anything real. Both the ordinary
     // "not yet announced" rows and an `undeclared_binary` line get the same
     // dash (review of task 18, M6).
     const realKinds = acc.receivedKinds.filter((k) => k !== 'unknown')
-    const kinds = realKinds.length > 0 ? realKinds.join(', ') : '—'
+    // Through the same `plugin_kind_*` catalog keys `InstallablesDialog.vue`
+    // uses for the same four words (m5): this column used to show the raw
+    // wire string (`source`, `display`…) while the dialog already translated
+    // it, the one surface in a French interface still speaking English.
+    // A template literal, not concatenation, for the same reason as there:
+    // `i18nKeysUsed.test.ts`'s literal-key scanner only recognises a quoted
+    // string immediately after `t(`, and the four keys are already on its
+    // explicit list.
+    //
+    // A kind outside the closed vocabulary still renders its raw
+    // `plugin_kind_<word>` catalog key here, exactly as it would in the
+    // dialog (F4): filtering it would need the same closed list hard-coded a
+    // fourth time (`plugin_catalogue_declaration.rs`, the scanner's
+    // allow-list, and the four locale keys already are three), which is F6's
+    // question to answer once, not this fix's to answer again here.
+    const kinds = realKinds.length > 0 ? realKinds.map((k) => t.value(`plugin_kind_${k}`)).join(', ') : '—'
     // Looked up by name rather than carried through the accumulator: the
     // offer lives on a wholly different payload (`/api/update`), read once
     // here rather than threaded through every accumulator field above.
@@ -494,7 +467,6 @@ const plugins = computed<PluginRow[]>(() => {
       catalog_unknown: acc.catalog_unknown,
       missing_binary: acc.missing_binary,
       undeclared_binary: acc.undeclared_binary,
-      not_installed: false,
       // Only a name `plugins.toml` truly declares can be reordered.
       // `undeclared_binary` is the one flag among these rows that means
       // "not declared" — everything else here (including `missing_binary`)
@@ -502,44 +474,38 @@ const plugins = computed<PluginRow[]>(() => {
       declared: !acc.undeclared_binary,
       offered: offer?.offered ?? null,
       binary_file: acc.binary_file,
+      removal_pending: acc.removal_pending,
     }
   })
 
-  // The release offers a plugin and nothing on this device declares it or has
-  // its binary: no line for it exists in `/api/status` at all (nothing ever
-  // ran, nothing sits on disk to scan), so this is the one row shape that can
-  // only be known from `/api/update`. Declared plugins come first, in the
-  // file's own order (preserved by the `Map` above); these come after them —
-  // the release's own order, which is the order the components arrived in.
-  const availableNames = new Set(declaredRows.map((r) => r.name))
-  const availableRows: PluginRow[] = update.value.components
-    .filter((c) => c.availability === 'not_installed' && !availableNames.has(c.name))
-    .map((c) => ({
-      name: c.name,
-      kinds: '—',
-      connected: false,
-      stalled: false,
-      starting: false,
-      disabled: false,
-      busy: false,
-      admin: false,
-      version: c.offered ?? undefined,
-      incompatible: undefined,
-      catalog_unknown: false,
-      missing_binary: false,
-      undeclared_binary: false,
-      not_installed: true,
-      declared: false,
-      offered: c.offered,
-    }))
-
-  return [...declaredRows, ...availableRows]
+  // A `not_installed` component used to grow a synthetic row here — the
+  // release offers a plugin and nothing on this device declares it or has
+  // its binary, so no line for it exists in `/api/status` at all. That row
+  // shape now lives on its own screen (`InstallablesDialog.vue`, behind
+  // "Add a component"): choosing to add something the device does not have
+  // is a different question from managing what it runs, and mixing the two
+  // in one table is what the owner objected to. `update.components` is
+  // passed to the dialog directly, and its own `rows` computed does the
+  // `not_installed` filtering — this table renders declared rows alone, and
+  // `PluginRow` no longer carries a `not_installed` field at all: every row
+  // this computed can ever produce is `declared`-or-`undeclared_binary`, so
+  // a third, always-false flag would have been dead weight kept only for a
+  // row shape that can no longer reach this table.
+  //
+  // The guard this used to carry — `!availableNames.has(c.name)`, excluding
+  // a `not_installed` component already present as a declared row — is gone
+  // with it, deliberately. Measured server-side
+  // (`update::state`, `NotInstalled` is only ever set together with
+  // `declared = false`): the two can never name the same component, so the
+  // guard was only ever protecting row uniqueness inside this one table — a
+  // concern that does not exist once "what you have" and "what you could
+  // add" live on two different surfaces.
+  return declaredRows
 })
 
 /** Position of every row that `plugins.toml` actually declares, among
- * themselves only: an `undeclared_binary` or `not_installed` row never
- * carries an arrow, so it must not count when deciding which declared row
- * sits at either end. */
+ * themselves only: an `undeclared_binary` row never carries an arrow, so it
+ * must not count when deciding which declared row sits at either end. */
 const declaredOrder = computed(() => plugins.value.filter((p) => p.declared).map((p) => p.name))
 const isFirstDeclared = (name: string) => declaredOrder.value[0] === name
 const isLastDeclared = (name: string) =>
@@ -581,15 +547,21 @@ async function togglePlugin(row: PluginRow) {
 }
 
 /**
- * One place a stale second tab can be told an arrow no longer applies:
- * `move_entry` refuses out of range rather than clamping, and unlike the
- * `delta` guard (which the page can never trigger, since it only ever sends
- * ±1) this refusal is reachable by an ordinary operator, and carries a
- * catalog sentence of its own (`plugin_already_at_end`). Surfaced exactly
- * like any other refusal here: read from the server's answer, never
- * reworded on this side.
+ * One place a stale second tab can be told an arrow — or a drag — no longer
+ * applies: `move_entry` refuses out of range rather than clamping, and this
+ * refusal is reachable by an ordinary operator, and carries a catalog
+ * sentence of its own (`plugin_move_out_of_range`). Surfaced exactly like any
+ * other refusal here: read from the server's answer, never reworded on this
+ * side.
+ *
+ * `to` is a target position among the **declared** plugins, not a step: a
+ * drag can cross several ranks in one gesture, so the route learned a
+ * position instead of the ±1 it used to accept. The arrows still call this
+ * with their own neighbouring position (see `declaredIndex`) — one write
+ * either way, immediate on drop rather than batched behind a save button,
+ * which is fewer writes than the one-per-arrow-press this table already had.
  */
-async function movePlugin(name: string, delta: 1 | -1) {
+async function movePlugin(name: string, to: number) {
   // Fix round 1, M2: `inProgress` already exists for `togglePlugin`, and
   // every gesture this table added shares its row's name with that same
   // marker — a plugin mid-move is not a plugin that should also be toggled
@@ -597,7 +569,7 @@ async function movePlugin(name: string, delta: 1 | -1) {
   if (inProgress.value.has(name)) return
   inProgress.value.add(name)
   try {
-    const err = await api.post(`/api/plugins/${encodeURIComponent(name)}/move`, { delta })
+    const err = await api.post(`/api/plugins/${encodeURIComponent(name)}/move`, { to })
     if (err) {
       toast.error(err)
       return
@@ -606,6 +578,39 @@ async function movePlugin(name: string, delta: 1 | -1) {
   } finally {
     inProgress.value.delete(name)
   }
+}
+
+/** This plugin's own position among the declared rows, or `-1` for a name
+ * `declaredOrder` no longer carries — a stale drop target disappearing
+ * mid-drag, say. Both the arrows and the drag handle compute a target
+ * position from this rather than from the row's index in the full table,
+ * which also lists rows nothing declares. */
+function declaredIndex(name: string): number {
+  return declaredOrder.value.indexOf(name)
+}
+
+/** Name of the plugin currently being dragged, or `null`: the row grays out
+ * from this, same idiom as `RadioAdmin.vue`'s station table. */
+const draggingPlugin = ref<string | null>(null)
+
+/**
+ * Drop handler for the plugins table's own drag handle.
+ *
+ * `to` is the row dropped onto's own position in `declaredOrder`, read
+ * **before** the drop takes effect — the same convention `move()` itself
+ * uses (splice the source out, then insert at `to` into what remains) and
+ * the one `move_entry` already implements server-side. There is nothing
+ * else to compute: this table has no local list to keep in step, since the
+ * write lands immediately and the next `/api/status` poll is what redraws
+ * the row order.
+ */
+async function dropPlugin(targetName: string) {
+  const from = draggingPlugin.value
+  draggingPlugin.value = null
+  if (!from || from === targetName) return
+  const to = declaredIndex(targetName)
+  if (to === -1) return
+  await movePlugin(from, to)
 }
 
 /**
@@ -713,8 +718,13 @@ async function changeOutput() {
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
 
-async function saveSettings() {
-  const err = await api.put('/api/settings', {
+/**
+ * The `/api/settings` body, shared by every card that writes it
+ * (`saveSettings` and `saveDisplay`): a single conversion list rather than
+ * two copies that would drift.
+ */
+function settingsPayload() {
+  return {
     ...settings.value,
     volume_repeat_initial_ms: Number(settings.value.volume_repeat_initial_ms),
     volume_repeat_interval_ms: Number(settings.value.volume_repeat_interval_ms),
@@ -739,7 +749,11 @@ async function saveSettings() {
     cover_passthrough_max_ko: Number(settings.value.cover_passthrough_max_ko),
     cover_max_pixels_mpx: Number(settings.value.cover_max_pixels_mpx),
     update_hour: Number(settings.value.update_hour),
-  })
+  }
+}
+
+async function saveSettings() {
+  const err = await api.put('/api/settings', settingsPayload())
   toast[err ? 'error' : 'success'](err ?? t.value('ok'))
 }
 
@@ -792,6 +806,11 @@ async function onUpdateCheck() {
 }
 
 const showInstallDialog = ref(false)
+/** The installables dialog (`InstallablesDialog.vue`), behind its own
+ * button: choosing to add a component the device does not have is a
+ * different question from managing the ones it runs, so it does not share
+ * `showInstallDialog`. */
+const showInstallablesDialog = ref(false)
 
 async function onConfirmInstall(names: string[]) {
   showInstallDialog.value = false
@@ -804,12 +823,36 @@ async function onConfirmInstall(names: string[]) {
   await refreshUpdate()
 }
 
-// Changing the language reloads the catalogs instead of reloading the whole
-// page as the old UI did.
-async function changeLanguage() {
-  const err = await api.put('/api/locale', { locale: lang.value })
+/**
+ * Saves the "Language and display" card: the ordinary settings first, the
+ * language only if it moved.
+ *
+ * **The order is load-bearing.** `PUT /api/locale` is followed by a full
+ * reload of the page state (`loadAll`), which overwrites `settings` with what
+ * the server holds. Sent before the settings `PUT`, it would therefore
+ * discard every field of this card the owner had just edited — a date format
+ * quietly reverting, with no error anywhere. A test pins the order.
+ *
+ * The language `PUT` is skipped when the selection has not moved: otherwise
+ * saving a date format would reload the whole state for nothing, and the page
+ * would flicker on an ordinary gesture.
+ *
+ * Partial failure is a real state and is reported honestly: the first error
+ * wins and the second write does not happen.
+ */
+async function saveDisplay() {
+  const err = await api.put('/api/settings', settingsPayload())
   if (err) {
     toast.error(err)
+    return
+  }
+  if (lang.value === loadedLocale.value) {
+    toast.success(t.value('ok'))
+    return
+  }
+  const localeErr = await api.put('/api/locale', { locale: lang.value })
+  if (localeErr) {
+    toast.error(localeErr)
     return
   }
   await loadAll()
@@ -824,12 +867,9 @@ const SECTIONS = [
   { id: 'update', key: 'update_title' },
   { id: 'plugins', key: 'plugins_title' },
   { id: 'audio', key: 'audio_output' },
-  { id: 'language', key: 'language' },
+  { id: 'display', key: 'display_card_title' },
   { id: 'startup', key: 'startup_title' },
-  { id: 'clock', key: 'clock_title' },
-  { id: 'volume-hold', key: 'volume_hold_title' },
-  { id: 'overlays', key: 'overlays_title' },
-  { id: 'seek', key: 'seek_card_title' },
+  { id: 'player', key: 'player_card_title' },
   { id: 'covers', key: 'cover_card_title' },
 ] as const
 
@@ -874,81 +914,21 @@ function goTo(id: string) {
   <div class="flex gap-8">
     <div class="min-w-0 flex-1 space-y-4">
       <!-- Above the plugins table, not inside it (decision 8: the whole of
-           auto-update lives on this one tab). The card and the policy below
-           it are two different cards on purpose: the card is what a payload
-           read from `/api/update` renders, and the policy is an ordinary
-           setting saved through `saveSettings`, like every other card on
-           this page — merging them would mean two save paths behind one
-           title. -->
+           auto-update lives on this one tab). The automatic-checks policy
+           lives inside `UpdateCard` itself, below a separator: above it, two
+           buttons — Check, Install — that act at once; below it, settings
+           that wait for one Save button. That is one save path, not two, so
+           merging what used to be a second card here into `UpdateCard` does
+           not repeat the "two save paths behind one title" mistake this
+           section once refused — there is only one. -->
       <section id="update" class="scroll-mt-6 space-y-4">
-        <UpdateCard :update="update" @check="onUpdateCheck" @install="showInstallDialog = true" />
-
-        <Card>
-          <CardHeader><CardTitle>{{ t('update_policy_title') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-end gap-4">
-            <label class="grid gap-1 text-sm">
-              {{ t('update_policy_label') }}
-              <Select v-model="settings.update_policy">
-                <SelectTrigger class="min-w-40" data-update-policy :aria-label="t('update_policy_label')">
-                  <SelectValue>{{ updatePolicyLabel }}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="off">{{ t('update_policy_off') }}</SelectItem>
-                  <SelectItem value="check">{{ t('update_policy_check') }}</SelectItem>
-                  <SelectItem value="check_and_install">{{ t('update_policy_check_and_install') }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <label class="grid gap-1 text-sm">
-              {{ t('update_hour_label') }}
-              <Input type="number" min="0" max="23" class="w-20" data-update-hour
-                v-model="settings.update_hour" />
-            </label>
-            <label class="grid gap-1 text-sm">
-              {{ t('update_cadence_label') }}
-              <Select :model-value="settings.update_cadence?.kind ?? 'daily'" @update:model-value="onCadenceKindChange">
-                <SelectTrigger class="min-w-32" data-update-cadence :aria-label="t('update_cadence_label')">
-                  <SelectValue>{{ updateCadenceLabel }}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="daily">{{ t('update_cadence_daily') }}</SelectItem>
-                  <SelectItem value="weekly">{{ t('update_cadence_weekly') }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <label v-if="settings.update_cadence?.kind === 'weekly'" class="grid gap-1 text-sm">
-              {{ t('update_cadence_day_label') }}
-              <Select v-model="weeklyDay">
-                <SelectTrigger class="min-w-32" data-update-cadence-day :aria-label="t('update_cadence_day_label')">
-                  <SelectValue>{{ weekdayLabel }}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="d in WEEKDAYS" :key="d" :value="d">{{ t(`weekday_${d}`) }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <!-- Full width, so it reads as its own subject rather than a
-                 fifth field of the "when" row above — and its label names
-                 its scope, because it governs **every** check, the one this
-                 card schedules and the one the button on the card above
-                 fires. It lives here all the same: this is the card that
-                 owns a save path, and the update card above has none. -->
-            <div class="w-full border-t border-border pt-4">
-              <label class="flex items-start gap-3 text-sm">
-                <Switch
-                  data-update-prereleases
-                  :model-value="settings.update_prereleases"
-                  @update:model-value="(v: boolean) => (settings.update_prereleases = v)"
-                />
-                <span class="grid gap-1">
-                  {{ t('update_prereleases_label') }}
-                  <span class="text-xs text-muted-foreground">{{ t('update_prereleases_help') }}</span>
-                </span>
-              </label>
-            </div>
-            <Button data-update-policy-change @click="saveSettings">{{ t('change') }}</Button>
-          </CardContent>
-        </Card>
+        <UpdateCard
+          :update="update"
+          :settings="settings"
+          @check="onUpdateCheck"
+          @install="showInstallDialog = true"
+          @save="saveSettings"
+        />
 
         <UpdateDialog
           :open="showInstallDialog"
@@ -976,8 +956,49 @@ function goTo(id: string) {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="p in plugins" :key="p.name" data-plugin-row class="border-t border-border">
-                  <td class="py-1" data-plugin-name>{{ p.name }}</td>
+                <!--
+                  Draggable rows: only a declared row has a `plugins.toml`
+                  position to drop into, so the handle and the drag
+                  attributes are conditional on `p.declared` — an
+                  `undeclared_binary` or `missing_binary` row's arrows are
+                  already hidden the same way. `dragover.prevent` is
+                  essential, or the browser refuses the drop. The handle
+                  lives inside the name cell rather than a column of its
+                  own, so the header count this table is locked to in the
+                  e2e journey does not change.
+                -->
+                <tr
+                  v-for="p in plugins"
+                  :key="p.name"
+                  data-plugin-row
+                  class="border-t border-border"
+                  :class="p.declared && draggingPlugin === p.name ? 'opacity-50' : ''"
+                  :draggable="p.declared"
+                  @dragstart="p.declared && (draggingPlugin = p.name)"
+                  @dragover.prevent
+                  @drop.prevent="p.declared && dropPlugin(p.name)"
+                  @dragend="draggingPlugin = null"
+                >
+                  <td class="py-1">
+                    <!-- The handle sits beside the name, not inside
+                         `[data-plugin-name]`: that attribute is the name's
+                         own text everywhere else it is queried, and must
+                         keep meaning only that. `aria-hidden` for the same
+                         reason at the accessibility layer: the cell's own
+                         accessible name (what the config journey looks the
+                         row up by) must stay the plugin's name alone —
+                         dragging is decorative and keyboard-inaccessible
+                         either way, the arrows are the real affordance for
+                         anyone not using a pointer. -->
+                    <span
+                      v-if="p.declared"
+                      class="cursor-grab select-none pr-1"
+                      :title="t('reorder_hint')"
+                      aria-hidden="true"
+                      data-plugin-drag-handle
+                    >⠿</span>
+                    <span data-plugin-name>{{ p.name }}</span>
+                  </td>
                   <td data-plugin-kind>{{ p.kinds }}</td>
                   <td data-plugin-version>{{ p.version ?? '—' }}</td>
                   <td data-plugin-state>
@@ -989,16 +1010,14 @@ function goTo(id: string) {
                             ? 'outline'
                             : p.undeclared_binary
                               ? 'outline'
-                              : p.not_installed
+                              : p.disabled
                                 ? 'outline'
-                                : p.disabled
+                                : p.busy
                                   ? 'outline'
-                                  : p.busy
+                                  : p.catalog_unknown && p.connected
                                     ? 'outline'
-                                    : p.catalog_unknown && p.connected
-                                      ? 'outline'
-                                      : p.connected
-                                        ? 'secondary'
+                                    : p.connected
+                                      ? 'secondary'
                                       : p.starting
                                         ? 'secondary'
                                         : p.stalled
@@ -1014,9 +1033,7 @@ function goTo(id: string) {
                            declaration) come next, **before** "connected": both
                            are more precise than a bare "not connected", and
                            must not be confused with each other — they license
-                           opposite gestures. `not_installed` (the release
-                           offers it, nothing here knows it yet) sits beside
-                           them for the same reason. "Busy" comes **before**
+                           opposite gestures. "Busy" comes **before**
                            "connected": a busy plugin is reachable, and that is
                            precisely why "connected" says nothing useful.
                            `catalog_unknown` sits right after, but **paired
@@ -1053,29 +1070,27 @@ function goTo(id: string) {
                            The accumulator already takes that care with `??`;
                            testing `p.incompatible` here would undo it.
 
-                           `update_binary_missing`/`update_undeclared`/
-                           `update_not_installed` are the same catalog keys
-                           `/api/update`'s own card would use for the matching
-                           `Availability` — one wording per condition, never
-                           reinvented here, so the table and the update card
-                           can never disagree about what to call it. -->
+                           `update_binary_missing`/`update_undeclared` are the
+                           same catalog keys `/api/update`'s own card would use
+                           for the matching `Availability` — one wording per
+                           condition, never reinvented here, so the table and
+                           the update card can never disagree about what to
+                           call it. -->
                       {{
                         p.incompatible !== undefined
                           ? t('plugin_incompatible', { found: p.incompatible, expected: protocol })
                           : p.missing_binary
                             ? t('update_binary_missing')
                             : p.undeclared_binary
-                              ? t('update_undeclared')
-                              : p.not_installed
-                                ? t('update_not_installed')
-                                : p.disabled
-                                  ? t('disabled')
-                                  : p.busy
-                                    ? t('busy')
-                                    : p.catalog_unknown && p.connected
-                                      ? t('plugin_catalog_unknown')
-                                      : p.connected
-                                        ? t('connected')
+                              ? t(p.removal_pending ? 'update_removal_pending' : 'update_undeclared')
+                              : p.disabled
+                                ? t('disabled')
+                                : p.busy
+                                  ? t('busy')
+                                  : p.catalog_unknown && p.connected
+                                    ? t('plugin_catalog_unknown')
+                                    : p.connected
+                                      ? t('connected')
                                     : p.starting
                                       ? t('starting')
                                       : p.stalled
@@ -1094,8 +1109,8 @@ function goTo(id: string) {
                     <!-- No confirmation: the action is reversible from this
                          same row, and the notification says what happened.
                          Only a declared row has anything to enable or
-                         disable: `not_installed` and `undeclared_binary` rows
-                         carry no manifest entry for the switch to flip. -->
+                         disable: an `undeclared_binary` row carries no
+                         manifest entry for the switch to flip. -->
                     <Switch
                       v-if="p.declared"
                       data-plugin-toggle
@@ -1114,31 +1129,37 @@ function goTo(id: string) {
                          than clamping, and an arrow that can be pressed and
                          always fails is worse than a greyed one. -->
                     <div v-if="p.declared" class="flex gap-1">
+                      <!-- Alternative to the drag handle: neither the
+                           keyboard nor a touchscreen fares well with
+                           drag-and-drop, the same reasoning the radio
+                           station table already carries. -->
                       <Button
-                        variant="outline" size="icon-sm" data-plugin-up
+                        variant="ghost" size="icon" data-plugin-up
                         :disabled="isFirstDeclared(p.name) || inProgress.has(p.name)"
                         :aria-label="t('plugin_move_up')"
-                        @click="movePlugin(p.name, -1)"
-                      >↑</Button>
+                        @click="movePlugin(p.name, declaredIndex(p.name) - 1)"
+                      >▲</Button>
                       <Button
-                        variant="outline" size="icon-sm" data-plugin-down
+                        variant="ghost" size="icon" data-plugin-down
                         :disabled="isLastDeclared(p.name) || inProgress.has(p.name)"
                         :aria-label="t('plugin_move_down')"
-                        @click="movePlugin(p.name, 1)"
-                      >↓</Button>
+                        @click="movePlugin(p.name, declaredIndex(p.name) + 1)"
+                      >▼</Button>
                     </div>
                     <span v-else>-</span>
                   </td>
                   <td data-plugin-actions>
-                    <!-- Four states, two gestures each, and never the same
+                    <!-- Two states carry two gestures each, and never the same
                          pair twice (Ruling 13/65): `missing_binary` (declared,
                          no binary) installs or uninstalls; `undeclared_binary`
                          (binary, no declaration) declares or removes the
-                         binary; `not_installed` (neither, offered by the
-                         release) only installs — there is no declaration to
-                         remove and no binary to erase; every other row already
-                         has its binary and its declaration, so only
-                         uninstalling applies. -->
+                         binary. Every other row already has its binary and
+                         its declaration, so only uninstalling applies. A
+                         `not_installed` row (neither binary nor declaration,
+                         offered by the release) used to be a third state
+                         here with only Install to offer; that row shape now
+                         lives in `InstallablesDialog.vue` instead, so this
+                         table never renders it any more. -->
                     <!-- Ruling 88, applied here for the same reason it
                          applies to `UpdateDialog`'s switch: `offered ===
                          null` (never `kind`) is the guard, and it is
@@ -1148,24 +1169,29 @@ function goTo(id: string) {
                          from, must not offer a button that can only fail. -->
                     <div class="flex gap-1">
                       <Button
-                        v-if="p.missing_binary || p.not_installed"
+                        v-if="p.missing_binary"
                         variant="outline" size="xs" data-plugin-install
                         :disabled="p.offered === null || inProgress.has(p.name)"
                         @click="installPlugin(p.name)"
                       >{{ t('plugin_install') }}</Button>
+                      <!-- Both gestures this state licenses are withheld while
+                           the binary is already being erased: declaring a file
+                           that is about to vanish, or asking a second time for
+                           the erasure in flight, are the two ways this row used
+                           to mislead. The row says what is happening instead. -->
                       <Button
-                        v-if="p.undeclared_binary"
+                        v-if="p.undeclared_binary && !p.removal_pending"
                         variant="outline" size="xs" data-plugin-declare
                         :disabled="p.offered === null || inProgress.has(p.name)"
                         @click="installPlugin(p.name)"
                       >{{ t('plugin_declare') }}</Button>
                       <Button
-                        v-if="p.undeclared_binary"
+                        v-if="p.undeclared_binary && !p.removal_pending"
                         variant="outline" size="xs" data-plugin-remove-binary
                         @click="removeBinaryTarget = p.binary_file ?? p.name"
                       >{{ t('plugin_remove_binary') }}</Button>
                       <Button
-                        v-if="!p.undeclared_binary && !p.not_installed"
+                        v-if="!p.undeclared_binary"
                         variant="outline" size="xs" data-plugin-uninstall
                         @click="uninstallTarget = p.name"
                       >{{ t('plugin_uninstall') }}</Button>
@@ -1175,8 +1201,26 @@ function goTo(id: string) {
               </tbody>
             </table>
             <p class="mt-2 text-xs text-muted-foreground">{{ t('plugin_order_note') }}</p>
+            <!-- Its own screen, behind its own button: choosing to ADD a
+                 component the device does not have is a different question
+                 from managing the ones it runs, so `not_installed` rows no
+                 longer sit in the table above (see the `plugins` computed). -->
+            <Button
+              variant="outline" size="sm" class="mt-3" data-installables-open
+              @click="showInstallablesDialog = true"
+            >{{ t('installables_title') }}</Button>
           </CardContent>
         </Card>
+
+        <InstallablesDialog
+          :open="showInstallablesDialog"
+          :components="update.components"
+          :outcome="update.outcome"
+          :last-check-unix-s="update.last_check_unix_s"
+          :busy="update.busy"
+          @update:open="(v: boolean) => (showInstallablesDialog = v)"
+          @install="installPlugin"
+        />
 
         <!-- One shared dialog for the whole table, keyed by `uninstallTarget`
              rather than one per row: only one confirmation is ever on screen,
@@ -1258,26 +1302,81 @@ function goTo(id: string) {
                 </SelectItem>
               </SelectContent>
             </Select>
-            <Button data-audio-change :disabled="audioUnavailable" @click="changeOutput">{{ t('change') }}</Button>
+            <Button data-audio-change :disabled="audioUnavailable" @click="changeOutput">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
 
-      <section id="language" class="scroll-mt-6">
+      <!-- Language and display: the owner's own three pairings ("language
+           goes with date/time", "date/time is display", "overlays are
+           display") only resolve into distinct cards if read in isolation —
+           together they name one card, not two. One button, because the two
+           routes behind it interact: see `saveDisplay`. -->
+      <section id="display" class="scroll-mt-6">
         <Card>
-          <CardHeader><CardTitle>{{ t('language') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-center gap-2">
-            <Select v-model="lang">
-              <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue>{{ languageLabel }}</SelectValue></SelectTrigger>
-              <SelectContent>
-                <!-- Name of the language and not its code: "français" is read,
-                     "fr" is guessed. The code remains the value sent to the core. -->
-                <SelectItem v-for="l in locale.locales" :key="l" :value="l">
-                  {{ languageName(l) }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Button data-lang-change @click="changeLanguage">{{ t('change') }}</Button>
+          <CardHeader><CardTitle>{{ t('display_card_title') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-col gap-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <Select v-model="lang">
+                <SelectTrigger class="min-w-32" :aria-label="t('language')"><SelectValue>{{ languageLabel }}</SelectValue></SelectTrigger>
+                <SelectContent>
+                  <!-- Name of the language and not its code: "français" is read,
+                       "fr" is guessed. The code remains the value sent to the core. -->
+                  <SelectItem v-for="l in locale.locales" :key="l" :value="l">
+                    {{ languageName(l) }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <!-- Date and time. Two separate settings, at the owner's request: the
+                 order of a date and the 12/24 h format do not vary together from one
+                 country to another. No time zone setting — the display runs on the
+                 device, the page formats in the browser's time zone, and a third
+                 setting could only contradict one of the two. -->
+            <div class="flex flex-wrap items-end gap-4 border-t border-border pt-4">
+              <label class="grid gap-1 text-sm">
+                {{ t('clock_date_label') }}
+                <Select v-model="settings.date_format">
+                  <SelectTrigger class="min-w-36" data-date-format-select :aria-label="t('clock_date_label')"><SelectValue>{{ dateFormatLabel }}</SelectValue></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="day_month_year">{{ t('clock_date_dmy') }}</SelectItem>
+                    <SelectItem value="year_month_day">{{ t('clock_date_ymd') }}</SelectItem>
+                    <SelectItem value="month_day_year">{{ t('clock_date_mdy') }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <label class="grid gap-1 text-sm">
+                {{ t('clock_hours_label') }}
+                <!-- A boolean rendered as two named choices rather than a
+                     checkbox: "24 h" is not the absence of "12 h", and a checkbox
+                     labelled "24 h" would read badly when unchecked. -->
+                <Select :model-value="settings.clock_24h ? '24' : '12'"
+                        @update:model-value="(v) => (settings.clock_24h = v === '24')">
+                  <SelectTrigger class="min-w-36" data-clock-hours-select :aria-label="t('clock_hours_label')"><SelectValue>{{ clockHoursLabel }}</SelectValue></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="24">{{ t('clock_24h') }}</SelectItem>
+                    <SelectItem value="12">{{ t('clock_12h') }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <p class="w-full text-sm text-muted-foreground">{{ t('clock_hint') }}</p>
+            </div>
+
+            <div class="flex flex-wrap items-end gap-4 border-t border-border pt-4">
+              <label class="grid gap-1 text-sm">
+                {{ t('overlay_ms_label') }}
+                <Input type="number" min="1000" max="15000" step="500" class="w-28" data-overlay-ms
+                  v-model="settings.overlay_ms" />
+              </label>
+              <label class="grid gap-1 text-sm">
+                {{ t('tens_window_ms_label') }}
+                <Input type="number" min="1000" max="15000" step="500" class="w-28" data-tens-window-ms
+                  v-model="settings.tens_window_ms" />
+              </label>
+            </div>
+
+            <Button data-display-change @click="saveDisplay">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -1294,99 +1393,42 @@ function goTo(id: string) {
                 <SelectItem value="previous">{{ t('startup_previous') }}</SelectItem>
               </SelectContent>
             </Select>
-            <Button data-startup-change @click="saveSettings">{{ t('change') }}</Button>
+            <Button data-startup-change @click="saveSettings">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
 
-      <!-- Date and time. Two separate settings, at the owner's request: the
-           order of a date and the 12/24 h format do not vary together from one
-           country to another. No time zone setting — the display runs on the
-           device, the page formats in the browser's time zone, and a third
-           setting could only contradict one of the two. -->
-      <section id="clock" class="scroll-mt-6">
+      <!-- Player: the owner's own pairing, "volume hold and seeking are
+           player configuration". One button: both fields already share the
+           same route (`saveSettings`), so merging them costs nothing beyond
+           the card boundary. -->
+      <section id="player" class="scroll-mt-6">
         <Card>
-          <CardHeader><CardTitle>{{ t('clock_title') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-end gap-4">
-            <label class="grid gap-1 text-sm">
-              {{ t('clock_date_label') }}
-              <Select v-model="settings.date_format">
-                <SelectTrigger class="min-w-36" data-date-format-select :aria-label="t('clock_date_label')"><SelectValue>{{ dateFormatLabel }}</SelectValue></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="day_month_year">{{ t('clock_date_dmy') }}</SelectItem>
-                  <SelectItem value="year_month_day">{{ t('clock_date_ymd') }}</SelectItem>
-                  <SelectItem value="month_day_year">{{ t('clock_date_mdy') }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <label class="grid gap-1 text-sm">
-              {{ t('clock_hours_label') }}
-              <!-- A boolean rendered as two named choices rather than a
-                   checkbox: "24 h" is not the absence of "12 h", and a checkbox
-                   labelled "24 h" would read badly when unchecked. -->
-              <Select :model-value="settings.clock_24h ? '24' : '12'"
-                      @update:model-value="(v) => (settings.clock_24h = v === '24')">
-                <SelectTrigger class="min-w-36" data-clock-hours-select :aria-label="t('clock_hours_label')"><SelectValue>{{ clockHoursLabel }}</SelectValue></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="24">{{ t('clock_24h') }}</SelectItem>
-                  <SelectItem value="12">{{ t('clock_12h') }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </label>
-            <Button data-clock-change @click="saveSettings">{{ t('change') }}</Button>
-            <p class="w-full text-sm text-muted-foreground">{{ t('clock_hint') }}</p>
-          </CardContent>
-        </Card>
-      </section>
+          <CardHeader><CardTitle>{{ t('player_card_title') }}</CardTitle></CardHeader>
+          <CardContent class="flex flex-col gap-4">
+            <div class="flex flex-wrap items-end gap-4">
+              <label class="grid gap-1 text-sm">
+                {{ t('volume_hold_initial') }}
+                <Input type="number" min="200" max="5000" step="100" class="w-28" data-hold-initial
+                  v-model="settings.volume_repeat_initial_ms" />
+              </label>
+              <label class="grid gap-1 text-sm">
+                {{ t('volume_hold_interval') }}
+                <Input type="number" min="100" max="2000" step="50" class="w-28" data-hold-interval
+                  v-model="settings.volume_repeat_interval_ms" />
+              </label>
+              <p data-hold-hint class="w-full text-sm text-muted-foreground">{{ t('volume_hold_hint') }}</p>
+            </div>
 
-      <section id="volume-hold" class="scroll-mt-6">
-        <Card>
-          <CardHeader><CardTitle>{{ t('volume_hold_title') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-end gap-4">
-            <label class="grid gap-1 text-sm">
-              {{ t('volume_hold_initial') }}
-              <Input type="number" min="200" max="5000" step="100" class="w-28" data-hold-initial
-                v-model="settings.volume_repeat_initial_ms" />
-            </label>
-            <label class="grid gap-1 text-sm">
-              {{ t('volume_hold_interval') }}
-              <Input type="number" min="100" max="2000" step="50" class="w-28" data-hold-interval
-                v-model="settings.volume_repeat_interval_ms" />
-            </label>
-            <Button data-hold-change @click="saveSettings">{{ t('change') }}</Button>
-          </CardContent>
-        </Card>
-      </section>
+            <div class="flex flex-wrap items-end gap-4 border-t border-border pt-4">
+              <label class="grid gap-1 text-sm">
+                {{ t('seek_step_label') }}
+                <Input type="number" min="1" max="120" class="w-28" data-seek-step-s
+                  v-model="settings.seek_step_s" />
+              </label>
+            </div>
 
-      <section id="overlays" class="scroll-mt-6">
-        <Card>
-          <CardHeader><CardTitle>{{ t('overlays_title') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-end gap-4">
-            <label class="grid gap-1 text-sm">
-              {{ t('overlay_ms_label') }}
-              <Input type="number" min="1000" max="15000" step="500" class="w-28" data-overlay-ms
-                v-model="settings.overlay_ms" />
-            </label>
-            <label class="grid gap-1 text-sm">
-              {{ t('tens_window_ms_label') }}
-              <Input type="number" min="1000" max="15000" step="500" class="w-28" data-tens-window-ms
-                v-model="settings.tens_window_ms" />
-            </label>
-            <Button data-overlays-change @click="saveSettings">{{ t('change') }}</Button>
-          </CardContent>
-        </Card>
-      </section>
-
-      <section id="seek" class="scroll-mt-6">
-        <Card>
-          <CardHeader><CardTitle>{{ t('seek_card_title') }}</CardTitle></CardHeader>
-          <CardContent class="flex flex-wrap items-end gap-4">
-            <label class="grid gap-1 text-sm">
-              {{ t('seek_step_label') }}
-              <Input type="number" min="1" max="120" class="w-28" data-seek-step-s
-                v-model="settings.seek_step_s" />
-            </label>
-            <Button data-seek-change @click="saveSettings">{{ t('change') }}</Button>
+            <Button data-player-change @click="saveSettings">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>
@@ -1528,7 +1570,7 @@ function goTo(id: string) {
               </p>
             </div>
 
-            <Button data-cover-change @click="saveSettings">{{ t('change') }}</Button>
+            <Button data-cover-change @click="saveSettings">{{ t('save') }}</Button>
           </CardContent>
         </Card>
       </section>

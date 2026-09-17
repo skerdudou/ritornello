@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import {
   api, Button, createT, Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
-  Input, Skeleton, useSkeleton, type Catalog,
+  Input, move, Skeleton, useSkeleton, type Catalog,
 } from '@ritornello/ui'
 import { computed, onMounted, ref } from 'vue'
-import { move } from './order'
 import CountryPicker from './CountryPicker.vue'
 import { countryName, ALL_COUNTRIES, type Country } from './country'
 

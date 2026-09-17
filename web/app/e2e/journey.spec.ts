@@ -26,10 +26,14 @@ test('navigation between the home page, the config and the plugin pages', async 
   // caught.
   await expect(page.getByRole('cell', { name: 'radio', exact: true })).toBeVisible()
 
-  // The update card, and its two buttons. Counted rather than merely found:
-  // a button removed by a refactor must turn this red.
+  // The update card, now the one card holding every control the second,
+  // merged-away card used to own too: Check, Install, the beta switch, the
+  // policy trigger, the cadence trigger, and Save (the cadence-day trigger
+  // stays hidden on the harness's default daily cadence, so it does not
+  // count here). Counted rather than merely found: a button removed by a
+  // refactor must turn this red.
   await expect(page.locator('[data-update-card]')).toBeVisible()
-  await expect(page.locator('[data-update-card] button')).toHaveCount(2)
+  await expect(page.locator('[data-update-card] button')).toHaveCount(6)
   // Against the real `/api/update` this harness serves, not only the page:
   // `not.toHaveText('')` and a `toHaveText` pinned to the client's own
   // pre-fetch default would both stay green against a broken or 404
@@ -54,7 +58,7 @@ test('navigation between the home page, the config and the plugin pages', async 
     'aria-checked',
     'false',
   )
-  await expect(page.locator('[data-update-policy-change]')).toHaveCount(1)
+  await expect(page.locator('[data-update-save]')).toHaveCount(1)
 
   // The plugins table's columns, against a real core. Nothing here counted
   // them before, so the Version column could have been added — or dropped
@@ -87,7 +91,7 @@ test('navigation between the home page, the config and the plugin pages', async 
   // **in the document flow** -- a bare text at the bottom of the page, which
   // had to be scrolled to. Nothing but this journey can catch it: jsdom
   // computes no style, and the equivalent unit assertion would wrongly pass.
-  await page.locator('[data-seek-change]').click()
+  await page.locator('[data-player-change]').click()
   const notif = page.locator('[data-sonner-toast]').first()
   await expect(notif).toBeVisible()
   // `fixed`: this is the proof that the stylesheet is loaded. Without it, the
@@ -486,9 +490,11 @@ test('an order arrow writes a real reorder, checked against the server, and is p
     // completed successfully — `order()` is read fresh rather than assumed.
     const current = await order();
     if (JSON.stringify(current) !== JSON.stringify(before)) {
-      const radioIndex = current.indexOf('radio')
-      const delta = radioIndex > before.indexOf('radio') ? -1 : 1
-      await request.post('/api/plugins/radio/move', { data: { delta } })
+      // The wire moved from a ±1 `delta` to an absolute `to`: radio's own
+      // original position among the declared plugins is the target, no
+      // direction to compute.
+      const to = before.indexOf('radio')
+      await request.post('/api/plugins/radio/move', { data: { to } })
       await expect.poll(order).toEqual(before)
     }
   }

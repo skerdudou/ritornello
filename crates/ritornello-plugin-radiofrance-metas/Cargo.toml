@@ -8,6 +8,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# What the release catalogue publishes about this plugin, so the installables
+# dialog can describe it before anything of it has ever run: the kinds it
+# serves, and one line an owner reads to choose. English here because this is
+# the only declaration guaranteed to exist — four plugins ship no locale pack
+# at all. A French translation is an addition in the plugin's own pack.
+[package.metadata.ritornello]
+kinds = ["metadata"]
+description = "Track titles for Radio France stations, from their live feed."
+
 [[bin]]
 name = "ritornello-plugin-radiofrance-metas"
 path = "src/main.rs"

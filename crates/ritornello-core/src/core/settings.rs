@@ -433,6 +433,24 @@ mod tests {
         assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
     }
 
+    /// The sentence that tells an owner which switch to tick must name that
+    /// switch as it is actually labelled. A rename on one side alone makes
+    /// the interface contradict itself, and no other test would notice.
+    #[test]
+    fn the_prerelease_sentence_quotes_the_switch_label() {
+        for pack in [
+            ritornello_i18n::try_parse(crate::i18n::EN).unwrap(),
+            ritornello_i18n::try_parse(&fr_pack()).unwrap(),
+        ] {
+            let label = pack.get("update_prereleases_label").expect("label key present");
+            let sentence = pack.get("update_only_prereleases").expect("sentence key present");
+            assert!(
+                sentence.contains(label.as_str()),
+                "{sentence:?} does not name {label:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_cache_estimate_never_promises_that_every_cover_fits() {
         // **A promise the cache cannot keep, in both catalogues.** With

@@ -582,9 +582,23 @@ its section.
 ### Update card
 
 Backed by `GET /api/update`. One line: never checked, no release
-published yet, up to date, or an update available (the installed and the
+published yet, only prereleases published, up to date, or an update
+available (the installed and the
 offered version, in that order, so a reader notices if they were ever
-swapped). An error from the last check, and a one-off note naming what a
+swapped).
+
+**"Only prereleases published" is a sentence of its own and not a shade of
+"no release published yet."** The two differ in the one way that matters to
+whoever reads them: this one names a switch that reader owns. A device whose
+"Offer prereleases" switch is off, reading a repository whose only published
+release is a beta, used to be told nothing was published — a statement about
+the repository, and a false one, which also hid the single gesture that would
+have changed the answer. A **draft** still reduces to "no release published
+yet", and cannot be told apart from an empty repository from the device's
+chair: GitHub lists drafts to a reader with push access alone, and this core
+polls with no token.
+
+An error from the last check, and a one-off note naming what a
 just-finished install placed, show below it when there is one — **except
 for the core**, whose install ends this process before it can write that
 note, so the page comes back reading "Never checked" until the next check
@@ -761,7 +775,7 @@ situations that must not be confused with each other:
 |---|---|---|
 | Declared, binary present | The ordinary case | Enable/disable switch, reorder, Uninstall |
 | Declared, binary **missing** | `plugins.toml` names it but nothing is on disk | Install, or Uninstall (removes the declaration) |
-| Binary present, **undeclared** | A file sits in the plugins directory that nothing declares | Declare, or Remove the binary |
+| Binary present, **undeclared** | A file sits in the plugins directory that nothing declares | Declare, or Remove the binary — **neither, while an erasure is already in flight for it** |
 | Neither, offered by a release | The device has never had it | Install only — there is no declaration to remove and no binary to erase |
 
 Only a genuinely declared row (the first two) carries an order arrow or
@@ -773,14 +787,34 @@ there" instead of inviting a press that can only fail.
 **Uninstall and "Remove the binary" answer before the file is gone**, and
 that is deliberate: erasing it goes through the same privileged step as an
 install, behind the same queue, so it can take up to two minutes. The
-declaration is removed and the plugin stopped straight away, which is why
-the row reappears at once as "Installed but not declared" and settles on
-the next reload. If the erasure itself fails — no polkit rule, most likely
+declaration is removed and the plugin stopped straight away, so the row
+comes back at once as an undeclared binary — which is the truth, since that
+is exactly what the device holds at that instant.
+
+**What that row says while the erasure is in flight is "Erasing the
+binary…", and it offers neither of the two gestures above.** Both would ask
+for something already on its way: declaring a file about to vanish, or
+queueing a second erasure behind the first. The page keeps probing until the
+mark clears, so the row settles on its own rather than waiting for a reload
+— and an owner who reads it is told what is happening instead of being
+offered a button that makes an ordinary uninstall look like a job left half
+done. That reading was the defect this replaced.
+
+If the erasure itself fails — no polkit rule, most likely
 (see
 [installation.md](installation.md#enabling-automatic-updates-once-by-hand))
 — the reason is shown on the Update card above, in the same place an install
-refusal appears. A row that stays "Installed but not declared" with a
-sentence up there is telling you the binary is still on the device.
+refusal appears, and the row falls back to the plain "Installed but not
+declared". A row in **that** state, with a sentence up there, is telling you
+the binary is still on the device.
+
+**An uninstall leaves a row you can act on.** `GET /api/update` serves a
+stored snapshot, so the uninstall writes the component's new state into it
+rather than leaving it to the next check: the row becomes the undeclared one,
+then — once the binary is gone — the fourth state above, offering Install. It
+goes only when nothing offers that component, because there is then genuinely
+nothing to click; publishing a release, not uninstalling, is what makes a
+component installable again.
 
 **The physical remote's source key now cycles through the sources in
 this table's own order, not alphabetically.** Reordering with the arrows

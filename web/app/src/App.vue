@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ConfigProvider, Skeleton, Toaster, useSkeleton } from '@ritornello/ui'
+import { Button, ConfigProvider, Skeleton, Toaster, useSkeleton } from '@ritornello/ui'
 import { computed, onMounted } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import BottomNav from './components/BottomNav.vue'
@@ -37,6 +37,9 @@ const skeleton = useSkeleton(catalogPending)
 // on the configuration page remove or restore the menu entry here, without
 // reloading the page. See `usePlugins`, which writes the previous default.
 const { admins, refresh: refreshPlugins } = usePlugins()
+// Whether the core has restarted under this page since it was loaded — see
+// `useMetrics`' `staleUi` for the latch itself, this is only its read side.
+const { staleUi } = useMetrics()
 
 /**
  * Classes shared by the nav links. The underline is an `after` pseudo-element
@@ -79,6 +82,13 @@ onMounted(async () => {
   await reload()
   await refreshPlugins()
 })
+
+/** Deliberately a whole-document reload: `index.html` is served `no-cache`
+ *  and the app's chunks carry a hash in their name, so this is what picks up
+ *  the new bundle. Wrapped in a function so the test can spy on it. */
+function reloadPage() {
+  window.location.reload()
+}
 </script>
 
 <template>
@@ -106,6 +116,20 @@ onMounted(async () => {
        through the kit). -->
   <ConfigProvider :scroll-body="false">
     <div class="min-h-screen">
+      <!-- App-wide and not on the configuration tab: an update lands while
+           the owner may be anywhere in the SPA. A bar rather than a toast —
+           a toast that has been dismissed cannot be found again, and this
+           statement stays true until the page is reloaded. -->
+      <div
+        v-if="staleUi"
+        data-ui-stale
+        class="flex items-center justify-between gap-3 border-b border-border bg-muted px-3 py-2 text-sm"
+      >
+        <span>{{ t('ui_stale_title') }}</span>
+        <Button size="xs" variant="secondary" data-ui-stale-reload @click="reloadPage">
+          {{ t('ui_stale_reload') }}
+        </Button>
+      </div>
       <header class="border-b border-border">
         <nav class="mx-auto flex max-w-5xl items-center gap-4 px-4 py-3">
           <!-- The brand is the home link, so it carries the same marker:

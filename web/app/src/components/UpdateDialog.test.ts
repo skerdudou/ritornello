@@ -60,6 +60,66 @@ function isChecked(name: string): string | null {
 }
 
 describe('UpdateDialog', () => {
+  it('lists what is out of step and nothing else', async () => {
+    // A component the device does not have belongs in the installables
+    // dialog, not here: mixing "what moved" with "what you could add" is
+    // what made this screen unreadable.
+    mountDialog([
+      core(),
+      {
+        name: 'console',
+        kind: 'plugin',
+        declared: false,
+        binary_present: false,
+        installed: null,
+        offered: '0.3.0',
+        availability: 'not_installed',
+      },
+    ])
+    await flushPromises()
+    const names = [...document.body.querySelectorAll('[data-update-row-name]')].map((n) =>
+      n.textContent?.trim(),
+    )
+    expect(names).toEqual(['core'])
+  })
+
+  it('keeps a declared component whose binary is missing', async () => {
+    // Installing IS the repair for that row, and it is a component the
+    // device declares — so it is not "something you could add".
+    mountDialog([
+      {
+        name: 'cd',
+        kind: 'plugin',
+        declared: true,
+        binary_present: false,
+        installed: null,
+        offered: '0.3.0',
+        availability: 'binary_missing',
+      },
+    ])
+    await flushPromises()
+    expect(document.body.querySelectorAll('[data-update-row-name]')).toHaveLength(1)
+  })
+
+  it('keeps a third-party row that has an offer', async () => {
+    // Its repository answered: it can genuinely be updated from there, and
+    // the row carries the warning that says where the bytes come from.
+    mountDialog([
+      {
+        name: 'x',
+        kind: 'third_party',
+        declared: true,
+        binary_present: true,
+        installed: '1.0.0',
+        offered: '2.0.0',
+        availability: 'update_available',
+        third_party_repo: 'owner/repo',
+      },
+    ])
+    await flushPromises()
+    expect(document.body.querySelectorAll('[data-update-row-name]')).toHaveLength(1)
+  })
+
   it('pre-checks what is out of step and nothing else', async () => {
     mountDialog([
       core(),
@@ -72,8 +132,9 @@ describe('UpdateDialog', () => {
         offered: '0.3.0',
         availability: 'update_available',
       },
-      // not_installed → unchecked, because choosing what is installed is the
-      // operator's decision.
+      // not_installed → excluded from the dialog entirely (task 7): choosing
+      // what to install is a different question, asked by
+      // `InstallablesDialog.vue`, not this one.
       {
         name: 'mpd',
         kind: 'plugin',
@@ -87,7 +148,7 @@ describe('UpdateDialog', () => {
     await flushPromises()
     expect(isChecked('core')).toBe('true')
     expect(isChecked('radio')).toBe('true')
-    expect(isChecked('mpd')).toBe('false')
+    expect(row('mpd')).toBeNull()
   })
 
   /// **The third of the dialog's three exclusions, and the one nothing
@@ -200,38 +261,40 @@ describe('UpdateDialog', () => {
 
   it('does not warn about an unchecked plugin, even while the core is left behind', async () => {
     // The operand the "warns when a plugin is checked" test title promises
-    // but, on its own, does not pin: `mpd` here is never checked (it is
-    // `not_installed`, excluded by the same default as in the first test),
-    // yet the core ends up left behind exactly as in the warning test above.
-    // Without the `checked.value.has(c.name)` guard, every plugin row would
-    // warn whenever the core is left behind, checked or not.
+    // but, on its own, does not pin: `files` here is never checked (it needs
+    // a manual step, same exclusion as in "leaves a component known to need
+    // a manual step unchecked"), yet the core ends up left behind exactly as
+    // in the warning test above. Without the `checked.value.has(c.name)`
+    // guard, every plugin row would warn whenever the core is left behind,
+    // checked or not.
     mountDialog([
       core(),
       {
-        name: 'mpd',
+        name: 'files',
         kind: 'plugin',
-        declared: false,
-        binary_present: false,
-        installed: null,
+        declared: true,
+        binary_present: true,
+        installed: '0.2.0',
         offered: '0.3.0',
-        availability: 'not_installed',
+        availability: 'update_available',
+        installable: false,
       },
     ])
     await flushPromises()
-    expect(isChecked('mpd')).toBe('false')
+    expect(isChecked('files')).toBe('false')
 
     await row('core')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
     await flushPromises()
     expect(isChecked('core')).toBe('false')
-    expect(isChecked('mpd')).toBe('false')
-    expect(row('mpd')?.querySelector('[data-update-row-warning]')).toBeNull()
+    expect(isChecked('files')).toBe('false')
+    expect(row('files')?.querySelector('[data-update-row-warning]')).toBeNull()
   })
 
   it('does not warn about a checked plugin when the core has nothing to update', async () => {
-    // The other operand of the same predicate: the core is unchecked here
-    // too (nothing pre-checks an aligned core), but there is no update it
-    // could be "left behind" from, so a manually-checked plugin gets no
-    // warning either.
+    // The other operand of the same predicate: the core has nothing to
+    // update here (`aligned`), so it does not even appear as a row — but a
+    // manually-checked plugin still gets no warning, because there is
+    // nothing for it to be "left behind" from.
     mountDialog([
       core('aligned'),
       {
@@ -245,7 +308,7 @@ describe('UpdateDialog', () => {
       },
     ])
     await flushPromises()
-    expect(isChecked('core')).toBe('false')
+    expect(row('core')).toBeNull()
     expect(isChecked('radio')).toBe('true')
     expect(row('radio')?.querySelector('[data-update-row-warning]')).toBeNull()
   })
@@ -273,19 +336,21 @@ describe('UpdateDialog', () => {
   })
 
   it('resets its selection every time it reopens, rather than keeping a stale hand-check', async () => {
-    const w = mountDialog([core('aligned')])
+    const w = mountDialog([core('binary_missing')])
     await flushPromises()
-    // Hand-check a row that the default policy would leave unchecked (core
-    // is aligned here, nothing to do), then close and reopen with the same,
-    // still-aligned component. If the reset did not run, the hand-check
-    // would still read `true` — the one outcome this test cannot get by
-    // accident, since the fresh default for an aligned row is `false`.
+    // Hand-check a row that the default policy would leave unchecked
+    // (`binary_missing` is not `update_available`, so nothing pre-checks
+    // it, yet it stays in the dialog — installing is its own repair), then
+    // close and reopen with the same, still-`binary_missing` component. If
+    // the reset did not run, the hand-check would still read `true` — the
+    // one outcome this test cannot get by accident, since the fresh default
+    // for this row is `false`.
     await row('core')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
     await flushPromises()
     expect(isChecked('core')).toBe('true')
 
     await w.setProps({ open: false })
-    await w.setProps({ open: true, components: [core('aligned')] })
+    await w.setProps({ open: true, components: [core('binary_missing')] })
     await flushPromises()
     expect(isChecked('core')).toBe('false')
   })
@@ -301,10 +366,15 @@ describe('UpdateDialog', () => {
         name: 'someones-plugin',
         kind: 'third_party',
         declared: true,
-        binary_present: true,
-        installed: '1.4.0',
+        // `binary_missing`, not `unknown`: the `relevant` filter (task 7)
+        // hides `unknown` rows entirely, so reaching the disabled-switch
+        // guard below needs a fixture that stays in `relevant` — a declared
+        // component whose binary is gone can genuinely have no offer, when
+        // this release's own archive does not carry a build for it either.
+        binary_present: false,
+        installed: null,
         offered: null,
-        availability: 'unknown',
+        availability: 'binary_missing',
         third_party_repo: 'someone/their-plugin',
       },
     ])
@@ -318,16 +388,19 @@ describe('UpdateDialog', () => {
   it('an official plugin this release does not carry cannot be hand-checked either', async () => {
     // Same guard, kind-agnostic: disabling only `third_party` rows would have
     // left this one clickable, offering an install that could only fail.
+    // `binary_missing`, not `unknown`, for the same reason as the test
+    // above: `unknown` never reaches this guard any more, `relevant` hides
+    // it first.
     mountDialog([
       core('aligned'),
       {
         name: 'legacy',
         kind: 'plugin',
         declared: true,
-        binary_present: true,
-        installed: '0.1.0',
+        binary_present: false,
+        installed: null,
         offered: null,
-        availability: 'unknown',
+        availability: 'binary_missing',
       },
     ])
     await flushPromises()

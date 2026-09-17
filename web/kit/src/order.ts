@@ -1,9 +1,12 @@
-// Reordering of stations: pure logic, testable without a DOM.
+// Reordering by drag-and-drop: pure logic, testable without a DOM.
 //
-// The preset **is** the row's position (see `save()` in RadioAdmin.vue and
-// `save_numbers_from_1_to_n_by_position` on the plugin side): dragging a
-// station therefore changes its remote-control number, and that is indeed
-// the intent.
+// Shared by every table in this repository that lets an operator drag a row:
+// the radio station list keeps the preset **as** the row's position (see
+// `save()` in `RadioAdmin.vue` and `save_numbers_from_1_to_n_by_position` on
+// the plugin side), and the configuration page's plugins table sends the
+// result straight to `POST /api/plugins/{name}/move`. Two implementations of
+// one reordering on the same configuration page would be two behaviours to
+// keep in step by hand; this is the one the kit owns instead.
 
 /**
  * Moves the element at index `from` to index `to`, returning a **new**
