@@ -47,6 +47,19 @@ describe('api', () => {
     await expect(api.put('/x', {})).resolves.toBe('duplicate preset')
   })
 
+  it('put never lets an empty error message read as success', async () => {
+    // The convention every caller relies on is `if (err)`: a falsy return
+    // means the write went through. A failed response whose body carries an
+    // empty `error` would therefore be rendered as "Saved ✓" — a refusal
+    // shown as a success. Defensive (see `errorMessage`'s own doc for why no
+    // current producer emits this), but the cost of being wrong here is the
+    // owner believing a setting was stored when it was refused.
+    mockFetch(new Response(JSON.stringify({ error: '' }), { status: 422 }))
+    const err = await api.put('/x', {})
+    expect(err).toBeTruthy()
+    expect(err).toBe('HTTP 422')
+  })
+
   it('put falls back to HTTP <code> when the body is not JSON', async () => {
     mockFetch(new Response('plugin unreachable', { status: 502 }))
     await expect(api.put('/x', {})).resolves.toBe('HTTP 502')
