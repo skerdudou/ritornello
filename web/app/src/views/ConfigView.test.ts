@@ -944,6 +944,14 @@ describe('ConfigView — language and display', () => {
     // `fr` is incomplete but the chosen (and unchanged) language is the
     // complete `en`, so a correct implementation must still skip the whole
     // locale PUT.
+    //
+    // `fallback` is deliberately moved away from `loadedFallback` below:
+    // with the language match dropped, `incomplete` would (wrongly) read
+    // `true` off `fr`'s entry, and `!incomplete || fallback ===
+    // loadedFallback` would then hinge entirely on the fallback comparison
+    // — which passes as long as `fallback` never moves. Moving it is what
+    // makes this test fail against that specific mutation instead of
+    // passing for an unrelated reason.
     const { w, puts } = await mountView({
       '/api/locale': {
         locales: ['en', 'fr'],
@@ -956,6 +964,9 @@ describe('ConfigView — language and display', () => {
         fallback_candidates: ['en', 'fr'],
       },
     })
+    const vm = w.vm as unknown as { fallback: string }
+    vm.fallback = 'fr'
+    await w.vm.$nextTick()
     await w.find('[data-display-change]').trigger('click')
     await flushPromises()
     expect(puts.map((p) => p.url)).not.toContain('/api/locale')
