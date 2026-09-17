@@ -119,6 +119,14 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
     // round 2 — see that clamp's own comment for what depended on it
     // (finding B: a plugin's own admin catalog request is built from that
     // field, and used to silently fall back to `en` for exactly this case).
+    //
+    // **And it clamps what is reported without touching what is stored, on
+    // purpose.** `state.json` goes on holding the language whose pack went
+    // missing, so putting that pack back restores the choice the owner made
+    // instead of leaving the device in an English it never asked for. The
+    // device meanwhile says English everywhere and the card says nothing,
+    // which is honest; nothing here rewrites the setting behind the owner's
+    // back, and nothing should.
     let current = state.locale_current.read().await.clone().filter(|l| locales.iter().any(|x| x == l));
     // Clamped to `fallback_candidates`, falling back to `en`, for the same
     // reason `current` just above is clamped: the stored value can name a
