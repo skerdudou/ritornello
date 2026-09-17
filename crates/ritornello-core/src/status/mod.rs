@@ -69,6 +69,14 @@ pub struct AppState {
     /// up by the next `resweep` — a real locale change — rather than by
     /// every read of this field, and, as before, by a restart of the
     /// service.
+    ///
+    /// **`GET /api/i18n` is no longer one of its readers**: that route
+    /// resolves from `registry` per request, because being a snapshot is
+    /// exactly what made it answer in the *old* language to the re-fetch
+    /// that follows a language change (see `locales::i18n_json`'s own doc).
+    /// What is left here is the HTTP layer's own error wording (the audio
+    /// output routes below), where being one locale change behind for the
+    /// duration of a disk walk costs nothing.
     pub catalog: Arc<RwLock<ritornello_i18n::Chain>>,
     /// Every module's translation layers — the core's own, `common`'s, and
     /// each plugin's announced catalogue — swept from disk once at startup

@@ -267,13 +267,40 @@ pub(super) async fn locale_put(State(state): State<AppState>, Json(req): Json<Lo
 
 /// The core catalog in the current language, flattened, for the SPA's `t()`.
 ///
-/// No I/O: `state.catalog` is a snapshot already resolved from the shared
-/// `Registry` (task 4) by `crate::i18n::core_catalog`, rebuilt only on a real
-/// locale change (`Core::set_locale`) — see `AppState.catalog`'s own doc.
-/// This route, like `admin::admin_i18n` (task 5), only ever reads memory
-/// that was already built before the request arrived.
+/// **Resolved per request from the shared `Registry`, not read from the
+/// snapshot** — the same kind of route as `admin::admin_i18n` (task 5),
+/// which has always done it this way, and for the same reason.
+///
+/// It used to serve `state.catalog`, and that snapshot is swapped by
+/// `Core::set_locale` only *after* `Registry::resweep_async` has walked the
+/// pack root in `spawn_blocking` (`core/settings.rs`). `PUT /api/locale`
+/// answers `204` as soon as the change has been *sent* to the core loop, and
+/// `ConfigView.vue`'s `saveDisplay` then immediately re-fetches this route:
+/// the request raced the walk, and when it won, the page reloaded the
+/// **previous** language's catalogue and stayed in it — nothing re-fetches
+/// afterwards — while `/api/status.locale` already reported the new one.
+/// That is this chantier's own origin defect, one layer up, and the reason
+/// it survived the suite is that the language e2e polled `/api/locale
+/// .current` and never asserted a word of rendered text (final whole-branch
+/// review, device pass, finding 2).
+///
+/// Resolving here removes the race rather than timing it: there is no
+/// snapshot left for a response to precede. `locale_put` writes
+/// `locale_current` before it returns, so any request that observes the
+/// `204` observes the new language here too.
+///
+/// Still no I/O, and no blocking: `Registry::chain_for` reads two in-memory
+/// tiers (its disk tier is swept once — see `Registry`'s own doc), under one
+/// read guard, held for the length of one statement. What is *not* picked up
+/// without a real locale change is a pack edited on disk since the last
+/// sweep, exactly as before: the refresh gesture is unchanged.
 pub(super) async fn i18n_json(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let cat = state.catalog.read().await;
+    let locale = state.locale_current.read().await.clone().unwrap_or_else(|| "en".to_string());
+    let fallback = state.fallback_current.read().await.clone().unwrap_or_else(|| "en".to_string());
+    let cat = {
+        let registry = state.registry.read().await;
+        crate::i18n::core_catalog(&registry, &locale, &fallback)
+    };
     Json(serde_json::json!(cat.entries()))
 }
 
@@ -767,5 +794,54 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["audio_output"], "Sortie audio");
+    }
+
+    /// Final whole-branch review, device pass, finding 2: the page could
+    /// come back from a language change **in the old language**, and stay
+    /// there until a manual reload.
+    ///
+    /// The sequence the SPA actually performs, with nothing draining the
+    /// locale channel — which is the whole point: it stands for the core
+    /// loop still inside `Registry::resweep_async`'s disk walk, the window
+    /// this chantier widened. `PUT` answers `204`, the SPA re-fetches
+    /// `/api/i18n` at once, and the answer must already be the language the
+    /// `204` implied.
+    ///
+    /// The second assertion is what makes the first mean anything: the
+    /// snapshot `state.catalog` is deliberately checked to be *still in the
+    /// old language*, so the route cannot be passing by accident through
+    /// something that had already caught up.
+    ///
+    /// **[MUTATION]**: put `i18n_json` back to `state.catalog.read().await`
+    /// — this test fails, the route answering `Sortie audio` after a `204`
+    /// that said English.
+    #[tokio::test]
+    async fn api_i18n_answers_the_new_language_as_soon_as_put_locale_has() {
+        let (state, _rx, _frx, _dir) = tests_support::app_state_fr();
+        let snapshot = state.catalog.clone();
+        let app = router(state);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::put("/api/locale")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"locale":"en"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = app.oneshot(Request::get("/api/i18n").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["audio_output"], "Audio output", "the page must not reload the language it just left");
+
+        assert_eq!(
+            snapshot.read().await.get("audio_output"),
+            "Sortie audio",
+            "the core has not applied anything yet: that is the race, and the route must not depend on it"
+        );
     }
 }

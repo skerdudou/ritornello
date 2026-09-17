@@ -619,6 +619,26 @@ test('the language card annotates an incomplete language and offers a fallback',
 
     await page.locator('[data-display-change]').click()
 
+    // **The page itself must now be in French**, and this is the assertion
+    // that was missing (final whole-branch review, device pass, finding 2):
+    // everything else in this journey polls the API, and the API was right
+    // all along while the page could come back in the language it had just
+    // left, and stay there until a manual reload. `saveDisplay` re-fetches
+    // `/api/i18n` the moment `PUT /api/locale` answers `204`; that response
+    // used to precede the core's own catalogue swap, which happens after a
+    // `spawn_blocking` walk of the pack root.
+    //
+    // This very button is the check: `save` is one of the two keys the
+    // throwaway French pack above carries (`save = "Enregistrer"`), so its
+    // label moves only if the catalogue the page is holding really did.
+    // The German pack translates the same two keys differently, so no
+    // assertion here can pass by coincidence of an untranslated string.
+    await expect(page.locator('[data-display-change]')).toHaveText('Enregistrer')
+    // The other key of the same pack, on another element and through
+    // another channel (an attribute, not a text node): `language =
+    // "Langue"`.
+    await expect(page.locator('[data-language-select]')).toHaveAttribute('aria-label', 'Langue')
+
     // Checked against the real core, not only the page: both the chosen
     // language and the fallback travelled in the same `PUT /api/locale`
     // (task 13's combined wire shape).
