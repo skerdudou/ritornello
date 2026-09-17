@@ -207,8 +207,12 @@ mod tests {
         // A fixture that failed to load, or was emptied by accident, must
         // not read as "every case passed" — the exact hazard a hardcoded
         // subject list has already produced twice on this branch
-        // (`shipped_language_packs`'s own doc).
-        assert!(cases.len() >= 6, "fixture has fewer cases than expected: {cases:?}");
+        // (`shipped_language_packs`'s own doc). The threshold is the
+        // fixture's own current case count, not a loose lower bound: a
+        // looser number would let a case be deleted — silently narrowing
+        // what this test actually covers — without either side's minimum-
+        // count guard ever noticing (task 15 re-review, N6a).
+        assert!(cases.len() >= 8, "fixture has fewer cases than expected: {cases:?}");
 
         for case in cases {
             let name = case["name"].as_str().expect("case.name is a string");

@@ -1521,8 +1521,20 @@ TOML packs**, decentralized per component:
   in the response), offered only among the languages the *core itself*
   ships (`fallback_candidates`, `Registry::core_languages`): the owner's
   rule reserves a fallback to what is guaranteed to resolve everywhere,
-  never a plugin-only language. A complete language shows just its name —
-  nothing to annotate, nothing to offer a fallback for.
+  never a plugin-only language. **The chosen language is filtered out of
+  its own fallback candidates** — offering French as its own fallback
+  would let the control render a no-op and look like it had acted. A
+  complete language shows just its name — nothing to annotate, nothing to
+  offer a fallback for.
+- **The fallback result**, a second line under the completeness
+  annotation once a fallback other than `en` is actually picked: "the only
+  way to know if the fallback served" — how many of the modules still
+  missing in the chosen language the fallback actually closes, as a true
+  set union of the two languages' own complete modules (not an upper
+  bound), down to "nothing left in English" when it closes every gap.
+  Picking `en` itself as the fallback changes nothing over the chosen
+  language alone, so this line stays empty rather than repeating the
+  completeness annotation right above it.
 - **Adding a language**: copy the reference `en`, translate the values,
   drop it under `<root>/<component>/<lang>.toml`. A missing key or pack
   automatically falls back through the chain above (per-key degradation,

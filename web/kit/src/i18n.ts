@@ -77,11 +77,6 @@ export function createT(catalog: Catalog) {
     // just confirmed the key is the object's own, not inherited or absent —
     // TypeScript's narrowing does not special-case `hasOwn`, so it has to be
     // asserted rather than inferred.
-    // `noUncheckedIndexedAccess` types `catalog[key]` as `string | undefined`
-    // on its own; the `!` is safe here specifically because `Object.hasOwn`
-    // just confirmed the key is the object's own, not inherited or absent —
-    // TypeScript's narrowing does not special-case `hasOwn`, so it has to be
-    // asserted rather than inferred.
     const template = Object.hasOwn(catalog, key) ? catalog[key]! : key
     return params ? interpolate(template, params) : template
   }

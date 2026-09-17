@@ -142,10 +142,12 @@ impl Runtime {
     /// source**, exactly the form a plugin already holds it in
     /// (`include_str!("locales/en.toml")`, as `ritornello-plugin-cd` does
     /// today for English alone — see `CD_EN`). Parsed here with
-    /// [`Layer::parse`], so the refusal below lives where the parse does,
-    /// at **build time**, before a single socket is bound: a plugin that
-    /// has text to confide must be caught here if that text is broken,
-    /// rather than discovered later on a screen.
+    /// [`Layer::parse`], so the refusal below lives where the parse does —
+    /// at the plugin's own **startup**, before a single socket is bound
+    /// (not at Rust compile time: `include_str!` only embeds the bytes,
+    /// this method is what reads them) — a plugin that has text to confide
+    /// must be caught here if that text is broken, rather than discovered
+    /// later on a screen.
     ///
     /// Refuses (`Err`) in two cases, both meaning the same thing — a
     /// plugin that calls this method is declaring it has real text, and a
@@ -1095,8 +1097,9 @@ mod tests {
     }
 
     /// **[MUTATION]** Barrier 6 of the spec: a plugin declaring text whose
-    /// English pack is not even valid TOML must be refused at build time,
-    /// before a socket is bound — not left to fail silently on screen.
+    /// English pack is not even valid TOML must be refused at the
+    /// plugin's own startup, before a socket is bound — not left to fail
+    /// silently on screen.
     #[test]
     fn texts_refuses_an_english_layer_that_fails_to_parse() {
         let r = Runtime::new(

@@ -2587,9 +2587,9 @@ request for it, and `AdminPlugin` carries no `catalog` method. A plugin
 that has UI text confides it once, at startup, through `Runtime::texts(...)`
 (chained onto `declare_runtime!()?` before `.admin(...)?`) — the SDK
 parses and validates every language passed this way there, before a
-single socket is bound, so a broken pack is refused at build time rather
-than discovered on a screen; the sole requirement is a non-empty `en`
-entry (see [Text, translations, and what a plugin owes the
+single socket is bound, so a broken pack is refused at the plugin's own
+startup rather than discovered on a screen; the sole requirement is a
+non-empty `en` entry (see [Text, translations, and what a plugin owes the
 catalogue](#text-translations-and-what-a-plugin-owes-the-catalogue) for
 the full contract and a third-party author's obligations).
 

@@ -102,7 +102,17 @@ export function applyTheme(
   doc: Document = document,
   catalog: Record<string, Preset> = presets,
 ): void {
-  const preset = catalog[id]
+  // `Object.hasOwn`, not bracket access alone: the same prototype-chain
+  // hazard `web/kit/src/i18n.ts`'s `createT` was found carrying (task 15
+  // review, N5) — a stored theme id of `toString` or `constructor` would
+  // otherwise resolve `catalog[id]` against the inherited
+  // `Object.prototype` method (a truthy function), skip the "unknown
+  // theme ignored" warning below, and hand that function to `resolveVars`
+  // instead of falling back honestly. Low reach (the picker only ever
+  // offers a closed list of real preset ids; only a hand-edited
+  // `state.json` could supply an arbitrary one) but the same shape of
+  // defect, so it gets the same fix.
+  const preset = Object.hasOwn(catalog, id) ? catalog[id] : undefined
   if (!preset) {
     console.warn(`unknown theme ignored: ${id}`)
     return

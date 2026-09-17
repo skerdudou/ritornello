@@ -150,11 +150,13 @@ describe('resolver parity with the Rust chain', () => {
   const cases: ParityCase[] = JSON.parse(readFileSync(fixturePath, 'utf-8'))
 
   it('loads the shared fixture, and it is not empty', () => {
-    // Mirrors the Rust side's own `assert!(cases.len() >= 6, ...)`: a
+    // Mirrors the Rust side's own `assert!(cases.len() >= 8, ...)`: a
     // fixture that failed to load or was emptied by accident must fail
     // loudly here too, not read as "every case passed" because there was
-    // nothing to iterate.
-    expect(cases.length).toBeGreaterThanOrEqual(6)
+    // nothing to iterate. Pinned to the fixture's own current case count
+    // (task 15 re-review, N6a) — a looser bound would let a case be
+    // deleted without either side's guard noticing.
+    expect(cases.length).toBeGreaterThanOrEqual(8)
   })
 
   for (const c of cases) {

@@ -48,9 +48,18 @@ impl<P: Player> Core<P> {
     /// A real locale change is also the registry's refresh gesture: the
     /// registry's disk tier is swept once (at startup) and never re-read on
     /// its own, so resweeping here is what lets an operator who edited a
-    /// pack on disk see it without restarting the service — they only have
-    /// to pick a language (even the same one again) for it to take effect.
-    /// Through `Registry::resweep_async`, not the bare, synchronous
+    /// pack on disk see it without restarting the service. **This method
+    /// must actually run for that to happen** — `ConfigView.vue`'s
+    /// `saveDisplay` short-circuits before `PUT /api/locale` when the
+    /// picked language (and, while it is incomplete, the fallback) is
+    /// unchanged from what was last loaded, so re-picking the language
+    /// already in force calls neither this method nor `set_fallback` and
+    /// resweeps nothing (task 15 review, blocking finding 3: an earlier
+    /// version of this comment, and of `docs/interface.md`, claimed
+    /// otherwise). The two gestures that do reach here: a service restart
+    /// (which sweeps once at startup regardless), or an **actual** change
+    /// of the language or the fallback. Through `Registry::resweep_async`,
+    /// not the bare, synchronous
     /// `resweep`: the directory walk and TOML parse run off the async
     /// runtime and before any lock is taken, so this call never blocks a
     /// concurrent reader of the registry (`admin::admin_i18n`, since task 5)
