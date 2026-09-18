@@ -1,9 +1,12 @@
 name: Claude Code
 
-# Say `@claude` and Claude does what the comment asks. `@review` is the other
-# workflow's word, and `claude-code-review.yml` is the only one that answers
-# it -- the exclusion below is what keeps a comment carrying both from
-# starting two runs on the same request.
+# Say `@claude` and Claude does what the comment asks.
+#
+# `/review` and `@claude-review` belong to `claude-code-review.yml`, and the
+# exclusion below is load-bearing rather than tidy: **`@claude-review`
+# contains `@claude`**, so without it every request for a code review would
+# start a second session here, in parallel, doing something nobody asked for
+# and paying for it.
 
 on:
   issue_comment:
@@ -24,8 +27,8 @@ jobs:
     # today -- checked across every workflow and script -- and that is a
     # property worth keeping true by construction rather than by inspection.
     if: |
-      (github.event_name == 'issue_comment' && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude') && !contains(github.event.comment.body, '@review')) ||
-      (github.event_name == 'pull_request_review_comment' && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude') && !contains(github.event.comment.body, '@review')) ||
+      (github.event_name == 'issue_comment' && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude') && !contains(github.event.comment.body, '@claude-review') && !startsWith(github.event.comment.body, '/review')) ||
+      (github.event_name == 'pull_request_review_comment' && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude') && !contains(github.event.comment.body, '@claude-review') && !startsWith(github.event.comment.body, '/review')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest

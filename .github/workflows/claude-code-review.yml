@@ -15,9 +15,19 @@ name: Claude Code Review
 # and nothing reported what it did. Across the whole repository only two runs
 # had ever produced a comment.
 #
-# **It is asked for now, not automatic.** Say `@review` in a comment on a
-# pull request and this runs; say nothing and nothing happens. Reviewing every
-# push was spending tokens on changes nobody was waiting on a verdict for.
+# **It is asked for now, not automatic.** Say `/review` or `@claude-review`
+# in a comment on a pull request and this runs; say nothing and nothing
+# happens. Reviewing every push was spending tokens on changes nobody was
+# waiting on a verdict for.
+#
+# **Why two spellings, and why they are matched differently.** `/review` is a
+# command, so it is read at the START of the comment: `contains` would fire on
+# any comment quoting a URL that happens to hold `/review` -- a link to
+# `.../pull/41/reviews` is enough -- and a review nobody asked for is the
+# thing this trigger exists to stop. `@claude-review` is a mention, so it is
+# read anywhere in the comment, the way a mention is written. It is also not a
+# GitHub account (checked: 404), unlike `@review`, which is an organisation
+# and would have rendered every request as a link to strangers.
 #
 # Two consequences of the trigger, both deliberate:
 #
@@ -32,8 +42,9 @@ name: Claude Code Review
 #    nothing here changes that.
 #
 # `claude.yml` answers `@claude` and does whatever the comment asks. The two
-# do not overlap: this one runs the plugin's five-pass procedure and reports a
-# verdict, and it is the only one that answers `@review`.
+# do not overlap, and keeping that true takes an explicit exclusion over
+# there: `@claude-review` CONTAINS `@claude`, so without it every request for
+# a review would start a second, unasked-for session alongside this one.
 
 on:
   issue_comment:
@@ -48,13 +59,14 @@ jobs:
     # **No review triggered by a bot**, keyed on `user.type` rather than on a
     # list of logins so a bot added later is covered without an edit here.
     # `dependabot-analysis.yml` writes comments on the bump pull requests, and
-    # one of them quoting a diff that happens to contain `@review` would
+    # one of them quoting a diff that happens to carry either spelling would
     # otherwise start a review nobody asked for, on the one class of pull
     # request this repository has deliberately excluded.
     if: |
       github.event.issue.pull_request &&
       github.event.comment.user.type != 'Bot' &&
-      contains(github.event.comment.body, '@review')
+      (startsWith(github.event.comment.body, '/review') ||
+       contains(github.event.comment.body, '@claude-review'))
 
     runs-on: ubuntu-latest
     permissions:
