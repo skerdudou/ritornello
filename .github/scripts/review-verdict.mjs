@@ -57,6 +57,13 @@ export function decide(messages, postedComments, { workflowChanged = false } = {
   // review that DID run is judged on what it did, whatever the workflow diff
   // says, so this cannot become a way to land an unreviewed change by
   // touching the file.
+  //
+  // Since the trigger became a comment the validated file is the default
+  // branch's own copy, so this may no longer be reachable at all. The caller
+  // now answers the question by listing the pull request's files rather than
+  // by diffing a workspace that no longer holds it; the branch stays because
+  // a guess about someone else's server is not worth a comment telling the
+  // author their change went unreviewed when it did not.
   if (workflowChanged && !usable) {
     return {
       verdict: 'skipped',

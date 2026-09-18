@@ -14,25 +14,47 @@ name: Claude Code Review
 # Two things were wrong and both are fixed below: the review could not run,
 # and nothing reported what it did. Across the whole repository only two runs
 # had ever produced a comment.
+#
+# **It is asked for now, not automatic.** Say `@review` in a comment on a
+# pull request and this runs; say nothing and nothing happens. Reviewing every
+# push was spending tokens on changes nobody was waiting on a verdict for.
+#
+# Two consequences of the trigger, both deliberate:
+#
+# 1. **A comment-triggered run is not a check on the pull request.** It shows
+#    in the Actions tab and not in the merge box, so a red job no longer
+#    blocks anything. The red is kept anyway -- it is still what distinguishes
+#    a review that failed from one that found nothing, and the verdict comment
+#    says which on the pull request itself.
+# 2. **Dependabot is untouched.** This workflow already skipped bots, so the
+#    bump pull requests never reached it; `dependabot-analysis.yml` and
+#    `dependabot-auto-merge.yml` are what handle those, automatically, and
+#    nothing here changes that.
+#
+# `claude.yml` answers `@claude` and does whatever the comment asks. The two
+# do not overlap: this one runs the plugin's five-pass procedure and reports a
+# verdict, and it is the only one that answers `@review`.
 
 on:
-  pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+  issue_comment:
+    types: [created]
 
 jobs:
   claude-review:
-    # **No review for a bot's pull request.** Dependabot opens one per grouped
-    # bump (see .github/dependabot.yml), and reviewing `serde 1.0.x -> 1.0.y`
-    # spends tokens to reach the conclusion the CI already proves. Keyed on
-    # `user.type` rather than on a list of logins, so a bot added later is
-    # covered without an edit here.
+    # **`issue_comment` fires on issues too**, where there is nothing to
+    # review: `github.event.issue.pull_request` is the field that exists only
+    # on a pull request's comments, and is how the two are told apart.
     #
-    # **And none for a draft.** The plugin's own first step stops on one, so
-    # the review was being paid for and thrown away; `ready_for_review` is in
-    # the trigger list above, so the review happens when the draft opens. This
-    # also keeps the verdict below honest: the legitimate early stop it would
-    # otherwise have to tell apart from an abandoned run no longer reaches it.
-    if: github.event.pull_request.user.type != 'Bot' && !github.event.pull_request.draft
+    # **No review triggered by a bot**, keyed on `user.type` rather than on a
+    # list of logins so a bot added later is covered without an edit here.
+    # `dependabot-analysis.yml` writes comments on the bump pull requests, and
+    # one of them quoting a diff that happens to contain `@review` would
+    # otherwise start a review nobody asked for, on the one class of pull
+    # request this repository has deliberately excluded.
+    if: |
+      github.event.issue.pull_request &&
+      github.event.comment.user.type != 'Bot' &&
+      contains(github.event.comment.body, '@review')
 
     runs-on: ubuntu-latest
     permissions:
@@ -63,30 +85,48 @@ jobs:
           set -euo pipefail
           echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      # **Does this pull request edit the workflow the action is about to
-      # validate?** The action compares the running file against the default
-      # branch's copy byte for byte and skips when they differ -- so a pull
-      # request touching this file can never be reviewed, and reddening it
-      # would be a permanent false alarm on exactly the changes that need
-      # care. Measured on PR #36: "Skipping action due to workflow
-      # validation", no model invoked.
+      # **Does this pull request edit the workflow the action validates?** The
+      # action compares the running file against the default branch's copy
+      # byte for byte and skips when they differ, so a pull request touching
+      # this file may not be reviewable at all -- and reddening that would be
+      # a false alarm on exactly the changes that need the most care. Measured
+      # on PR #36: "Skipping action due to workflow validation", no model
+      # invoked.
       #
-      # Computed here rather than read out of the action's log: a warning
-      # string is not an interface, and `git diff` against the default branch
-      # is the same question the server asks.
+      # **Asked of the pull request, not of the workspace.** Under the old
+      # `pull_request` trigger a `git diff` against the default branch was the
+      # same question the server asks, because the workspace held the pull
+      # request. Under `issue_comment` the workspace starts on the default
+      # branch -- the action checks the pull request out afterwards, for
+      # itself -- so that diff would now compare the default branch with
+      # itself and answer `false` every time, quietly retiring the branch it
+      # guards. The file list of the pull request is the same question asked
+      # of something this trigger has not moved.
+      #
+      # It may well be that this case can no longer happen, the validated file
+      # now being the default branch's own. That is a guess about someone
+      # else's server, and the cost of being wrong is a red job and a comment
+      # saying a pull request was not reviewed when it was -- so the branch
+      # stays until a run proves it unreachable.
       - name: Does this pull request change the review workflow itself?
         id: selfchange
         shell: bash
         env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
-          git fetch --depth=1 origin "$DEFAULT_BRANCH"
-          if git diff --quiet FETCH_HEAD -- .github/workflows/claude-code-review.yml; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
+          # One filename per line across every page, so the per-page `--jq`
+          # trap does not apply. `grep -q` exits 1 when it matches nothing,
+          # which is a legitimate answer here and not an error: inside `if`
+          # it does not trip `set -e`.
+          if gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename' \
+            | grep -qxF '.github/workflows/claude-code-review.yml'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "This pull request edits the review workflow, so the action will refuse to run."
+            echo "This pull request edits the review workflow; the action may refuse to run."
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Run Claude Code Review
@@ -104,7 +144,7 @@ jobs:
           # silent one.
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.issue.number }}'
           # **`bypassPermissions`, not an allow-list.** This line used to read
           # `--allowedTools "mcp__github_inline_comment__create_inline_comment"`
           # -- one tool, while the plugin's procedure needs `gh pr diff`,
@@ -114,11 +154,20 @@ jobs:
           # next. An allow-list also cannot anticipate what the next version
           # of an unpinned plugin will reach for, so it would silently rot.
           #
-          # The trade is bounded: this is `pull_request`, not
-          # `pull_request_target`, and the action already restores `.claude/`,
-          # `CLAUDE.md` and the other sensitive paths from `origin/main`
-          # before running, treating the pull request head as untrusted. The
-          # token is read-only for contents.
+          # **What bounds the trade, now that the trigger is a comment.** It
+          # used to be the `pull_request` trigger itself. That argument is
+          # gone: `issue_comment` runs from the default branch with the
+          # repository's own token, and the action then checks the pull
+          # request out and runs its code under this very permission mode. So
+          # the bound is elsewhere, and it is worth naming because it is now
+          # the only one:
+          #
+          #   - the action resolves the commenter and refuses anyone without
+          #     write access ("Checking permissions for actor" / "Permission
+          #     level retrieved" in every run log), so a passer-by on a public
+          #     repository cannot start this by commenting;
+          #   - the bot filter above keeps an automated comment from doing it;
+          #   - `contents` stays `read`, so nothing here can write a ref.
           claude_args: '--permission-mode bypassPermissions'
 
       # **The step that ends the silence.** Runs whatever the review did,
@@ -130,10 +179,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event.issue.number }}
           SINCE: ${{ steps.since.outputs.at }}
           EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
           WORKFLOW_CHANGED: ${{ steps.selfchange.outputs.changed }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
 
@@ -145,6 +195,17 @@ jobs:
           # comparison is a chronological one. `github-actions[bot]` -- the
           # author of the verdict comment posted below -- is not `claude[bot]`
           # and so cannot be counted as a finding by a later run.
+          #
+          # **The action's own progress comment must not count as a finding.**
+          # On a comment trigger -- and only there -- the action posts
+          # "Claude finished @user's task in 1m 56s" under `claude[bot]`
+          # itself, so every run would otherwise report `findings` and no run
+          # could ever be `clean`. It is excluded by the run id it links to
+          # rather than by that sentence: the wording is someone else's to
+          # change, while a comment pointing at this very run is by
+          # construction this run talking about itself. Verified on PR #26,
+          # where the body carries no HTML marker to key on and the job link
+          # is the only stable handle.
           # **Summed across pages, not read as one number.** `gh api
           # --paginate` emits one JSON document PER PAGE and `--jq` runs
           # against each separately ("Each page is a separate JSON array"), so
@@ -158,7 +219,7 @@ jobs:
           # comments" -- a clean verdict on a review nobody measured, which is
           # the exact silence this file replaces. Measured while writing it: a
           # TLS timeout on the `gh` call printed `0` and returned success.
-          filter="[.[] | select(.user.login == \"claude[bot]\") | select(.created_at >= \"$SINCE\")] | length"
+          filter="[.[] | select(.user.login == \"claude[bot]\") | select(.created_at >= \"$SINCE\") | select((.body | contains(\"actions/runs/$RUN_ID\")) | not)] | length"
           sum_pages() { gh api "$1" --paginate --jq "$filter" | awk '{ total += $1 } END { print total + 0 }'; }
           inline=$(sum_pages "repos/$REPO/pulls/$PR/comments")
           summary=$(sum_pages "repos/$REPO/issues/$PR/comments")
