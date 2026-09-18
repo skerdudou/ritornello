@@ -25,6 +25,7 @@ const CATALOGUE = {
   connected: 'connecté', unavailable: 'unavailable', stalled: 'figé', disabled: 'désactivé',
   starting: 'démarrage', busy: 'occupé',
   plugin_incompatible: 'Compilé pour le protocole {found} ; ce cœur parle le {expected}',
+  plugin_catalog_unknown: 'Compilé avant les packs de langue',
   admin_link: 'admin', toggle_plugin: 'Activer ou désactiver {name}',
   plugin_enabled: '{name} activé.', plugin_disabled: '{name} désactivé.',
   update_binary_missing: 'Non installé', update_undeclared: 'Installé mais non déclaré',
@@ -118,7 +119,19 @@ function payloads() {
       ],
       current: 'hw:CARD=HDMI',
     } as unknown,
-    '/api/locale': { locales: ['en', 'fr'], current: 'fr' } as unknown,
+    '/api/locale': {
+      locales: ['en', 'fr'],
+      current: 'fr',
+      // Both complete: existing tests in this file assume the language card
+      // shows nothing but the plain selector (task 14 predates none of
+      // them, and the owner's rule is "nothing for a complete language").
+      completeness: [
+        { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+        { language: 'fr', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+      ],
+      fallback_current: 'en',
+      fallback_candidates: ['en'],
+    } as unknown,
     '/api/logs': { lines: ['WARN plugin radio unavailable'] } as unknown,
     '/api/settings': {
       volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
@@ -520,6 +533,53 @@ describe('ConfigView — plugin table', () => {
     expect(row.text()).toContain('0.2.1')
   })
 
+  it('names a wired plugin whose announcement predates the catalog field', async () => {
+    // Unlike `incompatible`, this plugin is fully wired — `connected: true`
+    // — and the badge must say so is not the point: it must name the
+    // missing language packs instead of a bare "connected" that would say
+    // nothing about them. See `PluginRow.catalog_unknown`'s own doc.
+    const w = await mountWithStatus({
+      plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false, catalog_unknown: true }],
+      active_source: '',
+    })
+    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'cd')!
+    expect(row.get('[data-plugin-state]').text()).toBe('Compilé avant les packs de langue')
+    // The raw key must never reach the screen — same discipline as
+    // `plugin_incompatible` above.
+    expect(row.text()).not.toContain('plugin_catalog_unknown')
+  })
+
+  it('a legacy plugin whose socket failed reads as unavailable, not as legacy', async () => {
+    // The defect this test was added to catch (fix round 2, Important 1):
+    // the core sets `catalog_unknown` from the announcement alone, at the
+    // same site as `ui_version`/`version`/`repository` — whether or not the
+    // socket connect that follows succeeds — so `catalog_unknown: true` and
+    // `connected: false` is a real combination, not a hypothetical one. The
+    // more urgent fact (this specific attempt failed) must win: a legacy
+    // binary that cannot even be reached needs "unavailable", not a
+    // sentence about its language packs.
+    const w = await mountWithStatus({
+      plugins: [{ name: 'cd', kind: 'source', connected: false, admin: false, catalog_unknown: true }],
+      active_source: '',
+    })
+    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'cd')!
+    expect(row.get('[data-plugin-state]').text()).toBe('unavailable')
+    expect(row.text()).not.toContain('plugin_catalog_unknown')
+  })
+
+  it('a wired plugin with an announced but empty catalog is not named as legacy', async () => {
+    // The mirror case: no `catalog_unknown` in the payload at all — exactly
+    // what a textless but up-to-date plugin (`console`, `ouifm-metas`,
+    // `radiofrance-metas`) announces. Conflating the two would make every
+    // legitimately textless plugin look like an old binary.
+    const w = await mountWithStatus({
+      plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false }],
+      active_source: '',
+    })
+    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'cd')!
+    expect(row.get('[data-plugin-state]').text()).toBe('connecté')
+  })
+
   it('encodes the plugin name in the toggle URL', async () => {
     const wrapper = await mountWithStatus({
       plugins: [{ name: 'my plugin', kind: 'source', connected: true, admin: false }],
@@ -843,10 +903,98 @@ describe('ConfigView — language and display', () => {
     expect(urls.indexOf('/api/settings')).toBeLessThan(urls.indexOf('/api/locale'))
   })
 
+  it('loads the persisted fallback rather than silently defaulting to en (fix round 1, finding 4/R4)', async () => {
+    // The review measured that every fixture in this file used
+    // `fallback_current: 'en'` — the same value `fallback`'s own default
+    // starts at — so replacing `fallback.value = locale.value
+    // .fallback_current` with a hardcoded `'en'` in `loadAll` left all 94
+    // tests in this file green. The real-world failure mode of that
+    // mutation: a device with a persisted fallback of `fr` would show
+    // English in the control, then submit `fallback: 'en'` on the next
+    // unrelated save — silently wiping the stored value. A fixture whose
+    // `fallback_current` is not `'en'` is the only way to tell the read
+    // from the default apart.
+    const { w } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr', 'de'],
+        current: 'fr',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
+          { language: 'de', complete: false, done: 0, total: 1, complete_modules: [] },
+        ],
+        fallback_current: 'de',
+        fallback_candidates: ['en', 'fr', 'de'],
+      },
+    })
+    const vm = w.vm as unknown as { fallback: string }
+    expect(vm.fallback).toBe('de')
+  })
+
   it('does not touch the locale route when the language was not changed', async () => {
     // Otherwise every save of a date format would reload the whole state
     // for nothing, and the page would flicker on an ordinary gesture.
     const { w, puts } = await mountView({})
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+    expect(puts.map((p) => p.url)).not.toContain('/api/locale')
+  })
+
+  it('does not touch the locale route when nothing moved, even for an incomplete current language', async () => {
+    // Mutation check on `localeUnchanged`'s `!incomplete || fallback.value
+    // === loadedFallback.value`: with `incomplete` true, `!incomplete` is
+    // false, so only the OR's second half can still make the whole
+    // expression true. A `||` turned into `&&` here would send a redundant
+    // PUT even though neither the language nor the fallback moved — this is
+    // the one scenario (`incomplete` true, fallback genuinely unchanged)
+    // where the two operators actually disagree.
+    const { w, puts } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr'],
+        current: 'fr',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
+        ],
+        fallback_current: 'en',
+        fallback_candidates: ['en', 'fr'],
+      },
+    })
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+    expect(puts.map((p) => p.url)).not.toContain('/api/locale')
+  })
+
+  it('never sends a fallback while staying on a complete language, even if another language in the union is incomplete', async () => {
+    // Mutation check on `localeIsIncomplete`'s `c.language === code &&
+    // !c.complete`: dropping the language match would make *any* incomplete
+    // entry anywhere in the array mark every language "incomplete" — here
+    // `fr` is incomplete but the chosen (and unchanged) language is the
+    // complete `en`, so a correct implementation must still skip the whole
+    // locale PUT.
+    //
+    // `fallback` is deliberately moved away from `loadedFallback` below:
+    // with the language match dropped, `incomplete` would (wrongly) read
+    // `true` off `fr`'s entry, and `!incomplete || fallback ===
+    // loadedFallback` would then hinge entirely on the fallback comparison
+    // — which passes as long as `fallback` never moves. Moving it is what
+    // makes this test fail against that specific mutation instead of
+    // passing for an unrelated reason.
+    const { w, puts } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr'],
+        current: 'en',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
+        ],
+        fallback_current: 'en',
+        fallback_candidates: ['en', 'fr'],
+      },
+    })
+    const vm = w.vm as unknown as { fallback: string }
+    vm.fallback = 'fr'
+    await w.vm.$nextTick()
     await w.find('[data-display-change]').trigger('click')
     await flushPromises()
     expect(puts.map((p) => p.url)).not.toContain('/api/locale')
@@ -883,6 +1031,102 @@ describe('ConfigView — language and display', () => {
     // The catalog was re-read after the PUTs — otherwise the UI would stay
     // displayed in the old language until the next manual reload.
     expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBeGreaterThan(before)
+  })
+
+  it('sends the fallback alongside the locale once the chosen language is incomplete', async () => {
+    // Owner's rule (task 14): the fallback field only makes sense — and is
+    // only submitted — when `LanguageCard`'s own control was visible, i.e.
+    // the chosen language is incomplete. The test above (a complete "en")
+    // pins the opposite branch: no `fallback` field at all.
+    const { w, puts } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr', 'de'],
+        current: 'en',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
+          { language: 'de', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+        ],
+        fallback_current: 'en',
+        fallback_candidates: ['en', 'fr', 'de'],
+      },
+    })
+    const vm = w.vm as unknown as { lang: string; fallback: string }
+    vm.lang = 'fr'
+    // Moved, not merely present: the field now travels only when the owner
+    // edited the control (see the test just below for why).
+    vm.fallback = 'de'
+    await w.vm.$nextTick()
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+
+    const localePut = puts.find((p) => p.url === '/api/locale')
+    expect(localePut?.body).toEqual({ locale: 'fr', fallback: 'de' })
+  })
+
+  it('does not write back a fallback the owner never touched', async () => {
+    // Final whole-branch review, device pass, finding 1. What this card
+    // holds in `fallback` is what `GET /api/locale` reported, and that
+    // response is clamped: a stored fallback equal to the chosen language
+    // comes back as `"en"`, because it resolves nothing. Submitting it
+    // unchanged — which is what a plain language change used to do — would
+    // write the clamp into `state.json` and destroy the fallback the owner
+    // had chosen, by the one door the "its value stays memorized" rule did
+    // not watch. Reading a value is not consenting to it.
+    //
+    // The language really does move here (so the PUT fires at all) and the
+    // chosen one really is incomplete (so the old code would have attached
+    // the field): those are the two conditions under which the loss
+    // happened.
+    const { w, puts } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr'],
+        current: 'en',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
+        ],
+        fallback_current: 'en',
+        fallback_candidates: ['en', 'fr'],
+      },
+    })
+    const vm = w.vm as unknown as { lang: string }
+    vm.lang = 'fr'
+    await w.vm.$nextTick()
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+
+    const localePut = puts.find((p) => p.url === '/api/locale')
+    expect(localePut?.body).toEqual({ locale: 'fr' })
+    expect(localePut?.body).not.toHaveProperty('fallback')
+  })
+
+  it('a fallback change alone, on an unchanged incomplete language, still reaches the locale route', async () => {
+    // Mutation check on the other half of `localeUnchanged`
+    // (`lang.value === loadedLocale.value && (!incomplete || fallback.value
+    // === loadedFallback.value)`): `lang` never moves in this test, so only
+    // the second half decides whether the PUT fires at all. Dropping it (or
+    // reading it backwards) would silently skip a real fallback edit.
+    const { w, puts } = await mountView({
+      '/api/locale': {
+        locales: ['en', 'fr'],
+        current: 'fr',
+        completeness: [
+          { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+          { language: 'fr', complete: false, done: 0, total: 1, complete_modules: [] },
+        ],
+        fallback_current: 'en',
+        fallback_candidates: ['en', 'fr'],
+      },
+    })
+    const vm = w.vm as unknown as { lang: string; fallback: string }
+    vm.fallback = 'fr'
+    await w.vm.$nextTick()
+    await w.find('[data-display-change]').trigger('click')
+    await flushPromises()
+
+    const localePut = puts.find((p) => p.url === '/api/locale')
+    expect(localePut?.body).toEqual({ locale: 'fr', fallback: 'fr' })
   })
 
   it('every dropdown follows a language change, without waiting to be opened', async () => {

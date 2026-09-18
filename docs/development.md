@@ -125,8 +125,7 @@ is exactly why they have to be overridden in a checkout:
 | `RITORNELLO_MPV_SOCKET` | core | `/run/ritornello/mpv.sock` |
 | `RITORNELLO_MPV_BIN` | core | `mpv` |
 | `RITORNELLO_RUNTIME_DIR` | core, `files` | `/run/ritornello` |
-| `RITORNELLO_LOCALES` | core and every plugin | `/etc/ritornello/locales` |
-| `RITORNELLO_LOCALE` | plugins | set by the core when it launches them |
+| `RITORNELLO_LOCALES` | core | `/etc/ritornello/locales` |
 | `RITORNELLO_AUDIO_BUFFER`, `RITORNELLO_NETWORK_READAHEAD` | core (mpv tuning) | built-in durations |
 | `RITORNELLO_CD_DEV` | core (mpv) **and** `cd` | `/dev/sr0` |
 | `RITORNELLO_CONSOLE_TTY` | `console` | `/dev/tty1` |
@@ -153,12 +152,13 @@ say so rather than failing:
   roots work, SMB shares do not.
 
 `RITORNELLO_LOCALES` matters more than it looks: English is embedded in the
-binary, every other language is read from disk at startup. Its default
-(`/etc/ritornello/locales`) is a path `deploy.sh` installs and that a
-development checkout does not have, so without the line above the language
-dropdown offers **English only** — the French pack sits unread in
-`deploy/locales/`. One setting is enough: plugins inherit the core's
-environment and read the same variable.
+binary, every other language is read from disk at startup — by the core
+alone, which resolves every module's text (its own and every plugin's)
+against its shared registry, no plugin process ever reading a pack by
+itself. Its default (`/etc/ritornello/locales`) is a path `deploy.sh`
+installs and that a development checkout does not have, so without the line
+above the language dropdown offers **English only** — the French pack sits
+unread in `deploy/locales/`.
 
 ## Language
 
@@ -184,11 +184,12 @@ Three audiences, three rules — the boundary is the audience, not the file:
   `validate_audio_device`, `theme::validate`, `system::parse_action` all
   return a typed error); the HTTP route is what resolves it against the
   core's current catalogue. The radio plugin's `config.rs` shows the pattern
-  every one of them follows — a typed `ValidationError` with a
-  `message(&Catalog)` and an English `Display` for logs. The same split
-  applies to a save that fails on disk: the plugin admin backends turn the
-  I/O failure into a catalogue phrase for the reader and log the raw detail,
-  never the other way around.
+  every one of them follows — a typed `ValidationError` with a `text()`
+  returning an unresolved `Text` (a key and its parameters, resolved by the
+  core against this plugin's announced catalog) and an English `Display` for
+  logs. The same split applies to a save that fails on disk: the plugin
+  admin backends turn the I/O failure into a catalogue phrase for the
+  reader and log the raw detail, never the other way around.
 
 ## Layout of the core crate: `core/` and `status/`
 

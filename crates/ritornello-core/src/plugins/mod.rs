@@ -315,22 +315,22 @@ pub fn prepare_sockets_dir(runtime_dir: &Path) -> Result<PathBuf> {
 /// No file pre-deletion here: `prepare_sockets_dir` wiped the whole directory
 /// before the first launch.
 ///
-/// `locale` passes the current language via `RITORNELLO_LOCALE`, applied **at
-/// launch** only (unchanged).
+/// No language is passed here any more (`RITORNELLO_LOCALE` used to be, at
+/// launch): task 11 of the language-packs chantier retired
+/// `SourceReq::SetLocale` along with it, and nothing on the plugin side ever
+/// read the variable once a plugin's own `Catalog` field was gone (tasks
+/// 8-10) — a plugin's admin catalog is served on demand, by locale, straight
+/// from the core's registry.
 pub fn spawn(
     exec: &str,
     register: &Path,
     name: &str,
     prefix: &Path,
-    locale: Option<&str>,
 ) -> Result<tokio::process::Child> {
     let mut cmd = tokio::process::Command::new(exec);
     cmd.arg("--register").arg(register);
     cmd.arg("--name").arg(name);
     cmd.arg("--socket-prefix").arg(prefix);
-    if let Some(locale) = locale {
-        cmd.env("RITORNELLO_LOCALE", locale);
-    }
     // The path is named in the error: "No such file or directory" alone leaves
     // one guessing **which** of the `plugins.toml` paths is at fault, and the
     // most common confusion is precisely there — a deployment `exec`
@@ -460,7 +460,6 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
             &dir.path().join("register.sock"),
             "dummy",
             &dir.path().join("dummy"),
-            None,
         )
         .expect_err("a missing executable must fail");
         let message = format!("{e:#}");

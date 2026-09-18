@@ -30,6 +30,11 @@ store_io_error = "could not write or read \"{path}\""
 
 # Refus de la moitié Admin.
 bad_request = "the page sent something this plugin did not understand ({detail})"
+# A background task (scan, browse, search) was interrupted before reporting
+# anything — a `tokio::task::JoinHandle` error, never seen in practice
+# outside a panic or a shutdown. Not translated from any specific cause,
+# unlike every refusal above: `{detail}` carries whatever the runtime says.
+internal_task_error = "an internal task was interrupted: {detail}"
 
 # Libellés de la page de gestion.
 root_label = "Root"
@@ -78,8 +83,7 @@ btn_save_playlist = "Save the playlist"
 no_saved = "No saved playlist"
 load_playlist_label = "Playlist to load"
 btn_load_playlist = "Load"
-load_error_1 = "Error: "
-load_error_2 = ""
+load_error = "Error: {cause}"
 
 # --- Declared sources ---
 sources_title = "Sources"
@@ -89,8 +93,18 @@ btn_add_to_playlist = "Add to playlist"
 btn_remove_source = "Remove this source"
 btn_retry_mount = "Retry mount"
 mount_error_title = "The last mount attempt failed:"
+# `{detail}` is `systemctl`'s own raw output, never translated (see
+# `mount::reconcile`'s doc: a polkit refusal is explicit there, and a
+# home-made sentence would make it opaque) — the same shape `share_not_declared`
+# already carries.
+mount_retry_failed = "the mount attempt failed: {detail}"
 share_not_declared = "the share was not mounted, so it has not been declared: {detail}"
-mount_silent_failure = "systemd reported success but the mount point is missing: check the share name, the credentials, and that cifs-utils is installed; see journalctl -u ritornello-media-mount for the exact cause"
+# Whole-sentence key, not `share_not_declared` nested inside itself: the
+# fallback used to be a *resolved* sentence handed to `share_not_declared` as
+# its own `{detail}`, which is exactly the two-levels-of-resolution shape
+# this chantier moved away from (language-packs chantier, task 9). Composed
+# once, in each language, instead.
+share_not_declared_silent = "the share was not mounted, so it has not been declared: systemd reported success but the mount point is missing: check the share name, the credentials, and that cifs-utils is installed; see journalctl -u ritornello-media-mount for the exact cause"
 
 # --- Wizard: folder from this device ---
 dlg_device_title = "Add a folder from this device"

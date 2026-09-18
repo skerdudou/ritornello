@@ -163,6 +163,31 @@ pub struct PluginStatus {
     /// the manifest and would survive the fix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incompatible: Option<u32>,
+    /// This plugin's announcement carried **no** `catalog` field at all — a
+    /// binary built before this core could ask a plugin for its embedded
+    /// translation layers (`ritornello_proto::Announcement::catalog`, whose
+    /// own doc this field is the twin of).
+    ///
+    /// **Distinct from an announced, empty catalog** (`catalog: Some({})`),
+    /// which is a module that legitimately has no text of its own — three
+    /// plugins ship that way and it sets no flag here. This one names only
+    /// the plugin whose announcement predates the field entirely.
+    ///
+    /// This is the accepted mitigation for `PROTOCOL_VERSION` staying at 1
+    /// across the whole language-pack effort (see its own doc): nothing at
+    /// the wire level refuses such a plugin — `incompatible` above stays
+    /// `None` for it, since the protocol itself did not change — so without
+    /// this flag a device stuck with an old plugin binary would go on
+    /// missing its language packs in silence. With it, the cause is named
+    /// on the Système page instead of merely suffered.
+    ///
+    /// Deliberately **not** `disabled`: nothing here writes `enabled = false`
+    /// into the manifest, and this plugin is otherwise wired exactly as any
+    /// other — same idiom as `incompatible`.
+    ///
+    /// Additive like `stalled` and `busy`: absent from the JSON when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub catalog_unknown: bool,
 }
 
 impl PluginStatus {
@@ -189,6 +214,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
+            catalog_unknown: false,
         }
     }
 
@@ -215,6 +241,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
+            catalog_unknown: false,
         }
     }
 
@@ -272,6 +299,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
+            catalog_unknown: false,
         }
     }
 
@@ -295,6 +323,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
+            catalog_unknown: false,
         }
     }
 
@@ -321,6 +350,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: Some(found),
+            catalog_unknown: false,
         }
     }
 }
@@ -1507,7 +1537,7 @@ mod tests {
     /// **This 400 is reachable by an ordinary operator** — a second tab whose
     /// list is one gesture out of date — so it must carry a sentence.
     /// Resolved against the **embedded** catalog rather than
-    /// compared to a copy of the string: `Catalog::get` returns the key itself
+    /// compared to a copy of the string: `Chain::get` returns the key itself
     /// when it finds nothing, so a key misspelled in the code would put
     /// `plugin_move_out_of_range` on the operator's screen with no test
     /// complaining, and the parity test between the two catalogs does not look
@@ -1535,7 +1565,7 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let catalog =
-            Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+            Chain::load_for_tests("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         let message = v["error"].as_str().expect("a refusal an operator can reach needs a sentence");
         assert_eq!(message, catalog.get("plugin_move_out_of_range").replace("{name}", "radio"));
         assert!(
@@ -1571,7 +1601,7 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let catalog =
-            Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+            Chain::load_for_tests("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         assert_eq!(v["error"], catalog.get("plugin_action_failed").replace("{name}", "cd"));
         assert_eq!(order_in(&dir), vec!["cd".to_string(), "radio".to_string()]);
     }
@@ -1725,7 +1755,7 @@ mod tests {
         // the string in `en.toml`: a typo in the key written in the code
         // would make this fail (raw key, or a different message) instead of
         // silently matching a copy-pasted expectation.
-        let catalog = Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        let catalog = Chain::load_for_tests("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         assert_eq!(v["error"], catalog.get("plugin_manifest_unreadable"));
     }
 
@@ -1733,7 +1763,7 @@ mod tests {
     ///
     /// The `message()` tests resolve against an **ad hoc** catalog, which
     /// proves the interpolation but not that the key written in the code really
-    /// exists: `Catalog::get` returns the key when it does not find it, so a
+    /// exists: `Chain::get` returns the key when it does not find it, so a
     /// typo would produce a toast displaying
     /// "settings_initial_delay_out_of_range" without any test complaining. The
     /// parity test between catalogs does not see it either: it compares the two
@@ -1743,7 +1773,7 @@ mod tests {
     /// actually embedded**, and refuses a message equal to its own key.
     #[test]
     fn every_refusal_resolves_against_the_embedded_catalog() {
-        let catalog = Catalog::load("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        let catalog = Chain::load_for_tests("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
         // A missing key is recognized by the message **being** the key: no
         // space, and the prefix it was given.
         let messages = [
@@ -2072,5 +2102,29 @@ mod tests {
         let j = serde_json::to_string(&l).unwrap();
         assert!(!j.contains("incompatible"), "{j}");
         assert!(!j.contains("version"), "{j}");
+    }
+
+    /// Twin of `an_incompatible_line_carries_the_number_and_nothing_else_claims_it`:
+    /// a plugin's announcement carrying no `catalog` field at all is flagged
+    /// on its own line, and nothing else about that line lies about it — it
+    /// is not `disabled` (nobody switched it off) and not `incompatible`
+    /// (the protocol itself matched).
+    #[test]
+    fn catalog_unknown_marks_a_wired_line_without_disguising_it_as_something_else() {
+        let l = PluginStatus { catalog_unknown: true, ..PluginStatus::kind("cd", "source", true, false) };
+        assert!(l.catalog_unknown);
+        assert!(l.connected, "the plugin is wired: this is a name, not a refusal");
+        assert!(!l.disabled, "a legacy binary is not the operator's switch");
+        assert_eq!(l.incompatible, None, "the protocol itself matched: this is a different fact");
+    }
+
+    /// Additive idiom, same as `a_compatible_line_omits_the_field_entirely`:
+    /// a plugin whose announcement carried a catalog (whether populated or
+    /// merely `Some({})`) must not grow this field on the wire.
+    #[test]
+    fn a_known_catalog_omits_the_field_entirely() {
+        let l = PluginStatus::kind("radio", "source", true, false);
+        let j = serde_json::to_string(&l).unwrap();
+        assert!(!j.contains("catalog_unknown"), "{j}");
     }
 }

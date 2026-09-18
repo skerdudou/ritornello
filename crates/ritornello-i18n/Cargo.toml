@@ -11,3 +11,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+# Parses the shared resolver-parity fixture (`tests/fixtures/resolver_parity.json`),
+# the same one `web/kit/src/i18n.test.ts` reads — test-only, this crate's
+# production code never touches JSON.
+serde_json = "1"

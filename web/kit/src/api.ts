@@ -8,11 +8,27 @@ const JSON_HEADERS = { 'content-type': 'application/json' }
  * `send` read the body, so a 502 from the core — which does carry its cause —
  * showed up as "HTTP 502" when loading a page, whereas the same failure on a
  * PUT said what was wrong.
+ *
+ * **An empty `error` is not a message, and must never read as success.**
+ * `send`'s whole convention is "a string means it failed, `null` means it
+ * did not", and every caller tests it with `if (err)` — so returning `""`
+ * for a response that was *not* ok turns a refusal into a green "Saved ✓".
+ * `HTTP <code>` is poor wording but true; silence is false.
+ *
+ * Defensive, not the repair of a live path: the one producer reachable from
+ * a plugin built against today's SDK is `AdminResult::Set`, and the SDK's
+ * own admin loop can only ever emit `{ ok: false, error_text: Some(..) }`
+ * (`crates/ritornello-plugin-sdk/src/server.rs`, the single `SetData` arm),
+ * so the core has a message to resolve on every refusal it can receive. The
+ * guard sits here because this function is where the whole SPA learns
+ * whether something failed, and a body that says `{"error": ""}` — from a
+ * pack whose value for the key is empty, or from a future route — must not
+ * be able to pass for consent.
  */
 async function errorMessage(r: Response): Promise<string> {
   try {
     const j = (await r.json()) as { error?: string }
-    if (j && typeof j.error === 'string') return j.error
+    if (j && typeof j.error === 'string' && j.error !== '') return j.error
   } catch {
     // non-JSON body: fall back to the status code
   }

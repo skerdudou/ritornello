@@ -7,6 +7,42 @@
 //! corresponding sockets already accept a connection.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Upper bound, in bytes, on a single announcement line.
+///
+/// This bound exists to stop a local process writing without limit for as
+/// long as the core's own read deadline lets it — not to police what a
+/// "reasonable" announcement looks like. A buffered line reader accumulates
+/// until it finds a `\n`, so nothing stops a connection from holding an
+/// unbounded amount of memory for the whole of that window without a bound
+/// like this one. That stopped being a theoretical risk the day task 3 puts
+/// a full translation catalogue in every announcement; this bound is put in
+/// place ahead of that change, not after it, precisely so the load never
+/// meets an unbounded reader.
+///
+/// 256 KiB, not a tighter figure closer to today's measurements: the
+/// heaviest catalogue measured across the plugins (`files`) weighs 6,677
+/// bytes in English and 7,281 in French, but the **core's own** French
+/// catalogue — the better proxy for how rich a single language can get —
+/// is 20,575 bytes, and a third-party plugin embedding a dozen languages at
+/// that size is exactly the kind of legitimate work this whole effort
+/// exists to let happen. A bound tighter than its purpose refuses that
+/// work for no gain: the cost of reading up to 256 KiB once per plugin at
+/// startup is negligible, and the property that actually protects the
+/// core — that the read is bounded at all, rather than open-ended — holds
+/// the same at 64 KiB or at 256 KiB. Do not tighten this back down on the
+/// strength of today's measurements alone; they will keep changing as
+/// plugins add languages, and this bound is not meant to track them.
+///
+/// Lives here, in the wire crate, rather than in the core alone: it is a
+/// property of the protocol both sides must agree on, not a policy the core
+/// enforces unilaterally. `ritornello-plugin-sdk`'s `Runtime::run` checks an
+/// outgoing announcement against this same constant before ever writing it,
+/// so an author who embeds too much text is refused with a message naming
+/// the actual size and the bound, rather than discovering — from the
+/// core's side only — that the process announced and then never registered.
+pub const ANNOUNCEMENT_MAX_BYTES: usize = 256 * 1024;
 
 /// What a plugin can do. The kind is a property of the **binary**, announced
 /// by it, and not a configuration line the operator would have to know (see
@@ -125,6 +161,44 @@ pub struct Announcement {
     /// own repository must announce one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
+    /// This plugin's own translation layers, language → key → value —
+    /// exactly what it holds **embedded** in the binary (`include_str!`);
+    /// its on-disk packs are a separate story the core reads for itself by
+    /// scanning the packs root, never asked of the plugin.
+    ///
+    /// **Derived, never asked**, like `covers` and `ui_version`: a plugin
+    /// confides its raw TOML sources to the SDK (see
+    /// `ritornello_plugin_sdk::Runtime`'s texts-registering method), which
+    /// parses and validates them at build time, before this line is ever
+    /// written — so the announcement cannot lie, and a broken pack is
+    /// refused before a socket even opens rather than discovered on screen.
+    ///
+    /// `None` and `Some({})` are two different facts, deliberately kept
+    /// apart:
+    /// - `None` — a binary **predating this field entirely**. It does not
+    ///   mean "no text": it means the plugin never had the chance to say.
+    ///   The one place this matters in practice is `PROTOCOL_VERSION`
+    ///   staying at 1 across this whole effort (an explicit choice, not an
+    ///   oversight — see its own doc): nothing at the wire level refuses
+    ///   such a plugin, so the core names it instead, on the Système page
+    ///   (`PluginStatus::catalog_unknown`), rather than letting it degrade
+    ///   in silence.
+    /// - `Some({})` — a module that genuinely **has no text of its own**.
+    ///   Four plugins ship this way today (`console`, `nrj-metas`,
+    ///   `ouifm-metas`, `radiofrance-metas`), and it is what a plugin built
+    ///   against this SDK but never calling the texts-registering method
+    ///   announces: an up-to-date binary with nothing to confide is not the same fact as
+    ///   an old one that was never asked, and an empty string (or an empty
+    ///   table standing in for "unknown") would erase exactly that
+    ///   distinction — the same reasoning `ui_version` and `repository`
+    ///   already document for their own `None`.
+    ///
+    /// This is also what keeps a future completeness count honest: a
+    /// denominator built from `Some(_)` alone would silently grow every
+    /// time an old binary is answered for, rather than left out because
+    /// nothing was ever confided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<HashMap<String, HashMap<String, String>>>,
 }
 
 /// Serde needs a function, not a literal, for a non-zero default.
@@ -149,6 +223,7 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             version: Some("0.2.0".into()),
             repository: Some("https://github.com/skerdudou/ritornello".into()),
+            catalog: None,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(
@@ -216,6 +291,7 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             version: None,
             repository: None,
+            catalog: None,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert!(line.contains(r#""protocol":1"#), "the protocol must always travel: {line}");
@@ -241,6 +317,7 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             version: None,
             repository: None,
+            catalog: None,
         };
         let back: Announcement =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
@@ -268,6 +345,7 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             version: None,
             repository: None,
+            catalog: None,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
@@ -282,5 +360,56 @@ mod tests {
         let line = r#"{"name":"x","kinds":["source"]}"#;
         let a: Announcement = serde_json::from_str(line).unwrap();
         assert_eq!(a.repository, None);
+    }
+
+    /// A minimal announcement for tests that only care about one field —
+    /// `catalog` here — and want `..base_announcement()` to fill in the
+    /// rest, rather than repeating all eight neighbouring fields verbatim.
+    fn base_announcement() -> Announcement {
+        Announcement {
+            name: "x".into(),
+            kinds: vec![PluginKind::Source],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: None,
+        }
+    }
+
+    /// `None` and `Some({})` are two different facts and the wire must keep them
+    /// apart: `None` is a binary predating this field, `Some({})` a component
+    /// that has no text at all (four plugins are in that case: `console`,
+    /// `nrj-metas`, `ouifm-metas`, `radiofrance-metas`). Conflating them
+    /// would make the completeness denominator wrong and would rob the core of
+    /// its only way to name an outdated binary.
+    #[test]
+    fn an_absent_catalog_and_an_empty_one_do_not_serialise_the_same() {
+        let absent = Announcement { catalog: None, ..base_announcement() };
+        let empty = Announcement { catalog: Some(Default::default()), ..base_announcement() };
+        let a = serde_json::to_string(&absent).unwrap();
+        let e = serde_json::to_string(&empty).unwrap();
+        assert!(!a.contains("catalog"), "absent must be skipped entirely: {a}");
+        assert!(e.contains("catalog"), "empty must be present: {e}");
+        let back_a: Announcement = serde_json::from_str(&a).unwrap();
+        let back_e: Announcement = serde_json::from_str(&e).unwrap();
+        assert_eq!(back_a.catalog, None);
+        assert_eq!(back_e.catalog, Some(Default::default()));
+    }
+
+    /// A catalog carrying real text survives the round trip, nested map and
+    /// all — the shape that makes this field worth having.
+    #[test]
+    fn a_populated_catalog_survives_a_round_trip() {
+        let mut en = HashMap::new();
+        en.insert("play".to_string(), "Play".to_string());
+        let mut layers = HashMap::new();
+        layers.insert("en".to_string(), en);
+        let a = Announcement { catalog: Some(layers.clone()), ..base_announcement() };
+        let line = serde_json::to_string(&a).unwrap();
+        let back: Announcement = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.catalog, Some(layers));
     }
 }

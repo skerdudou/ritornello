@@ -499,3 +499,164 @@ test('an order arrow writes a real reorder, checked against the server, and is p
     }
   }
 })
+
+/**
+ * The language card (task 14, language-packs chantier; fix round 1
+ * addressed findings 1-8 of the review): the union of languages, an
+ * annotation on the two the harness ships incomplete, the fallback
+ * control, and a real `PUT /api/locale` round trip. The exact arithmetic
+ * behind the annotation (the true set union of `complete_modules`, "still
+ * in English") is unit-tested in `LanguageCard.test.ts` against fixtures
+ * built for that; this journey proves the real core serves two incomplete
+ * languages and the page reacts to them honestly, numbers included.
+ *
+ * `serve.mjs` ships two deliberately partial core packs (`fr`, `de`, two
+ * keys each of the ~320 the embedded English carries) under
+ * `RITORNELLO_LOCALES` — a second one since fix round 1 (finding 7/R6): the
+ * chosen language is now excluded from its own fallback candidates, so a
+ * *different* real language is needed to exercise the control at all.
+ */
+test('the language card annotates an incomplete language and offers a fallback', async ({
+  page,
+  request,
+}) => {
+  await page.goto('/config')
+
+  const languageTrigger = page.locator('[data-language-select]')
+  await expect(languageTrigger).toBeVisible()
+  await languageTrigger.click()
+
+  // "English": nothing extra — the owner's rule, "nothing shown for a
+  // complete language, just its name". "Français": the phrase-key
+  // annotation, named unit included ("0 module /4" — fix round 2, finding
+  // E — the fixture's French pack covers neither `save` nor `language` on
+  // any of this harness's four texted modules, core included, so nothing
+  // counts as `Complete`).
+  const englishOption = page.getByRole('option', { name: 'English' })
+  const frenchOption = page.getByRole('option', { name: 'Français' })
+  await expect(englishOption).toBeVisible()
+  await expect(frenchOption).toBeVisible()
+  await expect(englishOption).not.toContainText('/4')
+  await expect(frenchOption).toContainText('0 module /4')
+
+  try {
+    await frenchOption.click()
+
+    // The trigger reflects the pick immediately, without reopening the
+    // list, and reads **exactly** the language's name — the guard
+    // `<SelectValue>{{ languageLabel }}</SelectValue>` (`LanguageCard.vue`)
+    // exists for.
+    //
+    // **The mechanism (fix round 3, task 14 re-review, finding G — this
+    // comment's second rewrite; the first one was also wrong, in the
+    // opposite direction).** Read from reka-ui's own source
+    // (`SelectItemText.vue`): each item stores a plain snapshot of its
+    // rendered `textContent` when it mounts, and reka-ui's default
+    // `<SelectValue />` renders that stored snapshot — never the DOM live —
+    // until the item remounts (reopening the list, which registers the
+    // *newly* selected item's *current* text). This card's items render
+    // `languageName(l)` (stable, keyed only on the code) **plus
+    // `annotation(l)`**, which is not stable: it is both payload-driven
+    // (`completeness[].total`, `.complete_modules`) and `t()`-driven. Two
+    // independent, real routes reach it without ever touching this
+    // select's own DOM node:
+    //  1. `total` moves while the card stays mounted (a plugin disabled or
+    //     re-enabled changes how many modules are counted — `Registry::
+    //     forget`/`insert_announced`) — measured: the card's own
+    //     `[data-locale-completeness]` read `0 module /9`; a bare
+    //     `<SelectValue />` trigger stayed at `Français0 module /4`.
+    //  2. the catalog reloads — `useCatalog.reload()`, which `saveDisplay`
+    //     already calls on **every** locale change, i.e. the one action
+    //     this very test performs — measured the same way, with
+    //     `locale_completeness_none`'s own wording changed instead of
+    //     `total`.
+    // So the override is not defending a hazard that merely *could* exist
+    // in principle: `toHaveText` below is exact (not `toContainText`)
+    // because a bare `<SelectValue />` would fail it by holding a *frozen*
+    // extra fragment, not a live one — a distinction the previous version
+    // of this comment got backwards.
+    await expect(languageTrigger).toHaveText('Français')
+
+    // Choosing an incomplete language unlocks the fallback control — hidden
+    // a moment ago, while English (complete) was selected.
+    const fallbackRow = page.locator('[data-fallback-row]')
+    await expect(fallbackRow).toBeVisible()
+    // A fresh device has never set a fallback: `fallback_current` defaults
+    // to "en", the wire's own representable "none" (task 13). This
+    // select's own items are a bare `{{ languageName(c) }}` — a pure
+    // function of the code alone, never of `payload` or of the active
+    // catalog (fix round 3, finding H: a secondary code line was added
+    // here once to give this exact assertion something to catch when its
+    // override was removed; reverted, since a test must not reshape the
+    // product to become provable). So unlike the language trigger just
+    // above, this line is a correctness check on the selection flow, not a
+    // defect guard — the hazard `annotation(l)` creates on the language
+    // select simply is not reachable on bare items, and
+    // `LanguageCard.test.ts` pins the override here structurally instead,
+    // as the project convention it is on this select.
+    const fallbackTrigger = page.locator('[data-fallback-select]')
+    await expect(fallbackTrigger).toHaveText('English')
+    // The hint explaining what "English" means in this list (fix round 1,
+    // finding 5/R7).
+    await expect(page.locator('[data-fallback-hint]')).not.toHaveText('')
+
+    // The chosen language itself must not be offered as its own fallback
+    // (fix round 1, finding 7/R6): with only "fr" chosen, "de" and "en"
+    // are the only options.
+    await fallbackTrigger.click()
+    await expect(page.getByRole('option', { name: 'Français' })).toHaveCount(0)
+    const germanOption = page.getByRole('option', { name: 'Deutsch' })
+    await expect(germanOption).toBeVisible()
+    await germanOption.click()
+    await expect(fallbackTrigger).toHaveText('Deutsch')
+
+    // A real, non-self fallback closes no gap here (both "fr" and "de"
+    // leave every one of the four modules untranslated), so the line
+    // states that honestly — the number this control exists to report,
+    // now checked end to end and not only against `LanguageCard.test.ts`'s
+    // synthetic fixtures (fix round 1, finding 8).
+    await expect(page.locator('[data-fallback-result]')).toHaveText('0 /4, 4 modules still in English')
+
+    await page.locator('[data-display-change]').click()
+
+    // **The page itself must now be in French**, and this is the assertion
+    // that was missing (final whole-branch review, device pass, finding 2):
+    // everything else in this journey polls the API, and the API was right
+    // all along while the page could come back in the language it had just
+    // left, and stay there until a manual reload. `saveDisplay` re-fetches
+    // `/api/i18n` the moment `PUT /api/locale` answers `204`; that response
+    // used to precede the core's own catalogue swap, which happens after a
+    // `spawn_blocking` walk of the pack root.
+    //
+    // This very button is the check: `save` is one of the two keys the
+    // throwaway French pack above carries (`save = "Enregistrer"`), so its
+    // label moves only if the catalogue the page is holding really did.
+    // The German pack translates the same two keys differently, so no
+    // assertion here can pass by coincidence of an untranslated string.
+    await expect(page.locator('[data-display-change]')).toHaveText('Enregistrer')
+    // The other key of the same pack, on another element and through
+    // another channel (an attribute, not a text node): `language =
+    // "Langue"`.
+    await expect(page.locator('[data-language-select]')).toHaveAttribute('aria-label', 'Langue')
+
+    // Checked against the real core, not only the page: both the chosen
+    // language and the fallback travelled in the same `PUT /api/locale`
+    // (task 13's combined wire shape).
+    await expect
+      .poll(async () => (await (await request.get('/api/locale')).json()).current)
+      .toBe('fr')
+    const locale = await (await request.get('/api/locale')).json()
+    expect(locale.fallback_current).toBe('de')
+  } finally {
+    // Put back the way the harness started: `en` is complete, so a plain
+    // `{"locale":"en"}` is enough — the persisted fallback is left as `de`
+    // (task 13's own "omitted fallback leaves it untouched" rule would
+    // apply on the page, but this direct API call has no reason to send
+    // one at all), which is harmless for every other journey since none of
+    // them ever selects an incomplete language again.
+    await request.put('/api/locale', { data: { locale: 'en' } })
+    await expect
+      .poll(async () => (await (await request.get('/api/locale')).json()).current)
+      .toBe('en')
+  }
+})

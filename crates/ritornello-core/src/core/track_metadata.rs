@@ -708,6 +708,7 @@ mod tests {
                     protocol: ritornello_proto::PROTOCOL_VERSION,
                     version: None,
                     repository: None,
+                    catalog: None,
                 },
             );
         }
@@ -1557,7 +1558,7 @@ mod tests {
         // becomes conditional.
         let (mut core, _np_rx, _state_rx, tmp) = test_core();
         let mut permanent = sdk_frame();
-        permanent.status = Some("LIVE".into());
+        permanent.status_text = Some(Text::Verbatim("LIVE".into()));
         core.handle_source_update("radio", permanent);
 
         let image = tmp.path().join("folder.jpg");

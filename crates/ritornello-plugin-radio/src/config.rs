@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use ritornello_i18n::Catalog;
-use ritornello_proto::Preset;
+use ritornello_proto::{Preset, Text};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -18,8 +18,9 @@ pub struct Stations {
 }
 
 /// Typed validation error: the user-facing text is produced at the boundary
-/// via `message(&Catalog)`. `Display` provides an English version for internal
-/// (dev) logs, outside the i18n perimeter.
+/// via `text()`, unresolved — the core resolves it against this plugin's
+/// announced catalog (language-packs chantier, task 10). `Display` provides
+/// an English version for internal (dev) logs, outside the i18n perimeter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     PresetOutOfRange { preset: u8, name: String },
@@ -28,20 +29,51 @@ pub enum ValidationError {
 }
 
 impl ValidationError {
-    /// Localized message surfaced to the user (body of the admin-side 422).
-    pub fn message(&self, catalog: &Catalog) -> String {
+    /// Unresolved refusal surfaced to the user (body of the admin-side 422).
+    ///
+    /// **This site's own manifestation of a confirmed defect is gone, the
+    /// underlying class is not.** The old `message(&Catalog)` built
+    /// `BadUrl`'s sentence with two *chained* `.replace()` calls — `{name}`
+    /// first, `{url}` second — so a station **name** that happened to
+    /// contain the literal text `{url}` got rewritten by the second call,
+    /// which cannot tell "a `{url}` the template put there" from "a `{url}`
+    /// that arrived inside `name`". Verified by feeding exactly that name
+    /// (`"my station {url}"`) through this method and asserting the `name`
+    /// parameter comes back unmodified — see
+    /// `bad_url_carries_the_name_unmodified_even_when_it_contains_the_url_placeholder_text`,
+    /// below in this file. This hand-written chain is gone — both parameters
+    /// now travel in one map, resolved by `ritornello_core::resolve_text`.
+    /// **The residual concern this comment used to leave for the reviewer —
+    /// that resolver still substituting one `.replace()` per parameter, over
+    /// an unordered `HashMap` — is closed** (language-packs chantier, task
+    /// 10b): `resolve_text` now calls `ritornello_i18n::interpolate`, a
+    /// single left-to-right pass over the template that never rescans text
+    /// it has already emitted, so no parameter's value can be rewritten by
+    /// another parameter's substitution regardless of map iteration order.
+    /// The same fix landed at every other producer of this class of text —
+    /// `resolve_admin_text` and the two chains in `update/mod.rs` on the
+    /// Rust side, `web/kit/src/i18n.ts`'s `createT` on the browser side —
+    /// see `ritornello_i18n::interpolate`'s module doc.
+    pub fn text(&self) -> Text {
         match self {
-            ValidationError::PresetOutOfRange { preset, name } => catalog
-                .get("preset_out_of_range")
-                .replace("{p}", &preset.to_string())
-                .replace("{name}", name),
-            ValidationError::DuplicatePreset { preset } => {
-                catalog.get("preset_duplicate").replace("{p}", &preset.to_string())
-            }
-            ValidationError::BadUrl { name, url } => catalog
-                .get("bad_url")
-                .replace("{name}", name)
-                .replace("{url}", url),
+            ValidationError::PresetOutOfRange { preset, name } => Text::Keyed {
+                key: "preset_out_of_range".into(),
+                params: HashMap::from([
+                    ("p".to_string(), preset.to_string()),
+                    ("name".to_string(), name.clone()),
+                ]),
+            },
+            ValidationError::DuplicatePreset { preset } => Text::Keyed {
+                key: "preset_duplicate".into(),
+                params: HashMap::from([("p".to_string(), preset.to_string())]),
+            },
+            ValidationError::BadUrl { name, url } => Text::Keyed {
+                key: "bad_url".into(),
+                params: HashMap::from([
+                    ("name".to_string(), name.clone()),
+                    ("url".to_string(), url.clone()),
+                ]),
+            },
         }
     }
 }
@@ -309,17 +341,61 @@ mod tests {
     }
 
     #[test]
-    fn validation_message_uses_the_catalog() {
-        use ritornello_i18n::Catalog;
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
-        std::fs::write(
-            dir.path().join("radio/fr.toml"),
-            "preset_out_of_range = \"préréglage {p} hors bornes ({name})\"\n",
-        )
-        .unwrap();
-        let cat = Catalog::load("radio", "fr", dir.path(), crate::RADIO_EN);
+    fn every_refusal_names_a_key_that_exists_in_the_embedded_catalog() {
+        // The plugin no longer resolves (no `Catalog` left — language-packs
+        // chantier, task 10): what this test still owns is that the key is
+        // not a typo.
+        let known = ritornello_i18n::try_parse(crate::RADIO_EN).unwrap();
+        for t in [
+            ValidationError::PresetOutOfRange { preset: 10, name: "X".into() }.text(),
+            ValidationError::DuplicatePreset { preset: 3 }.text(),
+            ValidationError::BadUrl { name: "X".into(), url: "ftp://x".into() }.text(),
+        ] {
+            match t {
+                Text::Keyed { key, .. } => assert!(known.contains_key(&key), "unknown key: {key}"),
+                Text::Verbatim(s) => panic!("a validation refusal must be a key, not verbatim: {s}"),
+            }
+        }
+    }
+
+    #[test]
+    fn preset_out_of_range_carries_both_parameters() {
         let err = ValidationError::PresetOutOfRange { preset: 10, name: "X".into() };
-        assert_eq!(err.message(&cat), "préréglage 10 hors bornes (X)");
+        match err.text() {
+            Text::Keyed { key, params } => {
+                assert_eq!(key, "preset_out_of_range");
+                assert_eq!(params.get("p").map(String::as_str), Some("10"));
+                assert_eq!(params.get("name").map(String::as_str), Some("X"));
+            }
+            Text::Verbatim(_) => panic!("expected a keyed text"),
+        }
+    }
+
+    /// The regression a review found and the brief asked to verify at this
+    /// task: a *chained* `.replace("{name}", name).replace("{url}", url)`
+    /// rewrote a `{url}` that arrived **inside** `name`, indistinguishable
+    /// from the template's own placeholder. Both parameters now travel
+    /// independently in the same map, so a station named literally
+    /// `"my station {url}"` keeps that text unrewritten in its own slot —
+    /// there is no second `.replace()` pass at this call site to corrupt it.
+    ///
+    /// **[MUTATION]**: go back to `catalog.get("bad_url").replace("{name}",
+    /// name).replace("{url}", url)` (reintroducing the chain) — this test
+    /// would then require running through `ritornello_core::resolve_text`
+    /// to observe the corruption, which this unit alone cannot reproduce;
+    /// what this test actually proves is the **narrower**, mechanically
+    /// checkable claim: the `name` parameter is carried verbatim, unmodified
+    /// by anything in this function.
+    #[test]
+    fn bad_url_carries_the_name_unmodified_even_when_it_contains_the_url_placeholder_text() {
+        let err =
+            ValidationError::BadUrl { name: "my station {url}".into(), url: "ftp://x".into() };
+        match err.text() {
+            Text::Keyed { params, .. } => {
+                assert_eq!(params.get("name").map(String::as_str), Some("my station {url}"));
+                assert_eq!(params.get("url").map(String::as_str), Some("ftp://x"));
+            }
+            Text::Verbatim(_) => panic!("expected a keyed text"),
+        }
     }
 }

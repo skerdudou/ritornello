@@ -2,9 +2,10 @@
 //! arrived at.
 
 use crate::state::{self, OnArrival};
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::AdminPlugin;
+use ritornello_proto::Text;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -27,11 +28,6 @@ pub struct CdAdmin {
     /// obeyed must be what is saved, otherwise a setting applied but not
     /// persisted would silently revert at the next restart.
     pub on_arrival: Arc<RwLock<OnArrival>>,
-    pub catalog: Arc<RwLock<Catalog>>,
-    /// Root of the on-disk language packs, kept so a catalog can be rebuilt in
-    /// any requested language — `Catalog::load` only parses a TOML file, so
-    /// this costs nothing per request.
-    pub locales_root: PathBuf,
 }
 
 #[async_trait::async_trait]
@@ -48,22 +44,6 @@ impl AdminPlugin for CdAdmin {
         }
     }
 
-    fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
-        match lang {
-            // The language the plugin was started in: the catalog already
-            // built, no work at all.
-            None => serde_json::json!(self.catalog.read().unwrap().entries()),
-            // A language explicitly asked for. Rebuilt rather than translated
-            // from the current one: the on-disk pack is the authority, and
-            // only `Catalog::load` knows how to layer it over the embedded
-            // English.
-            Some(l) => {
-                let c = Catalog::load("cd", l, &self.locales_root, crate::CD_EN);
-                serde_json::json!(c.entries())
-            }
-        }
-    }
-
     async fn get_data(&self) -> serde_json::Value {
         // Served from the shared value rather than re-read from disk: it is
         // the one the Source half actually obeys, so the page cannot show a
@@ -71,9 +51,10 @@ impl AdminPlugin for CdAdmin {
         serde_json::json!({ "on_arrival": *self.on_arrival.read().unwrap() })
     }
 
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
-        let write: SettingWrite = serde_json::from_value(data).map_err(|e| {
-            self.catalog.read().unwrap().get("bad_request").replace("{detail}", &e.to_string())
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
+        let write: SettingWrite = serde_json::from_value(data).map_err(|e| Text::Keyed {
+            key: "bad_request".into(),
+            params: HashMap::from([("detail".to_string(), e.to_string())]),
         })?;
         // `update` and not `save`: the Source half writes the resume point
         // into this same file, and a state rebuilt here would erase it.
@@ -83,7 +64,7 @@ impl AdminPlugin for CdAdmin {
         // device would come back on a setting the owner had changed.
         state::update(&self.state_path, |s| s.on_arrival = write.on_arrival).map_err(|e| {
             tracing::warn!("persisting the arrival setting: {e}");
-            self.catalog.read().unwrap().get("save_failed").to_string()
+            Text::Keyed { key: "save_failed".into(), params: HashMap::new() }
         })?;
         *self.on_arrival.write().unwrap() = write.on_arrival;
         Ok(())
@@ -102,36 +83,42 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("plugin-cd.json");
-        let admin = CdAdmin {
-            state_path,
-            on_arrival: Arc::new(RwLock::new(OnArrival::default())),
-            catalog: Arc::new(RwLock::new(Catalog::load(
-                "cd",
-                "en",
-                std::path::Path::new("/nonexistent"),
-                crate::CD_EN,
-            ))),
-            locales_root: PathBuf::from("/nonexistent"),
-        };
+        let admin = CdAdmin { state_path, on_arrival: Arc::new(RwLock::new(OnArrival::default())) };
         Fixture { admin, _dir: dir }
     }
 
-    /// French pack shipped in the repository.
-    fn fr_pack() -> String {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../deploy/locales/cd/fr.toml");
-        std::fs::read_to_string(p).expect("shipped fr pack")
-    }
-
+    /// **Generalized (task 15).** Was "en vs fr, key sets only" — a
+    /// hardcoded language that stops covering a second one the moment it
+    /// ships, and a comparison blind to a translation that renamed or
+    /// dropped a `{named}` parameter. `shipped_language_packs` derives the
+    /// language list from the tree; the `assert!(!shipped.is_empty(), ...)`
+    /// below is what keeps that derivation honest instead of vacuously
+    /// green on a broken discovery.
     #[test]
-    fn key_parity_between_the_embedded_en_and_the_fr_pack() {
+    fn key_and_param_parity_between_the_embedded_en_and_every_shipped_language() {
         let en = ritornello_i18n::try_parse(crate::CD_EN).unwrap();
-        let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut en_keys: Vec<&String> = en.keys().collect();
-        let mut fr_keys: Vec<&String> = fr.keys().collect();
-        en_keys.sort();
-        fr_keys.sort();
-        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
+        let deploy_locales = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let shipped = ritornello_i18n::shipped_language_packs(&deploy_locales, "cd");
+        assert!(!shipped.is_empty(), "no shipped language found for cd under deploy/locales");
+        for (lang, content) in shipped {
+            let pack = ritornello_i18n::try_parse(&content)
+                .unwrap_or_else(|e| panic!("{lang} pack for cd is invalid TOML: {e}"));
+            let mut en_keys: Vec<&String> = en.keys().collect();
+            let mut pack_keys: Vec<&String> = pack.keys().collect();
+            en_keys.sort();
+            pack_keys.sort();
+            assert_eq!(en_keys, pack_keys, "en/{lang} key sets diverge for cd");
+
+            for (key, en_value) in &en {
+                if let Some(translated) = pack.get(key) {
+                    assert_eq!(
+                        ritornello_i18n::params_in(en_value),
+                        ritornello_i18n::params_in(translated),
+                        "key {key}: {lang} translation's named parameters diverge from English"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -181,14 +168,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refusal_is_a_sentence_never_a_catalog_key() {
-        // The page displays this text as is (same convention as the other
-        // plugins): returning the bare key would put `bad_request` on screen.
+    async fn a_refusal_travels_as_a_key_and_its_parameters_not_a_sentence() {
+        // The plugin no longer resolves anything (no `Catalog` left): the
+        // core does, from the announced catalog, at `PUT /plugins/cd/api/data`
+        // (see `ritornello-core`'s `resolve_admin_text`). What this test
+        // owns is the shape the plugin still controls — the key and the
+        // `{detail}` parameter, unresolved.
         let mut f = fixture();
         let err = f.admin.set_data(serde_json::json!({ "on_arrival": 7 })).await.unwrap_err();
-        assert!(!err.is_empty());
-        assert_ne!(err, "bad_request", "the key must have been resolved");
-        assert!(!err.contains("{detail}"), "the placeholder must have been filled: {err}");
+        match err {
+            Text::Keyed { key, params } => {
+                assert_eq!(key, "bad_request");
+                assert!(params.get("detail").is_some_and(|d| !d.is_empty()), "{params:?}");
+            }
+            Text::Verbatim(s) => panic!("a bad request must be a key, not verbatim text: {s}"),
+        }
     }
 
     #[tokio::test]

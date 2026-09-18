@@ -29,6 +29,7 @@ store_io_error = "écriture ou lecture de « {path} » impossible"
 
 # Refus de la moitié Admin.
 bad_request = "la page a envoyé quelque chose que ce plugin n'a pas compris ({detail})"
+internal_task_error = "une tâche interne a été interrompue : {detail}"
 
 # Libellés de la page de gestion.
 root_label = "Racine"
@@ -77,8 +78,7 @@ btn_save_playlist = "Enregistrer la liste"
 no_saved = "Aucune liste enregistrée"
 load_playlist_label = "Liste à charger"
 btn_load_playlist = "Charger"
-load_error_1 = "Erreur : "
-load_error_2 = ""
+load_error = "Erreur : {cause}"
 
 # --- Declared sources ---
 sources_title = "Sources"
@@ -88,8 +88,9 @@ btn_add_to_playlist = "Ajouter à la liste"
 btn_remove_source = "Retirer cette source"
 btn_retry_mount = "Réessayer le montage"
 mount_error_title = "La dernière tentative de montage a échoué :"
+mount_retry_failed = "la tentative de montage a échoué : {detail}"
 share_not_declared = "le partage n'a pas été monté, il n'a donc pas été déclaré : {detail}"
-mount_silent_failure = "systemd n'a signalé aucune erreur mais le point de montage est absent : vérifiez le nom du partage, les identifiants, et que cifs-utils est installé ; consultez journalctl -u ritornello-media-mount pour la cause exacte"
+share_not_declared_silent = "le partage n'a pas été monté, il n'a donc pas été déclaré : systemd n'a signalé aucune erreur mais le point de montage est absent : vérifiez le nom du partage, les identifiants, et que cifs-utils est installé ; consultez journalctl -u ritornello-media-mount pour la cause exacte"
 
 # --- Wizard: folder from this device ---
 dlg_device_title = "Ajouter un dossier de l'appareil"

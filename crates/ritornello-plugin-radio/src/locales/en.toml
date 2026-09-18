@@ -13,10 +13,9 @@ col_name = "Name"
 col_url = "Stream URL"
 btn_add = "+ Add"
 btn_save = "Save"
-load_error_1 = "Error loading stations ("
-load_error_2 = ") — fix stations.toml, then reload"
+load_error = "Error loading stations ({cause}) — fix stations.toml, then reload"
 saved = "Saved ✓"
-save_error = "Error: "
+save_error = "Error: {cause}"
 limit_reached = "99 presets maximum — remove one first"
 
 # annuaire en ligne

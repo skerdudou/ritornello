@@ -3,7 +3,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use ritornello_i18n::Catalog;
+use ritornello_i18n::Chain;
 use serde::{Deserialize, Serialize};
 
 /// Default preset of the installation. The core only knows its name.
@@ -28,7 +28,7 @@ impl Default for ThemeState {
 
 /// Theme validation error. Follows the model of `ValidationError`
 /// (`ritornello-plugin-radio/src/config.rs`): the user-facing text is produced
-/// at the boundary via `message(&Catalog)`, `Display` provides an English
+/// at the boundary via `message(&Chain)`, `Display` provides an English
 /// version for the logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThemeError {
@@ -38,7 +38,7 @@ pub enum ThemeError {
 }
 
 impl ThemeError {
-    pub fn message(&self, catalog: &Catalog) -> String {
+    pub fn message(&self, catalog: &Chain) -> String {
         match self {
             ThemeError::UnknownMode { mode } => {
                 catalog.get("theme_unknown_mode").replace("{mode}", mode)
@@ -236,7 +236,7 @@ mod tests {
             "theme_unknown_mode = \"mode {mode} inconnu\"\n",
         )
         .unwrap();
-        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN);
+        let cat = ritornello_i18n::Chain::load_for_tests("core", "fr", dir.path(), crate::i18n::EN);
         let err = ThemeError::UnknownMode { mode: "system".to_string() };
         assert_eq!(err.message(&cat), "mode system inconnu");
     }

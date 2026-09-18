@@ -37,7 +37,7 @@ use crate::update::state::{
     component_offers, Availability, CheckOutcome, ComponentKind, ComponentOffer, Installed,
     ThirdPartyOffer, UpdateState,
 };
-use ritornello_i18n::Catalog;
+use ritornello_i18n::Chain;
 use ritornello_updater::request::{Action, Request, REQUEST_FORMAT};
 use ritornello_updater::target::plugins_dir;
 use std::path::{Path, PathBuf};
@@ -581,7 +581,7 @@ impl std::fmt::Display for Refusal {
 /// constraint (user-facing text through the catalog, named parameters, both
 /// languages) applies to this path as much as to any other, and a `format!`
 /// here would reach a French screen in English.
-fn refusal_message(catalog: &Catalog, component: &str, why: &Refusal) -> String {
+fn refusal_message(catalog: &Chain, component: &str, why: &Refusal) -> String {
     let (key, detail) = match why {
         Refusal::NoRoom => ("update_no_room", None),
         Refusal::NoDigest => ("update_no_digest", None),
@@ -596,11 +596,11 @@ fn refusal_message(catalog: &Catalog, component: &str, why: &Refusal) -> String 
         Refusal::Privileged(d) => ("update_privileged_failed", Some(d)),
         Refusal::NothingPublished => ("update_nothing_published", None),
     };
-    let text = catalog.get(key).replace("{component}", component);
-    match detail {
-        Some(d) => text.replace("{detail}", d),
-        None => text,
+    let mut params: Vec<(&str, &str)> = vec![("component", component)];
+    if let Some(d) = detail {
+        params.push(("detail", d.as_str()));
     }
+    ritornello_i18n::interpolate(catalog.get(key), params)
 }
 
 /// Is every one of these lines describing a plugin that has finished having
@@ -808,7 +808,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// thing that happened. With one component installed, which is the ordinary
 /// gesture, there is nothing to choose between.
 fn install_report(
-    catalog: &Catalog,
+    catalog: &Chain,
     placed: &[Placement],
     failure: Option<String>,
 ) -> Option<CheckOutcome> {
@@ -820,12 +820,15 @@ fn install_report(
     // for a first installation names no version, because there is no version
     // it moved from. The row beside it already carries the one it now has.
     let text = if last.fresh {
-        catalog.get("update_installed_new").replace("{component}", &last.component)
+        ritornello_i18n::interpolate(
+            catalog.get("update_installed_new"),
+            [("component", last.component.as_str())],
+        )
     } else {
-        catalog
-            .get("update_installed")
-            .replace("{component}", &last.component)
-            .replace("{version}", &last.version)
+        ritornello_i18n::interpolate(
+            catalog.get("update_installed"),
+            [("component", last.component.as_str()), ("version", last.version.as_str())],
+        )
     };
     Some(CheckOutcome::Installed(text))
 }
@@ -964,7 +967,7 @@ pub struct Worker {
     pub state: Arc<RwLock<UpdateState>>,
     /// Every message this worker publishes goes through it: the page shows
     /// `busy` and `outcome` as they arrive, without a second lookup.
-    pub catalog: Arc<RwLock<Catalog>>,
+    pub catalog: Arc<RwLock<Chain>>,
     /// Where a plugin's announced version is read. The binary is the only
     /// thing that knows it, and it says so in its announcement.
     pub status: Arc<RwLock<StatusState>>,
@@ -1018,8 +1021,17 @@ impl Worker {
     /// A catalog message with its one named parameter filled in. Named and
     /// never concatenated: a number glued to a label is not translatable, a
     /// lesson already paid for here.
+    ///
+    /// **Single-parameter only, by contract.** A caller that needs a second
+    /// parameter must not chain a further `.replace()`/`interpolate()` call
+    /// onto this method's result — that composition is exactly the
+    /// chained-replace defect this crate spent task 10b removing, just
+    /// split across two call sites instead of one (`removal_failed` did
+    /// precisely this before that task). Reach for
+    /// `ritornello_i18n::interpolate` directly with every parameter in one
+    /// call instead.
     async fn message_for(&self, key: &str, component: &str) -> String {
-        self.message(key).await.replace("{component}", component)
+        ritornello_i18n::interpolate(&self.message(key).await, [("component", component)])
     }
 
     async fn set_busy(&self, busy: Option<String>) {
@@ -1569,7 +1581,7 @@ impl Worker {
         //
         // Written **before** the unit runs, so a unit that then fails leaves
         // the new locale catalogs beside the old binary. Harmless as things
-        // stand — `Catalog::get` falls back to the embedded English and, past
+        // stand — `Chain::get` falls back to the embedded English and, past
         // that, to the key itself — and the alternative (placing them after)
         // would leave the new binary beside the old catalogs, which is the
         // same mismatch the other way round with no fallback at all.
@@ -2017,10 +2029,13 @@ impl Worker {
     /// card's own gesture, and an uninstall is not one.
     async fn removal_failed(&self, name: &str, detail: String) {
         tracing::warn!("update: erasing {name}'s binary: {detail}");
-        let message = self
-            .message_for("update_removal_failed", name)
-            .await
-            .replace("{detail}", &detail);
+        // Both parameters together, not `message_for`'s single-token
+        // substitution followed by a further `.replace()`: that composition
+        // is itself the chained-replace defect (task 10b) — a `name` that
+        // happened to contain the literal text `{detail}` would be rewritten
+        // by the second call.
+        let template = self.message("update_removal_failed").await;
+        let message = ritornello_i18n::interpolate(&template, [("component", name), ("detail", detail.as_str())]);
         self.publish_failure(message).await;
     }
 }
@@ -3037,9 +3052,9 @@ mod tests {
     /// The French pack this repository ships, loaded as a real catalog rather
     /// than parsed as a table: what the test needs to know is what a French
     /// screen would actually receive.
-    fn french() -> Catalog {
+    fn french() -> Chain {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
-        Catalog::load("core", "fr", &root, crate::i18n::EN)
+        Chain::load_for_tests("core", "fr", &root, crate::i18n::EN)
     }
 
     /// **Every refusal reaches the page as a translated sentence.** A
@@ -3054,7 +3069,7 @@ mod tests {
     /// particular, and the parity test only compares key *sets*.
     #[test]
     fn every_refusal_is_a_translated_sentence_with_its_parameters_filled_in() {
-        let english = Catalog::load(
+        let english = Chain::load_for_tests(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
@@ -3077,7 +3092,7 @@ mod tests {
         for catalog in [&english, &french()] {
             for why in &all {
                 let message = refusal_message(catalog, "radio", why);
-                // `Catalog::get` answers the key itself when it knows none,
+                // `Chain::get` answers the key itself when it knows none,
                 // so a key missing from either pack shows up here.
                 assert!(
                     !message.starts_with("update_"),
@@ -3089,6 +3104,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **[MUTATION target — see `ritornello_i18n::interpolate`'s own
+    /// `parameter_order_cannot_change_the_result`]**: `refusal_message`
+    /// composes exactly two parameters, `component` then (conditionally)
+    /// `detail`, and used to fold them with chained `.replace()` calls in
+    /// that order — so a `component` that happened to contain the literal
+    /// text `{detail}` got rewritten a second time by the `detail` pass,
+    /// indistinguishable from the template's own placeholder. `component`
+    /// here is a plugin name the core itself names, not user text, but the
+    /// mechanism must hold regardless of who supplies the string: `detail`
+    /// carries raw `systemctl`/tokio output, which is exactly the
+    /// unconstrained kind of text this whole task exists to protect against.
+    #[test]
+    fn refusal_message_does_not_let_the_component_name_rewrite_the_detail_token() {
+        let english =
+            Chain::load_for_tests("core", "en", std::path::Path::new("/nonexistent"), crate::i18n::EN);
+        let message = refusal_message(
+            &english,
+            "radio {detail}",
+            &Refusal::Download("connection reset by peer".to_string()),
+        );
+        assert_eq!(message, "Could not download radio {detail}: connection reset by peer");
     }
 
     // ---- The worker, against a temporary root ---------------------------
@@ -3124,7 +3162,7 @@ mod tests {
         .unwrap();
         Worker {
             state: Arc::new(RwLock::new(UpdateState::initial("0.2.0", &[]))),
-            catalog: Arc::new(RwLock::new(Catalog::load("core", "en", root, crate::i18n::EN))),
+            catalog: Arc::new(RwLock::new(Chain::load_for_tests("core", "en", root, crate::i18n::EN))),
             status,
             manifest,
             plugins_tx: mpsc::channel(1).0,
@@ -3345,7 +3383,7 @@ mod tests {
                 // comparison it reddens (`state.outcome` carries
                 // `update_nothing_published` filled with the file name
                 // instead of `update_digest_mismatch` filled with `mpd`).
-                let catalog = Catalog::load("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+                let catalog = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
                 let expected = refusal_message(&catalog, "mpd", &Refusal::DigestMismatch);
                 assert_eq!(message, &expected, "the refusal must name exactly the component `mpd`");
             }
@@ -4182,7 +4220,7 @@ mod tests {
     /// nothing leaves the check's own answer alone.
     #[test]
     fn a_failed_component_never_lets_a_pass_read_as_a_clean_install() {
-        let english = Catalog::load(
+        let english = Chain::load_for_tests(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
@@ -4230,6 +4268,27 @@ mod tests {
         let Some(CheckOutcome::Installed(message)) = french else { panic!("{french:?}") };
         assert!(!message.contains('{'), "{message}");
         assert!(message.contains("mpd") && message.contains("0.3.1"), "{message}");
+    }
+
+    /// Same defect as `refusal_message_does_not_let_the_component_name_rewrite_the_detail_token`,
+    /// at `install_report`'s own two-parameter template
+    /// (`"{component} updated to {version}"`): a `component` that happens to
+    /// contain the literal text `{version}` must not be rewritten by the
+    /// `version` substitution that used to follow it in a chained
+    /// `.replace()`.
+    #[test]
+    fn install_report_does_not_let_the_component_name_rewrite_the_version_token() {
+        let english = Chain::load_for_tests(
+            "core",
+            "en",
+            std::path::Path::new("/nonexistent"),
+            crate::i18n::EN,
+        );
+        let placed = [replaced("mpd {version}", "0.3.1")];
+        assert_eq!(
+            install_report(&english, &placed, None),
+            Some(CheckOutcome::Installed("mpd {version} updated to 0.3.1".to_string())),
+        );
     }
 
     /// **A plugin the device does not declare, whose archive carries no block,

@@ -33,6 +33,11 @@ export interface PluginStatus {
    * this core's own (see `StatusPayload.protocol`). Its presence is the
    * refusal itself. */
   incompatible?: number
+  /** This plugin's announcement carried no `catalog` field at all — a binary
+   * built before this core could ask for its embedded translation layers.
+   * Distinct from a plugin that announced an empty catalog, which has no
+   * text of its own and sets nothing here. Optional: absent when false. */
+  catalog_unknown?: boolean
   /** Declared, and its binary is not on disk. Optional: absent when false. */
   missing_binary?: boolean
   /** A binary sitting in the plugins directory that nothing declares — the
@@ -165,7 +170,46 @@ export interface UpdatePayload {
 
 export interface AudioDevice { name: string; description: string }
 export interface AudioPayload { devices: AudioDevice[]; current: string | null }
-export interface LocalePayload { locales: string[]; current: string | null }
+/**
+ * One candidate language's measured completeness, mirroring
+ * `crates/ritornello-core/src/status/locales.rs`'s `LanguageCompleteness`:
+ * `complete` is what the owner's display rule pivots on ("nothing shown for
+ * a complete language, just its name"), `done`/`total` are the raw numbers
+ * the phrase key needs (`{done}`/`{total}`, never a concatenated string).
+ */
+export interface LanguageCompleteness {
+  language: string
+  complete: boolean
+  done: number
+  total: number
+  /**
+   * Names of the modules `Complete` for this language (fix round 1, task 14
+   * review). Lets the SPA compute the true set union between a chosen
+   * language and a candidate fallback, instead of `Math.max(chosen.done,
+   * fallback.done)` — a bound that was exact only when one language's
+   * covered set contained the other's, and reachable up to "N still in
+   * English" when the truth was 0, in the exact configuration this feature
+   * targets (a plugin-only chosen language, a core-language fallback).
+   */
+  complete_modules: string[]
+}
+/**
+ * Widened for task 14 of the language-packs chantier (task 12's own report:
+ * "task 14 will need to widen it to actually use completeness/
+ * fallback_current/fallback_candidates"). Leaving it at `{ locales, current
+ * }` compiles fine — a structural interface silently drops the extra JSON
+ * fields — but keeps every field task 12 built invisible to the SPA.
+ */
+export interface LocalePayload {
+  locales: string[]
+  current: string | null
+  /** Completeness for every language in `locales`, in the same order. */
+  completeness: LanguageCompleteness[]
+  /** The device's persisted fallback language, or `"en"` (never `null`). */
+  fallback_current: string
+  /** The core's own installed languages only — never the plugin union. */
+  fallback_candidates: string[]
+}
 export interface ThemePayload { theme: string; mode: Mode }
 export interface LogsPayload { lines: string[] }
 /** The three values of `settings.startup_power`, on the core side as on the UI side. */

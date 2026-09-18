@@ -10,7 +10,7 @@ import {
 } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
 import FolderPicker from './FolderPicker.vue'
-import type { Data, Send, T } from './data'
+import { resolveStoredText, type Data, type Send, type T } from './data'
 
 /**
  * "Network share" wizard.
@@ -217,7 +217,7 @@ function close(): void {
       </div>
 
       <template v-else>
-        <p v-if="ex.error" class="min-w-0 break-words text-sm text-destructive" data-share-error>{{ ex.error }}</p>
+        <p v-if="ex.error" class="min-w-0 break-words text-sm text-destructive" data-share-error>{{ resolveStoredText(t, ex.error) }}</p>
 
         <!-- `min-w-0` for the same reason as in the local wizard: a grid
              child does not shrink below its content's width without

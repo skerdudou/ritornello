@@ -1208,6 +1208,7 @@ dependencies = [
 name = "ritornello-i18n"
 version = "0.2.0-beta.1"
 dependencies = [
+ "serde_json",
  "tempfile",
  "toml",
  "tracing",
@@ -1404,6 +1405,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
+ "ritornello-i18n",
  "ritornello-proto",
  "serde_json",
  "tempfile",

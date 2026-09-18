@@ -10,8 +10,9 @@
 //! Parsing the outputs is pure and is tested without a NAS. The formats are
 //! those of samba 4.19.5.
 
-use ritornello_i18n::Catalog;
+use ritornello_proto::Text;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -48,20 +49,40 @@ pub struct SmbEntry {
 }
 
 impl SmbError {
-    pub fn message(&self, catalog: &Catalog, host: &str) -> String {
+    /// Unresolved refusal: a key and its parameters, resolved by the core
+    /// against this plugin's announced catalog — except `Other`, below,
+    /// which is the **one sanctioned** producer of `Text::Verbatim` in the
+    /// whole plugin fleet (see
+    /// `ritornello-plugin-sdk`'s `verbatim_has_no_producer_outside_the_files_plugin`).
+    pub fn text(&self, host: &str) -> Text {
+        let keyed = |key: &str| Text::Keyed { key: key.to_string(), params: HashMap::new() };
+        let with_host = |key: &str| Text::Keyed {
+            key: key.to_string(),
+            params: HashMap::from([("host".to_string(), host.to_string())]),
+        };
         match self {
-            SmbError::NotInstalled => catalog.get("smb_not_installed").to_string(),
-            SmbError::BadCredentials => catalog.get("smb_bad_credentials").to_string(),
-            SmbError::AccessDenied => catalog.get("smb_access_denied").to_string(),
-            SmbError::Unreachable => catalog.get("smb_unreachable").replace("{host}", host),
-            SmbError::NotFound => catalog.get("smb_not_found").to_string(),
-            SmbError::Timeout => catalog.get("smb_timeout").replace("{host}", host),
-            SmbError::UnreadableOutput(raw) => {
-                catalog.get("smb_unreadable_output").replace("{detail}", raw)
-            }
-            // Verbatim: an unknown NT_STATUS code is the only information
-            // available, and a home-made sentence would lose it.
-            SmbError::Other(m) => m.clone(),
+            SmbError::NotInstalled => keyed("smb_not_installed"),
+            SmbError::BadCredentials => keyed("smb_bad_credentials"),
+            SmbError::AccessDenied => keyed("smb_access_denied"),
+            SmbError::Unreachable => with_host("smb_unreachable"),
+            SmbError::NotFound => keyed("smb_not_found"),
+            SmbError::Timeout => with_host("smb_timeout"),
+            SmbError::UnreadableOutput(raw) => Text::Keyed {
+                key: "smb_unreadable_output".into(),
+                params: HashMap::from([("detail".to_string(), raw.clone())]),
+            },
+            // **Verbatim, deliberately — the door this whole chantier's
+            // `Text::Verbatim` variant exists for.** An unknown NT_STATUS
+            // code is the only information available at this point: the
+            // plugin does not know what it means, so a home-made sentence
+            // would name nothing and a key would resolve to nothing either
+            // (no pack carries a translation for a code nobody has seen
+            // yet). Passing it through unchanged is the honest answer, and
+            // it is a deliberate choice recorded here — not a leftover of
+            // an incomplete migration. This is the only `Text::Verbatim`
+            // construction the SDK's static guard allows outside this
+            // file's own tests.
+            SmbError::Other(m) => Text::Verbatim(m.clone()),
         }
     }
 }
@@ -442,7 +463,6 @@ pub async fn list_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ritornello_i18n::Catalog;
     use std::path::Path;
 
     /// Output **captured** from `smbclient -L //192.168.1.15 -g` against a real
@@ -481,8 +501,8 @@ SMB1 disabled -- no workgroup available
 \t\t102400 blocks of size 1024. 102380 blocks available
 ";
 
-    fn sources_catalog() -> Catalog {
-        Catalog::load("files", "en", Path::new("/inexistant"), crate::FILES_EN)
+    fn known_keys() -> std::collections::HashMap<String, String> {
+        ritornello_i18n::try_parse(crate::FILES_EN).unwrap()
     }
 
     #[test]
@@ -619,10 +639,12 @@ SMB1 disabled -- no workgroup available
     }
 
     #[test]
-    fn every_refusal_resolves_against_the_embedded_catalog() {
-        // `Catalog::get` returns the key when it does not find it: without this
-        // test, a typo would show "smb_bad_credentials" on screen.
-        let c = sources_catalog();
+    fn every_refusal_names_a_key_that_exists_in_the_embedded_catalog() {
+        // The plugin no longer resolves (no `Catalog` left — language-packs
+        // chantier, task 9): what this test still owns is that the key is
+        // not a typo, and that `{host}` travels for the two variants that
+        // need it.
+        let known = known_keys();
         for e in [
             SmbError::NotInstalled,
             SmbError::BadCredentials,
@@ -632,11 +654,36 @@ SMB1 disabled -- no workgroup available
             SmbError::Timeout,
             SmbError::UnreadableOutput("raw".into()),
         ] {
-            let m = e.message(&c, "nas");
-            assert!(m.contains(' '), "raw key sent to the screen: {m:?}");
-            assert!(!m.contains('{'), "token left as is: {m:?}");
+            match e.text("nas") {
+                Text::Keyed { key, .. } => assert!(known.contains_key(&key), "unknown key: {key}"),
+                Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+            }
         }
-        assert!(SmbError::Unreachable.message(&c, "nas").contains("nas"));
+        match SmbError::Unreachable.text("nas") {
+            Text::Keyed { params, .. } => {
+                assert_eq!(params.get("host").map(String::as_str), Some("nas"));
+            }
+            Text::Verbatim(_) => panic!("expected a keyed text"),
+        }
+    }
+
+    /// **Barrier this task's step 3.** The one sanctioned case of
+    /// `Text::Verbatim` in the whole plugin fleet: an unknown `NT_STATUS`
+    /// code must reach the screen **exactly as sent**, because it cannot be
+    /// resolved — no pack carries a translation for a code nobody has seen
+    /// yet.
+    ///
+    /// **[MUTATION]**: change `SmbError::Other`'s arm in `text()` to
+    /// `keyed("smb_unknown")` (or any other key) — this test fails,
+    /// because nothing but `Text::Verbatim` preserves the raw code
+    /// unchanged. This is what tells the assumed verbatim apart from an
+    /// oversight: the assertion fails loudly the moment it is turned into a
+    /// key.
+    #[test]
+    fn an_unknown_nt_status_travels_verbatim_unchanged() {
+        let raw = "NT_STATUS_SOMETHING_NEW: the future";
+        let e = SmbError::Other(raw.to_string());
+        assert_eq!(e.text("nas"), Text::Verbatim(raw.to_string()));
     }
 
     #[test]

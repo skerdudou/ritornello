@@ -208,6 +208,30 @@ name = "generic-input"
 exec = "${root}/target/debug/ritornello-plugin-generic-input"
 `,
 )
+// Two deliberately partial core packs, for the language-card journey (task
+// 14, language-packs chantier; a second one added in fix round 1 so a real
+// fallback other than the chosen language itself exists — see finding
+// 7/R6, "nothing stops the chosen language being picked as its own
+// fallback"). Each covers two keys of the ~320 the embedded English
+// carries — enough to make the language show up in the union (a module's
+// layer only needs to be non-empty) while staying `Partial`, never
+// `Complete`. Real end-to-end coverage of the completeness *arithmetic*
+// (the true set union, "still in English") lives in `LanguageCard.test.ts`,
+// with fixtures crafted for that; this fixture only has to prove the real
+// core serves two incomplete languages and the page reacts to them,
+// including the "still in English" figure computed from real server data.
+const localesRootNative = join(configDirNative, 'locales')
+mkdirSync(join(localesRootNative, 'core'), { recursive: true })
+writeFileSync(
+  join(localesRootNative, 'core', 'fr.toml'),
+  'language = "Langue"\nsave = "Enregistrer"\n',
+)
+writeFileSync(
+  join(localesRootNative, 'core', 'de.toml'),
+  'language = "Sprache"\nsave = "Speichern"\n',
+)
+const localesRoot = `${configDir}/locales`
+
 writeFileSync(
   join(configDirNative, 'stations.toml'),
   '[[stations]]\nname = "FIP"\nurl = "http://icecast.radiofrance.fr/fip-midfi.mp3"\npreset = 1\n',
@@ -246,6 +270,11 @@ const env = {
   RITORNELLO_RADIO_STATE: `${execDir}/plugin-radio.json`,
   RITORNELLO_INPUT_BINDINGS: `${execDir}/input-bindings.toml`,
   RITORNELLO_INPUT_PRESETS: `${root}/deploy/input-presets`,
+  // The partial French core pack above — default is `/etc/ritornello/
+  // locales`, which does not exist on a developer machine either, so
+  // without this the language card journey would find only `en` and never
+  // see the annotation or the fallback control it exists to exercise.
+  RITORNELLO_LOCALES: localesRoot,
   // Every file the `files` plugin writes goes to the throwaway execution
   // directory. Its defaults are `/etc/ritornello` and `/var/lib/ritornello`:
   // left alone, a journey run on a machine where Ritornello is installed would

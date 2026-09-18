@@ -1004,7 +1004,7 @@ mod tests {
 
         let mut ephemeral = bare_update();
         ephemeral.transient = true;
-        ephemeral.status = Some("empty preset".into());
+        ephemeral.status_text = Some(Text::Verbatim("empty preset".into()));
         core.handle_source_update("radio", ephemeral);
 
         core.handle_command(Command::Select(3)).await.unwrap();

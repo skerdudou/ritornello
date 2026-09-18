@@ -129,6 +129,25 @@ describe('applyTheme', () => {
     expect(root.style.getPropertyValue('--background')).toBe('')
   })
 
+  /// Task 15 review, N5: the same prototype-chain hazard `web/kit/src/
+  /// i18n.ts`'s `createT` was fixed against (a review round ran
+  /// `createT({})('toString')` and got a function object back) also sat
+  /// here — `catalog[id]` with `id = "toString"` resolves against the
+  /// inherited `Object.prototype.toString` method, a truthy function, so
+  /// `if (!preset)` never fires and that function reaches `resolveVars`
+  /// instead of the "unknown theme ignored" warning.
+  ///
+  /// [MUTATION]: replace `Object.hasOwn(catalog, id) ? catalog[id] :
+  /// undefined` with the bare `catalog[id]` — this test then throws
+  /// instead of leaving `root` untouched, because `resolveVars` receives
+  /// a function where it expects `{ styles: { light, dark } }`.
+  it('ignores a preset id named after an Object.prototype member without throwing', () => {
+    applyTheme('toString', 'light', root)
+    expect(root.style.getPropertyValue('--background')).toBe('')
+    applyTheme('constructor', 'light', root)
+    expect(root.style.getPropertyValue('--background')).toBe('')
+  })
+
   it('injects a single font link and replaces it on change', () => {
     applyTheme(DEFAULT_PRESET, 'light', root)
     const links = () => [...document.head.querySelectorAll('link[data-ritornello-fonts]')]

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use ritornello_proto::{
     SourcesCatalog, Cover, DisplayFrame, Enrichment, IdentityUpdate, NowPlaying, PlayerState, Preset,
-    SourceAction, SourceMessage, SourceReq, SourceRequest,
+    SourceAction, SourceMessage, SourceReq, SourceRequest, Text,
 };
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -25,8 +25,8 @@ pub struct SourceOutcome {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
-    /// See `SourceMessage::status`.
-    pub status: Option<String>,
+    /// See `SourceMessage::status_text`.
+    pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
     pub presets: Option<Vec<Preset>>,
 }
@@ -41,7 +41,7 @@ impl SourceOutcome {
             preset: None,
             preset_count: None,
             preset_name: None,
-            status: None,
+            status_text: None,
             presets: None,
         }
     }
@@ -79,9 +79,11 @@ impl SourceOutcome {
         self
     }
 
-    /// Declares the source's own state word (see `SourceMessage::status`).
-    pub fn status(mut self, word: impl Into<String>) -> Self {
-        self.status = Some(word.into());
+    /// Declares the source's own state, **unresolved** (see
+    /// `SourceMessage::status_text`): a key into the plugin's own
+    /// translation layer and its parameters, or explicit verbatim text.
+    pub fn status_text(mut self, text: Text) -> Self {
+        self.status_text = Some(text);
         self
     }
 
@@ -130,8 +132,8 @@ pub struct Notification {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
-    /// See `SourceMessage::status`.
-    pub status: Option<String>,
+    /// See `SourceOutcome::status_text`.
+    pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
     pub presets: Option<Vec<Preset>>,
     /// See `SourceMessage::cover`.
@@ -166,9 +168,9 @@ impl Notification {
         self
     }
 
-    /// Declares the source's own state word (see `SourceMessage::status`).
-    pub fn status(mut self, word: impl Into<String>) -> Self {
-        self.status = Some(word.into());
+    /// See `SourceOutcome::status_text`.
+    pub fn status_text(mut self, text: Text) -> Self {
+        self.status_text = Some(text);
         self
     }
 
@@ -297,7 +299,7 @@ pub trait SourcePlugin: Send + 'static {
     /// Default implementation: declare that nothing is playing anymore, which
     /// is true for every Source. Without a status, this frame **erases** the
     /// status memorized core-side (a permanent frame without a status means
-    /// erasure, see `SourceMessage::status`) — which is correct here, a
+    /// erasure, see `SourceMessage::status_text`) — which is correct here, a
     /// Source with no permanent status having nothing to lose. A Source that
     /// declares one on every frame (the cd) must override and go back through
     /// its own status logic, or watch it vanish on stop; a Source that also
@@ -350,12 +352,6 @@ pub trait SourcePlugin: Send + 'static {
     async fn player_track(&mut self, _n: i64) -> SourceOutcome {
         SourceOutcome::new(SourceAction::Noop)
     }
-
-    /// Changes the plugin's current language. Default implementation: no-op —
-    /// a plugin with no text of its own (console, mce) has nothing to do, and
-    /// cd/radio compile unchanged as long as they have not overridden this
-    /// method.
-    async fn set_locale(&mut self, _locale: String) {}
 
     /// The named presets, if this source knows how to enumerate them.
     /// Default: the empty list, which means "I only have numbers". The cd is
@@ -436,15 +432,11 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     SourceReq::Eject => plugin.eject().await,
                     SourceReq::Stop => plugin.stop().await,
                     SourceReq::PlayerTrack(n) => plugin.player_track(n).await,
-                    SourceReq::SetLocale(locale) => {
-                        plugin.set_locale(locale).await;
-                        SourceOutcome::new(SourceAction::Noop)
-                    }
-                    // Same precedent as `SetLocale`: a method that does not
-                    // return a `SourceOutcome`. The `Noop` is not decorative —
-                    // it is what unties the `SourceClient`'s `oneshot`, which
-                    // requires `(Some(id), Some(action))`. Without an action,
-                    // the caller would wait out the 5 s timeout and then fail,
+                    // A method that does not return a `SourceOutcome`. The
+                    // `Noop` is not decorative — it is what unties the
+                    // `SourceClient`'s `oneshot`, which requires
+                    // `(Some(id), Some(action))`. Without an action, the
+                    // caller would wait out the 5 s timeout and then fail,
                     // while the list is already there, right next to it.
                     SourceReq::ListPresets => {
                         // No guard here anymore: `SourceOutcome::presets`
@@ -475,7 +467,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     preset: outcome.preset,
                     preset_count: outcome.preset_count,
                     preset_name: outcome.preset_name,
-                    status: outcome.status,
+                    status_text: outcome.status_text,
                     // Stamped here, once, rather than by a constructor call on
                     // each of a plugin's ten declaration paths: a capability
                     // forgotten on a single path would give a button that
@@ -511,7 +503,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             preset: n.preset,
                             preset_count: n.preset_count,
                             preset_name: n.preset_name,
-                            status: n.status,
+                            status_text: n.status_text,
                             can_eject: Some(plugin.can_eject()),
                             // Same reason as the reply path above: stamped on
                             // **every** frame, so the spontaneous notification
@@ -894,13 +886,15 @@ pub trait AdminPlugin: Send + Sync + 'static {
     /// UI asset: `(mime, body)`, or `None` if the path is unknown.
     /// Typically `ui.js` and `ui.css`, embedded via `include_str!`.
     fn asset(&self, path: &str) -> Option<(String, String)>;
-    /// The plugin's i18n catalog, flattened.
-    ///
-    /// `lang = None`: the language the plugin was started in. `Some(l)`:
-    /// rebuild for `l` — cheap, `Catalog::load` only parses a TOML pack.
-    fn catalog(&self, lang: Option<&str>) -> serde_json::Value;
     async fn get_data(&self) -> serde_json::Value;
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String>;
+    /// `Err` carries the refusal **unresolved** (see
+    /// `ritornello_proto::AdminResult::Set::error_text`): a key into the
+    /// plugin's own translation layer and its parameters, or explicit
+    /// verbatim text. Every plugin that implements this trait has, by the
+    /// time this signature widened (language-packs chantier, tasks 8-10),
+    /// migrated off a `Catalog` of its own — there is no longer anything
+    /// here to resolve a finished `String` with.
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text>;
 }
 
 /// Binds an admin plugin's socket, without serving yet.
@@ -925,10 +919,10 @@ pub fn bind_admin(socket_path: &Path) -> Result<UnixListener> {
 /// Responses now leave in the order they complete; the `id` correlates them,
 /// not the order.
 ///
-/// The plugin sits behind an `RwLock`: `asset`, `catalog`, `get_data` read in
+/// The plugin sits behind an `RwLock`: `asset`, `get_data` read in
 /// parallel, `set_data` is exclusive — legitimately so, it is a write. The
 /// budget (`deadline_ms`) covers the **wait for the lock** as well as the
-/// processing: a `GetCatalog` stuck behind a 60 s `set_data` answers
+/// processing: a `GetAsset` stuck behind a 60 s `set_data` answers
 /// `Expired` at its deadline instead of staying silent.
 ///
 /// `Ping` takes no lock: that is what lets the core tell "busy" from "dead".
@@ -1010,33 +1004,25 @@ pub async fn serve_admin(listener: UnixListener, plugin: impl AdminPlugin) -> Re
     Ok(())
 }
 
-/// Is `s` a shape `GetCatalog`'s language may ever be let through as?
+/// No language ever crosses this dispatch any more, and that is why the
+/// `is_plain_locale` path-safety guard that used to sit right here — sanitizing
+/// `AdminReq::GetCatalog`'s `lang` before it reached `AdminPlugin::catalog`,
+/// which built a filesystem path out of it — was removed alongside that
+/// request rather than kept for a future use.
 ///
-/// Accepted: non-empty, at most 16 characters, `[A-Za-z0-9_-]` only.
-/// Rejected — in particular a path-traversal payload such as
-/// `../../../../etc/passwd` — because every `AdminPlugin::catalog`
-/// implementation hands its `lang` straight to `Catalog::load`, which builds
-/// a filesystem path out of it.
-///
-/// **Deliberately the same rule as `valid_locale`**
-/// (`crates/ritornello-core/src/status/locales.rs`), which is the actual
-/// authority — it already gates `PUT /api/locale` and already accepts
-/// languages like `pt-BR` and `zh_Hant` that a stricter, hand-rolled "plain
-/// locale" grammar (this function's previous shape) would have refused. The
-/// two cannot share code — this crate does not depend on the core — but this
-/// guard must never be *stricter* than the core's: a value the core accepted
-/// and forwarded, then silently downgraded to `None` here, is the same class
-/// of bug as forwarding an unvalidated one, one layer down. If `valid_locale`
-/// ever changes, mirror the change here too.
-///
-/// This is only the path-safety net, not a check that the language is one
-/// the core actually installed — the core owns that stricter check (against
-/// `list_locales`) at its HTTP boundary, because only it knows what is
-/// installed.
-pub fn is_plain_locale(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 16 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
+/// **The wider claim, as of task 11.** No language reaches a plugin at all
+/// any more, by either socket: `SourceReq::SetLocale` — the last request
+/// that ever carried one — is gone too, along with `SourcePlugin::set_locale`
+/// and every plugin's own `Catalog`. Resolution is entirely the core's own,
+/// against its shared `Registry`; a plugin's admin catalog is served on
+/// demand, by locale, straight from that registry (`admin::admin_i18n`, on
+/// the core side), never asked of the plugin over IPC. There is therefore
+/// nothing left in this crate that turns a language string into a path, on
+/// either socket — not a residual claim to keep re-verifying, but the reason
+/// no guard belongs here. If a future admin request ever lets a language
+/// travel from an untrusted caller into this crate again, it needs its own
+/// guard: this comment is the record that its absence here is deliberate,
+/// not an oversight.
 async fn handle_admin<P: AdminPlugin>(
     plugin: std::sync::Arc<tokio::sync::RwLock<P>>,
     assets: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
@@ -1061,23 +1047,10 @@ async fn handle_admin<P: AdminPlugin>(
                 None => AdminResult::Asset { mime: "text/plain".to_string(), body: None },
             }
         }
-        AdminReq::GetCatalog(lang) => {
-            // Sanitized **here**, before any plugin ever sees it: every one of
-            // them hands `lang` straight to `Catalog::load`, which builds a
-            // filesystem path from it (`root/component/{lang}.toml`). This is
-            // a trust boundary, not defensive habit — `lang` arrives over IPC
-            // (eventually from an HTTP query parameter) and a payload like
-            // `../../../../etc/passwd` would otherwise escape the locales
-            // root and get served to the browser as catalog entries. A single
-            // choke point here, rather than five plugins each having to
-            // remember to validate.
-            let lang = lang.filter(|l| is_plain_locale(l));
-            AdminResult::Catalog(plugin.read().await.catalog(lang.as_deref()))
-        }
         AdminReq::GetData => AdminResult::Data(plugin.read().await.get_data().await),
         AdminReq::SetData(data) => match plugin.write().await.set_data(data).await {
-            Ok(()) => AdminResult::Set { ok: true, error: None },
-            Err(msg) => AdminResult::Set { ok: false, error: Some(msg) },
+            Ok(()) => AdminResult::Set { ok: true, error_text: None },
+            Err(text) => AdminResult::Set { ok: false, error_text: Some(text) },
         },
     }
 }
@@ -1110,16 +1083,13 @@ mod admin_server_tests {
                 _ => None,
             }
         }
-        fn catalog(&self, _lang: Option<&str>) -> serde_json::Value {
-            serde_json::json!({ "btn_save": "Enregistrer" })
-        }
         async fn get_data(&self) -> serde_json::Value {
             self.data.clone()
         }
-        async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
+        async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
             tokio::time::sleep(self.set_delay).await;
             if data.get("bad").is_some() {
-                return Err("refused".into());
+                return Err(Text::Keyed { key: "refused".into(), params: HashMap::new() });
             }
             self.data = data;
             Ok(())
@@ -1165,7 +1135,7 @@ mod admin_server_tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(1), "{:?}", start.elapsed());
         let second = line(&mut r).await;
         assert_eq!(second.id, 1);
-        assert_eq!(second.result, AdminResult::Set { ok: true, error: None });
+        assert_eq!(second.result, AdminResult::Set { ok: true, error_text: None });
     }
 
     #[tokio::test]
@@ -1190,19 +1160,7 @@ mod admin_server_tests {
     }
 
     #[tokio::test]
-    async fn get_catalog_waits_for_the_lock_within_its_budget_then_expires() {
-        // The catalog reads the plugin's state, so it waits for an ongoing
-        // `set_data` to finish; if the budget is shorter than that set, it is
-        // `Expired`, not a silence.
-        let (mut r, mut w) = connected_client(slow_fake(3)).await;
-        w.write_all(b"{\"id\":1,\"req\":\"SetData\",\"arg\":{}}\n").await.unwrap();
-        w.write_all(b"{\"id\":2,\"deadline_ms\":300,\"req\":\"GetCatalog\",\"arg\":null}\n").await.unwrap();
-        let resp = line(&mut r).await;
-        assert_eq!((resp.id, resp.result), (2, AdminResult::Expired));
-    }
-
-    #[tokio::test]
-    async fn getasset_getdata_setdata_getcatalog_dialogue() {
+    async fn getasset_getdata_setdata_dialogue() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("admin.sock");
         let socket_srv = socket.clone();
@@ -1245,97 +1203,6 @@ mod admin_server_tests {
         let l = lines.next_line().await.unwrap().unwrap();
         let r: AdminResponse = serde_json::from_str(&l).unwrap();
         assert!(matches!(r.result, AdminResult::Asset { body: None, .. }));
-
-        write.write_all(b"{\"id\":5,\"req\":\"GetCatalog\",\"arg\":null}\n").await.unwrap();
-        let l = lines.next_line().await.unwrap().unwrap();
-        let r: AdminResponse = serde_json::from_str(&l).unwrap();
-        assert!(matches!(r.result, AdminResult::Catalog(ref v) if v["btn_save"] == "Enregistrer"));
-    }
-
-    /// A test-only admin plugin whose catalog simply echoes the requested
-    /// language, so the wiring from the wire to `AdminPlugin::catalog` can be
-    /// observed without a real i18n pack.
-    struct LangEchoAdmin;
-
-    #[async_trait::async_trait]
-    impl AdminPlugin for LangEchoAdmin {
-        fn asset(&self, _path: &str) -> Option<(String, String)> {
-            None
-        }
-        fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
-            serde_json::json!({ "lang": lang })
-        }
-        async fn get_data(&self) -> serde_json::Value {
-            serde_json::json!({})
-        }
-        async fn set_data(&mut self, _data: serde_json::Value) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn a_catalog_request_carries_the_language_through_to_the_plugin() {
-        // The language must be **obeyed**, not merely used as a cache key: the
-        // URL that asks for `fr` is served `immutable` (Task 8), so it must
-        // contain French whatever the plugin's current locale is. Otherwise
-        // the promise lies.
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("admin.sock");
-        std::mem::forget(dir);
-        let listener = bind_admin(&socket).unwrap();
-        tokio::spawn(async move { serve_admin(listener, LangEchoAdmin).await.unwrap() });
-        let stream = UnixStream::connect(&socket).await.unwrap();
-        let (r, mut w) = stream.into_split();
-        let mut r = BufReader::new(r);
-        w.write_all(b"{\"id\":1,\"req\":\"GetCatalog\",\"arg\":\"fr\"}\n").await.unwrap();
-        let resp = line(&mut r).await;
-        let AdminResult::Catalog(v) = resp.result else { panic!("expected a Catalog result: {resp:?}") };
-        assert_eq!(v["lang"], "fr");
-    }
-
-    #[tokio::test]
-    async fn a_malformed_language_never_reaches_the_plugin_and_falls_back_to_none() {
-        // Trust boundary: `lang` arrives over IPC (and, once the core wires
-        // its HTTP query parameter through, ultimately from a browser), and a
-        // plugin hands it straight to `Catalog::load`, which builds a
-        // filesystem path from it (`root/component/{lang}.toml`). A
-        // path-traversal payload must never reach that call: it must produce
-        // exactly the same answer as `None`, not an error and not the
-        // requested file's contents.
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("admin.sock");
-        std::mem::forget(dir);
-        let listener = bind_admin(&socket).unwrap();
-        tokio::spawn(async move { serve_admin(listener, LangEchoAdmin).await.unwrap() });
-        let stream = UnixStream::connect(&socket).await.unwrap();
-        let (r, mut w) = stream.into_split();
-        let mut r = BufReader::new(r);
-
-        w.write_all(b"{\"id\":1,\"req\":\"GetCatalog\",\"arg\":\"../../../../etc/passwd\"}\n")
-            .await
-            .unwrap();
-        let malicious = line(&mut r).await;
-
-        w.write_all(b"{\"id\":2,\"req\":\"GetCatalog\",\"arg\":null}\n").await.unwrap();
-        let none = line(&mut r).await;
-
-        assert_eq!(malicious.result, none.result, "a malformed language must answer exactly like None");
-        let AdminResult::Catalog(v) = malicious.result else { panic!("expected a Catalog result") };
-        assert_eq!(v["lang"], serde_json::Value::Null, "the plugin must never see the raw payload");
-    }
-
-    #[test]
-    fn is_plain_locale_accepts_only_the_installable_shape() {
-        // Same bounds as `valid_locale`'s own test
-        // (`status::locales::tests::valid_locale_accepts_codes_and_refuses_the_rest`):
-        // this guard must accept everything that one does, or a value the
-        // core installed and forwarded would be silently downgraded here.
-        for ok in ["en", "fr", "pt-BR", "zh_Hant", "fr-CA"] {
-            assert!(is_plain_locale(ok), "{ok} should be accepted");
-        }
-        for bad in ["", "..", "../fr", "fr/..", "../../../../etc/passwd", "fr toml", &"a".repeat(17)] {
-            assert!(!is_plain_locale(bad), "{bad} should be rejected");
-        }
     }
 }
 
@@ -1404,16 +1271,17 @@ mod tests {
         );
         // The other fields do not move: that is the trap of a builder.
         assert_eq!(n.preset, None);
-        assert_eq!(n.status, None);
+        assert_eq!(n.status_text, None);
         assert!(!n.transient);
     }
 
     #[test]
-    fn the_builder_status_lands_in_the_frame() {
-        let o = SourceOutcome::new(SourceAction::Noop).status("PAS DE DISQUE");
-        assert_eq!(o.status.as_deref(), Some("PAS DE DISQUE"));
-        let n = Notification::new().status("FIP").preset_name("FIP");
-        assert_eq!(n.status.as_deref(), Some("FIP"));
+    fn the_builder_status_text_lands_in_the_frame() {
+        let key = Text::Keyed { key: "no_disc".into(), params: HashMap::new() };
+        let o = SourceOutcome::new(SourceAction::Noop).status_text(key.clone());
+        assert_eq!(o.status_text, Some(key.clone()));
+        let n = Notification::new().status_text(key.clone()).preset_name("FIP");
+        assert_eq!(n.status_text, Some(key));
         assert_eq!(n.preset_name.as_deref(), Some("FIP"));
     }
 
@@ -1577,7 +1445,7 @@ mod tests {
             "the notification under test must be the one that carries only a cover: {spont_line}"
         );
         assert!(
-            spontaneous.identity.is_none() && spontaneous.status.is_none(),
+            spontaneous.identity.is_none() && spontaneous.status_text.is_none(),
             "otherwise the frame would qualify by itself and the stamp would no longer be \
              load-bearing: {spont_line}"
         );
@@ -1655,7 +1523,7 @@ mod tests {
 
         let (spontaneous, spont_line) = spontaneous.expect("the spontaneous notification");
         assert!(
-            spontaneous.identity.is_none() && spontaneous.status.is_none(),
+            spontaneous.identity.is_none() && spontaneous.status_text.is_none(),
             "otherwise the frame would qualify by itself and the stamp would no longer be \
              load-bearing: {spont_line}"
         );
@@ -1695,8 +1563,9 @@ mod tests {
     async fn set_play_mode_is_dispatched_to_the_plugin() {
         // Symmetrical to `overridden_wake_is_dispatched`: proves the request
         // reaches the plugin with both flags, and that the correlation still
-        // releases on a `Noop` (see `SetLocale`'s precedent, right above the
-        // dispatch arm).
+        // releases on a `Noop` — a method that does not return a
+        // `SourceOutcome` still unties the `SourceClient`'s oneshot, exactly
+        // like `ArchiveCover` and `ListPresets` below.
         struct RecordingSource {
             seen: std::sync::Arc<std::sync::Mutex<Option<(bool, bool)>>>,
         }
@@ -1733,7 +1602,7 @@ mod tests {
             .unwrap();
         let line = lines.next_line().await.unwrap().unwrap();
         let msg: SourceMessage = serde_json::from_str(&line).unwrap();
-        assert_eq!(msg.id, Some(1), "the oneshot must be released, exactly like SetLocale");
+        assert_eq!(msg.id, Some(1), "the oneshot must be released even on a Noop");
         assert_eq!(msg.action, Some(SourceAction::Noop));
         assert_eq!(*seen.lock().unwrap(), Some((true, false)));
     }
@@ -1960,51 +1829,6 @@ mod tests {
         // play() dispatched, NOT activate() — which here plays nothing, the
         // very situation that made the Play key inert on the cd.
         assert_eq!(msg.action, Some(SourceAction::play("cdda://")));
-    }
-
-    #[tokio::test]
-    async fn set_locale_is_forwarded_to_the_plugin_and_answers_noop() {
-        use std::sync::{Arc, Mutex};
-        struct RecordingLocale {
-            seen: Arc<Mutex<Option<String>>>,
-        }
-        #[async_trait::async_trait]
-        impl SourcePlugin for RecordingLocale {
-            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn set_locale(&mut self, locale: String) {
-                *self.seen.lock().unwrap() = Some(locale);
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("plugin.sock");
-        let socket_for_server = socket.clone();
-        let seen = Arc::new(Mutex::new(None));
-        let seen_srv = seen.clone();
-        tokio::spawn(async move {
-            run_source_plugin(RecordingLocale { seen: seen_srv }, &socket_for_server).await.unwrap();
-        });
-        let mut client = None;
-        for _ in 0..50 {
-            if let Ok(s) = UnixStream::connect(&socket).await {
-                client = Some(s);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        let (read, mut write) = client.expect("plugin connection").into_split();
-        let mut lines = BufReader::new(read).lines();
-        write.write_all(b"{\"id\":1,\"req\":\"SetLocale\",\"arg\":\"fr\"}\n").await.unwrap();
-        let line = lines.next_line().await.unwrap().unwrap();
-        let msg: ritornello_proto::SourceMessage = serde_json::from_str(&line).unwrap();
-        assert_eq!(msg.id, Some(1));
-        assert_eq!(msg.action, Some(SourceAction::Noop));
-        assert_eq!(seen.lock().unwrap().as_deref(), Some("fr"));
     }
 
     #[tokio::test]

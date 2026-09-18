@@ -655,6 +655,53 @@ fn unwired_plugin_lines(gathered: &register::Gathered) -> Vec<PluginStatus> {
     lines
 }
 
+/// One status line built from what a plugin **announced**: the four fields
+/// every wiring site copies out of its `Announcement`, in one place.
+///
+/// Extracted from `main`'s inline assembly for the reason
+/// `unwired_plugin_lines` just above was: twelve call sites — six at the
+/// startup rendezvous, six in `hotplug` — each copied the same four fields
+/// by hand, and the six startup ones were reachable by no test at all, so
+/// the whole `Announcement` → status-line transcription could be broken on
+/// the path every boot takes with `cargo test --workspace` still green
+/// (final whole-branch review, boundaries pass, finding 2). One copy, one
+/// guard: `an_announced_line_carries_what_the_plugin_announced`.
+fn announced_plugin_line(name: &str, kind: &str, connected: bool, announcement: &Announcement) -> PluginStatus {
+    PluginStatus {
+        ui_version: announcement.ui_version.clone(),
+        version: announcement.version.clone(),
+        repository: announcement.repository.clone(),
+        catalog_unknown: announcement.catalog.is_none(),
+        ..PluginStatus::kind(name, kind, connected, announcement.admin)
+    }
+}
+
+/// Wires one announcement's embedded catalogue into the shared registry —
+/// the startup rendezvous and `hotplug` alike, through the same statement.
+///
+/// **This is how a plugin's text reaches the device at all.** Every plugin
+/// admin page, and every source status the twenty-column display shows,
+/// resolves through what this statement put into the registry; a regression
+/// here leaves the whole device resolving keys to themselves.
+///
+/// It was, until now, one inline statement inside `main()` — on the path
+/// every boot takes, and reachable by no test: neutralising it left
+/// `cargo test --workspace` at exit 0 (final whole-branch review,
+/// boundaries pass, finding 1). Extracted for the same reason
+/// `unwired_plugin_lines` was, and guarded by
+/// `startup_wiring_puts_an_announced_catalog_into_the_registry` and its
+/// `None` twin.
+///
+/// `None` leaves the module **absent** from the registry rather than
+/// inventing an empty one: see `Announcement.catalog`'s own doc on why the
+/// two facts must not be conflated, and `Registry::announced_module` for
+/// the accessor that keeps them apart afterwards.
+async fn wire_announced_catalog(registry: &i18n::Shared, name: &str, announcement: &Announcement) {
+    if let Some(catalog) = &announcement.catalog {
+        registry.write().await.insert_announced(name.to_string(), i18n::module_layers_from_catalog(name, catalog));
+    }
+}
+
 /// Stops a plugin refused at the startup rendezvous for speaking another
 /// protocol — the rendezvous-side half of what `hotplug` already does when
 /// the same refusal arrives hot.
@@ -707,8 +754,11 @@ struct HotPlugChildren {
     /// `covers`: purging a fresh, empty cache would invalidate nothing of
     /// what the routes actually serve.
     admin_assets: Arc<admin::AssetCache>,
-    /// Same sharing rule as `admin_assets`, for the plugin catalogs.
-    admin_catalogs: Arc<admin::CatalogCache>,
+    /// **The same** `Arc` as the HTTP `AppState`'s and the core's — see
+    /// `crate::i18n::Shared`'s doc. `hotplug` grows it with a late
+    /// announcement's layers; `forget_page` (below and in `hot_unplug`)
+    /// shrinks it when the plugin disconnects.
+    registry: crate::i18n::Shared,
     /// How a closing socket makes itself known to the main loop.
     ///
     /// **This is the only path through which the death of an unsupervised
@@ -814,7 +864,7 @@ async fn hotplug<P: player::Player>(
         // to reverse elsewhere. Without it, `/api/admin/<name>` and
         // `/plugins/<name>/` would burn the request's whole timeout budget
         // against a dead backend instead of answering 404 right away.
-        admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, &name).await;
+        admin::forget_page(&children.admin_backends, &children.admin_assets, &children.registry, &name).await;
         // Nothing is persisted: this is a refusal to run, not the `disabled`
         // switch. `enabled = false` written here would keep the plugin off
         // even after a matching binary was installed, and the fix would look
@@ -929,13 +979,20 @@ async fn hotplug<P: player::Player>(
                         // Cloned before `hotplug_source` takes it: the
                         // catalog request below addresses the same client.
                         let catalog_client = client.clone();
-                        // `hotplug_source` does the four things that
-                        // `add_source` alone does not: the current locale
-                        // (otherwise a manually restarted `cd` on a device in
-                        // French comes back displaying `NO DISC`), the
-                        // current play mode, the wake-up if it is the core's
-                        // **first** source (otherwise it is active and
-                        // silent), and publishing the state.
+                        // `hotplug_source` does the three things that
+                        // `add_source` alone does not: the current play mode,
+                        // the wake-up if it is the core's **first** source
+                        // (otherwise it is active and silent), and publishing
+                        // the state.
+                        //
+                        // It used to push the current locale as well, and a
+                        // manually restarted `cd` on a device in French came
+                        // back displaying its status in English when it did
+                        // not. That whole mechanism is gone: no language
+                        // crosses the Source wire any more, a status is
+                        // resolved at publication against the registry, so a
+                        // freshly wired source is in the right language with
+                        // nothing pushed to it.
                         //
                         // First wiring or rewiring: that is precisely the
                         // event sought by whoever is debugging a flapping
@@ -984,21 +1041,11 @@ async fn hotplug<P: player::Player>(
                                 tracing::debug!("list_presets for {catalog_name}: {e}");
                             }
                         });
-                        lines.push(PluginStatus {
-                            ui_version: announcement.ui_version.clone(),
-                            version: announcement.version.clone(),
-                            repository: announcement.repository.clone(),
-                            ..PluginStatus::kind(&name, "source", true, announcement.admin)
-                        });
+                        lines.push(announced_plugin_line(&name, "source", true, &announcement));
                     }
                     Err(e) => {
                         tracing::warn!("plugin {name} source unavailable: {e}");
-                        lines.push(PluginStatus {
-                            ui_version: announcement.ui_version.clone(),
-                            version: announcement.version.clone(),
-                            repository: announcement.repository.clone(),
-                            ..PluginStatus::kind(&name, "source", false, announcement.admin)
-                        });
+                        lines.push(announced_plugin_line(&name, "source", false, &announcement));
                     }
                 }
             }
@@ -1016,21 +1063,11 @@ async fn hotplug<P: player::Player>(
                         children.catalog_rx.clone(),
                         UnreachableNotice { wiring, tx: children.unreachable_tx.clone() },
                     );
-                    lines.push(PluginStatus {
-                        ui_version: announcement.ui_version.clone(),
-                        version: announcement.version.clone(),
-                        repository: announcement.repository.clone(),
-                        ..PluginStatus::kind(&name, "display", true, announcement.admin)
-                    });
+                    lines.push(announced_plugin_line(&name, "display", true, &announcement));
                 }
                 Err(e) => {
                     tracing::warn!("display plugin {name} unavailable: {e}");
-                    lines.push(PluginStatus {
-                        ui_version: announcement.ui_version.clone(),
-                        version: announcement.version.clone(),
-                        repository: announcement.repository.clone(),
-                        ..PluginStatus::kind(&name, "display", false, announcement.admin)
-                    });
+                    lines.push(announced_plugin_line(&name, "display", false, &announcement));
                 }
             },
             PluginKind::Input => {
@@ -1048,12 +1085,7 @@ async fn hotplug<P: player::Player>(
                     // receiver with it — so it does not need to be distinguished.
                     let _ = unreachable.send((task_name, wiring)).await;
                 });
-                lines.push(PluginStatus {
-                    ui_version: announcement.ui_version.clone(),
-                    version: announcement.version.clone(),
-                    repository: announcement.repository.clone(),
-                    ..PluginStatus::kind(&name, "input", true, announcement.admin)
-                });
+                lines.push(announced_plugin_line(&name, "input", true, &announcement));
             }
             PluginKind::Metadata => {
                 let tx = children.enrich_tx.clone();
@@ -1069,12 +1101,7 @@ async fn hotplug<P: player::Player>(
                     }
                     let _ = unreachable.send((task_name, wiring)).await;
                 });
-                lines.push(PluginStatus {
-                    ui_version: announcement.ui_version.clone(),
-                    version: announcement.version.clone(),
-                    repository: announcement.repository.clone(),
-                    ..PluginStatus::kind(&name, "metadata", true, announcement.admin)
-                });
+                lines.push(announced_plugin_line(&name, "metadata", true, &announcement));
             }
         }
     }
@@ -1087,7 +1114,11 @@ async fn hotplug<P: player::Player>(
     // Assets go with the backend: a re-announcement is the end of one process
     // followed by the start of another, and the new one may carry a rebuilt
     // `ui.js`. Keeping them served the old one until the core restarted.
-    admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, &name).await;
+    admin::forget_page(&children.admin_backends, &children.admin_assets, &children.registry, &name).await;
+    // Re-inserted, through the same statement the startup rendezvous uses:
+    // a re-announcement must refresh the module's text, and an announcement
+    // without a catalogue must leave it absent.
+    wire_announced_catalog(&children.registry, &name, &announcement).await;
     let mut admin_connected = false;
     if announcement.admin {
         let path = ritornello_plugin_sdk::admin_socket(&prefix);
@@ -1285,7 +1316,7 @@ async fn hot_unplug<P: player::Player>(
     // Removed, otherwise `/plugins/<name>/` would wait out the request's
     // timeout budget before ending in error, where a plain 404 says right
     // away that there is nothing at this address.
-    admin::forget_page(&children.admin_backends, &children.admin_assets, &children.admin_catalogs, name).await;
+    admin::forget_page(&children.admin_backends, &children.admin_assets, &children.registry, name).await;
     let mut statuses = children.status_state.write().await;
     status::replace_plugin_lines(&mut statuses, name, vec![PluginStatus::disabled(name)], false);
     statuses.active_source = core.active_source().to_string();
@@ -1320,11 +1351,10 @@ async fn relaunch(
     generation: u64,
     children: &HotPlugChildren,
     register_path: &Path,
-    locale: Option<&str>,
     kill_triggers: &mut HashMap<String, tokio::sync::oneshot::Sender<()>>,
 ) -> Option<PluginExit> {
     let prefix = children.sockets_dir.join(name);
-    match plugins::spawn(exec, register_path, name, &prefix, locale) {
+    match plugins::spawn(exec, register_path, name, &prefix) {
         Ok(child) => {
             tracing::info!("plugin {name} re-enabled, launched again");
             let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1475,7 +1505,6 @@ async fn declare_plugin<P: player::Player>(
                 generation,
                 children,
                 register_path,
-                core.current_locale().as_deref(),
                 kill_triggers,
             )
             .await;
@@ -1669,11 +1698,22 @@ async fn main() -> Result<()> {
     let persisted = state::load(&state_path);
 
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
-    let catalog = Arc::new(RwLock::new(ritornello_i18n::Catalog::load(
-        "core",
+    // The one registry for the whole process: swept from disk once here,
+    // seeded with the core's own module and `common`'s, then grown by one
+    // `insert_announced` per plugin announcement (initial wiring loop and
+    // `hotplug`, below) and shrunk by `forget` (`admin::forget_page`) as
+    // plugins disconnect — see `crate::i18n::Shared`'s doc. `locales_root`'s
+    // only other reader, `AppState.locales_root`, was removed once every
+    // route that used it moved onto this same registry (`Registry::
+    // core_languages` — task 12) instead of a second, independent disk
+    // read, so this is now its last use.
+    let registry: i18n::Shared = Arc::new(RwLock::new(i18n::seeded_registry(locales_root)));
+    // The device's own persisted fallback (task 13), or "en" on a device
+    // that has never set one — see `i18n::core_catalog`'s doc.
+    let catalog = Arc::new(RwLock::new(i18n::core_catalog(
+        &*registry.read().await,
         persisted.locale.as_deref().unwrap_or("en"),
-        &locales_root,
-        i18n::EN,
+        persisted.fallback.as_deref().unwrap_or("en"),
     )));
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<InputMessage>(32);
@@ -1708,6 +1748,7 @@ async fn main() -> Result<()> {
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
+    let (fallback_tx, mut fallback_rx) = mpsc::channel::<String>(4);
     let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
     let (settings_tx, mut settings_rx) = mpsc::channel::<state::Settings>(4);
     let (plugin_order_tx, mut plugin_order_rx) = mpsc::channel::<status::PluginOrder>(4);
@@ -1818,13 +1859,7 @@ async fn main() -> Result<()> {
             continue;
         }
         let prefix = sockets_dir.join(&p.name);
-        match plugins::spawn(
-            &p.exec,
-            &register_path,
-            &p.name,
-            &prefix,
-            persisted.locale.as_deref(),
-        ) {
+        match plugins::spawn(&p.exec, &register_path, &p.name, &prefix) {
             Ok(child) => {
                 let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
                 kill_triggers.insert(p.name.clone(), kill_tx);
@@ -1936,6 +1971,7 @@ async fn main() -> Result<()> {
         let Some(announcement) = gathered.announcements.get(name) else {
             continue;
         };
+        wire_announced_catalog(&registry, name, announcement).await;
         let prefix = sockets_dir.join(name);
 
         for kind in &announcement.kinds {
@@ -1967,42 +2003,22 @@ async fn main() -> Result<()> {
                     {
                         Ok(client) => {
                             sources.insert(name.clone(), client);
-                            plugin_statuses.push(PluginStatus {
-                                ui_version: announcement.ui_version.clone(),
-                                version: announcement.version.clone(),
-                                repository: announcement.repository.clone(),
-                                ..PluginStatus::kind(name, "source", true, announcement.admin)
-                            });
+                            plugin_statuses.push(announced_plugin_line(name, "source", true, announcement));
                         }
                         Err(e) => {
                             tracing::warn!("plugin {name} source unavailable: {e}");
-                            plugin_statuses.push(PluginStatus {
-                                ui_version: announcement.ui_version.clone(),
-                                version: announcement.version.clone(),
-                                repository: announcement.repository.clone(),
-                                ..PluginStatus::kind(name, "source", false, announcement.admin)
-                            });
+                            plugin_statuses.push(announced_plugin_line(name, "source", false, announcement));
                         }
                     }
                 }
                 PluginKind::Display => match DisplayClient::connect(&socket).await {
                     Ok(client) => {
                         display_clients.push((name.clone(), client, announcement.covers));
-                        plugin_statuses.push(PluginStatus {
-                            ui_version: announcement.ui_version.clone(),
-                            version: announcement.version.clone(),
-                            repository: announcement.repository.clone(),
-                            ..PluginStatus::kind(name, "display", true, announcement.admin)
-                        });
+                        plugin_statuses.push(announced_plugin_line(name, "display", true, announcement));
                     }
                     Err(e) => {
                         tracing::warn!("display plugin {name} unavailable: {e}");
-                        plugin_statuses.push(PluginStatus {
-                            ui_version: announcement.ui_version.clone(),
-                            version: announcement.version.clone(),
-                            repository: announcement.repository.clone(),
-                            ..PluginStatus::kind(name, "display", false, announcement.admin)
-                        });
+                        plugin_statuses.push(announced_plugin_line(name, "display", false, announcement));
                     }
                 },
                 PluginKind::Input => {
@@ -2022,12 +2038,7 @@ async fn main() -> Result<()> {
                         // name.
                         let _ = unreachable.send((task_name, 0)).await;
                     });
-                    plugin_statuses.push(PluginStatus {
-                        ui_version: announcement.ui_version.clone(),
-                        version: announcement.version.clone(),
-                        repository: announcement.repository.clone(),
-                        ..PluginStatus::kind(name, "input", true, announcement.admin)
-                    });
+                    plugin_statuses.push(announced_plugin_line(name, "input", true, announcement));
                 }
                 PluginKind::Metadata => {
                     // Two-way relay, in its own task: its failure concerns
@@ -2046,12 +2057,7 @@ async fn main() -> Result<()> {
                         }
                         let _ = unreachable.send((task_name, 0)).await;
                     });
-                    plugin_statuses.push(PluginStatus {
-                        ui_version: announcement.ui_version.clone(),
-                        version: announcement.version.clone(),
-                        repository: announcement.repository.clone(),
-                        ..PluginStatus::kind(name, "metadata", true, announcement.admin)
-                    });
+                    plugin_statuses.push(announced_plugin_line(name, "metadata", true, announcement));
                 }
             }
         }
@@ -2091,8 +2097,6 @@ async fn main() -> Result<()> {
     // loop and `hotplug` must purge **this** cache, the one the routes read,
     // never a fresh copy.
     let admin_assets: Arc<admin::AssetCache> = Arc::new(Default::default());
-    // Same reason as `admin_assets`, for the plugin catalogs.
-    let admin_catalogs: Arc<admin::CatalogCache> = Arc::new(Default::default());
     // Computed once, here: every restart of the core (and only a restart)
     // must produce a fresh stamp — see `AppState::session`.
     let session = status::new_session();
@@ -2132,6 +2136,7 @@ async fn main() -> Result<()> {
     }));
     let audio_current = Arc::new(RwLock::new(persisted.audio_device.clone()));
     let locale_current = Arc::new(RwLock::new(persisted.locale.clone()));
+    let fallback_current = Arc::new(RwLock::new(persisted.fallback.clone()));
     // `state.json` is reread with no guarantee: `theme_put` validates the
     // HTTP path, but a corrupted or hand-edited state file can carry
     // anything. An unknown theme name makes `applyTheme` on the SPA side
@@ -2295,12 +2300,13 @@ async fn main() -> Result<()> {
             audio_current: audio_current.clone(),
             audio_tx: audio_tx.clone(),
             catalog: catalog.clone(),
+            registry: registry.clone(),
             locale_current: locale_current.clone(),
             locale_tx: locale_tx.clone(),
-            locales_root: locales_root.clone(),
+            fallback_current: fallback_current.clone(),
+            fallback_tx: fallback_tx.clone(),
             admin_backends: admin_backends.clone(),
             admin_assets: admin_assets.clone(),
-            admin_catalogs: admin_catalogs.clone(),
             session: session.clone(),
             cmd_tx: cmd_tx.clone(),
             theme_current: theme_current.clone(),
@@ -2338,7 +2344,7 @@ async fn main() -> Result<()> {
                 persisted,
                 state_path,
                 catalog: catalog.clone(),
-                locales_root: locales_root.clone(),
+                registry: registry.clone(),
                 manifest_order: manifest_order.clone(),
                 metadata: MetadataWiring {
                     plugins: metadata_plugins,
@@ -2434,7 +2440,7 @@ async fn main() -> Result<()> {
         status_state: status_state.clone(),
         admin_backends: admin_backends.clone(),
         admin_assets: admin_assets.clone(),
-        admin_catalogs: admin_catalogs.clone(),
+        registry: registry.clone(),
         unreachable_tx: unreachable_tx.clone(),
     };
 
@@ -2665,7 +2671,7 @@ async fn main() -> Result<()> {
                     // two other locks, and nesting them would make safety
                     // depend on an order never to reverse elsewhere.
                     drop(statuses);
-                    admin::forget_page(&admin_backends, &admin_assets, &admin_catalogs, &name).await;
+                    admin::forget_page(&admin_backends, &admin_assets, &registry, &name).await;
                 }
             }
             Some((name, update)) = source_update_rx.recv() => {
@@ -2697,6 +2703,11 @@ async fn main() -> Result<()> {
             Some(locale) = locale_rx.recv() => {
                 if let Err(e) = core.set_locale(locale).await {
                     tracing::warn!("locale change: {e}");
+                }
+            }
+            Some(fallback) = fallback_rx.recv() => {
+                if let Err(e) = core.set_fallback(fallback).await {
+                    tracing::warn!("fallback change: {e}");
                 }
             }
             Some(t) = theme_rx.recv() => {
@@ -2746,7 +2757,6 @@ async fn main() -> Result<()> {
                                             generation,
                                             &hot_children,
                                             &register_path,
-                                            core.current_locale().as_deref(),
                                             &mut kill_triggers,
                                         )
                                         .await
@@ -2840,7 +2850,6 @@ async fn main() -> Result<()> {
                                         generation,
                                         &hot_children,
                                         &register_path,
-                                        core.current_locale().as_deref(),
                                         &mut kill_triggers,
                                     )
                                     .await
@@ -3107,7 +3116,7 @@ async fn main() -> Result<()> {
                         // deaths must leave the same state, or behavior
                         // would depend on who launched the process.
                         drop(statuses);
-                        admin::forget_page(&admin_backends, &admin_assets, &admin_catalogs, &name).await;
+                        admin::forget_page(&admin_backends, &admin_assets, &registry, &name).await;
                     }
                 }
             }
@@ -3320,8 +3329,8 @@ mod toggle_tests {
         gathered: register::Gathered,
         kill_triggers: HashMap<String, tokio::sync::oneshot::Sender<()>>,
         non_supervised: HashSet<String>,
-        /// Held until the end of the test: `state_path` and `locales_root`
-        /// depend on it.
+        /// Held until the end of the test: `state_path` and the registry's
+        /// pack root depend on it.
         _dir: tempfile::TempDir,
     }
 
@@ -3341,12 +3350,14 @@ mod toggle_tests {
         let (sources_catalog_tx, catalog_rx) = watch::channel(SourcesCatalog::default());
 
         let covers = Arc::new(CoverCache::new());
-        let catalog = Arc::new(RwLock::new(ritornello_i18n::Catalog::load(
-            "core",
-            "en",
-            &root,
-            crate::i18n::EN,
-        )));
+        // Built as a plain value first, and only wrapped in the shared
+        // `Arc<RwLock<_>>` afterwards: `bench()` is sync, and the
+        // tokio `RwLock` this crate uses elsewhere has no synchronous
+        // reader safe to call from inside a `#[tokio::test]`'s worker
+        // thread.
+        let registry_val = crate::i18n::seeded_registry(root.clone());
+        let catalog = Arc::new(RwLock::new(crate::i18n::core_catalog(&registry_val, "en", "en")));
+        let registry: crate::i18n::Shared = Arc::new(RwLock::new(registry_val));
 
         // The one declared name, shared by the core and the hot-plug
         // children: they must agree, and a test that changes it changes both.
@@ -3359,7 +3370,7 @@ mod toggle_tests {
                 persisted: Default::default(),
                 state_path: root.join("state.json"),
                 catalog,
-                locales_root: root.clone(),
+                registry: registry.clone(),
                 manifest_order: manifest_order.clone(),
                 sources_catalog: sources_catalog_tx,
                 metadata: MetadataWiring {
@@ -3394,7 +3405,7 @@ mod toggle_tests {
             })),
             admin_backends: Arc::new(RwLock::new(HashMap::new())),
             admin_assets: Arc::new(Default::default()),
-            admin_catalogs: Arc::new(Default::default()),
+            registry,
         };
 
         let mut gathered = register::Gathered::default();
@@ -3409,6 +3420,7 @@ mod toggle_tests {
                 protocol: ritornello_proto::PROTOCOL_VERSION,
                 version: None,
                 repository: None,
+                catalog: None,
             },
         );
 
@@ -3438,6 +3450,7 @@ mod toggle_tests {
             protocol: ritornello_proto::PROTOCOL_VERSION,
             version: None,
             repository: None,
+            catalog: None,
         }
     }
 
@@ -4346,6 +4359,7 @@ mod toggle_tests {
             protocol: foreign,
             version: Some("0.2.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(
@@ -4390,6 +4404,7 @@ mod toggle_tests {
             protocol: ritornello_proto::PROTOCOL_VERSION,
             version: Some("0.3.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(
@@ -4429,6 +4444,7 @@ mod toggle_tests {
             protocol: foreign,
             version: Some("0.2.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
@@ -4473,6 +4489,7 @@ mod toggle_tests {
             protocol: foreign,
             version: Some("0.2.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
@@ -4522,6 +4539,7 @@ mod toggle_tests {
             protocol: ritornello_proto::PROTOCOL_VERSION + 1,
             version: Some("0.2.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
@@ -4548,6 +4566,7 @@ mod toggle_tests {
             protocol: foreign,
             version: Some("0.2.0".into()),
             repository: None,
+            catalog: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
@@ -4560,6 +4579,300 @@ mod toggle_tests {
         let json = serde_json::to_string(line).unwrap();
         assert!(json.contains(&format!("\"incompatible\":{foreign}")), "{json}");
         assert!(!json.contains("stalled"), "{json}");
+    }
+
+    /// Twin of `the_status_page_says_why_a_plugin_was_refused`, for the other
+    /// silent failure `PROTOCOL_VERSION` staying at 1 lets through: a
+    /// **matching** protocol, so nothing refuses the plugin, but no
+    /// `catalog` at all in the announcement — the binary is legitimately
+    /// wired and simply predates the field. From the announcement to the
+    /// JSON the page reads, exactly as its sibling: proving the constructor
+    /// works would prove nothing about `hotplug` actually calling it.
+    #[tokio::test]
+    async fn the_status_page_names_a_wired_plugin_that_predates_the_catalog_field() {
+        let mut b = bench();
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: Some("0.2.0".into()),
+            repository: None,
+            catalog: None,
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        let statuses = b.children.status_state.read().await;
+        let line = statuses.plugins.iter().find(|l| l.name == "mpd").unwrap();
+        assert!(line.catalog_unknown, "an absent catalog must be named, not silently absorbed");
+        assert_eq!(line.incompatible, None, "the protocol itself matched: not the same refusal");
+
+        let json = serde_json::to_string(line).unwrap();
+        assert!(json.contains("\"catalog_unknown\":true"), "{json}");
+        assert!(!json.contains("incompatible"), "{json}");
+    }
+
+    /// The mirror case: a plugin that **does** announce a catalog — even an
+    /// empty one, `Some({})`, exactly what a textless but up-to-date plugin
+    /// (`console`, `nrj-metas`, `ouifm-metas`, `radiofrance-metas`) writes —
+    /// must not be named as predating the field. Conflating the two would
+    /// make every legitimately textless plugin look like a lagging binary.
+    #[tokio::test]
+    async fn a_wired_plugin_with_an_empty_but_present_catalog_is_not_named() {
+        let mut b = bench();
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: Some("0.2.0".into()),
+            repository: None,
+            catalog: Some(Default::default()),
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        let statuses = b.children.status_state.read().await;
+        let line = statuses.plugins.iter().find(|l| l.name == "mpd").unwrap();
+        assert!(!line.catalog_unknown, "an announced, empty catalog is a legitimate state");
+    }
+
+    /// From the announcement to the shared `Registry`: `hotplug` must
+    /// actually wire `Announcement.catalog` in, not just derive
+    /// `catalog_unknown` from it. Driven through the real event, as the
+    /// sibling tests above are — a test that called `insert_announced`
+    /// directly would prove the registry's own logic, never that `hotplug`
+    /// calls it.
+    #[tokio::test]
+    async fn hotplug_wires_the_announced_catalog_into_the_shared_registry() {
+        let mut b = bench();
+        let mut catalog = HashMap::new();
+        catalog.insert("en".to_string(), HashMap::from([("greeting".to_string(), "Hi there".to_string())]));
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: Some(catalog),
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        let registry = b.children.registry.read().await;
+        assert_eq!(registry.chain_for("mpd", "en", "en").get("greeting"), "Hi there");
+    }
+
+    /// The discriminating half of the event-driven proof: `hotplug`'s guard
+    /// (`if let Some(catalog) = &announcement.catalog`) must leave the
+    /// module genuinely **absent** from the registry when the announcement
+    /// carries `None` — not insert an empty `ModuleLayers` in its place.
+    /// `chain_for` alone cannot tell the two apart (both resolve every key
+    /// to itself); `Registry::announced_module` can, and this is the test
+    /// that would fail if the guard were relaxed to `.unwrap_or_default()`.
+    #[tokio::test]
+    async fn hotplug_leaves_the_module_absent_from_the_registry_when_the_catalog_is_none() {
+        let mut b = bench();
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: None,
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        assert_eq!(
+            b.children.registry.read().await.announced_module("mpd"),
+            None,
+            "a binary predating the field must leave the module absent, not present-and-empty"
+        );
+    }
+
+    /// The mirror case, completing the discrimination: `Some({})` — an
+    /// up-to-date binary with no text of its own — must reach the registry
+    /// as a genuinely **present**, merely empty, `ModuleLayers`.
+    #[tokio::test]
+    async fn hotplug_inserts_a_present_but_empty_module_when_the_catalog_is_some_empty() {
+        let mut b = bench();
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: Some(Default::default()),
+        };
+
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        let registry = b.children.registry.read().await;
+        let announced = registry.announced_module("mpd");
+        assert!(announced.is_some(), "an announced, empty catalogue must be present in the registry");
+        assert_eq!(announced.unwrap().languages().count(), 0);
+    }
+
+    /// The other half of the event-driven proof: `hot_unplug` must actually
+    /// forget the module from the shared registry (via `admin::forget_page`,
+    /// its single purge point), not just remove the status line.
+    #[tokio::test]
+    async fn hot_unplug_forgets_the_module_from_the_shared_registry() {
+        let mut b = bench();
+        // Supervised, like `a_supervised_plugin_turns_off_and_its_announcement_disappears`:
+        // without this, `hotplug` itself would classify "mpd" as
+        // `non_supervised` (a manually relaunched plugin), and `turn_off`
+        // below would correctly refuse — a fact about liveness, not about
+        // what this test means to exercise.
+        b.kill_triggers.insert("mpd".to_string(), tokio::sync::oneshot::channel::<()>().0);
+        let mut catalog = HashMap::new();
+        catalog.insert("en".to_string(), HashMap::from([("greeting".to_string(), "Hi there".to_string())]));
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: Some(catalog),
+        };
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+        assert_eq!(
+            b.children.registry.read().await.chain_for("mpd", "en", "en").get("greeting"),
+            "Hi there",
+            "the rig must actually carry the announced layer before disabling proves anything"
+        );
+
+        assert!(turn_off(&mut b).await, "disabling a wired plugin must succeed");
+
+        assert_eq!(
+            b.children.registry.read().await.chain_for("mpd", "en", "en").get("greeting"),
+            "greeting",
+            "the announced layer must be gone once the plugin is disabled"
+        );
+    }
+
+    /// An announcement, and the shared registry that must carry its text —
+    /// the **startup rendezvous**' half of what
+    /// `hotplug_wires_the_announced_catalog_into_the_shared_registry`
+    /// already proves for the hot path.
+    ///
+    /// Written because the final whole-branch review measured that half
+    /// unguarded: the statement was inline in `main()`, and neutralising it
+    /// (`if false && ...`) left `cargo test --workspace` at exit 0 while a
+    /// normal boot would have put no plugin text into the registry at all.
+    /// `wire_announced_catalog` is that statement, now reachable; the one
+    /// thing no test can reach is `main()` calling it, exactly as for
+    /// `unwired_plugin_lines`.
+    #[tokio::test]
+    async fn startup_wiring_puts_an_announced_catalog_into_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry: i18n::Shared =
+            std::sync::Arc::new(tokio::sync::RwLock::new(i18n::seeded_registry(dir.path().to_path_buf())));
+        let mut catalog = HashMap::new();
+        catalog.insert("en".to_string(), HashMap::from([("greeting".to_string(), "Hi there".to_string())]));
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: Some(catalog),
+        };
+
+        wire_announced_catalog(&registry, "mpd", &a).await;
+
+        assert_eq!(registry.read().await.chain_for("mpd", "en", "en").get("greeting"), "Hi there");
+    }
+
+    /// The discriminating half: an announcement carrying `None` must leave
+    /// the module **genuinely absent**, not present-and-empty.
+    /// `chain_for` cannot tell those apart (both resolve every key to
+    /// itself); `Registry::announced_module` can, and task 12's
+    /// completeness denominator depends on the distinction.
+    #[tokio::test]
+    async fn startup_wiring_leaves_the_module_absent_when_the_announcement_has_no_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry: i18n::Shared =
+            std::sync::Arc::new(tokio::sync::RwLock::new(i18n::seeded_registry(dir.path().to_path_buf())));
+        let a = Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display],
+            admin: false,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: None,
+            repository: None,
+            catalog: None,
+        };
+
+        wire_announced_catalog(&registry, "mpd", &a).await;
+
+        assert_eq!(
+            registry.read().await.announced_module("mpd"),
+            None,
+            "a binary predating the field must leave the module absent, not present-and-empty"
+        );
+    }
+
+    /// What the Systeme page shows about a wired plugin — its version, its
+    /// UI version, its repository link, whether its page is reachable — is
+    /// pure transcription from the announcement, and the six startup sites
+    /// doing it were reachable by no test (final whole-branch review,
+    /// boundaries pass, finding 2). All twelve now go through
+    /// `announced_plugin_line`; this is its guard, both branches of the
+    /// `catalog` predicate included, since `None` and `Some({})` are
+    /// different facts about a binary, not degrees of the same one.
+    #[test]
+    fn an_announced_line_carries_what_the_plugin_announced() {
+        let mut a = Announcement {
+            name: "cd".into(),
+            kinds: vec![PluginKind::Source],
+            admin: true,
+            covers: false,
+            ui_version: Some("3".into()),
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            version: Some("0.2.0".into()),
+            repository: Some("https://example.invalid/cd".into()),
+            catalog: None,
+        };
+
+        let line = announced_plugin_line("cd", "source", true, &a);
+        assert_eq!(line.kind, "source");
+        assert!(line.connected);
+        assert!(line.admin, "the line's `admin` flag must come from the announcement, not be invented");
+        assert_eq!(line.version.as_deref(), Some("0.2.0"));
+        assert_eq!(line.ui_version.as_deref(), Some("3"));
+        assert_eq!(line.repository.as_deref(), Some("https://example.invalid/cd"));
+        assert!(line.catalog_unknown, "an absent catalogue must be named, not silently absorbed");
+
+        // `Some({})` is what every legitimately textless plugin announces
+        // (`console`, `nrj-metas`, `ouifm-metas`, `radiofrance-metas`):
+        // conflating it with `None` would make four healthy plugins look
+        // like binaries that never confided anything.
+        a.catalog = Some(Default::default());
+        assert!(!announced_plugin_line("cd", "source", true, &a).catalog_unknown);
     }
 
     #[test]

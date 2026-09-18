@@ -1,9 +1,10 @@
 use crate::config::Config;
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::AdminPlugin;
+use ritornello_proto::Text;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 /// Body of `SetData`, distinct from `Config`: both fields are **mandatory**
 /// here, with no `#[serde(default = ...)]`. Those defaults are right for
@@ -24,11 +25,6 @@ pub struct MpdAdmin {
     /// In-memory copy of the last successful save: `get_data` returns it
     /// without re-reading the disk on every request.
     pub config: RwLock<Config>,
-    pub catalog: Arc<RwLock<Catalog>>,
-    /// Root of the on-disk language packs, kept so a catalog can be rebuilt in
-    /// any requested language — `Catalog::load` only parses a TOML file, so
-    /// this costs nothing per request.
-    pub locales_root: PathBuf,
     /// How the new configuration reaches the network half, which then rebinds
     /// without a restart (see `session::listen`).
     ///
@@ -55,44 +51,29 @@ impl AdminPlugin for MpdAdmin {
         }
     }
 
-    fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
-        match lang {
-            // The language the plugin was started in: the catalog already
-            // built, no work at all.
-            None => serde_json::json!(self.catalog.read().unwrap().entries()),
-            // A language explicitly asked for. Rebuilt rather than translated
-            // from the current one: the on-disk pack is the authority, and
-            // only `Catalog::load` knows how to layer it over the embedded
-            // English.
-            Some(l) => {
-                let c = Catalog::load("mpd", l, &self.locales_root, crate::MPD_EN);
-                serde_json::json!(c.entries())
-            }
-        }
-    }
-
     async fn get_data(&self) -> serde_json::Value {
         let c = self.config.read().unwrap();
         serde_json::json!({ "listen": c.listen, "port": c.port })
     }
 
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
         // `ConfigWrite`, not `Config`: see the comment on the type — a missing
         // field must reject the request (`bad_request`), not get completed by
         // a *loading* default.
-        let writer: ConfigWrite = serde_json::from_value(data).map_err(|e| {
-            self.catalog.read().unwrap().get("bad_request").replace("{detail}", &e.to_string())
+        let writer: ConfigWrite = serde_json::from_value(data).map_err(|e| Text::Keyed {
+            key: "bad_request".into(),
+            params: HashMap::from([("detail".to_string(), e.to_string())]),
         })?;
         let config = Config { listen: writer.listen, port: writer.port };
         // `save` validates then writes atomically; in both failure cases it
         // returns a catalog **key** (`listen_empty`, `port_zero`,
-        // `save_failed`), never a raw I/O detail. It is here, and only here,
-        // that the key becomes a sentence: the Vue page shows `error` as is,
-        // without re-translating it (see the UI half's report) — returning the
-        // bare key would make it appear literally on screen.
+        // `save_failed`), never a raw I/O detail — already the exact shape
+        // `Text::Keyed` wants, with no parameter to carry. The core resolves
+        // it against this plugin's announced catalog (language-packs
+        // chantier, task 10); the plugin itself no longer resolves anything.
         config
             .save(&self.config_path)
-            .map_err(|key| self.catalog.read().unwrap().get(&key).to_string())?;
+            .map_err(|key| Text::Keyed { key, params: HashMap::new() })?;
         *self.config.write().unwrap() = config.clone();
         // The network half rebinds on its own. `send` fails only if nobody is
         // listening any more — the plugin is stopping — and there is then
@@ -126,20 +107,8 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("mpd.toml");
-        let catalog = Arc::new(RwLock::new(Catalog::load(
-            "mpd",
-            "en",
-            std::path::Path::new("/nonexistent"),
-            crate::MPD_EN,
-        )));
         Fixture {
-            admin: MpdAdmin {
-                config_path,
-                config: RwLock::new(Config::default()),
-                catalog,
-                locales_root: std::path::PathBuf::from("/nonexistent"),
-                rebind_tx: None,
-            },
+            admin: MpdAdmin { config_path, config: RwLock::new(Config::default()), rebind_tx: None },
             _dir: dir,
         }
     }
@@ -156,49 +125,38 @@ mod tests {
         assert!(f.admin.asset("index.html").is_none());
     }
 
+    /// **Generalized (task 15).** Was "en vs fr, key sets only" — a
+    /// hardcoded language that stops covering a second one the moment it
+    /// ships, and a comparison blind to a translation that renamed or
+    /// dropped a `{named}` parameter. `shipped_language_packs` derives the
+    /// language list from the tree; the `assert!(!shipped.is_empty(), ...)`
+    /// below is what keeps that derivation honest instead of vacuously
+    /// green on a broken discovery.
     #[test]
-    fn catalog_exposes_the_component_keys() {
-        let f = fixture();
-        let v = f.admin.catalog(None);
-        assert!(v["btn_save"].is_string(), "the catalog must carry the plugin keys");
-    }
-
-    #[test]
-    fn a_requested_language_is_honoured_whatever_the_current_one() {
-        // The plugin is started in English; asking for another language must
-        // rebuild, not return the current catalog. This is the whole basis of
-        // the `immutable` answer served over HTTP.
-        //
-        // Without a pack installed on disk, `Catalog::load` falls back on
-        // English and the two results would be equal — so a temporary pack is
-        // installed here, on the model of the repository's existing i18n
-        // tests (see `ritornello-plugin-radio::main::empty_preset_uses_the_catalog_after_set_locale`).
-        let mut f = fixture();
-        let locales = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(locales.path().join("mpd")).unwrap();
-        std::fs::write(locales.path().join("mpd/fr.toml"), "btn_save = \"Enregistrer\"\n").unwrap();
-        f.admin.locales_root = locales.path().to_path_buf();
-        let en = f.admin.catalog(None);
-        let fr = f.admin.catalog(Some("fr"));
-        assert_ne!(en, fr);
-        assert_eq!(fr["btn_save"], "Enregistrer");
-    }
-
-    /// French pack shipped in the repository.
-    fn fr_pack() -> String {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales/mpd/fr.toml");
-        std::fs::read_to_string(p).expect("shipped fr pack")
-    }
-
-    #[test]
-    fn key_parity_between_the_embedded_en_and_the_fr_pack() {
+    fn key_and_param_parity_between_the_embedded_en_and_every_shipped_language() {
         let en = ritornello_i18n::try_parse(crate::MPD_EN).unwrap();
-        let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut en_keys: Vec<&String> = en.keys().collect();
-        let mut fr_keys: Vec<&String> = fr.keys().collect();
-        en_keys.sort();
-        fr_keys.sort();
-        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
+        let deploy_locales = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let shipped = ritornello_i18n::shipped_language_packs(&deploy_locales, "mpd");
+        assert!(!shipped.is_empty(), "no shipped language found for mpd under deploy/locales");
+        for (lang, content) in shipped {
+            let pack = ritornello_i18n::try_parse(&content)
+                .unwrap_or_else(|e| panic!("{lang} pack for mpd is invalid TOML: {e}"));
+            let mut en_keys: Vec<&String> = en.keys().collect();
+            let mut pack_keys: Vec<&String> = pack.keys().collect();
+            en_keys.sort();
+            pack_keys.sort();
+            assert_eq!(en_keys, pack_keys, "en/{lang} key sets diverge for mpd");
+
+            for (key, en_value) in &en {
+                if let Some(translated) = pack.get(key) {
+                    assert_eq!(
+                        ritornello_i18n::params_in(en_value),
+                        ritornello_i18n::params_in(translated),
+                        "key {key}: {lang} translation's named parameters diverge from English"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -244,34 +202,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_invalid_port_returns_a_catalog_sentence_not_the_raw_key() {
-        // The regression this test blocks: `admin.rs` propagates
-        // `Err("port_zero".into())` directly without resolving it through the
-        // catalog. The Vue page shows `error` as is (no client-side
-        // re-translation), so the user would literally read "port_zero" on
-        // screen instead of the sentence. Verified by making this test fail
-        // deliberately (resolution removed) before writing it for good: see
-        // the task report for the proof.
+    async fn an_invalid_port_returns_the_port_zero_key_not_a_resolved_sentence() {
+        // The plugin no longer resolves (no `Catalog` left — language-packs
+        // chantier, task 10): what this test still owns is the key
+        // `Config::save` names, unresolved, with no parameter to carry.
         let mut f = fixture();
         let op = serde_json::json!({ "listen": "0.0.0.0", "port": 0 });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert_eq!(err, "The port must be between 1 and 65535.");
-        assert_ne!(err, "port_zero");
+        assert_eq!(err, Text::Keyed { key: "port_zero".into(), params: HashMap::new() });
         // Nothing was written, and the in-memory copy did not move.
         assert!(!f.admin.config_path.exists());
         assert_eq!(f.admin.get_data().await["port"], 6600);
     }
 
     #[tokio::test]
-    async fn an_empty_address_returns_a_catalog_sentence() {
+    async fn an_empty_address_returns_the_listen_empty_key() {
         let mut f = fixture();
         let op = serde_json::json!({ "listen": "", "port": 6600 });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert_eq!(err, "The listen address cannot be empty.");
+        assert_eq!(err, Text::Keyed { key: "listen_empty".into(), params: HashMap::new() });
     }
 
     #[tokio::test]
-    async fn a_write_failure_returns_a_catalog_sentence_not_the_io_detail() {
+    async fn a_write_failure_returns_the_save_failed_key_not_the_io_detail() {
         // Same regression as in generic-input and radio:
         // `save(...).map_err(|e| e.to_string())` would put the raw I/O detail
         // in the response body. `config_path` here targets an ordinary file as
@@ -283,11 +236,11 @@ mod tests {
         f.admin.config_path = obstacle.join("mpd.toml");
         let op = serde_json::json!({ "listen": "0.0.0.0", "port": 6600 });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert_eq!(err, "Could not save the settings.");
+        assert_eq!(err, Text::Keyed { key: "save_failed".into(), params: HashMap::new() });
     }
 
     #[tokio::test]
-    async fn a_malformed_request_returns_a_translated_error() {
+    async fn a_malformed_request_returns_the_bad_request_key() {
         // `ConfigWrite` (the type of the `SetData` body, distinct from
         // `Config`) has no `#[serde(default = ...)]`: an incompatible field
         // type (here `port` as a string, not a number) makes
@@ -296,7 +249,7 @@ mod tests {
         let mut f = fixture();
         let err =
             f.admin.set_data(serde_json::json!({ "listen": "0.0.0.0", "port": "lots" })).await.unwrap_err();
-        assert!(err.starts_with("Unexpected request:"), "unexpected message: {err}");
+        assert!(matches!(&err, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err:?}");
     }
 
     #[tokio::test]
@@ -312,7 +265,7 @@ mod tests {
         let mut f = fixture();
         assert!(f.admin.set_data(serde_json::json!({ "listen": "192.168.1.10", "port": 6601 })).await.is_ok());
         let err = f.admin.set_data(serde_json::json!({ "port": 6601 })).await.unwrap_err();
-        assert!(err.starts_with("Unexpected request:"), "unexpected message: {err}");
+        assert!(matches!(&err, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err:?}");
         assert_eq!(f.admin.get_data().await["listen"], "192.168.1.10", "listen must not have moved");
     }
 }

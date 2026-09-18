@@ -1,11 +1,11 @@
 use crate::bindings::Bindings;
 use crate::devices::Hub;
 use crate::presets;
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::AdminPlugin;
+use ritornello_proto::Text;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
 
 /// Operations carried by `SetData`, discriminated by the `op` field.
 #[derive(Debug, Deserialize)]
@@ -24,11 +24,13 @@ pub struct GenericInputAdmin {
     pub presets_root: PathBuf,
     pub input_root: PathBuf,
     pub hub: Hub,
-    pub catalog: Arc<RwLock<Catalog>>,
-    /// Root of the on-disk language packs, kept so a catalog can be rebuilt in
-    /// any requested language — `Catalog::load` only parses a TOML file, so
-    /// this costs nothing per request.
-    pub locales_root: PathBuf,
+}
+
+impl GenericInputAdmin {
+    /// A key with a single named parameter.
+    fn text_with(&self, key: &str, param: &str, value: &str) -> Text {
+        Text::Keyed { key: key.to_string(), params: HashMap::from([(param.to_string(), value.to_string())]) }
+    }
 }
 
 #[async_trait::async_trait]
@@ -47,22 +49,6 @@ impl AdminPlugin for GenericInputAdmin {
         }
     }
 
-    fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
-        match lang {
-            // The language the plugin was started in: the catalog already
-            // built, no work at all.
-            None => serde_json::json!(self.catalog.read().unwrap().entries()),
-            // A language explicitly asked for. Rebuilt rather than translated
-            // from the current one: the on-disk pack is the authority, and
-            // only `Catalog::load` knows how to layer it over the embedded
-            // English.
-            Some(l) => {
-                let c = Catalog::load("generic-input", l, &self.locales_root, crate::GENERIC_INPUT_EN);
-                serde_json::json!(c.entries())
-            }
-        }
-    }
-
     async fn get_data(&self) -> serde_json::Value {
         // No lock guard crosses an `.await` (there is none).
         let devices = self.hub.device_names();
@@ -77,22 +63,17 @@ impl AdminPlugin for GenericInputAdmin {
         })
     }
 
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
-        let op: Op = serde_json::from_value(data).map_err(|e| {
-            self.catalog
-                .read()
-                .unwrap()
-                .get("bad_request")
-                .replace("{detail}", &e.to_string())
-        })?;
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
+        let op: Op = serde_json::from_value(data)
+            .map_err(|e| self.text_with("bad_request", "detail", &e.to_string()))?;
         match op {
             Op::Save { bindings } => {
-                bindings.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                bindings.validate().map_err(|e| e.text())?;
                 bindings.save(&self.bindings_path).map_err(|e| {
                     // Same split as in radio: the I/O detail goes to the log,
                     // not into the response body.
                     tracing::warn!("failed to save bindings: {e}");
-                    self.catalog.read().unwrap().get("save_failed").to_string()
+                    Text::Keyed { key: "save_failed".into(), params: HashMap::new() }
                 })?;
                 *self.hub.bindings.write().unwrap() = bindings;
                 Ok(())
@@ -112,11 +93,10 @@ impl AdminPlugin for GenericInputAdmin {
                 // "shipped files, deemed valid" does not hold. Without this, an
                 // invalid preset became active in memory and it was the next
                 // "Save" that failed — on a table the UI itself had produced.
-                let bindings = presets::load(&self.presets_root, &preset)
-                    .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                let bindings = presets::load(&self.presets_root, &preset).map_err(|e| e.text())?;
                 let mut candidate = self.hub.bindings.read().unwrap().clone();
                 candidate.replace_device(&device, bindings);
-                candidate.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                candidate.validate().map_err(|e| e.text())?;
                 *self.hub.bindings.write().unwrap() = candidate;
                 Ok(())
             }
@@ -125,12 +105,11 @@ impl AdminPlugin for GenericInputAdmin {
                 // uploaded by the user may carry invalid bindings: we validate
                 // on a copy before touching the shared table, and nothing is
                 // persisted here either — only "Save" writes to disk.
-                let bindings = presets::parse_preset(&content).map_err(|e| {
-                    self.catalog.read().unwrap().get("bad_request").replace("{detail}", &e)
-                })?;
+                let bindings = presets::parse_preset(&content)
+                    .map_err(|e| self.text_with("bad_request", "detail", &e))?;
                 let mut candidate = self.hub.bindings.read().unwrap().clone();
                 candidate.replace_device(&device, bindings);
-                candidate.validate().map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                candidate.validate().map_err(|e| e.text())?;
                 *self.hub.bindings.write().unwrap() = candidate;
                 Ok(())
             }
@@ -180,20 +159,12 @@ mod tests {
             .write()
             .unwrap()
             .insert(std::path::PathBuf::from("/dev/input/event0"), "eHome".into());
-        let catalog = Arc::new(RwLock::new(Catalog::load(
-            "generic-input",
-            "en",
-            std::path::Path::new("/nonexistent"),
-            crate::GENERIC_INPUT_EN,
-        )));
         Fixture {
             admin: GenericInputAdmin {
                 bindings_path: dir.path().join("input-bindings.toml"),
                 presets_root,
                 input_root,
                 hub,
-                catalog,
-                locales_root: std::path::PathBuf::from("/nonexistent"),
             },
             _rx: rx,
             _dir: dir,
@@ -212,49 +183,38 @@ mod tests {
         assert!(f.admin.asset("index.html").is_none());
     }
 
+    /// **Generalized (task 15).** Was "en vs fr, key sets only" — a
+    /// hardcoded language that stops covering a second one the moment it
+    /// ships, and a comparison blind to a translation that renamed or
+    /// dropped a `{named}` parameter. `shipped_language_packs` derives the
+    /// language list from the tree; the `assert!(!shipped.is_empty(), ...)`
+    /// below is what keeps that derivation honest instead of vacuously
+    /// green on a broken discovery.
     #[test]
-    fn catalog_exposes_the_component_keys() {
-        let f = fixture();
-        let v = f.admin.catalog(None);
-        assert!(v["btn_save"].is_string(), "the catalog must carry the plugin's keys");
-    }
-
-    #[test]
-    fn a_requested_language_is_honoured_whatever_the_current_one() {
-        // The plugin is started in English; asking for another language must
-        // rebuild, not return the current catalog. This is the whole basis of
-        // the `immutable` answer served over HTTP.
-        let mut f = fixture();
-        let locales = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(locales.path().join("generic-input")).unwrap();
-        std::fs::write(
-            locales.path().join("generic-input/fr.toml"),
-            "btn_save = \"Enregistrer\"\n",
-        )
-        .unwrap();
-        f.admin.locales_root = locales.path().to_path_buf();
-        let en = f.admin.catalog(None);
-        let fr = f.admin.catalog(Some("fr"));
-        assert_ne!(en, fr);
-        assert_eq!(fr["btn_save"], "Enregistrer");
-    }
-
-    /// French pack shipped in the repository.
-    fn fr_pack() -> String {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../deploy/locales/generic-input/fr.toml");
-        std::fs::read_to_string(p).expect("shipped fr pack")
-    }
-
-    #[test]
-    fn key_parity_between_the_embedded_en_and_the_fr_pack() {
+    fn key_and_param_parity_between_the_embedded_en_and_every_shipped_language() {
         let en = ritornello_i18n::try_parse(crate::GENERIC_INPUT_EN).unwrap();
-        let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut en_keys: Vec<&String> = en.keys().collect();
-        let mut fr_keys: Vec<&String> = fr.keys().collect();
-        en_keys.sort();
-        fr_keys.sort();
-        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
+        let deploy_locales = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let shipped = ritornello_i18n::shipped_language_packs(&deploy_locales, "generic-input");
+        assert!(!shipped.is_empty(), "no shipped language found for generic-input under deploy/locales");
+        for (lang, content) in shipped {
+            let pack = ritornello_i18n::try_parse(&content)
+                .unwrap_or_else(|e| panic!("{lang} pack for generic-input is invalid TOML: {e}"));
+            let mut en_keys: Vec<&String> = en.keys().collect();
+            let mut pack_keys: Vec<&String> = pack.keys().collect();
+            en_keys.sort();
+            pack_keys.sort();
+            assert_eq!(en_keys, pack_keys, "en/{lang} key sets diverge for generic-input");
+
+            for (key, en_value) in &en {
+                if let Some(translated) = pack.get(key) {
+                    assert_eq!(
+                        ritornello_i18n::params_in(en_value),
+                        ritornello_i18n::params_in(translated),
+                        "key {key}: {lang} translation's named parameters diverge from English"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -290,7 +250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_write_failure_returns_a_catalog_sentence_not_the_io_detail() {
+    async fn a_write_failure_returns_the_save_failed_key_not_the_io_detail() {
         // Same regression as in radio: `Bindings::save(...).map_err(|e|
         // e.to_string())` put the raw I/O detail in the response body.
         // `bindings_path` here targets an ordinary file as if it were a parent
@@ -307,11 +267,11 @@ mod tests {
             ]}
         });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert_eq!(err, "the save failed");
+        assert_eq!(err, Text::Keyed { key: "save_failed".into(), params: HashMap::new() });
     }
 
     #[tokio::test]
-    async fn invalid_save_returns_a_translated_error_and_does_not_persist() {
+    async fn invalid_save_returns_a_keyed_error_and_does_not_persist() {
         let mut f = fixture();
         let op = serde_json::json!({
             "op": "save",
@@ -323,7 +283,13 @@ mod tests {
             ]}
         });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert!(err.contains("code 1"), "unexpected message: {err}");
+        match err {
+            Text::Keyed { key, params } => {
+                assert_eq!(key, "duplicate_code");
+                assert_eq!(params.get("code").map(String::as_str), Some("1"));
+            }
+            Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+        }
         assert!(!f.admin.bindings_path.exists());
         // the shared table is intact
         assert_eq!(
@@ -368,7 +334,10 @@ mod tests {
         let mut f = fixture();
         let op = serde_json::json!({ "op": "load_preset", "device": "eHome", "preset": "zzz" });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert!(err.contains("zzz"), "unexpected message: {err}");
+        assert_eq!(
+            err,
+            Text::Keyed { key: "unknown_preset".into(), params: HashMap::from([("preset".to_string(), "zzz".to_string())]) }
+        );
     }
 
     #[tokio::test]
@@ -387,7 +356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_preset_invalid_toml_returns_a_translated_error_and_changes_nothing() {
+    async fn import_preset_invalid_toml_returns_the_bad_request_key_and_changes_nothing() {
         let mut f = fixture();
         let op = serde_json::json!({
             "op": "import_preset",
@@ -395,7 +364,7 @@ mod tests {
             "content": "this is not = toml [",
         });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert!(err.starts_with("invalid request:"), "unexpected message: {err}");
+        assert!(matches!(&err, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err:?}");
         assert!(!f.admin.bindings_path.exists());
         assert_eq!(
             f.admin.hub.bindings.read().unwrap().resolve("eHome", 2),
@@ -409,7 +378,13 @@ mod tests {
         let content = "[[bindings]]\ncode = 2\ncmd = \"Mute\"\n\n[[bindings]]\ncode = 2\ncmd = \"Stop\"\n";
         let op = serde_json::json!({ "op": "import_preset", "device": "eHome", "content": content });
         let err = f.admin.set_data(op).await.unwrap_err();
-        assert!(err.contains("code 2"), "unexpected message: {err}");
+        match err {
+            Text::Keyed { key, params } => {
+                assert_eq!(key, "duplicate_code");
+                assert_eq!(params.get("code").map(String::as_str), Some("2"));
+            }
+            Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+        }
         assert!(!f.admin.bindings_path.exists());
         // the shared table is intact (the device's old binding)
         assert_eq!(
@@ -428,8 +403,8 @@ mod tests {
     async fn unknown_op_returns_an_error() {
         let mut f = fixture();
         let err = f.admin.set_data(serde_json::json!({ "op": "destroy" })).await.unwrap_err();
-        assert!(err.starts_with("invalid request:"), "unexpected message: {err}");
+        assert!(matches!(&err, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err:?}");
         let err2 = f.admin.set_data(serde_json::json!({ "nothing": 1 })).await.unwrap_err();
-        assert!(err2.starts_with("invalid request:"), "unexpected message: {err2}");
+        assert!(matches!(&err2, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err2:?}");
     }
 }

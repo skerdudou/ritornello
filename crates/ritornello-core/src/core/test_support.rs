@@ -3,6 +3,14 @@
 use super::*;
 use std::sync::Mutex;
 
+/// A `Registry` swept from `root`, shared like production wiring expects.
+/// Every rig below that used to build only a `Chain` for `Wiring.catalog`
+/// now needs this too, for `Wiring.registry` — kept in one place so a
+/// change to how a test registry is built happens once.
+pub(super) fn test_registry(root: &std::path::Path) -> crate::i18n::Shared {
+    Arc::new(RwLock::new(crate::i18n::Registry::sweep(root.to_path_buf())))
+}
+
 #[derive(Default)]
 pub(super) struct FakePlayer {
     pub(super) calls: Arc<Mutex<Vec<String>>>,
@@ -244,7 +252,7 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
     sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls.clone(), ..Default::default() }));
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
     let (covers, cover_tx) = test_covers();
     let manifest_order = declared_order(&sources);
     let core = Core::new(
@@ -254,7 +262,7 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
             persisted,
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring {
@@ -286,7 +294,7 @@ pub(super) fn setup_metadata(
     let (np_tx, np_rx) = watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
     let (covers, cover_tx) = test_covers();
     let manifest_order = declared_order(&sources);
     let core = Core::new(
@@ -296,7 +304,7 @@ pub(super) fn setup_metadata(
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring { plugins, now_playing: np_tx, state: state_tx },
@@ -344,7 +352,7 @@ pub(super) fn test_core_with_extraction() -> (
         watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
     let (covers, cover_tx) = test_covers();
     let (extraction_tx, extraction_rx) = mpsc::channel(4);
     let manifest_order = declared_order(&sources);
@@ -355,7 +363,7 @@ pub(super) fn test_core_with_extraction() -> (
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
@@ -392,7 +400,7 @@ impl Core<FakePlayer> {
 pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<PlayerState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
         "core",
         "en",
         &root,
@@ -410,7 +418,7 @@ pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<Playe
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring {
@@ -626,7 +634,7 @@ pub(super) fn test_core_with_cover_channel() -> (
         watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
     let (state_tx, state_rx) = watch::channel(PlayerState::default());
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
         "core",
         "en",
         &root,
@@ -642,7 +650,7 @@ pub(super) fn test_core_with_cover_channel() -> (
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
@@ -879,7 +887,7 @@ fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> Archivin
         }),
     );
     let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
         "core",
         "en",
         &root,
@@ -897,7 +905,7 @@ fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> Archivin
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            locales_root: root,
+            registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
             metadata: MetadataWiring {

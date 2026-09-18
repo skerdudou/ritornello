@@ -8,10 +8,10 @@
 //! 10 s of connection retries.
 
 use futures::{Stream, StreamExt};
-use ritornello_proto::{Announcement, PluginKind};
+use ritornello_proto::{Announcement, PluginKind, ANNOUNCEMENT_MAX_BYTES};
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::UnixListener;
 
 /// What the gathering learned.
@@ -71,13 +71,33 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// failed permanently, could no longer wire **any** announcement on a device
 /// that is never rebooted. The gathering had the same reader but its deadline
 /// bounded it; the permanent loop has none.
+///
+/// The read is also **bounded in bytes**, by `ritornello_proto::ANNOUNCEMENT_MAX_BYTES`
+/// — defined in the wire crate, not here, since the SDK enforces the same
+/// bound on the writing side (`Runtime::run`) and the two must agree — and
+/// that bound is applied to the stream **before** `lines()` ever sees it —
+/// wrapping it in `take` rather than measuring the string `lines()` hands
+/// back. Checking the length only after a full line was read would still let
+/// an oversized line grow the buffer without limit while it was being
+/// assembled; the point of a byte bound is exactly to stop that growth, so it
+/// has to sit ahead of the buffering, not behind it.
 async fn read_announcement(
     stream: tokio::net::UnixStream,
     tx: tokio::sync::mpsc::Sender<Announcement>,
     timeout: Duration,
 ) {
-    let mut lines = BufReader::new(stream).lines();
+    // One byte past the bound: a line that is exactly `ANNOUNCEMENT_MAX_BYTES`
+    // long still needs its trailing `\n` to be recognised as complete, and
+    // that extra byte is what lets the oversized branch below tell "exactly
+    // at the bound" from "one byte over" instead of both looking identical.
+    let capped = stream.take(ANNOUNCEMENT_MAX_BYTES as u64 + 1);
+    let mut lines = BufReader::new(capped).lines();
     match tokio::time::timeout(timeout, lines.next_line()).await {
+        Ok(Ok(Some(l))) if l.len() > ANNOUNCEMENT_MAX_BYTES => tracing::warn!(
+            "an announcement of at least {} bytes was refused: over the {}-byte bound",
+            l.len(),
+            ANNOUNCEMENT_MAX_BYTES
+        ),
         Ok(Ok(Some(l))) => match serde_json::from_str::<Announcement>(&l) {
             Ok(a) => {
                 let _ = tx.send(a).await;
@@ -874,6 +894,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_realistically_sized_announcement_passes() {
+        // The heaviest catalogue measured today (`files`) is about 7 KB per
+        // language, so five languages land near 35 KB. Built here through the
+        // **real** `Announcement.catalog` field (task 3 wires it in) rather
+        // than a same-sized padding string, so this test exercises the byte
+        // bound at the actual shape it has to pass, not at whatever was
+        // convenient to type before that field existed.
+        let (a, mut b) = tokio::net::UnixStream::pair().unwrap();
+        let (tx, mut rx) = channel();
+        tokio::spawn(read_announcement(a, tx, Duration::from_secs(5)));
+
+        let mut layers: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for lang in ["en", "fr", "de", "es", "it"] {
+            let mut layer = HashMap::new();
+            // ~7 KB per language: 100 keys of about 70 bytes each.
+            for i in 0..100 {
+                layer.insert(format!("key_{i}"), "x".repeat(60));
+            }
+            layers.insert(lang.to_string(), layer);
+        }
+        let line = serde_json::to_string(&serde_json::json!({
+            "name": "radio",
+            "kinds": ["source"],
+            "catalog": layers,
+        }))
+        .unwrap();
+        assert!(
+            line.len() > 30 * 1024,
+            "the fixture must stay realistically sized: {} bytes",
+            line.len()
+        );
+        b.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+        b.shutdown().await.unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("a realistically sized announcement must not be dropped")
+            .unwrap();
+        assert_eq!(received.name, "radio");
+        assert_eq!(
+            received.catalog.as_ref().and_then(|c| c.get("en")).map(HashMap::len),
+            Some(100),
+            "the catalog itself must have survived the round trip, not just the name"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_announcement_is_refused_and_pushes_nothing() {
+        // The case task 3 makes real: a local process able to write more
+        // within `READ_TIMEOUT` than `ANNOUNCEMENT_MAX_BYTES` allows. The
+        // assertion is on the channel, not the log: a refused announcement
+        // must push nothing, and `try_recv` on an mpsc receiver is how that
+        // absence is observed directly rather than inferred from tracing
+        // output.
+        let (a, mut b) = tokio::net::UnixStream::pair().unwrap();
+        let (tx, mut rx) = channel();
+        let read_task = tokio::spawn(read_announcement(a, tx, Duration::from_secs(5)));
+
+        // One byte over the bound, on a single line, and otherwise valid
+        // JSON: if the bound did not exist, this would parse and be pushed —
+        // exactly the failure this test exists to catch.
+        let oversized = "a".repeat(ANNOUNCEMENT_MAX_BYTES + 1);
+        let line = format!(r#"{{"name":"radio","kinds":["source"],"catalog":"{oversized}"}}"#);
+        // The reader gives up as soon as it has read `ANNOUNCEMENT_MAX_BYTES
+        // + 1` bytes and drops its end of the connection: the tail of this
+        // write is then refused by the kernel as a reset, not a graceful
+        // close, so its result is not what this test is about and is not
+        // asserted on.
+        let _ = b.write_all(format!("{line}\n").as_bytes()).await;
+        let _ = b.shutdown().await;
+
+        // Wait for the read task itself to finish, rather than for a signal
+        // on the socket: a connection reset is not the graceful half-close
+        // `a_silent_connection_is_dropped_after_the_timeout` reads as an EOF,
+        // so awaiting the task directly is what actually orders "the line
+        // was judged" before "the channel is checked" here.
+        tokio::time::timeout(Duration::from_secs(2), read_task)
+            .await
+            .expect("the task must give up on an oversized line, not hang on it")
+            .unwrap();
+
+        assert!(rx.try_recv().is_err(), "an oversized announcement must push nothing");
+    }
+
+    #[tokio::test]
     async fn a_silent_connection_does_not_block_late_announcements() {
         // Same head-of-line blocking as on the rendezvous, same fix: without
         // the read task per connection, the silent connection below would hold
@@ -932,6 +1037,7 @@ mod tests {
                     protocol: ritornello_proto::PROTOCOL_VERSION,
                     version: None,
                     repository: None,
+                    catalog: None,
                 },
             );
         }
@@ -946,6 +1052,7 @@ mod tests {
                 protocol: ritornello_proto::PROTOCOL_VERSION,
                 version: None,
                 repository: None,
+                catalog: None,
             },
         );
         let g = Gathered { announcements, ..Default::default() };

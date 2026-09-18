@@ -1,3 +1,4 @@
+use crate::Text;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6,16 +7,6 @@ pub enum AdminReq {
     /// A UI asset of the plugin (`"ui.js"`, `"ui.css"`). The path is **opaque**
     /// to the core: the plugin decides what it exposes.
     GetAsset(String),
-    /// The plugin's i18n catalog, flattened.
-    ///
-    /// `Some(lang)` asks for **that** language, whatever the plugin's current
-    /// locale; `None` keeps the historical behaviour (the current one).
-    ///
-    /// Carrying the language is what lets the HTTP answer be `immutable`: the
-    /// URL then fully determines the content. A `lang` used only as a cache
-    /// key would let a stale entry serve another language after a locale
-    /// change — the promise would be a lie.
-    GetCatalog(Option<String>),
     GetData,
     SetData(serde_json::Value),
     /// Liveness probe: the plugin answers `Pong` without touching its state or
@@ -44,9 +35,22 @@ pub enum AdminResult {
     /// `mime` is supplied by the plugin: the core infers nothing from an
     /// extension.
     Asset { mime: String, body: Option<String> },
-    Catalog(serde_json::Value),
     Data(serde_json::Value),
-    Set { ok: bool, error: Option<String> },
+    Set {
+        ok: bool,
+        /// The refusal, **unresolved**: a key into the plugin's own
+        /// translation layer and its parameters, or explicit verbatim text
+        /// (see [`crate::source::Text`]).
+        ///
+        /// Was preceded by a plain, already-resolved `error: Option<String>`,
+        /// the twin of `SourceMessage`'s retired `status`; the two fields
+        /// travelled side by side while every implementor of
+        /// `AdminPlugin::set_data` migrated off returning `Result<(), String>`.
+        /// `error` is retired as of task 11 of the language-packs chantier,
+        /// the same step that retires `status`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_text: Option<Text>,
+    },
     Pong,
     /// The plugin **is alive** but did not meet the budget (processing or
     /// waiting for the lock). Distinct from no answer at all: here it is the
@@ -74,26 +78,6 @@ mod tests {
     }
 
     #[test]
-    fn request_getcatalog_roundtrip() {
-        let r = AdminRequest { id: 2, deadline_ms: None, req: AdminReq::GetCatalog(None) };
-        let json = serde_json::to_string(&r).unwrap();
-        assert_eq!(json, r#"{"id":2,"req":"GetCatalog","arg":null}"#);
-        let back: AdminRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.req, AdminReq::GetCatalog(None));
-    }
-
-    #[test]
-    fn request_getcatalog_with_a_language_roundtrip() {
-        // The language must be **obeyed**, not merely used as a cache key: it
-        // travels on the wire so the plugin can honour it.
-        let r = AdminRequest { id: 2, deadline_ms: None, req: AdminReq::GetCatalog(Some("fr".into())) };
-        let json = serde_json::to_string(&r).unwrap();
-        assert_eq!(json, r#"{"id":2,"req":"GetCatalog","arg":"fr"}"#);
-        let back: AdminRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.req, AdminReq::GetCatalog(Some("fr".into())));
-    }
-
-    #[test]
     fn asset_result_roundtrip_present_and_absent() {
         for r in [
             AdminResult::Asset { mime: "text/javascript".into(), body: Some("export default 1".into()) },
@@ -108,14 +92,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_result_roundtrip() {
-        let r = AdminResult::Catalog(serde_json::json!({ "btn_save": "Enregistrer" }));
-        let json = serde_json::to_string(&AdminResponse { id: 4, result: r.clone() }).unwrap();
-        let back: AdminResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.result, r);
-    }
-
-    #[test]
     fn request_setdata_carries_the_opaque_json() {
         let r = AdminRequest { id: 2, deadline_ms: None, req: AdminReq::SetData(serde_json::json!({"stations": []})) };
         let json = serde_json::to_string(&r).unwrap();
@@ -126,19 +102,49 @@ mod tests {
 
     #[test]
     fn response_set_roundtrip() {
-        let r = AdminResponse { id: 4, result: AdminResult::Set { ok: false, error: Some("nope".into()) } };
+        let r = AdminResponse {
+            id: 4,
+            result: AdminResult::Set {
+                ok: false,
+                error_text: Some(crate::Text::Verbatim("nope".into())),
+            },
+        };
         let json = serde_json::to_string(&r).unwrap();
-        assert_eq!(json, r#"{"id":4,"result":{"kind":"Set","data":{"ok":false,"error":"nope"}}}"#);
+        assert_eq!(
+            json,
+            r#"{"id":4,"result":{"kind":"Set","data":{"ok":false,"error_text":{"kind":"Verbatim","data":"nope"}}}}"#
+        );
         let back: AdminResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.result, AdminResult::Set { ok: false, error: Some("nope".into()) });
+        assert_eq!(back.result, r.result);
+    }
+
+    #[test]
+    fn error_text_round_trips_and_stays_absent_by_default() {
+        let r = AdminResponse {
+            id: 5,
+            result: AdminResult::Set {
+                ok: false,
+                error_text: Some(crate::Text::Keyed { key: "bad_request".into(), params: Default::default() }),
+            },
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""error_text":{"kind":"Keyed","data":{"key":"bad_request"}}"#), "{json}");
+        let back: AdminResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.result, r.result);
+
+        // A frame from before this field existed reads back with nothing
+        // declared.
+        let old: AdminResponse =
+            serde_json::from_str(r#"{"id":5,"result":{"kind":"Set","data":{"ok":true}}}"#).unwrap();
+        assert_eq!(old.result, AdminResult::Set { ok: true, error_text: None });
     }
 
     #[test]
     fn a_request_without_deadline_still_parses() {
         // Frames written before this field existed: no `deadline_ms`.
-        let back: AdminRequest = serde_json::from_str(r#"{"id":1,"req":"GetCatalog","arg":null}"#).unwrap();
+        let back: AdminRequest = serde_json::from_str(r#"{"id":1,"req":"Ping"}"#).unwrap();
         assert_eq!(back.deadline_ms, None);
-        assert_eq!(back.req, AdminReq::GetCatalog(None));
+        assert_eq!(back.req, AdminReq::Ping);
     }
 
     #[test]

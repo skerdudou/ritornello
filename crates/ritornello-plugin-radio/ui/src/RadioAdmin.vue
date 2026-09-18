@@ -134,7 +134,7 @@ async function reload(): Promise<void> {
     // value.
     country.value = data.country ?? ALL_COUNTRIES
   } catch (e) {
-    message.value = t.value('load_error_1') + (e as Error).message + t.value('load_error_2')
+    message.value = t.value('load_error', { cause: (e as Error).message })
     loadFailed.value = true
   } finally {
     // A refusal settles the wait as much as a success does: the page must
@@ -167,7 +167,7 @@ async function openCountries(open: boolean): Promise<void> {
     countryList.value = data.countries ?? []
     message.value = ''
   } catch (e) {
-    message.value = t.value('load_error_1') + (e as Error).message + t.value('load_error_2')
+    message.value = t.value('load_error', { cause: (e as Error).message })
   } finally {
     searching.value = false
   }
@@ -221,7 +221,11 @@ async function save(): Promise<void> {
   if (loadFailed.value) return
   const payload = stations.value.map((s, i) => ({ preset: i + 1, name: s.name, url: s.url }))
   const err = await api.put(url('api/data'), { op: 'save', stations: payload })
-  message.value = err ? t.value('save_error') + err : t.value('saved')
+  // A single whole-sentence key with `{cause}`, not a concatenation of the
+  // label and the server's own (already resolved) refusal — the same trap
+  // as `load_error` just above, just with a full sentence in place of a raw
+  // exception message.
+  message.value = err ? t.value('save_error', { cause: err }) : t.value('saved')
 }
 
 // Single flight: the SDK serves admin requests strictly in series. A
@@ -257,7 +261,7 @@ async function search(): Promise<void> {
     results.value = data.search ?? []
     message.value = ''
   } catch (e) {
-    message.value = t.value('load_error_1') + (e as Error).message + t.value('load_error_2')
+    message.value = t.value('load_error', { cause: (e as Error).message })
   } finally {
     searching.value = false
   }

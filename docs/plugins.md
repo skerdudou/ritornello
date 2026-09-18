@@ -65,10 +65,11 @@ that the core opens before launching a single plugin:
    implements rather than asked of its author, which is the invariant of
    this handshake: an announcement cannot lie.
 
-The announcement carries three more fields, `protocol`, `version` and
-`repository`, all **derived** the same way `admin` and `covers` are — the SDK
-writes them, never the plugin's author, so an announcement cannot misreport any
-of them. The version is `env!("CARGO_PKG_VERSION")` and the repository is
+The announcement carries four more fields, `protocol`, `version`,
+`repository` and `catalog`, all **derived** the same way `admin` and
+`covers` are — the SDK writes them, never the plugin's author, so an
+announcement cannot misreport any of them. The version is
+`env!("CARGO_PKG_VERSION")` and the repository is
 `option_env!("CARGO_PKG_REPOSITORY")`, both expanded in the *plugin's own*
 crate by the `ritornello_plugin_sdk::declare_runtime!()` macro: written inside
 the SDK instead, they would report the SDK's, since that is whose `Cargo.toml`
@@ -174,16 +175,17 @@ write.
 
 `PROTOCOL_VERSION` itself is expected to move rarely, and **only on a break
 of the wire format, never on an addition**: every field this protocol has
-gained so far — `admin`, `covers`, `ui_version`, the eject capability, and
-now `protocol` and `version` themselves — was absorbed by a serde default,
-so an old plugin and a new core (or the reverse) keep understanding each
-other, with tests pinning that an old announcement still parses. A number
-that moves this rarely is exactly what makes it trustworthy when it does:
-seeing it change is the signal that something must actually be
-recompiled, not routine noise. Because a protocol break changes what a
-plugin and the core can promise each other, it carries a minor version bump
-of the whole product — the major.minor declared in `[workspace.package]`,
-which every shipped component's own version must stay on (see
+gained so far — `admin`, `covers`, `ui_version`, the eject capability,
+`catalog`, and now `protocol` and `version` themselves — was absorbed by a
+serde default, so an old plugin and a new core (or the reverse) keep
+understanding each other, with tests pinning that an old announcement still
+parses. A number that moves this rarely is exactly what makes it
+trustworthy when it does: seeing it change is the signal that something
+must actually be recompiled, not routine noise. Because a protocol break
+changes what a plugin and the core can promise each other, it carries a
+minor version bump of the whole product — the major.minor declared in
+`[workspace.package]`, which every shipped component's own version must
+stay on (see
 [installation.md's versioning
 paragraph](installation.md#installing-from-a-release) and
 `version_coherence.rs`). It is not, any more, a single version inherited by
@@ -290,6 +292,85 @@ beyond that tie — a plugin that only fills in what is missing never
 competes with one that overwrites (see [Now-playing
 metadata](#now-playing-metadata-the-metadata-kind)).
 
+### Text, translations, and what a plugin owes the catalogue
+
+Every user-facing string a plugin hands to the core — `SourceMessage::
+status_text`, `AdminResult::Set::error_text` — travels as a `Text`, never a
+finished sentence. `Text::Keyed { key, params }` names a catalogue entry
+and its named parameters (`{done}`, never a concatenation); the core
+resolves it through its own registry, at the device's chosen language, at
+the moment the frame is **published** — not at the moment your plugin sent
+it, which is also what lets a language change retranslate a status your
+plugin has not repeated. `Text::Verbatim(String)` carries a string through
+untranslated; it exists for text that is nobody's to translate (raw system
+output, a path, an error a library raised in English) and has exactly one
+sanctioned producer among this project's own plugins — `files`'s unknown
+`NT_STATUS` path. Reach for `Keyed` first, and reserve `Verbatim` for what
+genuinely has no key: the cd plugin's own status, for instance, is
+`Text::Keyed { key: "no_disc", .. }` / `Text::Keyed { key: "cd_audio", .. }`,
+never the literal strings "no disc" / "audio CD" that used to travel on
+the wire before this chantier.
+
+```rust
+// A TOML pack, embedded like any other translation this project ships:
+const MY_EN: &str = include_str!("locales/en.toml"); // no_disc = "no disc"
+
+ritornello_plugin_sdk::declare_runtime!()?
+    .texts([("en", MY_EN)])? // confides the catalogue; see below for the rule this enforces
+    .source(MySource)?
+    .run()
+    .await?;
+
+// Wherever your source declares what it is doing — the SDK hands you a
+// `SourceOutcome` (or a `Notification`), and `status_text` is a builder
+// call on it, not a field you fill in:
+SourceOutcome::new(SourceAction::Noop)
+    .status_text(Text::Keyed { key: "no_disc".into(), params: HashMap::new() })
+```
+
+**`Runtime::texts(...)` is what turns your embedded packs into
+`Announcement.catalog` — you never fill that field yourself.** It is
+chained onto `declare_runtime!()?`, before `.source(...)?` / `.admin(...)?`
+/ whichever kind-specific method your plugin calls, and takes any number
+of `(lang, source)` pairs, `source` being the raw TOML text
+(`include_str!`, exactly as your crate already holds it). **The SDK
+refuses to start if the `en` entry is missing or empty**: a plugin that
+calls `texts(...)` is declaring it has real text, and the call itself
+parses and validates every language passed, so a broken pack fails at
+your plugin's own startup, not on somebody's screen. A plugin with
+genuinely nothing to translate simply never calls `texts(...)` at all —
+the SDK still announces `catalog: Some({})` for it, which the config page
+reads as "confided nothing", never as a broken announcement.
+
+**Your own keys travel inside your binary, never as a disk pack.** A
+third-party archive carries your plugin binary and nothing else (see point
+3 above) — no `locales/` directory ships with it. What you embed at compile
+time is what you pass to `Runtime::texts(...)`, one map per language —
+the core folds it into the same registry as everyone else's, so **you are
+not limited to English**: `Runtime::texts([("en", MY_EN), ("nl", MY_NL)])?`
+confides both at once, unlike every bundled plugin today, which embeds
+English alone and leaves its other languages to disk packs shipped
+separately in `deploy/locales/` — a choice specific to how *this
+project's own* plugins are packaged, not a limit the SDK imposes on
+yours. An operator can still drop `<lang>.toml` files of
+their own under `/etc/ritornello/locales/<your-name>/`, exactly as for a
+bundled plugin (see [interface.md](interface.md)); that path is simply
+never yours to populate from an archive.
+
+**The common vocabulary — "Play", "Loading", the generic error
+sentences — travels with the core, not with you.** Your own keys resolve
+against your own catalogue first, `common`'s next; but `common` itself
+belongs to the core, seeded from its own embedded English regardless of
+what any plugin announces. A device whose core carries no pack for a
+language still resolves *your* keys correctly if you shipped that
+language — your own announced catalogue answers before `common` is ever
+consulted — while every `common` key around them falls through to the
+core's fallback language, or to English. A user who picks a language
+neither the core nor most plugins ship will see your admin page's own
+sentences correctly translated, sitting next to buttons labelled in
+another language. That is not a defect in your plugin, and it is not one
+the core can paper over: it never invents a translation nobody handed it.
+
 ### Turning a plugin off
 
 A third key, `enabled`, is optional and absent by default — absence
@@ -392,10 +473,10 @@ Saving a new station list from the admin page announces the fresh
 (`SourcePlugin::poll_notification`) rather than waiting for a preset to be
 played — otherwise the web grid kept showing the old set of numbers until
 something was played on the radio. That notification carries only
-`preset_count`: `identity`, `preset`, `preset_name` and `status` are all
-left unset (the radio plugin never fills the last two on this particular
-frame), so it disturbs neither the display nor whatever is currently
-playing.
+`preset_count`: `identity`, `preset`, `preset_name` and `status_text` are
+all left unset (the radio plugin never fills the last two on this
+particular frame), so it disturbs neither the display nor whatever is
+currently playing.
 
 Playing a preset also declares its `preset_name`: the configured station
 name, alongside the `preset` number, in the same frame. The field exists
@@ -466,14 +547,15 @@ core's admin protocol, which gives a `GetData` 5 s, so a search
 that drags on is stopped on its own with an error message rather than
 ending in a timeout.
 
-Selecting an **empty** preset declares a **transient** `status` — "empty
-preset" — for a few seconds, then whatever was already showing (the
-station's own status, or nothing at all) returns on its own: nothing was
-started, so nothing stopped, and the message must not durably describe a
-state that does not exist. `transient` only ever qualifies `status`: it
-feeds a passing overlay message and leaves whatever a source has
-permanently declared untouched underneath, ready to reappear once the
-message's time is up.
+Selecting an **empty** preset declares a **transient** `status_text` —
+`Text::Keyed { key: "empty_preset", .. }`, resolved by the core into
+"empty preset" or its translation — for a few seconds, then whatever was
+already showing (the station's own status, or nothing at all) returns on
+its own: nothing was started, so nothing stopped, and the message must not
+durably describe a state that does not exist. `transient` only ever
+qualifies `status_text`: it feeds a passing overlay message and leaves
+whatever a source has permanently declared untouched underneath, ready to
+reappear once the message's time is up.
 
 Variables: `RITORNELLO_RADIO_STATIONS`, `RITORNELLO_RADIO_STATE`,
 `RITORNELLO_RADIO_DIRECTORY` (**pins** a directory server: it becomes the
@@ -565,19 +647,22 @@ default is **false**: not knowing means offering nothing, which is what leaves
 radio, files and generic-input compiling unchanged with a correctly greyed key.
 The field deliberately does **not** make a frame "interesting" enough to be
 forwarded to the core (see `SourceClient`): a frame carrying only a capability
-must stay inert, because a permanent frame without `status` *erases* the
+must stay inert, because a permanent frame without `status_text` *erases* the
 remembered status, so waking up frames that are dropped today would wipe "no
 disc" off the display. The capability rides the frames the core already
 listens to instead.
 
-What it declares instead is a `status`: "audio CD" whenever a disc sits in
-the tray, "no disc" otherwise. Unlike `preset` and `preset_count`, whose
-absence means "this frame says nothing, keep the previous value", an absent
-`status` means **no status at all** — and the cd plugin restates one on
-every frame it produces through its own status-issuing path (`activate`,
-`wake`, `select`, `next`/`prev` while playing, `player_track`, `eject`, and
-`stop`) precisely because of that convention: it is the only one that lets
-a status be cleared. Had absence meant "keep the previous one" instead,
+What it declares instead is a `status_text`: `Text::Keyed { key: "cd_audio",
+.. }` whenever a disc sits in the tray, `Text::Keyed { key: "no_disc", .. }`
+otherwise — resolved by the core into "audio CD" / "no disc" in English, and
+their translations elsewhere, never sent as those literal words on the wire.
+Unlike `preset` and `preset_count`, whose absence means "this frame says
+nothing, keep the previous value", an absent `status_text` means **no status
+at all** — and the cd plugin restates one on every frame it produces through
+its own status-issuing path (`activate`, `wake`, `select`, `next`/`prev`
+while playing, `player_track`, `eject`, and `stop`) precisely because of
+that convention: it is the only one that lets a status be cleared. Had
+absence meant "keep the previous one" instead,
 "no disc" would stay on screen forever after a disc was inserted, with no
 later frame able to cancel it. A display picks between this sentence and
 the album once a `metadata` plugin resolves one — see the plugin console's
@@ -1034,7 +1119,10 @@ Variables: `RITORNELLO_FILES_ROOTS`, `RITORNELLO_FILES_CREDENTIALS` and
 outside the service's environment), `RITORNELLO_FILES_STATE`,
 `RITORNELLO_FILES_MPV_PLAYLIST`, `RITORNELLO_FILES_PLAYLISTS` (where
 playlists saved "internally" live, as opposed to those written onto a
-root) and `RITORNELLO_LOCALES` (read by the plugin).
+root). `RITORNELLO_LOCALES` is read by the **core**, not this plugin —
+the core sweeps that root itself and layers what it finds over the
+plugin's confided English (see "A plugin's UI", below, and
+[development.md](development.md)).
 
 **Saving onto a share needs one extra word.** Shares are mounted `ro`, so
 saving a playlist onto one is refused with a message rather than a kernel
@@ -1250,7 +1338,7 @@ lets you learn the key — or the keys — of each action, load a bundled preset
 (`mce`, `keyboard`) and save; it also lets you import a preset from an
 uploaded `.toml` file and export the selected device's current bindings to
 such a file. Variables: `RITORNELLO_INPUT_BINDINGS`,
-`RITORNELLO_INPUT_PRESETS`, `RITORNELLO_LOCALE`.
+`RITORNELLO_INPUT_PRESETS`.
 
 Learning listens for thirty seconds, in a dialog naming the action and the
 device; the four ways out of that dialog — its "Cancel", the cross, Escape,
@@ -2112,13 +2200,17 @@ deliberately not a regular expression: a free-form pattern would make you debug
 regexes, and a bad one would break every title on that station. A hand-set
 pattern is persisted and marked manual, so re-learning leaves it alone.
 
-Two known limits. Mojibake — a station emitting latin-1 where UTF-8 is assumed,
+One known limit. Mojibake — a station emitting latin-1 where UTF-8 is assumed,
 or the reverse — never validates, and looks like a bad split when the split was
 right; the log names it separately so the search is not led astray, but nothing
-repairs it. And a `metadata` plugin never receives `SetLocale` (that frame
-exists only for sources), so this page's language is fixed at plugin launch and
-a language change shows up only after the plugin restarts — the same limit as
-the MPD plugin's page.
+repairs it.
+
+A limit that **used to** apply here no longer does: a `metadata` plugin never
+receives a language notification (no plugin ever does, since the language-packs
+chantier's task 11 — see `docs/interface.md`'s "Language" section), but this
+page's resolution moved entirely to the core: it resolves this plugin's
+announced catalog against the registry on every request the page makes, so a
+language change is reflected immediately, without a restart.
 
 ### The cover chain
 
@@ -2490,10 +2582,36 @@ protocol:
   changes is that a plugin can no longer undo the shell's layout. A Playwright
   journey locks it, because the defect lives in the cascade of two really
   served sheets, which jsdom does not compute;
-- `GetCatalog` → its flat i18n catalog, which the view consumes through
-  `t()`;
 - `GetData` / `SetData` → the page's data, opaque JSON both ways;
 - `Ping` → `Pong`, without touching the plugin's state or taking any lock.
+
+A plugin never answers for its own i18n catalog: there is no admin
+request for it, and `AdminPlugin` carries no `catalog` method. A plugin
+that has UI text confides it once, at startup, through `Runtime::texts(...)`
+(chained onto `declare_runtime!()?` before `.admin(...)?`) — the SDK
+parses and validates every language passed this way there, before a
+single socket is bound, so a broken pack is refused at the plugin's own
+startup rather than discovered on a screen; the sole requirement is a
+non-empty `en` entry (see [Text, translations, and what a plugin owes the
+catalogue](#text-translations-and-what-a-plugin-owes-the-catalogue) for
+the full contract and a third-party author's obligations).
+
+**Every bundled plugin today confides only English this way** —
+`Runtime::texts([("en", MY_EN)])?`, next to the crate's own
+`include_str!("locales/en.toml")` constant — and leaves every other
+shipped language to a plain `.toml` file under the deployment's packs
+root (see [installation.md](installation.md)): the core sweeps that root
+itself (`RITORNELLO_LOCALES`, see [development.md](development.md) and
+[interface.md](interface.md)) and layers what it finds over the confided
+English. **That is this project's own arrangement, not a limit
+`Runtime::texts` imposes**: the method takes any number of `(lang,
+source)` pairs, so a plugin — including a third-party one, which cannot
+ship a disk pack of its own at all — may confide several languages at
+once, e.g. `Runtime::texts([("en", MY_EN), ("nl", MY_NL)])?`. The view
+then reads the resolved catalog from
+`GET /plugins/<name>/api/i18n[?lang=<l>]`, an ordinary core-served HTTP
+route backed by that layering — never a round trip to the plugin,
+whichever tier a given language came from.
 
 **The protocol is concurrent.** `serve_admin` spawns one task per request
 and a single writer for the socket: responses leave in the order they
@@ -2501,14 +2619,14 @@ and a single writer for the socket: responses leave in the order they
 serial (read, await, write, read again), so a `set_data` mounting a
 sleeping network share held back `ui.js` — a plain `include_str!` — until
 the core gave up, and the admin page simply vanished. The plugin now sits
-behind an `RwLock`: `asset`, `catalog` and `get_data` read in parallel,
+behind an `RwLock`: `asset` and `get_data` read in parallel,
 `set_data` is exclusive (legitimately: it is a write). Assets are cached
 by the SDK the first time they are seen, and `ui.js`/`ui.css` are read
 before the socket accepts, so they never wait behind a write.
 
 **Each request carries a budget** (`deadline_ms`), decided by the core
 from the request's nature — an in-memory asset does not get the budget of
-a network mount: `Ping` 500 ms, `GetAsset`/`GetCatalog` 1 s, `GetData`
+a network mount: `Ping` 500 ms, `GetAsset` 1 s, `GetData`
 5 s, `SetData` 30 s. The SDK enforces it server-side, **lock wait
 included**, and answers `Expired` at the deadline instead of going silent;
 the core maps `Expired` and silence alike to `AdminIpcError::Timeout`,
@@ -2527,13 +2645,15 @@ the async thread and behind a circuit breaker
 The shell mounts the module's default component passing it **two props**,
 which are the entirety of the data-side contract:
 
-- `catalog`: the flat i18n catalog returned by `GetCatalog`, to be
-  consumed through `createT(catalog)`. **Guaranteed settled at mount**: the
-  shell does not build the module's component until this catalog has come
-  back, so a first render never sees an empty one. "Settled" means
-  answered *or* refused — a plugin whose `GetCatalog` fails still gets its
-  component mounted, with an empty catalog, because a page withheld
-  forever would be worse than one showing keys;
+- `catalog`: the flat i18n catalog the shell itself fetched from
+  `GET /plugins/<name>/api/i18n` (see above — never a request the plugin
+  answers), to be consumed through `createT(catalog)`.
+  **Guaranteed settled at mount**: the shell does not build the module's
+  component until this fetch has come back, so a first render never
+  sees an empty one. "Settled" means answered *or* refused — a plugin
+  whose catalog fetch fails still gets its component mounted, with an
+  empty catalog, because a page withheld forever would be worse than
+  one showing keys;
 - `base`: the **absolute** prefix under which the core serves this
   plugin's routes, trailing slash included (`/plugins/<name>/`). Every
   URL in the module is built from it — `api.get(`${base}api/data`)` — and

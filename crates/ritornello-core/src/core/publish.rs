@@ -110,7 +110,25 @@ impl<P: Player> Core<P> {
             preset_count: self.preset_count,
             // Standby wins over the source status: the device sleeps, what
             // the source says no longer applies.
-            status: if self.standby { self.standby_status.clone() } else { self.source_status.clone() },
+            //
+            // Resolved **here**, at every publication, rather than at
+            // receipt: `source_status` is stored as a `Text` precisely so
+            // that a language change (`Core::set_locale`) retranslates it
+            // without the Source having sent anything new — the defect
+            // task 7 of the language-packs chantier removes.
+            // `standby_status`, by contrast, is a key the core owns and
+            // already resolves eagerly on every locale change (see its own
+            // field doc): nothing to do here for that half of the branch.
+            //
+            // `and_then`, not `map`: `resolve_text` answers `None` on a
+            // registry lock miss, and that must collapse into "no status"
+            // here rather than `Some(None)`-shaped nonsense — see its own
+            // doc for why a miss is not allowed to show the raw key.
+            status: if self.standby {
+                self.standby_status.clone()
+            } else {
+                self.source_status.as_ref().and_then(|t| self.resolve_text(t, &self.active_source))
+            },
             overlay: self.overlay.as_ref().map(|(o, deadline)| {
                 let remaining = deadline.saturating_duration_since(Instant::now()).as_millis();
                 // The stored `remaining_ms` is never read: it is rewritten
@@ -344,7 +362,7 @@ mod tests {
         // if it keeps (in practice it does not) declaring one.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let mut update = bare_update();
-        update.status = Some("FIP".into());
+        update.status_text = Some(Text::Verbatim("FIP".into()));
         core.handle_source_update("radio", update);
         assert_eq!(core.player_state().status.as_deref(), Some("FIP"));
 
@@ -367,6 +385,219 @@ mod tests {
             core.player_state().status,
             None,
             "waking must not make a status reappear that the source has not redeclared"
+        );
+    }
+
+    /// The present defect this chantier removes, proven from the event
+    /// rather than from the method: `Core::set_locale` already re-resolves
+    /// `standby_status` on every locale change — a key the core owns,
+    /// resolved eagerly, see its field doc for why — but until task 7,
+    /// `source_status` was a finished string received from the plugin, so
+    /// changing the language left the source's status line in the old
+    /// language until the next frame from the player: forever, on a disc
+    /// sitting still.
+    ///
+    /// `source_status` now stores a `Text` and `player_state` resolves it at
+    /// **every** publication (see the comment above `status:` in
+    /// `player_state`), which is what this test proves by feeding one frame,
+    /// changing the language, and observing the published state without
+    /// sending anything new. A test that called a resolve method directly
+    /// would prove the logic and never that it actually runs at publication.
+    #[tokio::test]
+    async fn changing_the_language_retranslates_the_remembered_status() {
+        let (mut core, _pc, _sc, mut state_rx, _d) = setup();
+        {
+            // The active source's own module, exactly as `Registry::chain_for`
+            // expects it to be announced (task 4): a real plugin would have
+            // confided this through its `Announcement.catalog`, but the test
+            // registry starts empty, so the pack is planted by hand.
+            let mut registry = core.registry.write().await;
+            let mut layers = ritornello_i18n::ModuleLayers::new("radio");
+            layers.insert("en", ritornello_i18n::Layer::from_map(
+                [("no_disc".to_string(), "NO DISC".to_string())].into(),
+            ));
+            layers.insert("fr", ritornello_i18n::Layer::from_map(
+                [("no_disc".to_string(), "PAS DE DISQUE".to_string())].into(),
+            ));
+            registry.insert_announced("radio", layers);
+        }
+        let _ = state_rx.borrow_and_update();
+
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                status_text: Some(ritornello_proto::Text::Keyed {
+                    key: "no_disc".into(),
+                    params: std::collections::HashMap::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("NO DISC"));
+
+        // The one event of this test besides the frame above: a language
+        // change, with the Source sending nothing new.
+        core.set_locale("fr".into()).await.unwrap();
+
+        assert_eq!(
+            state_rx.borrow_and_update().status.as_deref(),
+            Some("PAS DE DISQUE"),
+            "the remembered status must retranslate on its own, without a second frame"
+        );
+    }
+
+    /// Partner test for task 13's fallback setting, on the same model:
+    /// `resolve_text` used to pass a hardcoded `"en"` as the second language
+    /// to `Registry::chain_for`; it now passes `self.fallback`. The key here
+    /// is defined **only** in the fallback language ("nl"), never in the
+    /// chosen one ("fr") nor in English (neither the disk pack — there is
+    /// none in this rig — nor a hardcoded one), so a resolution through
+    /// anything but the real fallback tier falls through to the raw key
+    /// instead. Feeding one frame, then changing only the fallback with the
+    /// Source sending nothing new, is what proves this reaches through
+    /// publication and not merely through a direct call to `resolve_text`.
+    #[tokio::test]
+    async fn changing_the_fallback_retranslates_the_remembered_status() {
+        let (mut core, _pc, _sc, mut state_rx, _d) = setup();
+        {
+            let mut registry = core.registry.write().await;
+            let mut layers = ritornello_i18n::ModuleLayers::new("radio");
+            layers.insert(
+                "nl",
+                ritornello_i18n::Layer::from_map([("no_disc".to_string(), "GEEN SCHIJF".to_string())].into()),
+            );
+            registry.insert_announced("radio", layers);
+        }
+        core.set_locale("fr".into()).await.unwrap();
+        let _ = state_rx.borrow_and_update();
+
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                status_text: Some(ritornello_proto::Text::Keyed {
+                    key: "no_disc".into(),
+                    params: std::collections::HashMap::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            state_rx.borrow_and_update().status.as_deref(),
+            Some("no_disc"),
+            "neither the chosen language nor a hardcoded en resolves the key in this rig"
+        );
+
+        // The one event of this test besides the frame above: a fallback
+        // change, with the Source sending nothing new.
+        core.set_fallback("nl".into()).await.unwrap();
+
+        assert_eq!(
+            state_rx.borrow_and_update().status.as_deref(),
+            Some("GEEN SCHIJF"),
+            "the remembered status must retranslate through the new fallback, without a second frame"
+        );
+    }
+
+    /// I-1 (task 7 review): a registry lock miss during publication must
+    /// read as **no status**, never the raw key. `resolve_text` used to
+    /// fall back to the key, reasoning it mirrored `Chain::get`'s own
+    /// safety net for an unknown key — review rejected that comparison on
+    /// reading it: that fallback is a *successful* read finding nothing to
+    /// translate, this is a *failed* read finding nothing at all, and the
+    /// raw key on a twenty-column display (`no_disc`) is the exact outcome
+    /// this chantier exists to prevent.
+    ///
+    /// The miss is forced deterministically — no timing, no retry loop — by
+    /// holding the registry's write lock across the call: `registry` and
+    /// `player_state` are both accessible from here, so three lines force
+    /// the same contention `resolve_text`'s `try_read` would meet in
+    /// production during a real `resweep_async`.
+    #[tokio::test]
+    async fn a_registry_lock_miss_during_publication_reads_as_no_status() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                status_text: Some(ritornello_proto::Text::Keyed {
+                    key: "no_disc".into(),
+                    params: std::collections::HashMap::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        // Sanity: the lock is free and the registry has nothing to translate
+        // `"no_disc"` with, so a *successful* read falls back to the raw
+        // key — `Chain::get`'s own, different, safety net. This is the
+        // baseline the held-lock assertion below must differ from, or the
+        // two cases would be indistinguishable and this test would prove
+        // nothing.
+        assert_eq!(core.player_state().status.as_deref(), Some("no_disc"));
+
+        let _held = core.registry.write().await;
+        assert_eq!(
+            core.player_state().status,
+            None,
+            "a lock miss must read as no status, never the raw key"
+        );
+    }
+
+    /// **Task 15, step 3: the race to the finish line, proved rather than
+    /// read.** `handle_source_update`'s own guard doc makes an affirmation:
+    /// "the guard cannot refuse a legitimately early frame: at startup,
+    /// clients are wired before the loop drains the channel, and hotplug
+    /// wiring is awaited from the main loop, which therefore processes no
+    /// frame during that time" — in other words, no frame from a module the
+    /// core has never wired as a source can reach `handle_source_update` in
+    /// production; the announcement (the wiring, here) structurally
+    /// precedes any frame.
+    ///
+    /// `Core::new` can never construct the state this test needs —
+    /// `active_source` is always drawn from `sources.contains_key` (see its
+    /// own field doc) — so it is forced here, directly, on the private
+    /// fields this test module already has access to: `"radio"` is removed
+    /// from `sources`, standing in for "no announcement ever arrived for
+    /// this module", while `active_source` is left naming it, so that *if*
+    /// the guard at the top of `handle_source_update` were the only thing
+    /// stopping this frame, removing it would let the frame through to
+    /// resolution.
+    ///
+    /// This is deliberately a **different** case from the one
+    /// `a_registry_lock_miss_during_publication_reads_as_no_status` and
+    /// `changing_the_fallback_retranslates_the_remembered_status` already
+    /// accept: those are a module that **is** wired but was never announced
+    /// in the *i18n registry* — an honest resolution that finds nothing and
+    /// falls back to the raw key, by design. Here the module is not even a
+    /// known source at all — the frame must never be resolved into
+    /// anything, key included.
+    ///
+    /// **[MUTATION]**: delete the `if !self.sources.contains_key(name) {
+    /// tracing::debug!(...); return; }` guard at the very top of
+    /// `handle_source_update`. With it gone, this frame reaches
+    /// `resolve_text` — "radio" was never announced in the registry either
+    /// — and falls through to the raw key exactly like
+    /// `changing_the_fallback_retranslates_the_remembered_status` already
+    /// proves an unannounced module does; the assertion below then flips
+    /// from `None` to `Some("no_disc")` and the test fails.
+    #[tokio::test]
+    async fn a_status_for_a_source_never_wired_is_refused_before_any_resolution() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.sources.remove("radio");
+        core.active_source = "radio".to_string();
+
+        core.handle_source_update(
+            "radio",
+            SourceUpdate {
+                status_text: Some(Text::Keyed { key: "no_disc".into(), params: std::collections::HashMap::new() }),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            core.player_state().status,
+            None,
+            "a frame for a module the core never wired must be refused outright, before any \
+             resolution is even attempted — not even the honest raw-key fallback an unannounced \
+             but wired module gets elsewhere in this file"
         );
     }
 }

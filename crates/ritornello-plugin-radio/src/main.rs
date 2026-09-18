@@ -13,9 +13,9 @@ mod state;
 use crate::admin::RadioAdmin;
 use anyhow::Result;
 use config::Stations;
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
-use ritornello_proto::{Preset, SourceAction};
+use ritornello_proto::{Preset, SourceAction, Text};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
@@ -38,8 +38,6 @@ struct RadioSource {
     /// URL, on the other hand, durably identifies what is playing, and makes
     /// it possible to find the right number back in the reshuffled table.
     current_url: Option<String>,
-    catalog: Arc<RwLock<Catalog>>,
-    locales_root: PathBuf,
     /// Receives the new `Stations::preset_count()` announced by the Admin
     /// half after a successful save (see `RadioAdmin::set_data`). `main()`
     /// always builds this field as `Some`: the admin page is registered
@@ -90,7 +88,6 @@ impl RadioSource {
                 .preset_name(st.name.clone())
                 .preset_count(count)
         } else {
-            let empty = self.catalog.read().unwrap().get("empty_preset").to_string();
             // **Ephemeral** message: nothing was launched, so the previous
             // station is still playing and must reappear on screen. Leaving
             // it permanent durably described a state that did not exist.
@@ -101,7 +98,7 @@ impl RadioSource {
             // displayed title.
             SourceOutcome::new(SourceAction::Noop)
                 .transient()
-                .status(empty)
+                .status_text(Text::Keyed { key: "empty_preset".into(), params: HashMap::new() })
                 .preset_count(count)
         }
     }
@@ -149,10 +146,6 @@ impl SourcePlugin for RadioSource {
     async fn eject(&mut self) -> SourceOutcome {
         SourceOutcome::new(SourceAction::Noop)
     }
-    async fn set_locale(&mut self, locale: String) {
-        *self.catalog.write().unwrap() = Catalog::load("radio", &locale, &self.locales_root, RADIO_EN);
-    }
-
     /// The radio's named presets: its stations, under the `AsyncRwLock`
     /// shared with the Admin half. Only source overriding this method for
     /// now — the cd has no names by nature, and the file list is already the
@@ -274,8 +267,6 @@ async fn main() -> Result<()> {
     });
     let preset = state::load(&state_path).preset;
     let stations_shared = Arc::new(AsyncRwLock::new(stations));
-    let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
-    let catalog = Arc::new(RwLock::new(Catalog::load("radio", "en", &locales_root, RADIO_EN)));
 
     // Admin -> Source channel for the spontaneous `preset_count` announcement
     // (see `RadioAdmin::set_data` and `RadioSource::poll_notification`). The
@@ -289,8 +280,6 @@ async fn main() -> Result<()> {
         preset,
         // Nothing is playing yet: filled in at the first `Play`.
         current_url: None,
-        catalog: catalog.clone(),
-        locales_root: locales_root.clone(),
         // The receiver only makes sense if an Admin half exists to emit on
         // it (see below): otherwise `poll_notification` must wait forever,
         // not fall back onto a dead channel.
@@ -306,14 +295,17 @@ async fn main() -> Result<()> {
         stations_path,
         state_path,
         stations: stations_shared,
-        catalog,
-        locales_root,
         directory: Arc::new(directory),
         search: RwLock::new(Vec::new()),
         countries: RwLock::new(Vec::new()),
         preset_count_tx,
     };
-    ritornello_plugin_sdk::declare_runtime!()?.source(source)?.admin(admin)?.run().await
+    ritornello_plugin_sdk::declare_runtime!()?
+        .texts([("en", RADIO_EN)])?
+        .source(source)?
+        .admin(admin)?
+        .run()
+        .await
 }
 
 #[cfg(test)]
@@ -322,26 +314,21 @@ mod tests {
     use ritornello_plugin_sdk::AdminPlugin;
 
     #[tokio::test]
-    async fn empty_preset_uses_the_catalog_after_set_locale() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
-        std::fs::write(dir.path().join("radio/fr.toml"), "empty_preset = \"PRESET VIDE\"\n").unwrap();
-
-        let state_dir = tempfile::tempdir().unwrap();
-        let catalog = Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN)));
-        let mut source = RadioSource {
-            state_path: state_dir.path().join("plugin-radio.json"),
-            stations: Arc::new(AsyncRwLock::new(Stations::default())),
-            preset: 1,
-            current_url: None,
-            catalog: catalog.clone(),
-            locales_root: dir.path().to_path_buf(),
-            preset_count_rx: None,
-        };
-        source.set_locale("fr".into()).await;
+    async fn selecting_an_empty_preset_carries_a_key_not_a_resolved_text() {
+        // The present defect this task removes (language-packs chantier,
+        // task 10): the plugin used to resolve its own status into a
+        // finished string through a `Catalog` it kept in step with
+        // `set_locale` — a method that never re-emitted anything on its
+        // own. Fed from the event (selecting a preset that does not exist),
+        // not through a direct call to a private method.
+        let mut source = make_source(Stations::default(), 1);
         // no preset loaded → "empty_preset" branch
         let outcome = source.select(1).await;
-        assert_eq!(outcome.status.as_deref(), Some("PRESET VIDE"));
+        assert_eq!(
+            outcome.status_text,
+            Some(Text::Keyed { key: "empty_preset".into(), params: HashMap::new() }),
+            "the frame must carry a key for the core to resolve, not a finished string"
+        );
     }
 
     #[test]
@@ -356,8 +343,6 @@ mod tests {
             stations: Arc::new(AsyncRwLock::new(stations)),
             preset,
             current_url: None,
-            catalog: Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN))),
-            locales_root: dir.path().to_path_buf(),
             preset_count_rx: None,
         }
     }
@@ -452,9 +437,12 @@ mod tests {
             outcome.identity.is_none(),
             "declaring a stop would be false: the previous stream carries on"
         );
-        // The ephemeral word is declared via `status`: it is what feeds the
-        // overlay on the core side.
-        assert_eq!(outcome.status.as_deref(), Some("empty preset"));
+        // The ephemeral word is declared via `status_text`: it is what feeds
+        // the overlay on the core side, once resolved.
+        assert_eq!(
+            outcome.status_text,
+            Some(Text::Keyed { key: "empty_preset".into(), params: HashMap::new() })
+        );
         // Empty table: the declared count is 0, not absent.
         assert_eq!(outcome.preset_count, Some(0));
     }
@@ -626,8 +614,6 @@ mod tests {
             stations_path: dir.path().join("stations.toml"),
             state_path: dir.path().join("plugin-radio.json"),
             stations: stations_shared.clone(),
-            catalog: Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN))),
-            locales_root: dir.path().to_path_buf(),
             directory: Arc::new(crate::directory::HttpDirectory::from_env()),
             search: RwLock::new(Vec::new()),
             countries: RwLock::new(Vec::new()),
@@ -638,8 +624,6 @@ mod tests {
             stations: stations_shared,
             preset: 1,
             current_url: None,
-            catalog: Arc::new(RwLock::new(Catalog::load("radio", "en", dir.path(), RADIO_EN))),
-            locales_root: dir.path().to_path_buf(),
             preset_count_rx: Some(rx),
         };
 

@@ -12,7 +12,7 @@ const CATALOG = {
   dlg_learn_desc: 'Appuyez sur une touche du périphérique « {device} »…',
   learn_append_label: 'Ajouter aux codes existants',
   learn_countdown: 'Il reste {s} s',
-  saved: 'Enregistré', save_error: 'Échec : ', load_error: 'Erreur : ', no_device: 'Aucun périphérique',
+  saved: 'Enregistré', save_error: 'Échec : {cause}', load_error: 'Erreur : {cause}', no_device: 'Aucun périphérique',
   conflict_code: 'le code {code} est déjà affecté à {action}',
   conflict_dup: 'le code {code} est saisi deux fois',
   save_conflicts: 'Corrigez les codes en double avant d’enregistrer',

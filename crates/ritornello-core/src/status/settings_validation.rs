@@ -100,60 +100,62 @@ pub enum SettingsError {
 }
 
 impl SettingsError {
-    pub fn message(&self, catalog: &Catalog) -> String {
-        match self {
-            SettingsError::InitialDelay { min, max } => catalog
-                .get("settings_initial_delay_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::RepeatInterval { min, max } => catalog
-                .get("settings_repeat_interval_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::Overlay { min, max } => catalog
-                .get("settings_overlay_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::TensWindow { min, max } => catalog
-                .get("settings_tens_window_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::SeekStep { min, max } => catalog
-                .get("settings_seek_step_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::CoverSourceMax { min, max } => catalog
-                .get("settings_cover_source_max_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::CoverMaxEdge { min, max } => catalog
-                .get("settings_cover_max_edge_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::CoverJpegQuality { min, max } => catalog
-                .get("settings_cover_jpeg_quality_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::CoverPassthroughMax { min, max } => catalog
-                .get("settings_cover_passthrough_max_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::CoverCacheBudget { min, max } => catalog
-                .get("settings_cover_cache_budget_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::CoverDownloadMax { min, max } => catalog
-                .get("settings_cover_download_max_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::CoverMaxPixels { min, max } => catalog
-                .get("settings_cover_max_pixels_out_of_range")
-                .replace("{min}", &min.to_string())
-                .replace("{max}", &max.to_string()),
-            SettingsError::UpdateHour { value } => {
-                catalog.get("settings_update_hour_range").replace("{value}", &value.to_string())
+    pub fn message(&self, catalog: &Chain) -> String {
+        // Every arm below used to chain two `.replace()` calls
+        // (`{min}` then `{max}`) directly on the resolved string — the same
+        // shape task 10b removed from `core`, `admin` and `update`. `min`
+        // and `max` are `u32::to_string()`, so they can never themselves
+        // contain the literal text `{min}`/`{max}` today, but that safety
+        // rests entirely on the values staying numeric, a property nothing
+        // here enforces; routed through `ritornello_i18n::interpolate` like
+        // every other producer instead of leaving twelve copy-paste
+        // instances of the banned shape in the tree.
+        let (key, min, max) = match self {
+            SettingsError::InitialDelay { min, max } => {
+                ("settings_initial_delay_out_of_range", *min, *max)
             }
-        }
+            SettingsError::RepeatInterval { min, max } => {
+                ("settings_repeat_interval_out_of_range", *min, *max)
+            }
+            SettingsError::Overlay { min, max } => ("settings_overlay_out_of_range", *min, *max),
+            SettingsError::TensWindow { min, max } => {
+                ("settings_tens_window_out_of_range", *min, *max)
+            }
+            SettingsError::SeekStep { min, max } => {
+                ("settings_seek_step_out_of_range", *min, *max)
+            }
+            SettingsError::CoverSourceMax { min, max } => {
+                ("settings_cover_source_max_out_of_range", *min, *max)
+            }
+            SettingsError::CoverMaxEdge { min, max } => {
+                ("settings_cover_max_edge_out_of_range", *min, *max)
+            }
+            SettingsError::CoverJpegQuality { min, max } => {
+                ("settings_cover_jpeg_quality_out_of_range", *min, *max)
+            }
+            SettingsError::CoverPassthroughMax { min, max } => {
+                ("settings_cover_passthrough_max_out_of_range", *min, *max)
+            }
+            SettingsError::CoverCacheBudget { min, max } => {
+                ("settings_cover_cache_budget_out_of_range", *min, *max)
+            }
+            SettingsError::CoverDownloadMax { min, max } => {
+                ("settings_cover_download_max_out_of_range", *min, *max)
+            }
+            SettingsError::CoverMaxPixels { min, max } => {
+                ("settings_cover_max_pixels_out_of_range", *min, *max)
+            }
+            SettingsError::UpdateHour { value } => {
+                return ritornello_i18n::interpolate(
+                    catalog.get("settings_update_hour_range"),
+                    [("value", value.to_string().as_str())],
+                );
+            }
+        };
+        ritornello_i18n::interpolate(
+            catalog.get(key),
+            [("min", min.to_string().as_str()), ("max", max.to_string().as_str())],
+        )
     }
 }
 
@@ -404,7 +406,7 @@ mod tests {
             "settings_initial_delay_out_of_range = \"timeout hors bornes ({min}-{max})\"\n",
         )
         .unwrap();
-        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN);
+        let cat = ritornello_i18n::Chain::load_for_tests("core", "fr", dir.path(), crate::i18n::EN);
         let err = SettingsError::InitialDelay { min: 200, max: 5000 };
         assert_eq!(err.message(&cat), "timeout hors bornes (200-5000)");
     }
@@ -416,7 +418,7 @@ mod tests {
     fn the_seek_step_refusal_quotes_its_bounds() {
         // Nonexistent path: the catalog falls back to the embedded English,
         // the very one the key must now contain.
-        let catalog = ritornello_i18n::Catalog::load(
+        let catalog = ritornello_i18n::Chain::load_for_tests(
             "core",
             "en",
             std::path::Path::new("/nonexistent"),
@@ -426,5 +428,68 @@ mod tests {
         assert!(message.contains('1') && message.contains("120"), "{message}");
         assert!(!message.contains("{min}"), "key not substituted: {message}");
         assert_ne!(message, "settings_seek_step_out_of_range", "key missing from the catalog");
+    }
+
+    /// `SettingsError::message` used to chain two `.replace()` calls on
+    /// every `min`/`max` arm (task 10b, F-2 review round): the same shape
+    /// removed from every other producer of catalog text. This walks every
+    /// variant and proves the substitution is still complete after routing
+    /// through `ritornello_i18n::interpolate` — no arm was left resolving to
+    /// its own key or with an unfilled `{min}`/`{max}`/`{value}` token.
+    #[test]
+    fn every_settings_error_resolves_with_its_bounds_filled_in() {
+        let catalog = ritornello_i18n::Chain::load_for_tests(
+            "core",
+            "en",
+            std::path::Path::new("/nonexistent"),
+            crate::i18n::EN,
+        );
+        let all = [
+            SettingsError::InitialDelay { min: 200, max: 5000 },
+            SettingsError::RepeatInterval { min: 100, max: 2000 },
+            SettingsError::Overlay { min: 1000, max: 15000 },
+            SettingsError::TensWindow { min: 1000, max: 15000 },
+            SettingsError::SeekStep { min: 1, max: 120 },
+            SettingsError::CoverSourceMax { min: 1, max: 20 },
+            SettingsError::CoverMaxEdge { min: 64, max: 2048 },
+            SettingsError::CoverJpegQuality { min: 40, max: 100 },
+            SettingsError::CoverPassthroughMax { min: 16, max: 2048 },
+            SettingsError::CoverMaxPixels { min: 1, max: 64 },
+            SettingsError::CoverCacheBudget { min: 8, max: 256 },
+            SettingsError::CoverDownloadMax { min: 1, max: 20 },
+            SettingsError::UpdateHour { value: 24 },
+        ];
+        for err in &all {
+            let message = err.message(&catalog);
+            assert!(!message.contains('{'), "{err:?} left a parameter unfilled: {message}");
+            assert!(!message.starts_with("settings_"), "{err:?} fell through to its own key: {message}");
+        }
+    }
+
+    /// Pinned exact strings for the two `min`/`max` arms already covered
+    /// above by a different assertion shape, plus `UpdateHour`'s single
+    /// parameter: proof that routing through `interpolate` produced **the
+    /// same output** as the chained `.replace()` calls it replaced, not
+    /// merely "some" substitution.
+    #[test]
+    fn interpolate_produces_the_exact_same_strings_the_chained_replace_did() {
+        let catalog = ritornello_i18n::Chain::load_for_tests(
+            "core",
+            "en",
+            std::path::Path::new("/nonexistent"),
+            crate::i18n::EN,
+        );
+        assert_eq!(
+            SettingsError::InitialDelay { min: 200, max: 5000 }.message(&catalog),
+            "initial delay out of range (200-5000 ms)"
+        );
+        assert_eq!(
+            SettingsError::CoverJpegQuality { min: 40, max: 100 }.message(&catalog),
+            "cover JPEG quality out of range (40-100)"
+        );
+        assert_eq!(
+            SettingsError::UpdateHour { value: 24 }.message(&catalog),
+            "The update hour must be between 0 and 23, not 24"
+        );
     }
 }

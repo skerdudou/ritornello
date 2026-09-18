@@ -23,13 +23,12 @@ use admin::CdAdmin;
 use anyhow::Result;
 use rand::seq::SliceRandom;
 use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
-use ritornello_proto::SourceAction;
+use ritornello_proto::{SourceAction, Text};
 use state::{OnArrival, Remembered};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
-
-use ritornello_i18n::Catalog;
 
 const CD_EN: &str = include_str!("locales/en.toml");
 
@@ -64,12 +63,6 @@ struct CdSource {
     presence_rx: mpsc::Receiver<bool>,
     toc_tx: mpsc::Sender<ReadToc>,
     toc_rx: mpsc::Receiver<ReadToc>,
-    /// Shared with the Admin half, which serves it to its page — the same
-    /// arrangement as the radio, and for the same reason: `SetLocale` reaches
-    /// the Source half only, and a private copy on each side would leave the
-    /// page in the old language until the plugin restarted.
-    catalog: Arc<RwLock<Catalog>>,
-    locales_root: PathBuf,
     /// What to do when the source is arrived at, shared with the Admin half
     /// that writes it. Read at each arrival rather than copied at startup: a
     /// setting changed from the page must apply to the next press, not to the
@@ -182,11 +175,13 @@ impl CdSource {
     fn issue(&self, action: SourceAction) -> SourceOutcome {
         let outcome = SourceOutcome::new(action);
         // The Source's permanent status: what the SPA's Player card now
-        // displays (see `SourceMessage::status`).
+        // displays (see `SourceMessage::status_text`), resolved by the core
+        // against this plugin's announced catalog — the plugin itself holds
+        // no catalog any more (language-packs chantier, task 8).
         let outcome = if self.present {
-            outcome.status(self.catalog.read().unwrap().get("cd_audio"))
+            outcome.status_text(Text::Keyed { key: "cd_audio".into(), params: HashMap::new() })
         } else {
-            outcome.status(self.catalog.read().unwrap().get("no_disc"))
+            outcome.status_text(Text::Keyed { key: "no_disc".into(), params: HashMap::new() })
         };
         // The count is a property of the inserted disc, not of playback: it is
         // declared on every frame, 0 when no TOC is known (no disc, or the
@@ -1057,10 +1052,6 @@ impl SourcePlugin for CdSource {
         self.issue(SourceAction::Stop)
     }
 
-    async fn set_locale(&mut self, locale: String) {
-        *self.catalog.write().unwrap() = Catalog::load("cd", &locale, &self.locales_root, CD_EN);
-    }
-
     async fn poll_notification(&mut self) -> Option<Notification> {
         tokio::select! {
             presence = self.presence_rx.recv() => {
@@ -1192,7 +1183,7 @@ impl CdSource {
             // The cd plugin never names a preset (see `SourceMessage::preset_name`).
             preset_name: issue.preset_name,
             // Same status logic as any other frame: presence flips it.
-            status: issue.status,
+            status_text: issue.status_text,
             // The cd never enumerates named presets: a track has no name
             // without a database. `list_presets` keeps the default empty list,
             // and a spontaneous frame has nothing to republish here.
@@ -1220,15 +1211,12 @@ async fn main() -> Result<()> {
 
     let (toc_tx, toc_rx) = mpsc::channel::<ReadToc>(4);
 
-    let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
-
     let state_path =
         PathBuf::from(env_or("RITORNELLO_CD_STATE", "/var/lib/ritornello/plugin-cd.json"));
     let persisted = state::load(&state_path);
     // Shared, not copied into each half: the page writes it and the Source
     // half reads it at every arrival, so a change applies to the next press.
     let on_arrival = Arc::new(RwLock::new(persisted.on_arrival));
-    let catalog = Arc::new(RwLock::new(Catalog::load("cd", "en", &locales_root, CD_EN)));
 
     let source = CdSource {
         cd_dev,
@@ -1242,8 +1230,6 @@ async fn main() -> Result<()> {
         presence_rx,
         toc_tx,
         toc_rx,
-        catalog: catalog.clone(),
-        locales_root: locales_root.clone(),
         on_arrival: on_arrival.clone(),
         state_path: state_path.clone(),
         remembered: persisted.remembered,
@@ -1254,8 +1240,13 @@ async fn main() -> Result<()> {
         order: Vec::new(),
         cursor: 0,
     };
-    let admin = CdAdmin { state_path, on_arrival, catalog, locales_root };
-    ritornello_plugin_sdk::declare_runtime!()?.source(source)?.admin(admin)?.run().await
+    let admin = CdAdmin { state_path, on_arrival };
+    ritornello_plugin_sdk::declare_runtime!()?
+        .texts([("en", CD_EN)])?
+        .source(source)?
+        .admin(admin)?
+        .run()
+        .await
 }
 
 #[cfg(test)]
@@ -1278,13 +1269,6 @@ mod tests {
             presence_rx,
             toc_tx: toc_tx.clone(),
             toc_rx,
-            catalog: Arc::new(RwLock::new(Catalog::load(
-                "cd",
-                "en",
-                std::path::Path::new("/nonexistent"),
-                CD_EN,
-            ))),
-            locales_root: std::path::PathBuf::from("/nonexistent"),
             on_arrival: Arc::new(RwLock::new(OnArrival::default())),
             // A writable path that no test reads: `remember` is called by
             // every track change, and pointing it at an unwritable place
@@ -2234,7 +2218,11 @@ mod tests {
         // number at stop rested on a non-existent promise.
         let mut source = playing_source();
         let out = source.stop().await;
-        assert_eq!(out.status.as_deref(), Some("audio CD"), "the disc is still present");
+        assert_eq!(
+            out.status_text,
+            Some(Text::Keyed { key: "cd_audio".into(), params: HashMap::new() }),
+            "the disc is still present"
+        );
         assert_eq!(out.preset, None, "nothing plays: no key must be highlighted");
     }
 
@@ -2243,7 +2231,7 @@ mod tests {
         let (mut source, _p, _t) = source_with_channels();
         source.present = false;
         let out = source.stop().await;
-        assert_eq!(out.status.as_deref(), Some("no disc"));
+        assert_eq!(out.status_text, Some(Text::Keyed { key: "no_disc".into(), params: HashMap::new() }));
     }
 
     #[tokio::test]
@@ -2402,31 +2390,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_status_uses_the_catalog_after_set_locale() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("cd")).unwrap();
-        std::fs::write(dir.path().join("cd/fr.toml"), "no_disc = \"PAS DE DISQUE\"\n").unwrap();
-
-        let (mut source, _presence_tx, _toc_tx) = source_with_channels();
+    async fn a_disc_presence_notification_carries_a_key_not_a_resolved_text() {
+        // The present defect this task removes (language-packs chantier,
+        // task 8): the plugin used to resolve its own status into a
+        // finished string through a `Catalog` it kept in step with
+        // `set_locale` — a method that never re-emitted anything on its
+        // own, the exact "NO DISC" trap a relaunched plugin used to fall
+        // into for lack of a language. Fed from the event (a disc presence
+        // change on `presence_rx`), not through a direct call to `issue()`:
+        // this is the frame the core actually receives, not merely the
+        // logic that builds it.
+        let (mut source, presence_tx, _toc_tx) = source_with_channels();
         source.present = false;
-        source.locales_root = dir.path().to_path_buf();
-        source.set_locale("fr".into()).await;
-        assert_eq!(source.issue(SourceAction::Noop).status.as_deref(), Some("PAS DE DISQUE"));
+        presence_tx.send(true).await.unwrap();
+        let n = source.poll_notification().await.expect("a presence change notifies");
+        assert_eq!(
+            n.status_text,
+            Some(Text::Keyed { key: "cd_audio".into(), params: HashMap::new() }),
+            "the frame must carry a key for the core to resolve, not a finished string"
+        );
     }
 
     #[tokio::test]
     async fn the_status_declares_the_absence_or_presence_of_a_disc() {
-        // This is what the SPA's Player card now displays (see
-        // `SourceMessage::status`): "no disc" or "audio CD", depending on
-        // `self.present`, on every frame.
+        // This is what the SPA's Player card now displays, once the core
+        // resolves it (see `SourceMessage::status_text`): "no disc" or
+        // "audio CD", depending on `self.present`, on every frame.
         let (mut source, _presence_tx, _toc_tx) = source_with_channels();
         source.present = false;
         let outcome = source.activate().await;
-        assert_eq!(outcome.status.as_deref(), Some("no disc"));
+        assert_eq!(outcome.status_text, Some(Text::Keyed { key: "no_disc".into(), params: HashMap::new() }));
 
         let mut source = playing_source();
         let outcome = source.activate().await;
-        assert_eq!(outcome.status.as_deref(), Some("audio CD"));
+        assert_eq!(outcome.status_text, Some(Text::Keyed { key: "cd_audio".into(), params: HashMap::new() }));
     }
 
     #[tokio::test]
@@ -2789,7 +2786,7 @@ mod tests {
         source.present = false;
         let out = source.wake().await;
         assert_eq!(out.action, SourceAction::Noop, "cd must not play on wake");
-        assert_eq!(out.status.as_deref(), Some("no disc"));
+        assert_eq!(out.status_text, Some(Text::Keyed { key: "no_disc".into(), params: HashMap::new() }));
         assert_eq!(out.identity, Some(IdentityUpdate::Nothing));
     }
 

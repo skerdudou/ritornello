@@ -8,17 +8,6 @@ impl<P: Player> Core<P> {
         &self.active_source
     }
 
-    /// Current language, to pass along when launching a relit plugin.
-    ///
-    /// The language is passed to the process via `RITORNELLO_LOCALE`: a plugin
-    /// relit on a French-speaking device must find it at startup, without
-    /// waiting for a `SetLocale` — the trap already met with `cd`, which
-    /// displayed `NO DISC` again for lack of a language as long as no language
-    /// change happened afterwards.
-    pub fn current_locale(&self) -> Option<String> {
-        self.locale.clone()
-    }
-
     /// Adds a source discovered **after** startup: a plugin that missed the
     /// rendezvous, or that was relaunched by hand. Returns `true` if it is a
     /// replacement (re-announcement of a plugin already wired).
@@ -288,15 +277,15 @@ impl<P: Player> Core<P> {
     /// Two paths, and keeping them together here is the whole point:
     ///
     /// - **First source of the core** (the table was empty): startup is
-    ///   replayed by `resume`, so `SetLocale`, the play mode, then `Wake`, in
-    ///   that order. `add_source` only designates the active one; without
-    ///   this wake, a source arriving at t+30 s would be active and
-    ///   **silent** until the user touched something — the device would look
-    ///   broken while everything is wired.
-    /// - **Additional source, or core in standby**: only the language and the
-    ///   play mode are due. Waking here would relight a device that was
-    ///   deliberately switched off, and would change what plays because a
-    ///   plugin finished starting.
+    ///   replayed by `resume`, so the play mode then `Wake`, in that order.
+    ///   `add_source` only designates the active one; without this wake, a
+    ///   source arriving at t+30 s would be active and **silent** until the
+    ///   user touched something — the device would look broken while
+    ///   everything is wired.
+    /// - **Additional source, or core in standby**: only the play mode is
+    ///   due. Waking here would relight a device that was deliberately
+    ///   switched off, and would change what plays because a plugin finished
+    ///   starting.
     ///
     /// The state is published in both cases: the source's name just appeared
     /// in the frame, and the SPA as well as the displays were announcing "no
@@ -311,50 +300,22 @@ impl<P: Player> Core<P> {
         if first && !self.standby {
             self.resume().await?;
         } else {
-            self.send_locale_to(&name).await;
             self.send_play_mode_to(&name).await;
             self.publish_state();
         }
         Ok(replacement)
     }
 
-    /// Pushes the current language to **a single** source: the one that was
-    /// just hot-wired.
+    /// Pushes the current play mode to **a single** source: the one that was
+    /// just hot-wired, or any other single-source caller of
+    /// `SourceReq::SetPlayMode`.
     ///
-    /// `resume` and `set_locale` only serve the sources present in the table
-    /// at the time of their call. A source arriving after — a plugin that
-    /// missed the rendezvous, or relaunched by hand without its language
-    /// argument — would never have received `SetLocale`: on a French-speaking
-    /// device, a relaunched `cd` came back displaying `NO DISC` in its status
-    /// line, and would have stayed that way until the next language change.
+    /// `random` and `repeat_all` always have a value (`false` by default,
+    /// read from `PersistedState` at construction), so there is never a
+    /// reason to skip this send.
     ///
-    /// No effect if the core has no language set: the plugin then keeps its
-    /// default, which is the same as the core's. Best-effort like the two
-    /// other paths — a source that does not answer `SetLocale` must not
-    /// prevent its wiring.
-    pub async fn send_locale_to(&self, name: &str) {
-        let Some(locale) = self.locale.clone() else {
-            return;
-        };
-        if let Some(src) = self.sources.get(name)
-            && let Err(e) = src.request(SourceReq::SetLocale(locale)).await
-        {
-            tracing::warn!("SetLocale to {name}: {e}");
-        }
-    }
-
-    /// Pushes the current play mode to **a single** source: the counterpart
-    /// of `send_locale_to`, for `SourceReq::SetPlayMode` instead of
-    /// `SetLocale`.
-    ///
-    /// No "nothing set yet" guard here, unlike `send_locale_to`: `random`
-    /// and `repeat_all` always have a value (`false` by default, read from
-    /// `PersistedState` at construction), so there is never a reason to skip
-    /// this send.
-    ///
-    /// Best-effort, same reason as `send_locale_to`: a source that does not
-    /// answer must not prevent its wiring, nor abort the command that
-    /// triggered this push.
+    /// Best-effort: a source that does not answer must not prevent its
+    /// wiring, nor abort the command that triggered this push.
     pub async fn send_play_mode_to(&self, name: &str) {
         if let Some(src) = self.sources.get(name)
             && let Err(e) = src
@@ -375,8 +336,8 @@ impl<P: Player> Core<P> {
     /// Called at every point that changes the mode (the four commands) or
     /// that makes a source newly reachable (wake, hotplug, activation of an
     /// already-known one) — see `send_play_mode_to`'s callers for the full
-    /// list, and the doc of `SetLocale`'s own three points for why a single
-    /// broadcast function is not enough on its own.
+    /// list: a source that missed one push still gets the next one that
+    /// touches the mode, but never on its own initiative.
     pub(super) async fn push_play_mode(&self) {
         for name in self.source_order.clone() {
             self.send_play_mode_to(&name).await;
@@ -552,7 +513,7 @@ mod tests {
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: calls.clone(), ..Default::default() }));
         sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls, ..Default::default() }));
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let core = Core::new(
             FakePlayer::default(),
@@ -561,7 +522,7 @@ mod tests {
                 persisted: PersistedState::default(),
                 state_path: dir.path().join("state.json"),
                 catalog,
-                locales_root: root,
+                registry: test_registry(&root),
                 manifest_order: order.iter().map(|n| n.to_string()).collect(),
                 metadata: silent_wiring(vec![]),
                 sources_catalog: watch::channel(SourcesCatalog::default()).0,
@@ -952,7 +913,7 @@ mod tests {
                 preset: Some(3),
                 preset_count: Some(23),
                 preset_name: Some("France Inter".into()),
-                status: Some("EN DIRECT".into()),
+                status_text: Some(Text::Verbatim("EN DIRECT".into())),
                 can_eject: Some(true),
                 has_finite_list: Some(true),
                 ..Default::default()
@@ -1039,47 +1000,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_hot_wired_source_receives_the_current_language() {
-        // `resume` and `set_locale` only serve the sources present in the
-        // table at the time of their call. Without this path, a source
-        // arriving after would never have received `SetLocale`: on a
-        // French-speaking device, a `cd` relaunched by hand came back
-        // displaying `NO DISC`.
-        let (mut core, _pc, source_calls, _rx, _d) = setup();
-        core.set_locale("fr".into()).await.unwrap();
-
-        let late_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        core.hotplug_source(
-            "files".into(),
-            Arc::new(FakeSource { name: "files", calls: late_calls.clone(), ..Default::default() }),
-        )
-        .await
-        .unwrap();
-
-        // The language and the play mode, and **nothing else**: `files` is
-        // not the core's first source, so it is not woken — what plays does
-        // not change because a plugin finished starting.
-        assert_eq!(
-            late_calls.lock().unwrap().as_slice(),
-            [
-                "files:SetLocale(\"fr\")".to_string(),
-                "files:SetPlayMode { random: false, repeat_all: false }".to_string()
-            ]
-        );
-        assert_eq!(core.active_source(), "radio");
-        assert_eq!(
-            source_calls.lock().unwrap().iter().filter(|c| c.starts_with("radio:SetLocale")).count(),
-            1,
-            "only the hot-wired source is concerned, the others are not renotified"
-        );
-    }
-
-    #[tokio::test]
     async fn a_source_that_arrives_late_learns_the_current_mode() {
-        // The lesson of `SetLocale`, which had to be pushed at three moments
-        // for exactly this reason: a plugin that missed the rendezvous
-        // window would otherwise play in order while the SPA shows
-        // "shuffle".
+        // `push_play_mode`/`send_play_mode_to` only serve the sources present
+        // in the table at the time of their call: a plugin that missed the
+        // rendezvous window would otherwise play in order while the SPA
+        // shows "shuffle".
         let (mut core, _pc, _sc, _rx, _d) = setup();
         declare_finite_list(&mut core, "radio");
         core.handle_command(Command::SetRandom(true)).await.unwrap();
@@ -1149,13 +1074,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_set_language_only_the_play_mode_is_pushed_to_the_hot_wired_source() {
-        // No language on the core side: the plugin keeps its default, which
-        // is the same. Pushing `SetLocale(None)` does not exist, and pushing
-        // "en" by force would overwrite a plugin launched with its own
-        // language. The play mode has no such "unset" state — `random` and
-        // `repeat_all` are always `false` or `true` — so it is still pushed,
-        // at its default value here.
+    async fn only_the_play_mode_is_pushed_to_a_hot_wired_source() {
+        // The play mode is the only setting a hot-wired, non-first source is
+        // owed: `random` and `repeat_all` always have a value (`false` or
+        // `true`, never "unset"), so it is always pushed, at its default
+        // value here.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let late_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         core.hotplug_source(
@@ -1172,12 +1095,11 @@ mod tests {
 
     #[tokio::test]
     async fn the_first_hot_wired_source_is_woken() {
-        // `add_source` only designates the active one: no `SetLocale`, no
-        // `Wake`, no `Activate`. A source arriving at t+30 s would therefore
-        // be active and **silent** until the user touched something — the
-        // device would look broken while everything is wired.
+        // `add_source` only designates the active one: no `Wake`, no
+        // `Activate`. A source arriving at t+30 s would therefore be active
+        // and **silent** until the user touched something — the device would
+        // look broken while everything is wired.
         let (mut core, mut state_rx, dir) = setup_without_source();
-        core.set_locale("fr".into()).await.unwrap();
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         assert!(
             !core
@@ -1193,11 +1115,10 @@ mod tests {
         assert_eq!(
             seen.lock().unwrap().as_slice(),
             [
-                "radio:SetLocale(\"fr\")".to_string(),
-                "radio:SetPlayMode { random: false, repeat_all: false }".into(),
+                "radio:SetPlayMode { random: false, repeat_all: false }".to_string(),
                 "radio:Wake".into()
             ],
-            "the language and the play mode BEFORE the wake, exactly as at startup"
+            "the play mode BEFORE the wake, exactly as at startup"
         );
         // The `Play` returned by `Wake` was applied: something plays.
         assert!(core.player.calls.lock().unwrap().contains(&"play http://fip".to_string()));
@@ -1208,11 +1129,9 @@ mod tests {
     #[tokio::test]
     async fn the_first_hot_wired_source_does_not_wake_a_core_in_standby() {
         // Standby is a **wanted** state: a plugin's arrival does not relaunch
-        // the device. Only the language and the play mode are due, so that
-        // the source does not compose its first frame in the language of its
-        // launch, nor with the wrong play mode.
+        // the device. Only the play mode is due, so that the source does not
+        // compose its first frame with the wrong one.
         let (mut core, _rx, dir) = setup_without_source();
-        core.set_locale("fr".into()).await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         core.hotplug_source(
@@ -1224,10 +1143,7 @@ mod tests {
 
         assert_eq!(
             seen.lock().unwrap().as_slice(),
-            [
-                "radio:SetLocale(\"fr\")".to_string(),
-                "radio:SetPlayMode { random: false, repeat_all: false }".to_string()
-            ]
+            ["radio:SetPlayMode { random: false, repeat_all: false }".to_string()]
         );
         assert!(
             !core.player.calls.lock().unwrap().iter().any(|c| c.starts_with("play")),
@@ -1323,7 +1239,7 @@ mod tests {
         sources.insert("cd".into(), Arc::new(EmptySource));
         let (state_tx, state_rx) = watch::channel(PlayerState::default());
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let metadata = MetadataWiring {
             plugins: vec![],
             now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
@@ -1331,7 +1247,7 @@ mod tests {
         };
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::SourceCycle).await.unwrap();
         // It is the core that stopped mpv, without depending on the plugins.
@@ -1355,10 +1271,10 @@ mod tests {
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
         sources.insert("cd".into(), Arc::new(FailingSource));
         let root = dir.path().to_path_buf();
-        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load("core", "en", &root, crate::i18n::EN)));
+        let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, locales_root: root, manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(core.handle_command(Command::SourceCycle).await.is_err());
         // The state is consistent: new source everywhere, and nothing plays.
@@ -1426,7 +1342,7 @@ mod tests {
         let (mut core, _pc, _sc, mut state_rx, _d) = setup();
         core.resume().await.unwrap();
         let mut update = bare_update();
-        update.status = Some("pas de disque".into());
+        update.status_text = Some(Text::Verbatim("pas de disque".into()));
         core.handle_source_update("radio", update);
         assert_eq!(state_rx.borrow_and_update().status.as_deref(), Some("pas de disque"));
         core.handle_command(Command::SourceCycle).await.unwrap();

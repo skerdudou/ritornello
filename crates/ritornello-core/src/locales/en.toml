@@ -22,6 +22,7 @@ plugin_uninstall_confirm = "Uninstall {name}? Its configuration is kept, so rein
 plugin_remove_binary_confirm = "Remove the binary '{file}'? This cannot be undone."
 plugin_order_note = "The order commands the source key and metadata priority."
 plugin_incompatible = "Built for protocol {found}; this core speaks {expected}"
+plugin_catalog_unknown = "Built before this core could ask for its language packs; reinstall it to receive translations"
 connected = "connected"
 unavailable = "unavailable"
 starting = "starting"
@@ -56,6 +57,36 @@ overlay_ms_label = "Display duration (volume, messages) (ms)"
 tens_window_ms_label = "Entry window for the +10 offset (ms)"
 language = "Language"
 display_card_title = "Language and display"
+# Whole-sentence phrase keys with named parameters (task 14, language-packs
+# chantier; the six `locale_completeness_*` keys added in fix round 1): a
+# number concatenated to a label is not translatable, and this is the exact
+# trap the chantier's own plan names ("cœur + 3 greffons sur 7"). The six
+# `locale_completeness_*` keys annotate one incomplete language in the
+# selector, naming `core` when it is among the covered modules and the unit
+# ("plugins", or "module" for the none case since fix round 2 — see finding
+# E) otherwise — every combination of "core covered?" x "how many others,
+# 0 / 1 / many" (the 0/1 split, not a plural suffix, is what keeps the
+# French forms grammatical: see `locale_completeness_core_plugin` vs
+# `_plugins`). `locale_fallback_result`/`_one`/`_none` are what the fallback
+# control shows once a real fallback is chosen — "the only way to know if
+# the fallback served" — with the same singular/plural split for the same
+# reason; the unit there is "modules" rather than "plugins", since the set
+# still uncovered can include `core` itself. `_none` (fix round 2, finding
+# C) is the success case, "nothing left in English": before it existed,
+# `remaining === 0` suppressed the line entirely, indistinguishable on
+# screen from "no fallback chosen" — silence in the one case the line
+# exists to report.
+locale_completeness_core = "core /{total}"
+locale_completeness_core_plugin = "core + 1 plugin /{total}"
+locale_completeness_core_plugins = "core + {plugins} plugins /{total}"
+locale_completeness_none = "0 module /{total}"
+locale_completeness_plugin = "1 plugin /{total}"
+locale_completeness_plugins = "{plugins} plugins /{total}"
+locale_fallback_label = "Fallback"
+locale_fallback_hint = "English always underlies every choice — picking it here adds no extra fallback."
+locale_fallback_result_none = "{done} /{total}, nothing left in English"
+locale_fallback_result_one = "{done} /{total}, 1 module still in English"
+locale_fallback_result = "{done} /{total}, {remaining} modules still in English"
 player_card_title = "Player"
 ok = "OK"
 remote_title = "Remote control"

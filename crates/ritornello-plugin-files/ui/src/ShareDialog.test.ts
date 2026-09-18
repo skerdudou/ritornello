@@ -162,11 +162,14 @@ describe('ShareDialog', () => {
     expect(send.mock.calls[0]?.[0]).toMatchObject({ subpath: null })
   })
 
-  it('a refusal displays instead of an empty share list', async () => {
+  it('a refusal displays instead of an empty share list, resolved from its key', async () => {
     // A silent dialog after clicking "Connect" reads like a connection that
-    // never happened.
-    await mountDialog(connected({ error: 'host unreachable' }))
-    expect(inPopover('[data-share-error]')?.textContent ?? '').toContain('host unreachable')
+    // never happened. The plugin no longer resolves this itself (no
+    // `Catalog` left — language-packs chantier, task 9): the page does.
+    await mountDialog(
+      connected({ error: { kind: 'Keyed', data: { key: 'smb_unreachable', params: { host: 'nas' } } } }),
+    )
+    expect(inPopover('[data-share-error]')?.textContent ?? '').toContain('nas')
     expect(inPopover('[data-share]')).toBeNull()
   })
 

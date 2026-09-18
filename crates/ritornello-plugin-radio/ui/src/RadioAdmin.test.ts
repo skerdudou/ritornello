@@ -9,7 +9,7 @@ const CATALOG = {
   // catalog, exactly as the real merged catalog delivers it.
   loading: 'Chargement…',
   btn_add: 'Ajouter', btn_save: 'Enregistrer', btn_search: 'Chercher',
-  btn_add_result: '+', saved: 'Enregistré', save_error: 'Échec : ',
+  btn_add_result: '+', saved: 'Enregistré', save_error: 'Échec : {cause}',
   limit_reached: '99 maximum', empty_query: 'Saisir un terme',
   searching: 'Recherche…', no_results: 'Aucun résultat',
   col_num: 'N°', col_name: 'Nom', col_url: 'URL',
@@ -17,7 +17,7 @@ const CATALOG = {
   country_all: 'Tous', country_filter_placeholder: 'Country ou code',
   country_none: 'Aucun country', country_loading: 'Chargement…',
   reorder_hint: 'Glisser', move_up: 'Monter', move_down: 'Descendre',
-  load_error_1: 'Erreur : ', load_error_2: '',
+  load_error: 'Erreur : {cause}',
 }
 
 // Absolute prefix the shell passes via the (required) `base` prop: that's

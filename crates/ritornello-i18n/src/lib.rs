@@ -1,104 +1,51 @@
 //! Shared i18n catalog for ritornello.
 //!
-//! Two independent layers per component:
-//! - `own`: the component's embedded English (`en.toml`), overlaid by the
-//!   external pack `<root>/<component>/<lang>.toml`.
-//! - `common`: English embedded in this crate, overlaid by
-//!   `<root>/common/<lang>.toml`.
+//! The model is two types, one built on the other:
+//! - `Layer` (see `layer`): one language's contribution to one pack, holding
+//!   **only** the keys that language defines — never English filled into
+//!   its holes. That is what makes stacking possible: a layer that carried
+//!   a floor of its own would shadow whatever pack sits below it.
+//! - `Chain` (see `chain`): an ordered stack of layers. The first layer to
+//!   define a key wins; the stacking is what produces the floor, never a
+//!   layer by itself. `Chain::load_for_tests` builds one, single-language,
+//!   four layers — a **test fixture helper**, not the resolution production
+//!   uses: `ritornello_core::i18n::Registry::chain_for` is, stacking *three*
+//!   languages (chosen, a device fallback, then English) through `Chain::
+//!   new`, up to twelve layers, and consulting an `announced` tier (a
+//!   plugin's own confided catalog) `Chain::load_for_tests` has no concept
+//!   of at all. See that constructor's own doc for exactly what it omits.
 //!
-//! Resolution by key: `own` → `common` → the key itself (safety net).
-//! Interpolation: the component does `catalog.get(key)` then
-//! `str::replace("{n}", &n.to_string())` (no template engine).
+//! `ModuleLayers` (see `layer`) groups one module's layers by language; it
+//! is data, not resolution, kept alongside `Layer` for the callers that
+//! need to reason about a module's coverage across languages.
+//!
+//! `coverage` (see `coverage`) is the arithmetic that reasoning runs on: the
+//! union of languages at least one module translates, and — for one
+//! candidate language — which modules are complete, partial or absent.
+//! Pure, key-set arithmetic over `ModuleLayers` already in memory; see its
+//! own module doc for the choices behind "complete".
+//!
+//! Resolution by key: `own` (component) → `common` → the key itself (safety
+//! net). Interpolation: the caller does `catalog.get(key)` then
+//! `interpolate::interpolate` to fill its `{name}` tokens (no template
+//! engine) — a single left-to-right pass, not the chained `str::replace`
+//! folds that used to live at each call site (see `interpolate`'s module
+//! doc for why that mattered).
 
-use std::collections::HashMap;
-use std::path::Path;
+mod chain;
+mod coverage;
+mod interpolate;
+mod layer;
 
-/// Common English vocabulary embedded in the crate.
-const COMMON_EN: &str = include_str!("locales/common_en.toml");
+pub use chain::{common_embedded, Chain};
+pub use coverage::{coverage, union_of_languages, Coverage, ModuleCoverage};
+pub use interpolate::{interpolate, params_in};
+pub use layer::{shipped_language_packs, try_parse, Layer, ModuleLayers};
 
-/// Pure parse of a flat TOML pack (`key = "value"`). Returns the parse error
-/// to the caller that wants to log it (loading of the base layers).
-pub fn try_parse(s: &str) -> Result<HashMap<String, String>, toml::de::Error> {
-    toml::from_str(s)
-}
-
-/// Overlays `base` with the TOML pack read from disk at `path`. File
-/// **absent**: silent (the normal case — most components have no
-/// pack for most languages). Any other error — permission denied,
-/// invalid UTF-8, invalid TOML — leaves `base` unchanged but is **traced**:
-/// a pack present that the operator meant to install must not disappear
-/// without a log line.
-fn overlay_from_disk(base: &mut HashMap<String, String>, path: &Path) {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(e) => {
-            tracing::warn!("i18n pack {} ignored (read failed): {e}", path.display());
-            return;
-        }
-    };
-    match toml::from_str::<HashMap<String, String>>(&text) {
-        Ok(ext) => base.extend(ext),
-        Err(e) => tracing::warn!("i18n pack {} ignored (invalid TOML): {e}", path.display()),
-    }
-}
-
-pub struct Catalog {
-    own: HashMap<String, String>,
-    common: HashMap<String, String>,
-}
-
-impl Catalog {
-    /// Builds the catalog of a component for a given language.
-    /// Starts from the embedded English (`own_en` for `own`, `COMMON_EN` for
-    /// `common`), then layers on the external packs that are present and valid.
-    /// Never panics: an absent or invalid pack leaves the English in place.
-    pub fn load(component: &str, locale: &str, root: &Path, own_en: &str) -> Catalog {
-        let mut own = match try_parse(own_en) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("embedded pack {component} invalid: {e}");
-                HashMap::new()
-            }
-        };
-        let mut common = match try_parse(COMMON_EN) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("embedded common pack invalid: {e}");
-                HashMap::new()
-            }
-        };
-        overlay_from_disk(&mut common, &root.join("common").join(format!("{locale}.toml")));
-        overlay_from_disk(&mut own, &root.join(component).join(format!("{locale}.toml")));
-        Catalog { own, common }
-    }
-
-    /// Resolves a key: `own` → `common` → the key itself.
-    pub fn get<'a>(&'a self, key: &'a str) -> &'a str {
-        self.own
-            .get(key)
-            .or_else(|| self.common.get(key))
-            .map(String::as_str)
-            .unwrap_or(key)
-    }
-
-    /// Flat map of **all** known keys, `own` overriding
-    /// `common` — the same priority order as `get`, but exposed as one block.
-    ///
-    /// Used to ship the catalog to the browser (`GET /api/i18n`): the SPA
-    /// resolves its keys client-side, which replaces the `{{key}}`
-    /// substitution of old. The values remain **data** end to end:
-    /// no character is dangerous, unlike raw substitution
-    /// into JS source.
-    pub fn entries(&self) -> HashMap<&str, &str> {
-        let mut out: HashMap<&str, &str> =
-            self.common.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        for (k, v) in &self.own {
-            out.insert(k.as_str(), v.as_str());
-        }
-        out
-    }
-}
+// Only the crate's own tests (unmodified below) reach for the embedded
+// common pack directly; outside `cfg(test)` nothing needs it by name.
+#[cfg(test)]
+pub(crate) use chain::COMMON_EN;
 
 #[cfg(test)]
 mod tests {
@@ -117,7 +64,7 @@ mod tests {
     fn own_takes_priority_over_common() {
         let dir = tempfile::tempdir().unwrap();
         // own_en defines "error", common has it too: own must win.
-        let cat = Catalog::load("core", "en", dir.path(), "error = \"own-error\"\n");
+        let cat = Chain::load_for_tests("core", "en", dir.path(), "error = \"own-error\"\n");
         assert_eq!(cat.get("error"), "own-error");
     }
 
@@ -125,7 +72,7 @@ mod tests {
     fn an_external_pack_overrides_the_embedded_own() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "core", "fr.toml", "standby = \"VEILLE\"\n");
-        let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
+        let cat = Chain::load_for_tests("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         assert_eq!(cat.get("standby"), "VEILLE");
     }
 
@@ -133,14 +80,14 @@ mod tests {
     fn an_external_pack_overrides_the_embedded_common() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "common", "fr.toml", "error = \"Erreur\"\n");
-        let cat = Catalog::load("core", "fr", dir.path(), "");
+        let cat = Chain::load_for_tests("core", "fr", dir.path(), "");
         assert_eq!(cat.get("error"), "Erreur");
     }
 
     #[test]
     fn a_missing_key_falls_back_to_english_then_to_the_key_itself() {
         let dir = tempfile::tempdir().unwrap();
-        let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
+        let cat = Chain::load_for_tests("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         // no fr pack: the embedded English is kept
         assert_eq!(cat.get("standby"), "STANDBY");
         // unknown key: the key itself is returned
@@ -151,7 +98,7 @@ mod tests {
     fn invalid_toml_is_ignored_without_panicking() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "core", "fr.toml", "this = is not valid");
-        let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
+        let cat = Chain::load_for_tests("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         assert_eq!(cat.get("standby"), "STANDBY"); // fallback to English, no panic
     }
 
@@ -170,7 +117,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // `error` exists in the embedded common: `own` must take priority, as
         // in `get`.
-        let cat = Catalog::load("core", "en", dir.path(), "error = \"own-error\"\nother = \"x\"\n");
+        let cat = Chain::load_for_tests("core", "en", dir.path(), "error = \"own-error\"\nother = \"x\"\n");
         let e = cat.entries();
         assert_eq!(e.get("error").copied(), Some("own-error"));
         assert_eq!(e.get("other").copied(), Some("x"));
@@ -180,25 +127,58 @@ mod tests {
         assert!(e.keys().any(|k| *k == "play"), "the common vocabulary must be included");
     }
 
-    /// French `common` pack shipped in the repo. Same parity invariant as
-    /// for each component (see `core::settings::key_parity_between_the_embedded_en_and_the_fr_pack`),
-    /// which was missing from the common layer: nothing flagged a key added
-    /// to `common_en.toml` that had no French translation.
-    fn common_fr_pack() -> String {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../deploy/locales/common/fr.toml");
-        std::fs::read_to_string(p).expect("common fr pack shipped")
+    /// **Generalized (task 15).** The pre-task-15 shape of this test named
+    /// `fr` and compared key sets alone; both were hazards this project has
+    /// already paid for once each (see `docs/plugins.md`'s language-packs
+    /// chantier notes): a hardcoded language stops covering a second one
+    /// the moment it ships **while still passing**, and a key-set-only
+    /// comparison cannot see a translation that renamed or dropped a
+    /// `{named}` parameter the English value still carries.
+    ///
+    /// `shipped_language_packs` derives the language list from
+    /// `deploy/locales/common/` itself, so a language added there is
+    /// covered automatically; the `assert!(!shipped.is_empty(), ...)` below
+    /// is what keeps that derivation honest — an empty discovery must fail
+    /// loudly, not be indistinguishable from "every language passed".
+    #[test]
+    fn key_and_param_parity_between_the_embedded_common_and_every_shipped_language() {
+        let en = try_parse(COMMON_EN).unwrap();
+        let deploy_locales =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let shipped = shipped_language_packs(&deploy_locales, "common");
+        assert!(!shipped.is_empty(), "no shipped language found for common under deploy/locales");
+        for (lang, content) in shipped {
+            let pack = try_parse(&content)
+                .unwrap_or_else(|e| panic!("{lang} pack for common is invalid TOML: {e}"));
+            let mut en_keys: Vec<&String> = en.keys().collect();
+            let mut pack_keys: Vec<&String> = pack.keys().collect();
+            en_keys.sort();
+            pack_keys.sort();
+            assert_eq!(en_keys, pack_keys, "common en/{lang} key sets diverge");
+
+            for (key, en_value) in &en {
+                if let Some(translated) = pack.get(key) {
+                    assert_eq!(
+                        params_in(en_value),
+                        params_in(translated),
+                        "common key {key}: {lang} translation's named parameters diverge from English"
+                    );
+                }
+            }
+        }
     }
 
+    /// Sanity for the generalization above: pins that this repository does
+    /// ship at least the second language the whole chantier was built
+    /// around, so `key_and_param_parity_between_the_embedded_common_and_every_shipped_language`
+    /// is not vacuously satisfied by a discovery that happens to find zero
+    /// languages in a differently-shaped tree.
     #[test]
-    fn key_parity_between_the_embedded_common_and_the_fr_pack() {
-        let en = try_parse(COMMON_EN).unwrap();
-        let fr = try_parse(&common_fr_pack()).unwrap();
-        let mut en_keys: Vec<&String> = en.keys().collect();
-        let mut fr_keys: Vec<&String> = fr.keys().collect();
-        en_keys.sort();
-        fr_keys.sort();
-        assert_eq!(en_keys, fr_keys, "common en/fr key sets diverge");
+    fn common_fr_pack_is_among_the_discovered_shipped_languages() {
+        let deploy_locales =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let shipped = shipped_language_packs(&deploy_locales, "common");
+        assert!(shipped.iter().any(|(lang, _)| lang == "fr"), "fr must be among the shipped languages");
     }
 
     #[test]
@@ -216,7 +196,7 @@ mod tests {
         // `plugin_unavailable_cause` joined the list: it's the variant that
         // names the cause of the refusal, and it's shown in exactly the same
         // case — an unreachable plugin, hence an empty plugin catalog.
-        let cat = Catalog::load("radio", "en", dir.path(), "");
+        let cat = Chain::load_for_tests("radio", "en", dir.path(), "");
         for key in [
             "loading",
             "plugin_unavailable",
@@ -234,8 +214,59 @@ mod tests {
     fn entries_reflects_external_overrides() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "core", "fr.toml", "standby = \"VEILLE\"\n");
-        let cat = Catalog::load("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
+        let cat = Chain::load_for_tests("core", "fr", dir.path(), "standby = \"STANDBY\"\n");
         assert_eq!(cat.entries().get("standby").copied(), Some("VEILLE"));
     }
 
+    /// **The component dimension of the generalized parity, closed.**
+    /// `key_and_param_parity_between_the_embedded_en_and_every_shipped_
+    /// language` exists once per component (this file for `common`,
+    /// `ritornello-core::core::settings` for `core`, and one `admin.rs`
+    /// per plugin crate), each with one hardcoded module name — the
+    /// **language** dimension derives from the tree (`shipped_language_
+    /// packs`), but nothing previously derived the *component* list
+    /// itself, so a ninth `deploy/locales/<x>/` directory could ship with
+    /// no parity test naming it and nothing would say so. Found and named
+    /// by review; this is the fix.
+    ///
+    /// One canonical list, updated by hand exactly once whenever a
+    /// component's locale directory is added or removed — the same
+    /// discipline `docs_map.rs` already enforces for `AGENTS.md`'s table
+    /// of documents ("every document under `docs/` is named there"),
+    /// applied to the same shape of decay here. Read `COVERED_COMPONENTS`'
+    /// own doc before adding a `deploy/locales/<x>/` directory: this test
+    /// is what refuses to let the two lists drift apart silently.
+    const COVERED_COMPONENTS: &[&str] =
+        &["common", "core", "cd", "files", "generic-input", "mpd", "musicbrainz", "radio"];
+
+    #[test]
+    fn every_deploy_locales_directory_has_a_named_parity_test() {
+        let deploy_locales =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&deploy_locales)
+            .unwrap_or_else(|e| panic!("{}: {e}", deploy_locales.display()))
+            .filter_map(|entry| {
+                let entry = entry.unwrap();
+                entry.file_type().unwrap().is_dir().then(|| entry.file_name().to_string_lossy().into_owned())
+            })
+            .collect();
+        on_disk.sort();
+        // A directory walk that returned nothing must not read as "every
+        // component is covered" — the exact hazard this test exists to
+        // close for the *language* dimension already, now for this one.
+        assert!(!on_disk.is_empty(), "no component directories found under deploy/locales — the walk is wrong");
+
+        let mut covered: Vec<&str> = COVERED_COMPONENTS.to_vec();
+        covered.sort_unstable();
+
+        assert_eq!(
+            on_disk.iter().map(String::as_str).collect::<Vec<_>>(),
+            covered,
+            "deploy/locales/ and COVERED_COMPONENTS (crates/ritornello-i18n/src/lib.rs) \
+             disagree — a directory was added or removed without updating the list, or \
+             vice versa. Every name in COVERED_COMPONENTS must have its own \
+             key_and_param_parity_between_the_embedded_en_and_every_shipped_language test \
+             somewhere in the workspace."
+        );
+    }
 }

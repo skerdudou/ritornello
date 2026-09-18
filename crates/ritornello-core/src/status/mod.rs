@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use ritornello_i18n::Catalog;
+use ritornello_i18n::Chain;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -20,10 +20,12 @@ mod logs;
 mod locales;
 use locales::{i18n_json, locale_json, locale_put};
 // Re-exported for `admin.rs`: the authority on an acceptable language code
-// (`valid_locale`) and on what is actually installed (`list_locales`) lives
-// here, next to `/api/locale` which they already gate — `admin_i18n` reuses
-// both rather than inventing a second grammar.
-pub(crate) use locales::{list_locales, valid_locale};
+// lives here, next to `/api/locale` which it already gates — `admin_i18n`
+// reuses it rather than inventing a second grammar. What is actually
+// installed is `Registry::core_languages` (task 12): a registry accessor,
+// not a `locales` function, since the answer must come from the same
+// swept snapshot `chain_for` resolves against — see that method's own doc.
+pub(crate) use locales::valid_locale;
 use plugin_status::{plugin_binary_delete, plugin_delete, plugin_enabled_put, plugin_move_post};
 pub use plugin_status::{
     mark_plugin_disconnected, replace_plugin_lines, resequence_plugin_lines, PluginAction,
@@ -54,39 +56,110 @@ pub struct AppState {
     pub logs: Arc<LogBuffer>,
     pub audio_current: Arc<RwLock<Option<String>>>,
     pub audio_tx: mpsc::Sender<Option<String>>,
-    pub catalog: Arc<RwLock<ritornello_i18n::Catalog>>,
+    /// The core's own resolved catalog for the current locale, built by
+    /// `crate::i18n::core_catalog` — itself a `Registry`-stacked `Chain`
+    /// (task 4) wrapped back into `Chain` for compatibility with every
+    /// existing reader of this field.
+    ///
+    /// **Stated limitation, unchanged in kind by the registry**: this is a
+    /// snapshot, rebuilt only when something calls `Core::set_locale` (a
+    /// real locale change) — not on every read. `Registry::chain_for`
+    /// itself performs no I/O at all (its disk tier is swept once, see
+    /// `Registry`'s doc), so an operator editing a pack on disk is picked
+    /// up by the next `resweep_async` — a real locale change — rather than by
+    /// every read of this field, and, as before, by a restart of the
+    /// service.
+    ///
+    /// **`GET /api/i18n` is no longer one of its readers**: that route
+    /// resolves from `registry` per request, because being a snapshot is
+    /// exactly what made it answer in the *old* language to the re-fetch
+    /// that follows a language change (see `locales::i18n_json`'s own doc).
+    /// What is left here is the HTTP layer's own error wording (the audio
+    /// output routes below), where being one locale change behind for the
+    /// duration of a disk walk costs nothing.
+    pub catalog: Arc<RwLock<ritornello_i18n::Chain>>,
+    /// Every module's translation layers — the core's own, `common`'s, and
+    /// each plugin's announced catalogue — swept from disk once at startup
+    /// and kept current by `Registry::resweep_async`/`insert_announced`/`forget`
+    /// as plugins announce themselves, disconnect, or a locale changes.
+    ///
+    /// **The same `Arc`** as the one `Core` holds (see `core::Wiring`): the
+    /// core seeds it and resolves its own catalog from it, and the HTTP layer
+    /// reads it for the plugin catalog route (`admin::admin_i18n`, task 5) —
+    /// one registry, not two copies that could drift.
+    pub registry: crate::i18n::Shared,
     pub locale_current: Arc<RwLock<Option<String>>>,
     pub locale_tx: mpsc::Sender<String>,
-    pub locales_root: std::path::PathBuf,
+    /// The device's persisted fallback language (task 13), mirroring
+    /// `locale_current`/`locale_tx`: read back as `LocaleResponse::
+    /// fallback_current`, written by `locale_put`'s optional `fallback`
+    /// field, and pushed to `Core::set_fallback` — a separate channel from
+    /// `locale_tx` so a request that changes only the fallback, leaving
+    /// `locale` untouched, still reaches the `select!` loop as its own
+    /// event.
+    pub fallback_current: Arc<RwLock<Option<String>>>,
+    pub fallback_tx: mpsc::Sender<String>,
     /// Reachable admin pages. Under a lock: a plugin that announces itself
     /// late must see its page appear without restarting the core.
     pub admin_backends: crate::admin::AdminBackends,
     pub admin_assets: Arc<crate::admin::AssetCache>,
-    /// Plugin catalogs already fetched, by `(plugin, lang)`. No entry for "no
-    /// language requested" — see `crate::admin::CatalogCache`'s doc for why
-    /// that case is never cached at all.
-    pub admin_catalogs: Arc<crate::admin::CatalogCache>,
     /// Identifier of this run of the core, used as the cache stamp of the
-    /// catalogs (`?v=<session>`).
+    /// plugin **assets** (`?v=<session>` on `admin::admin_asset`).
     ///
     /// Not a fingerprint of the content: getting one would mean already
-    /// holding the catalog, whereas the stamp has to be written into the very
-    /// URL that asks for it. Not the plugin's fingerprint either — an
-    /// operator can edit an on-disk language pack
-    /// (`/etc/ritornello/locales/<component>/<lang>.toml`) without
-    /// recompiling anything, and the catalog would then stay frozen **for
-    /// ever** in the caches, which is the danger `immutable` carries.
-    /// Editing a pack ends with a restart of the service: that is the
-    /// gesture which refreshes them all.
+    /// holding the asset, whereas the stamp has to be written into the very
+    /// URL that asks for it.
     ///
-    /// **Stated limitation**: the stamp is the core's session alone, not the
-    /// plugin's. A plugin restarted *within* one core session, with a
-    /// rebuilt catalog, keeps this same `session` value, so a browser that
-    /// already cached the old catalog under `?v=<session>` goes on serving it
-    /// `immutable` until the core itself restarts. `admin::forget_page`
-    /// purges the core-side cache for exactly this case but cannot reach a
-    /// browser's copy. Accepted: a core restart clears it, and editing a
-    /// language pack ends in a service restart anyway.
+    /// **No longer used by the plugin catalog route.** Until task 5's fix
+    /// round, `admin::admin_i18n` accepted the same `?v=<session>` stamp and
+    /// marked its response `immutable` whenever both `lang` and `v` were
+    /// present — a promise carried over unexamined from the asset route,
+    /// where it is earned. It does not hold for the catalog: `admin_i18n`
+    /// resolves straight from the shared `Registry` (task 4), and the
+    /// registry's disk tier is re-swept by `Registry::resweep_async` on every real
+    /// locale change (`Core::set_locale`) — not only by a restart, and never
+    /// by moving `session`. So the same stamped URL could start answering
+    /// differently mid-session: an operator edits a plugin's on-disk pack
+    /// (`/etc/ritornello/locales/<component>/<lang>.toml`) and picks the
+    /// interface language twice (any two real `PUT /api/locale` calls), and
+    /// a browser already holding the old text under `?lang=<l>&v=<session>`
+    /// as `immutable` would never ask again. Proven end to end by
+    /// `admin::tests::the_plugin_catalog_route_is_never_marked_immutable_unlike_the_asset_route`.
+    ///
+    /// **The fix is not a longer key.** `admin_i18n` now answers `no-cache`
+    /// unconditionally — reversible, not "immutable with a bigger key" — for
+    /// two reasons together, not one: the IPC round trip that used to make
+    /// re-fetching a plugin's catalogue costly is exactly what task 5
+    /// removed (a `Registry` lookup is a memory read), so paying
+    /// revalidation on every admin-page visit is close to free; and this
+    /// project's own recorded lesson is that when a URL stops determining
+    /// its content, the fix is to make the promise reversible, not to keep
+    /// making it under a longer key. This also closes, incidentally, a
+    /// staleness this stamp already had before this chantier and that this
+    /// task did not introduce: `session` is drawn once per run of the core
+    /// (`main.rs`), so a plugin that self-updates and re-announces mid-run
+    /// (`insert_announced` refreshes the registry immediately) used to leave
+    /// a browser's `immutable`-cached catalogue stale until the *core*
+    /// restarted, even though the core itself had moved on. A revalidating
+    /// route has no such gap: it asks again.
+    ///
+    /// **`admin_assets` keeps the promise, unchanged.** A `ui.js`/`ui.css`
+    /// bundle is still fetched over IPC once and cached indefinitely in
+    /// `admin_assets`: an operator who rebuilds a plugin's `ui.js` without
+    /// recompiling the core sees the old one until the service restarts (or
+    /// `admin::forget_page` runs, on disconnect) — genuinely nothing else
+    /// moves it, so `immutable` stays an honest promise there. A future
+    /// reader who "unifies" the two routes onto the same header logic would
+    /// reintroduce exactly the gap this comment describes: the two are
+    /// treated differently on purpose, not by oversight.
+    ///
+    /// **Stated limitation, still true, for `admin_assets` only**: the stamp
+    /// is the core's session alone, not the plugin's. A plugin restarted
+    /// *within* one core session, with a rebuilt asset bundle, keeps this
+    /// same `session` value, so a browser that already cached the old asset
+    /// under `?v=<session>` goes on serving it `immutable` until the core
+    /// itself restarts. `admin::forget_page` purges the core-side cache for
+    /// exactly this case but cannot reach a browser's copy.
     pub session: String,
     pub cmd_tx: mpsc::Sender<ritornello_proto::InputMessage>,
     pub theme_current: Arc<RwLock<crate::theme::ThemeState>>,
@@ -111,7 +184,7 @@ pub struct AppState {
     /// Enabled/disabled toggle of the plugins: the manifest to rewrite, the
     /// accepted names, and the core's ear.
     pub plugins: Arc<PluginsControl>,
-    /// Catalog of the sources and their named presets, as the core broadcasts
+    /// Chain of the sources and their named presets, as the core broadcasts
     /// it to the displays (`Core::sources_catalog`). The same `watch` as the
     /// Display plugins': the route reads the last value, nothing is probed on
     /// the core side, and the list only changes when a source announces
@@ -254,14 +327,40 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
             }
         }
     }
-    // Clamped to the installed set, falling back to `en`: `locale_current` can
-    // carry a language `valid_locale` accepts but `admin_i18n` refuses (a pack
-    // removed after being selected, or restored as-is from `state.json`).
-    // `admin_i18n`'s doc claims the core never refuses a language it
-    // advertises here — enforcing it here is what makes that true rather than
-    // merely asserted. Content-identical: `Catalog::load` already falls back
-    // to embedded English for an uninstalled language.
-    let installed = list_locales(&state.locales_root);
+    // Clamped to the **union** (fix round 2, task 14 re-review, finding
+    // B) — the same rule `locale_json`'s own `current` field applies
+    // (`status/locales.rs`, "`locales` on purpose, not `core_languages`"),
+    // and for the same reason: `locale` is this route's only consumer's
+    // only source for a plugin's own catalog request
+    // (`web/app/src/composables/usePlugins.ts`'s `locale` →
+    // `PluginRoute.vue`'s `catalogQuery`, `?lang=<locale>`). Clamping to
+    // `core_languages` here — as this route did until this fix round —
+    // silently turned a plugin-only chosen language back into `en` at the
+    // one place a user would notice: a plugin's own admin page, rendered
+    // in English while its own pack sat installed and `admin_i18n` would
+    // have served it (that route stopped checking membership — see its own
+    // doc, `admin.rs`). The union `locale_json` already computes from this
+    // same kind of registry read is what `admin_i18n` actually resolves
+    // through (`Registry::chain_for` — no I/O, falls back to `en` for a
+    // language genuinely uninstalled anywhere), so clamping against it
+    // here can never offer a language `admin_i18n` would refuse.
+    //
+    // Read from the registry's already-swept snapshot, not a live
+    // `read_dir` — task 12's review ("F-2") named this as the second of
+    // two sites disagreeing with `chain_for` about which languages exist;
+    // `locale_json` (task 12) had the same defect and was fixed the same
+    // way, before this fix round changed *which* set both sites clamp to.
+    //
+    // `Registry::union_languages`, not `modules_with_text` +
+    // `union_of_languages` — fix round 3, finding I. This route only ever
+    // asks "is this one code among the union", never anything about a
+    // language's content, and `modules_with_text` was built for
+    // `locale_json`'s different question ("what does each language
+    // *contain*"), paying a merge — a clone of every key of every source
+    // layer — this route never uses. `union_languages` answers the same
+    // membership question this route needs, from the same registry read,
+    // without building a single merged `Layer`. See that method's own doc.
+    let installed = state.registry.read().await.union_languages();
     let locale = state
         .locale_current
         .read()
@@ -321,7 +420,7 @@ struct AudioOutputRequest {
 
 /// Audio output validation error. Follows the model of `ValidationError`
 /// (`ritornello-plugin-radio/src/config.rs`): the user-facing text is
-/// produced at the boundary via `message(&Catalog)`, `Display` provides an
+/// produced at the boundary via `message(&Chain)`, `Display` provides an
 /// English version for the logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioOutputError {
@@ -329,7 +428,7 @@ pub enum AudioOutputError {
 }
 
 impl AudioOutputError {
-    pub fn message(&self, catalog: &Catalog) -> String {
+    pub fn message(&self, catalog: &Chain) -> String {
         match self {
             AudioOutputError::EmptyName => catalog.get("audio_output_name_empty").to_string(),
         }
@@ -454,24 +553,32 @@ pub(crate) mod tests_support {
     pub(crate) fn app_state() -> AppState {
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
+        let (fallback_tx, _fallback_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
+            // `seeded_registry`, not a bare `Registry::sweep`: production
+            // always seeds `core`/`common` with their embedded English
+            // first, and `locale_json` (task 12) needs that seed to find
+            // "core" through `Registry::modules_with_text` at all.
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
+                std::path::PathBuf::from("/nonexistent"),
+            ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
-            locales_root: std::path::PathBuf::from("/nonexistent"),
+            fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
+            fallback_tx,
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
-            admin_catalogs: Arc::new(Default::default()),
             session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -498,24 +605,32 @@ pub(crate) mod tests_support {
     pub(crate) fn app_state_with_audio() -> (AppState, tokio::sync::mpsc::Receiver<Option<String>>) {
         let (audio_tx, audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
+        let (fallback_tx, _fallback_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(Some("default".to_string()))),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
+            // `seeded_registry`, not a bare `Registry::sweep`: production
+            // always seeds `core`/`common` with their embedded English
+            // first, and `locale_json` (task 12) needs that seed to find
+            // "core" through `Registry::modules_with_text` at all.
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
+                std::path::PathBuf::from("/nonexistent"),
+            ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
-            locales_root: std::path::PathBuf::from("/nonexistent"),
+            fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
+            fallback_tx,
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
-            admin_catalogs: Arc::new(Default::default()),
             session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -544,24 +659,32 @@ pub(crate) mod tests_support {
     pub(crate) fn app_state_with_cmd() -> (AppState, tokio::sync::mpsc::Receiver<ritornello_proto::InputMessage>) {
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
+        let (fallback_tx, _fallback_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "en",
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
+            // `seeded_registry`, not a bare `Registry::sweep`: production
+            // always seeds `core`/`common` with their embedded English
+            // first, and `locale_json` (task 12) needs that seed to find
+            // "core" through `Registry::modules_with_text` at all.
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
+                std::path::PathBuf::from("/nonexistent"),
+            ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
-            locales_root: std::path::PathBuf::from("/nonexistent"),
+            fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
+            fallback_tx,
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
-            admin_catalogs: Arc::new(Default::default()),
             session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -586,9 +709,15 @@ pub(crate) mod tests_support {
         (state, cmd_rx)
     }
 
-    /// Variant with an observable `locale_tx` and a catalog loaded in `fr`
-    /// from a temporary root (the TempDir is returned so it stays alive).
-    pub(crate) fn app_state_fr() -> (AppState, tokio::sync::mpsc::Receiver<String>, tempfile::TempDir) {
+    /// Variant with an observable `locale_tx`/`fallback_tx` and a catalog
+    /// loaded in `fr` from a temporary root (the TempDir is returned so it
+    /// stays alive).
+    pub(crate) fn app_state_fr() -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<String>,
+        tokio::sync::mpsc::Receiver<String>,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(
@@ -598,24 +727,28 @@ pub(crate) mod tests_support {
         .unwrap();
         let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, locale_rx) = tokio::sync::mpsc::channel(4);
+        let (fallback_tx, fallback_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         let state = AppState {
             status: Arc::new(tokio::sync::RwLock::new(sample())),
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
-            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Catalog::load(
+            catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "fr",
                 dir.path(),
                 crate::i18n::EN,
             ))),
+            // Same reasoning as the other rigs above: seed core/common so
+            // `Registry::modules_with_text` finds "core".
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(dir.path().to_path_buf()))),
             locale_current: Arc::new(tokio::sync::RwLock::new(Some("fr".to_string()))),
             locale_tx,
-            locales_root: dir.path().to_path_buf(),
+            fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
+            fallback_tx,
             admin_backends: Arc::new(Default::default()),
             admin_assets: Arc::new(Default::default()),
-            admin_catalogs: Arc::new(Default::default()),
             session: "test-session".to_string(),
             cmd_tx,
             theme_current: Arc::new(tokio::sync::RwLock::new(Default::default())),
@@ -637,7 +770,7 @@ pub(crate) mod tests_support {
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
         };
-        (state, locale_rx, dir)
+        (state, locale_rx, fallback_rx, dir)
     }
 }
 
@@ -831,9 +964,8 @@ mod tests {
     #[async_trait::async_trait]
     impl crate::admin::AdminBackend for FakeOccupe {
         async fn asset(&self, _: &str) -> anyhow::Result<Option<(String, String)>> { Ok(None) }
-        async fn catalog(&self, _lang: Option<&str>) -> anyhow::Result<serde_json::Value> { Ok(serde_json::json!({})) }
         async fn get_data(&self) -> anyhow::Result<serde_json::Value> { Ok(serde_json::json!({})) }
-        async fn set_data(&self, _: serde_json::Value) -> anyhow::Result<Result<(), String>> { Ok(Ok(())) }
+        async fn set_data(&self, _: serde_json::Value) -> anyhow::Result<Result<(), ritornello_proto::Text>> { Ok(Ok(())) }
         async fn ping(&self) -> anyhow::Result<()> { Err(ritornello_plugin_sdk::AdminIpcError::Timeout.into()) }
     }
 
@@ -870,7 +1002,7 @@ mod tests {
     /// here rather than a separate `/api/locale` round trip.
     #[tokio::test]
     async fn api_status_carries_the_session_and_the_current_locale() {
-        let (state, _rx, _dir) = tests_support::app_state_fr();
+        let (state, _rx, _frx, _dir) = tests_support::app_state_fr();
         let session = state.session.clone();
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
@@ -898,19 +1030,49 @@ mod tests {
     /// uninstalled language (a pack removed after being selected, say) would
     /// then be echoed here and refused by every plugin catalog request naming
     /// it — every plugin page rendering raw translation keys next to a
-    /// refusal banner. Clamping here is content-identical: `Catalog::load`
-    /// already falls back to embedded English for an uninstalled language, so
-    /// nothing a user sees changes except that the URL this locale ends up
-    /// in now works.
+    /// refusal banner. Clamping here is content-identical: `Registry::
+    /// chain_for` already falls back to embedded English for an uninstalled
+    /// language, so nothing a user sees changes except that the URL this
+    /// locale ends up in now works.
     #[tokio::test]
     async fn api_status_clamps_an_uninstalled_locale_to_en() {
-        let (state, _rx, _dir) = tests_support::app_state_fr();
+        let (state, _rx, _frx, _dir) = tests_support::app_state_fr();
         *state.locale_current.write().await = Some("de".to_string()); // valid_locale, not installed
         let app = router(state);
         let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["locale"], "en");
+    }
+
+    /// Fix round 2 (task 14 re-review, finding B): a language only a
+    /// connected plugin translates must survive this clamp, or its own
+    /// catalog request (`?lang=<locale>`, built from this very field —
+    /// `usePlugins.ts`'s `locale` → `PluginRoute.vue`'s `catalogQuery`)
+    /// silently sends `lang=en` instead, and the plugin's own installed
+    /// pack is never fetched — the one place a user would actually notice
+    /// the union this chantier exists to serve. Before this fix, clamping
+    /// against `core_languages` alone reintroduced exactly this: the
+    /// selector offers "de", the page even lets it be chosen and kept
+    /// (`/api/locale.current`, clamped against the union since fix round
+    /// 1), but `/api/status.locale` — this route — echoed `"en"` regardless,
+    /// so the German-only plugin's admin page rendered in English forever.
+    ///
+    /// **[MUTATION]**: clamp `locale` against `registry.core_languages()`
+    /// instead of the union — this test fails, asserting `"en"` instead of
+    /// `"de"`.
+    #[tokio::test]
+    async fn api_status_does_not_clamp_a_plugin_only_locale() {
+        let (state, _rx, _frx, _dir) = tests_support::app_state_fr();
+        let mut radio_de = ritornello_i18n::ModuleLayers::new("radio");
+        radio_de.insert("de", ritornello_i18n::Layer::parse("play = \"Spielen\"\n").unwrap());
+        state.registry.write().await.insert_announced("radio", radio_de);
+        *state.locale_current.write().await = Some("de".to_string());
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["locale"], "de");
     }
 
     /// The web remote tiles read the preset names here: the core already
@@ -1283,7 +1445,7 @@ mod tests {
             "audio_output_name_empty = \"nom de sortie vide\"\n",
         )
         .unwrap();
-        let cat = ritornello_i18n::Catalog::load("core", "fr", dir.path(), crate::i18n::EN);
+        let cat = ritornello_i18n::Chain::load_for_tests("core", "fr", dir.path(), crate::i18n::EN);
         assert_eq!(AudioOutputError::EmptyName.message(&cat), "nom de sortie vide");
     }
 

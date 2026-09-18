@@ -1,15 +1,16 @@
 use crate::config::{Station, Stations};
 use crate::directory::{Directory, DirectoryCountry, DirectoryStation};
-use ritornello_i18n::Catalog;
 use ritornello_plugin_sdk::AdminPlugin;
+use ritornello_proto::Text;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as AsyncRwLock;
 
 /// Operations carried by `SetData`, discriminated by the `op` field (model of
 /// the generic-input plugin): the admin protocol is **not** extended, everything
-/// goes through `GetAsset` / `GetCatalog` / `GetData` / `SetData`.
+/// goes through `GetAsset` / `GetData` / `SetData`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
@@ -45,11 +46,6 @@ pub struct RadioAdmin {
     /// chosen country is retained, next to the preset.
     pub state_path: PathBuf,
     pub stations: Arc<AsyncRwLock<Stations>>,
-    pub catalog: Arc<RwLock<Catalog>>,
-    /// Root of the on-disk language packs, kept so a catalog can be rebuilt in
-    /// any requested language — `Catalog::load` only parses a TOML file, so
-    /// this costs nothing per request.
-    pub locales_root: PathBuf,
     /// Access to the directory behind a trait: tests inject results without
     /// ever touching the network.
     pub directory: Arc<dyn Directory>,
@@ -66,6 +62,20 @@ pub struct RadioAdmin {
     pub preset_count_tx: tokio::sync::watch::Sender<u8>,
 }
 
+impl RadioAdmin {
+    /// A bare key, no parameters — unresolved, the core resolving it
+    /// against this plugin's announced catalog (language-packs chantier,
+    /// task 10).
+    fn text(&self, key: &str) -> Text {
+        Text::Keyed { key: key.to_string(), params: HashMap::new() }
+    }
+
+    /// A key with a single named parameter.
+    fn text_with(&self, key: &str, param: &str, value: &str) -> Text {
+        Text::Keyed { key: key.to_string(), params: HashMap::from([(param.to_string(), value.to_string())]) }
+    }
+}
+
 #[async_trait::async_trait]
 impl AdminPlugin for RadioAdmin {
     fn asset(&self, path: &str) -> Option<(String, String)> {
@@ -79,22 +89,6 @@ impl AdminPlugin for RadioAdmin {
                 include_str!("../ui/dist/ui.css").to_string(),
             )),
             _ => None,
-        }
-    }
-
-    fn catalog(&self, lang: Option<&str>) -> serde_json::Value {
-        match lang {
-            // The language the plugin was started in: the catalog already
-            // built, no work at all.
-            None => serde_json::json!(self.catalog.read().unwrap().entries()),
-            // A language explicitly asked for. Rebuilt rather than translated
-            // from the current one: the on-disk pack is the authority, and
-            // only `Catalog::load` knows how to layer it over the embedded
-            // English.
-            Some(l) => {
-                let c = Catalog::load("radio", l, &self.locales_root, crate::RADIO_EN);
-                serde_json::json!(c.entries())
-            }
         }
     }
 
@@ -116,26 +110,19 @@ impl AdminPlugin for RadioAdmin {
         })
     }
 
-    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), String> {
-        let op: Op = serde_json::from_value(data).map_err(|e| {
-            self.catalog
-                .read()
-                .unwrap()
-                .get("bad_request")
-                .replace("{detail}", &e.to_string())
-        })?;
+    async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
+        let op: Op = serde_json::from_value(data)
+            .map_err(|e| self.text_with("bad_request", "detail", &e.to_string()))?;
         match op {
             Op::Save { stations } => {
                 let stations = Stations { stations };
-                stations
-                    .validate()
-                    .map_err(|e| e.message(&self.catalog.read().unwrap()))?;
+                stations.validate().map_err(|e| e.text())?;
                 stations.save(&self.stations_path).map_err(|e| {
                     // The technical detail (path, I/O cause) stays in the log:
                     // a read-only `/var/lib` must remain diagnosable, but not
                     // at the price of serving that diagnosis as UI text.
                     tracing::warn!("failed to save stations: {e}");
-                    self.catalog.read().unwrap().get("save_failed").to_string()
+                    self.text("save_failed")
                 })?;
                 let count = stations.preset_count();
                 *self.stations.write().await = stations;
@@ -163,13 +150,7 @@ impl AdminPlugin for RadioAdmin {
                     .directory
                     .search(query.trim(), country.as_deref())
                     .await
-                    .map_err(|detail| {
-                        self.catalog
-                            .read()
-                            .unwrap()
-                            .get("search_error")
-                            .replace("{detail}", &detail)
-                    })?;
+                    .map_err(|detail| self.text_with("search_error", "detail", &detail))?;
                 *self.search.write().unwrap() = results;
                 // The country is only retained after a **successful** search: a
                 // failed search says nothing about the user's intent, and
@@ -184,13 +165,11 @@ impl AdminPlugin for RadioAdmin {
                 Ok(())
             }
             Op::Countries => {
-                let countries = self.directory.countries().await.map_err(|detail| {
-                    self.catalog
-                        .read()
-                        .unwrap()
-                        .get("search_error")
-                        .replace("{detail}", &detail)
-                })?;
+                let countries = self
+                    .directory
+                    .countries()
+                    .await
+                    .map_err(|detail| self.text_with("search_error", "detail", &detail))?;
                 *self.countries.write().unwrap() = countries;
                 Ok(())
             }
@@ -267,13 +246,6 @@ mod tests {
             stations_path: path,
             state_path: dir.join("plugin-radio.json"),
             stations: Arc::new(AsyncRwLock::new(stations)),
-            catalog: Arc::new(RwLock::new(Catalog::load(
-                "radio",
-                "en",
-                std::path::Path::new("/nonexistent"),
-                crate::RADIO_EN,
-            ))),
-            locales_root: std::path::PathBuf::from("/nonexistent"),
             directory,
             search: RwLock::new(Vec::new()),
             countries: RwLock::new(Vec::new()),
@@ -313,30 +285,6 @@ mod tests {
         assert!(a.asset("index.html").is_none());
     }
 
-    #[test]
-    fn catalog_exposes_the_component_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let v = admin(dir.path()).catalog(None);
-        assert!(v["btn_save"].is_string(), "the sources_catalog must carry the plugin's keys");
-    }
-
-    #[test]
-    fn a_requested_language_is_honoured_whatever_the_current_one() {
-        // The plugin is started in English; asking for another language must
-        // rebuild, not return the current catalog. This is the whole basis of
-        // the `immutable` answer served over HTTP.
-        let dir = tempfile::tempdir().unwrap();
-        let locales = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(locales.path().join("radio")).unwrap();
-        std::fs::write(locales.path().join("radio/fr.toml"), "btn_save = \"Enregistrer\"\n").unwrap();
-        let mut a = admin(dir.path());
-        a.locales_root = locales.path().to_path_buf();
-        let en = a.catalog(None);
-        let fr = a.catalog(Some("fr"));
-        assert_ne!(en, fr);
-        assert_eq!(fr["btn_save"], "Enregistrer");
-    }
-
     #[tokio::test]
     async fn get_data_returns_the_stations_and_an_empty_search() {
         let dir = tempfile::tempdir().unwrap();
@@ -360,14 +308,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_write_failure_returns_a_catalog_sentence_not_the_io_detail() {
+    async fn a_write_failure_returns_the_save_failed_key_not_the_io_detail() {
         // `stations_path` targets an ordinary file as if it were a parent
         // directory: `create_dir_all` fails with an I/O error, without ever
         // touching the real stations on disk.
         // Targeted regression: `Stations::save(...).map_err(|e| e.to_string())`
         // put that raw error (paths included) in the response body — the text
-        // meant for the player must remain a sources_catalog sentence, the
-        // technical detail going to the log.
+        // meant for the player must remain a resolvable key, the technical
+        // detail going to the log. The plugin no longer resolves it itself
+        // (no `Catalog` left — language-packs chantier, task 10).
         let dir = tempfile::tempdir().unwrap();
         let obstacle = dir.path().join("obstacle");
         std::fs::write(&obstacle, b"not a directory").unwrap();
@@ -378,7 +327,7 @@ mod tests {
             "stations": [{ "name": "Inter", "url": "http://inter", "preset": 1 }]
         });
         let err = a.set_data(new).await.unwrap_err();
-        assert_eq!(err, "the save failed");
+        assert_eq!(err, Text::Keyed { key: "save_failed".into(), params: HashMap::new() });
     }
 
     #[tokio::test]
@@ -460,7 +409,13 @@ mod tests {
             .set_data(serde_json::json!({ "op": "save", "stations": stations }))
             .await
             .unwrap_err();
-        assert!(err.contains("100"), "unexpected message: {err}");
+        match err {
+            Text::Keyed { key, params } => {
+                assert_eq!(key, "preset_out_of_range");
+                assert_eq!(params.get("p").map(String::as_str), Some("100"), "{params:?}");
+            }
+            Text::Verbatim(s) => panic!("expected a keyed text, got verbatim: {s}"),
+        }
         assert!(!Stations::load(&a.stations_path).unwrap().stations.is_empty());
     }
 
@@ -513,7 +468,7 @@ mod tests {
             .set_data(serde_json::json!({ "op": "search", "query": "france", "country": "FR" }))
             .await
             .unwrap_err();
-        assert_eq!(err, "Directory search failed: timeout");
+        assert_eq!(err, Text::Keyed { key: "search_error".into(), params: HashMap::from([("detail".to_string(), "timeout".to_string())]) });
         assert_eq!(a.get_data().await["search"].as_array().unwrap().len(), 4);
         assert_eq!(a.stations.read().await.stations[0].name, "FIP");
     }
@@ -540,7 +495,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin_with(dir.path(), StubDirectory::err("timeout"));
         let err = a.set_data(serde_json::json!({ "op": "countries" })).await.unwrap_err();
-        assert_eq!(err, "Directory search failed: timeout");
+        assert_eq!(err, Text::Keyed { key: "search_error".into(), params: HashMap::from([("detail".to_string(), "timeout".to_string())]) });
         assert_eq!(a.get_data().await["countries"], serde_json::json!([]));
     }
 
@@ -589,29 +544,45 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut a = admin(dir.path());
         let err = a.set_data(serde_json::json!({ "op": "destroy" })).await.unwrap_err();
-        assert!(err.starts_with("invalid request:"), "unexpected message: {err}");
+        assert!(matches!(&err, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err:?}");
         let err2 = a
             .set_data(serde_json::json!({ "stations": [] }))
             .await
             .unwrap_err();
-        assert!(err2.starts_with("invalid request:"), "unexpected message: {err2}");
+        assert!(matches!(&err2, Text::Keyed { key, .. } if key == "bad_request"), "unexpected: {err2:?}");
     }
 
-    /// French pack shipped in the repository.
-    fn fr_pack() -> String {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../deploy/locales/radio/fr.toml");
-        std::fs::read_to_string(p).expect("shipped fr pack")
-    }
-
+    /// **Generalized (task 15).** Was "en vs fr, key sets only" — a
+    /// hardcoded language that stops covering a second one the moment it
+    /// ships, and a comparison blind to a translation that renamed or
+    /// dropped a `{named}` parameter. `shipped_language_packs` derives the
+    /// language list from the tree; the `assert!(!shipped.is_empty(), ...)`
+    /// below is what keeps that derivation honest instead of vacuously
+    /// green on a broken discovery.
     #[test]
-    fn key_parity_between_the_embedded_en_and_the_fr_pack() {
+    fn key_and_param_parity_between_the_embedded_en_and_every_shipped_language() {
         let en = ritornello_i18n::try_parse(crate::RADIO_EN).unwrap();
-        let fr = ritornello_i18n::try_parse(&fr_pack()).unwrap();
-        let mut en_keys: Vec<&String> = en.keys().collect();
-        let mut fr_keys: Vec<&String> = fr.keys().collect();
-        en_keys.sort();
-        fr_keys.sort();
-        assert_eq!(en_keys, fr_keys, "en/fr key sets diverge");
+        let deploy_locales = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
+        let shipped = ritornello_i18n::shipped_language_packs(&deploy_locales, "radio");
+        assert!(!shipped.is_empty(), "no shipped language found for radio under deploy/locales");
+        for (lang, content) in shipped {
+            let pack = ritornello_i18n::try_parse(&content)
+                .unwrap_or_else(|e| panic!("{lang} pack for radio is invalid TOML: {e}"));
+            let mut en_keys: Vec<&String> = en.keys().collect();
+            let mut pack_keys: Vec<&String> = pack.keys().collect();
+            en_keys.sort();
+            pack_keys.sort();
+            assert_eq!(en_keys, pack_keys, "en/{lang} key sets diverge for radio");
+
+            for (key, en_value) in &en {
+                if let Some(translated) = pack.get(key) {
+                    assert_eq!(
+                        ritornello_i18n::params_in(en_value),
+                        ritornello_i18n::params_in(translated),
+                        "key {key}: {lang} translation's named parameters diverge from English"
+                    );
+                }
+            }
+        }
     }
 }
