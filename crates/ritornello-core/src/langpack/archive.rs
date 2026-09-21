@@ -15,7 +15,7 @@
 
 use std::io::Read;
 
-use ritornello_i18n::{Layer, PackError, PackManifest, MAX_BYTES, MAX_FILES};
+use ritornello_i18n::{Layer, PackError, PackManifest, MAX_FILES};
 
 /// The manifest this pack declares, the layers it resolves to, and the raw
 /// bytes to write.
@@ -23,7 +23,16 @@ use ritornello_i18n::{Layer, PackError, PackManifest, MAX_BYTES, MAX_FILES};
 /// `files` is kept beside `layers` rather than re-serialised from them: what
 /// lands on disk must be byte-for-byte what was published and verified, not
 /// this core's idea of how to write the same map back out.
+///
+/// The `expect` below is conditioned on `not(test)`: this crate's own test
+/// module is the one caller today, so in a test build the item is genuinely
+/// used and an unconditional `expect` would itself warn as an "unfulfilled
+/// lint expectation" -- the exact mislabelling `expect` exists to avoid.
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the update worker that installs a language pack, task 8")
+)]
 pub struct PackContents {
     pub manifest: PackManifest,
     pub layers: Vec<(String, Layer)>,
@@ -32,16 +41,33 @@ pub struct PackContents {
 }
 
 /// The manifest's own name inside the archive.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the update worker that installs a language pack, task 8")
+)]
 const MANIFEST: &str = "pack.toml";
 
 /// Tar's framing on top of the payload, the same slack the component reader
 /// allows and for the same reason: headers and end-of-archive padding are
 /// decompressed bytes too, and a budget of exactly the cap would refuse a
 /// payload sitting exactly at it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the update worker that installs a language pack, task 8")
+)]
 const FRAMING_SLACK: usize = 256 * 1024;
 
-pub fn read(bytes: &[u8]) -> Result<PackContents, PackError> {
-    let budget = MAX_BYTES + FRAMING_SLACK;
+/// `cap` is a parameter, not `MAX_BYTES` read directly, for the same reason
+/// the component reader's own `read` takes one: it lets a test drive the
+/// decompression bound with a small budget instead of a multi-megabyte
+/// fixture. Production passes `ritornello_i18n::MAX_BYTES`; nothing about
+/// the real bound changes.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "consumed by the update worker that installs a language pack, task 8")
+)]
+pub fn read(bytes: &[u8], cap: usize) -> Result<PackContents, PackError> {
+    let budget = cap + FRAMING_SLACK;
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder.take(budget as u64 + 1));
 
@@ -76,8 +102,8 @@ pub fn read(bytes: &[u8]) -> Result<PackContents, PackError> {
             .read_to_end(&mut body)
             .map_err(|e| PackError::Manifest(format!("the archive could not be read: {e}")))?;
         total = total.saturating_add(body.len());
-        if total > MAX_BYTES {
-            return Err(PackError::TooLarge(MAX_BYTES));
+        if total > cap {
+            return Err(PackError::TooLarge(cap));
         }
         if name == MANIFEST {
             manifest_text = Some(
@@ -133,7 +159,7 @@ mod tests {
             ("pack.toml", sound_manifest()),
             ("core.toml", b"standby = \"VEILLE\"\n"),
         ]);
-        let c = read(&bytes).expect("a sound archive");
+        let c = read(&bytes, ritornello_i18n::MAX_BYTES).expect("a sound archive");
         assert_eq!(c.manifest.language, "fr");
         assert_eq!(c.layers.len(), 1);
         assert_eq!(c.layers[0].0, "core");
@@ -147,13 +173,13 @@ mod tests {
     #[test]
     fn a_leading_dot_slash_is_stripped() {
         let bytes = targz(&[("./pack.toml", sound_manifest()), ("./core.toml", b"k = \"v\"\n")]);
-        assert!(read(&bytes).is_ok());
+        assert!(read(&bytes, ritornello_i18n::MAX_BYTES).is_ok());
     }
 
     #[test]
     fn an_archive_with_no_manifest_is_refused() {
         let bytes = targz(&[("core.toml", b"k = \"v\"\n")]);
-        assert!(matches!(read(&bytes), Err(PackError::Manifest(_))));
+        assert!(matches!(read(&bytes, ritornello_i18n::MAX_BYTES), Err(PackError::Manifest(_))));
     }
 
     /// The shape that must never be mistaken for a component archive. A pack
@@ -165,28 +191,63 @@ mod tests {
             ("pack.toml", sound_manifest()),
             ("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
         ]);
-        assert!(matches!(read(&bytes), Err(PackError::BadEntry(_) | PackError::UndeclaredFile(_))));
+        assert!(matches!(read(&bytes, ritornello_i18n::MAX_BYTES), Err(PackError::BadEntry(_) | PackError::UndeclaredFile(_))));
 
         let bytes = targz(&[
             ("pack.toml", sound_manifest()),
             ("core.toml", b"k = \"v\"\n"),
             ("etc/systemd/system/ritornello.service", b"[Unit]\n"),
         ]);
-        assert!(matches!(read(&bytes), Err(PackError::BadEntry(_) | PackError::UndeclaredFile(_))));
+        assert!(matches!(read(&bytes, ritornello_i18n::MAX_BYTES), Err(PackError::BadEntry(_) | PackError::UndeclaredFile(_))));
     }
 
     /// The decompression cap, measured as it is consumed rather than after
-    /// the fact: a bomb must error instead of being allocated.
+    /// the fact: a bomb must error instead of being allocated. With the
+    /// production cap (four mebibytes) this entry is well inside the
+    /// `take`-bounded decoder's own budget (cap + `FRAMING_SLACK`), so
+    /// `take` never truncates anything here -- this test walks only the
+    /// post-read `total > cap` counter. The sibling test below drives the
+    /// same archive against a cap small enough that `take` truncates the
+    /// read first, and reports what actually happens then.
     #[test]
     fn an_archive_that_decompresses_past_the_cap_is_refused() {
         let huge = vec![b'x'; ritornello_i18n::MAX_BYTES + 4096];
         let bytes = targz(&[("pack.toml", sound_manifest()), ("core.toml", &huge)]);
-        assert!(matches!(read(&bytes), Err(PackError::TooLarge(_))));
+        assert!(matches!(read(&bytes, ritornello_i18n::MAX_BYTES), Err(PackError::TooLarge(_))));
+    }
+
+    /// A cap tiny enough that the `take`-bounded decoder, not the post-read
+    /// counter, is what actually stops the read: `take`'s budget here is
+    /// `16 + FRAMING_SLACK` (about 256 KiB), far below the several
+    /// megabytes this archive decompresses to, so `entry.read_to_end` can
+    /// never see the whole entry -- only what `take` lets through before it
+    /// starts returning `Ok(0)`.
+    ///
+    /// **Measured, not assumed: this still returns `TooLarge` through the
+    /// exact same `total > cap` line as the test above, not through a
+    /// separate error path.** `std::io::Read::take` fails silently (a short
+    /// read, never an `Err`) once its budget is spent, so `read_to_end`
+    /// returns `Ok` with whatever partial bytes it managed to collect
+    /// (verified by instrumenting `read` and printing the returned variant
+    /// before writing this assertion) -- and that partial length is still
+    /// well over the cap, so the *same* counter check downstream catches
+    /// it. Unlike the component reader's `Bounded` wrapper, which turns a
+    /// spent budget into its own distinct I/O error via a `tripped` flag,
+    /// this reader has no such branch: `take` and the counter are not two
+    /// independent paths to a refusal, they are one path where `take` only
+    /// changes how many bytes get buffered before the counter runs. What
+    /// this test proves that the one above does not is exactly that bound
+    /// on memory, not a different kind of refusal.
+    #[test]
+    fn a_tiny_cap_bounds_memory_even_on_an_archive_comfortably_larger_than_it() {
+        let huge = vec![b'x'; ritornello_i18n::MAX_BYTES + 4096];
+        let bytes = targz(&[("pack.toml", sound_manifest()), ("core.toml", &huge)]);
+        assert!(matches!(read(&bytes, 16), Err(PackError::TooLarge(16))));
     }
 
     #[test]
     fn something_that_is_not_a_gzipped_tar_is_refused_without_panicking() {
-        assert!(matches!(read(b"<html>rate limited</html>"), Err(PackError::Manifest(_) | PackError::BadEntry(_))));
+        assert!(matches!(read(b"<html>rate limited</html>", ritornello_i18n::MAX_BYTES), Err(PackError::Manifest(_) | PackError::BadEntry(_))));
     }
 
     /// Directory entries describe no content. A pack archive should carry
@@ -211,7 +272,7 @@ mod tests {
         let raw = tar.into_inner().unwrap();
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         enc.write_all(&raw).unwrap();
-        assert!(read(&enc.finish().unwrap()).is_ok());
+        assert!(read(&enc.finish().unwrap(), ritornello_i18n::MAX_BYTES).is_ok());
     }
 
     /// The two readers must never learn about each other. Stated as a test

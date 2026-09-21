@@ -16,8 +16,10 @@ pub mod archive;
 /// what a person wrote by hand, and an install must never write there. The
 /// separation is what lets a removal be exact and a hand-written pack
 /// survive -- which it does not today, where an update overwrites it.
+#[expect(dead_code, reason = "consumed by langpack::store, task 5")]
 pub const DEFAULT_PACKS_ROOT: &str = "/etc/ritornello/language-packs";
 
 /// The environment variable that moves that root, for tests and for the e2e
 /// harness. Same idiom as `RITORNELLO_LOCALES`.
+#[expect(dead_code, reason = "consumed by the language pack registry, task 6")]
 pub const PACKS_ROOT_ENV: &str = "RITORNELLO_LANGUAGE_PACKS";
