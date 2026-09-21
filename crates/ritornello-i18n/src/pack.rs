@@ -215,6 +215,17 @@ mod tests {
     /// invisible unless the test pins the exact variant. Found by mutation:
     /// forcing `valid_pack_name(module)` to `true` here left this test
     /// green while it still refused every case, just via `UndeclaredFile`.
+    ///
+    /// `"core"` is the eighth entry, added after review: every other input
+    /// here contains a `.` or a `/`, so `valid_pack_name` refuses all seven
+    /// regardless of whether `.toml` was stripped first -- this test's own
+    /// job, "prove every shape of bad entry is caught", was not actually
+    /// proven for the shape `strip_suffix(".toml")` exists to produce. A
+    /// bare name with no `.toml` suffix at all is the one input that
+    /// distinguishes stripping from not stripping: mutating
+    /// `strip_suffix(".toml")` to `Some(name)` makes `"core"` pass
+    /// `valid_pack_name` unchanged, match the declared module `"core"`
+    /// exactly, and be wrongly accepted -- caught only by this case.
     #[test]
     fn an_entry_that_is_not_a_bare_module_file_is_refused() {
         let m = manifest("fr", &["core"]);
@@ -226,6 +237,7 @@ mod tests {
             "usr/local/lib/ritornello/plugins/ritornello-plugin-radio",
             "plugins.toml.fragment",
             "core.txt",
+            "core",
         ] {
             let files = vec![file(bad, "k = \"v\"\n")];
             assert!(matches!(validate(&m, &files), Err(PackError::BadEntry(_))), "{bad} was not refused as BadEntry");
@@ -302,5 +314,26 @@ mod tests {
     fn a_manifest_with_an_unknown_field_is_refused() {
         let text = "language = \"fr\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = []\nexec = \"/bin/sh\"\n";
         assert!(matches!(parse_manifest(text), Err(PackError::Manifest(_))));
+    }
+
+    /// A declared module name that is not a bare name is refused as
+    /// `BadModule`, specifically -- not merely refused somehow.
+    ///
+    /// Before this test, no fixture ever put an invalid name into
+    /// `manifest.modules` at all: the whole `BadModule` branch (the loop
+    /// over `manifest.modules` calling `valid_pack_name`) could be deleted
+    /// outright and the 62-test suite stayed green, because the file loop
+    /// re-applies `valid_pack_name` to every file's derived module name and
+    /// would refuse the same pack anyway -- just relabelled `MissingFile`
+    /// (no file was ever going to match an invalid declared name) or
+    /// `BadEntry`. Not a security hole, but a guard no test ever reached,
+    /// which a mutation therefore could not catch. This test reaches it:
+    /// `"Core"` fails `valid_pack_name` (uppercase), is declared, and no
+    /// file is offered for it, so `BadModule` must be the reason, not an
+    /// accident of some other check firing first.
+    #[test]
+    fn a_declared_module_that_is_not_a_bare_name_is_refused() {
+        let m = manifest("fr", &["Core"]);
+        assert!(matches!(validate(&m, &[]), Err(PackError::BadModule(_))));
     }
 }
