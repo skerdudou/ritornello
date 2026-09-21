@@ -22,9 +22,13 @@
 //! The disk read is separated from the stacking calculation on purpose, the
 //! same split `status::locales::list_locales` already draws against
 //! `parse_available_locales` and `audio_output::list_devices` against
-//! `parse_device_list`: [`stack`] is pure and carries the tests below, and
-//! [`sweep_disk`] (wrapped by `Registry::sweep`/`resweep_async`) is the I/O
-//! envelope.
+//! `parse_device_list`: [`Registry::sources_for`] and [`Registry::languages_of`]
+//! are the pure calculation — the one place the four tiers and their
+//! strongest-first order are enumerated — and [`sweep_disk`] (wrapped by
+//! `Registry::sweep`/`resweep_async`) is the I/O envelope. Most of the
+//! tests below drive that pure half through a real `Registry` and
+//! `chain_for`; `sources_for_lists_the_tiers_strongest_first` calls
+//! `sources_for` directly to pin the order it fixes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -293,7 +297,8 @@ impl Registry {
     /// language, which is exactly the narrower set `modules_with_text`'s
     /// union is not.
     ///
-    /// Reads `self.disk` — the snapshot `Registry::sweep`/`resweep_async` already
+    /// Reads `self.disk` and `self.announced` — the in-memory snapshots
+    /// `Registry::sweep`/`resweep_async` and `insert_announced` already
     /// built — rather than a live `std::fs::read_dir` of the pack root.
     /// This replaced a route that read the two answers from two different
     /// places: `locale_json` used to call a live, disk-reading
@@ -308,10 +313,27 @@ impl Registry {
     /// `status::status_json` (task 12's own report, "F-1"/"F-2"); both now
     /// read this one method instead.
     ///
-    /// Only `core`'s module directory is consulted — never `common`'s, and
-    /// never the announced tier, which for `core` only ever contributes
-    /// `en` in the first place (`crate::i18n::core_module_layers`), already
-    /// covered by the unconditional prefix below.
+    /// **Only `core`'s own two tiers are consulted — never `common`'s.**
+    /// `languages_of("core")` walks all four sources `sources_for` knows
+    /// about, `common`'s included, so the filter below is load-bearing: it
+    /// keeps a language only when `core`'s *own* disk pack or `core`'s own
+    /// announced layer actually carries it, which is what excludes a
+    /// language that only `common` speaks. That filter also means the
+    /// announced tier is very much read here, not skipped — the earlier
+    /// wording of this doc said otherwise, which was wrong the moment
+    /// `core_languages` started going through `sources_for`/`languages_of`
+    /// like every other method in this file. The result still happens to
+    /// equal "`en` plus whatever `core`'s disk pack carries" today only
+    /// because of a fact that lives elsewhere: `crate::i18n::
+    /// core_module_layers` never inserts anything but `"en"` into `core`'s
+    /// announced layer, so that tier never has a second language to
+    /// contribute. **If that invariant ever changes** — a second language
+    /// announced for `core` itself, not just shipped on disk — this method
+    /// picks it up automatically, which is the correct behaviour for the
+    /// arbitration described above; nothing here needs editing for that to
+    /// happen, but a reader adding that second announced language should
+    /// know, from this sentence, that `core_languages`'s output will grow
+    /// with it.
     pub fn core_languages(&self) -> Vec<String> {
         let mut out = vec!["en".to_string()];
         let mut rest: Vec<String> = self
