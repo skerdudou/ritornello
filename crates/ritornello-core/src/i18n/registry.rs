@@ -318,9 +318,12 @@ impl Registry {
     }
 
     /// Builds one module's merged view: every language either its own
-    /// tiers or `common`'s define, each language's `Layer` built from up to
-    /// four sources in `chain_for`'s own priority (last write wins here:
-    /// common-announced, common-disk, own-announced, own-disk).
+    /// tiers or `common`'s define, each language's `Layer` built from every
+    /// source `sources_for` returns — own disk, own pack(s), own announced,
+    /// then `common`'s disk, `common`'s pack(s), `common`'s announced —
+    /// folded in reverse of that order (weakest first) so `HashMap::
+    /// extend`'s last-write-wins overwrite reproduces `sources_for`'s own
+    /// strongest-first priority.
     fn merge_with_common(&self, module: &str) -> ModuleLayers {
         let mut out = ModuleLayers::new(module);
         for lang in self.languages_of(module) {
@@ -928,10 +931,10 @@ mod tests {
     /// `modules_with_text_own_layer_wins_over_common_within_one_language`
     /// above does not touch — that test only ever exercises the
     /// own-vs-common axis, with both sides on the *announced* tier. A
-    /// silent reordering of the four-source array (`merge_with_common`'s
-    /// `for l in [...]`) that swapped `own_announced` and `own_disk` would
-    /// pass every other test in this file and still be caught by nothing
-    /// without this one.
+    /// silent reordering of `sources_for`'s six-source list (`merge_with_common`
+    /// folds whatever it returns) that swapped `own_announced` and `own_disk`
+    /// would pass every other test in this file and still be caught by
+    /// nothing without this one.
     #[test]
     fn modules_with_text_own_disk_beats_own_announced_within_one_language() {
         let dir = tempfile::tempdir().unwrap();
@@ -1138,6 +1141,53 @@ mod tests {
             shared.read().await.chain_for("radio", "nl", "en").get("play"),
             "play",
             "a module whose directory is gone must be gone: the snapshot is replaced, not merged"
+        );
+    }
+
+    /// The pack tier's own twin of
+    /// `resweep_async_forgets_a_pack_removed_from_disk`, above — that test
+    /// proves wholesale replacement for `disk`, this one proves it for
+    /// `packs`, and the two are not the same fact. `w.packs = packs` and
+    /// `w.packs.extend(packs)` are **not** distinguished by a shrinking
+    /// inventory the way a `HashMap` assignment vs. merge would be: `packs`
+    /// is a `Vec`, so an `extend` after removal still fails closed rather
+    /// than open in the failure this test drives — the stale
+    /// `InstalledPack` stays in the list, `pack_layers` still finds its
+    /// layer, and the removed pack's text keeps resolving exactly as if
+    /// nothing had happened. Measured: temporarily changing
+    /// `resweep_async`'s `w.packs = packs` to `w.packs.extend(packs)` left
+    /// every other test in this file green, this one included the length
+    /// alone would not have caught it — hence the assertion below reads a
+    /// resolved key through `chain_for`, never `installed_packs().len()`.
+    #[tokio::test]
+    async fn resweep_async_forgets_a_language_pack_removed_from_disk() {
+        let locales = tempfile::tempdir().unwrap();
+        let packs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(packs.path().join("ritornello-lang-fr")).unwrap();
+        std::fs::write(
+            packs.path().join("ritornello-lang-fr/pack.toml"),
+            "language = \"fr\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"radio\"]\n",
+        )
+        .unwrap();
+        std::fs::write(packs.path().join("ritornello-lang-fr/radio.toml"), "play = \"Lecture\"\n").unwrap();
+
+        let shared: crate::i18n::Shared = std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(
+            locales.path().to_path_buf(),
+            packs.path().to_path_buf(),
+        )));
+        assert_eq!(
+            shared.read().await.chain_for("radio", "fr", "en").get("play"),
+            "Lecture",
+            "the installed pack must resolve before the removal"
+        );
+
+        std::fs::remove_dir_all(packs.path().join("ritornello-lang-fr")).unwrap();
+        Registry::resweep_async(&shared).await;
+
+        assert_eq!(
+            shared.read().await.chain_for("radio", "fr", "en").get("play"),
+            "play",
+            "the removed pack's text must no longer resolve, not merely be absent from a count"
         );
     }
 

@@ -1715,7 +1715,7 @@ async fn main() -> Result<()> {
     // core_languages` — task 12) instead of a second, independent disk
     // read, so this is now its last use.
     let registry: i18n::Shared =
-        Arc::new(RwLock::new(i18n::seeded_registry(locales_root, packs_root.clone())));
+        Arc::new(RwLock::new(i18n::seeded_registry(locales_root, packs_root)));
     // The device's own persisted fallback (task 13), or "en" on a device
     // that has never set one — see `i18n::core_catalog`'s doc.
     let catalog = Arc::new(RwLock::new(i18n::core_catalog(

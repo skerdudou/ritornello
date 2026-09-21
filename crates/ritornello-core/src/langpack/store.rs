@@ -31,7 +31,7 @@ pub struct InstalledPack {
 /// drift.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "consumed by task 6 (registry) and task 8 (update worker)")
+    expect(dead_code, reason = "consumed by task 8 (update worker)")
 )]
 pub fn pack_id(language: &str) -> String {
     format!("ritornello-lang-{language}")
@@ -82,7 +82,7 @@ fn refused_id(id: &str) -> std::io::Error {
 /// presented as one that installed successfully.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "consumed by task 6 (registry) and task 8 (update worker)")
+    expect(dead_code, reason = "consumed by task 8 (update worker)")
 )]
 pub fn install(root: &Path, id: &str, contents: &PackContents) -> std::io::Result<()> {
     let dir = pack_dir(root, id).ok_or_else(|| refused_id(id))?;
@@ -107,7 +107,7 @@ pub fn install(root: &Path, id: &str, contents: &PackContents) -> std::io::Resul
 /// ordinary miss instead of an attempt at the operator's own locales root.
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "consumed by task 6 (registry) and task 8 (update worker)")
+    expect(dead_code, reason = "consumed by task 8 (update worker)")
 )]
 pub fn remove(root: &Path, id: &str) -> std::io::Result<bool> {
     let dir = pack_dir(root, id).ok_or_else(|| refused_id(id))?;
