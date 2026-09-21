@@ -8,6 +8,7 @@
 //! into a root it alone chooses; the archive never names a destination.
 
 pub mod archive;
+pub mod store;
 
 /// Where installed packs live. One directory per pack, each holding its own
 /// `pack.toml` and one `<module>.toml` per module it covers.

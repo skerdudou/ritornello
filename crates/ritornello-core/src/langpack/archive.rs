@@ -185,20 +185,39 @@ mod tests {
     /// The shape that must never be mistaken for a component archive. A pack
     /// is flat; anything carrying a tree is refused before its manifest is
     /// even consulted.
+    ///
+    /// Asserts `BadEntry` specifically, not "`BadEntry` or `UndeclaredFile`".
+    /// The looser assertion was tried first and proved nothing: `validate`
+    /// checks an entry's `.toml` suffix before it ever consults the declared
+    /// module list, and neither fixture below carries a `.toml`-suffixed
+    /// name at all, so both are refused at the suffix check -- `UndeclaredFile`
+    /// is never reachable from either one. Measured by instrumenting `read`
+    /// and printing the returned variant before writing this assertion, not
+    /// assumed: `Err(BadEntry("usr/local/lib/ritornello/plugins/ritornello-plugin-radio"))`
+    /// and `Err(BadEntry("etc/systemd/system/ritornello.service"))`.
+    ///
+    /// That the two variants are genuinely distinct, reachable outcomes --
+    /// and so this tightening is a real claim -- was checked separately with
+    /// a throwaway probe entry ending in `.toml` but declaring no matching
+    /// module (`"rogue.toml"` with `modules = ["core"]`): that one comes back
+    /// `Err(UndeclaredFile("rogue.toml"))`, which the `BadEntry`-only form
+    /// here does *not* match, and declaring `"rogue"` in the manifest then
+    /// makes the archive sound outright (`Ok`). The probe was a temporary,
+    /// uncommitted test and is not part of this suite.
     #[test]
     fn an_archive_shaped_like_a_component_is_refused() {
         let bytes = targz(&[
             ("pack.toml", sound_manifest()),
             ("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
         ]);
-        assert!(matches!(read(&bytes, ritornello_i18n::MAX_BYTES), Err(PackError::BadEntry(_) | PackError::UndeclaredFile(_))));
+        assert!(matches!(read(&bytes, ritornello_i18n::MAX_BYTES), Err(PackError::BadEntry(_))));
 
         let bytes = targz(&[
             ("pack.toml", sound_manifest()),
             ("core.toml", b"k = \"v\"\n"),
             ("etc/systemd/system/ritornello.service", b"[Unit]\n"),
         ]);
-        assert!(matches!(read(&bytes, ritornello_i18n::MAX_BYTES), Err(PackError::BadEntry(_) | PackError::UndeclaredFile(_))));
+        assert!(matches!(read(&bytes, ritornello_i18n::MAX_BYTES), Err(PackError::BadEntry(_))));
     }
 
     /// The decompression cap, measured as it is consumed rather than after
