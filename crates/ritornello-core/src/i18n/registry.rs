@@ -249,38 +249,22 @@ impl Registry {
     /// borrowed rather than cloned (`ModuleLayers::layer` returns `Option<&
     /// Layer>`; `Layer::is_empty` reads its map's length, nothing more).
     pub fn union_languages(&self) -> Vec<String> {
-        let mut set: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for (module, own) in
-            self.announced.iter().filter(|(name, layers)| name.as_str() != "common" && layers.languages().next().is_some())
-        {
-            let module = module.as_str();
-            let own_disk = self.disk.get(module);
-            let common_announced = self.announced.get("common");
-            let common_disk = self.disk.get("common");
-            let mut langs: Vec<&str> = own
-                .languages()
-                .chain(own_disk.into_iter().flat_map(|m| m.languages()))
-                .chain(common_announced.into_iter().flat_map(|m| m.languages()))
-                .chain(common_disk.into_iter().flat_map(|m| m.languages()))
-                .collect();
-            langs.sort_unstable();
-            langs.dedup();
-            for lang in langs {
-                let has_text = [
-                    own.layer(lang),
-                    own_disk.and_then(|m| m.layer(lang)),
-                    common_announced.and_then(|m| m.layer(lang)),
-                    common_disk.and_then(|m| m.layer(lang)),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|l| !l.is_empty());
-                if has_text {
+        let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut modules: Vec<&str> = self
+            .announced
+            .iter()
+            .filter(|(name, layers)| name.as_str() != "common" && layers.languages().next().is_some())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        modules.sort_unstable();
+        for module in modules {
+            for lang in self.languages_of(module) {
+                if self.sources_for(module, &lang).iter().any(|l| !l.is_empty()) {
                     set.insert(lang);
                 }
             }
         }
-        let mut out: Vec<String> = set.into_iter().map(str::to_string).collect();
+        let mut out: Vec<String> = set.into_iter().collect();
         out.sort();
         out
     }
@@ -291,31 +275,12 @@ impl Registry {
     /// common-announced, common-disk, own-announced, own-disk).
     fn merge_with_common(&self, module: &str) -> ModuleLayers {
         let mut out = ModuleLayers::new(module);
-        let mut langs: Vec<&str> = self
-            .announced
-            .get(module)
-            .into_iter()
-            .flat_map(|m| m.languages())
-            .chain(self.disk.get(module).into_iter().flat_map(|m| m.languages()))
-            .chain(self.announced.get("common").into_iter().flat_map(|m| m.languages()))
-            .chain(self.disk.get("common").into_iter().flat_map(|m| m.languages()))
-            .collect();
-        langs.sort_unstable();
-        langs.dedup();
-        for lang in langs {
+        for lang in self.languages_of(module) {
             let mut merged: HashMap<String, String> = HashMap::new();
-            for l in [
-                self.announced_layer("common", lang),
-                self.disk_layer("common", lang),
-                self.announced_layer(module, lang),
-                self.disk_layer(module, lang),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            for l in self.sources_for(module, &lang).into_iter().rev() {
                 merged.extend(l.as_map().clone());
             }
-            out.insert(lang.to_string(), Layer::from_map(merged));
+            out.insert(lang.clone(), Layer::from_map(merged));
         }
         out
     }
@@ -349,11 +314,20 @@ impl Registry {
     /// covered by the unconditional prefix below.
     pub fn core_languages(&self) -> Vec<String> {
         let mut out = vec!["en".to_string()];
-        if let Some(core) = self.disk.get("core") {
-            let mut rest: Vec<&str> = core.languages().filter(|l| *l != "en").collect();
-            rest.sort_unstable();
-            out.extend(rest.into_iter().map(str::to_string));
-        }
+        let mut rest: Vec<String> = self
+            .languages_of("core")
+            .into_iter()
+            .filter(|l| l != "en")
+            // A language `common` alone carries is not a language the core
+            // can be relied on to speak: the owner's rule reserves a
+            // fallback to what resolves everywhere.
+            .filter(|l| {
+                self.disk_layer("core", l).is_some_and(|x| !x.is_empty())
+                    || self.announced_layer("core", l).is_some_and(|x| !x.is_empty())
+            })
+            .collect();
+        rest.sort();
+        out.extend(rest);
         out
     }
 
@@ -376,18 +350,50 @@ impl Registry {
     /// **Performs no I/O.** Both tiers it reads from — `disk` and
     /// `announced` — are already in memory; see the module doc.
     pub fn chain_for(&self, module: &str, chosen: &str, fallback: &str) -> Chain {
-        stack(self.block(module, chosen), self.block(module, fallback), self.block(module, "en"))
+        let mut layers = self.sources_for(module, chosen);
+        layers.extend(self.sources_for(module, fallback));
+        layers.extend(self.sources_for(module, "en"));
+        Chain::new(layers)
     }
 
-    /// Gathers one language block from the two tiers already in memory. No
-    /// I/O and no calculation — `stack` does the latter.
-    fn block(&self, module: &str, lang: &str) -> LanguageBlock {
-        LanguageBlock {
-            own_disk: self.disk_layer(module, lang),
-            own_announced: self.announced_layer(module, lang),
-            common_disk: self.disk_layer("common", lang),
-            common_announced: self.announced_layer("common", lang),
-        }
+    /// Every layer that can answer for `module` in `lang`, **strongest
+    /// first**.
+    ///
+    /// **The one place the tiers are enumerated.** They used to be listed at
+    /// four sites — the chain, the merge, the language union and the core's
+    /// own list — each restating the same order in its own words. That is
+    /// the shape this repository has been bitten by six times: a rule
+    /// changed at three of its sites out of four, silently. Everything that
+    /// needs to know where text can come from goes through here.
+    fn sources_for(&self, module: &str, lang: &str) -> Vec<Layer> {
+        [
+            self.disk_layer(module, lang),
+            self.announced_layer(module, lang),
+            self.disk_layer("common", lang),
+            self.announced_layer("common", lang),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Every language some source defines something for `module`, sorted and
+    /// deduplicated. The companion of `sources_for`: that one answers "what
+    /// can speak", this one "in which languages".
+    fn languages_of(&self, module: &str) -> Vec<String> {
+        let mut langs: Vec<&str> = [
+            self.announced.get(module),
+            self.disk.get(module),
+            self.announced.get("common"),
+            self.disk.get("common"),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|m| m.languages())
+        .collect();
+        langs.sort_unstable();
+        langs.dedup();
+        langs.into_iter().map(str::to_string).collect()
     }
 
     fn disk_layer(&self, module: &str, lang: &str) -> Option<Layer> {
@@ -432,67 +438,30 @@ fn sweep_disk(root: &Path) -> HashMap<String, ModuleLayers> {
     out
 }
 
-/// One language's four-layer contribution to a module's chain, gathered
-/// but not yet stacked: `Registry::block` builds one of these per language
-/// (`chosen`, `fallback`, `en`) before [`stack`] orders the three.
-///
-/// Field order matches the priority the whole task fixes for a single
-/// language: disk before announced, the module's own vocabulary before
-/// `common`'s. `Default` gives the empty block every test below starts
-/// from, so each test only ever fills in the one or two layers its
-/// boundary is about.
-#[derive(Debug, Default, Clone)]
-struct LanguageBlock {
-    own_disk: Option<Layer>,
-    own_announced: Option<Layer>,
-    common_disk: Option<Layer>,
-    common_announced: Option<Layer>,
-}
-
-impl LanguageBlock {
-    fn into_layers(self) -> impl Iterator<Item = Layer> {
-        [self.own_disk, self.own_announced, self.common_disk, self.common_announced].into_iter().flatten()
-    }
-}
-
-/// Pure: stacks three already-gathered language blocks — `chosen`,
-/// `fallback`, `en`, in that order — into one `Chain`. No filesystem
-/// access and no lookup: `Registry::chain_for` is the thin wrapper that
-/// gathers the three blocks from its in-memory tiers before calling this,
-/// which is what lets the tests below build a block by hand, with
-/// `Layer::parse`, and never touch a temporary directory.
-///
-/// The order between the three blocks is the chantier's central
-/// arbitration — the chosen language wins over specificity — and is fixed
-/// here, once, rather than left to each caller to get right.
-fn stack(chosen: LanguageBlock, fallback: LanguageBlock, en: LanguageBlock) -> Chain {
-    let layers = chosen.into_layers().chain(fallback.into_layers()).chain(en.into_layers()).collect();
-    Chain::new(layers)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn layer(pairs: &[(&str, &str)]) -> Layer {
-        let source: String = pairs.iter().map(|(k, v)| format!("{k} = {v:?}\n")).collect();
-        Layer::parse(&source).unwrap()
-    }
-
-    // The four tests below each isolate ONE boundary of the order fixed by
-    // `stack`'s doc: a test that only checked the final answer without
-    // controlling every other layer would not tell us which boundary, if
-    // any, actually held.
+    // The four tests below each isolate ONE boundary of the order
+    // `sources_for` now fixes in the single place it is enumerated: a test
+    // that only checked the final answer without controlling every other
+    // layer would not tell us which boundary, if any, actually held. They
+    // used to build a `LanguageBlock` by hand and call the now-deleted
+    // `stack` directly; routing them through a real `Registry` and
+    // `chain_for` instead exercises the same boundaries end to end, through
+    // the one code path `sources_for`/`languages_of` collapsed the four
+    // former call sites into.
 
     #[test]
     fn within_one_language_disk_beats_announced() {
-        let chosen = LanguageBlock {
-            own_disk: Some(layer(&[("k", "from-disk")])),
-            own_announced: Some(layer(&[("k", "from-announced")])),
-            ..Default::default()
-        };
-        let chain = stack(chosen, LanguageBlock::default(), LanguageBlock::default());
-        assert_eq!(chain.get("k"), "from-disk");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/fr.toml"), "k = \"from-disk\"\n").unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut radio = ModuleLayers::new("radio");
+        radio.insert("fr", Layer::from_map([("k".to_string(), "from-announced".to_string())].into()));
+        registry.insert_announced("radio", radio);
+        assert_eq!(registry.chain_for("radio", "fr", "fr").get("k"), "from-disk");
     }
 
     #[test]
@@ -502,13 +471,14 @@ mod tests {
         // to the module's own value, "own beats common" holds regardless
         // of which tier either side happens to use — not just in the case
         // where own also happens to be on disk.
-        let chosen = LanguageBlock {
-            own_announced: Some(layer(&[("k", "own-announced")])),
-            common_disk: Some(layer(&[("k", "common-disk")])),
-            ..Default::default()
-        };
-        let chain = stack(chosen, LanguageBlock::default(), LanguageBlock::default());
-        assert_eq!(chain.get("k"), "own-announced");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("common")).unwrap();
+        std::fs::write(dir.path().join("common/fr.toml"), "k = \"common-disk\"\n").unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut radio = ModuleLayers::new("radio");
+        radio.insert("fr", Layer::from_map([("k".to_string(), "own-announced".to_string())].into()));
+        registry.insert_announced("radio", radio);
+        assert_eq!(registry.chain_for("radio", "fr", "fr").get("k"), "own-announced");
     }
 
     #[test]
@@ -518,29 +488,62 @@ mod tests {
         // single most specific layer that exists anywhere in this order —
         // while `chosen` only has common's announced layer, the least
         // specific of all eight. If `chosen` still wins, the language
-        // genuinely dominates specificity; if this test is wrong to pass,
-        // step 5 (inverting chosen/fallback) must make it fail.
-        let chosen =
-            LanguageBlock { common_announced: Some(layer(&[("k", "chosen-common-announced")])), ..Default::default() };
-        let fallback = LanguageBlock { own_disk: Some(layer(&[("k", "fallback-own-disk")])), ..Default::default() };
-        let chain = stack(chosen, fallback, LanguageBlock::default());
-        assert_eq!(chain.get("k"), "chosen-common-announced");
+        // genuinely dominates specificity.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/nl.toml"), "k = \"fallback-own-disk\"\n").unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut common = ModuleLayers::new("common");
+        common.insert("fr", Layer::from_map([("k".to_string(), "chosen-common-announced".to_string())].into()));
+        registry.insert_announced("common", common);
+        assert_eq!(registry.chain_for("radio", "fr", "nl").get("k"), "chosen-common-announced");
     }
 
     #[test]
     fn the_fallback_language_beats_english() {
-        let fallback = LanguageBlock { own_disk: Some(layer(&[("k", "fallback-value")])), ..Default::default() };
-        let en = LanguageBlock { own_announced: Some(layer(&[("k", "english-value")])), ..Default::default() };
-        let chain = stack(LanguageBlock::default(), fallback, en);
-        assert_eq!(chain.get("k"), "fallback-value");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::write(dir.path().join("radio/nl.toml"), "k = \"fallback-value\"\n").unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut radio = ModuleLayers::new("radio");
+        radio.insert("en", Layer::from_map([("k".to_string(), "english-value".to_string())].into()));
+        registry.insert_announced("radio", radio);
+        // "de" is the chosen language, and carries nothing at all — the
+        // pure equivalent of the deleted test's empty `chosen` block.
+        assert_eq!(registry.chain_for("radio", "de", "nl").get("k"), "fallback-value");
     }
 
     #[test]
     fn an_unknown_key_still_resolves_to_itself() {
         // The safety net `Chain::get` already carries must survive being
-        // reached through three empty blocks.
-        let chain = stack(LanguageBlock::default(), LanguageBlock::default(), LanguageBlock::default());
-        assert_eq!(chain.get("nope"), "nope");
+        // reached through a registry with nothing in it at all.
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::sweep(dir.path().to_path_buf());
+        assert_eq!(registry.chain_for("radio", "fr", "en").get("nope"), "nope");
+    }
+
+    /// The resolution order, stated once as a test rather than four times as
+    /// a comment: own-disk beats own-announced beats common-disk beats
+    /// common-announced, inside one language. This is what `sources_for`
+    /// must keep when it becomes the single site the tiers are listed at.
+    #[test]
+    fn sources_for_lists_the_tiers_strongest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
+        std::fs::create_dir_all(dir.path().join("common")).unwrap();
+        std::fs::write(dir.path().join("radio/fr.toml"), "k = \"own-disk\"\n").unwrap();
+        std::fs::write(dir.path().join("common/fr.toml"), "k = \"common-disk\"\n").unwrap();
+        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut radio = ModuleLayers::new("radio");
+        radio.insert("fr", Layer::from_map([("k".to_string(), "own-announced".to_string())].into()));
+        registry.insert_announced("radio", radio);
+        let mut common = ModuleLayers::new("common");
+        common.insert("fr", Layer::from_map([("k".to_string(), "common-announced".to_string())].into()));
+        registry.insert_announced("common", common);
+
+        let layers = registry.sources_for("radio", "fr");
+        let got: Vec<&str> = layers.iter().filter_map(|l| l.get("k")).collect();
+        assert_eq!(got, vec!["own-disk", "own-announced", "common-disk", "common-announced"]);
     }
 
     // --- Registry itself: proving the sweep and `chain_for` are actually
