@@ -19,12 +19,12 @@ pub const EN: &str = include_str!("../locales/en.toml");
 /// each reader keep its own copy.
 pub type Shared = Arc<tokio::sync::RwLock<Registry>>;
 
-/// Sweeps `root` once and seeds the core's own module and `common`'s — the
-/// construction used exactly once, at startup (`main.rs`). Plugin modules
-/// are added afterwards, one `insert_announced` per announcement, as they
-/// arrive.
-pub fn seeded_registry(root: std::path::PathBuf) -> Registry {
-    let mut registry = Registry::sweep(root);
+/// Sweeps `root` and `packs_root` once and seeds the core's own module and
+/// `common`'s — the construction used exactly once, at startup (`main.rs`).
+/// Plugin modules are added afterwards, one `insert_announced` per
+/// announcement, as they arrive.
+pub fn seeded_registry(root: std::path::PathBuf, packs_root: std::path::PathBuf) -> Registry {
+    let mut registry = Registry::sweep(root, packs_root);
     seed_core_and_common(&mut registry);
     registry
 }
@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn core_catalog_resolves_the_core_s_own_embedded_english() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = seeded_registry(dir.path().to_path_buf());
+        let registry = seeded_registry(dir.path().to_path_buf(), dir.path().join("packs"));
         let cat = core_catalog(&registry, "en", "en");
         // The embedded pack is non-empty (core/settings.rs's own test pins
         // this fact for `EN` directly); this checks the same fact survives
@@ -113,7 +113,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(dir.path().join("core/fr.toml"), "standby = \"VEILLE\"\n").unwrap();
-        let registry = seeded_registry(dir.path().to_path_buf());
+        let registry = seeded_registry(dir.path().to_path_buf(), dir.path().join("packs"));
         let cat = core_catalog(&registry, "fr", "en");
         assert_eq!(cat.get("standby"), "VEILLE");
     }
@@ -134,7 +134,7 @@ mod tests {
         // neither the chosen one ("fr") nor English (embedded or disk) do.
         std::fs::write(dir.path().join("core/de.toml"), "only_de = \"nur Deutsch\"\n").unwrap();
 
-        let registry = seeded_registry(dir.path().to_path_buf());
+        let registry = seeded_registry(dir.path().to_path_buf(), dir.path().join("packs"));
         let via_registry = registry.chain_for("core", "fr", "de");
         assert_eq!(
             via_registry.get("only_de"),

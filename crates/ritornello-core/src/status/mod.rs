@@ -572,6 +572,7 @@ pub(crate) mod tests_support {
             // "core" through `Registry::modules_with_text` at all.
             registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
                 std::path::PathBuf::from("/nonexistent"),
+                std::path::PathBuf::from("/nonexistent-packs"),
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
@@ -624,6 +625,7 @@ pub(crate) mod tests_support {
             // "core" through `Registry::modules_with_text` at all.
             registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
                 std::path::PathBuf::from("/nonexistent"),
+                std::path::PathBuf::from("/nonexistent-packs"),
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
@@ -678,6 +680,7 @@ pub(crate) mod tests_support {
             // "core" through `Registry::modules_with_text` at all.
             registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
                 std::path::PathBuf::from("/nonexistent"),
+                std::path::PathBuf::from("/nonexistent-packs"),
             ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
@@ -742,7 +745,10 @@ pub(crate) mod tests_support {
             ))),
             // Same reasoning as the other rigs above: seed core/common so
             // `Registry::modules_with_text` finds "core".
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(dir.path().to_path_buf()))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
+                dir.path().to_path_buf(),
+                dir.path().join("packs"),
+            ))),
             locale_current: Arc::new(tokio::sync::RwLock::new(Some("fr".to_string()))),
             locale_tx,
             fallback_current: Arc::new(tokio::sync::RwLock::new(None)),

@@ -7,8 +7,13 @@ use std::sync::Mutex;
 /// Every rig below that used to build only a `Chain` for `Wiring.catalog`
 /// now needs this too, for `Wiring.registry` — kept in one place so a
 /// change to how a test registry is built happens once.
+///
+/// The packs root is `root/packs`, which none of these rigs ever create:
+/// `crate::langpack::store::inventory` treats an absent root as an empty
+/// inventory by design, so this is a plain "no packs installed" registry,
+/// same as it was before this chantier.
 pub(super) fn test_registry(root: &std::path::Path) -> crate::i18n::Shared {
-    Arc::new(RwLock::new(crate::i18n::Registry::sweep(root.to_path_buf())))
+    Arc::new(RwLock::new(crate::i18n::Registry::sweep(root.to_path_buf(), root.join("packs"))))
 }
 
 #[derive(Default)]

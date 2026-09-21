@@ -1,32 +1,45 @@
 //! The core's registry of translation layers.
 //!
-//! One `Registry` holds, per module (the core itself, or one plugin), two
-//! kinds of layers: the ones a module **announced** — a plugin's embedded
-//! catalogue (`Announcement.catalog`), or the core's own embedded text,
-//! folded in through the same path — and the ones found **on disk**, under
-//! the packs root. `chain_for` stacks both kinds, for up to three languages,
-//! into the one `Chain` the caller resolves keys against.
+//! One `Registry` holds, per module (the core itself, or one plugin), three
+//! kinds of layers, strongest first: what a person wrote **on disk**, by
+//! hand, under the operator's own locales root; what an **installed
+//! language pack** carries, under a second, separate root; and what a
+//! module **announced** — a plugin's embedded catalogue
+//! (`Announcement.catalog`), or the core's own embedded text, folded in
+//! through the same path. `chain_for` stacks all three kinds, for up to
+//! three languages, into the one `Chain` the caller resolves keys against.
 //!
-//! **The disk tier is swept once, not read per call.** `Registry::sweep`
-//! walks the pack root — one subdirectory per module, one `<lang>.toml` file
-//! per language — and keeps what it finds in memory; `resweep_async`
-//! repeats the walk and replaces that snapshot. `chain_for` itself performs
-//! **no I/O at all**: every module it might be asked about has already been
-//! read once, at sweep time. This matters three times over — an HTTP route
-//! must never block on disk, only a real sweep (not a guessed path) can ever
-//! tell a later reader which languages exist at all, and the refresh gesture
-//! this crate already documents ("an operator can edit a pack, and the
-//! restart is what refreshes it") stays true instead of quietly becoming
-//! "on every request".
+//! **The disk tier is never written by an install.** Before this chantier,
+//! a single root served both jobs — an operator's hand-written file and an
+//! installed pack shared one directory, so an update overwrote a
+//! hand-written translation with whatever the component's archive carried.
+//! The pack tier now lives under its own root (`Registry.packs_root`), one
+//! directory per pack, and only that root is ever touched by
+//! `crate::langpack::store::install`/`remove` — the operator's locales root
+//! is written by nobody but the operator.
+//!
+//! **Both roots are swept once, not read per call.** `Registry::sweep`
+//! walks the locales root — one subdirectory per module, one `<lang>.toml`
+//! file per language — and separately inventories the packs root
+//! (`crate::langpack::store::inventory`), keeping what it finds in memory;
+//! `resweep_async` repeats both walks and replaces that snapshot. `chain_for`
+//! itself performs **no I/O at all**: every module it might be asked about
+//! has already been read once, at sweep time. This matters three times over
+//! — an HTTP route must never block on disk, only a real sweep (not a
+//! guessed path) can ever tell a later reader which languages exist at all,
+//! and the refresh gesture this crate already documents ("an operator can
+//! edit a pack, and the restart is what refreshes it") stays true instead
+//! of quietly becoming "on every request".
 //!
 //! The disk read is separated from the stacking calculation on purpose, the
 //! same split `status::locales::list_locales` already draws against
 //! `parse_available_locales` and `audio_output::list_devices` against
 //! `parse_device_list`: [`Registry::sources_for`] and [`Registry::languages_of`]
-//! are the pure calculation — the one place the four tiers and their
-//! strongest-first order are enumerated — and [`sweep_disk`] (wrapped by
-//! `Registry::sweep`/`resweep_async`) is the I/O envelope. Most of the
-//! tests below drive that pure half through a real `Registry` and
+//! are the pure calculation — the one place the six tiers (own and
+//! `common`'s, times disk/pack/announced) and their strongest-first order
+//! are enumerated — and [`sweep_disk`]/`crate::langpack::store::inventory`
+//! (wrapped by `Registry::sweep`/`resweep_async`) are the I/O envelope. Most
+//! of the tests below drive that pure half through a real `Registry` and
 //! `chain_for`; `sources_for_lists_the_tiers_strongest_first` calls
 //! `sources_for` directly to pin the order it fixes.
 
@@ -38,30 +51,51 @@ use ritornello_i18n::{Chain, Layer, ModuleLayers};
 /// Registry of every module's translation layers.
 ///
 /// `disk` is populated by [`Registry::sweep`]/[`Registry::resweep_async`] —
-/// a walk of the pack root, kept in memory until the next sweep. `announced` is
-/// populated by `insert_announced` — called once per plugin announcement,
-/// and once for the core's own embedded text and for `common`'s, so that
-/// `chain_for` treats every module uniformly rather than special-casing the
-/// core. Neither tier is read from the filesystem by `chain_for` itself.
+/// a walk of the pack root, kept in memory until the next sweep. `packs` is
+/// populated the same way, from a second, separate root: every installed
+/// language pack, strongest first among packs of the same language (a fact
+/// livraison 1 never exercises, since it installs at most one pack per
+/// language, all of them ours). `announced` is populated by
+/// `insert_announced` — called once per plugin announcement, and once for
+/// the core's own embedded text and for `common`'s, so that `chain_for`
+/// treats every module uniformly rather than special-casing the core.
+/// Neither `disk` nor `packs` is read from the filesystem by `chain_for`
+/// itself.
 #[derive(Debug, Default)]
 pub struct Registry {
     root: PathBuf,
+    packs_root: PathBuf,
+    /// What a person wrote by hand under the locales root. **Never written
+    /// by an install**, unlike before this chantier, where an update
+    /// overwrote it with whatever the component's archive carried.
     disk: HashMap<String, ModuleLayers>,
+    /// The installed packs, strongest first. Livraison 1 puts at most one
+    /// pack per language here, all of them ours; livraison 2 is the single
+    /// place that will order several.
+    packs: Vec<crate::langpack::store::InstalledPack>,
     announced: HashMap<String, ModuleLayers>,
 }
 
 impl Registry {
-    /// Sweeps `root` once and returns a registry holding what it found, with
-    /// no announced module yet.
-    pub fn sweep(root: PathBuf) -> Registry {
+    /// Sweeps both roots once and returns a registry holding what it found,
+    /// with no announced module yet.
+    pub fn sweep(root: PathBuf, packs_root: PathBuf) -> Registry {
         let disk = sweep_disk(&root);
-        Registry { root, disk, announced: HashMap::new() }
+        let packs = crate::langpack::store::inventory(&packs_root);
+        Registry { root, packs_root, disk, packs, announced: HashMap::new() }
     }
 
-    /// Repeats the walk of the pack root and replaces the disk tier —
+    /// Every installed language pack, in the order `sources_for` consults
+    /// them.
+    #[expect(dead_code, reason = "consumed by the components page and the update worker, later tasks")]
+    pub fn installed_packs(&self) -> &[crate::langpack::store::InstalledPack] {
+        &self.packs
+    }
+
+    /// Repeats the walk of both roots and replaces the disk and pack tiers —
     /// wholesale, not merged, so a pack removed since the last sweep is
     /// actually forgotten rather than lingering. The announced tier is
-    /// untouched: it does not come from this root, and a plugin's
+    /// untouched: it does not come from either root, and a plugin's
     /// announcement is not re-read just because a locale changed. What
     /// `Core::set_locale` and `Core::set_fallback` call.
     ///
@@ -91,26 +125,36 @@ impl Registry {
     /// of task 5; it went unfixed because task 5 is what first put a second,
     /// HTTP-reachable reader on the same write lock this blocks.
     pub async fn resweep_async(shared: &crate::i18n::Shared) {
-        if let Some(disk) = Self::walk(shared).await {
-            shared.write().await.disk = disk;
+        if let Some((disk, packs)) = Self::walk(shared).await {
+            let mut w = shared.write().await;
+            w.disk = disk;
+            w.packs = packs;
         }
     }
 
-    /// The walk half of [`Registry::resweep_async`]: reads `root` (the only
-    /// touch of `shared`, and only ever a read — it coexists with any
-    /// number of concurrent readers, never with a writer holding exclusive
-    /// access) and then does the directory walk and TOML parse
-    /// (`sweep_disk`) in `tokio::task::spawn_blocking`, off the async
-    /// runtime's worker threads. Returns `None` if the blocking task
-    /// panicked (`JoinError`) rather than returning a fresh, empty map: the
-    /// caller then skips the swap and leaves the previous `disk` snapshot as
-    /// is — the same "leave what was there" posture `sweep_disk` already
-    /// takes for a root that cannot be read at all — rather than losing
-    /// every plugin's disk-sourced text over one bad sweep.
-    async fn walk(shared: &crate::i18n::Shared) -> Option<HashMap<String, ModuleLayers>> {
-        let root = shared.read().await.root.clone();
-        match tokio::task::spawn_blocking(move || sweep_disk(&root)).await {
-            Ok(disk) => Some(disk),
+    /// The walk half of [`Registry::resweep_async`]: reads `root` and
+    /// `packs_root` (the only touch of `shared`, and only ever a read — it
+    /// coexists with any number of concurrent readers, never with a writer
+    /// holding exclusive access) and then does the directory walk and TOML
+    /// parse (`sweep_disk`, `crate::langpack::store::inventory`) in
+    /// `tokio::task::spawn_blocking`, off the async runtime's worker
+    /// threads. Returns `None` if the blocking task panicked (`JoinError`)
+    /// rather than returning a fresh, empty pair: the caller then skips the
+    /// swap and leaves the previous `disk`/`packs` snapshot as is — the same
+    /// "leave what was there" posture `sweep_disk` and `inventory` already
+    /// take for a root that cannot be read at all — rather than losing every
+    /// plugin's disk-sourced text over one bad sweep.
+    async fn walk(
+        shared: &crate::i18n::Shared,
+    ) -> Option<(HashMap<String, ModuleLayers>, Vec<crate::langpack::store::InstalledPack>)> {
+        let (root, packs_root) = {
+            let r = shared.read().await;
+            (r.root.clone(), r.packs_root.clone())
+        };
+        match tokio::task::spawn_blocking(move || (sweep_disk(&root), crate::langpack::store::inventory(&packs_root)))
+            .await
+        {
+            Ok(both) => Some(both),
             Err(e) => {
                 tracing::warn!("registry resweep task failed: {e}");
                 None
@@ -290,18 +334,18 @@ impl Registry {
     }
 
     /// The core's own installed languages — `en` (always) plus every
-    /// language `core`'s **already-swept** disk tier carries — for the
-    /// fallback candidate list (`status::locales::LocaleResponse::
-    /// fallback_candidates`): the owner's arbitration reserves a fallback
-    /// to what is guaranteed to resolve everywhere, never a plugin-only
-    /// language, which is exactly the narrower set `modules_with_text`'s
-    /// union is not.
+    /// language `core`'s **already-swept** disk tier or an installed pack
+    /// carries — for the fallback candidate list (`status::locales::
+    /// LocaleResponse::fallback_candidates`): the owner's arbitration
+    /// reserves a fallback to what is guaranteed to resolve everywhere,
+    /// never a plugin-only language, which is exactly the narrower set
+    /// `modules_with_text`'s union is not.
     ///
-    /// Reads `self.disk` and `self.announced` — the in-memory snapshots
-    /// `Registry::sweep`/`resweep_async` and `insert_announced` already
-    /// built — rather than a live `std::fs::read_dir` of the pack root.
-    /// This replaced a route that read the two answers from two different
-    /// places: `locale_json` used to call a live, disk-reading
+    /// Reads `self.disk`, `self.packs` and `self.announced` — the in-memory
+    /// snapshots `Registry::sweep`/`resweep_async` and `insert_announced`
+    /// already built — rather than a live `std::fs::read_dir` of either
+    /// root. This replaced a route that read the two answers from two
+    /// different places: `locale_json` used to call a live, disk-reading
     /// `list_locales` for `fallback_candidates` in the very same response
     /// that built `locales`/`completeness` from this registry's swept
     /// snapshot. The live read was not actually fresher in any way that
@@ -313,27 +357,25 @@ impl Registry {
     /// `status::status_json` (task 12's own report, "F-1"/"F-2"); both now
     /// read this one method instead.
     ///
-    /// **Only `core`'s own two tiers are consulted — never `common`'s.**
-    /// `languages_of("core")` walks all four sources `sources_for` knows
-    /// about, `common`'s included, so the filter below is load-bearing: it
-    /// keeps a language only when `core`'s *own* disk pack or `core`'s own
-    /// announced layer actually carries it, which is what excludes a
-    /// language that only `common` speaks. That filter also means the
-    /// announced tier is very much read here, not skipped — the earlier
-    /// wording of this doc said otherwise, which was wrong the moment
-    /// `core_languages` started going through `sources_for`/`languages_of`
-    /// like every other method in this file. The result still happens to
-    /// equal "`en` plus whatever `core`'s disk pack carries" today only
-    /// because of a fact that lives elsewhere: `crate::i18n::
-    /// core_module_layers` never inserts anything but `"en"` into `core`'s
-    /// announced layer, so that tier never has a second language to
-    /// contribute. **If that invariant ever changes** — a second language
-    /// announced for `core` itself, not just shipped on disk — this method
-    /// picks it up automatically, which is the correct behaviour for the
-    /// arbitration described above; nothing here needs editing for that to
-    /// happen, but a reader adding that second announced language should
-    /// know, from this sentence, that `core_languages`'s output will grow
-    /// with it.
+    /// **Only `core`'s own three tiers are consulted — never `common`'s.**
+    /// `languages_of("core")` walks every source `sources_for` knows about,
+    /// `common`'s included, so the filter below is load-bearing: it keeps a
+    /// language only when `core`'s *own* disk pack, `core`'s own installed
+    /// language pack, or `core`'s own announced layer actually carries it,
+    /// which is what excludes a language that only `common` speaks. **The
+    /// pack check is the regression this chantier's spec named in advance:**
+    /// the core's own French ships as an installed pack
+    /// (`ritornello-lang-fr`) rather than as a hand-written disk file now,
+    /// so a filter that still only consulted `disk_layer`/`announced_layer`
+    /// would silently empty this control the moment that pack replaced the
+    /// old shipped `core/fr.toml` — no error, no failing test unless one
+    /// exists for it (see
+    /// `a_core_language_carried_by_a_pack_is_offered_as_a_fallback`, below).
+    /// The result no longer equals "`en` plus whatever `core`'s disk pack
+    /// carries" alone, by design: `crate::i18n::core_module_layers` never
+    /// inserts anything but `"en"` into `core`'s announced layer, so that
+    /// tier never has a second language to contribute, but the pack tier
+    /// now routinely does.
     pub fn core_languages(&self) -> Vec<String> {
         let mut out = vec!["en".to_string()];
         let mut rest: Vec<String> = self
@@ -343,9 +385,17 @@ impl Registry {
             // A language `common` alone carries is not a language the core
             // can be relied on to speak: the owner's rule reserves a
             // fallback to what resolves everywhere.
+            //
+            // The pack check matters as of this chantier: the core's own
+            // French now ships as a pack (`ritornello-lang-fr`), not as a
+            // disk file under the locales root, so a filter that only
+            // consulted `disk_layer`/`announced_layer` would silently empty
+            // this control the day that pack replaced the old shipped
+            // `core/fr.toml` — the regression the spec named in advance.
             .filter(|l| {
                 self.disk_layer("core", l).is_some_and(|x| !x.is_empty())
                     || self.announced_layer("core", l).is_some_and(|x| !x.is_empty())
+                    || self.pack_layers("core", l).any(|x| !x.is_empty())
             })
             .collect();
         rest.sort();
@@ -379,7 +429,9 @@ impl Registry {
     }
 
     /// Every layer that can answer for `module` in `lang`, **strongest
-    /// first**.
+    /// first**: the operator's own file, then an installed pack, then the
+    /// announced (embedded) text — each of those for `module` itself before
+    /// `common`'s.
     ///
     /// **The one place the tiers are enumerated.** They used to be listed at
     /// four sites — the chain, the merge, the language union and the core's
@@ -388,22 +440,21 @@ impl Registry {
     /// changed at three of its sites out of four, silently. Everything that
     /// needs to know where text can come from goes through here.
     fn sources_for(&self, module: &str, lang: &str) -> Vec<Layer> {
-        [
-            self.disk_layer(module, lang),
-            self.announced_layer(module, lang),
-            self.disk_layer("common", lang),
-            self.announced_layer("common", lang),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        let mut out = Vec::new();
+        out.extend(self.disk_layer(module, lang));
+        out.extend(self.pack_layers(module, lang));
+        out.extend(self.announced_layer(module, lang));
+        out.extend(self.disk_layer("common", lang));
+        out.extend(self.pack_layers("common", lang));
+        out.extend(self.announced_layer("common", lang));
+        out
     }
 
     /// Every language some source defines something for `module`, sorted and
     /// deduplicated. The companion of `sources_for`: that one answers "what
     /// can speak", this one "in which languages".
     fn languages_of(&self, module: &str) -> Vec<String> {
-        let mut langs: Vec<&str> = [
+        let mut langs: Vec<String> = [
             self.announced.get(module),
             self.disk.get(module),
             self.announced.get("common"),
@@ -412,10 +463,31 @@ impl Registry {
         .into_iter()
         .flatten()
         .flat_map(|m| m.languages())
+        .map(str::to_string)
         .collect();
-        langs.sort_unstable();
+        for p in &self.packs {
+            if p.layers.iter().any(|(m, _)| m == module || m == "common") {
+                langs.push(p.manifest.language.clone());
+            }
+        }
+        langs.sort();
         langs.dedup();
-        langs.into_iter().map(str::to_string).collect()
+        langs
+    }
+
+    /// One pack's layer for a module, if that pack carries both this
+    /// language and this module. Several packs can each answer, so this
+    /// returns an iterator rather than the single `Option<Layer>` the other
+    /// two source accessors do.
+    fn pack_layers(&self, module: &str, lang: &str) -> impl Iterator<Item = Layer> + '_ {
+        let module = module.to_string();
+        let lang = lang.to_string();
+        self.packs.iter().filter_map(move |p| {
+            if p.manifest.language != lang {
+                return None;
+            }
+            p.layers.iter().find(|(m, _)| *m == module).map(|(_, l)| l.clone())
+        })
     }
 
     fn disk_layer(&self, module: &str, lang: &str) -> Option<Layer> {
@@ -479,7 +551,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/fr.toml"), "k = \"from-disk\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         let mut radio = ModuleLayers::new("radio");
         radio.insert("fr", Layer::from_map([("k".to_string(), "from-announced".to_string())].into()));
         registry.insert_announced("radio", radio);
@@ -496,7 +568,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("common")).unwrap();
         std::fs::write(dir.path().join("common/fr.toml"), "k = \"common-disk\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         let mut radio = ModuleLayers::new("radio");
         radio.insert("fr", Layer::from_map([("k".to_string(), "own-announced".to_string())].into()));
         registry.insert_announced("radio", radio);
@@ -514,7 +586,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/nl.toml"), "k = \"fallback-own-disk\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         let mut common = ModuleLayers::new("common");
         common.insert("fr", Layer::from_map([("k".to_string(), "chosen-common-announced".to_string())].into()));
         registry.insert_announced("common", common);
@@ -526,7 +598,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/nl.toml"), "k = \"fallback-value\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         let mut radio = ModuleLayers::new("radio");
         radio.insert("en", Layer::from_map([("k".to_string(), "english-value".to_string())].into()));
         registry.insert_announced("radio", radio);
@@ -540,7 +612,7 @@ mod tests {
         // The safety net `Chain::get` already carries must survive being
         // reached through a registry with nothing in it at all.
         let dir = tempfile::tempdir().unwrap();
-        let registry = Registry::sweep(dir.path().to_path_buf());
+        let registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         assert_eq!(registry.chain_for("radio", "fr", "en").get("nope"), "nope");
     }
 
@@ -555,7 +627,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("common")).unwrap();
         std::fs::write(dir.path().join("radio/fr.toml"), "k = \"own-disk\"\n").unwrap();
         std::fs::write(dir.path().join("common/fr.toml"), "k = \"common-disk\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         let mut radio = ModuleLayers::new("radio");
         radio.insert("fr", Layer::from_map([("k".to_string(), "own-announced".to_string())].into()));
         registry.insert_announced("radio", radio);
@@ -568,6 +640,152 @@ mod tests {
         assert_eq!(got, vec!["own-disk", "own-announced", "common-disk", "common-announced"]);
     }
 
+    // --- The pack tier (task 6): a second, separate root, ranked between
+    // the operator's own disk layer and the announced (embedded) one. ---
+
+    /// The new order, end to end: the operator's own file beats an installed
+    /// pack, which beats the binary's embedded text.
+    #[test]
+    fn the_operator_layer_beats_a_pack_which_beats_the_announced_text() {
+        let locales = tempfile::tempdir().unwrap();
+        let packs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(locales.path().join("radio")).unwrap();
+        std::fs::create_dir_all(packs.path().join("ritornello-lang-fr")).unwrap();
+        std::fs::write(
+            packs.path().join("ritornello-lang-fr/pack.toml"),
+            "language = \"fr\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"radio\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            packs.path().join("ritornello-lang-fr/radio.toml"),
+            "a = \"pack\"\nb = \"pack\"\nd = \"pack-d\"\n",
+        )
+        .unwrap();
+        std::fs::write(locales.path().join("radio/fr.toml"), "a = \"operator\"\n").unwrap();
+
+        let mut registry = Registry::sweep(locales.path().to_path_buf(), packs.path().to_path_buf());
+        let mut radio = ModuleLayers::new("radio");
+        radio.insert(
+            "fr",
+            Layer::from_map(
+                [
+                    ("a".to_string(), "announced".to_string()),
+                    ("c".to_string(), "announced".to_string()),
+                    // Also defined by the pack (above, "pack-d"), and by
+                    // nothing else: the key that discriminates pack-vs-
+                    // announced order on its own, without the operator's
+                    // disk layer masking the outcome the way "a" does. A
+                    // mutation that swapped `pack_layers` and
+                    // `announced_layer` in `sources_for` would leave "a"
+                    // (still won by disk, first regardless of that order),
+                    // "b" (only the pack defines it) and "c" (only announced
+                    // defines it) all unchanged, and slip through — this key
+                    // is what makes that swap observable.
+                    ("d".to_string(), "announced-d".to_string()),
+                ]
+                .into(),
+            ),
+        );
+        registry.insert_announced("radio", radio);
+
+        let chain = registry.chain_for("radio", "fr", "en");
+        assert_eq!(chain.get("a"), "operator", "the operator's own file wins");
+        assert_eq!(chain.get("b"), "pack", "the pack fills what the operator did not write");
+        assert_eq!(chain.get("c"), "announced", "the embedded text is still the floor");
+        assert_eq!(chain.get("d"), "pack-d", "the pack also beats the announced text on a key disk never touches");
+    }
+
+    /// The partial-override property: a pack that redefines three keys must
+    /// not make the rest of its module fall back to English. Stated here
+    /// because it is what makes layers stack rather than replace, and
+    /// livraison 2's third-party packs depend on it entirely.
+    #[test]
+    fn a_pack_that_defines_one_key_does_not_hide_the_others() {
+        let locales = tempfile::tempdir().unwrap();
+        let packs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(locales.path().join("radio")).unwrap();
+        std::fs::write(locales.path().join("radio/fr.toml"), "a = \"operator-a\"\n").unwrap();
+        std::fs::create_dir_all(packs.path().join("ritornello-lang-fr")).unwrap();
+        std::fs::write(
+            packs.path().join("ritornello-lang-fr/pack.toml"),
+            "language = \"fr\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"radio\"]\n",
+        )
+        .unwrap();
+        std::fs::write(packs.path().join("ritornello-lang-fr/radio.toml"), "a = \"pack-a\"\nb = \"pack-b\"\n").unwrap();
+        let registry = Registry::sweep(locales.path().to_path_buf(), packs.path().to_path_buf());
+        let chain = registry.chain_for("radio", "fr", "en");
+        assert_eq!(chain.get("a"), "operator-a");
+        assert_eq!(chain.get("b"), "pack-b", "the pack still answers for what the operator left alone");
+    }
+
+    /// **The regression the spec named in advance.** The fallback control
+    /// offers the core's languages, and after this chantier the core's
+    /// French comes from a pack. A core_languages that still read only the
+    /// operator root would empty that control in silence.
+    #[test]
+    fn a_core_language_carried_by_a_pack_is_offered_as_a_fallback() {
+        let locales = tempfile::tempdir().unwrap();
+        let packs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(packs.path().join("ritornello-lang-fr")).unwrap();
+        std::fs::write(
+            packs.path().join("ritornello-lang-fr/pack.toml"),
+            "language = \"fr\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"core\"]\n",
+        )
+        .unwrap();
+        std::fs::write(packs.path().join("ritornello-lang-fr/core.toml"), "k = \"v\"\n").unwrap();
+        let registry = Registry::sweep(locales.path().to_path_buf(), packs.path().to_path_buf());
+        assert_eq!(registry.core_languages(), vec!["en".to_string(), "fr".to_string()]);
+    }
+
+    /// A pack for a plugin the device does not have stays invisible: it
+    /// creates no ghost language and no hole in any count, and it is
+    /// already in place the day that plugin is installed. This is what
+    /// makes "a pack carries every module" free rather than costly.
+    #[test]
+    fn a_pack_for_an_absent_module_creates_no_language_and_no_hole() {
+        let locales = tempfile::tempdir().unwrap();
+        let packs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(packs.path().join("ritornello-lang-de")).unwrap();
+        std::fs::write(
+            packs.path().join("ritornello-lang-de/pack.toml"),
+            "language = \"de\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"mpd\"]\n",
+        )
+        .unwrap();
+        std::fs::write(packs.path().join("ritornello-lang-de/mpd.toml"), "k = \"v\"\n").unwrap();
+        let mut registry = Registry::sweep(locales.path().to_path_buf(), packs.path().to_path_buf());
+        let mut core = ModuleLayers::new("core");
+        core.insert("en", Layer::from_map([("k".to_string(), "v".to_string())].into()));
+        registry.insert_announced("core", core);
+        assert_eq!(registry.union_languages(), vec!["en".to_string()], "no ghost German");
+    }
+
+    /// [MUTATION] The language filter in `pack_layers`, isolated from the
+    /// module filter that sits beside it. The test above
+    /// (`a_pack_for_an_absent_module_creates_no_language_and_no_hole`) does
+    /// not discriminate against `pack_layers` dropping its
+    /// `p.manifest.language != lang` guard: its German pack never carries
+    /// the "core" module at all, so `p.layers.iter().find(|(m, _)| *m ==
+    /// module)` already returns `None` before the language check would ever
+    /// run — measured by actually deleting that guard and re-running this
+    /// file's suite, which stayed green. Here the German pack *does* carry
+    /// "core", so only the language guard stands between an English
+    /// resolution and a German pack answering it.
+    #[test]
+    fn a_pack_never_answers_for_a_language_it_does_not_carry() {
+        let locales = tempfile::tempdir().unwrap();
+        let packs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(packs.path().join("ritornello-lang-de")).unwrap();
+        std::fs::write(
+            packs.path().join("ritornello-lang-de/pack.toml"),
+            "language = \"de\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"core\"]\n",
+        )
+        .unwrap();
+        std::fs::write(packs.path().join("ritornello-lang-de/core.toml"), "k = \"v\"\n").unwrap();
+        let registry = Registry::sweep(locales.path().to_path_buf(), packs.path().to_path_buf());
+        let chain = registry.chain_for("core", "en", "en");
+        assert_eq!(chain.get("k"), "k", "a pack declaring German must never answer an English request");
+    }
+
     // --- Registry itself: proving the sweep and `chain_for` are actually
     // wired together, rather than testing the ordering a second time. ---
 
@@ -576,7 +794,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/nl.toml"), "play = \"Spelen\"\n").unwrap();
-        let registry = Registry::sweep(dir.path().to_path_buf());
+        let registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         let chain = registry.chain_for("radio", "nl", "en");
         assert_eq!(chain.get("play"), "Spelen");
     }
@@ -584,7 +802,7 @@ mod tests {
     #[test]
     fn chain_for_uses_a_layer_inserted_via_insert_announced() {
         let dir = tempfile::tempdir().unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         let mut m = ModuleLayers::new("radio");
         m.insert("en", Layer::from_map([("play".to_string(), "Play".to_string())].into()));
         registry.insert_announced("radio", m);
@@ -597,7 +815,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/en.toml"), "play = \"disk-play\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         let mut m = ModuleLayers::new("radio");
         m.insert("en", Layer::from_map([("stop".to_string(), "announced-stop".to_string())].into()));
         registry.insert_announced("radio", m);
@@ -615,7 +833,7 @@ mod tests {
         // `ModuleLayers` — the two facts are not interchangeable even
         // though both currently resolve zero keys through `chain_for`.
         let dir = tempfile::tempdir().unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         assert_eq!(registry.announced_module("console"), None, "never announced at all");
 
         registry.insert_announced("console", ModuleLayers::new("console"));
@@ -638,7 +856,7 @@ mod tests {
     #[test]
     fn modules_with_text_excludes_a_module_never_announced() {
         let dir = tempfile::tempdir().unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")])]));
         // "console" is never mentioned at all: `announced_module("console")`
         // would read `None`, exactly like an old binary.
@@ -652,7 +870,7 @@ mod tests {
         // and announced, but confided nothing (the four legitimately
         // textless plugins), must not inflate the denominator either.
         let dir = tempfile::tempdir().unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")])]));
         registry.insert_announced("console", ModuleLayers::new("console"));
         let names: Vec<String> = registry.modules_with_text().into_iter().map(|m| m.name().to_string()).collect();
@@ -662,7 +880,7 @@ mod tests {
     #[test]
     fn modules_with_text_never_lists_common_as_a_module_of_its_own() {
         let dir = tempfile::tempdir().unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")])]));
         registry.insert_announced("common", module_layers("common", &[("en", &[("loading", "Loading")])]));
         let names: Vec<String> = registry.modules_with_text().into_iter().map(|m| m.name().to_string()).collect();
@@ -677,7 +895,7 @@ mod tests {
         // `merge_with_common`'s own doc for why this is not double
         // counting.
         let dir = tempfile::tempdir().unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("loading", "Loading")])]));
         registry.insert_announced("common", module_layers("common", &[("en", &[("loading", "Loading")]), ("fr", &[("loading", "Chargement")])]));
         let radio = registry.modules_with_text().into_iter().find(|m| m.name() == "radio").unwrap();
@@ -689,7 +907,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/de.toml"), "play = \"Spielen\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")])]));
         let radio = registry.modules_with_text().into_iter().find(|m| m.name() == "radio").unwrap();
         assert_eq!(radio.layer("de").and_then(|l| l.get("play")), Some("Spielen"));
@@ -698,7 +916,7 @@ mod tests {
     #[test]
     fn modules_with_text_own_layer_wins_over_common_within_one_language() {
         let dir = tempfile::tempdir().unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "own-play")])]));
         registry.insert_announced("common", module_layers("common", &[("en", &[("play", "common-play")])]));
         let radio = registry.modules_with_text().into_iter().find(|m| m.name() == "radio").unwrap();
@@ -719,7 +937,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/en.toml"), "play = \"disk-play\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "announced-play")])]));
         let radio = registry.modules_with_text().into_iter().find(|m| m.name() == "radio").unwrap();
         assert_eq!(radio.layer("en").and_then(|l| l.get("play")), Some("disk-play"));
@@ -728,7 +946,7 @@ mod tests {
     #[test]
     fn modules_with_text_is_sorted_by_module_name() {
         let dir = tempfile::tempdir().unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("k", "v")])]));
         registry.insert_announced("cd", module_layers("cd", &[("en", &[("k", "v")])]));
         registry.insert_announced("core", module_layers("core", &[("en", &[("k", "v")])]));
@@ -741,7 +959,7 @@ mod tests {
     #[test]
     fn core_languages_always_includes_en_even_with_nothing_on_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = Registry::sweep(dir.path().to_path_buf());
+        let registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         assert_eq!(registry.core_languages(), vec!["en".to_string()]);
     }
 
@@ -751,7 +969,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(dir.path().join("core/nl.toml"), "play = \"Spelen\"\n").unwrap();
         std::fs::write(dir.path().join("core/fr.toml"), "play = \"Lecture\"\n").unwrap();
-        let registry = Registry::sweep(dir.path().to_path_buf());
+        let registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         assert_eq!(registry.core_languages(), vec!["en".to_string(), "fr".to_string(), "nl".to_string()]);
     }
 
@@ -763,7 +981,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/de.toml"), "play = \"Spielen\"\n").unwrap();
-        let registry = Registry::sweep(dir.path().to_path_buf());
+        let registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         assert_eq!(registry.core_languages(), vec!["en".to_string()]);
     }
 
@@ -775,7 +993,7 @@ mod tests {
         // — a fallback candidate list built from a live read could
         // otherwise offer a language `chain_for` cannot resolve yet.
         let dir = tempfile::tempdir().unwrap();
-        let registry = Registry::sweep(dir.path().to_path_buf());
+        let registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(dir.path().join("core/de.toml"), "play = \"Spielen\"\n").unwrap();
         assert_eq!(
@@ -795,7 +1013,7 @@ mod tests {
         // (`status_json`'s clamp needs it too, since fix round 2), not
         // `core_languages`'s.
         let dir = tempfile::tempdir().unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")]), ("de", &[("play", "Spielen")])]));
         assert!(registry.union_languages().contains(&"de".to_string()));
     }
@@ -808,7 +1026,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("console")).unwrap();
         std::fs::write(dir.path().join("console/de.toml"), "k = \"v\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")])]));
         // "console" has a disk pack but was never announced: `de` must not
         // leak in through it.
@@ -826,7 +1044,7 @@ mod tests {
         std::fs::write(dir.path().join("radio/nl.toml"), "play = \"Spelen\"\n").unwrap();
         std::fs::create_dir_all(dir.path().join("common")).unwrap();
         std::fs::write(dir.path().join("common/it.toml"), "ok = \"Ok\"\n").unwrap();
-        let mut registry = Registry::sweep(dir.path().to_path_buf());
+        let mut registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         registry.insert_announced("core", module_layers("core", &[("en", &[("k", "v")])]));
         registry.insert_announced("radio", module_layers("radio", &[("en", &[("play", "Play")]), ("de", &[("play", "Spielen")])]));
         registry.insert_announced("common", module_layers("common", &[("en", &[("ok", "Ok")]), ("es", &[("ok", "Vale")])]));
@@ -854,7 +1072,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("files")).unwrap();
         std::fs::write(dir.path().join("files/de.toml"), "browse = \"Durchsuchen\"\n").unwrap();
-        let registry = Registry::sweep(dir.path().to_path_buf());
+        let registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         assert_eq!(registry.chain_for("files", "de", "en").get("browse"), "Durchsuchen");
     }
 
@@ -868,7 +1086,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         let pack = dir.path().join("radio/nl.toml");
         std::fs::write(&pack, "play = \"Spelen\"\n").unwrap();
-        let registry = Registry::sweep(dir.path().to_path_buf());
+        let registry = Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"));
         std::fs::remove_file(&pack).unwrap();
         assert_eq!(
             registry.chain_for("radio", "nl", "en").get("play"),
@@ -899,7 +1117,7 @@ mod tests {
         let pack = dir.path().join("radio/nl.toml");
         std::fs::write(&pack, "play = \"Spelen\"\n").unwrap();
         let shared: crate::i18n::Shared =
-            std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(dir.path().to_path_buf())));
+            std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"))));
         assert_eq!(shared.read().await.chain_for("radio", "nl", "en").get("play"), "Spelen");
 
         std::fs::remove_file(&pack).unwrap();
@@ -934,7 +1152,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         let shared: crate::i18n::Shared =
-            std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(dir.path().to_path_buf())));
+            std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"))));
         assert_eq!(
             shared.read().await.chain_for("radio", "nl", "en").get("play"),
             "play",
@@ -973,14 +1191,14 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("radio")).unwrap();
         std::fs::write(dir.path().join("radio/nl.toml"), "play = \"Spelen\"\n").unwrap();
         let shared: crate::i18n::Shared =
-            std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(dir.path().to_path_buf())));
+            std::sync::Arc::new(tokio::sync::RwLock::new(Registry::sweep(dir.path().to_path_buf(), dir.path().join("packs"))));
 
         // Held for the rest of the test: a real writer (the swap half of
         // `resweep_async`) could never be granted the lock while this is
         // alive. The walk must not care.
         let _read_guard = shared.read().await;
 
-        let disk = tokio::time::timeout(std::time::Duration::from_secs(5), Registry::walk(&shared))
+        let (disk, _packs) = tokio::time::timeout(std::time::Duration::from_secs(5), Registry::walk(&shared))
             .await
             .expect("the walk must never need to wait on a guard the test itself holds")
             .expect("the blocking task must not panic on a readable root");

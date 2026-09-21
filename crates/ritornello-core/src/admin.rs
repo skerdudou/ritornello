@@ -457,6 +457,10 @@ mod tests {
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         let mut backends: HashMap<String, Arc<dyn AdminBackend>> = HashMap::new();
         backends.insert("radio".into(), Arc::new(fake));
+        // A packs root that does not exist: `inventory` treats that as an
+        // empty inventory by design, exactly as an unwritten pack directory
+        // would on a fresh device.
+        let packs_root = locales_root.join("packs");
         AppState {
             status: Arc::new(tokio::sync::RwLock::new(StatusState {
                 plugins: vec![],
@@ -472,7 +476,7 @@ mod tests {
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(locales_root))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(locales_root, packs_root))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             fallback_current: Arc::new(tokio::sync::RwLock::new(None)),

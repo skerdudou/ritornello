@@ -1699,6 +1699,12 @@ async fn main() -> Result<()> {
     let persisted = state::load(&state_path);
 
     let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
+    // The operator's own locales root and the installed-packs root are two
+    // separate directories as of this chantier: an install writes only the
+    // second, so a hand-written file under the first can never be
+    // overwritten by an update again — see `i18n::registry`'s module doc.
+    let packs_root =
+        PathBuf::from(env_or(crate::langpack::PACKS_ROOT_ENV, crate::langpack::DEFAULT_PACKS_ROOT));
     // The one registry for the whole process: swept from disk once here,
     // seeded with the core's own module and `common`'s, then grown by one
     // `insert_announced` per plugin announcement (initial wiring loop and
@@ -1708,7 +1714,8 @@ async fn main() -> Result<()> {
     // route that used it moved onto this same registry (`Registry::
     // core_languages` — task 12) instead of a second, independent disk
     // read, so this is now its last use.
-    let registry: i18n::Shared = Arc::new(RwLock::new(i18n::seeded_registry(locales_root)));
+    let registry: i18n::Shared =
+        Arc::new(RwLock::new(i18n::seeded_registry(locales_root, packs_root.clone())));
     // The device's own persisted fallback (task 13), or "en" on a device
     // that has never set one — see `i18n::core_catalog`'s doc.
     let catalog = Arc::new(RwLock::new(i18n::core_catalog(
@@ -3356,7 +3363,7 @@ mod toggle_tests {
         // tokio `RwLock` this crate uses elsewhere has no synchronous
         // reader safe to call from inside a `#[tokio::test]`'s worker
         // thread.
-        let registry_val = crate::i18n::seeded_registry(root.clone());
+        let registry_val = crate::i18n::seeded_registry(root.clone(), root.join("packs"));
         let catalog = Arc::new(RwLock::new(crate::i18n::core_catalog(&registry_val, "en", "en")));
         let registry: crate::i18n::Shared = Arc::new(RwLock::new(registry_val));
 
@@ -4786,7 +4793,7 @@ mod toggle_tests {
     async fn startup_wiring_puts_an_announced_catalog_into_the_registry() {
         let dir = tempfile::tempdir().unwrap();
         let registry: i18n::Shared =
-            std::sync::Arc::new(tokio::sync::RwLock::new(i18n::seeded_registry(dir.path().to_path_buf())));
+            std::sync::Arc::new(tokio::sync::RwLock::new(i18n::seeded_registry(dir.path().to_path_buf(), dir.path().join("packs"))));
         let mut catalog = HashMap::new();
         catalog.insert("en".to_string(), HashMap::from([("greeting".to_string(), "Hi there".to_string())]));
         let a = Announcement {
@@ -4815,7 +4822,7 @@ mod toggle_tests {
     async fn startup_wiring_leaves_the_module_absent_when_the_announcement_has_no_catalog() {
         let dir = tempfile::tempdir().unwrap();
         let registry: i18n::Shared =
-            std::sync::Arc::new(tokio::sync::RwLock::new(i18n::seeded_registry(dir.path().to_path_buf())));
+            std::sync::Arc::new(tokio::sync::RwLock::new(i18n::seeded_registry(dir.path().to_path_buf(), dir.path().join("packs"))));
         let a = Announcement {
             name: "mpd".into(),
             kinds: vec![PluginKind::Display],

@@ -15,10 +15,6 @@ use super::archive::PackContents;
 
 /// One pack found on disk.
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by task 6 (registry) and task 8 (update worker)")
-)]
 pub struct InstalledPack {
     /// Its directory name, which is also its component name.
     pub id: String,
@@ -129,10 +125,6 @@ pub fn remove(root: &Path, id: &str) -> std::io::Result<bool> {
 /// does not parse is something this walk did not write. Both are traced, so
 /// a pack the operator meant to install cannot vanish in silence -- the same
 /// posture `Layer::from_disk` already takes.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by task 6 (registry) and task 8 (update worker)")
-)]
 pub fn inventory(root: &Path) -> Vec<InstalledPack> {
     let Ok(dirs) = std::fs::read_dir(root) else {
         return Vec::new();

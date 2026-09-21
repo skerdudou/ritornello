@@ -1634,12 +1634,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
+        let packs_root = root.join("packs");
         let wiring = Wiring {
             sources: HashMap::new(),
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(root))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(root, packs_root))),
             manifest_order: vec![],
             metadata: silent_wiring(vec![]),
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
