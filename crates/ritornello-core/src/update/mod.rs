@@ -775,10 +775,11 @@ fn initial_config_target(entry: &str) -> Option<String> {
 /// out rather than shared because neither of the other two fits: `plugins.rs`'s
 /// takes a `&str` and derives its temporary name from a `.toml` extension it
 /// assumes, and the privileged crate's is `pub(crate)` to a crate that must
-/// not gain a dependant. A fourth copy would be the sign that this belongs in
-/// a crate of its own — this one names the file rather than its extension, so
-/// it works for a locale catalog and an input preset alike.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// not gain a dependant. This one names the file rather than its extension, so
+/// it works for a locale catalog and an input preset alike — and, `pub(crate)`
+/// within this binary, also for `langpack::store`'s pack files and manifest,
+/// which is why there is still no fourth copy.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("/"));
     let tmp = dir.join(format!(
         ".{}.tmp",

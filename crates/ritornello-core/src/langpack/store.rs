@@ -41,44 +41,80 @@ pub fn pack_id(language: &str) -> String {
     format!("ritornello-lang-{language}")
 }
 
-fn pack_dir(root: &Path, id: &str) -> PathBuf {
-    root.join(id)
+/// `root` joined with `id`, or `None` for an `id` that is not a bare name.
+///
+/// **This is the security boundary**, the same shape
+/// `ritornello_updater::target::target_of` draws for the privileged side and
+/// for the same reason: `id` reaching here may have come from an HTTP
+/// request (a language code, wrapped by `pack_id`) rather than from a value
+/// this crate produced itself, so a bare `root.join(id)` would let `".."`
+/// resolve to the parent of `root` -- `/etc/ritornello`, on a real device,
+/// which is also where the operator's own hand-written locales layer lives.
+/// Refusing here, before either caller ever joins the path itself, is what
+/// makes that refusal apply everywhere rather than at each call site.
+fn pack_dir(root: &Path, id: &str) -> Option<PathBuf> {
+    if !ritornello_i18n::valid_pack_name(id) {
+        return None;
+    }
+    Some(root.join(id))
+}
+
+/// The error a refused id is reported as. Carries the id verbatim: an
+/// operator reading the journal after a refusal needs the string that was
+/// refused, the same reasoning `ritornello_updater::target::TargetError`
+/// applies to a plugin file name.
+fn refused_id(id: &str) -> std::io::Error {
+    std::io::Error::other(format!("refusing the language pack id {id:?}: it is not a bare name"))
 }
 
 /// Writes a pack, replacing whatever was there.
 ///
 /// **Replaces rather than merges**: the previous version's directory is
 /// removed first, so a module a new version no longer carries stops
-/// answering instead of lingering as a file nothing references. The manifest
-/// is written last, so a directory holding a manifest is a directory whose
-/// files are all already there.
+/// answering instead of lingering as a file nothing references. Each file
+/// is written through `write_atomic` (a temporary beside its target, then
+/// `rename`), so a power cut mid-write leaves either the old file or the new
+/// one, never a truncated one -- the device this runs on gets unplugged.
+///
+/// The manifest is written last **on purpose**, but that ordering does not
+/// by itself guarantee a directory holding a manifest has every file it
+/// names: a crash can still land between two of these `write_atomic` calls.
+/// What actually carries the property is `inventory`'s posture on the way
+/// back in -- an absent directory, an empty one, files with no manifest yet,
+/// a manifest torn by a crash mid-`rename`, and a manifest naming a module
+/// whose file never landed are all read as "not a pack" and skipped, never
+/// presented as one that installed successfully.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "consumed by task 6 (registry) and task 8 (update worker)")
 )]
 pub fn install(root: &Path, id: &str, contents: &PackContents) -> std::io::Result<()> {
-    let dir = pack_dir(root, id);
+    let dir = pack_dir(root, id).ok_or_else(|| refused_id(id))?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }
     std::fs::create_dir_all(&dir)?;
     for (name, bytes) in &contents.files {
-        std::fs::write(dir.join(name), bytes)?;
+        crate::update::write_atomic(&dir.join(name), bytes)?;
     }
     let text = toml::to_string(&contents.manifest)
         .map_err(|e| std::io::Error::other(format!("serialising the pack manifest: {e}")))?;
-    std::fs::write(dir.join("pack.toml"), text)?;
+    crate::update::write_atomic(&dir.join("pack.toml"), text.as_bytes())?;
     Ok(())
 }
 
-/// Removes a pack's directory. `false` when there was nothing to remove --
-/// a fact the caller reports rather than an error it handles.
+/// Removes a pack's directory. `Ok(false)` when there was nothing to remove
+/// -- a fact the caller reports rather than an error it handles. A refused
+/// id is a different thing entirely and is never folded into `Ok(false)`:
+/// reporting a refusal as "nothing was there" is a lie the caller would act
+/// on, most dangerously by treating a `".."` it should have rejected as an
+/// ordinary miss instead of an attempt at the operator's own locales root.
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "consumed by task 6 (registry) and task 8 (update worker)")
 )]
 pub fn remove(root: &Path, id: &str) -> std::io::Result<bool> {
-    let dir = pack_dir(root, id);
+    let dir = pack_dir(root, id).ok_or_else(|| refused_id(id))?;
     if !dir.exists() {
         return Ok(false);
     }
@@ -209,6 +245,36 @@ mod tests {
         remove(dir.path(), &pack_id("fr")).unwrap();
         assert!(dir.path().join("ritornello-lang-de/core.toml").exists(), "the neighbour survives");
         assert!(dir.path().join("a-note-from-the-operator.txt").exists(), "a stray file survives");
+    }
+
+    /// A hostile id is refused by `install` and `remove` before either ever
+    /// forms a path from it -- not merely rejected by chance because the
+    /// path it would have formed happens not to exist.
+    ///
+    /// `".."` is the id that matters most: joined onto a real packs root
+    /// (`/etc/ritornello/language-packs`), it resolves to `/etc/ritornello`,
+    /// which also holds the operator's own locales layer. A sibling
+    /// directory next to the temporary packs root stands in for it here --
+    /// built to exist, so a bug that stopped refusing would actually destroy
+    /// something and the test would actually notice.
+    #[test]
+    fn a_hostile_id_is_refused_by_install_and_remove_and_touches_nothing() {
+        const HOSTILE: &[&str] = &["..", "a/b", "../../etc/ritornello/locales", ".", ""];
+        for id in HOSTILE {
+            let workspace = tempfile::tempdir().unwrap();
+            let root = workspace.path().join("packs");
+            std::fs::create_dir_all(&root).unwrap();
+            let sibling = workspace.path().join("sibling-locales");
+            std::fs::create_dir_all(&sibling).unwrap();
+            std::fs::write(sibling.join("fr.toml"), "k = \"v\"\n").unwrap();
+
+            let c = contents("fr", &[("core", "k = \"v\"\n")]);
+            assert!(install(&root, id, &c).is_err(), "{id:?} should be refused by install");
+            assert!(remove(&root, id).is_err(), "{id:?} should be refused by remove");
+
+            assert!(sibling.join("fr.toml").exists(), "{id:?}: the sibling survives install and remove");
+            assert!(root.exists(), "{id:?}: the packs root itself survives");
+        }
     }
 
     /// A root that does not exist, or holds junk, is a normal state on a
