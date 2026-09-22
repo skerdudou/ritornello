@@ -187,6 +187,15 @@ fn carries(published: &Published, name: &str) -> bool {
     match &published.offer {
         Offer::Core => name == CORE,
         Offer::Plugin(plugin) => plugin == name,
+        // Not installed through this path yet. A pack's row is real (task
+        // 7 gives it one, judged the same way every other component is),
+        // but placing one on disk takes no privileged step and no staging
+        // area -- `crate::langpack::store::install` directly, which this
+        // worker does not call yet. `false` here, rather than matching the
+        // pack id, keeps `resolve` from routing an Install click at this
+        // row into the plugin/core placement path, which is wrong for
+        // something with no binary.
+        Offer::LanguagePack(_) => false,
         // Never installed component by component, and `download_name` already
         // answers `None` for it.
         Offer::Bundle => false,
@@ -1001,6 +1010,12 @@ pub struct Worker {
     /// the System tab's restart button uses, and for the same reason: mpv must
     /// die with it, and `std::process::exit` runs no `Drop`.
     pub restart: crate::system::RestartHook,
+    /// The one process-wide i18n registry (`crate::i18n::Shared`'s doc):
+    /// what this worker reads to learn which language packs are installed
+    /// (`Registry::installed_packs`), for the row `component_offers` gives
+    /// each one. Task 8 is what grows this worker's use of it to the
+    /// packs root and the actual install/remove step; this task only reads.
+    pub registry: crate::i18n::Shared,
 }
 
 impl Worker {
@@ -1141,6 +1156,24 @@ impl Worker {
         out
     }
 
+    /// The language packs this device already has, as `component_offers`
+    /// wants them: `(pack id, installed version)`.
+    ///
+    /// Read from the shared registry rather than from a scan of this
+    /// worker's own root: `registry` is the same handle `Registry::chain_for`
+    /// resolves text through, and `Registry::installed_packs` already holds
+    /// what the last sweep found in memory (see that method's own doc) — a
+    /// second, independent directory read here could disagree with it.
+    async fn installed_packs(&self) -> Vec<(String, String)> {
+        self.registry
+            .read()
+            .await
+            .installed_packs()
+            .iter()
+            .map(|p| (p.id.clone(), p.manifest.version.clone()))
+            .collect()
+    }
+
     /// What each third-party plugin's own repository publishes for it.
     ///
     /// At most `THIRD_PARTY_MAX` requests, decided by `third_party_targets`
@@ -1257,8 +1290,9 @@ impl Worker {
                 // Our repository publishing nothing says nothing about a
                 // stranger's, so the third-party rows are still answered.
                 let theirs = self.third_party_offers(client, &third_party_targets(&installed)).await;
+                let installed_packs = self.installed_packs().await;
                 let mut components =
-                    component_offers(self.core_version, &[], &theirs, &installed);
+                    component_offers(self.core_version, &[], &theirs, &installed, &installed_packs);
                 let mut state = self.state.write().await;
                 carry_core_notes(&state.components, &mut components);
                 state.outcome = match e {
@@ -1293,8 +1327,9 @@ impl Worker {
         let published = fold(&releases, ARCH);
         let installed = self.installed_when_settled().await;
         let theirs = self.third_party_offers(client, &third_party_targets(&installed)).await;
+        let installed_packs = self.installed_packs().await;
         let mut components =
-            component_offers(self.core_version, &published, &theirs, &installed);
+            component_offers(self.core_version, &published, &theirs, &installed, &installed_packs);
         let core = published.iter().find(|p| p.offer == Offer::Core);
         let mut state = self.state.write().await;
         carry_installable(&state.components, &mut components);
@@ -1428,8 +1463,14 @@ impl Worker {
     ) {
         if !placed.is_empty() {
             let installed = self.installed_when_settled().await;
-            let mut components =
-                component_offers(self.core_version, &checked.ours, &checked.theirs, &installed);
+            let installed_packs = self.installed_packs().await;
+            let mut components = component_offers(
+                self.core_version,
+                &checked.ours,
+                &checked.theirs,
+                &installed,
+                &installed_packs,
+            );
             let mut state = self.state.write().await;
             carry_installable(&state.components, &mut components);
             carry_core_notes(&state.components, &mut components);
@@ -3175,6 +3216,13 @@ mod tests {
             root: root.to_path_buf(),
             core_version: "0.2.0",
             restart: Arc::new(|| {}),
+            // An empty registry: no test in this module installs a pack, so
+            // `Registry::installed_packs` answering nothing is the correct
+            // fixture, not a shortcut.
+            registry: Arc::new(RwLock::new(crate::i18n::seeded_registry(
+                root.to_path_buf(),
+                root.join("packs"),
+            ))),
         }
     }
 

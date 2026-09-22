@@ -2249,6 +2249,7 @@ async fn main() -> Result<()> {
         root: PathBuf::from("/"),
         core_version: env!("CARGO_PKG_VERSION"),
         restart: restart_hook.clone(),
+        registry: registry.clone(),
     };
     // Read off the `Worker` actually built, not a second `PathBuf::from("/")`
     // literal: `status::PluginsControl.root` (below) must be the exact same

@@ -29,10 +29,6 @@ pub struct InstalledPack {
 /// components page, and the prefix of the published archive
 /// (`ritornello-lang-fr-0.2.0.tar.gz`). One function so the three cannot
 /// drift.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by task 8 (update worker)")
-)]
 pub fn pack_id(language: &str) -> String {
     format!("ritornello-lang-{language}")
 }

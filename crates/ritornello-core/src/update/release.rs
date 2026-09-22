@@ -61,6 +61,12 @@ pub struct Asset {
 pub enum Offer {
     Core,
     Plugin(String),
+    /// A language pack: the language it carries. **No architecture** -- it
+    /// is text, and publishing the same bytes three times over would be a
+    /// lie about what a pack is. That is also why the release workflow
+    /// builds packs in a job of its own rather than inside the per-arch
+    /// matrix, where three runs would collide on one file name.
+    LanguagePack(String),
     /// Every plugin at once. Never used by the updater — it installs component
     /// by component so a failure names one thing — but recognised so it is not
     /// mistaken for a plugin.
@@ -522,6 +528,34 @@ fn is_version(s: &str) -> bool {
 /// readable, the name's and the version's: the first candidate that parses is
 /// the boundary, because a plugin name cannot itself end in a version.
 pub fn classify_asset(name: &str, arch: &str) -> Option<(Offer, String)> {
+    // **Before the arch suffix is stripped, deliberately.** A pack name
+    // carries none, so the strip below would answer `None` for it and this
+    // branch would never be reached.
+    if let Some(rest) =
+        name.strip_suffix(".tar.gz").and_then(|s| s.strip_prefix("ritornello-lang-"))
+    {
+        for (dash, _) in rest.match_indices('-') {
+            let (language, version) = (&rest[..dash], &rest[dash + 1..]);
+            if language.is_empty()
+                || language.starts_with('-')
+                || !is_version(version)
+                // A pack carries no architecture at all, so a version-shaped
+                // string that itself ends in this device's own arch label is
+                // not one a pack archive can legitimately produce -- almost
+                // certainly a name that meant to carry an architecture the
+                // way a plugin's does, on a component that has none.
+                // `is_version` alone cannot catch this: "armv7" is, by
+                // shape, indistinguishable from a genuine single-word
+                // prerelease identifier, so the version-only grammar would
+                // otherwise accept `0.2.1-armv7` as a whole, valid version.
+                || version.ends_with(&format!("-{arch}"))
+            {
+                continue;
+            }
+            return Some((Offer::LanguagePack(language.to_string()), version.to_string()));
+        }
+        return None;
+    }
     let stem = name.strip_suffix(&format!("-{arch}.tar.gz"))?;
     if let Some(version) = stem.strip_prefix("ritornello-core-") {
         return is_version(version).then(|| (Offer::Core, version.to_string()));
@@ -584,6 +618,14 @@ pub fn download_name(offer: &Offer) -> Option<String> {
     match offer {
         Offer::Core => Some("staged-core".to_string()),
         Offer::Plugin(name) => Some(format!("staged-plugin-{name}")),
+        // Never actually called for a pack: installing one takes no
+        // privileged step, so nothing is ever placed in the staging area
+        // this name would address. The arm exists so the match stays
+        // exhaustive and nobody is tempted to answer `None` here believing
+        // that is the safe default -- `None` is `Bundle`'s answer, and it
+        // means something different: "never installed component by
+        // component" rather than "installed, but not through staging".
+        Offer::LanguagePack(lang) => Some(format!("staged-lang-{lang}")),
         Offer::Bundle => None,
     }
 }
@@ -706,6 +748,39 @@ mod tests {
             "ritornello-core-0.2.0-armv7.tar.gz.sig",
             "ritornello-plugin-0.2.0-armv7.tar.gz",
             "",
+        ] {
+            assert_eq!(classify_asset(name, "armv7"), None, "{name}");
+        }
+    }
+
+    /// A pack carries text, so it has no architecture. The branch runs
+    /// **before** the arch suffix is stripped: `classify_asset` cuts
+    /// `-<arch>.tar.gz` first, so a name without one would otherwise be
+    /// rejected before it was ever examined.
+    #[test]
+    fn a_language_pack_asset_is_recognised_without_an_architecture() {
+        assert_eq!(
+            classify_asset("ritornello-lang-fr-0.2.1.tar.gz", "armv7"),
+            Some((Offer::LanguagePack("fr".to_string()), "0.2.1".to_string()))
+        );
+        assert_eq!(
+            classify_asset("ritornello-lang-pt-BR-0.2.1-beta.1.tar.gz", "armv7"),
+            Some((Offer::LanguagePack("pt-BR".to_string()), "0.2.1-beta.1".to_string())),
+            "a regionalised code splits like a plugin name does"
+        );
+    }
+
+    /// The same shapes the plugin branch already refuses, restated for this
+    /// one: an empty language, a lone dash, and an arch where a version
+    /// belongs.
+    #[test]
+    fn a_malformed_language_pack_asset_is_not_classified() {
+        for name in [
+            "ritornello-lang--0.2.1.tar.gz",
+            "ritornello-lang-fr.tar.gz",
+            "ritornello-lang-fr-armv7.tar.gz",
+            "ritornello-lang-0.2.1.tar.gz",
+            "ritornello-lang-fr-0.2.1-armv7.tar.gz",
         ] {
             assert_eq!(classify_asset(name, "armv7"), None, "{name}");
         }

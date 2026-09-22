@@ -87,7 +87,6 @@ impl Registry {
 
     /// Every installed language pack, in the order `sources_for` consults
     /// them.
-    #[expect(dead_code, reason = "consumed by the components page and the update worker, later tasks")]
     pub fn installed_packs(&self) -> &[crate::langpack::store::InstalledPack] {
         &self.packs
     }

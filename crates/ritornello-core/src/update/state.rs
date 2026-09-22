@@ -56,6 +56,10 @@ pub enum ComponentKind {
     Core,
     Plugin,
     ThirdParty,
+    /// A language pack. Installed and removed by the core alone, with no
+    /// privileged step and no `plugins.toml` block -- it declares nothing
+    /// and launches nothing.
+    LanguagePack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -118,6 +122,7 @@ pub fn component_offers(
     published: &[Published],
     third_party: &[ThirdPartyOffer],
     installed: &[Installed],
+    installed_packs: &[(String, String)],
 ) -> Vec<ComponentOffer> {
     let core_offered = published.iter().find(|p| p.offer == Offer::Core).map(|p| p.version.clone());
 
@@ -133,7 +138,10 @@ pub fn component_offers(
         .iter()
         .filter_map(|p| match &p.offer {
             Offer::Plugin(name) => Some(name.as_str()),
-            Offer::Core | Offer::Bundle => None,
+            // A pack gets its own loop below, keyed by pack id rather than
+            // by name, and judged against `installed_packs` rather than
+            // `installed`: neither list here is the right one for it.
+            Offer::Core | Offer::Bundle | Offer::LanguagePack(_) => None,
         })
         .collect();
 
@@ -234,6 +242,35 @@ pub fn component_offers(
             offered: plugin_offered(name),
             availability: Availability::NotInstalled,
             installable: None,
+            third_party_repo: None,
+            not_installed_files: None,
+        });
+    }
+
+    for p in published.iter() {
+        let Offer::LanguagePack(language) = &p.offer else { continue };
+        let id = crate::langpack::store::pack_id(language);
+        let installed = installed_packs.iter().find(|(pid, _)| pid == &id).map(|(_, v)| v.clone());
+        out.push(ComponentOffer {
+            name: id,
+            kind: ComponentKind::LanguagePack,
+            // A pack declares nothing and has no binary: both are `false`
+            // rather than absent, because the page reads them unconditionally
+            // and an absent field would render as "declared".
+            declared: false,
+            binary_present: false,
+            availability: match &installed {
+                None => Availability::NotInstalled,
+                Some(v) if differs(Some(v), &p.version) => Availability::UpdateAvailable,
+                Some(_) => Availability::Aligned,
+            },
+            installed,
+            offered: Some(p.version.clone()),
+            // Always installable: a pack is judged by its own reader after
+            // download, not by the component rules. Stated rather than left
+            // absent so the page never offers the "manual step" sentence for
+            // something that has no manual step.
+            installable: Some(true),
             third_party_repo: None,
             not_installed_files: None,
         });
@@ -375,7 +412,7 @@ impl UpdateState {
             release_url: None,
             catalogue_url: None,
             last_check_unix_s: None,
-            components: component_offers(core_version, &[], &[], installed),
+            components: component_offers(core_version, &[], &[], installed, &[]),
             busy: None,
             last_rollback: None,
             // Nothing can be in flight before the first HTTP request: this
@@ -465,7 +502,7 @@ mod tests {
         published: &[Published],
         installed: &[Installed],
     ) -> Vec<ComponentOffer> {
-        component_offers(core_version, published, &[], installed)
+        component_offers(core_version, published, &[], installed, &[])
     }
 
     fn declared(name: &str, version: Option<&str>, binary: bool) -> Installed {
@@ -492,6 +529,13 @@ mod tests {
             checksums_url: None,
             catalogue_url: None,
         }
+    }
+
+    /// The same shorthand as `published`, for a language pack: the brief
+    /// this task implements calls this helper but never defines it, so it
+    /// is written here, modelled on `published` above.
+    fn pack_published(language: &str, version: &str) -> Published {
+        published(Offer::LanguagePack(language.to_string()), version)
     }
 
     #[test]
@@ -578,6 +622,37 @@ mod tests {
         // Only `Worker::install_one` ever learns this, from an archive it
         // just read; this pure function never sees one.
         assert_eq!(core.not_installed_files, None);
+    }
+
+    #[test]
+    fn a_published_pack_the_device_does_not_have_is_offered_for_installation() {
+        let published = vec![pack_published("fr", "0.2.1")];
+        let rows = component_offers("0.2.1", &published, &[], &[], &[]);
+        let row = rows.iter().find(|r| r.name == "ritornello-lang-fr").expect("a pack row");
+        assert_eq!(row.kind, ComponentKind::LanguagePack);
+        assert_eq!(row.availability, Availability::NotInstalled);
+        assert_eq!(row.installed, None);
+    }
+
+    #[test]
+    fn an_installed_pack_at_another_version_is_offered_for_update() {
+        let published = vec![pack_published("fr", "0.2.2")];
+        let installed = vec![("ritornello-lang-fr".to_string(), "0.2.1".to_string())];
+        let rows = component_offers("0.2.2", &published, &[], &[], &installed);
+        let row = rows.iter().find(|r| r.name == "ritornello-lang-fr").unwrap();
+        assert_eq!(row.availability, Availability::UpdateAvailable);
+    }
+
+    /// Equality, never order -- the rule the whole delivery scheme rests on.
+    #[test]
+    fn an_installed_pack_at_the_offered_version_is_aligned() {
+        let published = vec![pack_published("fr", "0.2.1")];
+        let installed = vec![("ritornello-lang-fr".to_string(), "0.2.1".to_string())];
+        let rows = component_offers("0.2.1", &published, &[], &[], &installed);
+        assert_eq!(
+            rows.iter().find(|r| r.name == "ritornello-lang-fr").unwrap().availability,
+            Availability::Aligned
+        );
     }
 
     #[test]
@@ -703,6 +778,7 @@ mod tests {
                 version: Some("1.4.0".to_string()),
                 repository: Some("https://github.com/someone/their-plugin".to_string()),
             }],
+            &[],
         );
         let it = rows.iter().find(|o| o.name == "someones-plugin").unwrap();
         assert_eq!(it.kind, ComponentKind::ThirdParty);
