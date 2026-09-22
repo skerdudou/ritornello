@@ -1,0 +1,8 @@
+# The version of each language pack. A pack is a shipped component, so it
+# declares its own number -- and it has no Cargo.toml to declare it in.
+#
+# Major and minor stay on the product generation, like every component;
+# only the third digit is free. version_coherence.rs asserts it, and
+# changed-components.sh reads this file to decide what to publish.
+[fr]
+version = "0.2.0-beta.2"

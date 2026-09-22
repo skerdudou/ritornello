@@ -14,18 +14,30 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+USAGE="usage: package-release.sh <cargo-target-triple> <arch-label> | --languages | --self-test"
 SELF_TEST=
-if [ "${1:-}" = "--self-test" ]; then
-  # Runs the version guards below against a table of cases and exits,
-  # building nothing. Called by the Rust suite (version_coherence.rs),
-  # because this script's only other exercise is the release job — which
-  # fires on a tag, so without it the guards are first read on the day a
-  # release is being cut.
-  SELF_TEST=1
-else
-  TARGET="${1:?usage: package-release.sh <cargo-target-triple> <arch-label>}"
-  ARCH="${2:?usage: package-release.sh <cargo-target-triple> <arch-label>}"
-fi
+LANGUAGES=
+case "${1:-}" in
+  --self-test)
+    # Runs the version guards below against a table of cases and exits,
+    # building nothing. Called by the Rust suite (version_coherence.rs),
+    # because this script's only other exercise is the release job — which
+    # fires on a tag, so without it the guards are first read on the day a
+    # release is being cut.
+    SELF_TEST=1
+    ;;
+  --languages)
+    # Builds one archive per language pack. Unlike the per-target path below,
+    # this one needs neither `$BIN` nor `$ARCH`: a pack is text, with no
+    # architecture of its own, and the CI job that calls this path runs
+    # outside the per-arch matrix precisely because of that (see ci.yml).
+    LANGUAGES=1
+    ;;
+  *)
+    TARGET="${1:?$USAGE}"
+    ARCH="${2:?$USAGE}"
+    ;;
+esac
 # `.gitattributes` normalizes *.sh/*.awk/*.service to LF but not *.toml, so a
 # checkout with core.autocrlf=true (the common Windows default) hands this
 # script CRLF-terminated TOML. `tr -d '\r'` keeps every value extracted below
@@ -92,6 +104,23 @@ crate_version() { # <crate directory name>
   echo "$v"
 }
 
+# The version a language pack declares for itself, read from its own section
+# of deploy/language-packs.toml rather than a Cargo.toml -- a pack is text,
+# not a crate. Scoped to the `[<language>]` section by hand, because that
+# file holds one section per language and a plain `sed` over the whole file
+# would answer with whichever language's `version =` line came first.
+pack_version() { # <language>
+  local lang="$1" v
+  v=$(awk -v section="[$lang]" '
+    $0 == section { found=1; next }
+    found && /^\[/ { found=0 }
+    found && /^version = / { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }
+  ' deploy/language-packs.toml | tr -d '\r')
+  [ -n "$v" ] || { echo "deploy/language-packs.toml declares no version for [$lang]" >&2; exit 1; }
+  version_fits "language pack $lang" "$v" || exit 1
+  echo "$v"
+}
+
 if [ -n "$SELF_TEST" ]; then
   fails=0
   expect() { # <product> <component> <ok|refused> <why>
@@ -111,30 +140,20 @@ if [ -n "$SELF_TEST" ]; then
   expect 0.2.1-beta1 0.2.0 ok "the same, with a suffix carrying no dot"
   expect 0.2.1-beta.1 0.2.1 refused "the number the finished release will carry"
   expect 0.2.1-beta.1 0.3.0 refused "off the generation, suffix or not"
+  # A language pack is a shipped component like any other: pack_version()
+  # calls this same version_fits, so these two cases are the pack-specific
+  # readings of the two rules above rather than a second code path.
+  expect 0.3.0 0.2.9 refused "a language pack off the product generation"
+  expect 0.2.1-beta.1 0.2.1 refused "a language pack at the number the finished release will carry, inside a prerelease"
   [ "$fails" -eq 0 ] || { echo "self-test: $fails case(s) wrong" >&2; exit 1; }
   echo "self-test: version guards ok"
   exit 0
 fi
 
-BIN="target/$TARGET/release"
-OUT="release/$ARCH"
-rm -rf "$OUT"
-mkdir -p "$OUT"
-
-# The plugin list comes from plugins.example.toml, the same source deploy.sh
-# uses. Deriving it is what stops the two from diverging.
-mapfile -t PLUGINS < <(sed -n 's/^name = "\(.*\)"/\1/p' deploy/plugins.example.toml | tr -d '\r')
-[ "${#PLUGINS[@]}" -gt 0 ] || { echo "no plugin found in plugins.example.toml" >&2; exit 1; }
-
 stage_plugin() {
   local name="$1" dir="$2"
   mkdir -p "$dir/usr/local/lib/ritornello/plugins"
   cp "$BIN/ritornello-plugin-$name" "$dir/usr/local/lib/ritornello/plugins/"
-  # Locales, when the plugin has any. Three of them legitimately have none.
-  if [ -d "deploy/locales/$name" ]; then
-    mkdir -p "$dir/etc/ritornello/locales/$name"
-    cp -r "deploy/locales/$name/." "$dir/etc/ritornello/locales/$name/"
-  fi
   python3 scripts/packaging.py stage "$name" "$dir" "$BIN"
   # The block to append to /etc/ritornello/plugins.toml. Installing a plugin
   # whose block nobody adds means a plugin that ships and never starts, in
@@ -153,8 +172,15 @@ stage_plugin() {
   [ -s "$dir/plugins.toml.fragment" ] || { echo "no plugins.toml block for $name" >&2; exit 1; }
 }
 
-pack() { # <staging dir> <archive base name> <version>
-  local archive="$OUT/$2-$3-$ARCH.tar.gz"
+# Builds one archive from a staging directory and refuses to produce
+# anything unsafe to extract as root. Shared by pack() and pack_noarch(),
+# which differ only in the archive's name: the owner/mode guards below are a
+# SECURITY property of every archive this script builds, not formatting, so
+# copying this block instead of factoring it would be two things to keep in
+# step -- and the one that drifted would ship an archive with the wrong
+# ownership.
+_pack_archive() { # <staging dir> <archive path>
+  local dir="$1" archive="$2"
   # `--owner=root --group=root --numeric-owner`, and this is a security
   # property rather than tidiness: tar records the uid/gid of every entry,
   # and GNU tar **restores** them when the extraction runs as the superuser
@@ -188,7 +214,7 @@ pack() { # <staging dir> <archive base name> <version>
   # included; a checkout where git's own mode bit says 644 would keep
   # those at 644 instead. Either way, nothing group- or world-writable
   # reaches the archive.
-  tar -C "$1" --owner=root --group=root --numeric-owner --mode='u+rwX,go=rX' -czf "$archive" .
+  tar -C "$dir" --owner=root --group=root --numeric-owner --mode='u+rwX,go=rX' -czf "$archive" .
   # Asserted and not merely flagged: a guard nobody has seen fail is a guard
   # nobody should trust, and a flag silently dropped by a future edit would
   # leave no trace at all. `--numeric-owner` on the listing too, so the
@@ -223,15 +249,77 @@ pack() { # <staging dir> <archive base name> <version>
     echo "$archive would overwrite operator data" >&2
     exit 1
   fi
-  rm -rf "$1"
+  rm -rf "$dir"
 }
+
+pack() { # <staging dir> <archive base name> <version>   (per-target archive)
+  _pack_archive "$1" "$OUT/$2-$3-$ARCH.tar.gz"
+}
+
+pack_noarch() { # <staging dir> <archive base name> <version>
+  # No `-$ARCH`: a language pack is text, built once for every architecture.
+  _pack_archive "$1" "$OUT/$2-$3.tar.gz"
+}
+
+# --- one archive per language --------------------------------------------
+# A pack has no architecture: it is text. It is therefore named without one,
+# and built by a job of its own in the release workflow -- three per-arch
+# runs producing the same file name would collide when the publish job
+# merges their directories.
+pack_language() { # <language>
+  local lang="$1" d modules=()
+  d=$(mktemp -d)
+  for dir in deploy/locales/*/; do
+    local module="${dir%/}"; module="${module##*/}"
+    [ -f "deploy/locales/$module/$lang.toml" ] || continue
+    cp "deploy/locales/$module/$lang.toml" "$d/$module.toml"
+    modules+=("$module")
+  done
+  [ "${#modules[@]}" -gt 0 ] || { echo "no locale file for $lang" >&2; exit 1; }
+  local v
+  v=$(pack_version "$lang")
+  {
+    printf 'language = "%s"\n' "$lang"
+    printf 'version = "%s"\n' "$v"
+    printf 'source = "https://github.com/skerdudou/ritornello"\n'
+    printf 'modules = ['
+    local sep=""
+    for m in "${modules[@]}"; do printf '%s"%s"' "$sep" "$m"; sep=", "; done
+    printf ']\n'
+  } > "$d/pack.toml"
+  pack_noarch "$d" "ritornello-lang-$lang" "$v"
+}
+
+if [ -n "$LANGUAGES" ]; then
+  OUT="release/languages"
+  rm -rf "$OUT"
+  mkdir -p "$OUT"
+  mapfile -t LANGS < <(sed -n 's/^\[\(.*\)\]$/\1/p' deploy/language-packs.toml | tr -d '\r')
+  [ "${#LANGS[@]}" -gt 0 ] || { echo "no language declared in deploy/language-packs.toml" >&2; exit 1; }
+  for l in "${LANGS[@]}"; do pack_language "$l"; done
+  ls -l "$OUT"
+  echo "OK — $(ls "$OUT" | wc -l) language pack(s)"
+  exit 0
+fi
+
+BIN="target/$TARGET/release"
+OUT="release/$ARCH"
+rm -rf "$OUT"
+mkdir -p "$OUT"
+
+# The plugin list comes from plugins.example.toml, the same source deploy.sh
+# uses. Deriving it is what stops the two from diverging.
+mapfile -t PLUGINS < <(sed -n 's/^name = "\(.*\)"/\1/p' deploy/plugins.example.toml | tr -d '\r')
+[ "${#PLUGINS[@]}" -gt 0 ] || { echo "no plugin found in plugins.example.toml" >&2; exit 1; }
 
 # --- the core -------------------------------------------------------------
 CORE=$(mktemp -d)
 mkdir -p "$CORE/usr/local/bin"
 cp "$BIN/ritornello-core" "$CORE/usr/local/bin/"
-# Everything else the core carries — its unit, its polkit rule, its own and
-# the shared locale packs — is named by the manifest, not repeated here.
+# Everything else the core carries — its unit and its polkit rules — is
+# named by the manifest, not repeated here. No locale catalog any more: the
+# core's French comes from installing the fr language pack, like every
+# other language.
 python3 scripts/packaging.py stage-core "$CORE" "$BIN"
 pack "$CORE" "ritornello-core" "$(crate_version ritornello-core)"
 

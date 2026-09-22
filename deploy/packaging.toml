@@ -2,10 +2,15 @@
 #
 # Derived elsewhere, and deliberately absent from this file:
 #   - the set of plugins comes from plugins.example.toml (same source as
-#     deploy.sh, so the two cannot diverge);
-#   - a plugin's locale directory is deploy/locales/<name>/, when it exists.
-#     Four plugins have none (ouifm-metas, radiofrance-metas, nrj-metas,
-#     console); that is normal, not an omission.
+#     deploy.sh, so the two cannot diverge).
+#
+# No component archive carries translated text any more. Every language,
+# French included, ships as its own archive built from deploy/locales/ by
+# package-release.sh's `--languages` path (see deploy/language-packs.toml)
+# and installed by the unprivileged core. A component that shipped its own
+# fr.toml AND a language pack that ships the same file would fight over one
+# path on disk, and reinstalling that component would move a translation
+# backwards — packaging_manifest.rs refuses the shape outright.
 #
 # `tree` entries land in the archive under the path they will have on the
 # device, so installing is one `tar -C /`. `examples` entries land beside the
@@ -30,10 +35,6 @@ tree = [
   { from = "deploy/ritornello-rollback.service", to = "etc/systemd/system/ritornello-rollback.service" },
   { from = "deploy/50-ritornello-power.rules", to = "etc/polkit-1/rules.d/50-ritornello-power.rules" },
   { from = "deploy/52-ritornello-update.rules", to = "etc/polkit-1/rules.d/52-ritornello-update.rules" },
-  { from = "deploy/locales/core", to = "etc/ritornello/locales/core" },
-  # `common` travels with the core: the core is always installed, so this is
-  # the one archive that can be relied on to carry the shared catalog.
-  { from = "deploy/locales/common", to = "etc/ritornello/locales/common" },
 ]
 
 [plugins.radio]

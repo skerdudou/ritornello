@@ -164,15 +164,34 @@ mod tests {
         assert!(checked >= 9, "checked only {checked} privileged files — the walk is wrong");
     }
 
+    /// **No component archive carries translated text any more.**
+    ///
+    /// The rule with no list to keep: a component that shipped its own
+    /// `fr.toml` AND a language pack that ships the same file would fight
+    /// over one path on disk, and reinstalling that component would move a
+    /// translation *backwards*. Refusing the shape outright is what makes
+    /// that impossible rather than merely unlikely.
     #[test]
-    fn a_plugin_without_locales_is_normal() {
-        // Four plugins have no catalog of their own. Asserting it here stops
-        // a future guard from "fixing" their absence into an error.
-        for name in ["ouifm-metas", "radiofrance-metas", "nrj-metas", "console"] {
-            assert!(
-                !deploy_dir().join("locales").join(name).exists(),
-                "{name} grew a locale directory: the packaging rule must now carry it"
-            );
+    fn no_component_archive_carries_a_locale_directory() {
+        let m = manifest();
+        let mut checked = 0;
+        for (name, c) in std::iter::once(("core".to_string(), &m.core))
+            .chain(m.plugins.iter().map(|(k, v)| (k.clone(), v)))
+        {
+            for entry in &c.tree {
+                assert!(
+                    !entry.from.starts_with("deploy/locales"),
+                    "{name} still ships {} -- translated text belongs to a language pack now",
+                    entry.from
+                );
+                assert!(
+                    !entry.to.contains("etc/ritornello/locales"),
+                    "{name} still writes into the operator's own locales root: {}",
+                    entry.to
+                );
+                checked += 1;
+            }
         }
+        assert!(checked > 0, "checked nothing — the walk is not looking where it should");
     }
 }
