@@ -33,6 +33,20 @@ pub fn pack_id(language: &str) -> String {
     format!("ritornello-lang-{language}")
 }
 
+/// The reverse of `pack_id`: the language a component row names, when that
+/// row is a language pack's.
+///
+/// A component row (`ComponentOffer::name`) is keyed by **pack id**
+/// (`ritornello-lang-fr`), while the `/api/locale` page needs a
+/// `LanguagePackRow` keyed by **language** (`fr`) — the card shows
+/// languages, not archive names. Kept next to `pack_id` rather than
+/// unspelling the `"ritornello-lang-"` prefix at the call site: the shape of
+/// an id belongs to one module, and a second copy of that prefix is a thing
+/// that drifts from this one the day either changes.
+pub fn language_of(id: &str) -> Option<&str> {
+    id.strip_prefix("ritornello-lang-")
+}
+
 /// `root` joined with `id`, or `None` for an `id` that is not a bare name.
 ///
 /// **This is the security boundary**, the same shape
@@ -292,6 +306,17 @@ mod tests {
         let found = inventory(dir.path());
         assert_eq!(found.len(), 2);
         assert!(found.iter().any(|p| p.id == "ritornello-lang-zh_Hant"));
+    }
+
+    /// The reverse of `pack_id`, round-tripped -- and `None` for a component
+    /// name that is not one of this module's own pack ids, since a stray
+    /// name must not be silently treated as naming some language.
+    #[test]
+    fn language_of_reverses_pack_id_and_refuses_a_stranger() {
+        assert_eq!(language_of(&pack_id("fr")), Some("fr"));
+        assert_eq!(language_of(&pack_id("pt-BR")), Some("pt-BR"));
+        assert_eq!(language_of("radio"), None);
+        assert_eq!(language_of("ritornello-plugin-radio"), None);
     }
 
     /// A directory whose name is not a bare name is skipped rather than

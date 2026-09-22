@@ -58,6 +58,63 @@ pub(super) struct LocaleResponse {
     /// not among every plugin's own languages. Never empty:
     /// `core_languages` always includes `"en"`.
     fallback_candidates: Vec<String>,
+    /// One row per language a gesture exists for: installable, removable, or
+    /// both. Built from the release's own `LanguagePack` component rows
+    /// (`state.update.read().await.components`) plus whatever is installed
+    /// but no longer offered (`registry.installed_packs()`) — a pack the
+    /// release has stopped publishing must still be listed, or it is
+    /// stranded on the device with no gesture left to remove it. See
+    /// `language_pack_rows`'s own doc for the union.
+    packs: Vec<LanguagePackRow>,
+}
+
+/// What the page needs to offer a gesture for one language.
+///
+/// Deliberately keyed by **language** rather than by pack id: the card shows
+/// languages, and livraison 2 -- where several packs may carry one language
+/// -- is the single place that will make this a list per language rather
+/// than one row.
+#[derive(Serialize)]
+pub(super) struct LanguagePackRow {
+    language: String,
+    installed: Option<String>,
+    offered: Option<String>,
+}
+
+/// Builds `LocaleResponse::packs`: the release's own `LanguagePack` rows,
+/// plus an installed pack the release does not (or no longer) offer -- each
+/// language appearing **once**.
+///
+/// The two sources name a pack differently on purpose (`ComponentOffer::
+/// name` is a pack id, `InstalledPack.manifest.language` is the language
+/// itself), which is exactly why a naive concatenation could duplicate a
+/// language that is both offered and installed: `offered_ids` is collected
+/// first and is what the second loop is filtered against, so a pack id
+/// already turned into a row above is never turned into a second one below.
+fn language_pack_rows(
+    registry: &crate::i18n::Registry,
+    components: &[crate::update::state::ComponentOffer],
+) -> Vec<LanguagePackRow> {
+    let offered = components.iter().filter(|c| c.kind == crate::update::state::ComponentKind::LanguagePack);
+    let mut packs: Vec<LanguagePackRow> = offered
+        .clone()
+        .map(|c| LanguagePackRow {
+            language: crate::langpack::store::language_of(&c.name).unwrap_or(&c.name).to_string(),
+            installed: c.installed.clone(),
+            offered: c.offered.clone(),
+        })
+        .collect();
+    let offered_ids: std::collections::HashSet<&str> = offered.map(|c| c.name.as_str()).collect();
+    for pack in registry.installed_packs() {
+        if !offered_ids.contains(pack.id.as_str()) {
+            packs.push(LanguagePackRow {
+                language: pack.manifest.language.clone(),
+                installed: Some(pack.manifest.version.clone()),
+                offered: None,
+            });
+        }
+    }
+    packs
 }
 
 /// Builds every field of `LocaleResponse` from **one** registry read guard,
@@ -97,6 +154,7 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
         })
         .collect();
     let fallback_candidates = registry.core_languages();
+    let packs = language_pack_rows(&registry, &state.update.read().await.components);
     drop(registry);
     // Clamped to `locales` (the **union**, not `core_languages`), falling
     // back to `None` — fix round 1, task 14 review, finding 3/R3. Before
@@ -186,6 +244,7 @@ pub(super) async fn locale_json(State(state): State<AppState>) -> Json<LocaleRes
         completeness,
         fallback_current,
         fallback_candidates,
+        packs,
     })
 }
 
@@ -629,6 +688,104 @@ mod tests {
             Some("fr"),
             "reporting a no-op fallback as none must not forget the value the owner chose"
         );
+    }
+
+    /// Builds a registry whose `packs_root` holds one real, installed pack
+    /// (written through `langpack::store::install`, the same path production
+    /// writes through) -- `Registry::sweep` reads `installed_packs()` off
+    /// disk once at construction, so the pack must exist before the registry
+    /// is built, not be injected into it afterwards.
+    fn registry_with_one_installed_pack(dir: &std::path::Path, language: &str, version: &str) -> crate::i18n::Registry {
+        let packs_root = dir.join("packs");
+        std::fs::create_dir_all(&packs_root).unwrap();
+        let manifest = ritornello_i18n::PackManifest {
+            language: language.to_string(),
+            version: version.to_string(),
+            source: "https://example.invalid/pack".to_string(),
+            modules: vec!["core".to_string()],
+        };
+        let files = vec![("core.toml".to_string(), b"k = \"v\"\n".to_vec())];
+        let layers = ritornello_i18n::validate(&manifest, &files).unwrap();
+        let contents = crate::langpack::archive::PackContents { manifest, layers, files };
+        crate::langpack::store::install(&packs_root, &crate::langpack::store::pack_id(language), &contents).unwrap();
+        crate::i18n::seeded_registry(dir.to_path_buf(), packs_root)
+    }
+
+    fn offered_language_pack(language: &str, installed: Option<&str>, offered: Option<&str>) -> crate::update::state::ComponentOffer {
+        crate::update::state::ComponentOffer {
+            name: crate::langpack::store::pack_id(language),
+            kind: crate::update::state::ComponentKind::LanguagePack,
+            declared: false,
+            binary_present: false,
+            installed: installed.map(str::to_string),
+            offered: offered.map(str::to_string),
+            availability: crate::update::state::Availability::NotInstalled,
+            installable: None,
+            third_party_repo: None,
+            not_installed_files: None,
+        }
+    }
+
+    /// The property step 4 exists for: a pack the release has stopped
+    /// publishing must still be listed, or it is stranded on the device with
+    /// no gesture at all left to remove it. The rig's release offers
+    /// **nothing** (`state.update`'s default, empty `components`), and the
+    /// pack is only found through `registry.installed_packs()`.
+    #[tokio::test]
+    async fn an_installed_pack_the_release_does_not_offer_is_still_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = registry_with_one_installed_pack(dir.path(), "de", "1.2.3");
+        let state = AppState { registry: Arc::new(RwLock::new(registry)), ..tests_support::app_state() };
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let packs: Vec<serde_json::Value> = serde_json::from_value(v["packs"].clone()).unwrap();
+        let de = packs.iter().find(|p| p["language"] == "de").expect("an installed pack must still be listed");
+        assert_eq!(de["installed"], "1.2.3");
+        assert_eq!(de["offered"], serde_json::Value::Null, "the release does not offer it");
+    }
+
+    /// The trap the brief does not name: `packs` is a union of the offered
+    /// component rows and the installed packs the release does not offer,
+    /// and a pack that is **both** installed and offered must appear once.
+    ///
+    /// **[MUTATION]**: change `language_pack_rows` to push every installed
+    /// pack unconditionally, dropping the `offered_ids` filter -- this test
+    /// must fail, finding two rows for "de" instead of one.
+    #[tokio::test]
+    async fn a_pack_both_installed_and_offered_is_listed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = registry_with_one_installed_pack(dir.path(), "de", "1.2.3");
+        let state = AppState { registry: Arc::new(RwLock::new(registry)), ..tests_support::app_state() };
+        state.update.write().await.components = vec![offered_language_pack("de", Some("1.2.3"), Some("1.3.0"))];
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let packs: Vec<serde_json::Value> = serde_json::from_value(v["packs"].clone()).unwrap();
+        let matching: Vec<&serde_json::Value> = packs.iter().filter(|p| p["language"] == "de").collect();
+        assert_eq!(matching.len(), 1, "a pack both installed and offered must appear once, not twice: {packs:?}");
+        assert_eq!(matching[0]["installed"], "1.2.3");
+        assert_eq!(matching[0]["offered"], "1.3.0");
+    }
+
+    /// A pack the release offers and nothing has installed yet must also be
+    /// listed -- the ordinary "offered, not installed" row, proven so the
+    /// union test above is not the only site exercising `language_pack_rows`.
+    #[tokio::test]
+    async fn an_offered_pack_nothing_has_installed_is_listed() {
+        let (state, _rx, _frx, _dir) = tests_support::app_state_fr();
+        state.update.write().await.components = vec![offered_language_pack("de", None, Some("1.0.0"))];
+        let app = router(state);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let packs: Vec<serde_json::Value> = serde_json::from_value(v["packs"].clone()).unwrap();
+        let de = packs.iter().find(|p| p["language"] == "de").expect("an offered pack must be listed");
+        assert_eq!(de["installed"], serde_json::Value::Null);
+        assert_eq!(de["offered"], "1.0.0");
     }
 
     #[test]

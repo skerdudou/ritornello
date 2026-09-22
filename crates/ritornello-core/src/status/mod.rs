@@ -226,6 +226,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/update/check", axum::routing::post(crate::update::routes::update_check_post))
         .route("/api/update/install", axum::routing::post(crate::update::routes::update_install_post))
         .route(
+            "/api/languages/{language}",
+            axum::routing::post(crate::update::routes::language_install_post)
+                .delete(crate::update::routes::language_remove_delete),
+        )
+        .route(
             "/plugins/{name}/api/data",
             get(crate::admin::admin_get_data).put(crate::admin::admin_put_data),
         )

@@ -139,6 +139,35 @@ pub struct InstallReq {
     pub components: Vec<String>,
 }
 
+/// `POST /api/languages/{language}` — installs every pack that language is
+/// offered in.
+///
+/// **202 and a queue, like every other write in this module.** Validates the
+/// shape of the code and nothing else: whether a pack exists for it, and
+/// whether it is worth installing, is the worker's to decide because the
+/// worker is the only thing that has read the release.
+pub async fn language_install_post(
+    State(state): State<AppState>,
+    axum::extract::Path(language): axum::extract::Path<String>,
+) -> Response {
+    if !crate::status::valid_locale(&language) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    enqueue(&state, crate::update::Job::InstallLanguage(language))
+}
+
+/// `DELETE /api/languages/{language}` — same contract as the install route
+/// above, for the opposite gesture.
+pub async fn language_remove_delete(
+    State(state): State<AppState>,
+    axum::extract::Path(language): axum::extract::Path<String>,
+) -> Response {
+    if !crate::status::valid_locale(&language) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    enqueue(&state, crate::update::Job::RemoveLanguage(language))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::status::tests_support::app_state;
@@ -366,5 +395,73 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(rx.try_recv().is_err(), "nothing was enqueued");
+    }
+
+    #[tokio::test]
+    async fn installing_a_language_is_enqueued_and_answered_at_once() {
+        let (state, mut rx) = state_with_queue(4);
+        let resp = router(state)
+            .oneshot(Request::post("/api/languages/fr").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(matches!(rx.try_recv(), Ok(crate::update::Job::InstallLanguage(l)) if l == "fr"));
+    }
+
+    #[tokio::test]
+    async fn removing_a_language_is_enqueued_and_answered_at_once() {
+        let (state, mut rx) = state_with_queue(4);
+        let resp = router(state)
+            .oneshot(Request::delete("/api/languages/fr").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(matches!(rx.try_recv(), Ok(crate::update::Job::RemoveLanguage(l)) if l == "fr"));
+    }
+
+    /// The shape check the route DOES do, and the only one: a language code
+    /// that could become a path is refused before the queue, exactly as the
+    /// install route refuses an empty component list.
+    ///
+    /// **Both doors, not only `POST`.** A first version of this test drove
+    /// `POST` alone and stayed green even with `language_remove_delete`'s own
+    /// `valid_locale` check mutated to `if false` (measured while writing
+    /// this task) — the two routes share the same guard in source but each
+    /// has its own call site, and a broken one leaves nothing red unless
+    /// something actually exercises it.
+    #[tokio::test]
+    async fn a_language_that_is_not_a_bare_code_is_refused_before_the_queue() {
+        let (state, mut rx) = state_with_queue(4);
+        let app = router(state);
+        for bad in ["..", "fr%2F..", "a-language-code-far-too-long-to-be-one"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::post(format!("/api/languages/{bad}")).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "POST {bad}");
+            let resp = app
+                .clone()
+                .oneshot(Request::delete(format!("/api/languages/{bad}")).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "DELETE {bad}");
+        }
+        assert!(rx.try_recv().is_err(), "nothing was enqueued");
+    }
+
+    /// The global constraint, restated for the two new doors: no route waits
+    /// for the worker.
+    #[tokio::test]
+    async fn a_full_queue_refuses_a_language_install_immediately() {
+        let (state, _rx) = state_with_queue(1);
+        state.update_tx.try_send(crate::update::Job::Check).unwrap();
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            router(state).oneshot(Request::post("/api/languages/fr").body(Body::empty()).unwrap()),
+        )
+        .await
+        .expect("the route answered rather than waiting for room");
+        assert_eq!(answer.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }

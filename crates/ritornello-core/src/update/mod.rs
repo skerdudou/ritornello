@@ -167,22 +167,13 @@ pub enum Job {
     /// block -- and sharing a variant would make the worker re-derive which
     /// kind it was holding.
     ///
-    /// Constructed by the HTTP routes task 9 adds (`POST /api/languages/
-    /// {language}`); this task only gives `run_worker` the arm that
-    /// consumes it. Unconditional, unlike `RemoveLanguage` below: nothing in
-    /// this crate constructs an `InstallLanguage` yet, in a test build or
-    /// otherwise (its own `run_worker` arm cannot be driven from a test —
-    /// see the comment there), so gating the `expect` on `not(test)` would
-    /// leave it warning here too.
-    #[expect(dead_code, reason = "constructed by the HTTP routes task 9 adds")]
+    /// Constructed by `POST /api/languages/{language}` (`update::routes::
+    /// language_install_post`, task 9).
     InstallLanguage(String),
-    /// Constructed in production by `DELETE /api/languages/{language}` (task
-    /// 9); this task's own test drives it through the real loop instead
+    /// Constructed by `DELETE /api/languages/{language}` (`update::routes::
+    /// language_remove_delete`, task 9); this task's own test also drives it
+    /// through the real loop
     /// (`job_remove_language_reaches_remove_language_through_the_worker_loop`).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "constructed by the HTTP routes task 9 adds")
-    )]
     RemoveLanguage(String),
 }
 
