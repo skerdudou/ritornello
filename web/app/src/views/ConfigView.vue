@@ -836,17 +836,40 @@ function stopLanguagePoll() {
 }
 
 /**
- * Whether `packs` already reflects `busy`'s outcome: installed (and, for an
- * update, replaced) for an install, gone — or merely no longer installed —
- * for a remove. `!row` covers the case where the removed language was not
- * offered by the release either: `language_pack_rows` (`status::locales`)
- * then has nothing left to say about it, and the row simply disappears
- * rather than reappearing with `installed: null`.
+ * Whether `packs` already reflects `busy`'s outcome.
+ *
+ * **Remove** keeps its own rule, unrelated to the install one below: the
+ * row is gone entirely — the language was not offered by the release
+ * either, so `language_pack_rows` (`status::locales`) has nothing left to
+ * say about it — or present with `installed: null`.
+ *
+ * **Install compares against the value `installed` held the moment the
+ * gesture started (`installedAtStart`), not against a fixed shape** (fix
+ * round 3 of the review: F4). `LanguagePacksRow`'s "Install" and "Update"
+ * both call `installLanguage`, i.e. both produce `busy.action === 'install'`
+ * — but a row only ever offers "Update" when `installed` is *already*
+ * non-null, so the round-2 rule (`row.installed !== null`) was satisfied on
+ * the very first read for an update, before the reinstall had landed: it
+ * was only ever correct for a fresh install, whose `installedAtStart` is
+ * `null`. "The value changed since the click" is the one rule that covers
+ * both without a special case — a fresh install moves from `null` to a
+ * version, an update moves from the old version to the new one.
+ *
+ * **A reinstall of the identical version can never satisfy this rule.**
+ * That is not a defect in the rule: it is an outcome this predicate cannot
+ * observe by construction (the row looks the same before and after), and
+ * the ceiling in `pollLanguageWhileBusy` is exactly the backstop for a
+ * gesture whose completion is unobservable this way — not a sign that
+ * something is broken when it fires for that case.
  */
-function languageGestureSettled(packs: LanguagePackRow[], busy: LanguageBusy): boolean {
+function languageGestureSettled(
+  packs: LanguagePackRow[],
+  busy: LanguageBusy,
+  installedAtStart: string | null,
+): boolean {
   const row = packs.find((p) => p.language === busy.language)
   if (busy.action === 'remove') return !row || row.installed === null
-  return !!row && row.installed !== null
+  return !!row && row.installed !== installedAtStart
 }
 
 /**
@@ -868,15 +891,23 @@ function languageGestureSettled(packs: LanguagePackRow[], busy: LanguageBusy): b
  * predicate this component can state precisely (`languageGestureSettled`),
  * is what proves the row is right, rather than hoping a signal built for a
  * different job shape happens to still be true.
+ *
+ * `installedAtStart` is read by the caller from `locale.value.packs` at the
+ * moment the gesture is enqueued, before anything here can have changed it
+ * — see `languageGestureSettled`'s own doc for why an install needs it and
+ * a remove does not.
  */
-function pollLanguageWhileBusy(busy: LanguageBusy) {
+function pollLanguageWhileBusy(busy: LanguageBusy, installedAtStart: string | null) {
   stopLanguagePoll()
   let attempts = 0
   languagePoll = setInterval(async () => {
     attempts += 1
     await refreshUpdate()
     locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
-    if (languageGestureSettled(locale.value.packs, busy) || attempts >= MAX_LANGUAGE_POLL_ATTEMPTS) {
+    if (
+      languageGestureSettled(locale.value.packs, busy, installedAtStart)
+      || attempts >= MAX_LANGUAGE_POLL_ATTEMPTS
+    ) {
       stopLanguagePoll()
       packBusy.value = null
     }
@@ -1026,10 +1057,17 @@ const packBusy = ref<LanguageBusy | null>(null)
  * what clears it now, once the row's own payload says the pack really
  * landed (or the poll's ceiling gives up). On a refusal, though, there is
  * nothing to wait for, so `packBusy` is released immediately, right here.
+ *
+ * **Captures `installedAtStart` before the request goes out** (fix round 3,
+ * F4): `languageGestureSettled` needs the value `installed` held at the
+ * moment of the click, not a fixed shape — a row already installed is
+ * exactly the "Update" case, and comparing against `null` would have
+ * declared it settled before the reinstall had even begun.
  */
 async function installLanguage(language: string) {
   if (packBusy.value) return
   const busy: LanguageBusy = { language, action: 'install' }
+  const installedAtStart = locale.value.packs.find((p) => p.language === language)?.installed ?? null
   packBusy.value = busy
   const err = await api.post(`/api/languages/${encodeURIComponent(language)}`, {})
   if (err) {
@@ -1038,7 +1076,7 @@ async function installLanguage(language: string) {
     return
   }
   toast.success(t.value('language_pack_installing', { language: languageName(language) }))
-  pollLanguageWhileBusy(busy)
+  pollLanguageWhileBusy(busy, installedAtStart)
   await loadAll()
 }
 
@@ -1084,7 +1122,9 @@ async function confirmRemoveLanguage() {
     return
   }
   toast.success(t.value('language_pack_removing', { language: languageName(language) }))
-  pollLanguageWhileBusy(busy)
+  // `null`: `languageGestureSettled`'s `remove` branch never reads this
+  // parameter, it only exists for the `install` branch (see its own doc).
+  pollLanguageWhileBusy(busy, null)
   await loadAll()
 }
 

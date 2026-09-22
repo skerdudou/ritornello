@@ -2133,6 +2133,44 @@ describe('ConfigView — language pack polling', () => {
     }
   })
 
+  // Fix round 3 (F4 of the review): `LanguagePacksRow`'s "Update" button
+  // calls the same `installLanguage` as "Install", producing the same
+  // `busy.action === 'install'` — but a row only ever offers Update when
+  // `installed` is already non-null, so a settling rule of plain
+  // `installed !== null` (round 2's own shape) was satisfied on the very
+  // first poll read, before the reinstall had landed at all. Nothing in
+  // the round-2 suite exercised `data-pack-update`, which is exactly how
+  // this got through: the two fresh-install/remove tests above cannot see
+  // a defect that only a row already installed can expose.
+  it('polls after an Update too, not settling until the version actually moves', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, table } = await mountView({
+        '/api/locale': localeWithPacks([{ language: 'es', installed: '0.2.0', offered: '0.2.1' }]),
+      })
+      await w.find('[data-pack-update="es"]').trigger('click')
+      await flushPromises()
+      // The row is already `installed: '0.2.0'` (that is what makes Update
+      // available at all) — the old rule would already call this settled.
+      expect(w.get('[data-pack-busy]').text()).toContain('Installation de')
+      expect(w.find('[data-pack-update="es"]').attributes('disabled')).toBeDefined()
+
+      // One tick where the table still reports the *old* version: the
+      // worker has not finished the reinstall yet. Must still be busy.
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.get('[data-pack-busy]').text()).toContain('Installation de')
+
+      // Now the version actually moves.
+      ;(table as Record<string, unknown>)['/api/locale'] =
+        localeWithPacks([{ language: 'es', installed: '0.2.1', offered: '0.2.1' }])
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.find('[data-pack-busy]').exists()).toBe(false)
+      expect(w.find('[data-pack-update="es"]').exists()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('polls after a removal too, using the same busy-row contract', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
