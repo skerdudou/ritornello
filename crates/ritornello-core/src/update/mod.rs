@@ -1322,7 +1322,17 @@ impl Worker {
             row.availability = match (&row.installed, &row.offered) {
                 (None, _) => Availability::NotInstalled,
                 (Some(i), Some(o)) if differs(Some(i.as_str()), o) => Availability::UpdateAvailable,
-                (Some(_), _) => Availability::Aligned,
+                (Some(_), Some(_)) => Availability::Aligned,
+                // Unreachable for a real pack row today: `component_offers`
+                // (`update::state`) only ever creates a language-pack row
+                // for a pack the release currently publishes, so `offered`
+                // is `Some` by construction wherever `mark_pack_row` finds
+                // one. Dead code, kept in step with that same function's
+                // own core row anyway (`None => Availability::Unknown`,
+                // fix round 1, item 5) rather than left to invent a second,
+                // different rule for the identical shape ("nothing to
+                // judge this against") elsewhere in the same module.
+                (Some(_), None) => Availability::Unknown,
             };
         }
     }

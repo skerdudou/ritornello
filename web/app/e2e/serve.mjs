@@ -46,6 +46,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
+import { get as httpGet } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
@@ -507,9 +508,30 @@ if (isWindows) {
   // this same node process, in its own process group's care (Playwright's
   // `webServer` teardown SIGKILLs the whole group, this one included —
   // see teardown.mjs's own comment on the non-Windows branch).
+  //
+  // Fix round 1, item 4: this used to have no failure handling at all, so
+  // a missing `python3` or a busy port 8098 surfaced only as the language-
+  // pack journey timing out at its own 25 s poll, forty-odd tests and a
+  // full minute later, with nothing pointing back here. `'error'` is what
+  // `spawn` emits for a launch failure proper (`ENOENT`, no `python3` on
+  // `PATH`); `'exit'` with a non-zero code is what a *launched* interpreter
+  // that then failed to bind (`OSError: [Errno 98] Address already in
+  // use`) looks like instead — `spawn` never emits `'error'` for that case,
+  // so both are needed to actually name the two distinct causes.
   spawn('python3', ['-m', 'http.server', String(FAKE_REPO_PORT), '--directory', fakeRepoDirNative], {
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
   })
+    .on('error', (e) => {
+      console.error(`[fake-repo] could not launch python3 (${e.message}) -- is it on PATH?`)
+    })
+    .on('exit', (code) => {
+      // `code === null` means a signal ended it -- teardown's own SIGKILL
+      // of this process's whole group, an ordinary end of run, not a
+      // failure worth naming.
+      if (code !== null && code !== 0) {
+        console.error(`[fake-repo] python3 -m http.server exited with code ${code} (port ${FAKE_REPO_PORT} already in use?)`)
+      }
+    })
   child = spawn(`${root}/target/debug/ritornello-core`, {
     stdio: 'inherit',
     // Same reason as the `export PATH` of the Windows branch: the fake
@@ -517,6 +539,45 @@ if (isWindows) {
     env: { ...process.env, ...env, PATH: `${fakeBinDir}:${process.env.PATH ?? ''}` },
   })
 }
+
+// A readiness check for the fake repository, so a missing `python3` or a
+// port already taken names itself in this process's own log within a few
+// seconds, rather than as the language-pack journey's own 25 s poll timing
+// out with nothing pointing back here (fix round 1, item 4). One check for
+// both platforms, since it asks the one thing that actually matters --
+// "does something answer on this port" -- rather than reproducing the
+// Windows branch's own reasoning about *why* nothing would: measured, a
+// port WSL is listening on **is** reachable from Windows at the same
+// `127.0.0.1` address (the always-on forwarding direction, the same one
+// that already lets this very process's browser reach the core's own
+// port 8099 — the *other* direction, Windows binding a port for WSL to
+// reach, is the one measured unreachable in this environment, which is
+// exactly why `python3` runs inside WSL in the first place; see
+// `testReleasesUrl`'s own comment above).
+function checkFakeRepoReady(deadlineMs) {
+  const startedAt = Date.now()
+  const attempt = () => {
+    const req = httpGet(`http://127.0.0.1:${FAKE_REPO_PORT}/releases.json`, (res) => {
+      res.resume()
+      if (res.statusCode !== 200) fail(`answered HTTP ${res.statusCode}`)
+    })
+    req.on('error', (e) => fail(e.message))
+  }
+  const fail = (reason) => {
+    if (Date.now() - startedAt < deadlineMs) {
+      setTimeout(attempt, 500)
+      return
+    }
+    console.error(
+      `[fake-repo] not reachable at 127.0.0.1:${FAKE_REPO_PORT} after ${deadlineMs}ms (${reason}). ` +
+        `Is python3 on PATH${isWindows ? ' inside WSL' : ''}? Is the port already in use? ` +
+        'The language-pack install journey (journey.spec.ts, last test) will otherwise ' +
+        'only time out at its own 25 s poll, naming nothing.',
+    )
+  }
+  attempt()
+}
+checkFakeRepoReady(15_000)
 
 // Safety net for the cases where this process really receives the signal
 // (e.g. Ctrl+C in development, outside Playwright's `taskkill /T /F`):

@@ -37,11 +37,28 @@ test('navigation between the home page, the config and the plugin pages', async 
   // Against the real `/api/update` this harness serves, not only the page:
   // `not.toHaveText('')` and a `toHaveText` pinned to the client's own
   // pre-fetch default would both stay green against a broken or 404
-  // endpoint — the SPA renders that default either way. The harness has no
-  // access to GitHub and never presses "Check" in this journey, so the
-  // server's own answer is deterministically `never_checked`.
+  // endpoint — the SPA renders that default either way. This holds only
+  // because nothing that runs before this line ever presses "Check": the
+  // one spec that does (`installing a language pack…`, this file's very
+  // last test) is deliberately placed after every other test in this file
+  // for exactly that reason — see its own doc comment. A future spec that
+  // pressed Check and sorted earlier than this one would turn this
+  // assertion red; the message below is what a reader meets instead of a
+  // puzzle. (Rejected the alternative of asserting "the card renders
+  // whatever `outcome` is" here instead of this fixed value: the client's
+  // own pre-fetch default is *also* `{ kind: 'never_checked' }`
+  // (`ConfigView.vue`'s initial `update` ref), so a summary that merely
+  // "is not empty" cannot tell a real, checked state from a fetch that
+  // silently failed and left the default showing — the exact failure mode
+  // this assertion exists to catch.)
   const updateState = await (await request.get('/api/update')).json()
-  expect(updateState.outcome).toEqual({ kind: 'never_checked' })
+  expect(
+    updateState.outcome,
+    'expected a fresh core to answer never_checked -- if this fired, a spec ' +
+      'sorting before this one in the run pressed "Check" first; see ' +
+      'journey.spec.ts\'s last test ("installing a language pack…"), the only ' +
+      'one that does, and why it must stay last',
+  ).toEqual({ kind: 'never_checked' })
   await expect(page.locator('[data-update-summary]')).toHaveText('Never checked')
   // The policy selector, with its hour, its cadence, and the button that
   // saves them — every added control on this card, not only the two that

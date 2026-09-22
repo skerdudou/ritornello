@@ -689,6 +689,63 @@ pub fn download_name(offer: &Offer) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// **The seam's safety, asserted rather than merely true.** Two facts
+    /// together are what keep `TEST_RELEASES_URL_ENV` off a shipped device:
+    /// the line that reads it is compiled only under
+    /// `#[cfg(debug_assertions)]` (so a release binary does not contain the
+    /// code that would read it at all), and nothing in this workspace ever
+    /// turns `debug_assertions` on inside a release profile, which would
+    /// defeat the first guarantee even with the attribute left untouched.
+    ///
+    /// Built from concatenated pieces, exactly like `langpack::archive`'s
+    /// own `the_pack_reader_and_the_component_reader_never_call_each_other`
+    /// (its own comment explains why): a search pattern spelled out whole
+    /// in this test's source would make this very line one of its own
+    /// matches, which `here.lines().position(...)` -- taking the *first*
+    /// line that contains it -- would then find *this test* rather than the
+    /// real seam were the two ever to collide.
+    #[test]
+    fn the_debug_only_seam_cannot_reach_a_release_build() {
+        let here = include_str!("release.rs");
+        let lines: Vec<&str> = here.lines().collect();
+        let read_pattern = ["std::env::var(", "TEST_RELEASES_URL_ENV", ")"].concat();
+        let read_line = lines.iter().position(|l| l.contains(&read_pattern)).expect(
+            "the seam's own read call must still exist, unchanged, for this guard to mean anything",
+        );
+        let guard_pattern = ["#[cfg(", "debug_assertions", ")]"].concat();
+        let guarded = lines[..read_line].iter().rev().take(3).any(|l| l.contains(&guard_pattern));
+        assert!(
+            guarded,
+            "the line reading {read_pattern:?} must be immediately preceded by {guard_pattern:?}, \
+             or a release build could read RITORNELLO_TEST_RELEASES_URL"
+        );
+
+        // The other half: a release *profile* that re-enables debug
+        // assertions would let a shipped `--release` binary read the seam
+        // even though the source line above stays correctly annotated —
+        // `#[cfg(debug_assertions)]` follows the *profile* setting, not the
+        // `--release`/`--debug` flag by name.
+        let workspace_toml = include_str!("../../../../Cargo.toml");
+        assert!(
+            !workspace_toml.contains("debug-assertions"),
+            "a [profile.release] debug-assertions key would defeat the seam's own guard"
+        );
+        // And the two places that actually build what ships must still ask
+        // for `--release` at all — a workspace with no release profile in
+        // sight but a build chain that quietly stopped using `--release`
+        // would make the first two checks vacuous.
+        let build_sh = include_str!("../../../../deploy/build.sh");
+        assert!(
+            build_sh.contains("cross build --release"),
+            "deploy/build.sh must still build the shipped artifact in release mode"
+        );
+        let ci_yml = include_str!("../../../../.github/workflows/ci.yml");
+        assert!(
+            ci_yml.contains("cross build --release"),
+            "ci.yml's release job must still build the shipped artifact in release mode"
+        );
+    }
+
     #[test]
     fn an_asset_name_yields_its_component_and_its_own_version() {
         assert_eq!(
@@ -1428,7 +1485,19 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
             releases_url_for("someone/their-plugin"),
             "https://api.github.com/repos/someone/their-plugin/releases?per_page=100"
         );
-        // And ours is the same function applied to the compile-time anchor.
-        assert_eq!(releases_url(), releases_url_for(REPO));
+        // And ours is the same function applied to the compile-time anchor
+        // -- checked against `releases_url_for(REPO)` directly, deliberately
+        // never through `releases_url()` itself (fix round 1, item 3):
+        // that wrapper reads `RITORNELLO_TEST_RELEASES_URL` when it is set
+        // (the debug-only e2e seam, see that constant's own doc), so a
+        // developer whose shell still carries it from an earlier e2e run
+        // would otherwise see this unrelated test fail for a reason it
+        // says nothing about. The property under test -- "ours takes the
+        // same path as a stranger's, just with a different argument" --
+        // does not need the wrapper at all to be checked.
+        assert_eq!(
+            releases_url_for(REPO),
+            "https://api.github.com/repos/skerdudou/ritornello/releases?per_page=100"
+        );
     }
 }
