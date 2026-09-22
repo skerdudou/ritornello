@@ -16,7 +16,9 @@ import { predictedThumbnailBytes } from '../composables/coverWeight'
 import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
-import type { AudioPayload, LanguageBusy, LocalePayload, SettingsPayload, UpdatePayload } from '../types'
+import type {
+  AudioPayload, LanguageBusy, LanguagePackRow, LocalePayload, SettingsPayload, UpdatePayload,
+} from '../types'
 
 const { t, reload } = useCatalog()
 // The plugin state comes from the module, not from a local `ref`: the top
@@ -813,6 +815,74 @@ function pollUpdateWhileBusy() {
   }, 2000)
 }
 
+/**
+ * Ceiling for `pollLanguageWhileBusy`, in ticks of its own 2 s interval — 20 s
+ * total. Not a measured worst case: a language pack is a small, text-only
+ * archive, and an ordinary install or removal settles in well under this.
+ * The ceiling exists so the poll cannot run forever if a job never reaches a
+ * terminal state at all (the worker restarting mid-job, say) — the same
+ * "no route may block, no page may wait on one" rule that gives the admin
+ * protocol its own 5 s deadline, applied here on the polling side instead.
+ */
+const MAX_LANGUAGE_POLL_ATTEMPTS = 10
+
+let languagePoll: ReturnType<typeof setInterval> | null = null
+
+function stopLanguagePoll() {
+  if (languagePoll !== null) {
+    clearInterval(languagePoll)
+    languagePoll = null
+  }
+}
+
+/**
+ * Whether `packs` already reflects `busy`'s outcome: installed (and, for an
+ * update, replaced) for an install, gone — or merely no longer installed —
+ * for a remove. `!row` covers the case where the removed language was not
+ * offered by the release either: `language_pack_rows` (`status::locales`)
+ * then has nothing left to say about it, and the row simply disappears
+ * rather than reappearing with `installed: null`.
+ */
+function languageGestureSettled(packs: LanguagePackRow[], busy: LanguageBusy): boolean {
+  const row = packs.find((p) => p.language === busy.language)
+  if (busy.action === 'remove') return !row || row.installed === null
+  return !!row && row.installed !== null
+}
+
+/**
+ * Refreshes `/api/locale` (and, for good measure, `/api/update`) until
+ * `LanguagePacksRow`'s own payload reflects what `busy` describes, or the
+ * ceiling above is reached — whichever comes first. Either way, `packBusy`
+ * clears here, not in `installLanguage`/`confirmRemoveLanguage`'s own
+ * `finally`: the row keeps showing the in-flight verb, and its buttons stay
+ * disabled, for the whole window the operator would otherwise see nothing
+ * happen in.
+ *
+ * **Why not just extend `pollUpdateWhileBusy`.** That poll stops on
+ * `!update.value.busy`, which does not track a language job the way it
+ * tracks a component install: `Job::RemoveLanguage` never calls `set_busy`
+ * at all (`remove_language`, `update/mod.rs`), and `Job::InstallLanguage`
+ * sets it only for the brief `check()` call ahead of the download — neither
+ * shape stays "busy" for as long as the pack actually takes to land or
+ * leave. Polling the payload this row actually reads, against a completion
+ * predicate this component can state precisely (`languageGestureSettled`),
+ * is what proves the row is right, rather than hoping a signal built for a
+ * different job shape happens to still be true.
+ */
+function pollLanguageWhileBusy(busy: LanguageBusy) {
+  stopLanguagePoll()
+  let attempts = 0
+  languagePoll = setInterval(async () => {
+    attempts += 1
+    await refreshUpdate()
+    locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
+    if (languageGestureSettled(locale.value.packs, busy) || attempts >= MAX_LANGUAGE_POLL_ATTEMPTS) {
+      stopLanguagePoll()
+      packBusy.value = null
+    }
+  }, 2000)
+}
+
 async function onUpdateCheck() {
   // `api.post` never rejects: a network failure comes back as the error
   // string, exactly like a refused check would.
@@ -938,7 +1008,7 @@ const packBusy = ref<LanguageBusy | null>(null)
  * reinstalls it over an already-installed one that carries an older
  * version — `POST /api/languages/{language}` does not distinguish the two
  * (task 9's own route doc), so `LanguagePacksRow`'s "Install" and "Update"
- * buttons both call this. Same poll-while-busy shape as `installPlugin`.
+ * buttons both call this.
  *
  * **Acknowledges success** (fix round 1, finding 2): the route answers 202
  * on enqueue only, so a message claiming the pack is installed would be
@@ -946,25 +1016,30 @@ const packBusy = ref<LanguageBusy | null>(null)
  * synchronous 204), but copying it here would claim a completion that has
  * not happened yet. Reusing `language_pack_installing` — the same sentence
  * `LanguagePacksRow` shows next to the busy row — states only what is true
- * at this point: the gesture was accepted and is under way. Without this,
- * a successful click produced no feedback at all beyond the row's own
- * (very brief) disabled state.
+ * at this point: the gesture was accepted and is under way.
+ *
+ * **`packBusy` outlives this function on the success path** (fix round 2,
+ * the reviewer's own follow-up on finding 2): it used to clear in a
+ * `finally` here, which released the row after the enqueue round trip alone
+ * — long before the worker had actually installed anything, and nothing
+ * afterwards ever told the row to look again. `pollLanguageWhileBusy` is
+ * what clears it now, once the row's own payload says the pack really
+ * landed (or the poll's ceiling gives up). On a refusal, though, there is
+ * nothing to wait for, so `packBusy` is released immediately, right here.
  */
 async function installLanguage(language: string) {
   if (packBusy.value) return
-  packBusy.value = { language, action: 'install' }
-  try {
-    const err = await api.post(`/api/languages/${encodeURIComponent(language)}`, {})
-    if (err) {
-      toast.error(err)
-      return
-    }
-    toast.success(t.value('language_pack_installing', { language: languageName(language) }))
-    pollUpdateWhileBusy()
-    await loadAll()
-  } finally {
+  const busy: LanguageBusy = { language, action: 'install' }
+  packBusy.value = busy
+  const err = await api.post(`/api/languages/${encodeURIComponent(language)}`, {})
+  if (err) {
+    toast.error(err)
     packBusy.value = null
+    return
   }
+  toast.success(t.value('language_pack_installing', { language: languageName(language) }))
+  pollLanguageWhileBusy(busy)
+  await loadAll()
 }
 
 /** Language a remove confirmation is open for, or `null` when the dialog is
@@ -984,29 +1059,33 @@ function askRemoveLanguage(language: string) {
 
 /**
  * Retires every pack installed for the confirmed language. Same
- * poll-while-busy shape as `installLanguage`, and the same confirmation
- * idiom as `confirmUninstall` — except for the success message, which
- * cannot honestly be `confirmUninstall`'s "OK": this route, like
- * `installLanguage`'s, only enqueues (202), it does not report the pack
- * gone. `language_pack_removing` says what is actually true right now.
+ * confirmation idiom as `confirmUninstall` — except for the success
+ * message, which cannot honestly be `confirmUninstall`'s "OK": this route,
+ * like `installLanguage`'s, only enqueues (202), it does not report the
+ * pack gone. `language_pack_removing` says what is actually true right now.
+ *
+ * **`packBusy` outlives this function on the success path**, exactly like
+ * `installLanguage` — see that function's own doc. `Job::RemoveLanguage`
+ * never even sets the server's own `busy` field (`remove_language`,
+ * `update/mod.rs`, calls no `set_busy`), which is precisely why
+ * `pollLanguageWhileBusy` watches this row's own payload instead of that
+ * signal.
  */
 async function confirmRemoveLanguage() {
   const language = removeLanguageTarget.value
   removeLanguageTarget.value = null
   if (!language || packBusy.value) return
-  packBusy.value = { language, action: 'remove' }
-  try {
-    const err = await api.del(`/api/languages/${encodeURIComponent(language)}`)
-    if (err) {
-      toast.error(err)
-      return
-    }
-    toast.success(t.value('language_pack_removing', { language: languageName(language) }))
-    pollUpdateWhileBusy()
-    await loadAll()
-  } finally {
+  const busy: LanguageBusy = { language, action: 'remove' }
+  packBusy.value = busy
+  const err = await api.del(`/api/languages/${encodeURIComponent(language)}`)
+  if (err) {
+    toast.error(err)
     packBusy.value = null
+    return
   }
+  toast.success(t.value('language_pack_removing', { language: languageName(language) }))
+  pollLanguageWhileBusy(busy)
+  await loadAll()
 }
 
 /**
@@ -1053,6 +1132,7 @@ onMounted(() => {
 onUnmounted(() => {
   observer?.disconnect()
   stopUpdatePoll()
+  stopLanguagePoll()
 })
 
 function goTo(id: string) {

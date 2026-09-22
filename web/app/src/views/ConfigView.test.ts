@@ -166,6 +166,27 @@ function payloads() {
 
 type Payloads = ReturnType<typeof payloads>
 
+/** `/api/locale` fixture for the language-pack gesture tests: same base
+ * shape `payloads()` itself uses (both languages complete, so
+ * `LanguageCard`'s own fallback control stays out of the way), `packs`
+ * overridden per call. Module-scoped so both the gesture tests and the
+ * polling tests below can build on it. */
+function localeWithPacks(
+  packs: Array<{ language: string; installed: string | null; offered: string | null }>,
+) {
+  return {
+    locales: ['en', 'fr'],
+    current: 'fr',
+    completeness: [
+      { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+      { language: 'fr', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+    ],
+    fallback_current: 'en',
+    fallback_candidates: ['en'],
+    packs,
+  }
+}
+
 // jsdom does not implement IntersectionObserver: the view needs it for the
 // scrollspy, so we replace it with a fake class that captures the callback,
 // letting the tests simulate sections entering/leaving the viewport.
@@ -887,26 +908,6 @@ describe('ConfigView — plugin table', () => {
 
 describe('ConfigView — language and display', () => {
   beforeEach(resetMocks)
-
-  /** `/api/locale` fixture for the language-pack gesture tests below: same
-   * base shape `payloads()` itself uses (both languages complete, so
-   * `LanguageCard`'s own fallback control stays out of the way), `packs`
-   * overridden per test. */
-  function localeWithPacks(
-    packs: Array<{ language: string; installed: string | null; offered: string | null }>,
-  ) {
-    return {
-      locales: ['en', 'fr'],
-      current: 'fr',
-      completeness: [
-        { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
-        { language: 'fr', complete: true, done: 1, total: 1, complete_modules: ['core'] },
-      ],
-      fallback_current: 'en',
-      fallback_candidates: ['en'],
-      packs,
-    }
-  }
 
   it('writes the settings before the locale, so a reload cannot erase them', async () => {
     // `PUT /api/locale` reloads the whole page state behind it. Sent first,
@@ -2027,6 +2028,151 @@ describe('ConfigView — update', () => {
 
     expect(w.get('[data-update-policy]').text()).toContain('off (en)')
     expect(w.get('[data-update-cadence]').text()).toContain('daily (en)')
+  })
+})
+
+// Fix round 2 of the review: after a language gesture is accepted, nothing
+// ever told the card to look at `/api/locale` again once the enqueue round
+// trip itself finished — `pollUpdateWhileBusy` does not help here, because
+// `Job::RemoveLanguage` never sets the server's `busy` field at all, and
+// `Job::InstallLanguage` only sets it for the brief `check()` ahead of the
+// download. So the row could keep offering "Install" long after the worker
+// had actually finished. `pollLanguageWhileBusy` closes that: it watches
+// `/api/locale` itself against a completion predicate for the specific
+// gesture in flight, bounded by a hard ceiling either way. Same `table`
+// mutation trick as the update-poll tests above.
+describe('ConfigView — language pack polling', () => {
+  beforeEach(resetMocks)
+
+  it('keeps the row busy and disabled, then updates it once the pack has actually landed', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, table } = await mountView({
+        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+      })
+      await w.find('[data-pack-install="de"]').trigger('click')
+      await flushPromises()
+      // Right after the enqueue: the worker has not touched the pack yet,
+      // so `/api/locale` (read once by `loadAll`) still shows it
+      // uninstalled — but the row must not look idle, or the operator has
+      // no idea anything is happening.
+      expect(w.find('[data-pack-install="de"]').attributes('disabled')).toBeDefined()
+      expect(w.get('[data-pack-busy]').text()).toContain('Installation de')
+
+      // The worker catches up one tick later.
+      ;(table as Record<string, unknown>)['/api/locale'] =
+        localeWithPacks([{ language: 'de', installed: '0.2.1', offered: '0.2.1' }])
+      await vi.advanceTimersByTimeAsync(2000)
+
+      expect(w.find('[data-pack-busy]').exists()).toBe(false)
+      expect(w.find('[data-pack-install="de"]').exists()).toBe(false)
+      expect(w.get('[data-pack-remove="de"]').attributes('disabled')).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops polling on its own once the row settles, proven by silence afterwards', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, spy, table } = await mountView({
+        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+      })
+      await w.find('[data-pack-install="de"]').trigger('click')
+      await flushPromises()
+      // Still busy right after the click: a mutant that clears `packBusy`
+      // as soon as the enqueue resolves (round 1's own shape, before this
+      // fix) would already have nothing left to settle here, and the
+      // "silence afterwards" proof below would hold vacuously.
+      expect(w.get('[data-pack-busy]').text()).toContain('Installation de')
+      const callsRightAfterClick = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
+
+      ;(table as Record<string, unknown>)['/api/locale'] =
+        localeWithPacks([{ language: 'de', installed: '0.2.1', offered: '0.2.1' }])
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.find('[data-pack-busy]').exists()).toBe(false)
+      const callsAfterSettle = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
+      // The row went from busy to settled only because the poll actually
+      // asked again and saw the change — not because it was never busy to
+      // begin with.
+      expect(callsAfterSettle).toBeGreaterThan(callsRightAfterClick)
+
+      // Proof the poll actually stopped rather than merely reading the
+      // settled state once: no further `/api/locale` GET after ten more
+      // seconds, well past a single interval.
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(spy.mock.calls.filter((c) => c[0] === '/api/locale').length).toBe(callsAfterSettle)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('gives up at its own ceiling if the pack never appears installed, releasing the row', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      // `table['/api/locale']` never changes: the job never lands, from
+      // this page's point of view.
+      const { w, spy } = await mountView({
+        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+      })
+      await w.find('[data-pack-install="de"]').trigger('click')
+      await flushPromises()
+      expect(w.get('[data-pack-busy]').text()).toContain('Installation de')
+
+      // Ten ticks at 2 s (the poll's own ceiling) — bounded, not indefinite.
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(w.find('[data-pack-busy]').exists()).toBe(false)
+      expect(w.find('[data-pack-install="de"]').attributes('disabled')).toBeUndefined()
+      const callsAtCeiling = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
+
+      // And it really has stopped, not merely gone quiet for one interval.
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(spy.mock.calls.filter((c) => c[0] === '/api/locale').length).toBe(callsAtCeiling)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('polls after a removal too, using the same busy-row contract', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, table } = await mountView({
+        '/api/locale': localeWithPacks([{ language: 'fr', installed: '0.2.1', offered: '0.2.1' }]),
+      })
+      await w.find('[data-pack-remove="fr"]').trigger('click')
+      await flushPromises()
+      ;(document.body.querySelector('[data-language-pack-remove-confirm]') as HTMLElement).click()
+      await flushPromises()
+      expect(w.get('[data-pack-busy]').text()).toContain('Retrait de')
+
+      // The pack is gone, and no longer offered either: `language_pack_rows`
+      // then has nothing left to say about it, so the row itself disappears
+      // — not `installed: null`, which `localeWithPacks`'s own filter would
+      // still render as an install offer.
+      ;(table as Record<string, unknown>)['/api/locale'] = localeWithPacks([])
+      await vi.advanceTimersByTimeAsync(2000)
+
+      expect(w.find('[data-language-packs]').exists()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops polling when the view unmounts', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, spy } = await mountView({
+        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+      })
+      await w.find('[data-pack-install="de"]').trigger('click')
+      await flushPromises()
+      w.unmount()
+      const before = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(spy.mock.calls.filter((c) => c[0] === '/api/locale').length).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
