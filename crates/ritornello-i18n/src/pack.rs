@@ -122,12 +122,19 @@ pub fn valid_pack_name(s: &str) -> bool {
 /// letter can be expressed however wide the rest of the alphabet gets.
 ///
 /// Two consequences a maintainer needs, not caveats:
-/// - It admits ids `pack_id` itself never produces (`fr`, `A1_2-3`, `____`).
-///   A directory an operator places by hand under the packs root is listed
-///   by `inventory` under whatever bare name it has, with no
-///   `ritornello-lang-` prefix required. **This is deliberate.** Tightening
-///   this predicate to require that prefix would silently stop every
-///   hand-placed pack from ever being seen again.
+/// - This predicate alone admits ids `pack_id` itself never produces (`fr`,
+///   `A1_2-3`, `____`), including ones with no `ritornello-lang-` prefix at
+///   all. It answers only "is this shape safe to join onto a path" -- the
+///   security boundary `pack_dir` needs -- and nothing here blesses an
+///   arbitrary bare name as one `inventory` will actually list: `inventory`
+///   additionally requires the directory's name to equal `pack_id` of the
+///   language its own `pack.toml` declares, and skips (with a warning) any
+///   directory that passes this predicate but fails that one. A directory
+///   an operator places by hand under a name other than its own pack's id
+///   -- `french/` declaring `language = "fr"` -- is exactly that case: it is
+///   never listed, because a row it produced under its own bare name could
+///   never be removed again (`store::remove` looks up a directory by the
+///   row's id, not by whatever name it happened to be found under).
 /// - The rule is case-sensitive: `pt-BR` and `pt-br` are two distinct
 ///   directories on the target filesystem, not the same pack spelled two
 ///   ways.

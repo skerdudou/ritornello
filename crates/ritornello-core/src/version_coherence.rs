@@ -361,6 +361,58 @@ mod tests {
         }
     }
 
+    /// **F2 of the whole-branch review.** No declared language may be a
+    /// `-`-prefix of another declared language: the `publish` job of
+    /// `.github/workflows/ci.yml` keeps each changed component's archive
+    /// with `mv assets/"$c"-*.tar.gz keep/`, one `mv` per name
+    /// `changed-components.sh` printed. With `pt` and `pt-BR` both
+    /// declared and both changed, the `mv` for `pt` also matches
+    /// `pt-BR`'s archive (its glob is `pt-*.tar.gz`, and
+    /// `ritornello-lang-pt-BR-0.2.1.tar.gz` fits that shape), so the first
+    /// `mv` silently takes both files and the second one fails `cannot
+    /// stat` -- under the Actions default shell
+    /// (`bash --noprofile --norc -eo pipefail`) that failure exits the
+    /// step, and if only `pt` had been the one actually needing
+    /// publication, `pt-BR`'s unchanged archive would have been quietly
+    /// republished under its old number, never fetched by a device.
+    ///
+    /// Dormant today -- exactly one language is declared -- which is
+    /// exactly why this guard exists rather than waiting to be found the
+    /// day a second, related language ships: none of the three guards this
+    /// chantier added can see it, because each checks one language against
+    /// itself.
+    ///
+    /// **Not anchored on a digit.** A first version of this rule tried
+    /// "language, then a dash, then a digit", on the theory that a version
+    /// suffix is what actually collides with the glob. `es-419` is a real
+    /// BCP 47 language tag with no dash-prefix relationship to `es` at
+    /// all, and it would pass that anchor by coincidence (`4` is a digit)
+    /// while meaning something completely different -- the exact shape of
+    /// mistake this project has already paid for once by inferring a
+    /// field instead of asserting the rule it actually means: "no declared
+    /// language is a longer declared language's own stem".
+    #[test]
+    fn no_declared_language_is_a_dash_prefix_of_another() {
+        let declared: Vec<String> = declared_packs().into_iter().map(|(l, _)| l).collect();
+        for a in &declared {
+            for b in &declared {
+                if a == b {
+                    continue;
+                }
+                assert!(
+                    !b.starts_with(&format!("{a}-")),
+                    "declared languages [{a}] and [{b}]: the publish job's \
+                     `mv assets/\"$c\"-*.tar.gz keep/` for [{a}] also matches \
+                     [{b}]'s archive ([{b}] starts with \"{a}-\"), so keeping \
+                     [{a}] then [{b}] fails the second mv, and keeping only \
+                     [{a}] would republish [{b}]'s unchanged archive under its \
+                     old number without a word -- see the publish job of \
+                     .github/workflows/ci.yml"
+                );
+            }
+        }
+    }
+
     /// The same generation rule, in the other language that enforces it.
     ///
     /// `scripts/package-release.sh` names every archive of a release and

@@ -696,6 +696,12 @@ mod tests {
     /// code that would read it at all), and nothing in this workspace ever
     /// turns `debug_assertions` on inside a release profile, which would
     /// defeat the first guarantee even with the attribute left untouched.
+    /// The second fact is checked in three places a `[profile.release]`
+    /// override could hide: `Cargo.toml` itself, `.cargo/config.toml` (which
+    /// cargo merges the same way), and `Cross.toml` (which can pass the same
+    /// override through to the cross-compiled release build) — the last two
+    /// read at runtime rather than `include_str!`ed, since neither exists in
+    /// this workspace today.
     ///
     /// Built from concatenated pieces, exactly like `langpack::archive`'s
     /// own `the_pack_reader_and_the_component_reader_never_call_each_other`
@@ -730,6 +736,31 @@ mod tests {
             !workspace_toml.contains("debug-assertions"),
             "a [profile.release] debug-assertions key would defeat the seam's own guard"
         );
+        // The same override could also live outside `Cargo.toml`: cargo
+        // merges a `[profile.release]` table found in `.cargo/config.toml`
+        // exactly as if it were written here, and `Cross.toml` can pass
+        // arbitrary environment or cargo flags through to the `cross build
+        // --release` invocation `deploy/build.sh` and `ci.yml` both run.
+        // Neither file exists in this workspace today, which is exactly why
+        // `include_str!` is the wrong tool for them: it refuses to compile
+        // the moment either is absent, so a copy of the check above pointed
+        // at them would have to be written (and deleted, and rewritten) in
+        // lockstep with whether the file happens to exist -- easy to forget
+        // the day one is added for an unrelated reason. A runtime read has
+        // no such day: an absent file reads as `""`, `"".contains(..)` is
+        // `false`, and the assertion holds the same way it does for a
+        // workspace with no override at all, while a file that exists and
+        // does carry the key still reddens this test.
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [".cargo/config.toml", "Cross.toml"] {
+            let text = std::fs::read_to_string(repo_root.join(relative)).unwrap_or_default();
+            assert!(
+                !text.contains("debug-assertions"),
+                "{relative} must not re-enable debug assertions in a release profile -- \
+                 it would defeat the seam's own guard the same way a [profile.release] \
+                 key written directly in Cargo.toml would"
+            );
+        }
         // And the two places that actually build what ships must still ask
         // for `--release` at all — a workspace with no release profile in
         // sight but a build chain that quietly stopped using `--release`

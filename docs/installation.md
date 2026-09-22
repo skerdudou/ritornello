@@ -147,7 +147,10 @@ release where it last changed, and that is where the device installs or
 repairs it from.
 
 **This is an upgrade path, not a fresh install.** The archives carry
-binaries, units, polkit rules and language packs — nothing else. They do not
+binaries, units and polkit rules — nothing else. A language pack is never
+part of a component's archive; see [Installing a language
+pack](#installing-a-language-pack) below for that archive's own shape. They
+do not
 create the `ritornello` system user, install `mpv`/`cd-discid`/`eject`/
 `cifs-utils`, create `/var/lib/ritornello`, `/mnt/ritornello` or
 `/etc/ritornello/media-credentials`, nor enable any unit. Extracting them
@@ -195,9 +198,41 @@ shares](#network-shares)). `deploy.sh` does this for you; an archive cannot,
 so a `files` plugin installed from a release and never enabled this way stops
 reconciling shares at the next reboot, in silence.
 
+### Installing a language pack
+
+Not by the recipe above. A language pack's archive is **flat** —
+`pack.toml` plus one `<module>.toml` per plugin it covers, no leading
+path at all — because it is meant to be read by the core's own pack
+reader (`crates/ritornello-core/src/langpack/archive.rs`), never
+extracted directly onto a device. Running the same
+`sudo tar --no-same-owner -C / -xzf ritornello-lang-<language>-<version>.tar.gz`
+against it drops `pack.toml` and every module file straight into `/`,
+which is not a mistake this project's own tooling ever makes and not one
+this recipe should invite either.
+
+The ordinary way to install one is from the config page, where the core
+fetches, verifies and writes it itself — no privileged step at all (see
+[interface.md](interface.md)). A device with no French installed simply
+reads its interface in English until that gesture is made, which is the
+correct and unremarkable state of a fresh install, not a fault to chase.
+
+Installed by hand instead — for a device with no network path to
+GitHub — a pack extracts into its own directory under
+`/etc/ritornello/language-packs/ritornello-lang-<language>/`, replacing
+whatever was there, and **never at `/`**:
+
+    sudo mkdir -p /etc/ritornello/language-packs/ritornello-lang-<language>
+    sudo tar --no-same-owner -C /etc/ritornello/language-packs/ritornello-lang-<language> \
+      -xzf ritornello-lang-<language>-<version>.tar.gz
+    sudo chown -R ritornello: /etc/ritornello/language-packs/ritornello-lang-<language>
+
+The core picks it up at its next sweep of that directory (a restart, or
+the same resweep an install or removal from the page already triggers);
+nothing needs to be declared anywhere else for it.
+
 ### Enabling automatic updates (once, by hand)
 
-An update can replace binaries and locale catalogs. It can never write a
+An update can replace binaries. It can never write a
 systemd unit or a polkit rule — that is what stops a forged archive from
 gaining root, and it is why this feature's own installation is manual.
 
@@ -234,7 +269,7 @@ Without the `OnFailure=` line everything works and there is no safety net.
 
 **Why a blind `sudo tar -C /` cannot clobber a configuration.** Each
 archive's tree holds files only at the exact path they occupy on the
-device — the binary, its systemd unit, its polkit rule, its language packs —
+device — the binary, its systemd unit, its polkit rule —
 and never `stations.toml`, `input-bindings.toml` or `plugins.toml`, the
 three files that hold what an operator produced (stations added from the
 browser, bindings learned, which plugins to launch). Those are structurally
@@ -401,6 +436,51 @@ when the file is absent** — a first installation needs no manual copy,
 and a file that exists is **never overwritten**, whatever it contains.
 Those two hold what you produced (stations added from the browser,
 learned bindings), so nothing may complete them.
+
+### Migrating a hand-deployed device's locales
+
+Before this chantier, this same section of `deploy.sh` copied
+`deploy/locales/` in whole into `/etc/ritornello/locales` on every
+deployment. A device deployed by hand at any point before this branch
+therefore carries `/etc/ritornello/locales/<module>/fr.toml` files written
+by that old script — real files, on disk, right now, on every device this
+project has ever deployed to by hand.
+
+That root is the **operator's own** layer, and `Registry::sources_for`
+resolves it *before* any installed language pack (own-disk beats
+own-announced beats common-disk, and every one of those beats a pack —
+see `crates/ritornello-core/src/i18n/registry.rs`). It outranks a pack on
+purpose: a file placed there by hand is assumed to be a deliberate
+override that must survive a pack update. The old `deploy.sh` never asked
+for that; it only ever wrote the project's own French text, indistinguishable
+from a pack's own copy of the same text.
+
+The consequence: on such a device, installing or updating the French pack
+changes nothing for a key the old copy already carries — that stale file
+keeps answering first, forever, and only a key the old copy never had
+falls through to the pack. Over releases the two drift apart one key at a
+time, into a French that is neither entirely the old copy nor entirely
+the new pack.
+
+**Nothing in this project moves or deletes those files for you, and
+nothing here will.** That decision belongs to whoever owns the device, and
+it is a real decision, not a formality:
+
+- if `/etc/ritornello/locales/<module>/fr.toml` is only ever a copy of
+  this project's own text — the ordinary case for a device that never had
+  a reason to hand-edit a translation — move it aside (or remove it) so
+  the installed pack takes over, the same text resolved through the
+  mechanism this chantier built rather than through a file nothing
+  updates any more;
+- if it carries a wording changed on purpose, keep it — that is exactly
+  what the operator layer is *for* — knowing that it now permanently
+  shadows the pack for the keys it declares, including future ones the
+  pack gains that this file does not.
+
+`deploy.sh` itself no longer writes into this root at all: it creates it
+if absent and otherwise leaves it strictly alone (see the comment beside
+`mkdir -p /etc/ritornello/locales` in the script). This paragraph is the
+only place that migration is explained; nothing in the code performs it.
 
 `plugins.toml` is the exception, because it holds no such thing: it lists
 which of the binaries just installed the core is to launch. It is
@@ -801,6 +881,15 @@ writing it, resweeping the registry and removing it are all covered by
 tests that fake the network and use a temporary directory; none has run on
 a Pi, and the pack job of the release workflow has never run at all — like
 the rest of that workflow.
+
+**The hand-deployed locales migration described under [Migrating a
+hand-deployed device's locales](#migrating-a-hand-deployed-devices-locales)
+has not been performed or tested on any device.** No device has actually
+had `/etc/ritornello/locales/<module>/fr.toml` files moved aside, kept on
+purpose, or observed drifting against an installed pack over releases —
+the paragraph states what a device carries and what the operator layer's
+own resolution order means for it, from reading the code and the old
+`deploy.sh`, not from watching it happen.
 
 **Known edges and debts in the code, recorded here rather than fixed or
 dressed up as design:**

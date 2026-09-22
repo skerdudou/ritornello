@@ -167,6 +167,27 @@ pub fn inventory(root: &Path) -> Vec<InstalledPack> {
                 continue;
             }
         };
+        // The directory must be named after the language its own manifest
+        // declares -- `pack_id(manifest.language)` -- and not merely be some
+        // bare name `valid_pack_id` happens to accept. Without this, a
+        // hand-placed directory under a different name (`french/` declaring
+        // `language = "fr"`) is listed as a second row for a language the
+        // release's own pack already covers, and pressing Remove on it
+        // reaches `store::remove(root, &that_row_id)`, which looks up a
+        // directory named after the *row's* id -- not this one -- so it
+        // answers `Ok(false)` and nothing happens: a row nobody can ever
+        // clear from the page. `docs/interface.md` documents the id-named
+        // convention for what an install writes; this is that same
+        // convention enforced for what the sweep reads back.
+        let expected_id = pack_id(&manifest.language);
+        if id != expected_id {
+            tracing::warn!(
+                "language pack directory {id:?} ignored: its pack.toml declares \
+                 language {:?}, whose directory should be named {expected_id:?}",
+                manifest.language
+            );
+            continue;
+        }
         let mut files = Vec::with_capacity(manifest.modules.len());
         for module in &manifest.modules {
             match std::fs::read(dir.join(format!("{module}.toml"))) {
@@ -216,6 +237,28 @@ mod tests {
         assert_eq!(found[0].id, "ritornello-lang-fr");
         assert_eq!(found[0].manifest.version, "0.2.0-beta.2");
         assert_eq!(found[0].layers[0].1.get("standby"), Some("VEILLE"));
+    }
+
+    /// **F6 of the whole-branch review.** A directory hand-placed under a
+    /// name that is not `pack_id` of its own declared language is skipped,
+    /// not listed under its own bare name: before this test, `inventory`
+    /// only checked `valid_pack_id` (a shape check, not an identity check),
+    /// so `french/` declaring `language = "fr"` was listed as `french`,
+    /// producing a second row for a language `ritornello-lang-fr` already
+    /// covers -- and `store::remove(root, "french")` (what pressing Remove
+    /// on that row would call) never matches the directory `store::remove`
+    /// looks for when it is instead asked for `ritornello-lang-fr`, so
+    /// nothing on the page could ever clear it.
+    #[test]
+    fn a_directory_named_for_something_other_than_its_own_language_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        install(dir.path(), &pack_id("fr"), &contents("fr", &[("core", "k = \"v\"\n")])).unwrap();
+        // A second, hand-placed directory: same language, wrong name.
+        std::fs::rename(dir.path().join("ritornello-lang-fr"), dir.path().join("french")).unwrap();
+
+        let found = inventory(dir.path());
+
+        assert!(found.is_empty(), "a directory misnamed for its own declared language must not be listed at all: {found:?}");
     }
 
     /// Reinstalling replaces, and leaves nothing of the previous version

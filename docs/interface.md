@@ -1500,7 +1500,14 @@ that are never the same directory and that never write into each other:
   wholesale by every install and never merged
   (`crates/ritornello-core/src/langpack/store.rs::install`), configurable
   through `RITORNELLO_LANGUAGE_PACKS` (default
-  `/etc/ritornello/language-packs`).
+  `/etc/ritornello/language-packs`). The sweep (`inventory`) enforces the
+  same naming: a directory whose name is not exactly `pack_id` of its own
+  `pack.toml`'s declared language is skipped and logged, never listed. A
+  hand-placed directory under any other name — `french/` declaring
+  `language = "fr"`, say — would otherwise produce a second row for a
+  language the release's own pack already covers, one that no Remove
+  button can ever act on (`store::remove` looks the directory up by the
+  same id it should have been named).
 - Both roots are swept by the same registry, and the operator's own layer
   resolves **first** — see the resolution chain below.
 - **The resolution chain, per key: chosen language → the device's

@@ -2,6 +2,7 @@ import { api, Select, SelectItem, toast } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
+import type { LocalePayload } from '../types'
 
 // Same approach as `useTheme.test.ts`: we keep the real module (components,
 // `api`, ...) and replace only the two `toast` entries this view uses, so we
@@ -140,7 +141,17 @@ function payloads() {
       fallback_current: 'en',
       fallback_candidates: ['en'],
       packs: [],
-    } as unknown,
+      // `as LocalePayload`, not `as unknown`: fix round 2, "a deferred minor
+      // promoted" of the whole-branch review. `as unknown` hid this fixture
+      // from `npm run typecheck` entirely, so a newly required field on
+      // `LocalePayload` would compile here and crash at runtime — exactly
+      // what happened once already during this delivery. Widening to the
+      // real interface (rather than `satisfies`, which would have kept
+      // `complete` narrowed to the literal `true` this fixture happens to
+      // write, and then refused every override in this file that legitimately
+      // sets it `false`) is what every `/api/locale` override below is
+      // actually checked against, through `Partial<Payloads>`.
+    } as LocalePayload,
     '/api/logs': { lines: ['WARN plugin radio unavailable'] } as unknown,
     '/api/settings': {
       volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
@@ -173,7 +184,7 @@ type Payloads = ReturnType<typeof payloads>
  * polling tests below can build on it. */
 function localeWithPacks(
   packs: Array<{ language: string; installed: string | null; offered: string | null }>,
-) {
+): LocalePayload {
   return {
     locales: ['en', 'fr'],
     current: 'fr',

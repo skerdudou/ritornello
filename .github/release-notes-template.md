@@ -110,6 +110,21 @@ Enabled, **not** started: what it is enabled for is machine boot, where it
 reconciles the declared network shares. Skip it and declared shares silently
 stop being mounted after a reboot.
 
+A language pack (`ritornello-lang-<language>-<version>.tar.gz`) is not part
+of the recipe above, and not part of any component's archive either. It is
+**flat** — `pack.toml` plus one file per plugin it covers, no leading
+path — so the `tar -C /` above must never be run against it: doing so drops
+those files straight into `/`. Install one from the config page, where the
+core fetches, verifies and writes it itself with no privileged step at all;
+or, by hand, extract it into its own directory:
+
+```sh
+sudo mkdir -p /etc/ritornello/language-packs/ritornello-lang-<language>
+sudo tar --no-same-owner -C /etc/ritornello/language-packs/ritornello-lang-<language> \
+  -xzf ritornello-lang-<language>-<version>.tar.gz
+sudo chown -R ritornello: /etc/ritornello/language-packs/ritornello-lang-<language>
+```
+
 ## What this release carries
 
 This release carries the components whose own version moved since the

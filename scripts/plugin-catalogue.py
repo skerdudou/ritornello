@@ -49,9 +49,11 @@ def french_description(name: str) -> str | None:
 
     `None` for a plugin with no pack at all (four of them: console,
     nrj-metas, ouifm-metas, radiofrance-metas -- a normal state, not an
-    error, asserted by `a_plugin_without_locales_is_normal`), and equally
-    `None` for a pack that exists but does not carry that key yet: either
-    way the caller falls back to the English text from Cargo.toml.
+    error, asserted by
+    `shipped_language_packs_of_an_absent_module_directory_is_empty` in
+    `crates/ritornello-i18n/src/layer.rs`), and equally `None` for a pack
+    that exists but does not carry that key yet: either way the caller
+    falls back to the English text from Cargo.toml.
     """
     pack = ROOT / "deploy" / "locales" / name / "fr.toml"
     if not pack.exists():
