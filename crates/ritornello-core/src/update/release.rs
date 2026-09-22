@@ -41,6 +41,22 @@ pub const ARCH: &str = if cfg!(target_arch = "arm") {
     "x86_64"
 };
 
+/// The closed set of architecture labels an archive name may carry — every
+/// value `ARCH` can ever be, on any device, not only this one's own.
+///
+/// A language pack carries **none** of them: it is text, not a binary, so no
+/// name it can legitimately take ends in one of these labels. That is what
+/// makes this set device-independent where `ARCH` alone is not — the same
+/// archive name must classify identically whichever device reads it, since
+/// this whole delivery scheme rests on every device seeing the same
+/// catalogue (`differs` compares by equality, never by order, for the same
+/// reason). A guard written against `ARCH` alone would refuse
+/// `ritornello-lang-fr-0.2.1-arm64.tar.gz` only on an `arm64` device and
+/// silently accept it as a pack named "fr" at version "0.2.1-arm64" on an
+/// `armv7` one — a name-dependent rule turned into a device-dependent one,
+/// which produces a bug report nobody else can reproduce.
+pub const ARCHES: [&str; 3] = ["armv7", "arm64", "x86_64"];
+
 /// GitHub requires a User-Agent and answers 403 without one. Same convention
 /// as the six other outbound clients in this repository.
 pub const USER_AGENT: &str = concat!(
@@ -540,15 +556,22 @@ pub fn classify_asset(name: &str, arch: &str) -> Option<(Offer, String)> {
                 || language.starts_with('-')
                 || !is_version(version)
                 // A pack carries no architecture at all, so a version-shaped
-                // string that itself ends in this device's own arch label is
-                // not one a pack archive can legitimately produce -- almost
-                // certainly a name that meant to carry an architecture the
-                // way a plugin's does, on a component that has none.
-                // `is_version` alone cannot catch this: "armv7" is, by
-                // shape, indistinguishable from a genuine single-word
-                // prerelease identifier, so the version-only grammar would
-                // otherwise accept `0.2.1-armv7` as a whole, valid version.
-                || version.ends_with(&format!("-{arch}"))
+                // string that itself ends in ANY of the closed set of arch
+                // labels an archive name can carry (`ARCHES`) is not one a
+                // pack archive can legitimately produce -- almost certainly
+                // a name that meant to carry an architecture the way a
+                // plugin's does, on a component that has none. `is_version`
+                // alone cannot catch this: "armv7" is, by shape,
+                // indistinguishable from a genuine single-word prerelease
+                // identifier, so the version-only grammar would otherwise
+                // accept `0.2.1-armv7` as a whole, valid version.
+                //
+                // Checked against the whole closed set, not just this
+                // call's own `arch`: the name must classify the same way on
+                // every device, and a guard scoped to the caller's own
+                // architecture would let a name refused here slip through
+                // as a pack on a device running a different one.
+                || ARCHES.iter().any(|label| version.ends_with(&format!("-{label}")))
             {
                 continue;
             }
@@ -777,6 +800,14 @@ mod tests {
     fn a_malformed_language_pack_asset_is_not_classified() {
         for name in [
             "ritornello-lang--0.2.1.tar.gz",
+            // A lone dash as the language, reached on the loop's SECOND
+            // dash rather than its first: `language.starts_with('-')` is
+            // what refuses it. Fix round 1's review measured that this
+            // clause held no test of its own -- mutating it to `false` left
+            // the whole `update::` suite green, twice -- because every
+            // other malformed name above is already excluded earlier by
+            // `language.is_empty()` before this guard is ever reached.
+            "ritornello-lang---0.2.1.tar.gz",
             "ritornello-lang-fr.tar.gz",
             "ritornello-lang-fr-armv7.tar.gz",
             "ritornello-lang-0.2.1.tar.gz",
@@ -784,6 +815,28 @@ mod tests {
         ] {
             assert_eq!(classify_asset(name, "armv7"), None, "{name}");
         }
+    }
+
+    /// **Device-independent, not caller-arch-dependent.** The same archive
+    /// name must classify identically whichever device reads it -- an
+    /// `arm64` label in the name is refused even when the *caller* is
+    /// `armv7`, because the guard checks the name against the whole closed
+    /// set `ARCHES`, not against this one call's own `arch` parameter. Fix
+    /// round 1's review named the failure mode a caller-scoped guard would
+    /// produce: the same bytes accepted as a pack on one device and refused
+    /// on another, which nothing could ever reproduce from a bug report.
+    #[test]
+    fn a_language_pack_asset_is_refused_for_any_arch_label_not_only_the_callers() {
+        assert_eq!(classify_asset("ritornello-lang-fr-0.2.1-arm64.tar.gz", "armv7"), None);
+        assert_eq!(classify_asset("ritornello-lang-fr-0.2.1-x86_64.tar.gz", "arm64"), None);
+    }
+
+    /// The drift guard: `ARCHES` is a second statement of the labels `ARCH`
+    /// can ever take, so nothing keeps the two in step but a test that reads
+    /// both.
+    #[test]
+    fn arch_is_always_one_of_the_labels_arches_names() {
+        assert!(ARCHES.contains(&ARCH));
     }
 
     fn body(releases: &str) -> String {

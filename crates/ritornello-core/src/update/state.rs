@@ -643,7 +643,15 @@ mod tests {
         assert_eq!(row.availability, Availability::UpdateAvailable);
     }
 
-    /// Equality, never order -- the rule the whole delivery scheme rests on.
+    /// A pack row reaches `Aligned` through the same shared `differs` every
+    /// other component goes through -- installed and offered happen to be
+    /// the same string here, so this test alone cannot tell equality from
+    /// ordering (fix round 1's review measured that mutating `differs` to
+    /// an ordering comparison leaves it green). The property that the
+    /// comparison really is equality, never order, is
+    /// `release::tests::alignment_is_what_is_compared_not_ordering`, which
+    /// exercises `differs` directly with values where the two would answer
+    /// differently; that is the test to read for it.
     #[test]
     fn an_installed_pack_at_the_offered_version_is_aligned() {
         let published = vec![pack_published("fr", "0.2.1")];
