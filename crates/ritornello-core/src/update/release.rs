@@ -547,8 +547,9 @@ pub fn classify_asset(name: &str, arch: &str) -> Option<(Offer, String)> {
     // **Before the arch suffix is stripped, deliberately.** A pack name
     // carries none, so the strip below would answer `None` for it and this
     // branch would never be reached.
-    if let Some(rest) =
-        name.strip_suffix(".tar.gz").and_then(|s| s.strip_prefix("ritornello-lang-"))
+    if let Some(rest) = name
+        .strip_suffix(".tar.gz")
+        .and_then(|s| s.strip_prefix(crate::langpack::store::PACK_ID_PREFIX))
     {
         for (dash, _) in rest.match_indices('-') {
             let (language, version) = (&rest[..dash], &rest[dash + 1..]);
@@ -790,6 +791,33 @@ mod tests {
             classify_asset("ritornello-lang-pt-BR-0.2.1-beta.1.tar.gz", "armv7"),
             Some((Offer::LanguagePack("pt-BR".to_string()), "0.2.1-beta.1".to_string())),
             "a regionalised code splits like a plugin name does"
+        );
+    }
+
+    /// **The coupling itself, not a restatement of it.** `pack_id` (the
+    /// prefix a pack is published and stored under) and `classify_asset`
+    /// (the prefix a release's own asset list is read back through) must
+    /// agree on the same string -- fix round 1 gave both a single home,
+    /// `langpack::store::PACK_ID_PREFIX`, and this test is what actually
+    /// exercises the agreement: the asset name is *built* from `pack_id`,
+    /// never spelled out again, so a version of this test that hard-coded
+    /// `"ritornello-lang-fr"` would go on passing even if `classify_asset`
+    /// quietly read its own, different literal -- proving nothing about
+    /// whether the two sides still agree.
+    #[test]
+    fn classify_asset_recognises_a_name_built_from_pack_id() {
+        let name = format!("{}-0.2.1.tar.gz", crate::langpack::store::pack_id("fr"));
+        assert_eq!(
+            classify_asset(&name, "armv7"),
+            Some((Offer::LanguagePack("fr".to_string()), "0.2.1".to_string()))
+        );
+        // A regionalised code, since that exact pairing (a dash inside the
+        // language code, read back by the same left-to-right dash scan a
+        // plugin name uses) has already caused one defect in this plan.
+        let name = format!("{}-0.2.1.tar.gz", crate::langpack::store::pack_id("pt-BR"));
+        assert_eq!(
+            classify_asset(&name, "armv7"),
+            Some((Offer::LanguagePack("pt-BR".to_string()), "0.2.1".to_string()))
         );
     }
 

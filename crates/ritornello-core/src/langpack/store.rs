@@ -23,6 +23,21 @@ pub struct InstalledPack {
     pub layers: Vec<(String, Layer)>,
 }
 
+/// The prefix that turns a language into a pack id, and the prefix
+/// `release::classify_asset` looks for when it reads a published archive's
+/// name back apart.
+///
+/// A **constant**, not a literal repeated at each of its three call sites,
+/// because the name is a contract those three places must agree on: what a
+/// pack is published under (`archive`/the release job), what it is stored
+/// on disk as and read back from (`pack_id`/`inventory`, this module), and
+/// what a running core recognises as a pack rather than a plugin when it
+/// reads a release's asset list (`classify_asset`). Three copies of this
+/// string would be three chances for one of them to drift from the other
+/// two -- exactly the shape of defect this constant exists to make
+/// impossible rather than merely unlikely.
+pub const PACK_ID_PREFIX: &str = "ritornello-lang-";
+
 /// The component name of the pack for `language`.
 ///
 /// The same string three times over: the directory on disk, the row on the
@@ -30,7 +45,7 @@ pub struct InstalledPack {
 /// (`ritornello-lang-fr-0.2.0.tar.gz`). One function so the three cannot
 /// drift.
 pub fn pack_id(language: &str) -> String {
-    format!("ritornello-lang-{language}")
+    format!("{PACK_ID_PREFIX}{language}")
 }
 
 /// The reverse of `pack_id`: the language a component row names, when that
@@ -40,11 +55,11 @@ pub fn pack_id(language: &str) -> String {
 /// (`ritornello-lang-fr`), while the `/api/locale` page needs a
 /// `LanguagePackRow` keyed by **language** (`fr`) — the card shows
 /// languages, not archive names. Kept next to `pack_id` rather than
-/// unspelling the `"ritornello-lang-"` prefix at the call site: the shape of
-/// an id belongs to one module, and a second copy of that prefix is a thing
-/// that drifts from this one the day either changes.
+/// unspelling the prefix at the call site: the shape of an id belongs to
+/// one module, and a second copy of that prefix is a thing that drifts
+/// from this one the day either changes.
 pub fn language_of(id: &str) -> Option<&str> {
-    id.strip_prefix("ritornello-lang-")
+    id.strip_prefix(PACK_ID_PREFIX)
 }
 
 /// `root` joined with `id`, or `None` for an `id` that is not a bare name.
