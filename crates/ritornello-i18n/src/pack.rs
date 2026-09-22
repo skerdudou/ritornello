@@ -83,7 +83,20 @@ impl std::fmt::Display for PackError {
 
 impl std::error::Error for PackError {}
 
-/// A bare name: what a module directory and a pack identifier may be called.
+/// A bare name for a **module**: the file `<module>.toml` inside a pack, and
+/// the declared entry in `PackManifest::modules` that names it.
+///
+/// This and `valid_pack_id` below look near-identical and are not
+/// interchangeable -- they judge two different things. A module name is a
+/// lowercase identifier this project itself chooses (`core`, `radio`,
+/// `files`); nothing regional ever names a module, so lowercase-only is
+/// exactly right here and must not be widened to admit what `valid_pack_id`
+/// admits. A pack *directory* name, by contrast, embeds a language code the
+/// rest of the product already lets be regionalised (`pt-BR`, `zh_Hant` --
+/// see `valid_language` and `ritornello_core::status::locales::valid_locale`),
+/// so it needs `valid_pack_id`'s wider grammar instead. Use this one for a
+/// module; use `valid_pack_id` for anything that becomes a pack's directory
+/// name on disk.
 ///
 /// The same alphabet the privileged side accepts for a plugin file name, and
 /// for the same reason -- a name that cannot contain a separator, a dot run
@@ -92,6 +105,25 @@ pub fn valid_pack_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+}
+
+/// A bare name for a **pack directory** (`ritornello_core::langpack::store`'s
+/// `pack_dir` and `inventory`), one step wider than `valid_pack_name` above:
+/// it also admits uppercase ASCII letters and `_`, because a pack directory's
+/// name is `pack_id(language)` and the language it embeds may be regionalised
+/// (`pt-BR`, `zh_Hant`). See `valid_pack_name`'s own doc for why the two
+/// differ rather than one having simply grown to cover both jobs.
+///
+/// Still an allow-list, and that is what makes it the security boundary
+/// `pack_dir` says it is: `.`, `/`, `\` and `:` stay excluded by
+/// construction, so neither `..`, an absolute path, a UNC path nor a drive
+/// letter can be expressed however wide the rest of the alphabet gets.
+pub fn valid_pack_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         && !s.starts_with('-')
         && !s.ends_with('-')
 }
@@ -314,6 +346,32 @@ mod tests {
     fn a_manifest_with_an_unknown_field_is_refused() {
         let text = "language = \"fr\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = []\nexec = \"/bin/sh\"\n";
         assert!(matches!(parse_manifest(text), Err(PackError::Manifest(_))));
+    }
+
+    /// `valid_pack_id` is wider than `valid_pack_name` in exactly the ways a
+    /// regionalised language code needs (uppercase, `_`), and no wider than
+    /// that: every hostile shape a directory name must never take is still
+    /// refused.
+    #[test]
+    fn valid_pack_id_admits_a_regionalised_code_and_refuses_every_hostile_shape() {
+        for good in ["fr", "pt-BR", "zh_Hant", "ritornello-lang-pt-BR", "a", "A1_2-3"] {
+            assert!(valid_pack_id(good), "{good:?} should be accepted");
+        }
+        for bad in [
+            "", "..", ".", "a/b", "a\\b", "a:b", "-leading", "trailing-", "a.b", "C:\\x",
+            &"x".repeat(65),
+        ] {
+            assert!(!valid_pack_id(bad), "{bad:?} should be refused");
+        }
+    }
+
+    /// Isolates the trailing-dash clause specifically: every other hostile
+    /// case above is also caught by the leading-dash check or the alphabet
+    /// check, so a mutation that deleted only `!s.ends_with('-')` left the
+    /// broader test above green. Found by running that exact mutation.
+    #[test]
+    fn valid_pack_id_refuses_a_trailing_dash_even_though_nothing_else_about_it_is_hostile() {
+        assert!(!valid_pack_id("pt-BR-"), "a trailing dash alone must be refused");
     }
 
     /// A declared module name that is not a bare name is refused as

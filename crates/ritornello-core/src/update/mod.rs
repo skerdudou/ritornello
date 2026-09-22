@@ -4116,6 +4116,25 @@ mod tests {
         assert!(rig.packs_root.join("ritornello-lang-fr/core.toml").exists());
     }
 
+    /// **The defect between task 8 and task 9, proven end to end.** A
+    /// regionalised language code (`pt-BR`) is accepted everywhere else in
+    /// this product -- `valid_locale`, `ritornello_i18n::pack::valid_language`,
+    /// and `classify_asset` all pass it -- so it must also install and
+    /// uninstall through the real worker, not merely satisfy `valid_pack_id`
+    /// in isolation. Before the fix this failed at `install_language`'s call
+    /// into `langpack::store::install`, refused as "not a bare name" even
+    /// though every earlier step (offer, download, digest, archive read,
+    /// manifest-language check) had already accepted `pt-BR`.
+    #[tokio::test]
+    async fn installing_and_removing_a_regionalised_language_pack_round_trips() {
+        let rig = pack_rig(&[("core", "standby = \"PARADO\"\n")], "pt-BR", "0.2.1").await;
+        rig.worker.install_language(&rig.checked, "pt-BR").await.expect("the pack installs");
+        assert!(rig.packs_root.join("ritornello-lang-pt-BR/core.toml").exists());
+
+        rig.worker.remove_language("pt-BR").await;
+        assert!(!rig.packs_root.join("ritornello-lang-pt-BR").exists());
+    }
+
     /// A refused archive writes nothing at all -- not the sound half of it,
     /// not an empty directory. The refusal names its cause on the card.
     #[tokio::test]

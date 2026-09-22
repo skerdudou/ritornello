@@ -45,7 +45,7 @@ pub fn pack_id(language: &str) -> String {
 /// Refusing here, before either caller ever joins the path itself, is what
 /// makes that refusal apply everywhere rather than at each call site.
 fn pack_dir(root: &Path, id: &str) -> Option<PathBuf> {
-    if !ritornello_i18n::valid_pack_name(id) {
+    if !ritornello_i18n::valid_pack_id(id) {
         return None;
     }
     Some(root.join(id))
@@ -123,7 +123,7 @@ pub fn inventory(root: &Path) -> Vec<InstalledPack> {
             continue;
         }
         let id = entry.file_name().to_string_lossy().into_owned();
-        if !ritornello_i18n::valid_pack_name(&id) {
+        if !ritornello_i18n::valid_pack_id(&id) {
             tracing::warn!("language pack directory {id:?} ignored: not a bare name");
             continue;
         }
@@ -269,6 +269,29 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("bad-manifest")).unwrap();
         std::fs::write(dir.path().join("bad-manifest/pack.toml"), "this is not toml =\n").unwrap();
         assert!(inventory(dir.path()).is_empty());
+    }
+
+    /// A regionalised language code is a pack id the rest of the product
+    /// already allows (`ritornello_core::status::locales::valid_locale`,
+    /// `ritornello_i18n::pack::valid_language` both accept `pt-BR`,
+    /// `zh_Hant`), so it must install and be found again, not be refused at
+    /// the last step by a directory-name check narrower than the language
+    /// grammar that let the pack get this far.
+    #[test]
+    fn a_regionalised_language_code_installs_and_is_found_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = contents("pt-BR", &[("core", "standby = \"PARADO\"\n")]);
+        install(dir.path(), &pack_id("pt-BR"), &c).unwrap();
+        let found = inventory(dir.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "ritornello-lang-pt-BR");
+        assert_eq!(found[0].layers[0].1.get("standby"), Some("PARADO"));
+
+        let c = contents("zh_Hant", &[("core", "standby = \"待機\"\n")]);
+        install(dir.path(), &pack_id("zh_Hant"), &c).unwrap();
+        let found = inventory(dir.path());
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().any(|p| p.id == "ritornello-lang-zh_Hant"));
     }
 
     /// A directory whose name is not a bare name is skipped rather than
