@@ -168,14 +168,13 @@ pub enum Job {
     /// kind it was holding.
     ///
     /// Constructed by the HTTP routes task 9 adds (`POST /api/languages/
-    /// {language}`, `DELETE /api/languages/{language}`); this task only
-    /// gives `run_worker` the arms that consume it and pins the shape with
-    /// its own test (`job_install_language_is_a_real_clonable_job`), since no
-    /// production caller exists yet.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "constructed by the HTTP routes task 9 adds")
-    )]
+    /// {language}`); this task only gives `run_worker` the arm that
+    /// consumes it. Unconditional, unlike `RemoveLanguage` below: nothing in
+    /// this crate constructs an `InstallLanguage` yet, in a test build or
+    /// otherwise (its own `run_worker` arm cannot be driven from a test —
+    /// see the comment there), so gating the `expect` on `not(test)` would
+    /// leave it warning here too.
+    #[expect(dead_code, reason = "constructed by the HTTP routes task 9 adds")]
     InstallLanguage(String),
     /// Constructed in production by `DELETE /api/languages/{language}` (task
     /// 9); this task's own test drives it through the real loop instead
@@ -2323,6 +2322,14 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
                 // the release as it stands right now, and a language pack
                 // is judged by that same fold (`Offer::LanguagePack`), not
                 // by a second, pack-only request.
+                //
+                // This arm is not driven by a test: `check()` calls
+                // `releases_url()`, a fixed GitHub host with no seam a test
+                // can point elsewhere (see `offered_pack`'s own doc). Gutting
+                // this arm to a no-op therefore leaves the suite green — the
+                // same is already true of the `Job::Install` and `Job::
+                // Scheduled` arms just above, for the same reason. Whoever
+                // gives `check()` a test seam makes this arm testable too.
                 if let Some(checked) = worker.check(&client).await
                     && let Err(e) = worker.install_language(&checked, &language).await
                 {
@@ -4171,17 +4178,45 @@ mod tests {
         assert!(rig.locale_rx.lock().await.try_recv().is_err(), "nothing was sent");
     }
 
+    /// The one place this task's `interpolate` deviation (see the doc on
+    /// `remove_language`'s `Err` arm) could leave a literal `{detail}` or
+    /// `{component}` token on screen: `every_refusal_is_a_translated_
+    /// sentence_with_its_parameters_filled_in` only drives the install path's
+    /// own `Refusal::Pack` through `refusal_message`, never this method's
+    /// own `Err` arm. `"x/y"` makes `pack_id` produce an id that is not a
+    /// bare name, so `store::remove` refuses it before touching disk, and
+    /// the refusal's own sentence is what `remove_language` must resolve
+    /// cleanly.
+    #[tokio::test]
+    async fn a_refused_removal_reaches_the_page_with_every_parameter_filled_in() {
+        let rig = pack_rig(&[("core", "k = \"v\"\n")], "fr", "0.2.1").await;
+        rig.worker.remove_language("x/y").await;
+        match &rig.worker.state.read().await.outcome {
+            CheckOutcome::Failed(message) => {
+                assert!(!message.contains('{'), "a parameter was left unfilled: {message}");
+                assert!(
+                    message.contains("ritornello-lang-x/y"),
+                    "the message must name the id, not merely be non-empty: {message}"
+                );
+            }
+            other => panic!("a refused removal must reach the page, not only the log: {other:?}"),
+        }
+    }
+
     /// **The wiring itself, not only the method it calls.** `run_worker`'s
     /// `Job::RemoveLanguage` arm must actually reach `remove_language` — this
     /// drives it through the real loop rather than only through a direct
     /// call, the same distinction task 18's review drew for `install()`.
-    /// `Job::InstallLanguage` is not driven the same way here: its own arm
-    /// always opens a real `check()` first (task 9's own brief: "the worker
-    /// is the only thing that has read the release"), which needs
-    /// `releases_url()` — a fixed GitHub host with no test seam, exactly the
-    /// reason `offered_pack` takes an already-performed `Checked` rather
-    /// than fetching one itself. See `job_install_language_is_a_real_clonable_job`
-    /// for what pins that variant instead.
+    /// `Job::InstallLanguage` is not driven the same way here, and has no
+    /// test of its own: its own arm always opens a real `check()` first
+    /// (task 9's own brief: "the worker is the only thing that has read the
+    /// release"), which needs `releases_url()` — a fixed GitHub host with no
+    /// test seam, exactly the reason `offered_pack` takes an
+    /// already-performed `Checked` rather than fetching one itself. A test
+    /// that only constructed and cloned the value, without driving the loop,
+    /// was tried and measured to prove nothing (gutting the arm to a no-op
+    /// left it green) and was removed rather than kept as decoration; see
+    /// the arm's own comment in `run_worker`.
     #[tokio::test]
     async fn job_remove_language_reaches_remove_language_through_the_worker_loop() {
         let rig = pack_rig(&[("core", "k = \"v\"\n")], "fr", "0.2.1").await;
@@ -4201,16 +4236,6 @@ mod tests {
 
         assert!(!packs_root.join("ritornello-lang-fr").exists());
         assert_eq!(locale_rx.try_recv().ok(), Some("en".to_string()));
-    }
-
-    /// `Job::InstallLanguage` is a real, `Clone`able job — pinned directly
-    /// because nothing else in this crate constructs one until task 9's
-    /// HTTP routes do (see the test above for why it is not driven through
-    /// `run_worker` here).
-    #[test]
-    fn job_install_language_is_a_real_clonable_job() {
-        let job = Job::InstallLanguage("fr".to_string());
-        assert!(matches!(job.clone(), Job::InstallLanguage(l) if l == "fr"));
     }
 
     /// **The property this whole task exists for, observed rather than
