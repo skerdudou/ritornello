@@ -100,6 +100,14 @@ const CATALOGUE = {
   plugin_kind_display: 'affichage',
   plugin_kind_input: 'entrée',
   plugin_kind_metadata: 'métadonnées',
+  language_pack_install: 'Installer',
+  language_pack_update: 'Mettre à jour',
+  language_pack_remove: 'Retirer',
+  language_pack_update_available: 'Un greffon plus récent est disponible',
+  language_pack_installing: 'Installation de {language}…',
+  language_pack_removing: 'Retrait de {language}…',
+  language_pack_remove_confirm:
+    "Retirer le greffon {language} ? L'interface repasse en anglais si c'est la langue utilisée.",
 }
 
 /** Payloads served by the fake `fetch`, overridable per test. */
@@ -880,6 +888,26 @@ describe('ConfigView — plugin table', () => {
 describe('ConfigView — language and display', () => {
   beforeEach(resetMocks)
 
+  /** `/api/locale` fixture for the language-pack gesture tests below: same
+   * base shape `payloads()` itself uses (both languages complete, so
+   * `LanguageCard`'s own fallback control stays out of the way), `packs`
+   * overridden per test. */
+  function localeWithPacks(
+    packs: Array<{ language: string; installed: string | null; offered: string | null }>,
+  ) {
+    return {
+      locales: ['en', 'fr'],
+      current: 'fr',
+      completeness: [
+        { language: 'en', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+        { language: 'fr', complete: true, done: 1, total: 1, complete_modules: ['core'] },
+      ],
+      fallback_current: 'en',
+      fallback_candidates: ['en'],
+      packs,
+    }
+  }
+
   it('writes the settings before the locale, so a reload cannot erase them', async () => {
     // `PUT /api/locale` reloads the whole page state behind it. Sent first,
     // it would pull the server's old settings back over the ones the owner
@@ -1197,6 +1225,78 @@ describe('ConfigView — language and display', () => {
     // No reload: the settings PUT never succeeded, re-reading the catalogs
     // would only hide the failure behind an unchanged UI.
     expect(spy.mock.calls.filter((c) => c[0] === '/api/i18n').length).toBe(before)
+  })
+
+  // Fix round 1, finding 1: the review grepped this file for `installLanguage`,
+  // `askRemoveLanguage`, `confirmRemoveLanguage`, `api/languages` and
+  // `data-pack-` and found none of them — the three handlers were exercised
+  // by nothing. This is the one place `api.post`'s "never rejects, may
+  // return a message" contract is consumed for a real click, which is
+  // exactly where an unwrapped exception once became a silent unhandled
+  // rejection elsewhere in this codebase.
+  it('installs a language pack: posts to the right route, acknowledges, and reloads the locale', async () => {
+    const { w, spy, posts } = await mountView({
+      '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+    })
+    const before = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
+    await w.find('[data-pack-install="de"]').trigger('click')
+    await flushPromises()
+    expect(posts).toContainEqual({ url: '/api/languages/de', body: {} })
+    // Fix round 1, finding 2: some acknowledgment, not silence, for a
+    // gesture that only got queued.
+    expect(toast.success).toHaveBeenCalled()
+    // `loadAll()` re-reads `/api/locale` right after the enqueue succeeds —
+    // the re-poll/reload the handler is supposed to trigger.
+    expect(spy.mock.calls.filter((c) => c[0] === '/api/locale').length).toBeGreaterThan(before)
+  })
+
+  it('toasts the refusal from a language install and releases the busy row', async () => {
+    const { w } = await mountView(
+      { '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]) },
+      undefined,
+      'nothing published for ritornello-lang-de',
+    )
+    await w.find('[data-pack-install="de"]').trigger('click')
+    await flushPromises()
+    expect(toast.error).toHaveBeenCalledWith('nothing published for ritornello-lang-de')
+    // Released, not stuck: a handler that surfaces the error but leaves the
+    // row disabled forever is the same dead end in a different costume.
+    expect(w.find('[data-pack-install="de"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('removes a language pack through its confirmation: deletes the right route, acknowledges, and reloads', async () => {
+    const { w, spy, deletes } = await mountView({
+      '/api/locale': localeWithPacks([{ language: 'fr', installed: '0.2.1', offered: '0.2.1' }]),
+    })
+    await w.find('[data-pack-remove="fr"]').trigger('click')
+    await flushPromises()
+    // The click opens a confirmation; it does not act on its own.
+    expect(deletes).toHaveLength(0)
+    const dialog = document.body.querySelector('[data-language-pack-remove-dialog]')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.textContent).toContain('Français')
+
+    const before = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
+    ;(document.body.querySelector('[data-language-pack-remove-confirm]') as HTMLElement).click()
+    await flushPromises()
+    expect(deletes).toEqual([{ url: '/api/languages/fr' }])
+    expect(toast.success).toHaveBeenCalled()
+    expect(spy.mock.calls.filter((c) => c[0] === '/api/locale').length).toBeGreaterThan(before)
+  })
+
+  it('toasts the refusal from a language removal and releases the busy row', async () => {
+    const { w } = await mountView(
+      { '/api/locale': localeWithPacks([{ language: 'fr', installed: '0.2.1', offered: '0.2.1' }]) },
+      undefined,
+      undefined,
+      'fr pack not found',
+    )
+    await w.find('[data-pack-remove="fr"]').trigger('click')
+    await flushPromises()
+    ;(document.body.querySelector('[data-language-pack-remove-confirm]') as HTMLElement).click()
+    await flushPromises()
+    expect(toast.error).toHaveBeenCalledWith('fr pack not found')
+    expect(w.find('[data-pack-remove="fr"]').attributes('disabled')).toBeUndefined()
   })
 })
 

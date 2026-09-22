@@ -16,7 +16,7 @@ import { predictedThumbnailBytes } from '../composables/coverWeight'
 import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
-import type { AudioPayload, LocalePayload, SettingsPayload, UpdatePayload } from '../types'
+import type { AudioPayload, LanguageBusy, LocalePayload, SettingsPayload, UpdatePayload } from '../types'
 
 const { t, reload } = useCatalog()
 // The plugin state comes from the module, not from a local `ref`: the top
@@ -916,12 +916,22 @@ async function saveDisplay() {
 }
 
 /**
- * Language whose install/update/remove request is currently in flight, or
- * `null`. A single value, not a `Set` like `inProgress`: `LanguagePacksRow`
- * disables one row at a time, and only one confirmation can be open at once
- * (`removeLanguageTarget`, right below).
+ * The language gesture currently in flight — the language **and** which of
+ * "install" or "remove" started it — or `null`. A single value, not a `Set`
+ * like `inProgress`: `LanguagePacksRow` disables one row at a time, and only
+ * one confirmation can be open at once (`removeLanguageTarget`, right
+ * below).
+ *
+ * **Named here, not guessed downstream** (fix round 1, finding 3 of task
+ * 10's review). `LanguagePacksRow` used to receive just the language and
+ * infer the verb from `row.installed` — wrong today, not only in some
+ * future refactor: a row that licenses both "Update" and "Remove" (a pack
+ * already installed, with a newer one offered) keeps `row.installed`
+ * non-null while an **install** (the reinstall-over-existing that "Update"
+ * triggers) is in flight, so the old guess said "removing" for an install.
+ * `ConfigView` already knows which button was pressed; it now says so.
  */
-const packBusy = ref<string | null>(null)
+const packBusy = ref<LanguageBusy | null>(null)
 
 /**
  * Installs every pack the release currently publishes for `language`, or
@@ -929,16 +939,27 @@ const packBusy = ref<string | null>(null)
  * version — `POST /api/languages/{language}` does not distinguish the two
  * (task 9's own route doc), so `LanguagePacksRow`'s "Install" and "Update"
  * buttons both call this. Same poll-while-busy shape as `installPlugin`.
+ *
+ * **Acknowledges success** (fix round 1, finding 2): the route answers 202
+ * on enqueue only, so a message claiming the pack is installed would be
+ * false — `confirmUninstall`'s "OK" is honest for its own route (a bare,
+ * synchronous 204), but copying it here would claim a completion that has
+ * not happened yet. Reusing `language_pack_installing` — the same sentence
+ * `LanguagePacksRow` shows next to the busy row — states only what is true
+ * at this point: the gesture was accepted and is under way. Without this,
+ * a successful click produced no feedback at all beyond the row's own
+ * (very brief) disabled state.
  */
 async function installLanguage(language: string) {
   if (packBusy.value) return
-  packBusy.value = language
+  packBusy.value = { language, action: 'install' }
   try {
     const err = await api.post(`/api/languages/${encodeURIComponent(language)}`, {})
     if (err) {
       toast.error(err)
       return
     }
+    toast.success(t.value('language_pack_installing', { language: languageName(language) }))
     pollUpdateWhileBusy()
     await loadAll()
   } finally {
@@ -961,20 +982,26 @@ function askRemoveLanguage(language: string) {
   removeLanguageTarget.value = language
 }
 
-/** Retires every pack installed for the confirmed language. Same
+/**
+ * Retires every pack installed for the confirmed language. Same
  * poll-while-busy shape as `installLanguage`, and the same confirmation
- * idiom as `confirmUninstall`. */
+ * idiom as `confirmUninstall` — except for the success message, which
+ * cannot honestly be `confirmUninstall`'s "OK": this route, like
+ * `installLanguage`'s, only enqueues (202), it does not report the pack
+ * gone. `language_pack_removing` says what is actually true right now.
+ */
 async function confirmRemoveLanguage() {
   const language = removeLanguageTarget.value
   removeLanguageTarget.value = null
   if (!language || packBusy.value) return
-  packBusy.value = language
+  packBusy.value = { language, action: 'remove' }
   try {
     const err = await api.del(`/api/languages/${encodeURIComponent(language)}`)
     if (err) {
       toast.error(err)
       return
     }
+    toast.success(t.value('language_pack_removing', { language: languageName(language) }))
     pollUpdateWhileBusy()
     await loadAll()
   } finally {
@@ -1527,7 +1554,7 @@ function goTo(id: string) {
             </DialogHeader>
             <Button
               variant="destructive" data-language-pack-remove-confirm
-              :disabled="removeLanguageTarget !== null && packBusy === removeLanguageTarget"
+              :disabled="removeLanguageTarget !== null && packBusy?.language === removeLanguageTarget"
               @click="confirmRemoveLanguage"
             >
               {{ t('language_pack_remove') }}

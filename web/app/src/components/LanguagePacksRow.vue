@@ -17,18 +17,27 @@
  * complete language.
  */
 import { Button } from '@ritornello/ui'
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
-import type { LanguagePackRow as PackRow, LocalePayload } from '../types'
+import type { LanguageBusy, LanguagePackRow as PackRow, LocalePayload } from '../types'
 
 const props = defineProps<{
   payload: LocalePayload
-  /** Language whose install/remove request is in flight, or `null` — the
-   *  same convention as `ConfigView`'s `inProgress`/`uninstallTarget`, but a
-   *  single value: only one language gesture can be queued from this row at
-   *  a time. */
-  busy: string | null
+  /**
+   * The gesture `ConfigView` currently has enqueued — the language **and**
+   * which of "install" or "remove" it started — or `null` when nothing is in
+   * flight. Fix round 1, finding 3: this component used to receive just the
+   * busy language and guess the verb from `row.installed` (installed →
+   * "removing", not installed → "installing"). That guess is wrong today,
+   * not only in some future refactor: a row that licenses both "Update" and
+   * "Remove" (a pack already installed, with a newer one offered) keeps
+   * `row.installed` non-null while an **Update** is in flight, so the old
+   * guess said "removing" for an install. `ConfigView` already knows which
+   * button started the request; this component renders exactly that and
+   * invents nothing.
+   */
+  busy: LanguageBusy | null
 }>()
 const emit = defineEmits<{ install: [string]; remove: [string] }>()
 
@@ -51,31 +60,16 @@ function updateAvailable(row: PackRow): boolean {
   return row.installed !== null && row.offered !== null && row.offered !== row.installed
 }
 
-/**
- * Which gesture this row's own click put in flight, tracked locally rather
- * than guessed from `row.installed`: a row with a pack already installed can
- * show both "Update" and "Remove" at once, and `busy` alone (just the
- * language code, the same convention `ConfigView` already uses elsewhere)
- * cannot tell the two apart once the request is in flight — both leave
- * `row.installed` non-null. Needs no reset on completion: the next gesture,
- * on any row, overwrites it before it emits, and this value is only ever
- * read while `busy` still names this row's own language.
- */
-const pendingAction = ref<'install' | 'remove' | null>(null)
-
-function onInstall(language: string) {
-  pendingAction.value = 'install'
-  emit('install', language)
+/** Whether `row` is the one `busy` names. */
+function isBusy(row: PackRow): boolean {
+  return props.busy !== null && props.busy.language === row.language
 }
 
-function onRemove(language: string) {
-  pendingAction.value = 'remove'
-  emit('remove', language)
-}
-
+/** The verb `busy.action` names for the busy row — never guessed from
+ * `row.installed`, see the prop's own doc. */
 function busyLabel(row: PackRow): string {
   const language = languageName(row.language)
-  return pendingAction.value === 'remove'
+  return props.busy?.action === 'remove'
     ? t.value('language_pack_removing', { language })
     : t.value('language_pack_installing', { language })
 }
@@ -93,7 +87,7 @@ function busyLabel(row: PackRow): string {
       <span v-if="updateAvailable(row)" class="text-xs text-muted-foreground" data-pack-update-note>
         {{ t('language_pack_update_available') }}
       </span>
-      <span v-if="busy === row.language" class="text-xs text-muted-foreground" data-pack-busy>
+      <span v-if="isBusy(row)" class="text-xs text-muted-foreground" data-pack-busy>
         {{ busyLabel(row) }}
       </span>
       <!-- Only a language with nothing on disk yet can be installed. -->
@@ -101,8 +95,8 @@ function busyLabel(row: PackRow): string {
         v-if="row.installed === null"
         variant="outline" size="xs"
         :data-pack-install="row.language"
-        :disabled="busy === row.language"
-        @click="onInstall(row.language)"
+        :disabled="isBusy(row)"
+        @click="emit('install', row.language)"
       >{{ t('language_pack_install') }}</Button>
       <!-- Same route as Install (`ConfigView`'s `installLanguage`): the core
            does not distinguish a first install from a reinstall over a
@@ -111,16 +105,16 @@ function busyLabel(row: PackRow): string {
         v-if="updateAvailable(row)"
         variant="outline" size="xs"
         :data-pack-update="row.language"
-        :disabled="busy === row.language"
-        @click="onInstall(row.language)"
+        :disabled="isBusy(row)"
+        @click="emit('install', row.language)"
       >{{ t('language_pack_update') }}</Button>
       <!-- Only an installed pack can be removed. -->
       <Button
         v-if="row.installed !== null"
         variant="outline" size="xs"
         :data-pack-remove="row.language"
-        :disabled="busy === row.language"
-        @click="onRemove(row.language)"
+        :disabled="isBusy(row)"
+        @click="emit('remove', row.language)"
       >{{ t('language_pack_remove') }}</Button>
     </div>
   </div>

@@ -1,6 +1,6 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import type { LocalePayload } from '../types'
+import type { LanguageBusy, LocalePayload } from '../types'
 
 const CATALOGUE = {
   language_pack_install: 'Install',
@@ -24,7 +24,7 @@ const BASE: LocalePayload = {
   ],
 }
 
-async function mountRow(payload: LocalePayload = BASE, busy: string | null = null) {
+async function mountRow(payload: LocalePayload = BASE, busy: LanguageBusy | null = null) {
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     if (url === '/api/i18n') return new Response(JSON.stringify(CATALOGUE), { status: 200 })
     return new Response('unknown', { status: 404 })
@@ -77,25 +77,30 @@ describe('LanguagePacksRow', () => {
   /// the one clicked: two installs racing would both be enqueued, and the
   /// queue holds four.
   it('disables the row whose gesture is in flight', async () => {
-    const w = await mountRow(BASE, 'de')
+    const w = await mountRow(BASE, { language: 'de', action: 'install' })
     expect(w.find('[data-pack-install="de"]').attributes('disabled')).toBeDefined()
     expect(w.find('[data-pack-remove="fr"]').attributes('disabled')).toBeUndefined()
   })
 
-  /// `busy` alone is just a language code: `fr` is installed, so it licenses
-  /// both "Update" and "Remove", and the two disagree on which sentence
-  /// belongs on screen. Pinned against a component that infers the sentence
-  /// from `row.installed` alone (always "removing" once a pack is on disk)
-  /// rather than from the button actually pressed.
-  it('labels the busy row installing or removing, matching the button actually pressed', async () => {
-    const w = await mountRow(BASE, null)
-    await w.find('[data-pack-remove="fr"]').trigger('click')
-    await w.setProps({ busy: 'fr' })
-    expect(w.find('[data-pack-busy]').text()).toContain('Removing')
+  it('labels the busy row with the verb `busy.action` names', async () => {
+    const remove = await mountRow(BASE, { language: 'fr', action: 'remove' })
+    expect(remove.find('[data-pack-busy]').text()).toContain('Removing')
 
-    const w2 = await mountRow(BASE, null)
-    await w2.find('[data-pack-update="es"]').trigger('click')
-    await w2.setProps({ busy: 'es' })
-    expect(w2.find('[data-pack-busy]').text()).toContain('Installing')
+    const install = await mountRow(BASE, { language: 'es', action: 'install' })
+    expect(install.find('[data-pack-busy]').text()).toContain('Installing')
+  })
+
+  /// Fix round 1, finding 3: this is the case that disproves inferring the
+  /// verb from `row.installed`, and it is not hypothetical — it is the exact
+  /// state a real "Update" click produces. `fr` is *installed*
+  /// (`installed: '0.2.1'`), so a component that guessed "installed →
+  /// removing" would print "Removing" here even though ConfigView explicitly
+  /// says this is an install (a reinstall over the existing pack, the
+  /// gesture "Update" performs). The component must render the verb it is
+  /// given, not the one `row.installed` would suggest.
+  it('names "installing" for a reinstall over an already-installed pack, never "removing"', async () => {
+    const w = await mountRow(BASE, { language: 'fr', action: 'install' })
+    expect(w.find('[data-pack-busy]').text()).toContain('Installing')
+    expect(w.find('[data-pack-busy]').text()).not.toContain('Removing')
   })
 })

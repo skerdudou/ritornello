@@ -230,6 +230,23 @@ export interface LanguagePackRow {
   installed: string | null
   offered: string | null
 }
+
+/**
+ * The language gesture `ConfigView` currently has enqueued, and which one it
+ * is — fix round 1, finding 3 of task 10's review. `LanguagePacksRow` used to
+ * receive just the busy language and guess the verb from `row.installed`
+ * (installed → "removing", not installed → "installing"), which happened to
+ * work only because the one thing ever writing that field was this same
+ * component's own click. A row that licenses both "Update" and "Remove" (a
+ * pack installed, with a newer one offered) makes that guess wrong for an
+ * Update in flight — `row.installed` stays non-null, so the guess said
+ * "removing" for an install. Named by the side that starts the gesture
+ * (`ConfigView`), never reconstructed by the side that only renders it.
+ */
+export interface LanguageBusy {
+  language: string
+  action: 'install' | 'remove'
+}
 export interface ThemePayload { theme: string; mode: Mode }
 export interface LogsPayload { lines: string[] }
 /** The three values of `settings.startup_power`, on the core side as on the UI side. */
