@@ -120,6 +120,17 @@ pub fn valid_pack_name(s: &str) -> bool {
 /// `pack_dir` says it is: `.`, `/`, `\` and `:` stay excluded by
 /// construction, so neither `..`, an absolute path, a UNC path nor a drive
 /// letter can be expressed however wide the rest of the alphabet gets.
+///
+/// Two consequences a maintainer needs, not caveats:
+/// - It admits ids `pack_id` itself never produces (`fr`, `A1_2-3`, `____`).
+///   A directory an operator places by hand under the packs root is listed
+///   by `inventory` under whatever bare name it has, with no
+///   `ritornello-lang-` prefix required. **This is deliberate.** Tightening
+///   this predicate to require that prefix would silently stop every
+///   hand-placed pack from ever being seen again.
+/// - The rule is case-sensitive: `pt-BR` and `pt-br` are two distinct
+///   directories on the target filesystem, not the same pack spelled two
+///   ways.
 pub fn valid_pack_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
@@ -359,7 +370,7 @@ mod tests {
         }
         for bad in [
             "", "..", ".", "a/b", "a\\b", "a:b", "-leading", "trailing-", "a.b", "C:\\x",
-            &"x".repeat(65),
+            "/etc/ritornello", "\\\\nas\\share", &"x".repeat(65),
         ] {
             assert!(!valid_pack_id(bad), "{bad:?} should be refused");
         }
