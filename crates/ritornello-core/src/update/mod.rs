@@ -30,7 +30,7 @@ use crate::update::download::{
     client, digest_hex, enough_room, fetch_capped, fetch_text, DownloadError, COMPRESSED_MAX,
 };
 use crate::update::release::{
-    download_name, fold, newest_catalogue_url, origin, parse_checksums, parse_releases,
+    differs, download_name, fold, newest_catalogue_url, origin, parse_checksums, parse_releases,
     releases_url, releases_url_for, Channel, Offer, Origin, Published, ReleasesError, ARCH, REPO,
 };
 use crate::update::state::{
@@ -1292,7 +1292,39 @@ impl Worker {
         crate::langpack::store::install(&self.packs_root, &id, &contents)
             .map_err(|e| Refusal::Prepare(format!("writing {id}: {e}")))?;
         crate::i18n::Registry::resweep_async(&self.registry).await;
+        self.mark_pack_row(&id, Some(contents.manifest.version.clone())).await;
         Ok(())
+    }
+
+    /// Patches this pack's own row in `state.components` right after a real
+    /// install or removal.
+    ///
+    /// **Without this, the row a device just told to install never says
+    /// so.** `language_pack_rows` (`status::locales`) reads `installed` off
+    /// `ComponentOffer`, and that field is a snapshot `check()` takes once,
+    /// at the top of `Job::InstallLanguage`/before either language job even
+    /// starts — neither `install_language` nor `remove_language` otherwise
+    /// touches it, and nothing else in this worker calls `check()` again on
+    /// their behalf. The gap is invisible to every test that came before
+    /// this one: `installing_a_pack_stages_nothing_and_asks_root_for_
+    /// nothing` and its neighbours assert the disk, never this row, and
+    /// `status::locales`'s own tests hand-construct `state.components`
+    /// rather than drive it through a real install. It is exactly what a
+    /// page polling `/api/locale` for the row to settle (`ConfigView.vue`'s
+    /// `pollLanguageWhileBusy`) needs to be able to observe — a real
+    /// install that never updates its own row would poll for the full
+    /// twenty seconds and give up, looking indistinguishable from a job
+    /// that silently failed.
+    async fn mark_pack_row(&self, id: &str, installed: Option<String>) {
+        let mut state = self.state.write().await;
+        for row in state.components.iter_mut().filter(|c| c.name == id) {
+            row.installed = installed.clone();
+            row.availability = match (&row.installed, &row.offered) {
+                (None, _) => Availability::NotInstalled,
+                (Some(i), Some(o)) if differs(Some(i.as_str()), o) => Availability::UpdateAvailable,
+                (Some(_), _) => Availability::Aligned,
+            };
+        }
     }
 
     /// Removes a language pack, and puts the device back on English if that
@@ -1325,6 +1357,7 @@ impl Worker {
             }
         }
         crate::i18n::Registry::resweep_async(&self.registry).await;
+        self.mark_pack_row(&id, None).await;
         if self.locale_current.read().await.as_deref() == Some(language) {
             // Through the channel the HTTP layer already uses, so the core
             // persists it exactly as a person picking English would.
@@ -4124,6 +4157,47 @@ mod tests {
 
         rig.worker.remove_language("pt-BR").await;
         assert!(!rig.packs_root.join("ritornello-lang-pt-BR").exists());
+    }
+
+    /// **Task 14's own finding: the row a device just installed must say
+    /// so.** `state.components`'s own copy of this pack's row is a
+    /// snapshot `check()` takes once, before `install_language`/
+    /// `remove_language` ever runs -- and neither of them otherwise
+    /// touches it, so a page polling `/api/locale` for this exact field
+    /// could poll forever without ever seeing the gesture settle. Found
+    /// while writing the e2e journey (the one test that drives this path
+    /// through a real `check()`), invisible to every test above: none of
+    /// them reads this row, only the disk. Seeded here the way a real
+    /// `check()` would have left it, since these rigs call
+    /// `install_language`/`remove_language` directly -- see this suite's
+    /// own header comment for why `check()` itself has no test seam.
+    #[tokio::test]
+    async fn installing_and_removing_updates_this_packs_own_row_without_a_second_check() {
+        let rig = pack_rig(&[("core", "k = \"v\"\n")], "fr", "0.2.1").await;
+        let id = crate::langpack::store::pack_id("fr");
+        rig.worker.state.write().await.components.push(ComponentOffer {
+            name: id.clone(),
+            kind: ComponentKind::LanguagePack,
+            declared: false,
+            binary_present: false,
+            installed: None,
+            offered: Some("0.2.1".to_string()),
+            availability: Availability::NotInstalled,
+            installable: Some(true),
+            third_party_repo: None,
+            not_installed_files: None,
+        });
+
+        rig.worker.install_language(&rig.checked, "fr").await.expect("the pack installs");
+        let row = |state: &UpdateState| state.components.iter().find(|c| c.name == id).cloned();
+        let after_install = row(&*rig.worker.state.read().await).expect("the row still exists");
+        assert_eq!(after_install.installed.as_deref(), Some("0.2.1"), "the row must say installed");
+        assert_eq!(after_install.availability, Availability::Aligned);
+
+        rig.worker.remove_language("fr").await;
+        let after_remove = row(&*rig.worker.state.read().await).expect("the row still exists");
+        assert_eq!(after_remove.installed, None, "the row must say not installed any more");
+        assert_eq!(after_remove.availability, Availability::NotInstalled);
     }
 
     /// A refused archive writes nothing at all -- not the sound half of it,

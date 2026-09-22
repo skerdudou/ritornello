@@ -43,11 +43,12 @@
 // state file is written here (real WSL-side PID + execution directory)
 // that `teardown.mjs` can find and stop explicitly, whatever the fate of
 // *this* node process.
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 
 const isWindows = process.platform === 'win32'
 const rootNative = process.cwd().replace(/[\\/]web[\\/]app$/, '')
@@ -232,6 +233,155 @@ writeFileSync(
 )
 const localesRoot = `${configDir}/locales`
 
+// The packs root (task 14, e2e journey): where an *installed* language pack
+// lives on disk, per `RITORNELLO_LANGUAGE_PACKS`
+// (`crate::langpack::PACKS_ROOT_ENV`) -- a tier separate from
+// `RITORNELLO_LOCALES` just above, which is the operator's own hand-written
+// layer. `docs/development.md`'s own words: "the repository's French text
+// now travels as an installed language pack instead, under a second,
+// separate root". This harness lays one pre-installed pack here, `fr`, so
+// the journey below finds a real device's baseline -- an empty
+// `RITORNELLO_LANGUAGE_PACKS` is a state this feature never actually ships
+// in, and the removal gesture (`DELETE /api/languages/fr`) needs something
+// real to remove.
+//
+// Deliberately the SAME two keys and the SAME values as the `fr` locale
+// fixture just above, not a richer, more "authentic" French translation:
+// the two layers compose (`Registry::sweep` unions every layer for a given
+// language), and the language-card journey's own French assertions ("0
+// module /4") were written against exactly two covered keys for `core`. A
+// pack that covered *more* of `core` would silently complete that module
+// for French and redden a test this change has no business touching.
+const packsRootNative = join(configDirNative, 'language-packs')
+mkdirSync(join(packsRootNative, 'ritornello-lang-fr'), { recursive: true })
+writeFileSync(
+  join(packsRootNative, 'ritornello-lang-fr', 'pack.toml'),
+  'language = "fr"\nversion = "0.2.0-beta.2"\n' +
+    'source = "https://github.com/skerdudou/ritornello"\nmodules = ["core"]\n',
+)
+writeFileSync(
+  join(packsRootNative, 'ritornello-lang-fr', 'core.toml'),
+  'language = "Langue"\nsave = "Enregistrer"\n',
+)
+const packsRoot = `${configDir}/language-packs`
+
+// A fake repository for the language-pack install journey (task 14):
+// `Worker::check()` addresses a fixed GitHub host (`update::release::REPO`)
+// everywhere except the one seam this harness relies on
+// (`RITORNELLO_TEST_RELEASES_URL`, compiled only into a debug build -- see
+// that constant's own doc in `release.rs` for why it exists and why it
+// cannot reach a real device). This harness is the only thing that ever
+// sets it: real GitHub, as of this writing, publishes no language-pack asset
+// at all (checked against the real, published release list), so there is
+// no way to drive `POST /api/languages/{language}` through a real install
+// without either this seam or an archive published for the occasion.
+//
+// The release this harness fabricates offers exactly one language pack,
+// `es` -- unused by any other fixture (`fr`/`de` already carry meaning for
+// the language-card journey), so installing and later removing it here
+// cannot perturb any other journey's completeness arithmetic.
+const FAKE_LANG = 'es'
+const FAKE_LANG_VERSION = '0.9.9'
+const FAKE_ARCHIVE_NAME = `ritornello-lang-${FAKE_LANG}-${FAKE_LANG_VERSION}.tar.gz`
+// Fixed, like the core's own 8099: a single core, a single fake repository,
+// nothing to discover at runtime.
+const FAKE_REPO_PORT = 8098
+
+/** A minimal, valid single-block ustar tar header for one regular file. */
+function tarHeader(name, size) {
+  const header = Buffer.alloc(512)
+  header.write(name, 0, 'utf8')
+  const octal = (offset, length, value) => {
+    header.write(`${value.toString(8).padStart(length - 1, '0')}\0`, offset, 'ascii')
+  }
+  octal(100, 8, 0o644) // mode
+  octal(108, 8, 0) // uid
+  octal(116, 8, 0) // gid
+  octal(124, 12, size) // size
+  octal(136, 12, Math.floor(Date.now() / 1000)) // mtime
+  header.fill(0x20, 148, 156) // checksum field, blanked while it is computed
+  header[156] = '0'.charCodeAt(0) // typeflag: regular file
+  header.write('ustar', 257, 'utf8')
+  header.write('00', 263, 'utf8')
+  let sum = 0
+  for (let i = 0; i < 512; i += 1) sum += header[i]
+  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 'ascii')
+  return header
+}
+
+/**
+ * One gzipped tar, built by hand with no dependency this repository does not
+ * already carry (`node:zlib`) -- matching exactly what `langpack::archive::
+ * read` (the real reader `Worker::install_language` hands the downloaded
+ * bytes to) actually parses: a flat, ustar-framed tar holding `pack.toml`
+ * plus one `<module>.toml` per module, nothing nested.
+ */
+function packTarGz(entries) {
+  const parts = []
+  for (const [name, content] of entries) {
+    const body = Buffer.from(content, 'utf8')
+    parts.push(tarHeader(name, body.length), body)
+    const pad = (512 - (body.length % 512)) % 512
+    if (pad > 0) parts.push(Buffer.alloc(pad))
+  }
+  parts.push(Buffer.alloc(1024)) // two all-zero end-of-archive blocks
+  return gzipSync(Buffer.concat(parts))
+}
+
+const fakePackArchive = packTarGz([
+  [
+    'pack.toml',
+    `language = "${FAKE_LANG}"\nversion = "${FAKE_LANG_VERSION}"\n` +
+      'source = "https://github.com/skerdudou/ritornello"\nmodules = ["core"]\n',
+  ],
+  ['core.toml', 'save = "Guardar"\n'],
+])
+// The digest of the exact bytes served for the archive -- `install_language`
+// verifies this against `SHA256SUMS` before it ever reads the archive, the
+// same as a real component install.
+const fakeChecksum = createHash('sha256').update(fakePackArchive).digest('hex')
+const fakeChecksumsBody = `${fakeChecksum}  ${FAKE_ARCHIVE_NAME}\n`
+
+const fakeRepoDirNative = join(configDirNative, 'fake-repo')
+mkdirSync(fakeRepoDirNative, { recursive: true })
+writeFileSync(
+  join(fakeRepoDirNative, 'releases.json'),
+  JSON.stringify([
+    {
+      tag_name: 'v0.9.9-e2e',
+      published_at: new Date().toISOString(),
+      draft: false,
+      prerelease: false,
+      assets: [
+        {
+          name: FAKE_ARCHIVE_NAME,
+          browser_download_url: `http://127.0.0.1:${FAKE_REPO_PORT}/${FAKE_ARCHIVE_NAME}`,
+          size: fakePackArchive.length,
+        },
+        {
+          name: 'SHA256SUMS',
+          browser_download_url: `http://127.0.0.1:${FAKE_REPO_PORT}/SHA256SUMS`,
+          size: Buffer.byteLength(fakeChecksumsBody),
+        },
+      ],
+    },
+  ]),
+)
+writeFileSync(join(fakeRepoDirNative, FAKE_ARCHIVE_NAME), fakePackArchive)
+writeFileSync(join(fakeRepoDirNative, 'SHA256SUMS'), fakeChecksumsBody)
+// Served by a plain `python3 -m http.server` over this same directory --
+// under Windows, launched *inside* WSL (see the launch branch below): a
+// Windows-side server was measured unreachable from the WSL2 guest in this
+// environment (no `networkingMode=mirrored`, and the default NAT gateway
+// address did not route back to a Windows-bound listener either), while the
+// core itself always runs inside that same WSL guest. Under native Linux,
+// core and fixture share one host, so the same address works for the
+// ordinary reason.
+const testReleasesUrl = `http://127.0.0.1:${FAKE_REPO_PORT}/releases.json`
+// The WSL-side spelling of the same directory (`/mnt/c/...`), for the
+// Windows launch branch below, which starts `python3` *inside* WSL.
+const fakeRepoDir = `${configDir}/fake-repo`
+
 writeFileSync(
   join(configDirNative, 'stations.toml'),
   '[[stations]]\nname = "FIP"\nurl = "http://icecast.radiofrance.fr/fip-midfi.mp3"\npreset = 1\n',
@@ -275,6 +425,13 @@ const env = {
   // without this the language card journey would find only `en` and never
   // see the annotation or the fallback control it exists to exercise.
   RITORNELLO_LOCALES: localesRoot,
+  // The pre-installed `fr` pack laid out above -- a device's OTHER root,
+  // never the operator's own.
+  RITORNELLO_LANGUAGE_PACKS: packsRoot,
+  // The debug-only seam `release.rs::releases_url` reads instead of the real
+  // GitHub host, so `POST /api/languages/{language}` can be driven for real
+  // against the fake repository this harness serves.
+  RITORNELLO_TEST_RELEASES_URL: testReleasesUrl,
   // Every file the `files` plugin writes goes to the throwaway execution
   // directory. Its defaults are `/etc/ritornello` and `/var/lib/ritornello`:
   // left alone, a journey run on a machine where Ritornello is installed would
@@ -322,9 +479,21 @@ if (isWindows) {
   // assignments above are single-quoted, so a `$PATH` written there would reach
   // the plugin literally instead of expanded — and the fake `smbclient` would
   // shadow nothing while the real `PATH` would be destroyed.
+  // The fake repository's static server, backgrounded *inside* WSL, ahead
+  // of `exec`: the core that is about to replace this very shell reads
+  // `RITORNELLO_TEST_RELEASES_URL` as `http://127.0.0.1:8098/...`, and that
+  // address only resolves to something under WSL, not under Windows (see
+  // `testReleasesUrl`'s own comment above). `FAKE_REPO_MARKER` carries no
+  // meaning `python3` reads; it exists only so this process's command line
+  // contains `${execDir}`, the same substring `teardown.mjs`'s `pgrep -f`
+  // sweep already searches for — without it this server would outlive the
+  // core it was started for.
+  const fakeRepoLine =
+    `env FAKE_REPO_MARKER='${execDir}' python3 -m http.server ${FAKE_REPO_PORT} ` +
+    `--directory '${fakeRepoDir}' >/dev/null 2>&1 &\n`
   writeFileSync(
     scriptLancementNative,
-    `#!/usr/bin/env bash\necho $$ > '${pidFile}'\nexport PATH='${fakeBinDir}':"$PATH"\nexec env ${affectations} '${root}/target/debug/ritornello-core'\n`,
+    `#!/usr/bin/env bash\necho $$ > '${pidFile}'\nexport PATH='${fakeBinDir}':"$PATH"\n${fakeRepoLine}exec env ${affectations} '${root}/target/debug/ritornello-core'\n`,
   )
   chmodSync(scriptLancementNative, 0o755)
   writeFileSync(
@@ -334,6 +503,13 @@ if (isWindows) {
   child = spawn('wsl.exe', ['--', 'bash', `${configDir}/lancer.sh`], { stdio: 'inherit' })
 } else {
   writeFileSync(statePath, JSON.stringify({ isWindows, configDirNative, mediaRoot }, null, 2))
+  // Under native Linux, core and fixture share one host: a plain child of
+  // this same node process, in its own process group's care (Playwright's
+  // `webServer` teardown SIGKILLs the whole group, this one included —
+  // see teardown.mjs's own comment on the non-Windows branch).
+  spawn('python3', ['-m', 'http.server', String(FAKE_REPO_PORT), '--directory', fakeRepoDirNative], {
+    stdio: 'ignore',
+  })
   child = spawn(`${root}/target/debug/ritornello-core`, {
     stdio: 'inherit',
     // Same reason as the `export PATH` of the Windows branch: the fake

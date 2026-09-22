@@ -99,7 +99,38 @@ pub enum Offer {
 /// One hundred is the API's maximum for a single page, and the depth this
 /// feature accepts: a component not published in the last hundred deliveries
 /// would drop out of the catalogue. Written down rather than suffered.
+///
+/// **The one seam this endpoint has, and it does not reach a shipped
+/// device.** Every earlier task that wrote a test against `check()` left
+/// this function untouched and said so in a comment (see `update::mod`'s
+/// `Job::InstallLanguage` arm), because there was no way to drive the real
+/// worker end to end without addressing the real GitHub host. Task 14 (the
+/// e2e journey) needed exactly that: an uninstalled language pack actually
+/// offered, actually downloaded, through the real `POST /api/languages/
+/// {language}` route rather than a `Checked` built by hand. `TEST_RELEASES_URL_ENV`
+/// is that seam, and it is drawn as narrowly as this problem allows:
+/// - `#[cfg(debug_assertions)]` means the branch below is not merely
+///   inactive in a release build, it is **absent from the compiled binary**
+///   — the same guarantee `REPO` itself relies on, extended to this one
+///   override rather than contradicted by it. `deploy/build.sh`'s shipped
+///   artifact is `cross build --release`, and `scripts/package-release.sh`
+///   only ever packages a `target/<triple>/release` binary; neither can
+///   read this variable because neither contains the code that would.
+/// - It overrides the **list endpoint only**. Every URL `check()` reaches
+///   afterwards — an archive, its `SHA256SUMS` — comes from the parsed
+///   response itself (`Published::url`/`checksums_url`), so a test fixture
+///   only ever has to control the one address it is read from, not every
+///   address it names.
+/// - It cannot touch `releases_url_for`, so a third-party plugin's own
+///   repository is still read exactly where its manifest announced it.
+#[cfg(debug_assertions)]
+pub const TEST_RELEASES_URL_ENV: &str = "RITORNELLO_TEST_RELEASES_URL";
+
 pub fn releases_url() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(url) = std::env::var(TEST_RELEASES_URL_ENV) {
+        return url;
+    }
     releases_url_for(REPO)
 }
 

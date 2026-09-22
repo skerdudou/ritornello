@@ -660,3 +660,84 @@ test('the language card annotates an incomplete language and offers a fallback',
       .toBe('en')
   }
 })
+
+/**
+ * Task 14 of the language-packs chantier: the one journey that drives `POST
+ * /api/languages/{language}` through a real browser, against the real
+ * worker, with the network answered by the harness's own fake repository
+ * (`serve.mjs`'s `fake-repo`) rather than a hand-built `Checked` the way
+ * every Rust-side test of `install_language` builds one.
+ *
+ * **Must stay the last test in this file.** The very first test above
+ * asserts the update card's `outcome` is `never_checked` and says so in its
+ * own comment: "The harness has no access to GitHub and never presses
+ * 'Check' in this journey". That was true of the whole suite until this
+ * test existed — nothing else here presses Check, and `outcome` has no
+ * route that resets it once it moves. Placed after every other test in
+ * this file (and so, given `playwright.config.ts`'s single shared core and
+ * `workers: 1`, after `files.spec.ts` too, and ahead only of
+ * `phone.spec.ts`/`dropdown-width.spec.ts`, neither of which reads
+ * `outcome` or a language-pack row), this ordering costs nothing; placed
+ * before the first test above it would redden it.
+ *
+ * `es` is the language this journey installs and removes: unused by the
+ * language-card journey just above (`fr`/`de`), so its completeness
+ * arithmetic is untouched whichever order the two run in.
+ */
+test('installing a language pack from the config page reaches the installed state', async ({
+  page,
+  request,
+}) => {
+  await page.goto('/config')
+
+  // The one real network round trip this suite makes:
+  // `update::release::releases_url()` reads `RITORNELLO_TEST_RELEASES_URL`
+  // in this debug build and addresses the fake repository `serve.mjs` built
+  // and now serves, instead of the real, fixed GitHub host. Waited on
+  // through the real API rather than a fixed delay — the same "wait for
+  // what the response carries" rule the rest of this file follows.
+  await page.locator('[data-update-check]').click()
+  await expect
+    .poll(async () => (await (await request.get('/api/update')).json()).outcome.kind)
+    .not.toBe('never_checked')
+
+  // `/api/locale` is only read once, on mount (`ConfigView.vue`'s own
+  // `onMounted`) — a reload is what a person reopening this page after the
+  // device's own nightly check would see. It is the only step here that is
+  // not itself under test; the gesture and its settling are what follow.
+  await page.reload()
+
+  const install = page.locator('[data-pack-install="es"]')
+  await expect(install).toBeVisible()
+  await install.click()
+
+  // 202 and a queue, not a synchronous success: the row must say so before
+  // it ever says "installed".
+  await expect(page.locator('[data-pack-busy]')).toBeVisible()
+
+  // The transition itself. `ConfigView.vue`'s own poll of `/api/locale`
+  // (`pollLanguageWhileBusy`, every 2 s, up to 20 s) is what moves this
+  // element from absent to present; `expect(...).toBeVisible()` is
+  // Playwright's poll of the live DOM, so this assertion waits for the
+  // page's own poll to have done its job — never a fixed delay, never a
+  // reload standing in for it. A poll that never refreshed, or a route that
+  // refused instead of enqueuing, both time out here rather than pass.
+  const remove = page.locator('[data-pack-remove="es"]')
+  await expect(remove).toBeVisible({ timeout: 25_000 })
+  await expect(install).toHaveCount(0)
+
+  // Checked against the real core too, not only the page.
+  const afterInstall = await (await request.get('/api/locale')).json()
+  const installedRow = afterInstall.packs.find((p: { language: string }) => p.language === 'es')
+  expect(installedRow?.installed).toBe('0.9.9')
+
+  // Put the harness back the way it was found, the same courtesy the
+  // language-card journey above pays: a `DELETE`, confirmed through the
+  // real dialog, then the same poll-driven wait in reverse.
+  await remove.click()
+  await page.locator('[data-language-pack-remove-confirm]').click()
+  await expect(install).toBeVisible({ timeout: 25_000 })
+  const afterRemove = await (await request.get('/api/locale')).json()
+  const removedRow = afterRemove.packs.find((p: { language: string }) => p.language === 'es')
+  expect(removedRow?.installed ?? null).toBeNull()
+})
