@@ -44,6 +44,9 @@ function payload(entries: LanguageCompleteness[], fallback_candidates = ['en', '
     completeness: entries,
     fallback_current: 'en',
     fallback_candidates,
+    // Empty: this file exercises the language/fallback selector alone, never
+    // `LanguagePacksRow` — that component has its own test file.
+    packs: [],
   }
 }
 

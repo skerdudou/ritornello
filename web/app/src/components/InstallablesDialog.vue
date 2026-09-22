@@ -27,14 +27,22 @@ const asked = ref(false)
 /**
  * Components the release publishes and this device does not have.
  *
- * Modelled as "an installable component, with a category" rather than as
- * "a plugin": a second category — installable language packs, or plugins
- * from a declared third-party source — must be able to join as a section
- * rather than as a second dialog. Nothing of either is written here.
+ * **Never a language pack** (arbitration C19, written after task 7's
+ * review): a pack does not travel through `POST /api/update/install` at
+ * all — `carries()` answers `false` for `Offer::LanguagePack` by design, a
+ * pack never rides the components' install path — so a row here whose
+ * "Install" called `installPlugin()` produced "nothing published for
+ * ritornello-lang-fr" even though the very same row showed an offered
+ * version. `LanguagePacksRow.vue` (`ConfigView`'s "Language and display"
+ * card) is the one place a pack installs from, because it is the only one
+ * that knows the right route (`POST /api/languages/{language}`). This was
+ * once going to be a second category inside this same dialog; it never
+ * happened, and it will not: the two gestures need two different routes,
+ * so they stay two different surfaces.
  */
 const rows = computed(() =>
   props.components
-    .filter((c) => c.availability === 'not_installed')
+    .filter((c) => c.availability === 'not_installed' && c.kind !== 'language_pack')
     .map((c) => ({ offer: c, entry: catalogue.value?.[c.name] ?? null })),
 )
 

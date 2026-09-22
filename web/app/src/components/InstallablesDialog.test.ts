@@ -250,6 +250,22 @@ describe('InstallablesDialog', () => {
     expect(spy.mock.calls.filter((c) => String(c[0]).includes('/api/update/catalogue'))).toHaveLength(1)
   })
 
+  // Arbitration C19: a language pack never rides this dialog's Install
+  // button, because that button calls `installPlugin()` — a bare `POST
+  // /api/update/install`, and `carries()` refuses `Offer::LanguagePack`
+  // definitively. Both assertions, not only the first: a mutant that hides
+  // every `not_installed` row (language pack or not) would still pass a
+  // test that only checked the pack's absence.
+  it('never lists a language pack, even one the device does not have, and still lists a plugin in the same state', async () => {
+    mountDialog([
+      offer({ name: 'ritornello-lang-fr', kind: 'language_pack', availability: 'not_installed', offered: '0.2.1' }),
+      offer({ name: 'console', kind: 'plugin', availability: 'not_installed', offered: '0.2.1' }),
+    ])
+    await flushPromises()
+    expect(document.body.querySelector('[data-installable-row][data-name="ritornello-lang-fr"]')).toBeNull()
+    expect(document.body.querySelector('[data-installable-row][data-name="console"]')).not.toBeNull()
+  })
+
   it('emits install for one row at a time', async () => {
     // One button per row rather than a multi-selection: installing a plugin
     // is the rare gesture, and the update dialog's checkbox list exists for

@@ -9,9 +9,11 @@ import { RouterLink } from 'vue-router'
 import CoverCacheDetails from '../components/CoverCacheDetails.vue'
 import InstallablesDialog from '../components/InstallablesDialog.vue'
 import LanguageCard from '../components/LanguageCard.vue'
+import LanguagePacksRow from '../components/LanguagePacksRow.vue'
 import UpdateCard from '../components/UpdateCard.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
 import { predictedThumbnailBytes } from '../composables/coverWeight'
+import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
 import type { AudioPayload, LocalePayload, SettingsPayload, UpdatePayload } from '../types'
@@ -35,6 +37,7 @@ const locale = ref<LocalePayload>({
   completeness: [],
   fallback_current: 'en',
   fallback_candidates: ['en'],
+  packs: [],
 })
 const device = ref('')
 const lang = ref('')
@@ -913,6 +916,73 @@ async function saveDisplay() {
 }
 
 /**
+ * Language whose install/update/remove request is currently in flight, or
+ * `null`. A single value, not a `Set` like `inProgress`: `LanguagePacksRow`
+ * disables one row at a time, and only one confirmation can be open at once
+ * (`removeLanguageTarget`, right below).
+ */
+const packBusy = ref<string | null>(null)
+
+/**
+ * Installs every pack the release currently publishes for `language`, or
+ * reinstalls it over an already-installed one that carries an older
+ * version — `POST /api/languages/{language}` does not distinguish the two
+ * (task 9's own route doc), so `LanguagePacksRow`'s "Install" and "Update"
+ * buttons both call this. Same poll-while-busy shape as `installPlugin`.
+ */
+async function installLanguage(language: string) {
+  if (packBusy.value) return
+  packBusy.value = language
+  try {
+    const err = await api.post(`/api/languages/${encodeURIComponent(language)}`, {})
+    if (err) {
+      toast.error(err)
+      return
+    }
+    pollUpdateWhileBusy()
+    await loadAll()
+  } finally {
+    packBusy.value = null
+  }
+}
+
+/** Language a remove confirmation is open for, or `null` when the dialog is
+ * closed — same shared-dialog pattern as `uninstallTarget`. */
+const removeLanguageTarget = ref<string | null>(null)
+
+/**
+ * Opens the remove confirmation for `language` — never straight to
+ * `DELETE /api/languages/{language}`: the sentence read there
+ * (`language_pack_remove_confirm`) is the one place the owner learns the
+ * interface itself may fall back to English if it is the language in use.
+ */
+function askRemoveLanguage(language: string) {
+  if (packBusy.value) return
+  removeLanguageTarget.value = language
+}
+
+/** Retires every pack installed for the confirmed language. Same
+ * poll-while-busy shape as `installLanguage`, and the same confirmation
+ * idiom as `confirmUninstall`. */
+async function confirmRemoveLanguage() {
+  const language = removeLanguageTarget.value
+  removeLanguageTarget.value = null
+  if (!language || packBusy.value) return
+  packBusy.value = language
+  try {
+    const err = await api.del(`/api/languages/${encodeURIComponent(language)}`)
+    if (err) {
+      toast.error(err)
+      return
+    }
+    pollUpdateWhileBusy()
+    await loadAll()
+  } finally {
+    packBusy.value = null
+  }
+}
+
+/**
  * The table of contents: one entry per card, in template order. It is data
  * (like REMOTE_ROWS for the remote control): the view walks it for the nav AND
  * for the scroll observation.
@@ -1378,6 +1448,13 @@ function goTo(id: string) {
               @update:fallback="(v) => (fallback = v)"
             />
 
+            <LanguagePacksRow
+              :payload="locale"
+              :busy="packBusy"
+              @install="installLanguage"
+              @remove="askRemoveLanguage"
+            />
+
             <!-- Date and time. Two separate settings, at the owner's request: the
                  order of a date and the 12/24 h format do not vary together from one
                  country to another. No time zone setting — the display runs on the
@@ -1428,6 +1505,35 @@ function goTo(id: string) {
             <Button data-display-change @click="saveDisplay">{{ t('save') }}</Button>
           </CardContent>
         </Card>
+
+        <!-- Same shared-dialog pattern as `uninstallTarget`: only one
+             confirmation is ever open at a time. The sentence
+             (`language_pack_remove_confirm`) is the one place the owner
+             learns the interface itself may fall back to English. -->
+        <Dialog
+          :open="removeLanguageTarget !== null"
+          @update:open="(v: boolean) => { if (!v) removeLanguageTarget = null }"
+        >
+          <DialogContent data-language-pack-remove-dialog>
+            <DialogHeader>
+              <DialogTitle>{{ t('language_pack_remove') }}</DialogTitle>
+              <DialogDescription>
+                {{
+                  removeLanguageTarget
+                    ? t('language_pack_remove_confirm', { language: languageName(removeLanguageTarget) })
+                    : ''
+                }}
+              </DialogDescription>
+            </DialogHeader>
+            <Button
+              variant="destructive" data-language-pack-remove-confirm
+              :disabled="removeLanguageTarget !== null && packBusy === removeLanguageTarget"
+              @click="confirmRemoveLanguage"
+            >
+              {{ t('language_pack_remove') }}
+            </Button>
+          </DialogContent>
+        </Dialog>
       </section>
 
       <section id="startup" class="scroll-mt-6">

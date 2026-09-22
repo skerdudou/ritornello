@@ -131,6 +131,7 @@ function payloads() {
       ],
       fallback_current: 'en',
       fallback_candidates: ['en'],
+      packs: [],
     } as unknown,
     '/api/logs': { lines: ['WARN plugin radio unavailable'] } as unknown,
     '/api/settings': {
@@ -925,6 +926,7 @@ describe('ConfigView — language and display', () => {
         ],
         fallback_current: 'de',
         fallback_candidates: ['en', 'fr', 'de'],
+        packs: [],
       },
     })
     const vm = w.vm as unknown as { fallback: string }
@@ -958,6 +960,7 @@ describe('ConfigView — language and display', () => {
         ],
         fallback_current: 'en',
         fallback_candidates: ['en', 'fr'],
+        packs: [],
       },
     })
     await w.find('[data-display-change]').trigger('click')
@@ -990,6 +993,7 @@ describe('ConfigView — language and display', () => {
         ],
         fallback_current: 'en',
         fallback_candidates: ['en', 'fr'],
+        packs: [],
       },
     })
     const vm = w.vm as unknown as { fallback: string }
@@ -1049,6 +1053,7 @@ describe('ConfigView — language and display', () => {
         ],
         fallback_current: 'en',
         fallback_candidates: ['en', 'fr', 'de'],
+        packs: [],
       },
     })
     const vm = w.vm as unknown as { lang: string; fallback: string }
@@ -1088,6 +1093,7 @@ describe('ConfigView — language and display', () => {
         ],
         fallback_current: 'en',
         fallback_candidates: ['en', 'fr'],
+        packs: [],
       },
     })
     const vm = w.vm as unknown as { lang: string }
@@ -1117,6 +1123,7 @@ describe('ConfigView — language and display', () => {
         ],
         fallback_current: 'en',
         fallback_candidates: ['en', 'fr'],
+        packs: [],
       },
     })
     const vm = w.vm as unknown as { lang: string; fallback: string }
