@@ -269,6 +269,18 @@ pack_noarch() { # <staging dir> <archive base name> <version>
 pack_language() { # <language>
   local lang="$1" d modules=()
   d=$(mktemp -d)
+  # Cleans up on ANY exit from here on, not only the declared-but-empty
+  # guard just below. This script runs under `set -e`: a failing `cp`, a
+  # `pack_version` that refuses, or a full disk all unwind the WHOLE script
+  # rather than returning through this function one frame at a time, so a
+  # plain `rm -rf "$d"` at the bottom of the function would never run for
+  # any of them -- only a trap does. `$d` is baked into the trap command by
+  # double-quoting it here, at set time, so a later call (a second
+  # language) can never fire this one's cleanup against ITS directory; and
+  # it is explicitly cleared (`trap - EXIT`) right before this function's
+  # own successful return, once `pack_noarch` has already removed `$d`
+  # itself, so the trap never outlives this one call.
+  trap "rm -rf '$d'" EXIT
   for dir in deploy/locales/*/; do
     local module="${dir%/}"; module="${module##*/}"
     [ -f "deploy/locales/$module/$lang.toml" ] || continue
@@ -288,6 +300,7 @@ pack_language() { # <language>
     printf ']\n'
   } > "$d/pack.toml"
   pack_noarch "$d" "ritornello-lang-$lang" "$v"
+  trap - EXIT
 }
 
 if [ -n "$LANGUAGES" ]; then
