@@ -1714,6 +1714,10 @@ async fn main() -> Result<()> {
     // route that used it moved onto this same registry (`Registry::
     // core_languages` — task 12) instead of a second, independent disk
     // read, so this is now its last use.
+    // Cloned before the move below: `update::Worker` writes into this same
+    // root (`install_language`/`remove_language`) and must never compose a
+    // second `PathBuf` of its own for it — see `Worker.packs_root`'s doc.
+    let worker_packs_root = packs_root.clone();
     let registry: i18n::Shared =
         Arc::new(RwLock::new(i18n::seeded_registry(locales_root, packs_root)));
     // The device's own persisted fallback (task 13), or "en" on a device
@@ -2250,6 +2254,9 @@ async fn main() -> Result<()> {
         core_version: env!("CARGO_PKG_VERSION"),
         restart: restart_hook.clone(),
         registry: registry.clone(),
+        packs_root: worker_packs_root,
+        locale_tx: locale_tx.clone(),
+        locale_current: locale_current.clone(),
     };
     // Read off the `Worker` actually built, not a second `PathBuf::from("/")`
     // literal: `status::PluginsControl.root` (below) must be the exact same

@@ -23,38 +23,28 @@ use ritornello_i18n::{Layer, PackError, PackManifest, MAX_FILES};
 /// `files` is kept beside `layers` rather than re-serialised from them: what
 /// lands on disk must be byte-for-byte what was published and verified, not
 /// this core's idea of how to write the same map back out.
-///
-/// The `expect` below is conditioned on `not(test)`: this crate's own test
-/// module is the one caller today, so in a test build the item is genuinely
-/// used and an unconditional `expect` would itself warn as an "unfulfilled
-/// lint expectation" -- the exact mislabelling `expect` exists to avoid.
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the update worker that installs a language pack, task 8")
-)]
 pub struct PackContents {
     pub manifest: PackManifest,
+    /// Read directly by this module's own tests (`c.layers[0]`, …); no
+    /// production caller needs the parsed form yet, since `store::install`
+    /// writes `files` verbatim and reserialises `manifest` — never `layers`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the parsed layers, kept for a caller this crate does not have yet; store::install writes the raw files instead")
+    )]
     pub layers: Vec<(String, Layer)>,
     /// `(<module>.toml, bytes)`, in the same order as `layers`.
     pub files: Vec<(String, Vec<u8>)>,
 }
 
 /// The manifest's own name inside the archive.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the update worker that installs a language pack, task 8")
-)]
 const MANIFEST: &str = "pack.toml";
 
 /// Tar's framing on top of the payload, the same slack the component reader
 /// allows and for the same reason: headers and end-of-archive padding are
 /// decompressed bytes too, and a budget of exactly the cap would refuse a
 /// payload sitting exactly at it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the update worker that installs a language pack, task 8")
-)]
 const FRAMING_SLACK: usize = 256 * 1024;
 
 /// `cap` is a parameter, not `MAX_BYTES` read directly, for the same reason
@@ -62,10 +52,6 @@ const FRAMING_SLACK: usize = 256 * 1024;
 /// decompression bound with a small budget instead of a multi-megabyte
 /// fixture. Production passes `ritornello_i18n::MAX_BYTES`; nothing about
 /// the real bound changes.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the update worker that installs a language pack, task 8")
-)]
 pub fn read(bytes: &[u8], cap: usize) -> Result<PackContents, PackError> {
     let budget = cap + FRAMING_SLACK;
     let decoder = flate2::read::GzDecoder::new(bytes);

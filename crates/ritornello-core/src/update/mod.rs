@@ -161,6 +161,30 @@ pub enum Job {
         /// carries it here rather than this job re-reading it.
         file: String,
     },
+    /// A language pack, by the language it carries. Its own variants rather
+    /// than a name squeezed into `Install`: a pack takes a different path
+    /// end to end -- its own reader, no privileged step, no plugins.toml
+    /// block -- and sharing a variant would make the worker re-derive which
+    /// kind it was holding.
+    ///
+    /// Constructed by the HTTP routes task 9 adds (`POST /api/languages/
+    /// {language}`, `DELETE /api/languages/{language}`); this task only
+    /// gives `run_worker` the arms that consume it and pins the shape with
+    /// its own test (`job_install_language_is_a_real_clonable_job`), since no
+    /// production caller exists yet.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "constructed by the HTTP routes task 9 adds")
+    )]
+    InstallLanguage(String),
+    /// Constructed in production by `DELETE /api/languages/{language}` (task
+    /// 9); this task's own test drives it through the real loop instead
+    /// (`job_remove_language_reaches_remove_language_through_the_worker_loop`).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "constructed by the HTTP routes task 9 adds")
+    )]
+    RemoveLanguage(String),
 }
 
 /// The name of the core's own row, the name the page sends to install it, and
@@ -547,6 +571,12 @@ enum Refusal {
     /// The privileged unit refused or could not be started. Carries
     /// systemctl's own words.
     Privileged(String),
+    /// A language pack archive the pack reader turned down, or a pack whose
+    /// manifest names a different language than the one it was installed
+    /// under, or a pack whose own directory could not be removed. The
+    /// detail is the reader's -- or the filesystem's -- own sentence, which
+    /// names which rule refused it.
+    Pack(String),
     /// Nothing published carries this name at all: dropped out of the
     /// hundred-release window this check reads, or never one of ours.
     ///
@@ -577,7 +607,9 @@ impl std::fmt::Display for Refusal {
                 write!(f, "its own repository was not consulted by this check")
             }
             Self::NoFragment => write!(f, "the archive carries no plugins.toml block"),
-            Self::Download(d) | Self::Prepare(d) | Self::Privileged(d) => write!(f, "{d}"),
+            Self::Download(d) | Self::Prepare(d) | Self::Privileged(d) | Self::Pack(d) => {
+                write!(f, "{d}")
+            }
             Self::NothingPublished => write!(f, "nothing published carries this name"),
         }
     }
@@ -603,6 +635,7 @@ fn refusal_message(catalog: &Chain, component: &str, why: &Refusal) -> String {
         Refusal::Download(d) => ("update_download_failed", Some(d)),
         Refusal::Prepare(d) => ("update_install_failed", Some(d)),
         Refusal::Privileged(d) => ("update_privileged_failed", Some(d)),
+        Refusal::Pack(d) => ("update_pack_refused", Some(d)),
         Refusal::NothingPublished => ("update_nothing_published", None),
     };
     let mut params: Vec<(&str, &str)> = vec![("component", component)];
@@ -968,6 +1001,21 @@ struct Checked {
     third_party: Vec<String>,
 }
 
+/// The release's own offer for one language pack, out of an already
+/// performed check.
+///
+/// **Not a second network round trip.** `checked.ours` is `check()`'s own
+/// fold of the release list, and a language pack sits in it as
+/// `Offer::LanguagePack` exactly like the core or a plugin sits in it as
+/// `Offer::Core`/`Offer::Plugin` — see `release::fold`, `release::
+/// classify_asset`. `install_language` is handed the same `checked` the job
+/// loop already produced for this run (`run_worker`'s `Job::InstallLanguage`
+/// arm), the same way `install`/`install_one` are handed it for the core and
+/// for a plugin, rather than asking GitHub a second time for one component.
+fn offered_pack<'a>(checked: &'a Checked, language: &str) -> Option<&'a Published> {
+    checked.ours.iter().find(|p| matches!(&p.offer, Offer::LanguagePack(l) if l == language))
+}
+
 /// Everything the worker needs, and nothing it could read twice.
 ///
 /// A struct rather than nine parameters threaded through five async
@@ -1016,6 +1064,24 @@ pub struct Worker {
     /// each one. Task 8 is what grows this worker's use of it to the
     /// packs root and the actual install/remove step; this task only reads.
     pub registry: crate::i18n::Shared,
+    /// Where an installed language pack's own directory lives -- a root
+    /// entirely separate from the operator's own locales root (see
+    /// `i18n::registry`'s module doc): `install_language`/`remove_language`
+    /// write only here, and `registry`'s own packs root must be exactly the
+    /// same path, or a resweep would look for what this worker just wrote in
+    /// the wrong place.
+    pub packs_root: PathBuf,
+    /// The same channel `PUT /api/locale` writes into, cloned rather than a
+    /// second one of its own: `remove_language` puts the device back on
+    /// English exactly as a person picking it from the interface would, and
+    /// through the one door that persists the choice.
+    pub locale_tx: mpsc::Sender<String>,
+    /// The language currently in use -- the same handle `AppState.
+    /// locale_current` is, cloned rather than a second cell. Read to decide
+    /// whether a removal must also send the device back to English: two
+    /// independent copies of "the language in use" could disagree about
+    /// which language a removal is judged against.
+    pub locale_current: Arc<RwLock<Option<String>>>,
 }
 
 impl Worker {
@@ -1172,6 +1238,108 @@ impl Worker {
             .iter()
             .map(|p| (p.id.clone(), p.manifest.version.clone()))
             .collect()
+    }
+
+    /// Installs a language pack. **The privileged installer is not involved,
+    /// and that is the design rather than an optimisation.**
+    ///
+    /// A pack carries no binary, so there is nothing for root to place:
+    /// `target.rs` keeps its two path shapes, no `Action` is formed, and
+    /// nothing is written into the staging directory. What the core does
+    /// here it does with its own, unprivileged hands, into a root it alone
+    /// chooses — the archive never names a destination.
+    ///
+    /// The order is `install_one`'s, deliberately: room, then digest, then
+    /// read, then write. A refusal at any of the first three has written
+    /// nothing.
+    ///
+    /// `checked` is `check()`'s own fold, read once by the caller (the job
+    /// loop, exactly as for the core and for a plugin) rather than fetched a
+    /// second time here — see `offered_pack`.
+    async fn install_language(&self, checked: &Checked, language: &str) -> Result<(), Refusal> {
+        let id = crate::langpack::store::pack_id(language);
+        let offered = offered_pack(checked, language).ok_or(Refusal::NothingPublished)?;
+        let root = self.root.to_string_lossy().to_string();
+        if !enough_room(crate::system::disk_usage(&root), offered.size as usize) {
+            return Err(Refusal::NoRoom);
+        }
+        let client = download::client().map_err(|e| Refusal::Download(e.to_string()))?;
+        let Some(checksums_url) = &offered.checksums_url else {
+            return Err(Refusal::NoDigest);
+        };
+        let bytes = fetch_capped(&client, &offered.url, COMPRESSED_MAX)
+            .await
+            .map_err(|e| Refusal::Download(format!("the archive of {id}: {e}")))?;
+        let (status, sums_body) = fetch_text(&client, checksums_url)
+            .await
+            .map_err(|e| Refusal::Download(format!("the checksums of {id}: {e}")))?;
+        if status != 200 {
+            return Err(Refusal::NoDigest);
+        }
+        let sums = parse_checksums(&sums_body);
+        let file = asset_name(&offered.url);
+        if let Err(e) = verify_digest(file, sums.get(file).map(String::as_str), &digest_hex(&bytes))
+        {
+            tracing::warn!("update: {id}: {e}");
+            return Err(match e {
+                DownloadError::Digest { .. } => Refusal::DigestMismatch,
+                _ => Refusal::NoDigest,
+            });
+        }
+        // The pack's OWN reader, never the component one. Everything a pack
+        // may carry, and every refusal, lives there.
+        let contents = crate::langpack::archive::read(&bytes, ritornello_i18n::MAX_BYTES)
+            .map_err(|e| Refusal::Pack(e.to_string()))?;
+        // The manifest must agree with what we asked for. An archive that
+        // says "de" under the French pack's name would otherwise install
+        // German files into the French pack's directory.
+        if contents.manifest.language != language {
+            return Err(Refusal::Pack(format!(
+                "the archive of {id} declares the language {:?}",
+                contents.manifest.language
+            )));
+        }
+        crate::langpack::store::install(&self.packs_root, &id, &contents)
+            .map_err(|e| Refusal::Prepare(format!("writing {id}: {e}")))?;
+        crate::i18n::Registry::resweep_async(&self.registry).await;
+        Ok(())
+    }
+
+    /// Removes a language pack, and puts the device back on English if that
+    /// was the language in use.
+    ///
+    /// **The stored choice goes too, and only on a deliberate removal.** Any
+    /// other disappearance — a pack that fails to reinstall, a component
+    /// update — keeps it, which is what makes recovery silent. Here the
+    /// operator asked for the language to go, so an appliance that slipped
+    /// back into it by itself the day a pack reappeared would be acting on
+    /// an intention nobody still holds.
+    async fn remove_language(&self, language: &str) {
+        let id = crate::langpack::store::pack_id(language);
+        match crate::langpack::store::remove(&self.packs_root, &id) {
+            Ok(true) => tracing::info!("update: {id} removed"),
+            Ok(false) => tracing::info!("update: {id} was not installed"),
+            Err(e) => {
+                // Not `message_for`: that helper fills only `{component}`,
+                // and this refusal's catalog text also names the cause, the
+                // same two parameters `refusal_message` gives the install
+                // path's own `Refusal::Pack`.
+                let detail = e.to_string();
+                let message = ritornello_i18n::interpolate(
+                    &self.message("update_pack_refused").await,
+                    [("component", id.as_str()), ("detail", detail.as_str())],
+                );
+                self.publish_failure(message).await;
+                tracing::warn!("update: removing {id}: {e}");
+                return;
+            }
+        }
+        crate::i18n::Registry::resweep_async(&self.registry).await;
+        if self.locale_current.read().await.as_deref() == Some(language) {
+            // Through the channel the HTTP layer already uses, so the core
+            // persists it exactly as a person picking English would.
+            let _ = self.locale_tx.send("en".to_string()).await;
+        }
     }
 
     /// What each third-party plugin's own repository publishes for it.
@@ -2148,6 +2316,23 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
             }
             Job::RemovePlugin { name, file } => {
                 worker.remove_plugin_binary(&name, &file).await;
+            }
+            Job::InstallLanguage(language) => {
+                // A check first, for the same reason `Job::Install` takes
+                // one: it is what gives the download URL and the digest of
+                // the release as it stands right now, and a language pack
+                // is judged by that same fold (`Offer::LanguagePack`), not
+                // by a second, pack-only request.
+                if let Some(checked) = worker.check(&client).await
+                    && let Err(e) = worker.install_language(&checked, &language).await
+                {
+                    let id = crate::langpack::store::pack_id(&language);
+                    let message = refusal_message(&*worker.catalog.read().await, &id, &e);
+                    worker.publish_failure(message).await;
+                }
+            }
+            Job::RemoveLanguage(language) => {
+                worker.remove_language(&language).await;
             }
         }
         worker.set_busy(None).await;
@@ -3129,6 +3314,7 @@ mod tests {
             Refusal::Download("connection reset by peer".to_string()),
             Refusal::Prepare("no space left on device".to_string()),
             Refusal::Privileged("Job for ritornello-update.service failed".to_string()),
+            Refusal::Pack("the archive of ritornello-lang-fr declares the language \"de\"".to_string()),
             Refusal::NothingPublished,
         ];
         for catalog in [&english, &french()] {
@@ -3216,13 +3402,20 @@ mod tests {
             root: root.to_path_buf(),
             core_version: "0.2.0",
             restart: Arc::new(|| {}),
-            // An empty registry: no test in this module installs a pack, so
-            // `Registry::installed_packs` answering nothing is the correct
-            // fixture, not a shortcut.
+            // An empty registry: most tests in this module never install a
+            // pack, so `Registry::installed_packs` answering nothing is the
+            // correct fixture, not a shortcut. `pack_rig` below points
+            // `packs_root` at this exact same directory, so a pack it
+            // installs is exactly what a resweep of this registry finds.
             registry: Arc::new(RwLock::new(crate::i18n::seeded_registry(
                 root.to_path_buf(),
                 root.join("packs"),
             ))),
+            packs_root: root.join("packs"),
+            // Unused by most tests: a language pack test replaces this with
+            // a channel it can `try_recv()` on — see `bare_pack_rig`.
+            locale_tx: mpsc::channel(1).0,
+            locale_current: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -3735,6 +3928,289 @@ mod tests {
         .expect("the install pass hung");
         let snapshot = seen.lock().unwrap();
         snapshot.clone()
+    }
+
+    // ---- Language packs: `install_language`/`remove_language` -----------
+    //
+    // Built on `worker_at`, per Ruling C10 -- the same rig every other
+    // install/refusal test above already uses, and the one that owns
+    // `staging`. A second, parallel rig would let "nothing was staged" pass
+    // by asserting against a directory nothing ever writes into.
+    //
+    // `install_language` takes the release's own fold (`Checked`) the same
+    // way `install_one` takes a `Published` -- see `offered_pack`'s own doc
+    // for why: there is no test seam for `releases_url()` itself (a fixed
+    // GitHub host, exactly like `check()`'s own "not tested here" note
+    // above), so every rig below builds the `Checked` its `install_language`
+    // call is handed, the same way `served`/`served_core` build the
+    // `Published` `install_one`'s own tests hand it.
+
+    /// A worker (`worker_at`'s own rig), with the packs root task 8 gives it
+    /// pointed at the same directory its `registry` already sweeps, and a
+    /// fresh, four-deep locale channel a test can `try_recv()` on.
+    fn bare_pack_rig() -> (Worker, tempfile::TempDir, mpsc::Receiver<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = worker_at(dir.path(), stalled_line());
+        let (locale_tx, locale_rx) = mpsc::channel(4);
+        worker.locale_tx = locale_tx;
+        worker.locale_current = Arc::new(RwLock::new(None));
+        (worker, dir, locale_rx)
+    }
+
+    /// Everything `bare_pack_rig` built, plus the `Checked` the test's
+    /// `install_language` call is handed.
+    struct PackRig {
+        worker: Worker,
+        _dir: tempfile::TempDir,
+        staging: PathBuf,
+        packs_root: PathBuf,
+        locale_current: Arc<RwLock<Option<String>>>,
+        locale_rx: tokio::sync::Mutex<mpsc::Receiver<String>>,
+        checked: Checked,
+    }
+
+    fn finish_pack_rig(
+        worker: Worker,
+        dir: tempfile::TempDir,
+        locale_rx: mpsc::Receiver<String>,
+        checked: Checked,
+    ) -> PackRig {
+        PackRig {
+            staging: worker.staging.clone(),
+            packs_root: worker.packs_root.clone(),
+            locale_current: worker.locale_current.clone(),
+            locale_rx: tokio::sync::Mutex::new(locale_rx),
+            checked,
+            worker,
+            _dir: dir,
+        }
+    }
+
+    /// A pack's `pack.toml`, built the way `contents` (in `langpack::store`'s
+    /// own tests) builds one, but as raw text rather than a parsed
+    /// `PackManifest`: these rigs go through the real archive bytes, not a
+    /// value constructed in memory.
+    fn pack_manifest_toml(language: &str, version: &str, modules: &[&str]) -> String {
+        let list = modules.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>().join(", ");
+        format!(
+            "language = {language:?}\nversion = {version:?}\nsource = \"https://github.com/skerdudou/ritornello\"\nmodules = [{list}]\n"
+        )
+    }
+
+    /// A gzipped tar shaped like a real language pack archive: `pack.toml`
+    /// plus one `<module>.toml` per entry of `modules`.
+    fn pack_archive(modules: &[(&str, &str)], language: &str, version: &str) -> Vec<u8> {
+        let names: Vec<&str> = modules.iter().map(|(m, _)| *m).collect();
+        let manifest = pack_manifest_toml(language, version, &names);
+        let file_names: Vec<String> = names.iter().map(|m| format!("{m}.toml")).collect();
+        let mut entries: Vec<(&str, &[u8])> = vec![("pack.toml", manifest.as_bytes())];
+        for (i, (_, body)) in modules.iter().enumerate() {
+            entries.push((&file_names[i], body.as_bytes()));
+        }
+        targz(&entries)
+    }
+
+    /// A `Published` for the language pack `language`/`version`, its archive
+    /// and its checksums served by two local, one-shot listeners -- the same
+    /// rig `served`/`served_core` build for a plugin's or the core's own
+    /// archive, extended to `Offer::LanguagePack` and to the pack naming
+    /// convention (`pack_id`'s own doc: `ritornello-lang-fr-0.2.0.tar.gz`).
+    async fn served_pack(language: &str, version: &str, archive: &[u8]) -> Published {
+        let id = crate::langpack::store::pack_id(language);
+        let file = format!("{id}-{version}.tar.gz");
+        let url = serve_once(archive.to_vec(), &file).await;
+        let sums = format!("{}  {file}\n", digest_hex(archive));
+        let checksums_url = serve_once(sums.into_bytes(), "SHA256SUMS").await;
+        Published {
+            offer: Offer::LanguagePack(language.to_string()),
+            version: version.to_string(),
+            url,
+            size: 0,
+            release_tag: format!("v{version}"),
+            checksums_url: Some(checksums_url),
+            catalogue_url: None,
+        }
+    }
+
+    /// A sound pack archive for `language`/`version`, covering exactly
+    /// `modules`, offered and ready to install.
+    async fn pack_rig(modules: &[(&str, &str)], language: &str, version: &str) -> PackRig {
+        let archive = pack_archive(modules, language, version);
+        let published = served_pack(language, version, &archive).await;
+        let (worker, dir, locale_rx) = bare_pack_rig();
+        finish_pack_rig(worker, dir, locale_rx, ours(vec![published]))
+    }
+
+    /// Like `pack_rig`, but the archive served is exactly `bytes` -- for a
+    /// fixture that must be refused by the pack reader before a single file
+    /// is written, rather than one built to be accepted.
+    async fn pack_rig_with_bytes(bytes: Vec<u8>, language: &str, version: &str) -> PackRig {
+        let published = served_pack(language, version, &bytes).await;
+        let (worker, dir, locale_rx) = bare_pack_rig();
+        finish_pack_rig(worker, dir, locale_rx, ours(vec![published]))
+    }
+
+    /// An archive shaped nothing like a language pack -- not gzip, not tar,
+    /// the same "rate limited" body `something_that_is_not_a_gzipped_tar_
+    /// is_refused_without_panicking` (`langpack::archive`'s own tests) already
+    /// drives through the reader directly.
+    fn bad_pack_archive() -> Vec<u8> {
+        b"<html>rate limited</html>".to_vec()
+    }
+
+    /// A French pack (`fr`, `0.2.1`) whose checksums file names a digest that
+    /// does not match its own archive -- so `install_language` reaches the
+    /// real download and is refused at `verify_digest`, never at reading the
+    /// archive at all. Mirrors `served_with_wrong_digest`.
+    async fn pack_rig_with_wrong_digest() -> PackRig {
+        let archive = pack_archive(&[("core", "k = \"v\"\n")], "fr", "0.2.1");
+        let id = crate::langpack::store::pack_id("fr");
+        let file = format!("{id}-0.2.1.tar.gz");
+        let url = serve_once(archive, &file).await;
+        let sums = format!("{}  {file}\n", digest_hex(b"not the archive's real bytes"));
+        let checksums_url = serve_once(sums.into_bytes(), "SHA256SUMS").await;
+        let published = Published {
+            offer: Offer::LanguagePack("fr".to_string()),
+            version: "0.2.1".to_string(),
+            url,
+            size: 0,
+            release_tag: "v0.2.1".to_string(),
+            checksums_url: Some(checksums_url),
+            catalogue_url: None,
+        };
+        let (worker, dir, locale_rx) = bare_pack_rig();
+        finish_pack_rig(worker, dir, locale_rx, ours(vec![published]))
+    }
+
+    /// A pack served **as** the offer for `"fr"` whose own `pack.toml`
+    /// declares `"de"` -- the digest matches (it is computed over the real
+    /// bytes), so this reaches the manifest-language check specifically,
+    /// rather than being turned away earlier for an unrelated reason.
+    async fn pack_rig_with_mismatched_language() -> PackRig {
+        let archive = pack_archive(&[("core", "k = \"v\"\n")], "de", "0.2.1");
+        let published = served_pack("fr", "0.2.1", &archive).await;
+        let (worker, dir, locale_rx) = bare_pack_rig();
+        finish_pack_rig(worker, dir, locale_rx, ours(vec![published]))
+    }
+
+    /// **The property this whole chantier turns on.** Installing a pack
+    /// forms no privileged action at all: nothing is staged, no request.json
+    /// is written, and the privileged unit is never asked to run. Driven
+    /// from the staging directory, which every privileged path in this
+    /// module writes into before it can do anything.
+    #[tokio::test]
+    async fn installing_a_pack_stages_nothing_and_asks_root_for_nothing() {
+        let rig = pack_rig(&[("core", "standby = \"VEILLE\"\n")], "fr", "0.2.1").await;
+        rig.worker.install_language(&rig.checked, "fr").await.expect("the pack installs");
+        assert!(
+            !rig.staging.join("request.json").exists(),
+            "a pack must never form a privileged request"
+        );
+        assert!(rig.packs_root.join("ritornello-lang-fr/core.toml").exists());
+    }
+
+    /// A refused archive writes nothing at all -- not the sound half of it,
+    /// not an empty directory. The refusal names its cause on the card.
+    #[tokio::test]
+    async fn a_refused_pack_archive_leaves_the_disk_untouched() {
+        let rig = pack_rig_with_bytes(bad_pack_archive(), "fr", "0.2.1").await;
+        assert!(rig.worker.install_language(&rig.checked, "fr").await.is_err());
+        assert!(!rig.packs_root.join("ritornello-lang-fr").exists());
+    }
+
+    /// A digest that does not match is refused before the archive is even
+    /// read -- same order as install_one, for the same reason.
+    #[tokio::test]
+    async fn a_pack_whose_digest_does_not_match_is_refused_before_it_is_read() {
+        let rig = pack_rig_with_wrong_digest().await;
+        assert!(matches!(
+            rig.worker.install_language(&rig.checked, "fr").await,
+            Err(Refusal::DigestMismatch)
+        ));
+        assert!(!rig.packs_root.join("ritornello-lang-fr").exists());
+    }
+
+    /// The manifest's own language must agree with what was asked for -- an
+    /// archive that says "de" under the French pack's id would otherwise
+    /// install German files into `ritornello-lang-fr`. Step 5's mutation
+    /// table asks for this test explicitly: no test drove this check before
+    /// it was written.
+    #[tokio::test]
+    async fn a_pack_whose_manifest_names_a_different_language_is_refused() {
+        let rig = pack_rig_with_mismatched_language().await;
+        let err = rig
+            .worker
+            .install_language(&rig.checked, "fr")
+            .await
+            .expect_err("a language mismatch must be refused");
+        assert!(matches!(err, Refusal::Pack(_)), "{err:?}");
+        assert!(!rig.packs_root.join("ritornello-lang-fr").exists());
+    }
+
+    /// §7.3: removing the pack of the language in use sends the interface
+    /// back to English, and the stored choice goes with it -- so the device
+    /// does not slip back into that language on its own the day a pack for
+    /// it reappears.
+    #[tokio::test]
+    async fn removing_the_pack_in_use_sends_the_device_back_to_english() {
+        let rig = pack_rig(&[("core", "k = \"v\"\n")], "fr", "0.2.1").await;
+        rig.worker.install_language(&rig.checked, "fr").await.unwrap();
+        *rig.locale_current.write().await = Some("fr".to_string());
+        rig.worker.remove_language("fr").await;
+        assert_eq!(rig.locale_rx.lock().await.try_recv().ok(), Some("en".to_string()));
+    }
+
+    /// The mirror, and it is the half that is easy to get wrong: removing
+    /// some OTHER language's pack must not touch the chosen one.
+    #[tokio::test]
+    async fn removing_another_language_leaves_the_chosen_one_alone() {
+        let rig = pack_rig(&[("core", "k = \"v\"\n")], "de", "0.2.1").await;
+        rig.worker.install_language(&rig.checked, "de").await.unwrap();
+        *rig.locale_current.write().await = Some("fr".to_string());
+        rig.worker.remove_language("de").await;
+        assert!(rig.locale_rx.lock().await.try_recv().is_err(), "nothing was sent");
+    }
+
+    /// **The wiring itself, not only the method it calls.** `run_worker`'s
+    /// `Job::RemoveLanguage` arm must actually reach `remove_language` — this
+    /// drives it through the real loop rather than only through a direct
+    /// call, the same distinction task 18's review drew for `install()`.
+    /// `Job::InstallLanguage` is not driven the same way here: its own arm
+    /// always opens a real `check()` first (task 9's own brief: "the worker
+    /// is the only thing that has read the release"), which needs
+    /// `releases_url()` — a fixed GitHub host with no test seam, exactly the
+    /// reason `offered_pack` takes an already-performed `Checked` rather
+    /// than fetching one itself. See `job_install_language_is_a_real_clonable_job`
+    /// for what pins that variant instead.
+    #[tokio::test]
+    async fn job_remove_language_reaches_remove_language_through_the_worker_loop() {
+        let rig = pack_rig(&[("core", "k = \"v\"\n")], "fr", "0.2.1").await;
+        rig.worker.install_language(&rig.checked, "fr").await.unwrap();
+        *rig.locale_current.write().await = Some("fr".to_string());
+        let PackRig { worker, locale_rx, packs_root, .. } = rig;
+        let mut locale_rx = locale_rx.into_inner();
+
+        let (tx, rx) = mpsc::channel(4);
+        let handle = tokio::spawn(run_worker(worker, rx));
+        tx.send(Job::RemoveLanguage("fr".to_string())).await.unwrap();
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("run_worker hung")
+            .expect("run_worker panicked");
+
+        assert!(!packs_root.join("ritornello-lang-fr").exists());
+        assert_eq!(locale_rx.try_recv().ok(), Some("en".to_string()));
+    }
+
+    /// `Job::InstallLanguage` is a real, `Clone`able job — pinned directly
+    /// because nothing else in this crate constructs one until task 9's
+    /// HTTP routes do (see the test above for why it is not driven through
+    /// `run_worker` here).
+    #[test]
+    fn job_install_language_is_a_real_clonable_job() {
+        let job = Job::InstallLanguage("fr".to_string());
+        assert!(matches!(job.clone(), Job::InstallLanguage(l) if l == "fr"));
     }
 
     /// **The property this whole task exists for, observed rather than
