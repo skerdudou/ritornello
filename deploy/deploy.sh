@@ -84,12 +84,45 @@ ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/locales /etc/ritornello
 ssh "${SSHOPTS[@]}" "$PI" 'rm -rf /tmp/language-packs && mkdir -p /tmp/language-packs'
 for archive in release/languages/ritornello-lang-*.tar.gz; do
   base=$(basename "$archive")
-  # ritornello-lang-<language>-<version>.tar.gz -> ritornello-lang-<language>,
-  # the pack's own id (crates/ritornello-core/src/langpack/mod.rs::pack_id).
-  # Cut at the first "-<digit>": a version always starts with one, and a
-  # language code never does, region suffix (pt-BR) or not.
-  id=$(echo "$base" | sed -E 's/-[0-9].*$//')
+  # The pack's own id is `ritornello-lang-<language>`, and `language` is
+  # read from the archive's own pack.toml -- never reconstructed from the
+  # archive's file name. A language code can itself contain a dash
+  # followed by digits (`es-419`, a real CLDR region `valid_locale`
+  # accepts), which no name-splitting rule can tell apart from the version
+  # that follows it: a `sed` cut at the first "-<digit>" used to land here
+  # and filed `ritornello-lang-es-419-0.2.0.tar.gz` under `ritornello-lang-es`,
+  # silently dropping the region -- measured, not assumed (see
+  # task-13-report.md, Fix round 1). This is this repository's standing
+  # rule applied to itself: a field is declared by the component that
+  # knows it, never inferred by the one that only reads the archive.
+  # Not wrapped in its own EXIT trap: this script already sets one, at the
+  # top, to close the shared ssh control connection (`fermer_liaison`), and
+  # a second `trap ... EXIT` here would replace it rather than add to it,
+  # leaking that connection on every run. A scratch directory left behind
+  # by a mid-loop failure is harmless -- `mktemp -d` never reuses a name --
+  # so a plain `rm -rf` on the success path is enough.
+  scratch=$(mktemp -d)
+  tar -xzf "$archive" -C "$scratch"
+  language=$(python3 - "$scratch/pack.toml" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    print(tomllib.load(f)["language"])
+PY
+)
+  rm -rf "$scratch"
+  [ -n "$language" ] || { echo "deploy.sh: $base declares no language in pack.toml" >&2; exit 1; }
+  id="ritornello-lang-$language"
   scp "${SSHOPTS[@]}" "$archive" "$PI:/tmp/language-packs/$base"
+  # `sudo tar -xzf` here extracts an archive built moments earlier, in this
+  # same invocation, from a `mktemp -d` staging directory that
+  # `pack_language()` (scripts/package-release.sh) fills only with
+  # `pack.toml` and files copied from a locally enumerated
+  # `deploy/locales/*/` -- no externally reachable input ever enters it,
+  # so no `../` or absolute entry can exist. The trust rests entirely on
+  # *how the archive was built*, not on this extraction: never reuse this
+  # line for an archive that arrived over the network, where
+  # `langpack::archive::read` (a reader, not an extractor) is the only
+  # thing allowed to open it.
   ssh "${SSHOPTS[@]}" "$PI" "sudo rm -rf /etc/ritornello/language-packs/$id \
     && sudo mkdir -p /etc/ritornello/language-packs/$id \
     && sudo tar -C /etc/ritornello/language-packs/$id -xzf /tmp/language-packs/$base \

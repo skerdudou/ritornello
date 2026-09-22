@@ -1505,12 +1505,15 @@ that are never the same directory and that never write into each other:
   resolves **first** — see the resolution chain below.
 - **The resolution chain, per key: chosen language → the device's
   fallback language → English → the key itself.** Each of the first three
-  is itself a small stack — a disk pack before the same module's embedded
-  text, and the module's own vocabulary before `common`'s — so up to
-  twelve layers can be consulted for one key, in that fixed order
-  (`Registry::chain_for`). **The chosen language wins over specificity,
-  deliberately**: a generic word `common` happens to carry in the chosen
-  language is preferred over a well-chosen, module-specific word from the
+  is itself a small stack — the operator's own disk file, before an
+  installed pack, before the module's embedded text (`Registry::sources_for`
+  enumerates the three, strongest first) — and the module's own vocabulary
+  is itself tried before `common`'s. Three tiers, times two vocabularies,
+  times three languages: up to **eighteen** layers can be consulted for one
+  key, in that fixed order (`Registry::chain_for`). **The chosen language
+  wins over specificity, deliberately**: a generic word `common` happens to
+  carry in the chosen language is preferred over a well-chosen,
+  module-specific word from the
   fallback language — someone who asked for a language gets that
   language's vocabulary exhausted before any other language is even
   tried. A missing key never errors: it degrades one language at a time,
