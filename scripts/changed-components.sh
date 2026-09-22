@@ -108,6 +108,65 @@ for c in "${CRATES[@]}"; do
   fi
 done
 
+# Language packs: one version per `[language]` section of
+# deploy/language-packs.toml, which is the file's only home for that number
+# -- a pack has no Cargo.toml. The languages come from that same file, the
+# same way the plugin list above comes from plugins.example.toml.
+mapfile -t LANGS < <(sed -n 's/^\[\(.*\)\]$/\1/p' deploy/language-packs.toml | tr -d '\r')
+[ "${#LANGS[@]}" -gt 0 ] || { echo "no language declared in deploy/language-packs.toml" >&2; exit 1; }
+
+# The version declared for one language section, from a language-packs.toml
+# on stdin. Scoped by hand, like pack_version() in package-release.sh: the
+# file holds one section per language, and a plain sed over the whole file
+# would answer with whichever language's `version =` line came first.
+pack_version() { # <language>
+  local lang="$1" v
+  v=$(tr -d '\r' | awk -v section="[$lang]" '
+    $0 == section { found=1; next }
+    found && /^\[/ { found=0 }
+    found && /^version = "/ { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }
+  ')
+  [ -n "$v" ] || v=absent
+  printf '%s\n' "$v"
+}
+
+# The name a filter downstream matches on: the `publish` job of ci.yml keeps
+# only `assets/"$c"-*.tar.gz` for every name this script prints, so this must
+# be `ritornello-lang-<language>` with no version -- package-release.sh names
+# the archive itself `ritornello-lang-<language>-<version>.tar.gz`, and the
+# filter appends `-*.tar.gz` on its own. A name that already carried the
+# version would match nothing, and the archive would be built and then
+# silently discarded by that job's `rm -rf assets`.
+MOVED_PACKS=()
+for l in "${LANGS[@]}"; do
+  now=$(pack_version "$l" < deploy/language-packs.toml)
+  [ "$now" != absent ] || { echo "deploy/language-packs.toml declares no version for [$l]" >&2; exit 1; }
+  if [ -z "$PREV" ]; then
+    printf '%s\n' "ritornello-lang-$l"
+    MOVED_PACKS+=("ritornello-lang-$l")
+    changed=$((changed + 1))
+    continue
+  fi
+  # A language that did not exist at <ref> is new, so it counts as changed --
+  # same fallback as the crate loop above, for the same reason.
+  then_=$(git show "$PREV:deploy/language-packs.toml" 2>/dev/null | pack_version "$l" || echo absent)
+  if [ "$now" != "$then_" ]; then
+    printf '%s\n' "ritornello-lang-$l"
+    MOVED_PACKS+=("ritornello-lang-$l")
+    changed=$((changed + 1))
+  fi
+done
+
+# A text changed with no number moved delivers nothing, and looks exactly
+# like a release that worked. Same class as the shared-crate case above, and
+# said the same way: on stderr, without refusing the release.
+if [ -n "$PREV" ] && ! git diff --quiet "$PREV" -- deploy/locales; then
+  if ! printf '%s\n' "${MOVED_PACKS[@]}" | grep -q .; then
+    echo "deploy/locales changed since $PREV but no language pack version moved —" >&2
+    echo "  the new text will not reach any device. Bump the pack in deploy/language-packs.toml." >&2
+  fi
+fi
+
 if [ "$changed" -eq 0 ]; then
   echo "no component version moved since $PREV — bump the component you fixed, or this release delivers nothing" >&2
   exit 2

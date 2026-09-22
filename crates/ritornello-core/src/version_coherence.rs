@@ -107,6 +107,77 @@ mod tests {
         read(&repo_root().join("crates").join(name).join("Cargo.toml"))
     }
 
+    /// The packs declared in `deploy/language-packs.toml`, as
+    /// `(language, version)`. Their version has no Cargo.toml to live in --
+    /// a pack is not a crate -- so this file is the one place it is written,
+    /// and this guard is what keeps it on the same rails as every component.
+    ///
+    /// Deliberately textual, like `declared_version` above: a `[section]`
+    /// header names the language and the `version = "..."` line that follows
+    /// it names its number, and a full TOML parse is more machinery than two
+    /// line shapes deserve.
+    fn declared_packs() -> Vec<(String, String)> {
+        let text = read(&repo_root().join("deploy").join("language-packs.toml"));
+        let mut packs = Vec::new();
+        let mut current: Option<String> = None;
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r').trim();
+            if let Some(lang) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                current = Some(lang.to_string());
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("version = \"") {
+                let version = rest
+                    .strip_suffix('"')
+                    .unwrap_or_else(|| panic!("malformed version line: {line}"));
+                let lang = current
+                    .clone()
+                    .unwrap_or_else(|| panic!("version line before any [language] section"));
+                packs.push((lang, version.to_string()));
+            }
+        }
+        assert!(
+            !packs.is_empty(),
+            "deploy/language-packs.toml declares no language pack at all"
+        );
+        packs
+    }
+
+    /// The languages `deploy/locales` carries text for: every module
+    /// directory it holds, deduplicated. A module without a given language's
+    /// `.toml` is normal -- not every plugin needs its own strings -- so this
+    /// asks only which languages exist anywhere under `deploy/locales`, not
+    /// which modules a language completes.
+    fn languages_on_disk() -> Vec<String> {
+        let root = repo_root().join("deploy").join("locales");
+        let mut languages = std::collections::BTreeSet::new();
+        for module in std::fs::read_dir(&root)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()))
+        {
+            let module = module.expect("readable directory entry").path();
+            if !module.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&module)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", module.display()))
+            {
+                let entry = entry.expect("readable directory entry").path();
+                if entry.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    let lang = entry
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_else(|| panic!("non-UTF8 file name: {}", entry.display()));
+                    languages.insert(lang.to_string());
+                }
+            }
+        }
+        assert!(
+            !languages.is_empty(),
+            "deploy/locales carries no language file at all"
+        );
+        languages.into_iter().collect()
+    }
+
     #[test]
     fn every_shipped_component_declares_its_own_version() {
         let mut names = vec!["ritornello-core".to_string()];
@@ -142,6 +213,25 @@ mod tests {
                 product,
                 "{name} is {version}, off the product generation {}.{}; \
                  only the third number is free",
+                product.0,
+                product.1
+            );
+        }
+    }
+
+    /// The same generation rule, for language packs: they have no
+    /// Cargo.toml, so `deploy/language-packs.toml` is the one place their
+    /// number is written, and this is what keeps it on the same rails as
+    /// every crate-shaped component.
+    #[test]
+    fn every_language_pack_stays_on_the_product_generation() {
+        let product = generation(&product_version());
+        for (lang, version) in declared_packs() {
+            assert_eq!(
+                generation(&version),
+                product,
+                "language pack [{lang}] is {version}, off the product \
+                 generation {}.{}; only the third number is free",
                 product.0,
                 product.1
             );
@@ -213,6 +303,60 @@ mod tests {
                  {finished} will carry that same number, and a device compares \
                  versions for equality, so whoever installs it here keeps the \
                  beta's bytes for ever"
+            );
+        }
+    }
+
+    /// The same trap as `a_prerelease_ships_no_component_under_the_finished_number`,
+    /// for language packs: a pack declaring the bare `0.2.1` inside product
+    /// `0.2.1-beta.1` carries no suffix at all, so it would slip past a
+    /// suffix check. The device compares versions for equality, so a pack
+    /// installed from the beta under `0.2.1` and shipped again unmoved in the
+    /// finished `v0.2.1` looks identical to a device that already has it: the
+    /// newer archive -- if the finished release even carries a newer one --
+    /// is never fetched.
+    #[test]
+    fn a_prerelease_ships_no_language_pack_under_the_finished_number() {
+        let product = product_version();
+        let Some(_) = prerelease(&product) else {
+            return; // a finished product: the generation rule above covers it
+        };
+        let finished = product.split('-').next().unwrap_or(&product);
+        for (lang, version) in declared_packs() {
+            assert_ne!(
+                version, finished,
+                "language pack [{lang}] is {version} inside prerelease \
+                 {product}: the finished {finished} will carry that same \
+                 number, and a device compares versions for equality, so \
+                 whoever installs it here keeps the beta's bytes for ever"
+            );
+        }
+    }
+
+    /// Every language `deploy/locales` carries has a pack declared for it,
+    /// and no pack is declared for a language nothing translates. Without
+    /// this, adding `de.toml` files would ship nothing and removing a
+    /// language would leave a pack naming an empty archive.
+    #[test]
+    fn the_declared_packs_are_exactly_the_languages_on_disk() {
+        let mut declared: Vec<String> = declared_packs().into_iter().map(|(l, _)| l).collect();
+        declared.sort_unstable();
+        declared.dedup();
+        let on_disk = languages_on_disk();
+        for lang in &on_disk {
+            assert!(
+                declared.contains(lang),
+                "deploy/locales carries text for [{lang}], but \
+                 deploy/language-packs.toml declares no pack for it -- that \
+                 text would never reach a device"
+            );
+        }
+        for lang in &declared {
+            assert!(
+                on_disk.contains(lang),
+                "deploy/language-packs.toml declares a pack for [{lang}], \
+                 but deploy/locales carries no text for it -- that pack \
+                 would name an archive with nothing in it"
             );
         }
     }
