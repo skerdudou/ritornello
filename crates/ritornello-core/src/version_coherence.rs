@@ -390,6 +390,39 @@ mod tests {
         );
     }
 
+    /// The same shape as the test above, for `changed-components.sh`'s
+    /// language-pack decision and naming -- and the closer of a real gap:
+    /// the `publish` job of `.github/workflows/ci.yml` keeps only
+    /// `assets/"$c"-*.tar.gz` for every name `changed-components.sh` prints,
+    /// then `rm -rf assets`. So this script's stdout is not informative --
+    /// it decides what survives that deletion. Its own `--self-test` proves
+    /// both halves of the version-diff decision (a pack whose number moved
+    /// is named, one that did not is not) and, separately, that the bare
+    /// token it would emit for a pack is exactly the prefix
+    /// `package-release.sh` actually built an archive under -- by building
+    /// one for real and checking the file exists, rather than comparing two
+    /// copies of the same literal string.
+    ///
+    /// Run here rather than only manually, for the same reason as its
+    /// neighbour above: this script's only other exercise is the `publish`
+    /// job, which fires on a tag, and a workflow change is never testable
+    /// from its own branch.
+    #[test]
+    fn changed_components_agrees_about_language_pack_naming() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let out = std::process::Command::new("bash")
+            .arg("scripts/changed-components.sh")
+            .arg("--self-test")
+            .current_dir(&root)
+            .output()
+            .expect("bash is available: the Rust suite runs on Linux here and in CI");
+        assert!(
+            out.status.success(),
+            "changed-components.sh --self-test failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn a_prerelease_suffix_is_the_products_own_or_absent() {
         let product = product_version();

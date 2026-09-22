@@ -111,11 +111,19 @@ crate_version() { # <crate directory name>
 # would answer with whichever language's `version =` line came first.
 pack_version() { # <language>
   local lang="$1" v
-  v=$(awk -v section="[$lang]" '
+  # `tr -d '\r'` BEFORE awk, not after: `$0 == section` compares the WHOLE
+  # line, so a CRLF-terminated file (the Windows-checkout case the comment
+  # above warns about) leaves a trailing \r that this exact-match line never
+  # strips on its own, and the section is silently never found. Stripping
+  # the output instead of the input looked equivalent and was not: nothing
+  # here ever called pack_language() before task 12's self-test, so a
+  # Windows checkout of this file broke `--languages` without a single test
+  # noticing.
+  v=$(tr -d '\r' < deploy/language-packs.toml | awk -v section="[$lang]" '
     $0 == section { found=1; next }
     found && /^\[/ { found=0 }
     found && /^version = / { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }
-  ' deploy/language-packs.toml | tr -d '\r')
+  ')
   [ -n "$v" ] || { echo "deploy/language-packs.toml declares no version for [$lang]" >&2; exit 1; }
   version_fits "language pack $lang" "$v" || exit 1
   echo "$v"
@@ -307,7 +315,11 @@ if [ -n "$LANGUAGES" ]; then
   OUT="release/languages"
   rm -rf "$OUT"
   mkdir -p "$OUT"
-  mapfile -t LANGS < <(sed -n 's/^\[\(.*\)\]$/\1/p' deploy/language-packs.toml | tr -d '\r')
+  # tr BEFORE sed, not after: the pattern is anchored on `]$`, and a
+  # CRLF-terminated file leaves a trailing \r that defeats that anchor
+  # before tr ever gets to run on the (already-empty) output. See the same
+  # fix in pack_version() above.
+  mapfile -t LANGS < <(tr -d '\r' < deploy/language-packs.toml | sed -n 's/^\[\(.*\)\]$/\1/p')
   [ "${#LANGS[@]}" -gt 0 ] || { echo "no language declared in deploy/language-packs.toml" >&2; exit 1; }
   for l in "${LANGS[@]}"; do pack_language "$l"; done
   ls -l "$OUT"

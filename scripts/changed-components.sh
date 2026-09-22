@@ -13,17 +13,30 @@
 # gesture, and forgetting to bump publishes nothing — a loud failure rather
 # than a silent one.
 #
-# Usage: changed-components.sh [ref]
+# Usage: changed-components.sh [ref] | --self-test
 #   with a ref    — the components whose declared version differs from it
 #   without a ref — every component (the first release, or an unknown history)
+#   --self-test   — the language-pack decision and naming, against a table of
+#                    cases and against what package-release.sh actually
+#                    builds; see the block guarded by $SELF_TEST below. Called
+#                    by the Rust suite (version_coherence.rs), for the same
+#                    reason package-release.sh --self-test is: this script's
+#                    only other exercise is the release job, which fires on a
+#                    tag.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-PREV="${1:-}"
 
-if [ -n "$PREV" ] && ! git rev-parse --verify -q "$PREV^{commit}" >/dev/null; then
-  echo "$PREV is not a commit — pass a release tag, or no argument for a first release" >&2
-  exit 1
+SELF_TEST=
+PREV=
+if [ "${1:-}" = "--self-test" ]; then
+  SELF_TEST=1
+else
+  PREV="${1:-}"
+  if [ -n "$PREV" ] && ! git rev-parse --verify -q "$PREV^{commit}" >/dev/null; then
+    echo "$PREV is not a commit — pass a release tag, or no argument for a first release" >&2
+    exit 1
+  fi
 fi
 
 # Shared crates are linked into every component's binary and inherit the
@@ -89,6 +102,109 @@ version_in() { # <manifest text on stdin>
   printf '%s\n' "$v"
 }
 
+# Language packs: one version per `[language]` section of
+# deploy/language-packs.toml, which is the file's only home for that number
+# -- a pack has no Cargo.toml. The languages come from that same file, the
+# same way the plugin list above comes from plugins.example.toml. Defined
+# here, ahead of the CRATES loop, so --self-test can exercise these
+# functions below without running any of the git-dependent logic above.
+# tr BEFORE sed, not after: the pattern is anchored on `]$`, and a
+# CRLF-terminated file (the Windows-checkout case package-release.sh's own
+# comment warns about) leaves a trailing \r that defeats that anchor before
+# tr ever runs on the -- by then empty -- output.
+mapfile -t LANGS < <(tr -d '\r' < deploy/language-packs.toml | sed -n 's/^\[\(.*\)\]$/\1/p')
+[ "${#LANGS[@]}" -gt 0 ] || { echo "no language declared in deploy/language-packs.toml" >&2; exit 1; }
+
+# The version declared for one language section, from a language-packs.toml
+# on stdin. Scoped by hand, like pack_version() in package-release.sh: the
+# file holds one section per language, and a plain sed over the whole file
+# would answer with whichever language's `version =` line came first. `tr`
+# runs on stdin before awk, for the same anchored-`$0 ==` reason as LANGS
+# above -- awk's exact-match section header would otherwise never see a
+# CRLF-terminated `[fr]` as equal to the literal `[fr]` it is looking for.
+pack_version() { # <language>
+  local lang="$1" v
+  v=$(tr -d '\r' | awk -v section="[$lang]" '
+    $0 == section { found=1; next }
+    found && /^\[/ { found=0 }
+    found && /^version = "/ { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }
+  ')
+  [ -n "$v" ] || v=absent
+  printf '%s\n' "$v"
+}
+
+# Whether a pack counts as changed: its declared version now differs from
+# what it declared at the reference (or from "absent", when there is no
+# reference or the pack is new there). Factored out so --self-test exercises
+# the SAME comparison the real loop below makes, rather than a restatement
+# of it -- the same reason version_fits is its own function in
+# package-release.sh instead of being inlined at both call sites.
+pack_changed() { # <now> <then>
+  [ "$1" != "$2" ]
+}
+
+# The name a filter downstream matches on: the `publish` job of ci.yml keeps
+# only `assets/"$c"-*.tar.gz` for every name this script prints, so this must
+# be `ritornello-lang-<language>` with no version -- package-release.sh names
+# the archive itself `ritornello-lang-<language>-<version>.tar.gz`, and the
+# filter appends `-*.tar.gz` on its own. A name that already carried the
+# version would match nothing, and the archive would be built and then
+# silently discarded by that job's `rm -rf assets`. Factored into its own
+# function for the same reason as pack_changed above: the real loop below and
+# --self-test's cross-check against package-release.sh must call the exact
+# same code, not two copies of the string "ritornello-lang-" that could drift
+# apart from each other.
+pack_archive_name() { # <language>
+  printf 'ritornello-lang-%s\n' "$1"
+}
+
+if [ -n "$SELF_TEST" ]; then
+  fails=0
+
+  # The positive and negative halves of the decision the per-language loop
+  # below makes. A real git ref cannot exercise both in isolation: the one
+  # tag this repository has predates deploy/language-packs.toml entirely, so
+  # comparing against it can only ever land on the "new since the reference"
+  # branch or the shared-crate fallback that republishes everything --
+  # never a case where the file existed at both ends and the version simply
+  # did, or did not, move. See task-12-report.md for the measurements.
+  expect_changed() { # <now> <then> <yes|no> <why>
+    local now="$1" then_="$2" want="$3" why="$4" got=no
+    pack_changed "$now" "$then_" && got=yes
+    if [ "$got" != "$want" ]; then
+      echo "self-test: now=$now then=$then_ -> $got, expected $want ($why)" >&2
+      fails=$((fails + 1))
+    fi
+  }
+  expect_changed 0.2.1-beta.2 0.2.0-beta.2 yes "the ordinary case: a pack whose number moved"
+  expect_changed 0.2.0-beta.2 0.2.0-beta.2 no  "a pack whose number did not move -- publishing it would look like a release, and deliver nothing"
+  expect_changed 0.2.0-beta.2 absent       yes "a pack new since the reference"
+
+  # The naming half, pinned against package-release.sh's OWN archive-building
+  # rather than a second copy of the same literal: this actually builds the
+  # language packs the way the release workflow does (--languages needs no
+  # toolchain, only deploy/locales and tar) and checks that the file it
+  # names exists at the exact path pack_archive_name() plus the real version
+  # would predict. If either script's naming ever drifted from the other,
+  # the expected file would not exist, and the publish job's filter would
+  # silently drop the archive it built.
+  rm -rf release/languages
+  bash scripts/package-release.sh --languages >/dev/null
+  for l in "${LANGS[@]}"; do
+    v=$(pack_version "$l" < deploy/language-packs.toml)
+    archive="release/languages/$(pack_archive_name "$l")-$v.tar.gz"
+    if [ ! -f "$archive" ]; then
+      echo "self-test: this script would emit '$(pack_archive_name "$l")' for [$l], but package-release.sh built no archive at $archive -- the publish job's filter (assets/\"\$c\"-*.tar.gz) would match nothing" >&2
+      fails=$((fails + 1))
+    fi
+  done
+  rm -rf release/languages
+
+  [ "$fails" -eq 0 ] || { echo "self-test: $fails case(s) wrong" >&2; exit 1; }
+  echo "self-test: language-pack change detection ok"
+  exit 0
+fi
+
 changed=0
 for c in "${CRATES[@]}"; do
   now=$(version_in < "crates/$c/Cargo.toml")
@@ -108,51 +224,23 @@ for c in "${CRATES[@]}"; do
   fi
 done
 
-# Language packs: one version per `[language]` section of
-# deploy/language-packs.toml, which is the file's only home for that number
-# -- a pack has no Cargo.toml. The languages come from that same file, the
-# same way the plugin list above comes from plugins.example.toml.
-mapfile -t LANGS < <(sed -n 's/^\[\(.*\)\]$/\1/p' deploy/language-packs.toml | tr -d '\r')
-[ "${#LANGS[@]}" -gt 0 ] || { echo "no language declared in deploy/language-packs.toml" >&2; exit 1; }
-
-# The version declared for one language section, from a language-packs.toml
-# on stdin. Scoped by hand, like pack_version() in package-release.sh: the
-# file holds one section per language, and a plain sed over the whole file
-# would answer with whichever language's `version =` line came first.
-pack_version() { # <language>
-  local lang="$1" v
-  v=$(tr -d '\r' | awk -v section="[$lang]" '
-    $0 == section { found=1; next }
-    found && /^\[/ { found=0 }
-    found && /^version = "/ { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }
-  ')
-  [ -n "$v" ] || v=absent
-  printf '%s\n' "$v"
-}
-
-# The name a filter downstream matches on: the `publish` job of ci.yml keeps
-# only `assets/"$c"-*.tar.gz` for every name this script prints, so this must
-# be `ritornello-lang-<language>` with no version -- package-release.sh names
-# the archive itself `ritornello-lang-<language>-<version>.tar.gz`, and the
-# filter appends `-*.tar.gz` on its own. A name that already carried the
-# version would match nothing, and the archive would be built and then
-# silently discarded by that job's `rm -rf assets`.
+# Language packs: LANGS, pack_version(), pack_changed() and
+# pack_archive_name() are all defined above, ahead of the CRATES loop, so
+# --self-test can reach them without the git-dependent logic in between.
 MOVED_PACKS=()
 for l in "${LANGS[@]}"; do
   now=$(pack_version "$l" < deploy/language-packs.toml)
   [ "$now" != absent ] || { echo "deploy/language-packs.toml declares no version for [$l]" >&2; exit 1; }
   if [ -z "$PREV" ]; then
-    printf '%s\n' "ritornello-lang-$l"
-    MOVED_PACKS+=("ritornello-lang-$l")
-    changed=$((changed + 1))
-    continue
+    then_=absent
+  else
+    # A language that did not exist at <ref> is new, so it counts as
+    # changed -- same fallback as the crate loop above, for the same reason.
+    then_=$(git show "$PREV:deploy/language-packs.toml" 2>/dev/null | pack_version "$l" || echo absent)
   fi
-  # A language that did not exist at <ref> is new, so it counts as changed --
-  # same fallback as the crate loop above, for the same reason.
-  then_=$(git show "$PREV:deploy/language-packs.toml" 2>/dev/null | pack_version "$l" || echo absent)
-  if [ "$now" != "$then_" ]; then
-    printf '%s\n' "ritornello-lang-$l"
-    MOVED_PACKS+=("ritornello-lang-$l")
+  if pack_changed "$now" "$then_"; then
+    printf '%s\n' "$(pack_archive_name "$l")"
+    MOVED_PACKS+=("$(pack_archive_name "$l")")
     changed=$((changed + 1))
   fi
 done
