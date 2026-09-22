@@ -111,8 +111,12 @@ their binaries, the file only ever overrides an entry gone stale. Every
 other line has the same job — pointing a default that lives under `/etc` or
 `/var/lib` at `/tmp/rp`, so that a checkout writes nowhere it has no right
 to write. Two of them are the exception, pointing into the checkout rather
-than at `/tmp`: `RITORNELLO_INPUT_PRESETS` and `RITORNELLO_LOCALES` name
-data the repository ships and `deploy.sh` installs.
+than at `/tmp`: `RITORNELLO_INPUT_PRESETS` names data the repository ships
+and `deploy.sh` installs; `RITORNELLO_LOCALES` names the **operator's own**
+locales root, which `deploy.sh` only creates, empty, and never writes into
+-- the repository's French text now travels as an installed language pack
+instead, under a second, separate root (`RITORNELLO_LANGUAGE_PACKS`; see
+[interface.md](interface.md)).
 
 Every variable, and who reads it — each default is a production path, which
 is exactly why they have to be overridden in a checkout:
@@ -155,10 +159,12 @@ say so rather than failing:
 binary, every other language is read from disk at startup — by the core
 alone, which resolves every module's text (its own and every plugin's)
 against its shared registry, no plugin process ever reading a pack by
-itself. Its default (`/etc/ritornello/locales`) is a path `deploy.sh`
-installs and that a development checkout does not have, so without the line
-above the language dropdown offers **English only** — the French pack sits
-unread in `deploy/locales/`.
+itself. Its default (`/etc/ritornello/locales`) is the **operator's own**
+layer, and `deploy.sh` only creates it empty and leaves it alone: French
+now arrives on a device as an installed language pack, under the separate
+`RITORNELLO_LANGUAGE_PACKS` root, and a checkout has neither. Without the
+line above, the language dropdown offers **English only** — the reference
+French text this pack is built from sits, unread, in `deploy/locales/`.
 
 ## Language
 

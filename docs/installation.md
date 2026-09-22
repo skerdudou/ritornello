@@ -795,6 +795,13 @@ report on this project described as broken, and nobody has yet watched its
 change — until that observation is made, this line stays, per this
 project's own rule against shrinking this section on faith.
 
+**No language pack has ever been installed on the device.** Building one,
+publishing it, fetching it, verifying its digest, refusing a malformed one,
+writing it, resweeping the registry and removing it are all covered by
+tests that fake the network and use a temporary directory; none has run on
+a Pi, and the pack job of the release workflow has never run at all — like
+the rest of that workflow.
+
 **Known edges and debts in the code, recorded here rather than fixed or
 dressed up as design:**
 

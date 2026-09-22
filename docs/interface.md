@@ -1473,18 +1473,36 @@ screen.
 ## Internationalization (i18n)
 
 The interface is multilingual. The base language is **English**, embedded
-in every binary; French (and other languages) are provided by **external
-TOML packs**, decentralized per component:
+in every binary; every other language — French included — is provided by
+external TOML text, decentralized per component, read from **two roots**
+that are never the same directory and that never write into each other:
 
-    /etc/ritornello/locales/
+    /etc/ritornello/locales/                # the operator's own layer
       common/fr.toml   # shared vocabulary (play/pause/stop/error…)
       core/fr.toml     # core text + config page
       radio/fr.toml    # radio plugin + admin page
       cd/fr.toml       # cd plugin
       <third-party-plugin>/fr.toml
 
-- Root configurable through `RITORNELLO_LOCALES` (default
-  `/etc/ritornello/locales`).
+    /etc/ritornello/language-packs/          # installed packs
+      ritornello-lang-fr/
+        pack.toml      # language, version, and the modules this pack covers
+        common.toml
+        core.toml
+        radio.toml
+        cd.toml
+
+- The first root is what a person edits **by hand**, configurable through
+  `RITORNELLO_LOCALES` (default `/etc/ritornello/locales`); nothing the
+  core does ever writes into it.
+- The second is what an **install** writes: one whole directory per pack,
+  named after the pack's own id (`ritornello-lang-<language>`), replaced
+  wholesale by every install and never merged
+  (`crates/ritornello-core/src/langpack/store.rs::install`), configurable
+  through `RITORNELLO_LANGUAGE_PACKS` (default
+  `/etc/ritornello/language-packs`).
+- Both roots are swept by the same registry, and the operator's own layer
+  resolves **first** — see the resolution chain below.
 - **The resolution chain, per key: chosen language → the device's
   fallback language → English → the key itself.** Each of the first three
   is itself a small stack — a disk pack before the same module's embedded
@@ -1535,25 +1553,40 @@ TOML packs**, decentralized per component:
   Picking `en` itself as the fallback changes nothing over the chosen
   language alone, so this line stays empty rather than repeating the
   completeness annotation right above it.
-- **Adding a language**: copy the reference `en`, translate the values,
-  drop it under `<root>/<component>/<lang>.toml`. A missing key or pack
-  automatically falls back through the chain above (per-key degradation,
-  never an error). A pack that is present but unreadable (permissions,
-  invalid TOML) is ignored **with a trace in the logs**.
-- The initial French packs ship in `deploy/locales/` and are copied by
-  `deploy/deploy.sh`.
-- **What an update does to a pack, and what it never touches.** A release
-  archive writes `etc/ritornello/locales/<component>/<lang>.toml`
-  unconditionally, for every language *that component ships* (`ETC_PREFIXES`
-  in `crates/ritornello-core/src/update/archive.rs`), the moment that
-  component updates — so a hand-edited `fr.toml` does not survive the next
-  update of its component. **A pack in a language no release ships for that
-  component is never written by an update at all**, because no archive
-  entry ever names that path: this is where a third-party translator's own
-  work — a language this project has never shipped for that component —
-  survives every update indefinitely. This was the question the whole
-  language-packs chantier started from, and the reason a disk pack, not an
-  embedded one, is where an operator's own translation belongs.
+- **Adding a language**: the ordinary way is a gesture on the config page,
+  not a file copy any more. Right under the language picker,
+  `LanguagePacksRow.vue` lists every language a pack is offered or already
+  installed for, and turns "Install" / "Update" / "Remove" into
+  `POST`/`DELETE /api/languages/{language}` — the update worker fetches,
+  verifies and writes the pack itself (see
+  [Update card](#update-card)). Writing a `<component>/<lang>.toml` by
+  hand under `RITORNELLO_LOCALES` is still how the **operator's own
+  layer** is filled in — an override, or a language nobody has published a
+  pack for yet — and it resolves ahead of any installed pack (see the two
+  roots above). A missing key or module automatically falls back through
+  the chain above (per-key degradation, never an error). A file that is
+  present but unreadable (permissions, invalid TOML), on either root, is
+  ignored **with a trace in the logs**.
+- The initial French pack is built from `deploy/locales/` by
+  `scripts/package-release.sh --languages` — the same path the release
+  workflow uses to publish every pack — and `deploy/deploy.sh` places the
+  packs it builds under `/etc/ritornello/language-packs/`, exactly as an
+  install would.
+- **What an update does to a pack, and what it never touches.** No release
+  archive carries any translated text at all any more
+  (`scripts/packaging.py` stages no locale file for the core or a plugin):
+  installing or updating a component writes nothing under
+  `etc/ritornello/locales/` or `etc/ritornello/language-packs/`, so a
+  hand-edited `fr.toml` under the operator's own root now survives every
+  update of the component it covers — **this used to be false, and was the
+  defect the whole language-packs chantier was opened to remove.** A
+  language pack's own update is contained the same way: installing
+  `ritornello-lang-<language>` replaces only that one pack's own directory
+  under `/etc/ritornello/language-packs`
+  (`langpack::store::install` removes the old directory first, then writes
+  the new one whole) and never touches the operator's own locales root —
+  the two roots exist precisely so an install can never overwrite what a
+  person wrote by hand.
 - **What picks up an edited pack.** The registry sweeps the pack root once,
   at startup, and again on every `Registry::resweep_async` — which
   `Core::set_locale` and `Core::set_fallback` call. **The config page does

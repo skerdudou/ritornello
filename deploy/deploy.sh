@@ -56,13 +56,45 @@ ssh "${SSHOPTS[@]}" "$PI" 'id -u ritornello >/dev/null 2>&1 \
   || sudo useradd --system --home-dir /var/lib/ritornello --no-create-home \
        --shell /usr/sbin/nologin ritornello'
 
-# Prior `rm -rf` of the staging areas: if a previous deployment failed
-# between the scp and the installation, `scp -r` into a leftover directory
-# would create /tmp/locales/locales, and a stray subdirectory would end up
-# in /etc/ritornello/locales.
-ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/locales && rm -rf /tmp/locales'
-scp "${SSHOPTS[@]}" -r deploy/locales "$PI:/tmp/locales"
-ssh "${SSHOPTS[@]}" "$PI" 'sudo cp -r /tmp/locales/. /etc/ritornello/locales/ && rm -rf /tmp/locales'
+# Language packs: built by scripts/package-release.sh's --languages path,
+# the same one the release job calls, rather than a second copy of how a
+# pack is made here. The tar ownership/mode invariants that path asserts
+# (see _pack_archive in that script) are a security property, not
+# formatting, and a second copy would be a second thing to keep in step --
+# the one that drifted would place a pack the core refuses.
+#
+# Each archive is flat (a pack.toml plus one <module>.toml, no leading
+# path -- see crates/ritornello-core/src/langpack/archive.rs), so it is
+# extracted straight into its own directory under
+# /etc/ritornello/language-packs/<pack-id>/, replacing whatever was there:
+# the same shape a device gives itself when it installs a pack on its own
+# (crates/ritornello-core/src/langpack/store.rs::install also replaces
+# rather than merges, for the same reason -- a module a new version drops
+# must stop answering, not linger).
+#
+# The operator's own locales root (/etc/ritornello/locales) is created if
+# it is absent and then left **strictly alone**: in the resolution order it
+# comes before every installed pack (Registry::sources_for), so anything
+# this script wrote there would permanently shadow every future pack
+# update -- exactly the trap language packs exist to remove. Before this
+# change, this block copied deploy/locales/ in whole into that root, which
+# was precisely that trap on a hand-deployed device.
+ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/locales /etc/ritornello/language-packs'
+./scripts/package-release.sh --languages
+ssh "${SSHOPTS[@]}" "$PI" 'rm -rf /tmp/language-packs && mkdir -p /tmp/language-packs'
+for archive in release/languages/ritornello-lang-*.tar.gz; do
+  base=$(basename "$archive")
+  # ritornello-lang-<language>-<version>.tar.gz -> ritornello-lang-<language>,
+  # the pack's own id (crates/ritornello-core/src/langpack/mod.rs::pack_id).
+  # Cut at the first "-<digit>": a version always starts with one, and a
+  # language code never does, region suffix (pt-BR) or not.
+  id=$(echo "$base" | sed -E 's/-[0-9].*$//')
+  scp "${SSHOPTS[@]}" "$archive" "$PI:/tmp/language-packs/$base"
+  ssh "${SSHOPTS[@]}" "$PI" "sudo rm -rf /etc/ritornello/language-packs/$id \
+    && sudo mkdir -p /etc/ritornello/language-packs/$id \
+    && sudo tar -C /etc/ritornello/language-packs/$id -xzf /tmp/language-packs/$base \
+    && rm -f /tmp/language-packs/$base"
+done
 
 ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/input-presets && rm -rf /tmp/input-presets'
 scp "${SSHOPTS[@]}" -r deploy/input-presets "$PI:/tmp/input-presets"
