@@ -112,13 +112,17 @@ crate_version() { # <crate directory name>
 pack_version() { # <language>
   local lang="$1" v
   # `tr -d '\r'` BEFORE awk, not after: `$0 == section` compares the WHOLE
-  # line, so a CRLF-terminated file (the Windows-checkout case the comment
-  # above warns about) leaves a trailing \r that this exact-match line never
-  # strips on its own, and the section is silently never found. Stripping
-  # the output instead of the input looked equivalent and was not: nothing
-  # here ever called pack_language() before task 12's self-test, so a
-  # Windows checkout of this file broke `--languages` without a single test
-  # noticing.
+  # line, so a CRLF-terminated file leaves a trailing \r that this
+  # exact-match line never strips on its own, and the section is never
+  # found.
+  #
+  # Not hypothetical: `.gitattributes` normalizes `*.sh`, `*.awk` and
+  # `*.service` to LF but not `*.toml`, so with `core.autocrlf=true` a
+  # plain `git checkout` of this file lands it CRLF in the working tree --
+  # a real defect for a developer on such a checkout. It fails loudly, not
+  # silently: the guard right below exits 1 with a message. CI runs on
+  # Linux, where this never applies, so a release was never at risk; only
+  # a Windows checkout of the working tree was.
   v=$(tr -d '\r' < deploy/language-packs.toml | awk -v section="[$lang]" '
     $0 == section { found=1; next }
     found && /^\[/ { found=0 }
