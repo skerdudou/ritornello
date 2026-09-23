@@ -460,9 +460,12 @@ mod tests {
     /// `DEFAULT_PLUGIN_DATA_ROOT` (this crate's own default) must name the
     /// exact same directory as `ritornello_plugin_sdk::default_data_dir`
     /// (the plugin side's own default, used when a plugin is launched by
-    /// hand without the core setting `RITORNELLO_PLUGIN_DATA_DIR`): the two
-    /// crates never share a dependency edge that would let the compiler
-    /// catch a drift between them, so this is asserted instead.
+    /// hand without the core setting `RITORNELLO_PLUGIN_DATA_DIR`).
+    /// `ritornello-core` does depend on `ritornello-plugin-sdk` — but a
+    /// dependency edge only lets the compiler catch two sides disagreeing
+    /// about a *type*; these are two independently-written string literals,
+    /// each free to drift from the other with nothing red to show for it,
+    /// which is exactly what this test is for.
     ///
     /// This does not reach the `files` root helper's own `FILES_DATA_DIR`
     /// (`media-mount.rs`) directly: `ritornello-core` does not depend on
@@ -475,8 +478,7 @@ mod tests {
     /// `FILES_DATA_DIR`'s definition.
     ///
     /// Proven by mutation: changing `DEFAULT_PLUGIN_DATA_ROOT` to anything
-    /// else reddens this test (checked by hand, then reverted — see the
-    /// task's own report).
+    /// else reddens this test, naming both sides of the mismatch.
     #[test]
     fn the_default_root_agrees_with_the_sdks_default_data_dir() {
         assert_eq!(
