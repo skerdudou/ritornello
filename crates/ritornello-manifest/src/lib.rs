@@ -1433,4 +1433,20 @@ exec = \"/y\"
         let out = insert_block_in_reference_order("", &frag("radio"), "radio", REF).unwrap();
         assert_eq!(names_in_order(&out).unwrap(), ["radio"]);
     }
+
+    /// `expected` (`radio`) is in `REF`, but the only entry already present
+    /// (`theirs`) is not: neither a predecessor nor a successor of `radio`
+    /// is present, so there is nothing to place it relative to, and it stays
+    /// where `append_block` put it — at the end. Distinct from
+    /// `into_an_empty_file`, whose single present entry IS the one being
+    /// inserted, so forcing the inner "no anchor present" branch to move it
+    /// to index 0 there is a no-op that cannot reveal a regression; here the
+    /// file already has an unrelated entry, so a wrongly-forced move to
+    /// index 0 is observable.
+    #[test]
+    fn no_reference_name_present_is_still_appended_at_the_end() {
+        let text = doc(&["theirs"]);
+        let out = insert_block_in_reference_order(&text, &frag("radio"), "radio", REF).unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), ["theirs", "radio"]);
+    }
 }
