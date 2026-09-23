@@ -226,6 +226,13 @@ describe('current queue pane', () => {
     ])
   })
 
+  it('names a single unresolved entry in the singular', async () => {
+    // Regression: one broken path in an m3u, the most common case, read
+    // "1 entries could not be found".
+    const { w } = await mountAdmin({ playlist: THREE, unresolved: ['Albums/Rock/lost.mp3'] })
+    expect(w.find('[data-unresolved] p').text()).toBe('1 entry could not be found')
+  })
+
   it('shows no box when everything was resolved', async () => {
     const { w } = await mountAdmin({ playlist: THREE })
     expect(w.find('[data-unresolved]').exists()).toBe(false)

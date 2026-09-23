@@ -40,6 +40,17 @@ describe('FolderPicker', () => {
     expect(w.get('[data-audio-count]').text()).toContain('3')
   })
 
+  it('agrees the audio count sentence with its number: none, one, many', () => {
+    // Regression: a single "{count} audio files here" key displayed
+    // "1 audio files here" on a folder holding one track, and the French
+    // "0 fichiers audio ici" on a folder of subfolders only. The exact
+    // sentence is asserted, since the number alone is in all three.
+    const line = (audioCount: number) => mountPicker({ audioCount }).get('[data-audio-count]').text()
+    expect(line(0)).toBe('No audio files here')
+    expect(line(1)).toBe('1 audio file here')
+    expect(line(3)).toBe('3 audio files here')
+  })
+
   it('descending emits the folder name, not a path', async () => {
     // It is the caller that knows how to compose the path: a local path and
     // an SMB path are not composed the same way.
