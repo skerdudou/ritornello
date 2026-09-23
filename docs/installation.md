@@ -447,9 +447,11 @@ by that old script — real files, on disk, right now, on every device this
 project has ever deployed to by hand.
 
 That root is the **operator's own** layer, and `Registry::sources_for`
-resolves it *before* any installed language pack (own-disk beats
-own-announced beats common-disk, and every one of those beats a pack —
-see `crates/ritornello-core/src/i18n/registry.rs`). It outranks a pack on
+resolves it *before* the installed language pack for the same vocabulary.
+For one module the order is: its operator file, then its installed pack,
+then the text its own component announces — and then the same three again
+for the shared `common` vocabulary (see
+`crates/ritornello-core/src/i18n/registry.rs`). It outranks a pack on
 purpose: a file placed there by hand is assumed to be a deliberate
 override that must survive a pack update. The old `deploy.sh` never asked
 for that; it only ever wrote the project's own French text, indistinguishable
@@ -473,9 +475,11 @@ it is a real decision, not a formality:
   mechanism this chantier built rather than through a file nothing
   updates any more;
 - if it carries a wording changed on purpose, keep it — that is exactly
-  what the operator layer is *for* — knowing that it now permanently
-  shadows the pack for the keys it declares, including future ones the
-  pack gains that this file does not.
+  what the operator layer is *for* — knowing that it shadows the pack
+  **only for the keys it declares**: every key it contains keeps its hand
+  wording through every pack update, including when a later pack improves
+  that same wording, while a key it does not contain — a new one a later
+  pack adds, for instance — falls through to the pack as usual.
 
 `deploy.sh` itself no longer writes into this root at all: it creates it
 if absent and otherwise leaves it strictly alone (see the comment beside
