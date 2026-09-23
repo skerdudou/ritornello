@@ -34,6 +34,7 @@ const CATALOGUE = {
   plugin_move_up: 'Monter', plugin_move_down: 'Descendre',
   plugin_install: 'Installer', plugin_declare: 'Déclarer',
   plugin_remove_binary: 'Supprimer le binaire', plugin_uninstall: 'Désinstaller',
+  plugin_privileged_note: 'Composant privilégié : installez-le ou désinstallez-le avec ritornello-install.',
   plugin_uninstall_confirm: 'Désinstaller {name} ? Sa configuration est conservée, une réinstallation la retrouve.',
   plugin_remove_binary_confirm: 'Supprimer le binaire « {file} » ? Cette action est irréversible.',
   plugin_order_note: "L'ordre commande la clé de source et la priorité des métadonnées.",
@@ -713,6 +714,30 @@ describe('ConfigView — plugin table', () => {
     expect(row.find('[data-plugin-remove-binary]').exists()).toBe(false)
     // And the row says what is happening instead of what could be asked for.
     expect(row.get('[data-plugin-state]').text()).toBe('Effacement du binaire…')
+  })
+
+  // Both halves in one test (a one-sided assertion here would pass against a
+  // page that never renders the sentence, or one that always renders it): a
+  // privileged plugin loses the Uninstall button and gains the sentence, and
+  // an ordinary one on the very same page keeps its button untouched.
+  it('replaces Uninstall with the ritornello-install sentence for a privileged plugin, and only that one', async () => {
+    const w = await mountWithStatus({
+      plugins: [
+        { name: 'files', kind: 'source', connected: true, admin: false, privileged: true },
+        { name: 'radio', kind: 'source', connected: true, admin: false },
+      ],
+      active_source: 'radio',
+      protocol: 1,
+    })
+    const rows = w.findAll('[data-plugin-row]')
+    const files = rows.find((r) => r.get('[data-plugin-name]').text() === 'files')!
+    const radio = rows.find((r) => r.get('[data-plugin-name]').text() === 'radio')!
+
+    expect(files.find('[data-plugin-uninstall]').exists()).toBe(false)
+    expect(files.get('[data-plugin-privileged-note]').text()).toContain('ritornello-install')
+
+    expect(radio.find('[data-plugin-privileged-note]').exists()).toBe(false)
+    expect(radio.find('[data-plugin-uninstall]').exists()).toBe(true)
   })
 
   it('disables the up arrow on the first row and the down arrow on the last', async () => {

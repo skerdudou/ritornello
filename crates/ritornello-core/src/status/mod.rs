@@ -373,6 +373,17 @@ async fn status_json(State(state): State<AppState>) -> Json<StatusResponse> {
         .clone()
         .filter(|l| installed.iter().any(|i| i == l))
         .unwrap_or_else(|| "en".to_string());
+    // Set fresh on every line, from the one list (`plugins::PRIVILEGED_PLUGINS`)
+    // — never carried from the stored snapshot, for the same reason `busy` and
+    // `undeclared_binary` above are not: it is a fact about the **name**, and a
+    // second, remembered copy could name a different answer for it than the
+    // list does the day one of the two is forgotten. Applied to every line
+    // regardless of how it was built (a `kind` line, a disabled one, the
+    // `undeclared_binary` line just pushed above), so a privileged plugin
+    // reads the same way whichever state it is caught in.
+    for p in status.plugins.iter_mut() {
+        p.privileged = crate::plugins::is_privileged(&p.name);
+    }
     Json(StatusResponse { status, session: state.session.clone(), locale })
 }
 
@@ -1181,6 +1192,30 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["plugins"][0]["ui_version"], "cafe");
         assert!(v["plugins"][1].get("ui_version").is_none(), "{}", v["plugins"][1]);
+    }
+
+    /// Both halves in one test (the brief's own requirement): the sentence's
+    /// data source must say yes for a privileged plugin **and** stay silent
+    /// for an ordinary one — a page that always answered `true` here would
+    /// still pass a one-sided check.
+    #[tokio::test]
+    async fn the_status_carries_the_privileged_flag_for_files_alone() {
+        let state = app_state();
+        state.status.write().await.plugins = vec![
+            PluginStatus::kind("files", "source", true, true),
+            PluginStatus::kind("radio", "source", true, false),
+        ];
+        let app = router(state);
+        let resp =
+            app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["plugins"][0]["privileged"], serde_json::json!(true));
+        assert!(
+            v["plugins"][1].get("privileged").is_none(),
+            "an ordinary plugin's line must not even carry the key: {}",
+            v["plugins"][1]
+        );
     }
 
     /// The first of the three cases RULING 63 asks for, exercised through the

@@ -188,6 +188,17 @@ watch(
                 {{ row.entry.description }}
               </span>
             </div>
+            <!-- `installable === false` names a privileged plugin (`files`
+                 today): its packaging places a root service, a systemd unit
+                 or a polkit rule this page cannot place, so an Install
+                 button here could only ever fail. `ritornello-install` does
+                 the whole job instead, in the same sentence
+                 `ConfigView.vue`'s table shows for the same reason. -->
+            <span
+              v-if="row.offer.installable === false"
+              data-installable-privileged
+              class="text-xs text-muted-foreground"
+            >{{ t('plugin_privileged_note') }}</span>
             <!-- Never disabled for a missing description: installing does not
                  depend on knowing how to describe the component. Disabled
                  while `busy` (m6): the update card's own Install button
@@ -195,6 +206,7 @@ watch(
                  re-enqueues a second `Job::Install` of a component whose
                  first install has not finished yet. -->
             <Button
+              v-else
               variant="outline" size="xs" data-installable-install
               :disabled="!!busy"
               @click="emit('install', row.offer.name)"

@@ -784,6 +784,25 @@ for either to act on, and the arrows are disabled rather than hidden at
 either end of the declared list, so a greyed arrow reads as "already
 there" instead of inviting a press that can only fail.
 
+**A privileged plugin has neither Install nor Uninstall on this page —
+in any of the four states above.** Today that means the files plugin
+alone: installing or uninstalling it is more than placing or erasing a
+binary in the plugins directory, since its packaging also carries a
+root-run helper outside that directory, a systemd unit and a polkit
+rule, and this page can place or erase none of those. Doing only the
+unprivileged half used to be exactly the defect this closed — an
+uninstall that stopped the plugin and forgot it, while its helper, its
+unit and its polkit rule stayed enabled at boot. In place of the
+button, the row shows a sentence naming `ritornello-install`, the
+separate program that installs and removes a component's privileged
+parts along with the rest of it. The core enforces the same rule
+itself, independently of this page, so the sentence is not merely a
+courtesy: asking directly for either gesture is refused the same way.
+Which plugins are privileged is a short list the core carries and
+checks against `deploy/packaging.toml` (see
+[plugins.md](plugins.md#writing-a-plugin-of-your-own)), never something
+a plugin announces about itself.
+
 **Uninstall and "Remove the binary" answer before the file is gone**, and
 that is deliberate: erasing it goes through the same privileged step as an
 install, behind the same queue, so it can take up to two minutes. The

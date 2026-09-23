@@ -164,6 +164,54 @@ mod tests {
         assert!(checked >= 9, "checked only {checked} privileged files — the walk is wrong");
     }
 
+    /// The core's own list of privileged plugins
+    /// (`crate::plugins::PRIVILEGED_PLUGINS`) and this manifest must agree in
+    /// **both directions**: a plugin whose entry places a privileged file
+    /// (an `extra_binaries` entry, or a `tree` destination under
+    /// `etc/systemd/system/` or `etc/polkit-1/rules.d/`) but is not in the
+    /// list would be uninstallable from the UI in name only — the route
+    /// refusal in `plugin_status::plugin_delete` reads the list, not this
+    /// file, so a plugin missing from it would still have its declaration
+    /// erased and its privileged parts left behind, the exact defect this
+    /// whole change closes. The reverse drift is just as real: a plugin
+    /// named in the list that places nothing privileged would be needlessly
+    /// sent to `ritornello-install` for an ordinary uninstall it could do
+    /// itself.
+    ///
+    /// Only `m.plugins` is walked, deliberately: `PRIVILEGED_PLUGINS` never
+    /// names `core` (it is not a plugin, and a third-party plugin can never
+    /// be privileged either — see the constant's own doc), so the core's
+    /// entry would only ever be a false positive here.
+    #[test]
+    fn every_privileged_plugin_agrees_with_packaging_toml() {
+        let m = manifest();
+        let mut checked = 0;
+        for (name, c) in &m.plugins {
+            let places_privileged_file = !c.extra_binaries.is_empty()
+                || c.tree.iter().any(|e| {
+                    e.to.starts_with("etc/systemd/system/") || e.to.starts_with("etc/polkit-1/rules.d/")
+                });
+            let listed = crate::plugins::PRIVILEGED_PLUGINS.contains(&name.as_str());
+            assert_eq!(
+                listed, places_privileged_file,
+                "{name}: packaging.toml places a privileged file = {places_privileged_file}, but \
+                 PRIVILEGED_PLUGINS lists it as privileged = {listed} -- {}",
+                if places_privileged_file {
+                    format!(
+                        "add \"{name}\" to PRIVILEGED_PLUGINS in crates/ritornello-core/src/plugins/mod.rs"
+                    )
+                } else {
+                    format!(
+                        "remove \"{name}\" from PRIVILEGED_PLUGINS, or its packaging.toml entry is \
+                         missing the privileged file that justified adding it"
+                    )
+                }
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "checked nothing — the walk is not looking where it should");
+    }
+
     /// **No component archive carries translated text any more.**
     ///
     /// The rule with no list to keep: a component that shipped its own

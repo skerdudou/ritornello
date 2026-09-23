@@ -366,6 +366,9 @@ interface PluginRow {
    * job left half done.
    */
   removal_pending: boolean
+  /** This plugin is privileged (`PluginStatus.privileged`): install and
+   * uninstall are the job of `ritornello-install`, never of this table. */
+  privileged: boolean
 }
 
 /** Intermediate accumulator: the raw kinds, before we decide what must stay in
@@ -387,6 +390,7 @@ interface PluginAccumulator {
   undeclared_binary: boolean
   binary_file?: string
   removal_pending: boolean
+  privileged: boolean
 }
 
 /**
@@ -418,6 +422,7 @@ const plugins = computed<PluginRow[]>(() => {
         undeclared_binary: !!p.undeclared_binary,
         binary_file: p.binary_file,
         removal_pending: !!p.removal_pending,
+        privileged: !!p.privileged,
       })
       continue
     }
@@ -442,6 +447,7 @@ const plugins = computed<PluginRow[]>(() => {
     acc.undeclared_binary = acc.undeclared_binary || !!p.undeclared_binary
     acc.binary_file = acc.binary_file ?? p.binary_file
     acc.removal_pending = acc.removal_pending || !!p.removal_pending
+    acc.privileged = acc.privileged || !!p.privileged
   }
   const declaredRows: PluginRow[] = [...byName.values()].map((acc) => {
     // "unknown" is never shown next to a real kind: we only keep it when it is
@@ -497,6 +503,7 @@ const plugins = computed<PluginRow[]>(() => {
       offered: offer?.offered ?? null,
       binary_file: acc.binary_file,
       removal_pending: acc.removal_pending,
+      privileged: acc.privileged,
     }
   })
 
@@ -1461,8 +1468,21 @@ function goTo(id: string) {
                         variant="outline" size="xs" data-plugin-remove-binary
                         @click="removeBinaryTarget = p.binary_file ?? p.name"
                       >{{ t('plugin_remove_binary') }}</Button>
+                      <!-- Privileged (`files` today): both Install and
+                           Uninstall stop being this table's job the moment
+                           the row could offer either. Its packaging places a
+                           root service, a systemd unit and a polkit rule
+                           this page has no way to touch — `ritornello-install`
+                           is the one program that can, and the sentence sends
+                           the operator there instead of a half-finished
+                           gesture. -->
+                      <span
+                        v-if="p.privileged && !p.undeclared_binary"
+                        data-plugin-privileged-note
+                        class="text-xs text-muted-foreground"
+                      >{{ t('plugin_privileged_note') }}</span>
                       <Button
-                        v-if="!p.undeclared_binary"
+                        v-else-if="!p.undeclared_binary"
                         variant="outline" size="xs" data-plugin-uninstall
                         @click="uninstallTarget = p.name"
                       >{{ t('plugin_uninstall') }}</Button>

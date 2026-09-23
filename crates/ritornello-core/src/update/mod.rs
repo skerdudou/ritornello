@@ -460,6 +460,33 @@ fn carry_installable(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) 
     }
 }
 
+/// Forces `installable: Some(false)` for every row naming a plugin
+/// `plugins::PRIVILEGED_PLUGINS` lists — decided by the plugin's **identity**
+/// alone, the one fact this check never has to fetch an archive to learn,
+/// unlike everything else `installable` can carry.
+///
+/// **Called last**, after `carry_installable`, and not folded into it: that
+/// function's whole job is carrying a *previous* answer forward, and on the
+/// very first check a device ever runs `previous` is empty — folding this
+/// rule into the same assignment would have `carry_installable` overwrite it
+/// with `None` before anyone ever saw `Some(false)`. Calling this afterwards
+/// means the privileged answer always wins, on the first check exactly as on
+/// the hundredth.
+///
+/// This is what lets `InstallablesDialog.vue` show its sentence instead of an
+/// Install button for a **never-installed** privileged plugin, and what
+/// closes the gap `automatic_install_list`'s own `installable != Some(false)`
+/// filter used to have: until this ran, an unattended device would try the
+/// files plugin's update once, fail it, and only then remember to stop
+/// trying — this makes that first attempt never happen at all.
+fn deny_privileged_install(components: &mut [ComponentOffer]) {
+    for row in components.iter_mut() {
+        if crate::plugins::is_privileged(&row.name) {
+            row.installable = Some(false);
+        }
+    }
+}
+
 /// Carries the core's own archive note across a check.
 ///
 /// Unlike `installable`, this describes the **installed** core — the archive
@@ -1529,6 +1556,7 @@ impl Worker {
                     component_offers(self.core_version, &[], &theirs, &installed, &installed_packs);
                 let mut state = self.state.write().await;
                 carry_core_notes(&state.components, &mut components);
+                deny_privileged_install(&mut components);
                 state.outcome = match e {
                     ReleasesError::OnlyPrereleases => CheckOutcome::OnlyPrereleases,
                     _ => CheckOutcome::NoRelease,
@@ -1568,6 +1596,7 @@ impl Worker {
         let mut state = self.state.write().await;
         carry_installable(&state.components, &mut components);
         carry_core_notes(&state.components, &mut components);
+        deny_privileged_install(&mut components);
         state.outcome = CheckOutcome::Ok;
         state.release_version = core.map(|p| p.version.clone());
         state.release_url = core.map(|p| release_page(&p.release_tag));
@@ -1759,6 +1788,7 @@ impl Worker {
             let mut state = self.state.write().await;
             carry_installable(&state.components, &mut components);
             carry_core_notes(&state.components, &mut components);
+            deny_privileged_install(&mut components);
             state.components = components;
         }
         let report = {
@@ -3355,6 +3385,48 @@ mod tests {
         let mut fresh = vec![row("files", ComponentKind::Plugin, Availability::UpdateAvailable)];
         carry_installable(&[previous], &mut fresh);
         assert_eq!(fresh[0].installable, None);
+    }
+
+    /// The gap this closes: on a device's very **first** check, `previous` is
+    /// empty, so `carry_installable` alone would leave a never-installed
+    /// files row at `installable: None` — exactly what
+    /// `InstallablesDialog.vue` reads as "show the Install button" and what
+    /// `automatic_install_list`'s `installable != Some(false)` filter reads
+    /// as "safe to install unattended". `deny_privileged_install` must answer
+    /// `Some(false)` from the plugin's name alone, with no previous check to
+    /// carry anything from.
+    #[test]
+    fn a_never_checked_privileged_plugin_is_still_refused() {
+        let mut fresh = vec![row("files", ComponentKind::Plugin, Availability::NotInstalled)];
+        fresh[0].installable = None;
+        deny_privileged_install(&mut fresh);
+        assert_eq!(fresh[0].installable, Some(false));
+    }
+
+    /// The counterpart: an ordinary plugin is not touched by this rule at
+    /// all, not even set to `Some(true)` -- `deny_privileged_install` answers
+    /// nothing for a plugin it does not refuse, leaving whatever
+    /// `carry_installable` or `component_offers` already decided in place.
+    #[test]
+    fn deny_privileged_install_leaves_an_ordinary_plugin_alone() {
+        let mut fresh = vec![row("radio", ComponentKind::Plugin, Availability::UpdateAvailable)];
+        deny_privileged_install(&mut fresh);
+        assert_eq!(fresh[0].installable, None);
+    }
+
+    /// `carry_installable` runs first in every real call site and must not be
+    /// allowed to win: a stale `previous` row (there should never be one, but
+    /// the ordering is what guarantees it, not the data) must not un-refuse a
+    /// privileged plugin.
+    #[test]
+    fn deny_privileged_install_overrides_whatever_carry_installable_set() {
+        let mut previous = row("files", ComponentKind::Plugin, Availability::UpdateAvailable);
+        previous.installable = Some(true);
+        let mut fresh = vec![row("files", ComponentKind::Plugin, Availability::UpdateAvailable)];
+        carry_installable(&[previous], &mut fresh);
+        assert_eq!(fresh[0].installable, Some(true), "carry_installable alone would leave this wrong");
+        deny_privileged_install(&mut fresh);
+        assert_eq!(fresh[0].installable, Some(false), "deny_privileged_install must win, called last");
     }
 
     /// The three shapes `SHA256SUMS` can take for one archive, and only one

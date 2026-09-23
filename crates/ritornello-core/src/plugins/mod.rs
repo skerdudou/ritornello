@@ -345,6 +345,43 @@ pub fn spawn(
 /// from a web page waiting for the answer.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
+/// Plugins of this repository whose packaging places files a privileged
+/// install alone can place: a root-run binary **outside** the plugins
+/// directory (`extra_binaries` in `deploy/packaging.toml`), a systemd unit, or
+/// a polkit rule (a `tree` destination under `etc/systemd/system/` or
+/// `etc/polkit-1/rules.d/`). Installing or uninstalling one of these from the
+/// web UI can only ever do half the job — the privileged half is
+/// `ritornello-install`'s, a separate program shipped in the same release.
+///
+/// **A list, not an announcement.** The owner first considered having each
+/// plugin announce that it is privileged, then chose this list instead: a
+/// plugin that has never announced itself — disabled, crashed, or never
+/// started — could not have said so, and the UI would then have had no way
+/// to refuse touching it for exactly that reason (2026-09-23 decision). The
+/// plugin protocol carries no such field and never will.
+///
+/// `deploy/packaging.toml` is the authority this list is checked against, in
+/// **both** directions, by
+/// `packaging_manifest::tests::every_privileged_plugin_agrees_with_packaging_toml`:
+/// a name here that packaging.toml does not privilege, or a privileged
+/// packaging.toml entry not named here, is a red test — never a silent drift
+/// between the two.
+///
+/// A third-party plugin can never be privileged: its archive is refused by
+/// `update::archive::only_its_own_binary`, which allows nothing but its own
+/// plugin binary. So this list only ever needs to name plugins that ship
+/// from this repository.
+pub const PRIVILEGED_PLUGINS: &[&str] = &["files"];
+
+/// Whether `name` is one of `PRIVILEGED_PLUGINS` — the single place both the
+/// route refusals (`status::plugin_status::plugin_delete`) and the
+/// status/update payloads (`PluginStatus::privileged`,
+/// `update::deny_privileged_install`) ask the question, so the three can
+/// never disagree with each other about one plugin.
+pub fn is_privileged(name: &str) -> bool {
+    PRIVILEGED_PLUGINS.contains(&name)
+}
+
 /// Terminates a plugin: `SIGTERM`, then `SIGKILL` if it lingers beyond
 /// `grace`.
 ///

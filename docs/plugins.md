@@ -1177,6 +1177,30 @@ plugins](#declaring-the-plugins)). The unit, the polkit rule,
 `/mnt/ritornello` and the credentials directory are installed by the same
 run, so the source is usable straight after a deployment.
 
+**Installing or uninstalling `files` from the web configuration page is
+refused, in both directions**, and shown as a sentence naming
+`ritornello-install` where an Install or an Uninstall button sits for
+every other plugin (see [interface.md](interface.md#plugins-table)). The
+page can place or erase only a binary in the plugins directory; this
+plugin's own packaging also carries `ritornello-media-mount` outside
+that directory, its unit and its polkit rule, none of which the page
+has any way to touch — doing only the unprivileged half used to leave
+the root helper, the unit (enabled at boot) and the polkit rule behind
+after an uninstall. `ritornello-install`, a separate program shipped in
+the same release, does the whole job instead. The core refuses the same
+two gestures itself, independently of the page, against a short list of
+this repository's privileged plugins
+(`crates/ritornello-core/src/plugins/mod.rs::PRIVILEGED_PLUGINS`) — a
+list, not something a plugin announces about itself, since a plugin
+that never announces at all (disabled, crashed, not yet started) could
+not have said so either way. **Adding a privileged plugin to this
+repository means declaring its privileged files in
+`deploy/packaging.toml`** (an `extra_binaries` entry, or a `tree`
+destination under `etc/systemd/system/` or `etc/polkit-1/rules.d/`) —
+`packaging_manifest.rs`'s own guard then checks the list against that
+declaration in both directions and names exactly which entry to add or
+remove if the two ever disagree.
+
 ## `ritornello-plugin-console` — the display
 
 A display plugin receives the appliance's full state — `PlayerState`, the

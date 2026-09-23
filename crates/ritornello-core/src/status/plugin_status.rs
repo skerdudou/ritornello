@@ -188,6 +188,26 @@ pub struct PluginStatus {
     /// Additive like `stalled` and `busy`: absent from the JSON when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub catalog_unknown: bool,
+    /// This plugin is one of `plugins::PRIVILEGED_PLUGINS`: its packaging
+    /// places files a privileged install alone can place (a root binary
+    /// outside the plugins directory, a systemd unit, a polkit rule), so
+    /// installing or uninstalling it from this page can only ever do half
+    /// the job. See the constant's own doc for why a list and not an
+    /// announcement.
+    ///
+    /// **Never set by a constructor.** Every one of them below writes
+    /// `false` here, like every other flag on this struct — the true value is
+    /// a fact about the **name**, not about an announcement or a scan, and
+    /// `status_json` is the one place that fills it in, from the one list,
+    /// for every line regardless of how it got built (a `kind` line, a
+    /// disabled one, an undeclared binary). Computing it anywhere else would
+    /// be a second reader of the same list, and the two could name a
+    /// different answer for the same plugin on the day one of them forgets
+    /// to be updated.
+    ///
+    /// Additive like `catalog_unknown`: absent from the JSON when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub privileged: bool,
 }
 
 impl PluginStatus {
@@ -215,6 +235,7 @@ impl PluginStatus {
             repository: None,
             incompatible: None,
             catalog_unknown: false,
+            privileged: false,
         }
     }
 
@@ -242,6 +263,7 @@ impl PluginStatus {
             repository: None,
             incompatible: None,
             catalog_unknown: false,
+            privileged: false,
         }
     }
 
@@ -300,6 +322,7 @@ impl PluginStatus {
             repository: None,
             incompatible: None,
             catalog_unknown: false,
+            privileged: false,
         }
     }
 
@@ -324,6 +347,7 @@ impl PluginStatus {
             repository: None,
             incompatible: None,
             catalog_unknown: false,
+            privileged: false,
         }
     }
 
@@ -351,6 +375,7 @@ impl PluginStatus {
             repository: None,
             incompatible: Some(found),
             catalog_unknown: false,
+            privileged: false,
         }
     }
 }
@@ -527,6 +552,19 @@ pub(super) async fn plugin_delete(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Response {
+    // **Before anything else** — no manifest read, no order sent. A
+    // privileged plugin (`plugins::PRIVILEGED_PLUGINS`) is refused here, and
+    // the refusal must land before the `Undeclare` order below stops the
+    // process: an uninstall that got as far as that order would leave the
+    // plugin dead and undeclared while its privileged parts — the root
+    // helper, its unit, its polkit rule — stayed exactly where they were,
+    // which is worse than refusing outright. The device is left running and
+    // declared, so the operator can send it to `ritornello-install` for the
+    // whole job instead of a half one done from here.
+    if crate::plugins::is_privileged(&name) {
+        let msg = state.catalog.read().await.get("plugin_uninstall_privileged").replace("{name}", &name);
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": msg }))).into_response();
+    }
     // Read rather than remembered, exactly as `plugin_enabled_put`: a plugin
     // installed while the core was running must be reachable at once, and the
     // file is the authority. The `exec` is kept, not just the boolean: once
@@ -1209,6 +1247,69 @@ mod tests {
             StatusCode::NOT_FOUND,
             "nothing declares it any more: a relaunch attempt must be refused, exactly as it would \
              be for a name nobody ever declared"
+        );
+    }
+
+    /// **The refusal must land before `Undeclare` stops the plugin.** Before
+    /// this guard existed, `plugin_delete` always sent that order first, so
+    /// an uninstall of `files` would have killed the process and erased its
+    /// declaration — leaving its root helper, its unit and its polkit rule
+    /// behind with nothing left on the page to reinstall from. Proven here by
+    /// what the mock core (`rx`) never receives, not merely by the response
+    /// code: a route that refused only *after* sending the order would still
+    /// answer 403 to a caller that awaited an unanswered channel, and this is
+    /// the assertion that tells the two apart.
+    #[tokio::test]
+    async fn an_uninstall_of_a_privileged_plugin_is_refused_before_anything_stops() {
+        let (state, dir, mut rx) = app_state_with_plugins(&["files", "cd"]);
+        state.status.write().await.plugins = vec![
+            PluginStatus::kind("files", "source", true, true),
+            PluginStatus::kind("cd", "source", true, false),
+        ];
+        let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
+
+        let response =
+            plugin_delete(axum::extract::State(state.clone()), axum::extract::Path("files".to_string()))
+                .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let msg = v["error"].as_str().unwrap();
+        assert!(msg.contains("ritornello-install"), "{msg}");
+        assert!(msg.contains("files"), "{msg}");
+
+        // Nothing was ever sent to the core: no `Undeclare`, no anything.
+        assert!(rx.try_recv().is_err(), "the route must refuse before it orders the core to do anything");
+        // The manifest is untouched.
+        assert_eq!(std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap(), before);
+        // The plugin is still shown running and declared.
+        let plugins = state.status.read().await.plugins.clone();
+        let line = plugins.iter().find(|p| p.name == "files").expect("still on the page");
+        assert!(line.connected, "left running: the process was never stopped");
+        drop(rx);
+    }
+
+    /// The counterpart of the test above: an ordinary plugin is unaffected by
+    /// the new guard. `an_undeclared_plugin_is_no_longer_relaunchable_unlike_a_disabled_one`
+    /// already proves the full uninstall of `cd` succeeds end to end; this
+    /// one pins the one new fact that test does not check — that a name
+    /// outside `PRIVILEGED_PLUGINS` never even reaches the 403 branch.
+    #[tokio::test]
+    async fn an_ordinary_plugin_never_sees_the_privileged_refusal() {
+        let (state, _dir, mut rx) = app_state_with_plugins(&["radio", "cd"]);
+        let core = tokio::spawn(async move {
+            let order = rx.recv().await.unwrap();
+            assert_eq!(order.action, PluginAction::Undeclare);
+            let _ = order.ack.send(true);
+        });
+        let response =
+            plugin_delete(axum::extract::State(state), axum::extract::Path("cd".to_string())).await;
+        core.await.unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "cd is not privileged and must reach the ordinary uninstall path"
         );
     }
 
