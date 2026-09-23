@@ -282,7 +282,7 @@ impl AuthFile {
     ///
     /// The fallback is not a convenience, it is the fix for a defect actually
     /// met: this file landed in the directory of the **persisted** credentials
-    /// (`/etc/ritornello/media-credentials`), which does not exist in
+    /// (`/var/lib/ritornello/plugins/files/credentials`), which does not exist in
     /// development and which an ordinary user cannot create. The symptom was
     /// as misleading as it gets — "smbclient: Permission denied (os error 13)"
     /// — and sent one looking for a mount or SMB rights problem where there

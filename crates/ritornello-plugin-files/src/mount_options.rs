@@ -90,8 +90,12 @@ mod tests {
 
     #[test]
     fn the_mount_line_imposes_the_point_and_the_options() {
-        let cmd =
-            mount_command(&smb_root(), Path::new("/etc/ritornello/media-credentials"), 998, 998);
+        let cmd = mount_command(
+            &smb_root(),
+            Path::new("/var/lib/ritornello/plugins/files/credentials"),
+            998,
+            998,
+        );
         assert_eq!(cmd[0], "mount");
         assert_eq!(cmd[1], "-t");
         assert_eq!(cmd[2], "cifs");
@@ -107,7 +111,7 @@ mod tests {
         assert!(options.contains(&"uid=998"), "{options:?}");
         assert!(options.contains(&"gid=998"), "{options:?}");
         assert!(
-            options.contains(&"credentials=/etc/ritornello/media-credentials/nas.cred"),
+            options.contains(&"credentials=/var/lib/ritornello/plugins/files/credentials/nas.cred"),
             "{options:?}"
         );
         // No frozen version: the kernel's negotiation is better.

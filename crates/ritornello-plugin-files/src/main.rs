@@ -1142,27 +1142,24 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::filter::filter_fn(frame_to_log))
         .init();
 
-    let state_path =
-        PathBuf::from(env_or("RITORNELLO_FILES_STATE", "/var/lib/ritornello/plugin-files.json"));
-    let mpv_playlist_path = PathBuf::from(env_or(
-        "RITORNELLO_FILES_MPV_PLAYLIST",
-        "/var/lib/ritornello/plugin-files.m3u",
-    ));
-    let roots_path =
-        PathBuf::from(env_or("RITORNELLO_FILES_ROOTS", "/etc/ritornello/media-roots.toml"));
-    let creds_dir = PathBuf::from(env_or(
-        "RITORNELLO_FILES_CREDENTIALS",
-        "/etc/ritornello/media-credentials",
-    ));
-    let playlists_dir =
-        PathBuf::from(env_or("RITORNELLO_FILES_PLAYLISTS", "/var/lib/ritornello/playlists"));
+    // Everything this plugin writes lives in its own data directory — see
+    // `ritornello_plugin_sdk::DATA_DIR_ENV` for why there is exactly one. The
+    // root mount helper (`media-mount.rs`) reads `roots_path` and `creds_dir`
+    // back from the same fixed location, since it runs with none of our
+    // environment.
+    let data = ritornello_plugin_sdk::data_dir();
+    let state_path = data.join("state.json");
+    let mpv_playlist_path = data.join("playlist.m3u");
+    let roots_path = data.join("media-roots.toml");
+    let creds_dir = data.join("credentials");
+    let playlists_dir = data.join("playlists");
     // Transient working directory, where the network wizard drops its
     // authentication file for the duration of an `smbclient` call.
     //
     // The **runtime directory**, and above all not the persisted credentials
-    // one: that one lives under `/etc` and is only writable in production.
-    // Confusing the two made the wizard fail in development with a
-    // "Permission denied" that seemed to blame SMB.
+    // one: that one lives under `/var/lib` and used to be root-owned before a
+    // plugin could create it itself. Confusing the two made the wizard fail
+    // in development with a "Permission denied" that seemed to blame SMB.
     //
     // Same default and same variable as the core (`RITORNELLO_RUNTIME_DIR`), so
     // that `docs/development.md` stays true from one binary to the other.

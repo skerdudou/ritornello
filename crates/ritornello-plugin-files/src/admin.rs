@@ -203,6 +203,19 @@ pub enum Op {
     LoadM3u { root: String, path: String },
 }
 
+/// The credentials directory, created on first use with mode 0700: nobody but
+/// the service account may read it (the root mount helper reads everything).
+/// It used to be created by `deploy.sh`; the plugin owns its directory now.
+fn ensure_credentials_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 impl FilesAdmin {
     /// A bare key, no parameters — unresolved, the core resolving it
     /// against this plugin's announced catalog (language-packs chantier,
@@ -292,10 +305,13 @@ impl FilesAdmin {
     ///
     /// The permissions are set **at creation**, not afterwards: creating
     /// then restricting would leave a window during which the passphrase
-    /// would be readable by everyone.
+    /// would be readable by everyone. The same applies to the directory
+    /// itself, hence `ensure_credentials_dir` rather than a plain
+    /// `create_dir_all`: it used to be `deploy.sh` that created it with the
+    /// right mode, and the plugin owns its directory now.
     fn write_credentials(path: &Path, user: &str, password: &str, domain: &str) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            ensure_credentials_dir(parent)?;
         }
         let tmp = path.with_extension("cred.tmp");
         #[cfg(unix)]
@@ -1707,6 +1723,16 @@ mod tests {
         admin.set_data(add_share("secret")).await.unwrap();
         let meta = std::fs::metadata(admin.creds_dir.join("musique.cred")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_credentials_directory_is_created_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let c = d.path().join("credentials");
+        ensure_credentials_dir(&c).unwrap();
+        assert_eq!(std::fs::metadata(&c).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
     #[tokio::test]
