@@ -8,6 +8,35 @@
 use anyhow::Context;
 use serde::Deserialize;
 
+/// M4: a field whose *key* must be present even though its value may be
+/// `null`.
+///
+/// A plain `Option<T>` field cannot express this on its own: serde-derive's
+/// generated code, on a missing key, calls a placeholder deserializer whose
+/// `deserialize_option` answers `visit_none()` — which is exactly what
+/// `Option<T>`'s own `Deserialize` impl asks for — so a missing key and an
+/// explicit `null` end up indistinguishable, and a future generator that
+/// stopped writing the key at all would be read as "no value" rather than
+/// refused. (A newtype wrapping `Option<T>` does not escape this either:
+/// its `Deserialize` impl still has to call `deserialize_option`
+/// eventually to read the value, and that alone is what the placeholder
+/// keys off — not the field's declared type name.)
+///
+/// The escape is narrower than a new type: *any* `#[serde(deserialize_with
+/// = "...")]` on the field, on its own, skips that placeholder entirely —
+/// serde-derive's own missing-field code checks for the attribute's
+/// presence, not what the function does, and reports "missing field"
+/// directly when it is missing. The function itself does nothing unusual
+/// for a key that *is* present: it deserializes `Option<T>` exactly as the
+/// derive would have, so an explicit `null` still reads as `None`.
+fn required_some<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// One file a component's release archive carries.
 ///
 /// Fields beyond `dest` are read only by the placing and removal code later
@@ -57,9 +86,13 @@ pub struct Component {
     #[cfg_attr(test, expect(dead_code, reason = "wired by task 15"))]
     pub enable: Vec<String>,
     #[cfg_attr(test, expect(dead_code, reason = "wired by task 15"))]
+    #[serde(deserialize_with = "required_some")]
     pub mount_root: Option<String>,
     /// The `plugins.toml` `[[plugin]]` block, or absent for the core, which
-    /// is not a plugin and never has one.
+    /// is not a plugin and never has one. `install-inventory.py` always
+    /// writes this key, `null` or not (M4) — see
+    /// `a_missing_block_key_is_refused_rather_than_defaulted_to_none`.
+    #[serde(deserialize_with = "required_some")]
     pub block: Option<String>,
 }
 
@@ -199,6 +232,116 @@ pub(crate) mod tests {
     fn an_unknown_top_level_field_is_refused_rather_than_silently_dropped() {
         let real = run_install_inventory();
         let mutated = real.replacen("\"format\": 1,", "\"format\": 1,\n  \"a_future_field\": true,", 1);
+        assert_ne!(mutated, real);
+        assert!(Inventory::parse(&mutated).is_err());
+    }
+
+    /// M3: only the top-level `deny_unknown_fields` was ever exercised.
+    /// Dropping it from `Component`, `FileEntry`, `InitialConfig` or `Pack`
+    /// individually reddened nothing, since the mutated field always
+    /// landed inside one of those nested objects, never at the top level.
+    /// One test per nested type, each anchored on a substring that is
+    /// unique in the real inventory (checked below) so the injected field
+    /// lands in exactly the object it names.
+    ///
+    /// **[MUTATION]**: drop `#[serde(deny_unknown_fields)]` from `Component`
+    /// — this test fails.
+    #[test]
+    fn an_unknown_component_field_is_refused_rather_than_silently_dropped() {
+        let real = run_install_inventory();
+        let anchor = "\"name\": \"core\",";
+        assert_eq!(real.matches(anchor).count(), 1, "expected exactly one Component named \"core\"");
+        let mutated = real.replacen(anchor, "\"name\": \"core\", \"a_future_field\": true,", 1);
+        assert_ne!(mutated, real);
+        assert!(Inventory::parse(&mutated).is_err());
+    }
+
+    /// **[MUTATION]**: drop `#[serde(deny_unknown_fields)]` from `FileEntry`
+    /// — this test fails.
+    #[test]
+    fn an_unknown_file_entry_field_is_refused_rather_than_silently_dropped() {
+        let real = run_install_inventory();
+        let anchor = "\"archive_path\": \"usr/local/bin/ritornello-core\",";
+        assert_eq!(real.matches(anchor).count(), 1, "expected exactly one FileEntry for the core binary");
+        let mutated = real.replacen(anchor, &format!("{anchor} \"a_future_field\": true,"), 1);
+        assert_ne!(mutated, real);
+        assert!(Inventory::parse(&mutated).is_err());
+    }
+
+    /// **[MUTATION]**: drop `#[serde(deny_unknown_fields)]` from
+    /// `InitialConfig` — this test fails.
+    #[test]
+    fn an_unknown_initial_config_field_is_refused_rather_than_silently_dropped() {
+        let real = run_install_inventory();
+        let anchor = "\"archive_path\": \"initial-config/stations.example.toml\",";
+        assert_eq!(real.matches(anchor).count(), 1, "expected exactly one radio InitialConfig entry");
+        let mutated = real.replacen(anchor, &format!("{anchor} \"a_future_field\": true,"), 1);
+        assert_ne!(mutated, real);
+        assert!(Inventory::parse(&mutated).is_err());
+    }
+
+    /// **[MUTATION]**: drop `#[serde(deny_unknown_fields)]` from `Pack` —
+    /// this test fails.
+    #[test]
+    fn an_unknown_pack_field_is_refused_rather_than_silently_dropped() {
+        let real = run_install_inventory();
+        let anchor = "\"language\": \"fr\",";
+        assert_eq!(real.matches(anchor).count(), 1, "expected exactly one pack for \"fr\"");
+        let mutated = real.replacen(anchor, &format!("{anchor} \"a_future_field\": true,"), 1);
+        assert_ne!(mutated, real);
+        assert!(Inventory::parse(&mutated).is_err());
+    }
+
+    /// M4, isolated from the real inventory's own shape: `required_some`
+    /// requires the key present, but still reads an explicit `null` as
+    /// `None` rather than refusing it.
+    ///
+    /// **[MUTATION]**: drop `#[serde(deserialize_with = "required_some")]`
+    /// from `Wrapper::x` below — the last assertion fails, since a plain
+    /// `Option<i32>` field accepts a missing key.
+    #[test]
+    fn required_some_needs_the_key_present_but_still_reads_an_explicit_null() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "required_some")]
+            x: Option<i32>,
+        }
+        assert_eq!(serde_json::from_str::<Wrapper>(r#"{"x": null}"#).unwrap().x, None);
+        assert_eq!(serde_json::from_str::<Wrapper>(r#"{"x": 3}"#).unwrap().x, Some(3));
+        assert!(serde_json::from_str::<Wrapper>("{}").is_err());
+    }
+
+    /// M4: a component whose `mount_root` key is missing entirely must be
+    /// refused, not read as `None` — the same ambiguity a bare `Option`
+    /// would create between "no value" and "the generator stopped writing
+    /// this key". Anchored on core's own object, the only one where
+    /// `mount_root` and `block` are both `null` (so this exact combined
+    /// string is unique), and `replacen(..., 1)` only ever touches the
+    /// first match regardless.
+    ///
+    /// **[MUTATION]**: change `Component::mount_root`'s type back to
+    /// `Option<String>` — this test fails, since the missing key would
+    /// then default to `None`.
+    #[test]
+    fn a_missing_mount_root_key_is_refused_rather_than_defaulted_to_none() {
+        let real = run_install_inventory();
+        let anchor = "\"mount_root\": null,\n    \"block\": null\n  },";
+        assert!(real.contains(anchor), "core's own mount_root/block pair moved or changed shape");
+        let mutated = real.replacen(anchor, "\"block\": null\n  },", 1);
+        assert_ne!(mutated, real);
+        assert!(Inventory::parse(&mutated).is_err());
+    }
+
+    /// M4, the same failure mode for `block`.
+    ///
+    /// **[MUTATION]**: change `Component::block`'s type back to
+    /// `Option<String>` — this test fails.
+    #[test]
+    fn a_missing_block_key_is_refused_rather_than_defaulted_to_none() {
+        let real = run_install_inventory();
+        let anchor = "\"mount_root\": null,\n    \"block\": null\n  },";
+        assert!(real.contains(anchor), "core's own mount_root/block pair moved or changed shape");
+        let mutated = real.replacen(anchor, "\"mount_root\": null\n  },", 1);
         assert_ne!(mutated, real);
         assert!(Inventory::parse(&mutated).is_err());
     }

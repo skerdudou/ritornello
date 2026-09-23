@@ -35,8 +35,35 @@ pub fn valid_language(language: &str) -> bool {
         && ritornello_i18n::valid_pack_id(&pack_id(language))
 }
 
+/// Whether `path` is safe to hand to a POSIX `sh` on the device: an
+/// absolute path built entirely of `/`-separated segments drawn from
+/// `[A-Za-z0-9._-]`, none of them empty, `.` or `..`, and no trailing `/`.
+///
+/// This is deliberately an allow-list of bytes, not a denylist of `..`:
+/// review I1 found that the previous version — rejecting only exact `.`
+/// and `..` segments — let NUL, newline, quotes, `$`, backquotes and empty
+/// segments straight through. A NUL byte inside a segment
+/// (`/etc/ritornello/.\0./.\0./etc/shadow`) still reads as a harmless
+/// dotted name here, in Rust, but dash's own input reader is known (from
+/// its `preadbuffer`, "delete nul characters") to strip NUL bytes before
+/// parsing a line — turning the same string into
+/// `/etc/ritornello/../../etc/shadow` on the one shell the device actually
+/// runs. A shell metacharacter (`'`, `` ` ``, `$`, a newline) has the same
+/// problem one layer up, in whatever command later embeds this path. None
+/// of that can be fixed downstream by quoting alone if this function's own
+/// contract is "safe, whatever the registry or the inventory says" — so
+/// the byte alphabet is fixed here, once, rather than trusted to every
+/// future caller.
 fn clean(path: &str) -> bool {
-    path.starts_with('/') && !path.split('/').any(|s| s == ".." || s == ".")
+    let Some(rest) = path.strip_prefix('/') else {
+        return false;
+    };
+    rest.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    })
 }
 
 /// Whether the installer may remove this file. Everything else is refused,
@@ -59,12 +86,48 @@ pub fn deletable_file(path: &str) -> bool {
         return true;
     }
     if let Some(f) = path.strip_prefix("/etc/systemd/system/") {
-        return !f.contains('/') && f.starts_with("ritornello") && f.ends_with(".service");
+        return !f.contains('/') && valid_ritornello_unit_name(f);
     }
     if let Some(f) = path.strip_prefix("/etc/polkit-1/rules.d/") {
-        return !f.contains('/') && f.contains("-ritornello-") && f.ends_with(".rules");
+        return !f.contains('/') && valid_ritornello_rule_name(f);
     }
     false
+}
+
+/// `ritornello.service`, or `ritornello-<bare name>.service`. A prefix
+/// match (`f.starts_with("ritornello")`) also accepted another package's
+/// `ritornellofoo.service`, since nothing required a separator after the
+/// shared prefix (M2). `ritornello-foo.service` staying accepted is
+/// intentional: it is still inside Ritornello's own namespace.
+fn valid_ritornello_unit_name(f: &str) -> bool {
+    if f == "ritornello.service" {
+        return true;
+    }
+    let Some(stem) = f.strip_prefix("ritornello-").and_then(|s| s.strip_suffix(".service")) else {
+        return false;
+    };
+    !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// `<two digits>-ritornello-<bare name>.rules`, matching every rule the
+/// real inventory ships (`50-`, `51-` and `52-ritornello-*.rules`) and
+/// nothing else. A substring match (`f.contains("-ritornello-")`) also
+/// accepted `x-ritornello-.rules` and a third party's own
+/// `49-foo-ritornello-bridge.rules` (M1): removing either through the
+/// registry would silently drop a permission the third party's own rule
+/// granted.
+fn valid_ritornello_rule_name(f: &str) -> bool {
+    let Some(rest) = f.strip_suffix(".rules") else {
+        return false;
+    };
+    let bytes = rest.as_bytes();
+    if bytes.len() < 2 || !bytes[0].is_ascii_digit() || !bytes[1].is_ascii_digit() {
+        return false;
+    }
+    let Some(bare) = rest[2..].strip_prefix("-ritornello-") else {
+        return false;
+    };
+    !bare.is_empty() && bare.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// Whether the installer may remove this directory recursively. Never
@@ -141,15 +204,39 @@ mod tests {
             "relative/path",
             "/mnt/ritornello/nas",
             "/var/lib/ritornello-update/../../etc/shadow",
-            // The bare directory root, trailing slash included: this is the
-            // one input `path.len() > p.len()` exists for. Without it,
-            // `path.starts_with(p)` alone is satisfied by `path == p`
-            // itself (the strings are equal, not just one a prefix of the
-            // other), and the directory root would be reported deletable
-            // as if it were a file.
+            // The bare directory root, trailing slash included: `clean()`
+            // now refuses a trailing `/` outright (an empty final
+            // segment), which is what makes this one refused today — not
+            // the `UNDER` length check, which the fix below leaves
+            // provably unreachable for this exact input (a clean path can
+            // never equal a `UNDER` prefix, since the prefix itself ends
+            // in `/` and `clean()` no longer admits that).
             "/etc/ritornello/",
+            // I1: a NUL byte disguises a `..` segment from Rust's own
+            // `split('/')` (`.\0.` is not literally `..`), but dash's
+            // input reader is known to strip NUL bytes before parsing a
+            // line, turning this back into `/etc/ritornello/../../etc/shadow`
+            // on the device's own shell.
+            "/etc/ritornello/.\0./.\0./etc/shadow",
+            // I1: shell metacharacters — a newline, a quote, a `$` — pass
+            // clean()'s old any-byte segment check outright.
+            "/etc/ritornello/x\n rm -rf /",
+            "/etc/ritornello/x'; rm -rf / #",
+            "/etc/ritornello/$(reboot)",
+            // I1: an empty segment (`//`) and a trailing `/` on a file
+            // that is not the bare directory root.
+            "/etc/ritornello//plugins.toml",
+            "/etc/ritornello/plugins.toml/",
+            // M1: a substring match on `-ritornello-` also accepted a bare
+            // prefix with no digits, and a third party's own rule that
+            // merely mentions Ritornello in its name.
+            "/etc/polkit-1/rules.d/x-ritornello-.rules",
+            "/etc/polkit-1/rules.d/49-foo-ritornello-bridge.rules",
+            // M2: `starts_with("ritornello")` had no separator, so another
+            // package's unit sharing the same prefix was also accepted.
+            "/etc/systemd/system/ritornellofoo.service",
         ] {
-            assert!(!deletable_file(bad), "{bad}");
+            assert!(!deletable_file(bad), "{bad:?}");
         }
     }
 
