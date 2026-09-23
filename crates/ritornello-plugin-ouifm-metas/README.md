@@ -27,7 +27,8 @@ along too.
 Deploy as usual and any Oüi FM stream already set up on the device starts
 showing titles.
 
-An optional `/etc/ritornello/ouifm-metas.toml` (see
+An optional `ouifm-metas.toml`, in this plugin's own data directory
+(`/var/lib/ritornello/plugins/ouifm-metas/` by default — see
 [the example](../../deploy/ouifm-metas.example.toml)) lets you correct a
 webradio or add one without rebuilding, should Oüi FM ever change a stream
 address.

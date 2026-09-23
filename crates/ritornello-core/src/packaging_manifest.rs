@@ -261,4 +261,37 @@ mod tests {
         }
         assert!(checked > 0, "checked nothing — the walk is not looking where it should");
     }
+
+    /// Fix round 1, R14: `deploy/mpd.example.toml` carried a literal
+    /// `</content>` line — an editor artefact, not TOML — that would have
+    /// been copied verbatim into `mpd`'s own data directory by `deploy.sh`
+    /// on a fresh install, or by an update installing the plugin for the
+    /// first time (`initial_config`), leaving the plugin unable to parse its
+    /// own configuration. Every `deploy/*.example.toml` must parse as TOML;
+    /// `toml::Value` rather than a typed struct, since each file has its own
+    /// shape and this guard only cares that the file is well-formed, not
+    /// what it means.
+    ///
+    /// **[MUTATION]**: put the `</content>` line back at the end of
+    /// `deploy/mpd.example.toml` — this test fails, naming that file.
+    #[test]
+    fn every_example_toml_parses() {
+        let dir = deploy_dir();
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            let is_example_toml = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".example.toml"));
+            if !is_example_toml {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            toml::from_str::<toml::Value>(&text)
+                .unwrap_or_else(|e| panic!("{} does not parse as TOML: {e}", path.display()));
+            checked += 1;
+        }
+        assert!(checked > 0, "checked no *.example.toml file at all — the walk is wrong");
+    }
 }
