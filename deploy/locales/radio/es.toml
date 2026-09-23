@@ -1,0 +1,40 @@
+empty_preset = "presintonía vacía"
+preset_out_of_range = "presintonía {p} fuera del rango 1-99 ({name})"
+preset_duplicate = "presintonía {p} duplicada"
+bad_url = "URL no válida para {name}: {url}"
+bad_request = "solicitud no válida: {detail}"
+search_error = "No se pudo buscar en el directorio: {detail}"
+save_failed = "no se pudo guardar"
+
+# admin page
+admin_title = "emisoras"
+col_num = "N.º"
+col_name = "Nombre"
+col_url = "URL del flujo"
+btn_add = "+ Añadir"
+btn_save = "Guardar"
+load_error = "Error al cargar las emisoras ({cause}): corrige stations.toml y vuelve a cargar"
+saved = "Guardado ✓"
+save_error = "Error: {cause}"
+limit_reached = "Máximo 99 presintonías: elimina una primero"
+
+# online directory
+search_title = "Añadir desde el directorio en línea"
+search_placeholder = "Nombre de la emisora"
+country_label = "País"
+# Country names are **not** translated here: the UI renders them with
+# `Intl.DisplayNames` from the ISO code, in the browser's language. A table
+# of 241 countries to maintain in every language pack would make no sense.
+country_all = "Todos los países"
+country_filter_placeholder = "País o código"
+country_none = "Ningún país coincide"
+country_loading = "Cargando países…"
+reorder_hint = "Arrastra para reordenar"
+move_up = "Subir"
+move_down = "Bajar"
+remove_station = "Quitar la emisora"
+btn_search = "Buscar"
+btn_add_result = "Añadir"
+searching = "Buscando…"
+no_results = "No se encontró ninguna emisora"
+empty_query = "Escribe algo para buscar"

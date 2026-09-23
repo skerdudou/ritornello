@@ -1,0 +1,77 @@
+# validation messages
+duplicate_code = "Code {code} ist auf {device} doppelt belegt"
+select_out_of_range = "Favorit {n} außerhalb des Bereichs 0-9 auf {device}"
+unknown_command = "unbekannter Befehl auf Code {code} auf {device}"
+unknown_preset = "unbekannte Vorlage: {preset}"
+bad_request = "ungültige Anfrage: {detail}"
+save_failed = "Speichern fehlgeschlagen"
+# live validation, client side: the same conflict as `duplicate_code`,
+# but detected before the round trip to the server.
+conflict_code = "Code {code} ist bereits {action} zugewiesen"
+conflict_dup = "Code {code} ist doppelt eingetragen"
+save_conflicts = "Beheben Sie die doppelten Tastencodes vor dem Speichern"
+
+# admin page
+admin_title = "Tastenbelegung"
+device_label = "Gerät"
+btn_refresh = "Aktualisieren"
+col_action = "Aktion"
+col_code = "Tastencode(s)"
+btn_learn = "Anlernen"
+btn_clear = "Leeren"
+preset_label = "Vorlage"
+btn_load_preset = "Laden"
+btn_import = "Importieren…"
+btn_export = "Exportieren"
+btn_save = "Speichern"
+btn_cancel = "Abbrechen"
+dlg_learn_title = "Taste anlernen"
+dlg_learn_desc = "Drücken Sie eine Taste auf dem Gerät „{device}“…"
+learn_append_label = "Zu den vorhandenen Codes hinzufügen, statt sie zu ersetzen"
+learn_timeout = "Keine Taste erkannt — abgebrochen"
+learn_countdown = "Noch {s} s"
+saved = "Gespeichert ✓"
+save_error = "Fehler: {cause}"
+load_error = "Fehler beim Laden: {cause}"
+no_device = "Kein Eingabegerät erkannt"
+
+# the 23 actions
+act_select_1 = "Favorit 1"
+act_select_2 = "Favorit 2"
+act_select_3 = "Favorit 3"
+act_select_4 = "Favorit 4"
+act_select_5 = "Favorit 5"
+act_select_6 = "Favorit 6"
+act_select_7 = "Favorit 7"
+act_select_8 = "Favorit 8"
+act_select_9 = "Favorit 9"
+act_select_0 = "Taste 0"
+# "Presets" rather than a bare "+10": this key shifts the next digit by ten
+# (+10 then 4 selects station 14), it does not move playback. Without that
+# word it reads as "+10 seconds" as soon as the seek actions share the same
+# list — which is exactly
+# what happened.
+act_plus10 = "Favoriten +10"
+act_volume_up = "Lautstärke +"
+act_volume_down = "Lautstärke -"
+act_mute = "Stummschalten"
+act_play_pause = "Wiedergabe/Pause"
+act_stop = "Stopp"
+# "in track" tells them apart from "Previous"/"Next", which change track.
+# No number in the label: the step is adjustable from the configuration page,
+# and "10 s" would become a lie.
+act_seek_back = "Im Titel zurückspulen"
+act_seek_forward = "Im Titel vorspulen"
+act_next = "Weiter"
+act_prev = "Zurück"
+act_eject = "Auswerfen"
+act_source_cycle = "Quelle wechseln"
+act_toggle_random = "Zufallswiedergabe"
+act_toggle_repeat_all = "Alle wiederholen"
+act_power = "Standby"
+
+# source shortcut rows, appended at the end of the table (one per source the
+# core announces via `/api/presets`, plus one for a source still bound but
+# no longer installed)
+act_select_source = "Quelle: {source}"
+act_select_source_unknown = "Quelle: {source} (nicht installiert)"

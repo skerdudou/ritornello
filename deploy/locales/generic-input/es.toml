@@ -1,0 +1,76 @@
+# validation messages
+duplicate_code = "el código {code} está asignado dos veces en {device}"
+select_out_of_range = "presintonía {n} fuera del rango 0-9 en {device}"
+unknown_command = "comando desconocido asignado al código {code} en {device}"
+unknown_preset = "perfil desconocido: {preset}"
+bad_request = "solicitud no válida: {detail}"
+save_failed = "no se pudo guardar"
+# live validation, client side: the same conflict as `duplicate_code`,
+# but detected before the round trip to the server.
+conflict_code = "el código {code} ya está asignado a {action}"
+conflict_dup = "el código {code} está introducido dos veces"
+save_conflicts = "Resuelve los códigos de tecla duplicados antes de guardar"
+
+# admin page
+admin_title = "asignación de teclas"
+device_label = "Dispositivo"
+btn_refresh = "Actualizar"
+col_action = "Acción"
+col_code = "Código(s) de tecla"
+btn_learn = "Aprender"
+btn_clear = "Borrar"
+preset_label = "Perfil"
+btn_load_preset = "Cargar"
+btn_import = "Importar…"
+btn_export = "Exportar"
+btn_save = "Guardar"
+btn_cancel = "Cancelar"
+dlg_learn_title = "Aprendizaje de tecla"
+dlg_learn_desc = "Pulsa una tecla del dispositivo «{device}»…"
+learn_append_label = "Añadir a los códigos existentes en lugar de reemplazarlos"
+learn_timeout = "No se detectó ninguna tecla: cancelado"
+learn_countdown = "Quedan {s} s"
+saved = "Guardado ✓"
+save_error = "Error: {cause}"
+load_error = "Error al cargar: {cause}"
+no_device = "No se detectó ningún dispositivo de entrada"
+
+# the 23 actions
+act_select_1 = "Presintonía 1"
+act_select_2 = "Presintonía 2"
+act_select_3 = "Presintonía 3"
+act_select_4 = "Presintonía 4"
+act_select_5 = "Presintonía 5"
+act_select_6 = "Presintonía 6"
+act_select_7 = "Presintonía 7"
+act_select_8 = "Presintonía 8"
+act_select_9 = "Presintonía 9"
+act_select_0 = "Tecla 0"
+# "Presets" rather than a bare "+10": this key shifts the next digit by ten
+# (+10 then 4 selects station 14), it does not move playback. Without that
+# word it reads as "+10 seconds" as soon as the seek actions share the same
+# list — which is exactly what happened.
+act_plus10 = "Presintonías +10"
+act_volume_up = "Volumen +"
+act_volume_down = "Volumen -"
+act_mute = "Silencio"
+act_play_pause = "Reproducir/pausa"
+act_stop = "Detener"
+# "in track" tells them apart from "Previous"/"Next", which change track.
+# No number in the label: the step is adjustable from the configuration
+# page, and "10 s" would become a lie.
+act_seek_back = "Retroceder en la pista"
+act_seek_forward = "Avanzar en la pista"
+act_next = "Siguiente"
+act_prev = "Anterior"
+act_eject = "Expulsar"
+act_source_cycle = "Cambiar de fuente"
+act_toggle_random = "Aleatorio"
+act_toggle_repeat_all = "Repetir todo"
+act_power = "En espera"
+
+# source shortcut rows, appended at the end of the table (one per source the
+# core announces via `/api/presets`, plus one for a source still bound but
+# no longer installed)
+act_select_source = "Fuente: {source}"
+act_select_source_unknown = "Fuente: {source} (no instalada)"

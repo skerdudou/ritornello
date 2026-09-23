@@ -1,0 +1,77 @@
+# validation messages
+duplicate_code = "codice {code} associato due volte su {device}"
+select_out_of_range = "preselezione {n} fuori dall'intervallo 0-9 su {device}"
+unknown_command = "comando sconosciuto associato al codice {code} su {device}"
+unknown_preset = "preset sconosciuto: {preset}"
+bad_request = "richiesta non valida: {detail}"
+save_failed = "salvataggio non riuscito"
+# live validation, client side: the same conflict as `duplicate_code`,
+# but detected before the round trip to the server.
+conflict_code = "il codice {code} è già assegnato a {action}"
+conflict_dup = "il codice {code} è inserito due volte"
+save_conflicts = "Correggi i codici tasto duplicati prima di salvare"
+
+# admin page
+admin_title = "associazioni dei tasti"
+device_label = "Periferica"
+btn_refresh = "Aggiorna"
+col_action = "Azione"
+col_code = "Codice/i tasto"
+btn_learn = "Apprendi"
+btn_clear = "Cancella"
+preset_label = "Preset"
+btn_load_preset = "Carica"
+btn_import = "Importa…"
+btn_export = "Esporta"
+btn_save = "Salva"
+btn_cancel = "Annulla"
+dlg_learn_title = "Apprendimento di un tasto"
+dlg_learn_desc = "Premi un tasto sulla periferica «{device}»…"
+learn_append_label = "Aggiungi ai codici esistenti invece di sostituirli"
+learn_timeout = "Nessun tasto rilevato — annullato"
+learn_countdown = "{s} s rimanenti"
+saved = "Salvato ✓"
+save_error = "Errore: {cause}"
+load_error = "Errore di caricamento: {cause}"
+no_device = "Nessuna periferica di ingresso rilevata"
+
+# the 23 actions
+act_select_1 = "Preselezione 1"
+act_select_2 = "Preselezione 2"
+act_select_3 = "Preselezione 3"
+act_select_4 = "Preselezione 4"
+act_select_5 = "Preselezione 5"
+act_select_6 = "Preselezione 6"
+act_select_7 = "Preselezione 7"
+act_select_8 = "Preselezione 8"
+act_select_9 = "Preselezione 9"
+act_select_0 = "Tasto 0"
+# "Presets" rather than a bare "+10": this key shifts the next digit by ten
+# (+10 then 4 selects station 14), it does not move playback. Without that
+# word it reads as "+10 seconds" as soon as the seek actions share the same
+# list — which is exactly
+# what happened.
+act_plus10 = "Preselezioni +10"
+act_volume_up = "Volume +"
+act_volume_down = "Volume -"
+act_mute = "Muto"
+act_play_pause = "Riproduci/pausa"
+act_stop = "Stop"
+# "in track" tells them apart from "Previous"/"Next", which change track.
+# No number in the label: the step is adjustable from the configuration page,
+# and "10 s" would become a lie.
+act_seek_back = "Indietro nel brano"
+act_seek_forward = "Avanti nel brano"
+act_next = "Successivo"
+act_prev = "Precedente"
+act_eject = "Espelli"
+act_source_cycle = "Cambia sorgente"
+act_toggle_random = "Casuale"
+act_toggle_repeat_all = "Ripeti tutto"
+act_power = "Standby"
+
+# source shortcut rows, appended at the end of the table (one per source the
+# core announces via `/api/presets`, plus one for a source still bound but
+# no longer installed)
+act_select_source = "Sorgente: {source}"
+act_select_source_unknown = "Sorgente: {source} (non installata)"

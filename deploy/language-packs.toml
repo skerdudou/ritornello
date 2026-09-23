@@ -6,3 +6,12 @@
 # changed-components.sh reads this file to decide what to publish.
 [fr]
 version = "0.2.0-beta.2"
+
+[de]
+version = "0.2.0-beta.2"
+
+[es]
+version = "0.2.0-beta.2"
+
+[it]
+version = "0.2.0-beta.2"

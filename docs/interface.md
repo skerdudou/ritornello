@@ -1577,7 +1577,9 @@ that are never the same directory and that never write into each other:
   the chain above (per-key degradation, never an error). A file that is
   present but unreadable (permissions, invalid TOML), on either root, is
   ignored **with a trace in the logs**.
-- The initial French pack is built from `deploy/locales/` by
+- The packs this project ships — French, German, Spanish and Italian,
+  one `[<language>]` section each in `deploy/language-packs.toml` — are
+  built from `deploy/locales/` by
   `scripts/package-release.sh --languages` — the same path the release
   workflow uses to publish every pack — and `deploy/deploy.sh` places the
   packs it builds under `/etc/ritornello/language-packs/`, exactly as an

@@ -1,0 +1,159 @@
+# German pack of the `files` plugin.
+#
+# Its key set must stay **identical** to that of the embedded English catalog
+# (`crates/ritornello-plugin-files/src/locales/en.toml`): a parity test checks
+# it, and a key missing here would show English without warning.
+
+# Statuses shown by the Source.
+status_files = "DATEIEN"
+no_playlist = "KEINE LISTE"
+empty_track = "TITEL FEHLT"
+
+# Root validation refusals.
+bad_root_name = "ungültiger Wurzelname „{name}“: nur Kleinbuchstaben, Ziffern und Bindestriche, beginnend mit einem Buchstaben oder einer Ziffer"
+bad_host = "ungültige Serveradresse „{host}“: keine Kommas, Leerzeichen oder „..“"
+bad_share = "ungültiger Freigabename „{share}“: keine Kommas, Leerzeichen oder „..“"
+bad_subpath = "ungültiger Unterordner „{path}“: Er muss relativ sein und darf nicht nach oben führen"
+duplicate_root = "eine Wurzel namens „{name}“ existiert bereits"
+relative_local_path = "der lokale Ordner „{path}“ muss ein absoluter Pfad sein"
+
+# Recursive scan refusals.
+too_many_tracks = "dieser Ordner enthält mehr als {cap} Titel: Schränken Sie ihn ein oder fügen Sie seine Unterordner einzeln hinzu"
+scan_io_error = "„{path}“ konnte nicht gelesen werden: Prüfen Sie, ob es noch existiert und ob Ritornello es lesen darf"
+
+# Saved-playlist store refusals.
+bad_playlist_name = "ungültiger Wiedergabelistenname „{name}“: keine Schrägstriche, und er darf nicht mit einem Punkt beginnen"
+read_only_root = "die Wurzel „{name}“ ist schreibgeschützt eingebunden: Erlauben Sie dort das Schreiben, um Wiedergabelisten darin zu speichern"
+unknown_root = "keine Wurzel namens „{name}“"
+store_io_error = "„{path}“ konnte nicht geschrieben oder gelesen werden"
+
+# Admin half refusals.
+bad_request = "die Seite hat etwas gesendet, das dieses Plugin nicht verstanden hat ({detail})"
+# A background task (scan, browse, search) was interrupted before reporting
+# anything — a `tokio::task::JoinHandle` error, never seen in practice
+# outside a panic or a shutdown. Not translated from any specific cause,
+# unlike every refusal above: `{detail}` carries whatever the runtime says.
+internal_task_error = "eine interne Aufgabe wurde unterbrochen: {detail}"
+
+# Management page labels.
+root_label = "Wurzel"
+kind_local = "lokaler Ordner"
+kind_smb = "Netzwerkfreigabe"
+mounted_yes = "eingebunden"
+mounted_no = "nicht eingebunden"
+writable_label = "Schreiben erlauben"
+archive_covers_label = "gefundene Cover hier ablegen"
+ph_host = "Server"
+ph_share = "Freigabe"
+ph_subpath = "Unterordner (optional)"
+ph_user = "Benutzer"
+ph_password = "Passwort"
+ph_domain = "Windows-Domäne (optional)"
+btn_add_share = "Freigabe eintragen"
+
+browse_title = "Durchsuchen"
+search_placeholder = "suchen"
+btn_search = "Suchen"
+no_results = "Kein Ergebnis"
+search_truncated = "Nur die ersten {count} werden angezeigt: Grenzen Sie die Suche ein."
+search_gave_up = "die Suche wurde abgebrochen, bevor sie diesen Ordner vollständig durchsucht hat: Öffnen Sie einen Unterordner und suchen Sie dort."
+empty_folder = "Leerer Ordner"
+btn_add_current_folder = "Diesen Ordner hinzufügen"
+search_scope = "Die Suche umfasst {path}"
+scan_progress = "Durchsuche {dir} — {found} Titel gefunden"
+
+playlist_title = "Aktuelle Wiedergabeliste"
+col_num = "Nr."
+col_track = "Titel"
+col_duration = "Dauer"
+empty_playlist = "Leere Wiedergabeliste"
+missing_badge = "nicht gefunden"
+reorder_hint = "Zum Umsortieren ziehen"
+btn_move_up = "Titel nach oben"
+btn_move_down = "Titel nach unten"
+btn_remove_track = "Titel entfernen"
+btn_clear = "Wiedergabeliste leeren"
+page_range = "{from}–{to} von {total}"
+unresolved_title = "{count} Einträge wurden nicht gefunden"
+unresolved_title_one = "1 Eintrag wurde nicht gefunden"
+ph_playlist_name = "Name der Wiedergabeliste"
+dest_label = "Ziel"
+dest_internal = "interner Speicher"
+btn_save_playlist = "Wiedergabeliste speichern"
+no_saved = "Keine gespeicherte Wiedergabeliste"
+load_playlist_label = "Zu ladende Wiedergabeliste"
+btn_load_playlist = "Laden"
+load_error = "Fehler: {cause}"
+
+# --- Declared sources ---
+sources_title = "Quellen"
+no_sources = "Noch keine Quelle eingetragen. Fügen Sie einen Ordner oder eine Netzwerkfreigabe hinzu, um zu beginnen."
+btn_add_device = "Ordner von diesem Gerät hinzufügen"
+btn_add_to_playlist = "Zur Wiedergabeliste hinzufügen"
+btn_remove_source = "Diese Quelle entfernen"
+btn_retry_mount = "Einbinden erneut versuchen"
+mount_error_title = "Der letzte Einbindeversuch ist fehlgeschlagen:"
+# `{detail}` is `systemctl`'s own raw output, never translated (see
+# `mount::reconcile`'s doc: a polkit refusal is explicit there, and a
+# home-made sentence would make it opaque) — the same shape `share_not_declared`
+# already carries.
+mount_retry_failed = "der Einbindeversuch ist fehlgeschlagen: {detail}"
+share_not_declared = "die Freigabe wurde nicht eingebunden und daher nicht eingetragen: {detail}"
+# Whole-sentence key, not `share_not_declared` nested inside itself: the
+# fallback used to be a *resolved* sentence handed to `share_not_declared` as
+# its own `{detail}`, which is exactly the two-levels-of-resolution shape
+# this chantier moved away from (language-packs chantier, task 9). Composed
+# once, in each language, instead.
+share_not_declared_silent = "die Freigabe wurde nicht eingebunden und daher nicht eingetragen: systemd meldete Erfolg, aber der Einhängepunkt fehlt: Prüfen Sie den Freigabenamen, die Zugangsdaten und ob cifs-utils installiert ist; die genaue Ursache zeigt journalctl -u ritornello-media-mount"
+
+# --- Wizard: folder from this device ---
+dlg_device_title = "Ordner von diesem Gerät hinzufügen"
+dlg_device_desc = "Wählen Sie ein Laufwerk, gehen Sie bis zu dem Ordner mit Ihrer Musik und bestätigen Sie."
+volumes_label = "Laufwerk"
+no_volumes = "Kein verwendbares Laufwerk gefunden."
+audio_here = "{count} Audiodateien hier"
+audio_here_none = "Keine Audiodateien hier"
+audio_here_one = "1 Audiodatei hier"
+btn_choose_folder = "Diesen Ordner verwenden"
+btn_up = "Eine Ebene höher"
+ph_manual_path = "oder einen absoluten Pfad eingeben"
+btn_go = "Öffnen"
+btn_cancel = "Abbrechen"
+
+# --- Wizard: network share ---
+dlg_share_title = "Netzwerkfreigabe hinzufügen"
+dlg_share_desc = "Geben Sie die Adresse des Hosts an, verbinden Sie sich, wählen Sie dann eine Freigabe und gehen Sie bis zu einem Ordner. Eingebunden wird erst nach Ihrer Bestätigung."
+btn_connect = "Verbinden"
+connecting = "Verbindung wird hergestellt…"
+shares_label = "Freigabe"
+btn_manual = "Angaben manuell eingeben"
+btn_assistant = "Zurück zum Assistenten"
+smb_unavailable = "Der Netzwerkassistent benötigt das Paket smbclient. Ohne es lässt sich eine Freigabe weiterhin eintragen, indem Sie ihre Angaben manuell eingeben."
+
+# --- smbclient refusals ---
+smb_not_installed = "smbclient ist nicht installiert: Installieren Sie das Paket smbclient, um eine Netzwerkfreigabe zu durchsuchen."
+smb_bad_credentials = "Der Host hat diese Zugangsdaten abgelehnt. Prüfen Sie Benutzername und Passwort."
+smb_access_denied = "Der Host hat die Verbindung angenommen, aber den Zugriff verweigert. Dieses Konto hat möglicherweise keine Berechtigung für diese Freigabe."
+smb_unreachable = "Der Host {host} hat nicht geantwortet. Prüfen Sie die Adresse und ob der Rechner eingeschaltet ist."
+smb_not_found = "Diese Freigabe oder dieser Ordner existiert auf dem Host nicht mehr."
+smb_timeout = "Der Host {host} hat zu lange für die Antwort gebraucht."
+smb_unreadable_output = "smbclient hat etwas geantwortet, das diese Version nicht lesen kann. Rohausgabe: {detail}"
+
+# --- Source refusals ---
+bad_local_path = "Dieser Pfad kann nicht durchsucht werden: {path}"
+unknown_source = "Unbekannte Quelle: {name}"
+duplicate_source = "Dieser Ordner ist bereits als Quelle eingetragen."
+
+not_a_playlist = "„{path}“ ist keine Wiedergabelistendatei (.m3u oder .m3u8)"
+btn_load_m3u = "Diese Wiedergabeliste laden"
+duration_progress = "Titellängen werden gelesen ({done} von {total})"
+
+# --- Unresponsive mount points ---
+#
+# Distinct from `bad_local_path` and from `missing_badge` on purpose: a share
+# that stopped answering is neither an invalid path nor a deleted file, and
+# saying either sends the user looking for the fault in the wrong place.
+root_unresponsive = "„{path}“ antwortet nicht: Die Freigabe schläft möglicherweise oder ist nicht erreichbar. Es wurde nichts geändert."
+unresponsive_title = "Diese Einhängepunkte antworten nicht:"
+unresponsive_hint = "Die angezeigten Informationen zu ihnen bleiben unvollständig, bis sie wieder antworten. Die Wiedergabe lokaler Quellen ist nicht betroffen."
+missing_unknown = "unbekannt"

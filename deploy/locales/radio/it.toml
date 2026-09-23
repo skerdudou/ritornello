@@ -1,0 +1,40 @@
+empty_preset = "preselezione vuota"
+preset_out_of_range = "preselezione {p} fuori dall'intervallo 1-99 ({name})"
+preset_duplicate = "preselezione {p} duplicata"
+bad_url = "URL non valido per {name}: {url}"
+bad_request = "richiesta non valida: {detail}"
+search_error = "Ricerca nell'elenco non riuscita: {detail}"
+save_failed = "salvataggio non riuscito"
+
+# admin page
+admin_title = "stazioni"
+col_num = "N."
+col_name = "Nome"
+col_url = "URL del flusso"
+btn_add = "+ Aggiungi"
+btn_save = "Salva"
+load_error = "Errore nel caricamento delle stazioni ({cause}) — correggi stations.toml, poi ricarica"
+saved = "Salvato ✓"
+save_error = "Errore: {cause}"
+limit_reached = "Massimo 99 preselezioni — rimuovine prima una"
+
+# online directory
+search_title = "Aggiungi dall'elenco online"
+search_placeholder = "Nome della stazione"
+country_label = "Paese"
+# Country names are **not** translated here: the UI renders them with
+# `Intl.DisplayNames` from the ISO code, in the browser's language. A table
+# of 241 countries to maintain in every language pack would make no sense.
+country_all = "Tutti i paesi"
+country_filter_placeholder = "Paese o codice"
+country_none = "Nessun paese corrispondente"
+country_loading = "Caricamento dei paesi…"
+reorder_hint = "Trascina per riordinare"
+move_up = "Sposta su"
+move_down = "Sposta giù"
+remove_station = "Rimuovi la stazione"
+btn_search = "Cerca"
+btn_add_result = "Aggiungi"
+searching = "Ricerca in corso…"
+no_results = "Nessuna stazione trovata"
+empty_query = "Scrivi qualcosa da cercare"

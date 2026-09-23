@@ -68,7 +68,8 @@ and 5) and `x86_64`, so a plain Linux PC runs it just as well.
   savable.
 - **Embedded web UI** — Vue 3, served by the core binary: player state
   pushed continuously (SSE), full remote control, light/dark toggle and 42
-  themes, English/French extensible through TOML language packs, a system
+  themes, English built in and French, German, Spanish and Italian as
+  installable TOML language packs, a system
   page (CPU, memory and the Ritornello process tree, temperature,
   under-voltage, shutdown/reboot).
 - **HDMI screen** — the console plugin composes now-playing and clock
