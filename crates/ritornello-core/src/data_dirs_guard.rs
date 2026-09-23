@@ -45,6 +45,38 @@
 //!   `mod.rs` or a `src/bin/` root — for any other file `foo.rs`, the rule
 //!   is `foo/name.rs` (or `foo/name/mod.rs`). `#[path = "..."]` is not
 //!   guessed at all; it is reported as an offender instead.
+//!
+//! **Fix round 3 (the last on this parser, per the controller).** A second
+//! re-review ported the parser to Python again and reports zero offenders on
+//! the real fleet — every remaining gap is contrived, none exploited today.
+//! Fixed anyway, kept small and local:
+//! - **B1**: `skip_gated_item` reported only the LINE an item ended on, so
+//!   `production_lines` always resumed scanning at the START of the next
+//!   line — production code sharing the item's own end-of-line (after a
+//!   same-line `;`/`}`) was silently dropped. It now reports the leftover
+//!   text on that same line too, scanned like any other production text.
+//! - **B2**: a gated match arm or struct-expression field ending in `,`
+//!   (never `;` or `{` of its own) let the skip adopt its next braced
+//!   SIBLING's braces as if they were its own, silently swallowing that
+//!   sibling whole. A `,` at brace depth 0, outside `()`/`[]`, before the
+//!   item's own first `{`/`;`, is now the same kind of undelimited failure
+//!   as a negative brace depth — reported, never silently adopted.
+//! - **B3 (Minor)**: the char-literal heuristic only knew ONE-character
+//!   escapes (`\n`, `\'`, …); a long one (`\x41`, `\u{7b}`) left a
+//!   `'`-that-does-not-really-close behind, which could then pair with a
+//!   later, unrelated `'` and miscount a real brace in between. Escape
+//!   sequences of any length are now measured properly.
+//! - **B4 (latent)**: a gated `mod x;` found INSIDE an inline `mod m { .. }`
+//!   resolves, in `rustc`, to `m/x.rs` — a directory this guard does not
+//!   know the name of without parsing `m`'s own declaration, so it is
+//!   reported rather than guessed at (wrongly, beside the whole file) as
+//!   round 2 did. A one-line `#[cfg(test)] #[path = ".."] mod m;` used to
+//!   be silently ignored (neither resolved nor reported, since the "item"
+//!   `locate_gated_item` returned was the literal text `#[path = ".."] mod
+//!   m;`, which matches no pattern `declared_test_only_module` knows); a
+//!   stacked attribute sharing the `#[cfg(test)]` attribute's own line is
+//!   now walked past exactly like one on its own line, so R20's `#[path]`
+//!   offender fires either way.
 
 /// What a `#[cfg(test)]` attribute at `lines[attr_line]` gates, once the
 /// item it applies to is actually located (Ruling R18, N1): text following
@@ -68,34 +100,53 @@ enum GatedItem<'a> {
 
 fn locate_gated_item<'a>(lines: &[&'a str], attr_line: usize) -> GatedItem<'a> {
     let trimmed = lines[attr_line].trim_start();
-    let after = &trimmed["#[cfg(test)]".len()..];
-    if !after.trim().is_empty() {
-        return GatedItem::Here(attr_line, after);
-    }
-    // Nothing follows the attribute on its own line: the item is the next
-    // line that is neither blank nor itself a further attribute
-    // (`#[cfg(test)]` stacked with e.g. `#[allow(dead_code)]`, or with
-    // `#[path = "..."]`, before the real item).
-    let mut j = attr_line + 1;
-    while j < lines.len() {
-        let t = lines[j].trim_start();
-        if t.is_empty() {
-            j += 1;
-            continue;
+    let mut rest = trimmed["#[cfg(test)]".len()..].trim_start();
+    let line = attr_line;
+    loop {
+        if rest.is_empty() {
+            // Nothing more on this physical line: the item is the next line
+            // that is neither blank nor itself a further attribute
+            // (`#[cfg(test)]` stacked with e.g. `#[allow(dead_code)]`, or
+            // with `#[path = "..."]`, before the real item).
+            let mut j = line + 1;
+            while j < lines.len() {
+                let t = lines[j].trim_start();
+                if t.is_empty() {
+                    j += 1;
+                    continue;
+                }
+                if t.starts_with("#[path") {
+                    return GatedItem::UnresolvablePath(j);
+                }
+                if t.starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                return GatedItem::Here(j, t);
+            }
+            return GatedItem::Dangling;
         }
-        if t.starts_with("#[path") {
-            return GatedItem::UnresolvablePath(j);
+        if rest.starts_with("#[path") {
+            return GatedItem::UnresolvablePath(line);
         }
-        if t.starts_with('#') {
-            j += 1;
-            continue;
+        if rest.starts_with('#') {
+            // Ruling R24, B4: a stacked attribute SHARING the `#[cfg(test)]`
+            // attribute's own line (`#[cfg(test)] #[path = ".."] mod m;`,
+            // all one line) used to be swallowed whole as "the item" itself
+            // — which matches no pattern `declared_test_only_module` knows,
+            // so it was silently ignored rather than resolved OR reported.
+            // Walked past here exactly like a stacked attribute on its own
+            // line, so the loop above still finds `#[path]` (or the real
+            // item) on the other side of it.
+            if let Some(end) = rest.find(']') {
+                rest = rest[end + 1..].trim_start();
+                continue;
+            }
+            // Malformed (no closing bracket on this line): fall through and
+            // let whatever is left stand as the item, rather than looping
+            // forever on text this function cannot make sense of.
         }
-        break;
-    }
-    if j >= lines.len() {
-        GatedItem::Dangling
-    } else {
-        GatedItem::Here(j, lines[j])
+        return GatedItem::Here(line, rest);
     }
 }
 
@@ -136,7 +187,14 @@ fn locate_gated_item<'a>(lines: &[&'a str], attr_line: usize) -> GatedItem<'a> {
 /// characters with the same open quote still remembered, which for a
 /// genuine line-continuation closes correctly anyway. No plugin's gated
 /// item relies on the difference either way.
-fn production_lines(text: &str) -> (Vec<(usize, &str)>, Vec<usize>) {
+///
+/// Owned `String`s, not borrowed `&str` slices (Ruling R24, B1): the item's
+/// own end-of-line leftover — production code sharing the item's closing
+/// `;`/`}` on the same physical line — has to be reconstructed from the
+/// character-indexed scan `skip_gated_item` runs, which cannot be sliced
+/// back out of the original `&str` without redoing UTF-8 byte-offset
+/// arithmetic `skip_gated_item` has already done the character-safe way.
+fn production_lines(text: &str) -> (Vec<(usize, String)>, Vec<usize>) {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     let mut undelimited = Vec::new();
@@ -152,15 +210,29 @@ fn production_lines(text: &str) -> (Vec<(usize, &str)>, Vec<usize>) {
                 GatedItem::UnresolvablePath(line) => Some((line, lines[line])),
             };
             let Some((line, item_text)) = start else { continue };
-            match skip_gated_item(&lines, line, item_text) {
-                Ok(end) => i = end + 1,
-                Err(bad_line) => {
+            // Ruling R24, B1: whichever of `Ok`/`Err` this is, the item's
+            // own end line may carry production text AFTER the point that
+            // ended (or failed to delimit) it — a same-line `#[cfg(test)]
+            // mod placeholder; fn main() { .. }`, or a gated fn's closing
+            // `}` immediately followed by `const P: &str = "..";` on that
+            // same line. That leftover is production and must be scanned,
+            // not silently carried along with whatever was just skipped.
+            let (end_line, rest) = match skip_gated_item(&lines, line, item_text) {
+                Ok((end_line, rest)) => {
+                    i = end_line + 1;
+                    (end_line, rest)
+                }
+                Err((bad_line, rest)) => {
                     undelimited.push(i); // reported at the ATTRIBUTE's own line.
                     i = bad_line + 1;
+                    (bad_line, rest)
                 }
+            };
+            if !rest.trim().is_empty() {
+                out.push((end_line + 1, rest));
             }
         } else {
-            out.push((i + 1, lines[i]));
+            out.push((i + 1, lines[i].to_string()));
             i += 1;
         }
     }
@@ -207,26 +279,73 @@ fn closes_raw_string(chars: &[char], quote_idx: usize, hashes: usize) -> bool {
     end <= chars.len() && chars[quote_idx + 1..end].iter().all(|&c| c == '#')
 }
 
+/// The number of characters, starting at `idx` (which must be a `\`), that
+/// make up ONE escape sequence inside a char or string literal (Ruling
+/// R24, B3): `\x41` (4: backslash, `x`, two hex digits), `\u{7b}` (however
+/// many it takes to reach its own closing `}`, inclusive), or anything else
+/// — `\n`, `\'`, `\\`, `\0`, `\r`, `\t` — a single character after the
+/// backslash, hence 2. Round 2's heuristic only ever knew this last, most
+/// common shape; a longer escape left its own closing quote MISCOUNTED as
+/// still open, which could then pair with a LATER, unrelated `'` and
+/// mistake a real brace in between for part of a char literal.
+fn escape_len(chars: &[char], idx: usize) -> usize {
+    match chars.get(idx + 1) {
+        Some('x') => 4,
+        Some('u') if chars.get(idx + 2) == Some(&'{') => {
+            let mut len = 3; // `\`, `u`, `{`.
+            while chars.get(idx + len) != Some(&'}') && idx + len < chars.len() {
+                len += 1;
+            }
+            if chars.get(idx + len) == Some(&'}') {
+                len += 1; // include the closing `}`.
+            }
+            len
+        }
+        _ => 2,
+    }
+}
+
 /// The 0-based index of the last line of the item starting at `start_line`,
 /// whose first line's relevant TEXT is `first_line_text` (Ruling R18: on a
 /// same-line attribute, this is a SUFFIX of `lines[start_line]`, not the
-/// whole line) — `Ok` if it ends in `;` before any `{` (`mod x;`), or on the
-/// line carrying its own matching closing `}`.
+/// whole line), together with whatever of that same line remains AFTER the
+/// item's own end (Ruling R24, B1) — `Ok` if it ends in `;` before any `{`
+/// (`mod x;`), or on the line carrying its own matching closing `}`; that
+/// leftover is production code sharing the item's own end-of-line, and
+/// round 2 dropped it silently by always resuming at the START of the
+/// NEXT line.
 ///
-/// `Err(line)` (Ruling R19, N2) when the item cannot be safely delimited at
-/// all:
+/// `Err((line, leftover))` (Ruling R19, N2 — and R24, B2) when the item
+/// cannot be safely delimited at all, the leftover meaning the same thing
+/// as for `Ok`:
 /// - brace depth goes negative before the item's own first `{` or `;` —
 ///   a gated struct field or enum variant (`probe: u8,`) has no delimiter
 ///   of its own before the ENCLOSING item's `}`, which this function must
 ///   never mistake for its own;
+/// - a `,` at brace depth 0, outside `()`/`[]`, appears before the item's
+///   own first `{` or `;` — the same failure, reached differently: a gated
+///   match arm or struct-expression field ALSO ends in `,`, and without
+///   this check the scan would otherwise adopt its next braced SIBLING's
+///   `{`/`}` as if they were its own, silently swallowing that sibling
+///   whole (`Cmd::Probe => probe(),` followed by `Cmd::Save => { .. }` —
+///   the `Save` arm, path literals included, vanishing with no offender at
+///   all). A depth-0 comma inside a generic parameter list (`fn f<A, B>()`)
+///   is not exempted here (only `()`/`[]` are) — an accepted, and safe,
+///   false "cannot delimit" in that shape, per Ruling R24's own text;
 /// - the scan reaches end of file with a string, a raw string, a block
 ///   comment or a brace still open — genuinely unclosed, or (in practice)
 ///   a shape this function's own tracking does not cover.
 ///
-/// Both cases used to be silently swallowed — the caller now knows to
+/// All of the above used to be silently swallowed — the caller now knows to
 /// report an offender instead of trusting a wrong or absent answer.
-fn skip_gated_item(lines: &[&str], start_line: usize, first_line_text: &str) -> Result<usize, usize> {
+fn skip_gated_item(
+    lines: &[&str],
+    start_line: usize,
+    first_line_text: &str,
+) -> Result<(usize, String), (usize, String)> {
     let mut depth: i32 = 0;
+    let mut paren_depth: usize = 0;
+    let mut bracket_depth: usize = 0;
     let mut found_brace = false;
     let mut mode = Mode::Normal;
     let mut line_no = start_line;
@@ -236,7 +355,7 @@ fn skip_gated_item(lines: &[&str], start_line: usize, first_line_text: &str) -> 
     loop {
         if k >= chars.len() {
             if next_line >= lines.len() {
-                return Err(line_no); // EOF: whatever state we were in never closed.
+                return Err((line_no, String::new())); // EOF: whatever state we were in never closed.
             }
             line_no = next_line;
             chars = lines[next_line].chars().collect();
@@ -298,16 +417,31 @@ fn skip_gated_item(lines: &[&str], start_line: usize, first_line_text: &str) -> 
                     mode = Mode::InString;
                     k += 1;
                 } else if c == '\'' {
-                    // A char literal closes within the next 1-2 characters
-                    // (an ordinary character, or a one-character escape); a
-                    // lifetime (`'a`) never does — treated as a bare token
-                    // when it does not close that soon.
-                    let closes_at = if chars.get(k + 1) == Some(&'\\') { k + 3 } else { k + 2 };
+                    // A char literal closes right after its own body — one
+                    // ordinary character, or one escape sequence of
+                    // whatever length `escape_len` measures; a lifetime or
+                    // label (`'a`, `'outer:`) never closes that soon —
+                    // treated as a bare token when it does not.
+                    let body_len =
+                        if chars.get(k + 1) == Some(&'\\') { escape_len(&chars, k + 1) } else { 1 };
+                    let closes_at = k + 1 + body_len;
                     if chars.get(closes_at) == Some(&'\'') {
                         k = closes_at + 1;
                     } else {
                         k += 1;
                     }
+                } else if c == '(' {
+                    paren_depth += 1;
+                    k += 1;
+                } else if c == ')' {
+                    paren_depth = paren_depth.saturating_sub(1);
+                    k += 1;
+                } else if c == '[' {
+                    bracket_depth += 1;
+                    k += 1;
+                } else if c == ']' {
+                    bracket_depth = bracket_depth.saturating_sub(1);
+                    k += 1;
                 } else if c == '{' {
                     depth += 1;
                     found_brace = true;
@@ -316,17 +450,26 @@ fn skip_gated_item(lines: &[&str], start_line: usize, first_line_text: &str) -> 
                     depth -= 1;
                     k += 1;
                     if found_brace && depth <= 0 {
-                        return Ok(line_no);
+                        return Ok((line_no, chars[k..].iter().collect()));
                     }
                     if depth < 0 {
                         // A closing brace we do not own: the item never had
                         // one of its own to begin with (a gated struct
                         // field or enum variant, ending in `,` rather than
                         // `;`) — this `}` belongs to whatever encloses it.
-                        return Err(line_no);
+                        return Err((line_no, chars[k..].iter().collect()));
                     }
                 } else if c == ';' && !found_brace && depth == 0 {
-                    return Ok(line_no);
+                    k += 1;
+                    return Ok((line_no, chars[k..].iter().collect()));
+                } else if c == ',' && !found_brace && depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                    // A gated match arm or struct-expression field, ending
+                    // in `,` rather than `;` or a `{..}` of its own — the
+                    // same "no delimiter of its own" failure as the
+                    // negative-depth case above, reported before the scan
+                    // ever reaches (and silently adopts) a braced SIBLING.
+                    k += 1;
+                    return Err((line_no, chars[k..].iter().collect()));
                 } else {
                     k += 1;
                 }
@@ -366,6 +509,103 @@ fn resolves_beside_itself(file: &std::path::Path) -> bool {
         _ => {}
     }
     file.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("bin")
+}
+
+/// The `{`/`}` nesting depth reached after scanning every line strictly
+/// before `upto` — string, char, raw-string and comment aware, the same way
+/// `skip_gated_item` is (kept in sync with it by hand; there is no shared
+/// helper, since one runs bounded by an item's own end and the other over a
+/// file's whole, unbounded prefix). Used only to tell whether a
+/// `#[cfg(test)]` attribute at `upto` sits at the file's own top level or
+/// inside an inline `mod m { .. }` (Ruling R24, B4): a gated `mod x;` found
+/// at depth 0 resolves beside the file (or its stem directory), exactly as
+/// `resolves_beside_itself` already decides — but ONE found at depth > 0
+/// resolves, in `rustc`, beside `m` ITSELF (`m/x.rs`), a directory this
+/// guard does not know the name of without separately parsing `m`'s own
+/// declaration. Reported as an offender instead of guessed at wrongly.
+fn brace_depth_before(lines: &[&str], upto: usize) -> i32 {
+    let mut depth: i32 = 0;
+    let mut mode = Mode::Normal;
+    for line in &lines[..upto] {
+        let chars: Vec<char> = line.chars().collect();
+        let mut k = 0usize;
+        while k < chars.len() {
+            let c = chars[k];
+            match &mut mode {
+                Mode::InString => {
+                    if c == '\\' {
+                        k += 2;
+                    } else if c == '"' {
+                        mode = Mode::Normal;
+                        k += 1;
+                    } else {
+                        k += 1;
+                    }
+                }
+                Mode::InRawString { hashes } => {
+                    let h = *hashes;
+                    if c == '"' && closes_raw_string(&chars, k, h) {
+                        k += 1 + h;
+                        mode = Mode::Normal;
+                    } else {
+                        k += 1;
+                    }
+                }
+                Mode::InBlockComment { depth: cdepth } => {
+                    if c == '/' && chars.get(k + 1) == Some(&'*') {
+                        *cdepth += 1;
+                        k += 2;
+                    } else if c == '*' && chars.get(k + 1) == Some(&'/') {
+                        if *cdepth == 0 {
+                            mode = Mode::Normal;
+                        } else {
+                            *cdepth -= 1;
+                        }
+                        k += 2;
+                    } else {
+                        k += 1;
+                    }
+                }
+                Mode::Normal => {
+                    if c == '/' && chars.get(k + 1) == Some(&'/') {
+                        k = chars.len();
+                    } else if c == '/' && chars.get(k + 1) == Some(&'*') {
+                        mode = Mode::InBlockComment { depth: 0 };
+                        k += 2;
+                    } else if c == 'r' {
+                        match raw_string_hashes_at(&chars, k) {
+                            Some(hashes) => {
+                                mode = Mode::InRawString { hashes };
+                                k += 2 + hashes;
+                            }
+                            None => k += 1,
+                        }
+                    } else if c == '"' {
+                        mode = Mode::InString;
+                        k += 1;
+                    } else if c == '\'' {
+                        let body_len =
+                            if chars.get(k + 1) == Some(&'\\') { escape_len(&chars, k + 1) } else { 1 };
+                        let closes_at = k + 1 + body_len;
+                        if chars.get(closes_at) == Some(&'\'') {
+                            k = closes_at + 1;
+                        } else {
+                            k += 1;
+                        }
+                    } else if c == '{' {
+                        depth += 1;
+                        k += 1;
+                    } else if c == '}' {
+                        depth -= 1;
+                        k += 1;
+                    } else {
+                        k += 1;
+                    }
+                }
+            }
+        }
+    }
+    depth
 }
 
 /// Every file, among `files`, that is test-only as a WHOLE: under a `tests/`
@@ -411,6 +651,24 @@ fn test_only_files(files: &[std::path::PathBuf]) -> (std::collections::HashSet<s
                 }
                 GatedItem::Here(_, item_text) => {
                     let Some(name) = declared_test_only_module(item_text) else { continue };
+                    // Ruling R24, B4: a gated `mod name;` found INSIDE an
+                    // inline `mod m { .. }` resolves, in rustc, beside `m`
+                    // itself — a directory this guard cannot name without
+                    // parsing `m`'s own declaration separately. Checked only
+                    // once we know this really is a `mod name;` (not a
+                    // gated fn/struct, which this depth says nothing useful
+                    // about): every plugin's own `#[cfg(test)] mod tests {
+                    // .. }` body is full of gated `#[test] fn`s one level
+                    // deep, and none of those may turn into a false
+                    // offender here.
+                    if brace_depth_before(&lines, idx) > 0 {
+                        offenders.push(format!(
+                            "cannot resolve a gated module declared inside an inline module at {}:{}",
+                            file.display(),
+                            idx + 1
+                        ));
+                        continue;
+                    }
                     let Some(parent) = file.parent() else { continue };
                     let (flat, nested) = if resolves_beside_itself(file) {
                         (parent.join(format!("{name}.rs")), parent.join(name).join("mod.rs"))
@@ -522,7 +780,7 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 mod tests {
     use super::*;
 
-    fn kept_lines(src: &str) -> Vec<&str> {
+    fn kept_lines(src: &str) -> Vec<String> {
         production_lines(src).0.into_iter().map(|(_, l)| l).collect()
     }
 
@@ -634,7 +892,7 @@ mod tests {
         let src = "struct S {\n#[cfg(test)]\nprobe: u8,\n}\nfn prod() {}\n";
         let (kept, undelimited) = production_lines(src);
         assert_eq!(undelimited, vec![1], "the attribute is on line 2 (index 1)");
-        let kept_lines: Vec<&str> = kept.into_iter().map(|(_, l)| l).collect();
+        let kept_lines: Vec<&str> = kept.iter().map(|(_, l)| l.as_str()).collect();
         assert!(kept_lines.contains(&"fn prod() {}"), "{kept_lines:?}");
     }
 
@@ -646,7 +904,7 @@ mod tests {
         let src = "enum E {\n#[cfg(test)]\nProbe,\n}\nfn prod() {}\n";
         let (kept, undelimited) = production_lines(src);
         assert!(!undelimited.is_empty());
-        let kept_lines: Vec<&str> = kept.into_iter().map(|(_, l)| l).collect();
+        let kept_lines: Vec<&str> = kept.iter().map(|(_, l)| l.as_str()).collect();
         assert!(kept_lines.contains(&"fn prod() {}"), "{kept_lines:?}");
     }
 
@@ -659,7 +917,7 @@ mod tests {
         let src = "fn before() {}\n#[cfg(test)]\nfn fixture() -> &'static str { r#\"{\"a\":\"{\"}\"# }\nfn prod() {}\n";
         let (kept, undelimited) = production_lines(src);
         assert!(undelimited.is_empty(), "{undelimited:?}");
-        let kept_lines: Vec<&str> = kept.into_iter().map(|(_, l)| l).collect();
+        let kept_lines: Vec<&str> = kept.iter().map(|(_, l)| l.as_str()).collect();
         assert_eq!(kept_lines, vec!["fn before() {}", "fn prod() {}"]);
     }
 
@@ -671,7 +929,7 @@ mod tests {
         let src = "fn before() {}\n#[cfg(test)]\nfn fixture() -> &'static str {\n    r#\"{\n        \"a\": \"b\"\n    }\"#\n}\nfn prod() {}\n";
         let (kept, undelimited) = production_lines(src);
         assert!(undelimited.is_empty(), "{undelimited:?}");
-        let kept_lines: Vec<&str> = kept.into_iter().map(|(_, l)| l).collect();
+        let kept_lines: Vec<&str> = kept.iter().map(|(_, l)| l.as_str()).collect();
         assert_eq!(kept_lines, vec!["fn before() {}", "fn prod() {}"]);
     }
 
@@ -682,7 +940,7 @@ mod tests {
         let src = "fn before() {}\n#[cfg(test)]\nmod tests {\n    /* { */\n}\nfn prod() {}\n";
         let (kept, undelimited) = production_lines(src);
         assert!(undelimited.is_empty(), "{undelimited:?}");
-        let kept_lines: Vec<&str> = kept.into_iter().map(|(_, l)| l).collect();
+        let kept_lines: Vec<&str> = kept.iter().map(|(_, l)| l.as_str()).collect();
         assert_eq!(kept_lines, vec!["fn before() {}", "fn prod() {}"]);
     }
 
@@ -693,7 +951,7 @@ mod tests {
         let src = "fn before() {}\n#[cfg(test)]\nmod tests {\n    /* outer /* inner */ still-comment */\n}\nfn prod() {}\n";
         let (kept, undelimited) = production_lines(src);
         assert!(undelimited.is_empty(), "{undelimited:?}");
-        let kept_lines: Vec<&str> = kept.into_iter().map(|(_, l)| l).collect();
+        let kept_lines: Vec<&str> = kept.iter().map(|(_, l)| l.as_str()).collect();
         assert_eq!(kept_lines, vec!["fn before() {}", "fn prod() {}"]);
     }
 
@@ -706,7 +964,7 @@ mod tests {
         let src = "fn before() {}\n#[cfg(test)]\nfn never_closes() {\n    let x = 1;\n";
         let (kept, undelimited) = production_lines(src);
         assert_eq!(undelimited, vec![1]);
-        let kept_lines: Vec<&str> = kept.into_iter().map(|(_, l)| l).collect();
+        let kept_lines: Vec<&str> = kept.iter().map(|(_, l)| l.as_str()).collect();
         assert_eq!(kept_lines, vec!["fn before() {}"]);
     }
 
@@ -785,6 +1043,133 @@ mod tests {
             "#[cfg(test)]\n#[path = \"elsewhere.rs\"]\nmod util;\n",
         )
         .unwrap();
+        let files = vec![state_rs];
+        let (excluded, offenders) = test_only_files(&files);
+        assert!(excluded.is_empty(), "nothing should be guessed at: {excluded:?}");
+        assert_eq!(offenders.len(), 1, "{offenders:?}");
+        assert!(offenders[0].contains("#[path]"), "{offenders:?}");
+    }
+
+    // --- B1: production code sharing the gated item's own end-of-line -----
+
+    /// The finding's own first example: a one-line gated `mod`, immediately
+    /// followed — on that SAME physical line — by real production code
+    /// carrying a path. Round 2 dropped it entirely (kept = `[]`); it must
+    /// now be scanned.
+    #[test]
+    fn production_code_sharing_a_one_line_gated_mods_own_end_of_line_is_kept() {
+        let src = "#[cfg(test)] mod placeholder; fn main() { let p = \"/etc/ritornello/x.toml\"; }\n";
+        let kept_lines = kept_lines(src);
+        assert!(
+            kept_lines.iter().any(|l| l.contains("/etc/ritornello/x.toml")),
+            "{kept_lines:?}"
+        );
+    }
+
+    /// The finding's second example: a gated `fn`'s own closing `}`,
+    /// immediately followed by more production code on that SAME line.
+    #[test]
+    fn production_code_sharing_a_gated_fns_own_closing_brace_line_is_kept() {
+        let src = "#[cfg(test)]\nfn t() {\n} const P: &str = \"/etc/ritornello/x.toml\";\n";
+        let kept_lines = kept_lines(src);
+        assert!(
+            kept_lines.iter().any(|l| l.contains("/etc/ritornello/x.toml")),
+            "{kept_lines:?}"
+        );
+    }
+
+    // --- B2: a gated match arm or struct-expression field ------------------
+
+    /// The finding's match-arm fixture: a gated arm ending in `,`, with no
+    /// braces of its own, followed by a braced sibling arm carrying a path.
+    /// Round 2 adopted the sibling's own braces as if they belonged to the
+    /// gated arm, silently swallowing it whole, path included. Must now be
+    /// an offender, and the sibling arm must still be kept.
+    #[test]
+    fn a_gated_match_arm_does_not_swallow_its_braced_sibling() {
+        let src = "match x {\n#[cfg(test)]\nCmd::Probe => probe(),\nCmd::Save => { std::fs::write(\"/etc/ritornello/x.toml\", b\"\")?; }\n}\n";
+        let (kept, undelimited) = production_lines(src);
+        assert!(!undelimited.is_empty(), "must be reported, not silently adopted");
+        let kept_lines: Vec<&str> = kept.iter().map(|(_, l)| l.as_str()).collect();
+        assert!(
+            kept_lines.iter().any(|l| l.contains("/etc/ritornello/x.toml")),
+            "the Save arm must not vanish with the Probe arm: {kept_lines:?}"
+        );
+    }
+
+    /// The finding's struct-expression fixture: same mechanism, a gated
+    /// field ending in `,` followed by an ordinary field whose VALUE is
+    /// itself braced.
+    #[test]
+    fn a_gated_struct_expression_field_does_not_swallow_its_braced_sibling() {
+        let src = "let s = S {\n#[cfg(test)]\nprobe: 0,\npath: { \"/etc/ritornello/x.toml\".into() },\n};\n";
+        let (kept, undelimited) = production_lines(src);
+        assert!(!undelimited.is_empty(), "must be reported, not silently adopted");
+        let kept_lines: Vec<&str> = kept.iter().map(|(_, l)| l.as_str()).collect();
+        assert!(
+            kept_lines.iter().any(|l| l.contains("/etc/ritornello/x.toml")),
+            "the path field must not vanish with the gated probe field: {kept_lines:?}"
+        );
+    }
+
+    // --- B3: a char literal with a multi-character escape ------------------
+
+    /// `'\x41'` is FOUR characters wide, not one — round 2's heuristic only
+    /// ever measured one-character escapes, so it left `'\x41'` looking
+    /// unclosed, which then paired with the unrelated `'{'` right after it
+    /// and miscounted a real brace. Inside an `impl`, that silently dropped
+    /// every method declared after the gated one.
+    #[test]
+    fn a_char_literal_with_a_long_escape_does_not_confuse_the_brace_count() {
+        let src = "impl S {\n#[cfg(test)]\nfn t() { let a = ['\\x41','{']; }\nfn prod() { \"/etc/ritornello/x.toml\" }\n}\n";
+        let (kept, undelimited) = production_lines(src);
+        assert!(undelimited.is_empty(), "{undelimited:?}");
+        let kept_lines: Vec<&str> = kept.iter().map(|(_, l)| l.as_str()).collect();
+        assert!(
+            kept_lines.iter().any(|l| l.contains("/etc/ritornello/x.toml")),
+            "fn prod must survive the gated fn before it: {kept_lines:?}"
+        );
+    }
+
+    // --- B4: a gated module inside an inline module, and a one-line #[path] -
+
+    /// A `#[cfg(test)] mod fixtures;` declared INSIDE an inline `mod tests {
+    /// .. }` resolves, in rustc, to `tests/fixtures.rs` — never beside the
+    /// declaring file itself, which is where round 2 would have looked
+    /// (finding nothing, or a same-named unrelated file). Reported instead.
+    #[test]
+    fn a_gated_module_declared_inside_an_inline_module_is_reported_rather_than_resolved_beside_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_rs = dir.path().join("main.rs");
+        std::fs::write(
+            &main_rs,
+            "mod tests {\n#[cfg(test)]\nmod fixtures;\n}\n",
+        )
+        .unwrap();
+        // A production file that must stay visible to the guard: proves the
+        // fix does not merely happen to find nothing beside `main.rs`.
+        std::fs::write(dir.path().join("fixtures.rs"), "pub fn real_fixtures() {}\n").unwrap();
+        let files = vec![main_rs, dir.path().join("fixtures.rs")];
+        let (excluded, offenders) = test_only_files(&files);
+        assert!(
+            !excluded.contains(&dir.path().join("fixtures.rs")),
+            "a production fixtures.rs beside main.rs must not be excluded for an inline module's own submodule"
+        );
+        assert_eq!(offenders.len(), 1, "{offenders:?}");
+        assert!(offenders[0].contains("inline module"), "{offenders:?}");
+    }
+
+    /// A one-line `#[cfg(test)] #[path = ".."] mod m;`: round 2's same-line
+    /// handling treated the WHOLE stacked-attribute-plus-item text as "the
+    /// item" itself, which matches no pattern `declared_test_only_module`
+    /// knows — silently ignored rather than resolved OR reported. The
+    /// `#[path]` attribute must now be found and reported, exactly as it
+    /// already is when written on its own line.
+    #[test]
+    fn a_one_line_stacked_path_attribute_is_reported_the_same_as_a_multi_line_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_rs = dir.path().join("state.rs");
+        std::fs::write(&state_rs, "#[cfg(test)] #[path = \"elsewhere.rs\"] mod util;\n").unwrap();
         let files = vec![state_rs];
         let (excluded, offenders) = test_only_files(&files);
         assert!(excluded.is_empty(), "nothing should be guessed at: {excluded:?}");
