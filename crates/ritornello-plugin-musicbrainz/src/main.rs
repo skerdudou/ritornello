@@ -1217,13 +1217,17 @@ async fn handle_icy(
     }
 }
 
+/// Where this plugin keeps its state file, relative to its data directory.
+fn state_path_in(data: &std::path::Path) -> PathBuf {
+    data.join("state.json")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    let state_path = PathBuf::from(
-        std::env::var("RITORNELLO_MUSICBRAINZ_STATE")
-            .unwrap_or_else(|_| "/var/lib/ritornello/plugin-musicbrainz.json".to_string()),
-    );
+    // Everything this plugin writes lives in its own data directory — see
+    // `ritornello_plugin_sdk::DATA_DIR_ENV` for why there is exactly one.
+    let state_path = state_path_in(&ritornello_plugin_sdk::data_dir());
     let store = Arc::new(RwLock::new(patterns::Store::load(&state_path)));
 
     ritornello_plugin_sdk::declare_runtime!()?
@@ -1242,6 +1246,14 @@ mod tests {
     #[test]
     fn embedded_musicbrainz_en_is_not_empty() {
         assert!(!ritornello_i18n::try_parse(MUSICBRAINZ_EN).unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_file_lives_in_the_plugin_s_own_directory() {
+        let d = std::path::Path::new("/x/plugins/musicbrainz");
+        let state = state_path_in(d);
+        assert!(state.starts_with(d));
+        assert_eq!(state.file_name().unwrap(), "state.json");
     }
 
     const FIXTURE: &str = include_str!("../tests/fixtures/mb_discid.json");

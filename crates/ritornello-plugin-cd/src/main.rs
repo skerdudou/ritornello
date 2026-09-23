@@ -40,6 +40,11 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Where this plugin keeps its state file, relative to its data directory.
+fn state_path_in(data: &std::path::Path) -> PathBuf {
+    data.join("state.json")
+}
+
 struct CdSource {
     cd_dev: String,
     present: bool,
@@ -1211,8 +1216,9 @@ async fn main() -> Result<()> {
 
     let (toc_tx, toc_rx) = mpsc::channel::<ReadToc>(4);
 
-    let state_path =
-        PathBuf::from(env_or("RITORNELLO_CD_STATE", "/var/lib/ritornello/plugin-cd.json"));
+    // Everything this plugin writes lives in its own data directory — see
+    // `ritornello_plugin_sdk::DATA_DIR_ENV` for why there is exactly one.
+    let state_path = state_path_in(&ritornello_plugin_sdk::data_dir());
     let persisted = state::load(&state_path);
     // Shared, not copied into each half: the page writes it and the Source
     // half reads it at every arrival, so a change applies to the next press.
@@ -1253,6 +1259,14 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use ritornello_proto::IdentityUpdate;
+
+    #[test]
+    fn every_file_lives_in_the_plugin_s_own_directory() {
+        let d = std::path::Path::new("/x/plugins/cd");
+        let state = state_path_in(d);
+        assert!(state.starts_with(d));
+        assert_eq!(state.file_name().unwrap(), "state.json");
+    }
 
     fn source_with_channels() -> (CdSource, mpsc::Sender<bool>, mpsc::Sender<ReadToc>) {
         let (presence_tx, presence_rx) = mpsc::channel(8);
