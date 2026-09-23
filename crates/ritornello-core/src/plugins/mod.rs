@@ -1,9 +1,4 @@
-// No caller yet: `append_block`, `remove_entry` and `move_entry` get their
-// first caller in a later task. Until then only this module's own tests
-// reach its public items, and a binary crate (unlike a library) does not
-// treat `pub` as "reachable from outside" on its own.
-#[allow(dead_code)]
-pub mod edit;
+pub use ritornello_manifest as edit;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;

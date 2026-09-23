@@ -490,6 +490,40 @@ pub fn move_entry(text: &str, name: &str, to: i32) -> Result<String, EditError> 
     Ok(doc.to_string())
 }
 
+/// Inserts `fragment` (one `[[plugin]]` block declaring `expected`) at the
+/// position `reference` gives it among the entries already present: right
+/// after the nearest entry that precedes it in `reference`; failing that,
+/// right before the nearest that follows it; failing that, at the end.
+///
+/// Existing entries never move: an order the operator chose by hand is kept,
+/// and only the new block finds its place relative to it.
+pub fn insert_block_in_reference_order(
+    text: &str,
+    fragment: &str,
+    expected: &str,
+    reference: &[&str],
+) -> Result<String, EditError> {
+    let appended = append_block(text, fragment, expected)?;
+    let present = names_in_order(&appended)?;
+    let Some(at) = reference.iter().position(|n| *n == expected) else {
+        return Ok(appended);
+    };
+    let index_of = |name: &str| present.iter().position(|p| p == name);
+    let before = reference[..at].iter().rev().find_map(|n| index_of(n));
+    let target = match before {
+        Some(i) => i + 1,
+        None => match reference[at + 1..].iter().find_map(|n| index_of(n)) {
+            Some(i) => i,
+            None => return Ok(appended),
+        },
+    };
+    let current = index_of(expected).expect("append_block just declared it");
+    if current == target {
+        return Ok(appended);
+    }
+    move_entry(&appended, expected, target as i32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,7 +807,7 @@ exec = \"/x\"
     /// changed line ending is not the defect this test is watching for.
     #[test]
     fn the_real_example_file_survives_a_move_down_then_back_up() {
-        let doc = include_str!("../../../../deploy/plugins.example.toml").replace("\r\n", "\n");
+        let doc = include_str!("../../../deploy/plugins.example.toml").replace("\r\n", "\n");
         let down = move_entry(&doc, "radio", 1).unwrap();
         let back = move_entry(&down, "radio", 0).unwrap();
         assert_eq!(back, doc, "the round trip did not restore deploy/plugins.example.toml");
@@ -785,7 +819,7 @@ exec = \"/x\"
     /// whoever `cd` displaces.
     #[test]
     fn the_real_example_file_keeps_comments_with_their_plugin_after_remove_then_move() {
-        let doc = include_str!("../../../../deploy/plugins.example.toml");
+        let doc = include_str!("../../../deploy/plugins.example.toml");
         let after_remove = remove_entry(doc, "radio").unwrap();
         let out = move_entry(&after_remove, "cd", 1).unwrap();
         let comment_at = out.find("Its page carries one setting").unwrap();
@@ -1344,5 +1378,59 @@ exec = \"/y\"
         // drifts would show up here and nowhere else.
         let back = move_entry(&down, "radio", 0).unwrap();
         assert_eq!(back, text);
+    }
+
+    const REF: &[&str] =
+        &["radio", "cd", "files", "ouifm-metas", "radiofrance-metas", "nrj-metas", "musicbrainz"];
+
+    fn doc(names: &[&str]) -> String {
+        names
+            .iter()
+            .map(|n| format!("[[plugin]]\nname = \"{n}\"\nexec = \"/x/{n}\"\n"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn frag(n: &str) -> String {
+        format!("[[plugin]]\nname = \"{n}\"\nexec = \"/x/{n}\"\n")
+    }
+
+    /// Declaration order arbitrates metadata plugins: a plugin added later must
+    /// land where the reference list puts it, not at the end, or it would get
+    /// the lowest priority by accident of the day it was installed.
+    #[test]
+    fn a_block_lands_after_its_nearest_predecessor_in_the_reference_order() {
+        let text = doc(&["radio", "ouifm-metas", "musicbrainz"]);
+        let out = insert_block_in_reference_order(&text, &frag("nrj-metas"), "nrj-metas", REF).unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), ["radio", "ouifm-metas", "nrj-metas", "musicbrainz"]);
+    }
+
+    #[test]
+    fn a_block_with_no_predecessor_present_goes_before_its_first_successor() {
+        let text = doc(&["files", "musicbrainz"]);
+        let out = insert_block_in_reference_order(&text, &frag("radio"), "radio", REF).unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), ["radio", "files", "musicbrainz"]);
+    }
+
+    /// A hand-reordered file is the operator's decision: existing entries do
+    /// not move, only the new one finds its place among them.
+    #[test]
+    fn existing_entries_keep_the_order_the_operator_gave_them() {
+        let text = doc(&["musicbrainz", "radio"]);
+        let out = insert_block_in_reference_order(&text, &frag("cd"), "cd", REF).unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), ["musicbrainz", "radio", "cd"]);
+    }
+
+    #[test]
+    fn a_name_outside_the_reference_is_appended_at_the_end() {
+        let text = doc(&["radio"]);
+        let out = insert_block_in_reference_order(&text, &frag("theirs"), "theirs", REF).unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), ["radio", "theirs"]);
+    }
+
+    #[test]
+    fn into_an_empty_file() {
+        let out = insert_block_in_reference_order("", &frag("radio"), "radio", REF).unwrap();
+        assert_eq!(names_in_order(&out).unwrap(), ["radio"]);
     }
 }

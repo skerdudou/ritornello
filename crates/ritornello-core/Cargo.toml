@@ -30,6 +30,8 @@ async-trait = "0.1"
 ritornello-proto = { path = "../ritornello-proto" }
 ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
 ritornello-i18n = { path = "../ritornello-i18n" }
+# plugins.toml editing, shared with the installer built in a later task.
+ritornello-manifest = { path = "../ritornello-manifest" }
 # The marker and the rollback report the privileged side writes, and the
 # shared grammar of the update request. The core links the library and never
 # the binary.

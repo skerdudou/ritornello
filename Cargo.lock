@@ -1186,6 +1186,7 @@ dependencies = [
  "lofty",
  "reqwest",
  "ritornello-i18n",
+ "ritornello-manifest",
  "ritornello-plugin-sdk",
  "ritornello-proto",
  "ritornello-updater",
@@ -1213,6 +1214,13 @@ dependencies = [
  "tempfile",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "ritornello-manifest"
+version = "0.2.0-beta.2"
+dependencies = [
+ "toml_edit",
 ]
 
 [[package]]

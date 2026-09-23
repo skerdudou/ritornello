@@ -4,6 +4,7 @@ members = [
     "crates/ritornello-proto",
     "crates/ritornello-i18n",
     "crates/ritornello-plugin-sdk",
+    "crates/ritornello-manifest",
     "crates/ritornello-core",
     "crates/ritornello-updater",
     "crates/ritornello-plugin-radio",
