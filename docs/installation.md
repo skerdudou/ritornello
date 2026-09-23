@@ -913,7 +913,7 @@ plugin's own directory rather than the old fixed locations, and the core
 actually creating `/var/lib/ritornello/plugins/<name>` before a plugin's
 first launch in service — none of it has been watched happening on a
 Raspberry Pi, on a fresh install or an upgrade from an older release. See
-[Moving data by hand](#moving-data-by-hand) below for what an operator
+[Moving data by hand](#moving-data-by-hand) above for what an operator
 upgrading an already-deployed device would need to do themselves: there is
 no automatic migration, and none is planned.
 

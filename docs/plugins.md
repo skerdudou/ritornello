@@ -113,14 +113,14 @@ installs, read by `generic-input` but never written by it. The `files`
 plugin's own data directory is also the root helper's one fixed, documented
 location (`/var/lib/ritornello/plugins/files`, `FILES_DATA_DIR` in
 `media-mount.rs`), spelled out rather than derived at runtime because the
-helper consumes no environment and no archive at all — it reads
-`media-roots.toml` and `credentials/` from underneath that one fixed path,
-`/etc/passwd` (the service user's `uid`/`gid`) and `/proc/mounts` (what is
-already mounted), and forms the one other path that is its to form,
+helper consumes no archive, and no environment except `RITORNELLO_USER`: it
+reads `media-roots.toml` under that one fixed path, `/etc/passwd` (to turn
+`RITORNELLO_USER` into the `uid`/`gid` the mounts get) and `/proc/mounts`
+(what is already mounted), hands `credentials/<name>.cred` to `mount.cifs`
+as an option — it is `mount.cifs` itself that reads that file's content,
+never the helper — and forms the one other path that is its to form,
 `/mnt/ritornello/<name>` (never read from `media-roots.toml`, see [The
-privilege boundary](#the-privilege-boundary) below) — unlike the updater,
-it is not limited to two path shapes overall, only to this one, fixed
-starting point.
+privilege boundary](#the-privilege-boundary) below).
 
 Each plugin's own files, below, in its section.
 
