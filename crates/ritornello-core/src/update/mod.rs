@@ -753,13 +753,6 @@ const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// for takes seconds.
 const SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Where a plugin's own configuration lives, under the worker's `root`.
-///
-/// Not one of `archive::ETC_PREFIXES`: those two subdirectories belong to the
-/// release and are overwritten on every update, whereas what lands directly in
-/// this directory belongs to the operator and is written once.
-const ETC_DIR: &str = "etc/ritornello";
-
 /// The `[[plugin]]` block this install must write, if any.
 ///
 /// Three answers, and the middle one is the whole point: a component the file
@@ -839,9 +832,9 @@ fn placement_target(exec: &str, plugins_dir: &Path, file: &str) -> Result<(), Re
 /// `None` for a name that is not a bare file name, and this is where that is
 /// decided rather than where the bytes are written: `archive::read` has already
 /// refused `..` and absolute paths, so what is left to refuse is a nested entry
-/// — `/etc/ritornello/<dir>/<file>` is a shape nothing packs and the core has
-/// no reason to create — and a dotted one, which would let an archive name the
-/// very temporary `write_atomic` writes beside its target.
+/// — `<plugin's data directory>/<dir>/<file>` is a shape nothing packs and the
+/// core has no reason to create — and a dotted one, which would let an archive
+/// name the very temporary `write_atomic` writes beside its target.
 fn initial_config_target(entry: &str) -> Option<String> {
     if entry.is_empty() || entry.contains('/') || entry.starts_with('.') {
         return None;
@@ -1101,6 +1094,16 @@ pub struct Worker {
     /// privileged crate takes a `prefix`: it is what keeps the paths this code
     /// forms inspectable rather than compiled in.
     pub root: PathBuf,
+    /// Where every plugin's own data directory lives -- the same root
+    /// `main` launches every plugin with (`RITORNELLO_PLUGIN_DATA_DIR` is
+    /// this joined with the plugin's name, via `plugins::data_dir_for`), and
+    /// it must be exactly that root: `write_initial_config` forms
+    /// `<plugin_data_root>/<name>` to place a fresh install's initial
+    /// configuration, and if the two ever disagreed the file would land
+    /// where the plugin it is meant for never looks. Not to be confused with
+    /// `packs_root`, a different root for a different kind of installed
+    /// thing.
+    pub plugin_data_root: PathBuf,
     /// This binary's own version, for the core's row.
     pub core_version: &'static str,
     /// How the core leaves once its binary has been replaced. The same hook
@@ -1948,7 +1951,7 @@ impl Worker {
         // leave it alone anyway — but not asking the question at all is what
         // makes that guarantee independent of a `exists()` call.
         if fresh {
-            self.write_initial_config(&contents.initial_config)?;
+            self.write_initial_config(name, &contents.initial_config)?;
         }
 
         let request = Request { format: REQUEST_FORMAT, actions: vec![action] };
@@ -2082,7 +2085,18 @@ impl Worker {
         Ok(())
     }
 
-    /// The plugin's own configuration, written **only where there is none**.
+    /// The plugin's own configuration, written **only where there is none**,
+    /// into the plugin's own data directory — never under `self.root`, and
+    /// never one of `archive::ETC_PREFIXES`, whose two subdirectories belong
+    /// to the release and are overwritten on every update. This is where the
+    /// operator's own files live, written once.
+    ///
+    /// `plugins::data_dir_for(&self.plugin_data_root, name)` forms the
+    /// directory, the same one `main` hands the plugin as
+    /// `RITORNELLO_PLUGIN_DATA_DIR`: writing anywhere else would place a
+    /// station list or a set of key bindings where the plugin it is meant
+    /// for never looks. A `name` that direction refuses is refused here too,
+    /// before any path is formed or any byte written.
     ///
     /// Unlike `write_etc_files`, which replaces unconditionally: what lands
     /// here is a station list or a set of key bindings, and those two files
@@ -2093,10 +2107,14 @@ impl Worker {
     /// A failure is a `Refusal` and not a warning: an operator who installs
     /// the radio and gets no stations has an install that did not do what it
     /// said, and saying so beats leaving them to notice.
-    fn write_initial_config(&self, files: &[(String, Vec<u8>)]) -> Result<(), Refusal> {
-        let dir = self.root.join(ETC_DIR);
+    fn write_initial_config(&self, name: &str, files: &[(String, Vec<u8>)]) -> Result<(), Refusal> {
+        let Some(dir) = crate::plugins::data_dir_for(&self.plugin_data_root, name) else {
+            return Err(Refusal::Prepare(format!(
+                "{name} is not a valid plugin name; refusing to write its initial configuration"
+            )));
+        };
         for (entry, bytes) in files {
-            let Some(name) = initial_config_target(entry) else {
+            let Some(file_name) = initial_config_target(entry) else {
                 // Listed on the page as something the archive carries, and
                 // written nowhere — the rule this whole module follows.
                 tracing::warn!(
@@ -2104,7 +2122,7 @@ impl Worker {
                 );
                 continue;
             };
-            let target = dir.join(&name);
+            let target = dir.join(&file_name);
             if target.exists() {
                 tracing::info!("update: {} already exists, keeping it", target.display());
                 continue;
@@ -3607,6 +3625,7 @@ mod tests {
             settings: Arc::new(RwLock::new(crate::state::Settings::default())),
             staging: root.join("staging"),
             root: root.to_path_buf(),
+            plugin_data_root: root.join("plugins"),
             core_version: "0.2.0",
             restart: Arc::new(|| {}),
             // An empty registry: most tests in this module never install a
@@ -5231,31 +5250,89 @@ mod tests {
 
     /// **What is already there is never replaced, and what is missing is
     /// written.** Both halves in one test because they are one rule, and each
-    /// alone would pass with the other's branch deleted.
+    /// alone would pass with the other's branch deleted. And it lands under
+    /// the plugin's own data directory, not under `etc/ritornello` — the
+    /// directory a release used to fill before this task moved it.
     #[test]
     fn a_shipped_configuration_only_fills_a_gap() {
         let dir = tempfile::tempdir().unwrap();
         let worker = worker_at(dir.path(), one_line(PluginStatus::startup("radio")));
-        let etc = dir.path().join(ETC_DIR);
-        std::fs::create_dir_all(&etc).unwrap();
-        std::fs::write(etc.join("stations.toml"), b"# what the operator built\n").unwrap();
+        let data_dir = worker.plugin_data_root.join("radio");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("stations.toml"), b"# what the operator built\n").unwrap();
 
         worker
-            .write_initial_config(&[
-                ("stations.example.toml".to_string(), b"# the shipped defaults\n".to_vec()),
-                ("input-bindings.example.toml".to_string(), b"# the shipped bindings\n".to_vec()),
-            ])
+            .write_initial_config(
+                "radio",
+                &[
+                    ("stations.example.toml".to_string(), b"# the shipped defaults\n".to_vec()),
+                    ("input-bindings.example.toml".to_string(), b"# the shipped bindings\n".to_vec()),
+                ],
+            )
             .unwrap();
 
         assert_eq!(
-            std::fs::read(etc.join("stations.toml")).unwrap(),
+            std::fs::read(data_dir.join("stations.toml")).unwrap(),
             b"# what the operator built\n",
             "a station list built from the browser must survive an installation"
         );
         assert_eq!(
-            std::fs::read(etc.join("input-bindings.toml")).unwrap(),
+            std::fs::read(data_dir.join("input-bindings.toml")).unwrap(),
             b"# the shipped bindings\n",
             "there was nothing there: the plugin must not start on an empty file"
+        );
+        assert!(
+            !dir.path().join("etc/ritornello").exists(),
+            "the initial configuration must land in the plugin's own data directory, never under etc/ritornello"
+        );
+    }
+
+    /// A name `plugins::data_dir_for` refuses never gets as far as a path:
+    /// the refusal comes before any directory is created and before any byte
+    /// is written, anywhere.
+    #[test]
+    fn an_invalid_plugin_name_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), one_line(PluginStatus::startup("radio")));
+
+        let result = worker.write_initial_config(
+            "../x",
+            &[("stations.example.toml".to_string(), b"# the shipped defaults\n".to_vec())],
+        );
+
+        assert!(matches!(result, Err(Refusal::Prepare(_))), "{result:?}");
+        assert!(
+            !worker.plugin_data_root.exists(),
+            "an invalid name must not create the plugin data root at all"
+        );
+        assert!(!dir.path().join("etc/ritornello").exists());
+    }
+
+    /// Driven through the real `install_one`, not called directly: this is
+    /// what proves the component's own name actually reaches
+    /// `write_initial_config` from the one caller that has it, rather than a
+    /// name typed once into both the call and the assertion.
+    #[tokio::test]
+    async fn a_fresh_install_writes_the_initial_configuration_under_its_own_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), one_line(PluginStatus::startup("radio")));
+        let _privileged = Privileged::answers(Ok(()));
+
+        let archive = targz(&[
+            ("usr/local/lib/ritornello/plugins/ritornello-plugin-newsource", b"ELF"),
+            ("initial-config/stations.example.toml", b"# the shipped defaults\n"),
+            ("plugins.toml.fragment", b"[[plugin]]\nname = \"newsource\"\nexec = \"/anything\"\n"),
+        ]);
+        let published = served("newsource", &archive).await;
+        let client = client().unwrap();
+
+        worker.install_one(&client, "newsource", &published, false).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(worker.plugin_data_root.join("newsource").join("stations.toml")).unwrap(),
+            b"# the shipped defaults\n",
+            "a fresh install must place the archive's initial configuration under the \
+             installing component's own name, not any other plugin's"
         );
     }
 

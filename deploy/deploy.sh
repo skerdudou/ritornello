@@ -134,31 +134,48 @@ ssh "${SSHOPTS[@]}" "$PI" 'sudo cp -r /tmp/input-presets/. /etc/ritornello/input
 # target file is absent: a first installation works without any manual
 # copy, and an existing configuration (stations added from the browser,
 # learned bindings) is never overwritten. These files hold what the user
-# produced, so nothing here has any business completing them.
+# produced, so nothing here has any business completing them. Each one lands
+# in its own plugin's data directory (/var/lib/ritornello/plugins/<name>),
+# never under /etc/ritornello — the core moved to the same directory for the
+# same file when it installs a plugin over the network.
 #
 # The files that double as an initial configuration are read from the
 # packaging manifest instead of being repeated here: the release installer
 # honours the same declaration when it installs a plugin the device does not
-# have yet, and two lists drift.
-mapfile -t INITIAL < <(python3 - <<'PY'
+# have yet, and two lists drift. The plugin name travels alongside each path
+# so the remote side knows whose directory a file belongs to.
+NAMES=()
+FILES=()
+while IFS=' ' read -r n p; do
+  NAMES+=("$n")
+  FILES+=("$p")
+done < <(python3 - <<'PY'
 import tomllib, pathlib
 m = tomllib.loads(pathlib.Path("deploy/packaging.toml").read_text())
-for section in m.get("plugins", {}).values():
+for name, section in m.get("plugins", {}).items():
     for p in section.get("initial_config", []):
-        print(p)
+        print(f"{name} {p}")
 PY
 )
-if [ "${#INITIAL[@]}" -eq 0 ]; then
+if [ "${#FILES[@]}" -eq 0 ]; then
   echo "deploy.sh: no initial_config declared in deploy/packaging.toml" >&2
   exit 1
 fi
-scp "${SSHOPTS[@]}" "${INITIAL[@]}" "$PI:/tmp/"
+scp "${SSHOPTS[@]}" "${FILES[@]}" "$PI:/tmp/"
 # `<name>.example.toml` becomes `<name>.toml`, the same rule the core applies
-# to the `initial-config/` entries of an archive. The names are expanded here,
-# by the local shell; everything escaped below is for the remote one.
+# to the `initial-config/` entries of an archive. The pairs are built here, by
+# the local shell; everything escaped below is for the remote one.
+PAIRS=()
+for i in "${!FILES[@]}"; do
+  PAIRS+=("${NAMES[$i]}:$(basename "${FILES[$i]}")")
+done
 ssh "${SSHOPTS[@]}" "$PI" "set -e
-  for f in ${INITIAL[*]##*/}; do
-    t=/etc/ritornello/\${f%.example.toml}.toml
+  for pair in ${PAIRS[*]}; do
+    nom=\${pair%%:*}
+    f=\${pair#*:}
+    d=/var/lib/ritornello/plugins/\$nom
+    t=\$d/\${f%.example.toml}.toml
+    sudo mkdir -p \"\$d\"
     [ -e \"\$t\" ] || sudo cp \"/tmp/\$f\" \"\$t\"
     rm -f \"/tmp/\$f\"
   done"
@@ -258,14 +275,12 @@ ssh "${SSHOPTS[@]}" "$PI" 'sudo install -m 0755 -o root -g root \
   && rm -f /tmp/ritornello-update /tmp/ritornello-update.service \
     /tmp/ritornello-rollback.service /tmp/52-ritornello-update.rules'
 
-# Mount points and credentials. The mount point of a share is imposed
-# (/mnt/ritornello/<name>), never read from the configuration. The credentials
-# directory belongs to the service — the page writes a <name>.cred file there
-# when a share is declared — and is readable by nobody else; the root binary,
-# for its part, reads everything.
-ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /mnt/ritornello /etc/ritornello/media-credentials \
-  && sudo chown ritornello: /etc/ritornello/media-credentials \
-  && sudo chmod 0700 /etc/ritornello/media-credentials'
+# The mount point of a share is imposed (/mnt/ritornello/<name>), never read
+# from the configuration. The credentials directory is no longer provisioned
+# here: it lives under the files plugin's own data directory now, and the
+# plugin creates it itself (see `ensure_credentials_dir`), readable by nobody
+# else.
+ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /mnt/ritornello'
 
 # Enabled, not started: the unit is a `oneshot` that reconciles the declared
 # shares, and what it is enabled for is the boot of the machine. The plugin

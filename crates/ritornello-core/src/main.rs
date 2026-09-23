@@ -2268,6 +2268,11 @@ async fn main() -> Result<()> {
         settings: settings_current.clone(),
         staging: staging_dir,
         root: PathBuf::from("/"),
+        // Cloned, not read a second time from `RITORNELLO_PLUGIN_DATA_ROOT`:
+        // `plugin_data_root` above is already the root the startup loop
+        // launches every plugin with, and `Worker.plugin_data_root`'s doc
+        // says why the two must never drift apart.
+        plugin_data_root: plugin_data_root.clone(),
         core_version: env!("CARGO_PKG_VERSION"),
         restart: restart_hook.clone(),
         registry: registry.clone(),
