@@ -362,11 +362,12 @@ On **Raspberry Pi OS Lite**:
     amixer set PCM 100%
 
 No configuration to copy: on first deployment, `deploy.sh` provisions
-`/etc/ritornello` with the defaults (all bundled plugins, two starter
-stations, MCE remote bindings — the `deploy/*.example.toml` files), then
-everything is adjusted from the browser or by editing those files. An
-existing configuration is never overwritten (see
-[Deploying](#deploying)).
+`/etc/ritornello/plugins.toml` and every bundled plugin's own data
+directory under `/var/lib/ritornello/plugins/` with the defaults (all
+bundled plugins declared, two starter stations, MCE remote bindings — the
+`deploy/*.example.toml` files), then everything is adjusted from the
+browser or by editing those files. An existing configuration is never
+overwritten (see [Deploying](#deploying)).
 
 Wifi: `sudo raspi-config` (System Options > Wireless LAN).
 
@@ -437,6 +438,34 @@ defaults **only when the file is absent** — a first installation needs no
 manual copy, and a file that exists is **never overwritten**, whatever it
 contains. Those two hold what you produced (stations added from the
 browser, learned bindings), so nothing may complete them.
+
+### Moving data by hand
+
+**There is no automatic migration, and none is planned.** A device
+deployed before every plugin moved to its own data directory keeps its
+files exactly where they were — `deploy.sh` and the plugins never delete
+anything on their own — but nothing reads them from there any more, and a
+plugin restarted after an upgrade starts as if it had never run: an empty
+station list, no learned bindings, no saved playlist. Move each file by
+hand, with the service stopped, before restarting it:
+
+| Old location | New location |
+|---|---|
+| `/etc/ritornello/stations.toml` | `/var/lib/ritornello/plugins/radio/stations.toml` |
+| `/etc/ritornello/input-bindings.toml` | `/var/lib/ritornello/plugins/generic-input/input-bindings.toml` |
+| `/etc/ritornello/mpd.toml` | `/var/lib/ritornello/plugins/mpd/mpd.toml` |
+| `/etc/ritornello/ouifm-metas.toml`, `radiofrance-metas.toml`, `nrj-metas.toml` | the same file name, under `/var/lib/ritornello/plugins/<plugin-name>/` |
+| `/etc/ritornello/media-roots.toml` | `/var/lib/ritornello/plugins/files/media-roots.toml` |
+| `/etc/ritornello/media-credentials/` | `/var/lib/ritornello/plugins/files/credentials/` |
+| `/var/lib/ritornello/plugin-radio.json`, `plugin-cd.json`, `plugin-musicbrainz.json` | `/var/lib/ritornello/plugins/<plugin-name>/state.json` |
+| `/var/lib/ritornello/plugin-files.json` | `/var/lib/ritornello/plugins/files/state.json` |
+| `/var/lib/ritornello/plugin-files.m3u` | `/var/lib/ritornello/plugins/files/playlist.m3u` |
+| `/var/lib/ritornello/playlists/` | `/var/lib/ritornello/plugins/files/playlists/` |
+
+`chown -R ritornello:` the whole of `/var/lib/ritornello/plugins` after
+moving anything into it by hand as root — the same command `deploy.sh`
+itself runs on every deployment — since a plugin cannot write into a
+directory it does not own.
 
 ### The operator's own locales layer is gone
 
@@ -869,6 +898,24 @@ archive to watch the refusal actually name `ritornello-install`. That
 program does not exist in this repository yet, so nothing about the
 hand-off to it — not even that it exists to be handed off to — has been
 verified either.
+
+**The move to one data directory per plugin has never run on a device.**
+Every plugin now writes only inside its own
+`/var/lib/ritornello/plugins/<name>/`, in place of the mix of fixed
+`/etc/ritornello/*.toml` files and `/var/lib/ritornello/plugin-*.json`
+files it used before — covered by the Rust test suite (including the
+static guard that scans every plugin crate's own source for a stray path
+outside that scheme) and by the end-to-end harness, never by a real
+upgrade. In particular: `deploy.sh` creating each plugin's directory
+(`mkdir -p`) and copying its default configuration into it **only when
+absent**, an update archive's `initial-config/` entries landing in the
+plugin's own directory rather than the old fixed locations, and the core
+actually creating `/var/lib/ritornello/plugins/<name>` before a plugin's
+first launch in service — none of it has been watched happening on a
+Raspberry Pi, on a fresh install or an upgrade from an older release. See
+[Moving data by hand](#moving-data-by-hand) below for what an operator
+upgrading an already-deployed device would need to do themselves: there is
+no automatic migration, and none is planned.
 
 **Known edges and debts in the code, recorded here rather than fixed or
 dressed up as design:**

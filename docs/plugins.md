@@ -112,10 +112,15 @@ bundled remote-control presets the repository ships and `deploy.sh`
 installs, read by `generic-input` but never written by it. The `files`
 plugin's own data directory is also the root helper's one fixed, documented
 location (`/var/lib/ritornello/plugins/files`, `FILES_DATA_DIR` in
-`media-mount.rs`): the root binary reads no archive and forms no other
-path than that one and the core binary's own (see [The privilege
-boundary](#the-privilege-boundary) below), so this single exception is
-spelled out rather than derived at runtime.
+`media-mount.rs`), spelled out rather than derived at runtime because the
+helper consumes no environment and no archive at all — it reads
+`media-roots.toml` and `credentials/` from underneath that one fixed path,
+`/etc/passwd` (the service user's `uid`/`gid`) and `/proc/mounts` (what is
+already mounted), and forms the one other path that is its to form,
+`/mnt/ritornello/<name>` (never read from `media-roots.toml`, see [The
+privilege boundary](#the-privilege-boundary) below) — unlike the updater,
+it is not limited to two path shapes overall, only to this one, fixed
+starting point.
 
 Each plugin's own files, below, in its section.
 
@@ -1159,11 +1164,15 @@ with no tags at all.
 
 Its data lives in its own directory (see [Where a plugin keeps its
 data](#where-a-plugin-keeps-its-data)): `media-roots.toml`, `credentials/`
-(also read by the **mount binary**, which runs on its own, outside the
+(consumed by `mount.cifs` itself, given as a `credentials=<path>` mount
+option by the **mount binary**, which runs on its own, outside the
 service's environment — see `RITORNELLO_USER` below), `state.json`,
 `playlist.m3u`, and `playlists/` (where playlists saved "internally" live,
 as opposed to those written onto a root). `RITORNELLO_USER` names the
-account the mount binary revalidates ownership against.
+account whose `uid`/`gid` (looked up in `/etc/passwd`) the mount binary
+passes as the mount's own `uid=`/`gid=` options — not an ownership check,
+but what makes the mounted files show up as owned by the service account
+rather than by whatever the share reports.
 `RITORNELLO_LANGUAGE_PACKS` is read by the **core**, not this plugin — the
 core sweeps that root itself and layers what it finds over the plugin's
 confided English (see "A plugin's UI", below, and
@@ -1408,8 +1417,10 @@ lets you learn the key — or the keys — of each action, load a bundled preset
 (`mce`, `keyboard`) and save; it also lets you import a preset from an
 uploaded `.toml` file and export the selected device's current bindings to
 such a file. Variable: `RITORNELLO_INPUT_PRESETS` (the bundled presets
-themselves, installed system-wide rather than kept per plugin — see
-`docs/development.md`'s variable table for why).
+themselves — data the repository ships and `deploy.sh` installs, read by
+this plugin but never written by it, hence installed system-wide rather
+than kept in its own data directory; see [Where a plugin keeps its
+data](#where-a-plugin-keeps-its-data) above).
 
 Learning listens for thirty seconds, in a dialog naming the action and the
 device; the four ways out of that dialog — its "Cancel", the cross, Escape,

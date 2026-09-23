@@ -131,7 +131,7 @@ is exactly why they have to be overridden in a checkout:
 | `RITORNELLO_CD_DEV` | core (mpv) **and** `cd` | `/dev/sr0` |
 | `RITORNELLO_CONSOLE_TTY` | `console` | `/dev/tty1` |
 | `RITORNELLO_PLUGIN_DATA_ROOT` | core | `/var/lib/ritornello/plugins` |
-| `RITORNELLO_PLUGIN_DATA_DIR` | every plugin (set by the core, not by hand) | `{RITORNELLO_PLUGIN_DATA_ROOT}/<name>` |
+| `RITORNELLO_PLUGIN_DATA_DIR` | every plugin (set by the core, not by hand) | when unset — a plugin launched by hand, outside the core — the SDK's own `default_data_dir(name)`, `/var/lib/ritornello/plugins/<name>` **whatever `RITORNELLO_PLUGIN_DATA_ROOT` is set to**: a plugin binary reads this variable, never that one, so a checkout's root override never reaches a hand-run plugin |
 | `RITORNELLO_RADIO_DIRECTORY` | `radio` | the radio-browser mirrors, tried in order |
 | `RITORNELLO_FILES_PROC_MOUNTS` | `files` | `/proc/mounts` (overridden by its tests only) |
 | `RITORNELLO_USER` | `files` (owner of the mounts) | `ritornello` |
