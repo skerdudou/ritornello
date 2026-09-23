@@ -209,6 +209,24 @@ mod tests {
             );
             checked += 1;
         }
+        // Fix round 1, I2: the loop above only ever visits a name that
+        // already has a `[plugins.X]` table, so a stale or mistyped entry in
+        // `PRIVILEGED_PLUGINS` — `files` renamed or removed from
+        // `packaging.toml` while a correct new entry is added elsewhere, or
+        // a typo such as `"file"` appended next to `"files"` — was never
+        // visited and the test stayed green. Walking `PRIVILEGED_PLUGINS`
+        // itself and asserting each name is a key of `m.plugins` is what
+        // catches that: the direction the loop above cannot reach, because
+        // it has nothing to iterate over for a name with no table at all.
+        for name in crate::plugins::PRIVILEGED_PLUGINS {
+            assert!(
+                m.plugins.contains_key(*name),
+                "PRIVILEGED_PLUGINS names {name:?}, which has no [plugins.{name}] table in \
+                 packaging.toml at all -- remove {name:?} from PRIVILEGED_PLUGINS in \
+                 crates/ritornello-core/src/plugins/mod.rs, or add its packaging.toml entry"
+            );
+            checked += 1;
+        }
         assert!(checked > 0, "checked nothing — the walk is not looking where it should");
     }
 

@@ -1259,6 +1259,14 @@ mod tests {
     /// code: a route that refused only *after* sending the order would still
     /// answer 403 to a caller that awaited an unanswered channel, and this is
     /// the assertion that tells the two apart.
+    ///
+    /// Fix round 1, M3: `plugin_delete(...).await` is wrapped in
+    /// `tokio::time::timeout`. Without the guard this test exists to prove,
+    /// removing it sends `Undeclare` and then awaits an acknowledgment
+    /// nobody in this test ever sends — a real, measured hang (libtest's own
+    /// 60-second stall notice), not a fast red. A bounded wait turns that
+    /// regression into an ordinary failing assertion instead, on the same
+    /// timescale as every other test in this suite.
     #[tokio::test]
     async fn an_uninstall_of_a_privileged_plugin_is_refused_before_anything_stops() {
         let (state, dir, mut rx) = app_state_with_plugins(&["files", "cd"]);
@@ -1268,9 +1276,15 @@ mod tests {
         ];
         let before = std::fs::read_to_string(dir.path().join("plugins.toml")).unwrap();
 
-        let response =
-            plugin_delete(axum::extract::State(state.clone()), axum::extract::Path("files".to_string()))
-                .await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            plugin_delete(axum::extract::State(state.clone()), axum::extract::Path("files".to_string())),
+        )
+        .await
+        .expect(
+            "plugin_delete did not answer within 5s -- it almost certainly sent Undeclare and is \
+             awaiting an acknowledgment nobody sends, exactly the regression this test exists to catch",
+        );
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let body = response.into_body().collect().await.unwrap().to_bytes();

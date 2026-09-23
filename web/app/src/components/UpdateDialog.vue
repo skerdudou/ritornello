@@ -95,6 +95,16 @@ const coreLeftBehind = computed(() => coreRow.value?.availability === 'update_av
 
 /** `null` when a row has nothing to say. */
 function warningFor(c: ComponentOffer): string | null {
+  // Fix round 1, M1: `installable === false` names a privileged plugin
+  // (`files` today) — its packaging places a root service, a systemd unit
+  // or a polkit rule this dialog cannot install, exactly the archive shape
+  // `installable_from_ui` refuses. The switch is disabled below for the
+  // same reason `offered === null` already disables one (Ruling 88); this
+  // is the sentence that tells the operator why, the same one `ConfigView`'s
+  // table and `InstallablesDialog` show in place of a button.
+  if (c.installable === false) {
+    return t.value('plugin_privileged_note')
+  }
   if (c.kind === 'third_party') {
     return t.value('update_row_third_party', { repo: c.third_party_repo ?? '?' })
   }
@@ -148,11 +158,17 @@ function confirm() {
                an official plugin this release does not carry. Disabling every
                third-party row would have also switched off the case task 17
                made real: a third-party plugin **with** an offer, which can
-               now genuinely be updated from its own repository. -->
+               now genuinely be updated from its own repository.
+
+               Fix round 1, M1: `installable === false` disables it too, the
+               same idiom as the missing-offer case above rather than hiding
+               the row — `defaultChecked` already left it unticked, but the
+               switch itself stayed enabled and a press-then-confirm reached
+               `installable_from_ui`'s refusal regardless. -->
           <Switch
             data-update-row-check
             :model-value="row.checked"
-            :disabled="row.offer.offered === null"
+            :disabled="row.offer.offered === null || row.offer.installable === false"
             :aria-label="row.offer.name"
             @update:model-value="(v: boolean) => setChecked(row.offer.name, v)"
           />

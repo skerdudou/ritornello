@@ -852,6 +852,18 @@ and unwritable everywhere else — the narrowed archive rule
 deployment never creating that directory at all — have run only in this
 repository's own test suite, never against a real deployment from scratch.
 
+**The privileged-plugin refusal has never been seen on the Pi.** Refusing
+to install or uninstall `files` from the web UI — the route returning
+403 before it stops the plugin, the archive check refusing its download,
+the table and the dialogs showing the sentence instead of a button — is
+covered entirely by unit and component tests built against fakes; nobody
+has clicked "Uninstall" for the files plugin on the real device to watch
+it stay running and declared, nor tried installing it from a release
+archive to watch the refusal actually name `ritornello-install`. That
+program does not exist in this repository yet, so nothing about the
+hand-off to it — not even that it exists to be handed off to — has been
+verified either.
+
 **Known edges and debts in the code, recorded here rather than fixed or
 dressed up as design:**
 

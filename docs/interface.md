@@ -800,8 +800,8 @@ itself, independently of this page, so the sentence is not merely a
 courtesy: asking directly for either gesture is refused the same way.
 Which plugins are privileged is a short list the core carries and
 checks against `deploy/packaging.toml` (see
-[plugins.md](plugins.md#writing-a-plugin-of-your-own)), never something
-a plugin announces about itself.
+[plugins.md](plugins.md#ritornello-plugin-files--audio-files-local-or-on-a-share)),
+never something a plugin announces about itself.
 
 **Uninstall and "Remove the binary" answer before the file is gone**, and
 that is deliberate: erasing it goes through the same privileged step as an

@@ -1437,7 +1437,10 @@ function goTo(id: string) {
                          offered by the release) used to be a third state
                          here with only Install to offer; that row shape now
                          lives in `InstallablesDialog.vue` instead, so this
-                         table never renders it any more. -->
+                         table never renders it any more. A privileged plugin
+                         (`p.privileged`) overrides all of the above, in
+                         every one of these states: see the comment further
+                         down, beside the sentence itself. -->
                     <!-- Ruling 88, applied here for the same reason it
                          applies to `UpdateDialog`'s switch: `offered ===
                          null` (never `kind`) is the guard, and it is
@@ -1446,46 +1449,57 @@ function goTo(id: string) {
                          `undeclared_binary` row with nothing to declare it
                          from, must not offer a button that can only fail. -->
                     <div class="flex gap-1">
-                      <Button
-                        v-if="p.missing_binary"
-                        variant="outline" size="xs" data-plugin-install
-                        :disabled="p.offered === null || inProgress.has(p.name)"
-                        @click="installPlugin(p.name)"
-                      >{{ t('plugin_install') }}</Button>
-                      <!-- Both gestures this state licenses are withheld while
-                           the binary is already being erased: declaring a file
-                           that is about to vanish, or asking a second time for
-                           the erasure in flight, are the two ways this row used
-                           to mislead. The row says what is happening instead. -->
-                      <Button
-                        v-if="p.undeclared_binary && !p.removal_pending"
-                        variant="outline" size="xs" data-plugin-declare
-                        :disabled="p.offered === null || inProgress.has(p.name)"
-                        @click="installPlugin(p.name)"
-                      >{{ t('plugin_declare') }}</Button>
-                      <Button
-                        v-if="p.undeclared_binary && !p.removal_pending"
-                        variant="outline" size="xs" data-plugin-remove-binary
-                        @click="removeBinaryTarget = p.binary_file ?? p.name"
-                      >{{ t('plugin_remove_binary') }}</Button>
-                      <!-- Privileged (`files` today): both Install and
-                           Uninstall stop being this table's job the moment
-                           the row could offer either. Its packaging places a
-                           root service, a systemd unit and a polkit rule
-                           this page has no way to touch — `ritornello-install`
-                           is the one program that can, and the sentence sends
-                           the operator there instead of a half-finished
-                           gesture. -->
+                      <!-- Privileged (`files` today): every gesture below —
+                           Install, Declare, Remove the binary, Uninstall —
+                           stops being this table's job, in **every** state
+                           the row can be in, not only the ordinary one.
+                           Its packaging places a root service, a systemd
+                           unit and a polkit rule this page has no way to
+                           touch — `ritornello-install` is the one program
+                           that can. Showing the sentence beside a working
+                           Install (a `missing_binary` row) or beside Declare
+                           and "Remove the binary" (an `undeclared_binary`
+                           row) would leave the operator a gesture that
+                           downloads the archive only to have
+                           `installable_from_ui` refuse it, or one that
+                           erases the plugin binary and leaves the root
+                           helper, its unit and its polkit rule behind — the
+                           exact half-finished job this change exists to
+                           close, reached from a different row shape. -->
                       <span
-                        v-if="p.privileged && !p.undeclared_binary"
+                        v-if="p.privileged"
                         data-plugin-privileged-note
                         class="text-xs text-muted-foreground"
                       >{{ t('plugin_privileged_note') }}</span>
-                      <Button
-                        v-else-if="!p.undeclared_binary"
-                        variant="outline" size="xs" data-plugin-uninstall
-                        @click="uninstallTarget = p.name"
-                      >{{ t('plugin_uninstall') }}</Button>
+                      <template v-else>
+                        <Button
+                          v-if="p.missing_binary"
+                          variant="outline" size="xs" data-plugin-install
+                          :disabled="p.offered === null || inProgress.has(p.name)"
+                          @click="installPlugin(p.name)"
+                        >{{ t('plugin_install') }}</Button>
+                        <!-- Both gestures this state licenses are withheld while
+                             the binary is already being erased: declaring a file
+                             that is about to vanish, or asking a second time for
+                             the erasure in flight, are the two ways this row used
+                             to mislead. The row says what is happening instead. -->
+                        <Button
+                          v-if="p.undeclared_binary && !p.removal_pending"
+                          variant="outline" size="xs" data-plugin-declare
+                          :disabled="p.offered === null || inProgress.has(p.name)"
+                          @click="installPlugin(p.name)"
+                        >{{ t('plugin_declare') }}</Button>
+                        <Button
+                          v-if="p.undeclared_binary && !p.removal_pending"
+                          variant="outline" size="xs" data-plugin-remove-binary
+                          @click="removeBinaryTarget = p.binary_file ?? p.name"
+                        >{{ t('plugin_remove_binary') }}</Button>
+                        <Button
+                          v-if="!p.undeclared_binary"
+                          variant="outline" size="xs" data-plugin-uninstall
+                          @click="uninstallTarget = p.name"
+                        >{{ t('plugin_uninstall') }}</Button>
+                      </template>
                     </div>
                   </td>
                 </tr>

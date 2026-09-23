@@ -740,6 +740,68 @@ describe('ConfigView — plugin table', () => {
     expect(radio.find('[data-plugin-uninstall]').exists()).toBe(true)
   })
 
+  // Fix round 1, I1: the sentence above only replaced Uninstall, so a
+  // privileged plugin whose binary happens to be missing still showed a
+  // working Install button beside it — clicking it downloads the archive
+  // only to have `installable_from_ui` refuse it, exactly the "button that
+  // then fails" this whole change exists to remove. Both halves again: the
+  // sentence for `files`, the Install button still there for an ordinary
+  // `missing_binary` row (`mpd`) on the same page.
+  it('replaces Install with the ritornello-install sentence on a privileged missing_binary row, and only that one', async () => {
+    const w = await mountWithStatus({
+      plugins: [
+        { name: 'files', kind: 'unknown', connected: false, admin: false, missing_binary: true, privileged: true },
+        { name: 'mpd', kind: 'unknown', connected: false, admin: false, missing_binary: true },
+      ],
+      active_source: 'radio',
+      protocol: 1,
+    })
+    const rows = w.findAll('[data-plugin-row]')
+    const files = rows.find((r) => r.get('[data-plugin-name]').text() === 'files')!
+    const mpd = rows.find((r) => r.get('[data-plugin-name]').text() === 'mpd')!
+
+    expect(files.find('[data-plugin-install]').exists()).toBe(false)
+    expect(files.get('[data-plugin-privileged-note]').text()).toContain('ritornello-install')
+
+    expect(mpd.find('[data-plugin-privileged-note]').exists()).toBe(false)
+    expect(mpd.find('[data-plugin-install]').exists()).toBe(true)
+  })
+
+  // Fix round 1, I1, the second gap: an `undeclared_binary` row showed
+  // Declare (the same download-then-refuse as Install) and "Remove the
+  // binary", which erases the plugin binary alone and leaves the root
+  // helper, its unit and its polkit rule behind — the half-uninstall this
+  // change exists to close, reached from a different row shape. Both
+  // halves: `files` loses both gestures and gains the sentence, `mpd` keeps
+  // both gestures on the same page.
+  it('replaces Declare and Remove the binary with the sentence on a privileged undeclared_binary row, and only that one', async () => {
+    const w = await mountWithStatus({
+      plugins: [
+        {
+          name: 'files', kind: 'unknown', connected: false, admin: false,
+          undeclared_binary: true, binary_file: 'ritornello-plugin-files', privileged: true,
+        },
+        {
+          name: 'mpd', kind: 'unknown', connected: false, admin: false,
+          undeclared_binary: true, binary_file: 'ritornello-plugin-mpd',
+        },
+      ],
+      active_source: 'radio',
+      protocol: 1,
+    })
+    const rows = w.findAll('[data-plugin-row]')
+    const files = rows.find((r) => r.get('[data-plugin-name]').text() === 'files')!
+    const mpd = rows.find((r) => r.get('[data-plugin-name]').text() === 'mpd')!
+
+    expect(files.find('[data-plugin-declare]').exists()).toBe(false)
+    expect(files.find('[data-plugin-remove-binary]').exists()).toBe(false)
+    expect(files.get('[data-plugin-privileged-note]').text()).toContain('ritornello-install')
+
+    expect(mpd.find('[data-plugin-privileged-note]').exists()).toBe(false)
+    expect(mpd.find('[data-plugin-declare]').exists()).toBe(true)
+    expect(mpd.find('[data-plugin-remove-binary]').exists()).toBe(true)
+  })
+
   it('disables the up arrow on the first row and the down arrow on the last', async () => {
     const w = await mountWithStatus({
       plugins: [
