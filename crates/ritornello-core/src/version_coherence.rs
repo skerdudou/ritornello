@@ -45,6 +45,12 @@ mod tests {
         // Shared plugins.toml editing: it inherits the product number and no
         // archive is named after it.
         "ritornello-manifest",
+        // The workstation-side installer: no archive is named after it
+        // either, and it inherits the product number for delivery 1. It is
+        // shipped its own way (built for a workstation, not published to a
+        // device), so whether delivery 2 gives it its own patch version is
+        // that delivery's own decision, not this one's.
+        "ritornello-install",
     ];
 
     fn repo_root() -> PathBuf {
