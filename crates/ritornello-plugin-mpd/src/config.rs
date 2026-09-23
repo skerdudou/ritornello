@@ -82,6 +82,14 @@ impl Config {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
         let text = toml::to_string_pretty(self).map_err(|_| "save_failed".to_string())?;
+        // Like `Stations::save`, `state::save` and `Bindings::save`: on a
+        // pristine machine where nothing under this plugin's data directory
+        // has been written yet (a hand launch, before the core has ever
+        // created it), the first save failed with `save_failed` for want of
+        // a parent directory.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|_| "save_failed".to_string())?;
+        }
         // Temporary file then rename: the rename is atomic on the same file
         // system, so no interruption leaves a truncated toml in place of the
         // good one.
@@ -146,6 +154,20 @@ mod tests {
         c.save(&path).unwrap();
         assert_eq!(Config::load(&path), c);
         assert!(!dir.path().join("mpd.toml.tmp").exists(), "the temporary file does not survive");
+    }
+
+    #[test]
+    fn the_save_creates_its_parent_directory_when_missing() {
+        // A hand-launched plugin on a fresh data directory (nothing has ever
+        // been written there yet) must not fail its first save with
+        // `save_failed` for want of a parent directory — see the sibling
+        // guards in `Stations::save`, `state::save` and `Bindings::save`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mpd/mpd.toml");
+        assert!(!path.parent().unwrap().exists(), "the parent must not exist yet");
+        let c = Config { listen: "127.0.0.1".into(), port: 6601 };
+        c.save(&path).unwrap();
+        assert_eq!(Config::load(&path), c);
     }
 
     #[test]
