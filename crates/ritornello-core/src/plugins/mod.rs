@@ -462,6 +462,34 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&out).unwrap(), data.to_str().unwrap());
     }
 
+    /// `DEFAULT_PLUGIN_DATA_ROOT` (this crate's own default) must name the
+    /// exact same directory as `ritornello_plugin_sdk::default_data_dir`
+    /// (the plugin side's own default, used when a plugin is launched by
+    /// hand without the core setting `RITORNELLO_PLUGIN_DATA_DIR`): the two
+    /// crates never share a dependency edge that would let the compiler
+    /// catch a drift between them, so this is asserted instead.
+    ///
+    /// This does not reach the `files` root helper's own `FILES_DATA_DIR`
+    /// (`media-mount.rs`) directly: `ritornello-core` does not depend on
+    /// `ritornello-plugin-files`, and never should — the whole point of the
+    /// helper reading a fixed, hard-coded location is that it consumes no
+    /// environment and no archive at all. The chain closes one hop at a
+    /// time instead: this test ties core to the SDK, and
+    /// `media_mount::tests` (in that crate) ties the helper's constant to
+    /// the same SDK default — see its own assertion, right beside
+    /// `FILES_DATA_DIR`'s definition.
+    ///
+    /// Proven by mutation: changing `DEFAULT_PLUGIN_DATA_ROOT` to anything
+    /// else reddens this test (checked by hand, then reverted — see the
+    /// task's own report).
+    #[test]
+    fn the_default_root_agrees_with_the_sdks_default_data_dir() {
+        assert_eq!(
+            std::path::Path::new(DEFAULT_PLUGIN_DATA_ROOT).join("files"),
+            ritornello_plugin_sdk::default_data_dir("files"),
+        );
+    }
+
     #[test]
     fn a_plugin_name_that_is_not_bare_forms_no_data_directory() {
         let root = std::path::Path::new("/var/lib/ritornello/plugins");
