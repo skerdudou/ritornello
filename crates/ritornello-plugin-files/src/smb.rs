@@ -281,12 +281,16 @@ impl AuthFile {
     /// Writes the file in `dir`, or failing that in the temporary directory.
     ///
     /// The fallback is not a convenience, it is the fix for a defect actually
-    /// met: this file landed in the directory of the **persisted** credentials
-    /// (`/var/lib/ritornello/plugins/files/credentials`), which does not exist in
-    /// development and which an ordinary user cannot create. The symptom was
-    /// as misleading as it gets — "smbclient: Permission denied (os error 13)"
-    /// — and sent one looking for a mount or SMB rights problem where there
-    /// was none.
+    /// met, back when the persisted credentials lived at the fixed,
+    /// privileged path `/etc/ritornello/media-credentials`: this file landed
+    /// there too, in a directory that did not exist in development and that
+    /// an ordinary user could not create. The symptom was as misleading as
+    /// it gets — "smbclient: Permission denied (os error 13)" — and sent one
+    /// looking for a mount or SMB rights problem where there was none. The
+    /// credentials directory has since moved into the plugin's own data
+    /// directory (`ritornello_plugin_sdk::data_dir()`, ordinarily writable),
+    /// but the fallback earns its keep regardless: `dir` is still whatever
+    /// the caller passed, and nothing here should assume it is writable.
     ///
     /// Safety does not come from the directory but from the **mode 0600 set at
     /// creation**: a file opened that way in `/tmp` is no more readable than

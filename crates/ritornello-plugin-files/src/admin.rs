@@ -303,12 +303,18 @@ impl FilesAdmin {
 
     /// Writes the credentials file consumed by `mount.cifs`.
     ///
-    /// The permissions are set **at creation**, not afterwards: creating
-    /// then restricting would leave a window during which the passphrase
-    /// would be readable by everyone. The same applies to the directory
-    /// itself, hence `ensure_credentials_dir` rather than a plain
-    /// `create_dir_all`: it used to be `deploy.sh` that created it with the
-    /// right mode, and the plugin owns its directory now.
+    /// The **file**'s permissions are set at creation, not afterwards:
+    /// creating then restricting would leave a window during which the
+    /// passphrase would be readable by everyone (the `mode(0o600)` below is
+    /// atomic with the `open`). The **directory**'s are not — `ensure_
+    /// credentials_dir` creates it, then `chmod`s it, a plain
+    /// `create_dir_all` under a different name — so a window does exist
+    /// there, between the two calls, during which the directory carries
+    /// whatever mode the process's own `umask` gives a fresh directory. What
+    /// still makes this safe is that nothing sensitive is written *into* it
+    /// during that window: this function, called right after, is what puts
+    /// the file there, and the file's own permissions are the ones that
+    /// carry the guarantee.
     fn write_credentials(path: &Path, user: &str, password: &str, domain: &str) -> Result<()> {
         if let Some(parent) = path.parent() {
             ensure_credentials_dir(parent)?;

@@ -1157,9 +1157,14 @@ async fn main() -> Result<()> {
     // authentication file for the duration of an `smbclient` call.
     //
     // The **runtime directory**, and above all not the persisted credentials
-    // one: that one lives under `/var/lib` and used to be root-owned before a
-    // plugin could create it itself. Confusing the two made the wizard fail
-    // in development with a "Permission denied" that seemed to blame SMB.
+    // one (`creds_dir`, above): confusing the two made the wizard fail in
+    // development with a "Permission denied" that seemed to blame SMB, back
+    // when the persisted directory sat at a fixed, privileged location under
+    // `/etc/ritornello`. It has since moved into the plugin's own data
+    // directory — `deploy.sh` gives the whole of it to the service user, and
+    // this plugin creates `creds_dir` itself on first use — but the two
+    // directories still serve different lifetimes and are kept apart for
+    // that reason, not for who owns them.
     //
     // Same default and same variable as the core (`RITORNELLO_RUNTIME_DIR`), so
     // that `docs/development.md` stays true from one binary to the other.
