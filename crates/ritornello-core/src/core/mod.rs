@@ -84,8 +84,7 @@ pub struct Wiring {
     /// The shared registry `catalog` is resolved from — see
     /// `crate::i18n::Shared`'s doc. The same `Arc` as the HTTP `AppState`'s.
     /// Also where the pack root lives now (captured once at
-    /// `Registry::sweep`): `Wiring` carries no separate `locales_root` any
-    /// more, `Core` never needed a second copy of it.
+    /// `Registry::sweep`).
     pub registry: crate::i18n::Shared,
     /// The declared plugin names, **in file order**. Only the names that also
     /// appear in `sources` end up in the cycle — the manifest declares
@@ -1640,7 +1639,7 @@ mod tests {
             persisted: PersistedState::default(),
             state_path: dir.path().join("state.json"),
             catalog,
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(root, packs_root))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(packs_root))),
             manifest_order: vec![],
             metadata: silent_wiring(vec![]),
             sources_catalog: watch::channel(SourcesCatalog::default()).0,

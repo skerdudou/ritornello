@@ -64,11 +64,11 @@ pub struct AppState {
     /// **Stated limitation, unchanged in kind by the registry**: this is a
     /// snapshot, rebuilt only when something calls `Core::set_locale` (a
     /// real locale change) — not on every read. `Registry::chain_for`
-    /// itself performs no I/O at all (its disk tier is swept once, see
-    /// `Registry`'s doc), so an operator editing a pack on disk is picked
-    /// up by the next `resweep_async` — a real locale change — rather than by
-    /// every read of this field, and, as before, by a restart of the
-    /// service.
+    /// itself performs no I/O at all (its pack tier is swept once, see
+    /// `Registry`'s doc), so an operator installing a different pack is
+    /// picked up by the next `resweep_async` — a real locale change —
+    /// rather than by every read of this field, and, as before, by a
+    /// restart of the service.
     ///
     /// **`GET /api/i18n` is no longer one of its readers**: that route
     /// resolves from `registry` per request, because being a snapshot is
@@ -116,12 +116,12 @@ pub struct AppState {
     /// present — a promise carried over unexamined from the asset route,
     /// where it is earned. It does not hold for the catalog: `admin_i18n`
     /// resolves straight from the shared `Registry` (task 4), and the
-    /// registry's disk tier is re-swept by `Registry::resweep_async` on every real
+    /// registry's pack tier is re-swept by `Registry::resweep_async` on every real
     /// locale change (`Core::set_locale`) — not only by a restart, and never
     /// by moving `session`. So the same stamped URL could start answering
-    /// differently mid-session: an operator edits a plugin's on-disk pack
-    /// (`/etc/ritornello/locales/<component>/<lang>.toml`) and picks the
-    /// interface language twice (any two real `PUT /api/locale` calls), and
+    /// differently mid-session: an operator installs a different language
+    /// pack for a plugin and picks the interface language twice (any two
+    /// real `PUT /api/locale` calls), and
     /// a browser already holding the old text under `?lang=<l>&v=<session>`
     /// as `immutable` would never ask again. Proven end to end by
     /// `admin::tests::the_plugin_catalog_route_is_never_marked_immutable_unlike_the_asset_route`.
@@ -575,10 +575,7 @@ pub(crate) mod tests_support {
             // always seeds `core`/`common` with their embedded English
             // first, and `locale_json` (task 12) needs that seed to find
             // "core" through `Registry::modules_with_text` at all.
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
-                std::path::PathBuf::from("/nonexistent"),
-                std::path::PathBuf::from("/nonexistent-packs"),
-            ))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(std::path::PathBuf::from("/nonexistent-packs")))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
@@ -628,10 +625,7 @@ pub(crate) mod tests_support {
             // always seeds `core`/`common` with their embedded English
             // first, and `locale_json` (task 12) needs that seed to find
             // "core" through `Registry::modules_with_text` at all.
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
-                std::path::PathBuf::from("/nonexistent"),
-                std::path::PathBuf::from("/nonexistent-packs"),
-            ))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(std::path::PathBuf::from("/nonexistent-packs")))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
@@ -683,10 +677,7 @@ pub(crate) mod tests_support {
             // always seeds `core`/`common` with their embedded English
             // first, and `locale_json` (task 12) needs that seed to find
             // "core" through `Registry::modules_with_text` at all.
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
-                std::path::PathBuf::from("/nonexistent"),
-                std::path::PathBuf::from("/nonexistent-packs"),
-            ))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(std::path::PathBuf::from("/nonexistent-packs")))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
@@ -727,9 +718,29 @@ pub(crate) mod tests_support {
         tempfile::TempDir,
     ) {
         let dir = tempfile::tempdir().unwrap();
+        // `Chain::load_for_tests` (below, `catalog`) reads its own
+        // `<root>/<component>/<locale>.toml` shape directly — unrelated to
+        // the registry's pack tier, and unaffected by it.
         std::fs::create_dir_all(dir.path().join("core")).unwrap();
         std::fs::write(
             dir.path().join("core/fr.toml"),
+            "active_source_label = \"Source active\"\naudio_output = \"Sortie audio\"\n",
+        )
+        .unwrap();
+        // The registry's own French, as an installed pack: this is what
+        // `core_languages`/`union_languages` (the clamp tests below) see as
+        // "fr" installed for `core`, exactly as a real device's French
+        // does — never a disk file, since the operator layer that once
+        // read one is gone.
+        let packs_root = dir.path().join("packs");
+        std::fs::create_dir_all(packs_root.join("ritornello-lang-fr")).unwrap();
+        std::fs::write(
+            packs_root.join("ritornello-lang-fr/pack.toml"),
+            "language = \"fr\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"core\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            packs_root.join("ritornello-lang-fr/core.toml"),
             "active_source_label = \"Source active\"\naudio_output = \"Sortie audio\"\n",
         )
         .unwrap();
@@ -750,10 +761,7 @@ pub(crate) mod tests_support {
             ))),
             // Same reasoning as the other rigs above: seed core/common so
             // `Registry::modules_with_text` finds "core".
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(
-                dir.path().to_path_buf(),
-                dir.path().join("packs"),
-            ))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::seeded_registry(packs_root))),
             locale_current: Arc::new(tokio::sync::RwLock::new(Some("fr".to_string()))),
             locale_tx,
             fallback_current: Arc::new(tokio::sync::RwLock::new(None)),

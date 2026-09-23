@@ -437,54 +437,11 @@ and a file that exists is **never overwritten**, whatever it contains.
 Those two hold what you produced (stations added from the browser,
 learned bindings), so nothing may complete them.
 
-### Migrating a hand-deployed device's locales
+### The operator's own locales layer is gone
 
-Before this chantier, this same section of `deploy.sh` copied
-`deploy/locales/` in whole into `/etc/ritornello/locales` on every
-deployment. A device deployed by hand at any point before this branch
-therefore carries `/etc/ritornello/locales/<module>/fr.toml` files written
-by that old script — real files, on disk, right now, on every device this
-project has ever deployed to by hand.
-
-That root is the **operator's own** layer, and `Registry::sources_for`
-resolves it *before* the installed language pack for the same vocabulary.
-For one module the order is: its operator file, then its installed pack,
-then the text its own component announces — and then the same three again
-for the shared `common` vocabulary (see
-`crates/ritornello-core/src/i18n/registry.rs`). It outranks a pack on
-purpose: a file placed there by hand is assumed to be a deliberate
-override that must survive a pack update. The old `deploy.sh` never asked
-for that; it only ever wrote the project's own French text, indistinguishable
-from a pack's own copy of the same text.
-
-The consequence: on such a device, installing or updating the French pack
-changes nothing for a key the old copy already carries — that stale file
-keeps answering first, forever, and only a key the old copy never had
-falls through to the pack. Over releases the two drift apart one key at a
-time, into a French that is neither entirely the old copy nor entirely
-the new pack.
-
-**Nothing in this project moves or deletes those files for you, and
-nothing here will.** That decision belongs to whoever owns the device, and
-it is a real decision, not a formality:
-
-- if `/etc/ritornello/locales/<module>/fr.toml` is only ever a copy of
-  this project's own text — the ordinary case for a device that never had
-  a reason to hand-edit a translation — move it aside (or remove it) so
-  the installed pack takes over, the same text resolved through the
-  mechanism this chantier built rather than through a file nothing
-  updates any more;
-- if it carries a wording changed on purpose, keep it — that is exactly
-  what the operator layer is *for* — knowing that it shadows the pack
-  **only for the keys it declares**: every key it contains keeps its hand
-  wording through every pack update, including when a later pack improves
-  that same wording, while a key it does not contain — a new one a later
-  pack adds, for instance — falls through to the pack as usual.
-
-`deploy.sh` itself no longer writes into this root at all: it creates it
-if absent and otherwise leaves it strictly alone (see the comment beside
-`mkdir -p /etc/ritornello/locales` in the script). This paragraph is the
-only place that migration is explained; nothing in the code performs it.
+`/etc/ritornello/locales` is no longer read by anything (owner's decision,
+2026-09-23, no backward compatibility): a device deployed before this
+delivery may delete it by hand.
 
 `plugins.toml` is the exception, because it holds no such thing: it lists
 which of the binaries just installed the core is to launch. It is
@@ -886,14 +843,14 @@ tests that fake the network and use a temporary directory; none has run on
 a Pi, and the pack job of the release workflow has never run at all — like
 the rest of that workflow.
 
-**The hand-deployed locales migration described under [Migrating a
-hand-deployed device's locales](#migrating-a-hand-deployed-devices-locales)
-has not been performed or tested on any device.** No device has actually
-had `/etc/ritornello/locales/<module>/fr.toml` files moved aside, kept on
-purpose, or observed drifting against an installed pack over releases —
-the paragraph states what a device carries and what the operator layer's
-own resolution order means for it, from reading the code and the old
-`deploy.sh`, not from watching it happen.
+**The removal of the operator's own locales layer has been exercised on
+exactly one device, by hand, and nowhere else.** The owner deleted
+`/etc/ritornello/locales` on the one real Raspberry Pi this project has
+(verified); the code and script changes that make that path unreadable
+and unwritable everywhere else — the narrowed archive rule
+(`update::archive::ETC_PREFIXES`), the trimmed `deploy.sh`, a fresh
+deployment never creating that directory at all — have run only in this
+repository's own test suite, never against a real deployment from scratch.
 
 **Known edges and debts in the code, recorded here rather than fixed or
 dressed up as design:**

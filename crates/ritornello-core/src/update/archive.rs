@@ -20,14 +20,22 @@ use std::io::Read;
 
 /// Where a plugin binary lives inside an archive.
 pub const PLUGINS_PREFIX: &str = "usr/local/lib/ritornello/plugins/";
-/// The only two places under `/etc/ritornello` a release owns. Deliberately
-/// not `etc/ritornello/` at large: the operator's own files live there —
+/// The only place under `/etc/ritornello` a release owns. Deliberately not
+/// `etc/ritornello/` at large: the operator's own files live there —
 /// `plugins.toml`, `stations.toml`, `input-bindings.toml`, `media-roots.toml`,
 /// the NAS credentials — and `etc_files` is written unconditionally, so a
 /// wide prefix would let a release replace a station list and a plugin
-/// declaration. Verified against `deploy/packaging.toml`, which ships these
-/// two and nothing else under that root.
-pub const ETC_PREFIXES: &[&str] = &["etc/ritornello/locales/", "etc/ritornello/input-presets/"];
+/// declaration. Verified against `deploy/packaging.toml`, which ships this
+/// one and nothing else under that root.
+///
+/// `etc/ritornello/locales/` used to be the second entry here: the
+/// operator's own hand-written locales layer that outranked every installed
+/// language pack. The owner removed that layer entirely (2026-09-23, no
+/// backward compatibility); translated text now reaches a device only
+/// through an installed language pack (see the crate's own pack-writing
+/// module), never through a component archive, so an archive carrying that
+/// path is refused like any other unknown one.
+pub const ETC_PREFIXES: &[&str] = &["etc/ritornello/input-presets/"];
 /// Files that become a plugin's configuration **only if it is absent**.
 pub const INITIAL_CONFIG_PREFIX: &str = "initial-config/";
 /// The `[[plugin]]` block to append to `plugins.toml`.
@@ -113,8 +121,8 @@ pub struct Contents {
     pub binary: Option<(String, Vec<u8>)>,
     pub core_binary: Option<Vec<u8>>,
     /// Paths under the prefixes in `ETC_PREFIXES`, with their bytes. Written
-    /// unconditionally by the core: locale catalogs and input presets belong
-    /// to the release, not to the operator.
+    /// unconditionally by the core: an input preset belongs to the release,
+    /// not to the operator.
     pub etc_files: Vec<(String, Vec<u8>)>,
     /// `(bare name, bytes)`. Written **only if the target is absent**.
     pub initial_config: Vec<(String, Vec<u8>)>,
@@ -185,7 +193,7 @@ pub fn installable_from_ui(entries: &[String]) -> bool {
 /// True when the archive carries **its plugin binary and nothing else**.
 ///
 /// The rule for a third-party archive, and it is strictly stronger than
-/// `installable_from_ui`: that one also allows `etc/ritornello/locales/`,
+/// `installable_from_ui`: that one also allows
 /// `etc/ritornello/input-presets/`, an initial configuration, examples and a
 /// `plugins.toml.fragment` — all of which the **core** writes, unprivileged,
 /// with its own hands.
@@ -538,7 +546,7 @@ mod tests {
     }
 
     /// The same relative layout `package-release.sh` produces for a plugin
-    /// with a locale catalog and an example — but not the literal bytes: real
+    /// with an input preset and an example — but not the literal bytes: real
     /// GNU tar, invoked the way that script invokes it, writes a `./` root
     /// entry and a parent directory entry for every level in between, and
     /// `tar::Builder` cannot express either (it drops a leading `./`
@@ -548,7 +556,7 @@ mod tests {
     fn a_plugin_archive() -> Vec<u8> {
         targz(&[
             ("./usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
-            ("./etc/ritornello/locales/radio/fr.toml", b"a = \"b\"\n"),
+            ("./etc/ritornello/input-presets/radio/default.toml", b"a = \"b\"\n"),
             ("./examples/stations.example.toml", b"# stations\n"),
             ("./plugins.toml.fragment", b"[[plugin]]\nname = \"radio\"\nexec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-radio\"\n"),
         ])
@@ -560,7 +568,7 @@ mod tests {
         assert_eq!(c.binary.as_ref().map(|(n, _)| n.as_str()), Some("ritornello-plugin-radio"));
         assert_eq!(c.binary.as_ref().map(|(_, b)| b.as_slice()), Some(b"ELF".as_slice()));
         assert_eq!(c.etc_files.len(), 1);
-        assert_eq!(c.etc_files[0].0, "etc/ritornello/locales/radio/fr.toml");
+        assert_eq!(c.etc_files[0].0, "etc/ritornello/input-presets/radio/default.toml");
         assert!(c.fragment.as_deref().unwrap().contains("name = \"radio\""));
         assert!(c.core_binary.is_none());
         assert!(c.initial_config.is_empty());
@@ -597,8 +605,8 @@ mod tests {
             "./",
             "./etc/",
             "./etc/ritornello/",
-            "./etc/ritornello/locales/",
-            "./etc/ritornello/locales/radio/",
+            "./etc/ritornello/input-presets/",
+            "./etc/ritornello/input-presets/radio/",
             "./usr/",
             "./usr/local/",
             "./usr/local/lib/",
@@ -609,7 +617,7 @@ mod tests {
         }
         raw_entry(
             &mut builder,
-            b"./etc/ritornello/locales/radio/fr.toml",
+            b"./etc/ritornello/input-presets/radio/default.toml",
             tar::EntryType::Regular,
             b"a = \"b\"\n",
         );
@@ -637,7 +645,7 @@ mod tests {
             ("./usr/local/bin/ritornello-core", b"ELF"),
             ("./etc/systemd/system/ritornello.service", b"[Unit]\n"),
             ("./etc/polkit-1/rules.d/50-ritornello-power.rules", b"// js\n"),
-            ("./etc/ritornello/locales/core/fr.toml", b"a = \"b\"\n"),
+            ("./etc/ritornello/input-presets/core/default.toml", b"a = \"b\"\n"),
         ]);
         let c = read(&gz, DECOMPRESSED_MAX).expect("reads");
         assert_eq!(c.core_binary.as_deref(), Some(b"ELF".as_slice()));
@@ -773,21 +781,39 @@ mod tests {
         }
     }
 
-    /// The regression guard for the narrowing above: a locale catalog and an
-    /// input preset — the two subdirectories `ETC_PREFIXES` actually names —
-    /// must stay installable and collected.
+    /// The regression guard for the narrowing above: an input preset — the
+    /// one subdirectory `ETC_PREFIXES` actually names — must stay installable
+    /// and collected.
     #[test]
-    fn locales_and_input_presets_files_remain_installable_and_collected() {
+    fn input_presets_files_remain_installable_and_collected() {
         let gz = targz(&[
             ("./usr/local/lib/ritornello/plugins/ritornello-plugin-generic-input", b"ELF"),
-            ("./etc/ritornello/locales/radio/en.json", b"{}"),
             ("./etc/ritornello/input-presets/default.toml", b"# preset\n"),
         ]);
         let c = read(&gz, DECOMPRESSED_MAX).expect("reads");
         assert!(installable_from_ui(&c.entries), "{:?}", c.entries);
-        assert_eq!(c.etc_files.len(), 2, "{:?}", c.etc_files);
-        assert!(c.etc_files.iter().any(|(p, _)| p == "etc/ritornello/locales/radio/en.json"));
+        assert_eq!(c.etc_files.len(), 1, "{:?}", c.etc_files);
         assert!(c.etc_files.iter().any(|(p, _)| p == "etc/ritornello/input-presets/default.toml"));
+    }
+
+    /// The owner's decision (2026-09-23): the operator's own locales layer is
+    /// removed, with no backward compatibility. An archive carrying
+    /// `etc/ritornello/locales/...` is no longer an allowed shape — refused
+    /// for the UI, and not collected, exactly like any other unknown path.
+    #[test]
+    fn a_locale_catalog_entry_is_no_longer_installable_or_collected() {
+        let gz = targz(&[
+            ("./usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
+            ("./etc/ritornello/locales/radio/fr.toml", b"a = \"b\"\n"),
+        ]);
+        let c = read(&gz, DECOMPRESSED_MAX).expect("reads");
+        assert!(!installable_from_ui(&c.entries), "{:?}", c.entries);
+        assert!(c.etc_files.is_empty(), "{:?}", c.etc_files);
+        assert!(
+            c.entries.iter().any(|e| e == "etc/ritornello/locales/radio/fr.toml"),
+            "still listed, so the page can say the release carries it: {:?}",
+            c.entries
+        );
     }
 
     /// The whitelist's positive members, asserted rather than assumed: an
@@ -799,7 +825,7 @@ mod tests {
     fn examples_an_initial_configuration_and_the_fragment_are_all_allowed() {
         let gz = targz(&[
             ("./usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
-            ("./etc/ritornello/locales/radio/en.json", b"{}"),
+            ("./etc/ritornello/input-presets/radio/default.toml", b"a = \"b\"\n"),
             ("./examples/stations.example.toml", b"# stations\n"),
             ("./initial-config/stations.toml", b"# stations\n"),
             ("./plugins.toml.fragment", b"[[plugin]]\nname = \"radio\"\n"),
@@ -1161,7 +1187,7 @@ mod tests {
         let mut builder = tar::Builder::new(Vec::new());
         raw_entry(
             &mut builder,
-            b"/etc/ritornello/locales/radio/fr.toml",
+            b"/etc/ritornello/input-presets/radio/default.toml",
             tar::EntryType::Regular,
             b"a = \"b\"\n",
         );
@@ -1174,8 +1200,8 @@ mod tests {
     /// test pins (`the_core_archive_could_never_pass_the_rule_that_governs_a_plugin`
     /// in `update::mod`), so a change to either list is caught by both tests
     /// at once. What must come out: the privileged installer, the three
-    /// systemd units and the two polkit rules — the core binary and the two
-    /// locale files are excluded because `install_one` does place them.
+    /// systemd units and the two polkit rules — the core binary is excluded
+    /// because `install_one` does place it.
     #[test]
     fn a_core_archive_names_the_installer_the_units_and_the_rules_as_not_installed() {
         let entries: Vec<String> = [
@@ -1184,12 +1210,6 @@ mod tests {
             "etc/polkit-1/rules.d/",
             "etc/polkit-1/rules.d/52-ritornello-update.rules",
             "etc/polkit-1/rules.d/50-ritornello-power.rules",
-            "etc/ritornello/",
-            "etc/ritornello/locales/",
-            "etc/ritornello/locales/common/",
-            "etc/ritornello/locales/common/fr.toml",
-            "etc/ritornello/locales/core/",
-            "etc/ritornello/locales/core/fr.toml",
             "etc/systemd/",
             "etc/systemd/system/",
             "etc/systemd/system/ritornello.service",
@@ -1232,9 +1252,9 @@ mod tests {
         let entries: Vec<String> = [
             "etc/",
             "etc/ritornello/",
-            "etc/ritornello/locales/",
-            "etc/ritornello/locales/radio/",
-            "etc/ritornello/locales/radio/fr.toml",
+            "etc/ritornello/input-presets/",
+            "etc/ritornello/input-presets/radio/",
+            "etc/ritornello/input-presets/radio/default.toml",
             "usr/",
             "usr/local/",
             "usr/local/lib/",

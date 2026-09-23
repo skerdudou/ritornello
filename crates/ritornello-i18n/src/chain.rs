@@ -46,9 +46,10 @@ impl Chain {
     /// **Test-only fixture helper — not the resolution production uses.**
     /// `ritornello_core::i18n::Registry::chain_for` is: it stacks *three*
     /// languages (the chosen one, a device fallback, then English), each
-    /// contributing up to four layers (disk pack and announced plugin text,
-    /// for both the component and `common`) — twelve layers, at most, in
-    /// strict language-then-tier order. This builds a `Chain` for **one**
+    /// contributing up to four layers (an installed language pack and
+    /// announced plugin text, for both the component and `common`) — twelve
+    /// layers, at most, in strict language-then-tier order. This builds a
+    /// `Chain` for **one**
     /// language only, four layers, in priority order:
     /// 1. disk pack for the component, at `<root>/<component>/<locale>.toml`
     /// 2. the component's embedded English (`own_en`)

@@ -273,8 +273,8 @@ test('key learning: the view reaches a defined state', async ({ page }) => {
   //  - learning started   -> "Press a key on the device…"
   // We assert on this closed set of messages (values from
   // crates/ritornello-plugin-generic-input/src/locales/en.toml — the embedded
-  // English, since RITORNELLO_LOCALES is not set by the harness), and not on
-  // "some text": a test that accepts anything proves nothing.
+  // English, since no installed language pack translates this plugin), and
+  // not on "some text": a test that accepts anything proves nothing.
   await expect(
     page.getByText(/No input device detected|Press a key on the device/),
   ).toBeVisible()
@@ -528,10 +528,11 @@ test('an order arrow writes a real reorder, checked against the server, and is p
  * languages and the page reacts to them honestly, numbers included.
  *
  * `serve.mjs` ships two deliberately partial core packs (`fr`, `de`, two
- * keys each of the ~320 the embedded English carries) under
- * `RITORNELLO_LOCALES` — a second one since fix round 1 (finding 7/R6): the
- * chosen language is now excluded from its own fallback candidates, so a
- * *different* real language is needed to exercise the control at all.
+ * keys each of the ~320 the embedded English carries), installed under
+ * `RITORNELLO_LANGUAGE_PACKS` — a second one since fix round 1 (finding
+ * 7/R6): the chosen language is now excluded from its own fallback
+ * candidates, so a *different* real language is needed to exercise the
+ * control at all.
  */
 test('the language card annotates an incomplete language and offers a fallback', async ({
   page,

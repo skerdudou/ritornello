@@ -431,36 +431,43 @@ mod tests {
         }
     }
 
+    /// Writes a one-module, one-language pack directly under `packs_root`,
+    /// in the shape `crate::langpack::store::inventory` reads back
+    /// (`pack.toml` plus one `<module>.toml`).
+    fn write_pack(packs_root: &std::path::Path, lang: &str, module: &str, body: &str) {
+        let dir = packs_root.join(format!("ritornello-lang-{lang}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pack.toml"),
+            format!("language = \"{lang}\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"{module}\"]\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join(format!("{module}.toml")), body).unwrap();
+    }
+
     /// Default rig: only `en` is "installed" (see
     /// `Registry::core_languages`'s fallback on an absent `core/`
     /// directory), which is enough for every test that does not itself
     /// exercise the installed-language bound.
     fn state_with(fake: Fake) -> AppState {
-        state_with_locales_root(fake, std::path::PathBuf::from("/nonexistent"))
+        state_with_packs_root(fake, std::path::PathBuf::from("/nonexistent"))
     }
 
-    /// Variant with a chosen `locales_root`, for the tests that need more
-    /// than the always-present `en` to be "installed", or a real on-disk
-    /// pack for a plugin module — see `two_languages_are_two_entries`.
+    /// Variant with a chosen `packs_root`, for the tests that need more
+    /// than the always-present `en` to be "installed", or a real installed
+    /// pack for a plugin module — see
+    /// `two_languages_serve_two_different_installed_packs`.
     ///
     /// The registry is swept from this root, exactly as `main.rs` wires it
     /// (one `Arc<RwLock<Registry>>` built from the same root the process's
-    /// own `RITORNELLO_LOCALES` names): a plugin's on-disk pack lives at
-    /// `<locales_root>/<plugin>/<lang>.toml`, in the same tree as
-    /// `<locales_root>/core`. `AppState` itself no longer carries this path
-    /// separately — task 12 removed `AppState.locales_root`, its last
-    /// reader replaced by `Registry::core_languages`, which answers from
-    /// the swept snapshot instead of a second, independent disk read.
-    fn state_with_locales_root(fake: Fake, locales_root: std::path::PathBuf) -> AppState {
+    /// own `RITORNELLO_LANGUAGE_PACKS` names): a plugin's installed pack
+    /// lives at `<packs_root>/ritornello-lang-<lang>/<plugin>.toml`.
+    fn state_with_packs_root(fake: Fake, packs_root: std::path::PathBuf) -> AppState {
         let (audio_tx, _rx) = tokio::sync::mpsc::channel(4);
         let (locale_tx, _locale_rx) = tokio::sync::mpsc::channel(4);
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(4);
         let mut backends: HashMap<String, Arc<dyn AdminBackend>> = HashMap::new();
         backends.insert("radio".into(), Arc::new(fake));
-        // A packs root that does not exist: `inventory` treats that as an
-        // empty inventory by design, exactly as an unwritten pack directory
-        // would on a fresh device.
-        let packs_root = locales_root.join("packs");
         AppState {
             status: Arc::new(tokio::sync::RwLock::new(StatusState {
                 plugins: vec![],
@@ -476,7 +483,7 @@ mod tests {
                 std::path::Path::new("/nonexistent"),
                 crate::i18n::EN,
             ))),
-            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(locales_root, packs_root))),
+            registry: Arc::new(tokio::sync::RwLock::new(crate::i18n::Registry::sweep(packs_root))),
             locale_current: Arc::new(tokio::sync::RwLock::new(None)),
             locale_tx,
             fallback_current: Arc::new(tokio::sync::RwLock::new(None)),
@@ -704,9 +711,8 @@ mod tests {
         // `locale_current` — the same field `status_json`'s `locale` reads —
         // resolved from the registry like every other case.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
-        std::fs::write(dir.path().join("radio/fr.toml"), "greeting = \"Bonjour\"\n").unwrap();
-        let state = state_with_locales_root(Fake::default(), dir.path().to_path_buf());
+        write_pack(dir.path(), "fr", "radio", "greeting = \"Bonjour\"\n");
+        let state = state_with_packs_root(Fake::default(), dir.path().to_path_buf());
         *state.locale_current.write().await = Some("fr".to_string());
         let app = router(state);
         let resp = app.oneshot(Request::get("/plugins/radio/api/i18n").body(Body::empty()).unwrap()).await.unwrap();
@@ -729,9 +735,8 @@ mod tests {
     #[tokio::test]
     async fn admin_i18n_resolves_through_the_devices_fallback_not_a_hardcoded_en() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
-        std::fs::write(dir.path().join("radio/fr.toml"), "greeting = \"Bonjour\"\n").unwrap();
-        let state = state_with_locales_root(Fake::default(), dir.path().to_path_buf());
+        write_pack(dir.path(), "fr", "radio", "greeting = \"Bonjour\"\n");
+        let state = state_with_packs_root(Fake::default(), dir.path().to_path_buf());
         *state.locale_current.write().await = Some("de".to_string());
         *state.fallback_current.write().await = Some("fr".to_string());
         let app = router(state);
@@ -743,16 +748,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_languages_serve_two_different_disk_packs() {
+    async fn two_languages_serve_two_different_installed_packs() {
         // What `immutable` must never lie about: serving French under the
         // English URL. The registry (task 4), not a cache keyed by
         // `(plugin, lang)`, is what keeps the two apart now — each language
-        // is its own on-disk pack under `<locales_root>/radio/<lang>.toml`.
+        // is its own installed pack under `<packs_root>/ritornello-lang-<lang>/radio.toml`.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
-        std::fs::write(dir.path().join("radio/en.toml"), "marker = \"en-value\"\n").unwrap();
-        std::fs::write(dir.path().join("radio/fr.toml"), "marker = \"fr-value\"\n").unwrap();
-        let app = router(state_with_locales_root(Fake::default(), dir.path().to_path_buf()));
+        write_pack(dir.path(), "en", "radio", "marker = \"en-value\"\n");
+        write_pack(dir.path(), "fr", "radio", "marker = \"fr-value\"\n");
+        let app = router(state_with_packs_root(Fake::default(), dir.path().to_path_buf()));
         for (lang, expected) in [("fr", "fr-value"), ("en", "en-value")] {
             let resp = app
                 .clone()
@@ -775,15 +779,15 @@ mod tests {
         // The premise `immutable` used to rest on (see `AppState::session`'s
         // doc, before this task): nothing under a stamped plugin URL could
         // change within one session, because nothing read the registry's
-        // disk tier for a plugin. Task 5 is precisely what broke that —
+        // pack tier for a plugin. Task 5 is precisely what broke that —
         // `admin_i18n` reads `Registry::chain_for` directly, and the
-        // registry's disk tier can change mid-session without the core's
+        // registry's pack tier can change mid-session without the core's
         // `session` stamp ever moving. This test writes out the case an
-        // operator triggers directly: an on-disk pack edited, then a real
-        // locale change (`Registry::resweep_async`, what `Core::set_locale`
-        // calls). `AppState::session`'s doc names a second case closed the
-        // same way, for the same reason, without a second test: a plugin
-        // that self-updates and re-announces mid-run
+        // operator triggers directly: a pack reinstalled with different
+        // text, then a real locale change (`Registry::resweep_async`, what
+        // `Core::set_locale` calls). `AppState::session`'s doc names a
+        // second case closed the same way, for the same reason, without a
+        // second test: a plugin that self-updates and re-announces mid-run
         // (`hotplug`/`insert_announced`) used to leave a browser's
         // `immutable`-cached catalogue stale until the *core* restarted,
         // even though the registry itself had already moved on — both cases
@@ -791,15 +795,14 @@ mod tests {
         // content) reached by two different writers of the same registry.
         // The fix (this fix round) is not a longer key: the catalog route
         // never claims `immutable` any more, at all — this test writes the
-        // on-disk-edit sequence end to end (same URL, an edit, a resweep,
-        // two different answers) and asserts the *header*, which is the
-        // discriminating check: it must fail the moment `immutable` is
-        // restored on this route, even with `lang` and a stamp both present
-        // — the exact shape that used to trigger it.
+        // pack-reinstall sequence end to end (same URL, a reinstall, a
+        // resweep, two different answers) and asserts the *header*, which
+        // is the discriminating check: it must fail the moment `immutable`
+        // is restored on this route, even with `lang` and a stamp both
+        // present — the exact shape that used to trigger it.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("radio")).unwrap();
-        std::fs::write(dir.path().join("radio/en.toml"), "greeting = \"before\"\n").unwrap();
-        let state = state_with_locales_root(Fake::default(), dir.path().to_path_buf());
+        write_pack(dir.path(), "en", "radio", "greeting = \"before\"\n");
+        let state = state_with_packs_root(Fake::default(), dir.path().to_path_buf());
         let app = router(state.clone());
         let url = "/plugins/radio/api/i18n?lang=en&v=abc";
 
@@ -810,13 +813,14 @@ mod tests {
             serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
         assert_eq!(v1["greeting"], "before");
 
-        // The operator edits the pack on disk, then the interface language
-        // is switched — the only gesture, today, that calls
-        // `Registry::resweep_async` (`Core::set_locale`). Called directly
-        // here: this test is at the HTTP layer, with no `Core` to drive. Now
-        // that the route never promises `immutable`, this is no longer a
-        // broken promise — a revalidating caller is expected to see it.
-        std::fs::write(dir.path().join("radio/en.toml"), "greeting = \"after\"\n").unwrap();
+        // The operator reinstalls the pack with different text, then the
+        // interface language is switched — the only gesture, today, that
+        // calls `Registry::resweep_async` (`Core::set_locale`). Called
+        // directly here: this test is at the HTTP layer, with no `Core` to
+        // drive. Now that the route never promises `immutable`, this is no
+        // longer a broken promise — a revalidating caller is expected to
+        // see it.
+        write_pack(dir.path(), "en", "radio", "greeting = \"after\"\n");
         crate::i18n::Registry::resweep_async(&state.registry).await;
 
         let second = app.oneshot(Request::get(url).body(Body::empty()).unwrap()).await.unwrap();
@@ -1027,8 +1031,8 @@ mod tests {
     /// honoured the device's own fallback setting even though the core's own
     /// status line and every Source status text already did. The key here is
     /// defined **only** in the fallback language ("fr"), never in the chosen
-    /// one ("de") nor in English — neither a disk pack (there is none) nor a
-    /// hardcoded one — so a resolution through anything but the real
+    /// one ("de") nor in English — neither an installed pack (there is none)
+    /// nor a hardcoded one — so a resolution through anything but the real
     /// fallback tier falls through to the raw key instead.
     ///
     /// **[MUTATION]**: revert `resolve_admin_text` to pass a hardcoded `"en"`

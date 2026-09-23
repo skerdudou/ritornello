@@ -13,7 +13,7 @@ use std::sync::Mutex;
 /// inventory by design, so this is a plain "no packs installed" registry,
 /// same as it was before this chantier.
 pub(super) fn test_registry(root: &std::path::Path) -> crate::i18n::Shared {
-    Arc::new(RwLock::new(crate::i18n::Registry::sweep(root.to_path_buf(), root.join("packs"))))
+    Arc::new(RwLock::new(crate::i18n::Registry::sweep(root.join("packs"))))
 }
 
 #[derive(Default)]

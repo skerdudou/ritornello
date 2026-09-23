@@ -91,7 +91,6 @@ the single `cargo run` line, whichever binary ends up reading it.
     RITORNELLO_PLUGINS=/tmp/rp/plugins.toml RITORNELLO_STATE=/tmp/rp/state.json \
     RITORNELLO_MPV_SOCKET=/tmp/rp/mpv.sock RITORNELLO_RUNTIME_DIR=/tmp/rp \
     RITORNELLO_HTTP=127.0.0.1:8080 \
-    RITORNELLO_LOCALES=deploy/locales \
     RITORNELLO_CONSOLE_TTY=/dev/stdout \
     RITORNELLO_RADIO_STATIONS=/tmp/rp/stations.toml RITORNELLO_RADIO_STATE=/tmp/rp/plugin-radio.json \
     RITORNELLO_FILES_ROOTS=/tmp/rp/media-roots.toml \
@@ -110,13 +109,9 @@ all, and the three `*_METAS` lines are optional: those tables are embedded in
 their binaries, the file only ever overrides an entry gone stale. Every
 other line has the same job — pointing a default that lives under `/etc` or
 `/var/lib` at `/tmp/rp`, so that a checkout writes nowhere it has no right
-to write. Two of them are the exception, pointing into the checkout rather
+to write. One of them is the exception, pointing into the checkout rather
 than at `/tmp`: `RITORNELLO_INPUT_PRESETS` names data the repository ships
-and `deploy.sh` installs; `RITORNELLO_LOCALES` names the **operator's own**
-locales root, which `deploy.sh` only creates, empty, and never writes into
--- the repository's French text now travels as an installed language pack
-instead, under a second, separate root (`RITORNELLO_LANGUAGE_PACKS`; see
-[interface.md](interface.md)).
+and `deploy.sh` installs.
 
 Every variable, and who reads it — each default is a production path, which
 is exactly why they have to be overridden in a checkout:
@@ -129,7 +124,6 @@ is exactly why they have to be overridden in a checkout:
 | `RITORNELLO_MPV_SOCKET` | core | `/run/ritornello/mpv.sock` |
 | `RITORNELLO_MPV_BIN` | core | `mpv` |
 | `RITORNELLO_RUNTIME_DIR` | core, `files` | `/run/ritornello` |
-| `RITORNELLO_LOCALES` | core | `/etc/ritornello/locales` |
 | `RITORNELLO_AUDIO_BUFFER`, `RITORNELLO_NETWORK_READAHEAD` | core (mpv tuning) | built-in durations |
 | `RITORNELLO_CD_DEV` | core (mpv) **and** `cd` | `/dev/sr0` |
 | `RITORNELLO_CONSOLE_TTY` | `console` | `/dev/tty1` |
@@ -155,16 +149,10 @@ say so rather than failing:
   `ritornello-media-mount.service`, which a checkout does not have. Local
   roots work, SMB shares do not.
 
-`RITORNELLO_LOCALES` matters more than it looks: English is embedded in the
-binary, every other language is read from disk at startup — by the core
-alone, which resolves every module's text (its own and every plugin's)
-against its shared registry, no plugin process ever reading a pack by
-itself. Its default (`/etc/ritornello/locales`) is the **operator's own**
-layer, and `deploy.sh` only creates it empty and leaves it alone: French
-now arrives on a device as an installed language pack, under the separate
-`RITORNELLO_LANGUAGE_PACKS` root, and a checkout has neither. Without the
-line above, the language dropdown offers **English only** — the reference
-French text this pack is built from sits, unread, in `deploy/locales/`.
+A local run shows **English only**, on purpose: English is embedded in the
+binary, every other language arrives as an installed language pack, under
+the directory `RITORNELLO_LANGUAGE_PACKS` names (default
+`/etc/ritornello/language-packs`), and a checkout has none installed there.
 
 ## Language
 

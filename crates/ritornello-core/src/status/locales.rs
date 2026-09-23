@@ -272,7 +272,7 @@ pub(super) struct LocaleRequest {
 /// (`<root>/<component>/<lang>.toml`, built from the code and read on
 /// demand): an arbitrary string was a path traversal
 /// (`{"locale":"../../whatever"}`) on an unauthenticated API. Since task 4
-/// no path is ever built from it — `Registry::sweep_disk` enumerates real
+/// no path is ever built from it — `crate::langpack::store::inventory` enumerates real
 /// directory entries and a locale code is only ever a `HashMap` key — so
 /// that particular danger is gone.
 ///
@@ -387,11 +387,11 @@ pub(super) async fn locale_put(State(state): State<AppState>, Json(req): Json<Lo
 /// `locale_current` before it returns, so any request that observes the
 /// `204` observes the new language here too.
 ///
-/// Still no I/O, and no blocking: `Registry::chain_for` reads two in-memory
-/// tiers (its disk tier is swept once — see `Registry`'s own doc), under one
+/// Still no I/O, and no blocking: `Registry::chain_for` reads only in-memory
+/// tiers (its pack tier is swept once — see `Registry`'s own doc), under one
 /// read guard, held for the length of one statement. What is *not* picked up
-/// without a real locale change is a pack edited on disk since the last
-/// sweep, exactly as before: the refresh gesture is unchanged.
+/// without a real locale change is a pack installed or removed since the
+/// last sweep, exactly as before: the refresh gesture is unchanged.
 pub(super) async fn i18n_json(State(state): State<AppState>) -> Json<serde_json::Value> {
     let locale = state.locale_current.read().await.clone().unwrap_or_else(|| "en".to_string());
     let fallback = state.fallback_current.read().await.clone().unwrap_or_else(|| "en".to_string());
@@ -708,7 +708,7 @@ mod tests {
         let layers = ritornello_i18n::validate(&manifest, &files).unwrap();
         let contents = crate::langpack::archive::PackContents { manifest, layers, files };
         crate::langpack::store::install(&packs_root, &crate::langpack::store::pack_id(language), &contents).unwrap();
-        crate::i18n::seeded_registry(dir.to_path_buf(), packs_root)
+        crate::i18n::seeded_registry(packs_root)
     }
 
     fn offered_language_pack(language: &str, installed: Option<&str>, offered: Option<&str>) -> crate::update::state::ComponentOffer {

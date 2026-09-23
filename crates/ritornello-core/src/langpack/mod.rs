@@ -13,12 +13,11 @@ pub mod store;
 /// Where installed packs live. One directory per pack, each holding its own
 /// `pack.toml` and one `<module>.toml` per module it covers.
 ///
-/// Deliberately **not** under the operator's own locales root: that one holds
-/// what a person wrote by hand, and an install must never write there. The
-/// separation is what lets a removal be exact and a hand-written pack
-/// survive -- which it does not today, where an update overwrites it.
+/// Its own root, separate from anything a component archive writes: an
+/// install must never overwrite what it did not put there, and a removal
+/// must remove exactly what it installed.
 pub const DEFAULT_PACKS_ROOT: &str = "/etc/ritornello/language-packs";
 
 /// The environment variable that moves that root, for tests and for the e2e
-/// harness. Same idiom as `RITORNELLO_LOCALES`.
+/// harness.
 pub const PACKS_ROOT_ENV: &str = "RITORNELLO_LANGUAGE_PACKS";

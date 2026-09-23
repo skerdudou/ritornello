@@ -70,7 +70,7 @@ pub fn language_of(id: &str) -> Option<&str> {
 /// request (a language code, wrapped by `pack_id`) rather than from a value
 /// this crate produced itself, so a bare `root.join(id)` would let `".."`
 /// resolve to the parent of `root` -- `/etc/ritornello`, on a real device,
-/// which is also where the operator's own hand-written locales layer lives.
+/// which holds every other component's configuration too.
 /// Refusing here, before either caller ever joins the path itself, is what
 /// makes that refusal apply everywhere rather than at each call site.
 fn pack_dir(root: &Path, id: &str) -> Option<PathBuf> {
@@ -125,7 +125,7 @@ pub fn install(root: &Path, id: &str, contents: &PackContents) -> std::io::Resul
 /// id is a different thing entirely and is never folded into `Ok(false)`:
 /// reporting a refusal as "nothing was there" is a lie the caller would act
 /// on, most dangerously by treating a `".."` it should have rejected as an
-/// ordinary miss instead of an attempt at the operator's own locales root.
+/// ordinary miss instead of an attempt to escape into `/etc/ritornello` at large.
 pub fn remove(root: &Path, id: &str) -> std::io::Result<bool> {
     let dir = pack_dir(root, id).ok_or_else(|| refused_id(id))?;
     if !dir.exists() {
@@ -286,8 +286,8 @@ mod tests {
     }
 
     /// **The property §7.3 turns on.** A removal touches the pack's own
-    /// directory and nothing else -- above all not the operator's own
-    /// locales root, which no install ever wrote to.
+    /// directory and nothing else -- above all not a neighbouring pack, or
+    /// any other file under the packs root that no install ever wrote.
     #[test]
     fn removing_a_pack_never_touches_a_neighbour_or_a_stray_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -305,7 +305,7 @@ mod tests {
     ///
     /// `".."` is the id that matters most: joined onto a real packs root
     /// (`/etc/ritornello/language-packs`), it resolves to `/etc/ritornello`,
-    /// which also holds the operator's own locales layer. A sibling
+    /// which holds every other component's configuration too. A sibling
     /// directory next to the temporary packs root stands in for it here --
     /// built to exist, so a bug that stopped refusing would actually destroy
     /// something and the test would actually notice.

@@ -425,8 +425,8 @@ fn resolve<'a>(checked: &'a Checked, name: &str) -> Resolved<'a> {
 ///   form the core binary's path; the units and the rules are listed for the
 ///   page and written by nobody here;
 /// - one of **ours** is judged by `installable_from_ui`, which allows the
-///   locale catalogs, input presets, examples and the `[[plugin]]` block that
-///   the core itself writes;
+///   input presets, examples and the `[[plugin]]` block that the core itself
+///   writes;
 /// - a **third-party** component gets `only_its_own_binary`, which allows none
 ///   of that. **No third-party component is ever exempt**, and the core's
 ///   exemption must never be generalised into one: it is a statement about one
@@ -548,7 +548,7 @@ enum Refusal {
     DigestMismatch,
     NeedsManualStep,
     /// A **third-party** archive carrying anything besides its own binary: a
-    /// unit, a polkit rule, a nested path, a locale catalog, an initial
+    /// unit, a polkit rule, a nested path, an input preset, an initial
     /// configuration, a `[[plugin]]` block, a second binary.
     ///
     /// Its own variant and not `NeedsManualStep`, because the two sentences
@@ -832,9 +832,9 @@ fn initial_config_target(entry: &str) -> Option<String> {
 /// takes a `&str` and derives its temporary name from a `.toml` extension it
 /// assumes, and the privileged crate's is `pub(crate)` to a crate that must
 /// not gain a dependant. This one names the file rather than its extension, so
-/// it works for a locale catalog and an input preset alike — and, `pub(crate)`
-/// within this binary, also for `langpack::store`'s pack files and manifest,
-/// which is why there is still no fourth copy.
+/// it works for an input preset and a language pack file alike — and,
+/// `pub(crate)` within this binary, also for `langpack::store`'s pack files
+/// and manifest, which is why there is still no fourth copy.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("/"));
     let tmp = dir.join(format!(
@@ -1087,8 +1087,8 @@ pub struct Worker {
     /// (`Registry::resweep_async`) once they have written or removed a
     /// pack's own directory under `packs_root`.
     pub registry: crate::i18n::Shared,
-    /// Where an installed language pack's own directory lives -- a root
-    /// entirely separate from the operator's own locales root (see
+    /// Where an installed language pack's own directory lives -- its own
+    /// root, separate from anything a component archive writes (see
     /// `i18n::registry`'s module doc): `install_language`/`remove_language`
     /// write only here, and `registry`'s own packs root must be exactly the
     /// same path, or a resweep would look for what this worker just wrote in
@@ -1904,14 +1904,14 @@ impl Worker {
         };
         // Written by the core, unprivileged, because the service already owns
         // `/etc/ritornello`: root has no business touching it, which is what
-        // keeps its list of paths down to two.
+        // keeps its list of paths down to one.
         //
         // Written **before** the unit runs, so a unit that then fails leaves
-        // the new locale catalogs beside the old binary. Harmless as things
-        // stand — `Chain::get` falls back to the embedded English and, past
-        // that, to the key itself — and the alternative (placing them after)
-        // would leave the new binary beside the old catalogs, which is the
-        // same mismatch the other way round with no fallback at all.
+        // the new input presets beside the old binary. Harmless as things
+        // stand — a preset is a default a plugin falls back on, not a live
+        // dependency — and the alternative (placing them after) would leave
+        // the new binary beside the old presets, which is the same mismatch
+        // the other way round.
         self.write_etc_files(&contents.etc_files)?;
         // Only for a plugin that was not there. On an update, the operator's
         // station list is already in place and `write_initial_config` would
@@ -2028,16 +2028,16 @@ impl Worker {
         }
     }
 
-    /// The locale catalogs and input presets a release owns.
+    /// The input presets a release owns.
     ///
-    /// Written unconditionally, which is why `ETC_PREFIXES` is two named
-    /// subdirectories and not `etc/ritornello/` at large: the operator's own
+    /// Written unconditionally, which is why `ETC_PREFIXES` is one named
+    /// subdirectory and not `etc/ritornello/` at large: the operator's own
     /// files live in that directory too.
     ///
     /// Through a temporary and a `rename`, like every other file this product
-    /// writes: this is a device one unplugs, and a `fr.toml` cut in half by a
-    /// power cut is a catalog that no longer parses — every message in it
-    /// falls back to its key, on screen.
+    /// writes: this is a device one unplugs, and a preset file cut in half by
+    /// a power cut is one that no longer parses — a plugin that reads it
+    /// simply falls back on its own defaults.
     fn write_etc_files(&self, files: &[(String, Vec<u8>)]) -> Result<(), Refusal> {
         for (path, bytes) in files {
             let target = self.root.join(path);
@@ -2680,12 +2680,6 @@ mod tests {
             "etc/polkit-1/rules.d/",
             "etc/polkit-1/rules.d/52-ritornello-update.rules",
             "etc/polkit-1/rules.d/50-ritornello-power.rules",
-            "etc/ritornello/",
-            "etc/ritornello/locales/",
-            "etc/ritornello/locales/common/",
-            "etc/ritornello/locales/common/fr.toml",
-            "etc/ritornello/locales/core/",
-            "etc/ritornello/locales/core/fr.toml",
             "etc/systemd/",
             "etc/systemd/system/",
             "etc/systemd/system/ritornello.service",
@@ -2706,9 +2700,9 @@ mod tests {
         let radio = names(&[
             "etc/",
             "etc/ritornello/",
-            "etc/ritornello/locales/",
-            "etc/ritornello/locales/radio/",
-            "etc/ritornello/locales/radio/fr.toml",
+            "etc/ritornello/input-presets/",
+            "etc/ritornello/input-presets/radio/",
+            "etc/ritornello/input-presets/radio/default.toml",
             "examples/",
             "examples/stations.example.toml",
             "usr/",
@@ -2893,10 +2887,10 @@ mod tests {
         // The two that separate this rule from the plugin rule. Both are
         // asserted against `installable_from_ui` first, so the fixture is
         // proven to be one our own rule accepts.
-        let catalog = with(&["etc/ritornello/locales/theirs/fr.toml"]);
+        let catalog = with(&["etc/ritornello/input-presets/theirs/default.toml"]);
         assert!(
             installable_from_ui(&catalog),
-            "the plugin rule accepts a locale catalog — that is what makes this fixture the discriminating one"
+            "the plugin rule accepts an input preset — that is what makes this fixture the discriminating one"
         );
         assert!(
             !archive_allowed(false, true, &catalog),
@@ -3394,25 +3388,25 @@ mod tests {
         );
     }
 
-    /// A release's locale catalog lands whole or not at all.
+    /// A release's input preset lands whole or not at all.
     ///
     /// The cheap proof that the write went through a `rename` rather than
     /// straight onto the target — the same shape the privileged crate uses
     /// for its own manifest: nothing named after the temporary survives, and
-    /// the temporary is not the target. A truncated `fr.toml` is a catalog
-    /// that no longer parses, and every message in it falls back to its key,
-    /// on screen.
+    /// the temporary is not the target. A truncated preset file is one that
+    /// no longer parses, and a plugin that reads it falls back on its own
+    /// defaults.
     #[test]
-    fn a_locale_catalog_is_written_through_a_temporary_and_a_rename() {
+    fn an_input_preset_is_written_through_a_temporary_and_a_rename() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("fr.toml");
-        write_atomic(&target, b"hello = \"bonjour\"\n").unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), b"hello = \"bonjour\"\n");
+        let target = dir.path().join("default.toml");
+        write_atomic(&target, b"binding = \"play\"\n").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"binding = \"play\"\n");
         let leftovers: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| n != "fr.toml")
+            .filter(|n| n != "default.toml")
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }
@@ -3548,10 +3542,7 @@ mod tests {
             // correct fixture, not a shortcut. `pack_rig` below points
             // `packs_root` at this exact same directory, so a pack it
             // installs is exactly what a resweep of this registry finds.
-            registry: Arc::new(RwLock::new(crate::i18n::seeded_registry(
-                root.to_path_buf(),
-                root.join("packs"),
-            ))),
+            registry: Arc::new(RwLock::new(crate::i18n::seeded_registry(root.join("packs")))),
             packs_root: root.join("packs"),
             // Unused by most tests: a language pack test replaces this with
             // a channel it can `try_recv()` on — see `bare_pack_rig`.
@@ -4813,11 +4804,11 @@ mod tests {
     /// **RULING 64 at the call site: the third-party path really does call the
     /// stricter rule.**
     ///
-    /// The archive carries its binary **and a locale catalog** — a shape
+    /// The archive carries its binary **and an input preset** — a shape
     /// `installable_from_ui` accepts, asserted here so the fixture is proven to
     /// be the discriminating one. Deleting the `archive_allowed` guard in
     /// `install_one` makes this red, and what goes red is not only the outcome:
-    /// the mutated path writes the stranger's catalog under `/etc/ritornello`
+    /// the mutated path writes the stranger's preset under `/etc/ritornello`
     /// and goes on to `systemctl`.
     #[tokio::test]
     async fn install_one_refuses_a_third_party_archive_before_writing_anything() {
@@ -4829,7 +4820,7 @@ mod tests {
         let (worker, dir) = worker_rig(status);
         let archive = targz(&[
             ("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
-            ("etc/ritornello/locales/radio/fr.toml", b"a = \"b\"\n"),
+            ("etc/ritornello/input-presets/radio/default.toml", b"a = \"b\"\n"),
         ]);
         assert!(
             installable_from_ui(&archive::read(&archive, DECOMPRESSED_MAX).unwrap().entries),
@@ -4849,7 +4840,7 @@ mod tests {
             outcome.as_ref().err()
         );
         assert!(
-            !dir.path().join("etc/ritornello/locales/radio/fr.toml").exists(),
+            !dir.path().join("etc/ritornello/input-presets/radio/default.toml").exists(),
             "the core wrote /etc/ritornello for a stranger's archive"
         );
         assert!(

@@ -19,12 +19,12 @@ pub const EN: &str = include_str!("../locales/en.toml");
 /// each reader keep its own copy.
 pub type Shared = Arc<tokio::sync::RwLock<Registry>>;
 
-/// Sweeps `root` and `packs_root` once and seeds the core's own module and
-/// `common`'s — the construction used exactly once, at startup (`main.rs`).
-/// Plugin modules are added afterwards, one `insert_announced` per
-/// announcement, as they arrive.
-pub fn seeded_registry(root: std::path::PathBuf, packs_root: std::path::PathBuf) -> Registry {
-    let mut registry = Registry::sweep(root, packs_root);
+/// Sweeps `packs_root` once and seeds the core's own module and `common`'s —
+/// the construction used exactly once, at startup (`main.rs`). Plugin
+/// modules are added afterwards, one `insert_announced` per announcement, as
+/// they arrive.
+pub fn seeded_registry(packs_root: std::path::PathBuf) -> Registry {
+    let mut registry = Registry::sweep(packs_root);
     seed_core_and_common(&mut registry);
     registry
 }
@@ -34,7 +34,7 @@ pub fn seeded_registry(root: std::path::PathBuf, packs_root: std::path::PathBuf)
 /// own catalogue — the uniform path `Registry::chain_for` relies on. Kept
 /// separate from `seeded_registry` so a caller that already holds a
 /// `Registry` (none does yet, but a future one might) can reseed without
-/// resweeping the disk.
+/// resweeping the packs root.
 fn seed_core_and_common(registry: &mut Registry) {
     registry.insert_announced("core", core_module_layers());
     registry.insert_announced("common", common_module_layers());
@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn core_catalog_resolves_the_core_s_own_embedded_english() {
         let dir = tempfile::tempdir().unwrap();
-        let registry = seeded_registry(dir.path().to_path_buf(), dir.path().join("packs"));
+        let registry = seeded_registry(dir.path().join("packs"));
         let cat = core_catalog(&registry, "en", "en");
         // The embedded pack is non-empty (core/settings.rs's own test pins
         // this fact for `EN` directly); this checks the same fact survives
@@ -109,11 +109,17 @@ mod tests {
     }
 
     #[test]
-    fn core_catalog_prefers_a_disk_pack_over_the_embedded_text() {
+    fn core_catalog_prefers_an_installed_pack_over_the_embedded_text() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("core")).unwrap();
-        std::fs::write(dir.path().join("core/fr.toml"), "standby = \"VEILLE\"\n").unwrap();
-        let registry = seeded_registry(dir.path().to_path_buf(), dir.path().join("packs"));
+        let packs_root = dir.path().join("packs");
+        std::fs::create_dir_all(packs_root.join("ritornello-lang-fr")).unwrap();
+        std::fs::write(
+            packs_root.join("ritornello-lang-fr/pack.toml"),
+            "language = \"fr\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"core\"]\n",
+        )
+        .unwrap();
+        std::fs::write(packs_root.join("ritornello-lang-fr/core.toml"), "standby = \"VEILLE\"\n").unwrap();
+        let registry = seeded_registry(packs_root);
         let cat = core_catalog(&registry, "fr", "en");
         assert_eq!(cat.get("standby"), "VEILLE");
     }
@@ -129,12 +135,19 @@ mod tests {
     #[test]
     fn load_for_tests_cannot_see_a_fallback_locale_the_registry_does() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("core")).unwrap();
-        // Only the fallback language ("de") defines this key on disk;
-        // neither the chosen one ("fr") nor English (embedded or disk) do.
-        std::fs::write(dir.path().join("core/de.toml"), "only_de = \"nur Deutsch\"\n").unwrap();
+        let packs_root = dir.path().join("packs");
+        // Only the fallback language ("de") defines this key, and it
+        // arrives as an installed pack; neither the chosen one ("fr") nor
+        // English (embedded or installed) define it.
+        std::fs::create_dir_all(packs_root.join("ritornello-lang-de")).unwrap();
+        std::fs::write(
+            packs_root.join("ritornello-lang-de/pack.toml"),
+            "language = \"de\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"core\"]\n",
+        )
+        .unwrap();
+        std::fs::write(packs_root.join("ritornello-lang-de/core.toml"), "only_de = \"nur Deutsch\"\n").unwrap();
 
-        let registry = seeded_registry(dir.path().to_path_buf(), dir.path().join("packs"));
+        let registry = seeded_registry(packs_root);
         let via_registry = registry.chain_for("core", "fr", "de");
         assert_eq!(
             via_registry.get("only_de"),
@@ -142,6 +155,10 @@ mod tests {
             "production resolves the fallback tier"
         );
 
+        // `load_for_tests` reads its own, unrelated `<root>/<component>/
+        // <locale>.toml` shape — nothing was ever written under `dir.path()`
+        // itself (only under `dir.path().join("packs")`), so it finds
+        // nothing regardless.
         let via_fixture =
             ritornello_i18n::Chain::load_for_tests("core", "fr", dir.path(), EN);
         assert_eq!(

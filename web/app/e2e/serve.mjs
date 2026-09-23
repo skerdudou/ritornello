@@ -222,37 +222,16 @@ exec = "${root}/target/debug/ritornello-plugin-generic-input"
 // with fixtures crafted for that; this fixture only has to prove the real
 // core serves two incomplete languages and the page reacts to them,
 // including the "still in English" figure computed from real server data.
-const localesRootNative = join(configDirNative, 'locales')
-mkdirSync(join(localesRootNative, 'core'), { recursive: true })
-writeFileSync(
-  join(localesRootNative, 'core', 'fr.toml'),
-  'language = "Langue"\nsave = "Enregistrer"\n',
-)
-writeFileSync(
-  join(localesRootNative, 'core', 'de.toml'),
-  'language = "Sprache"\nsave = "Speichern"\n',
-)
-const localesRoot = `${configDir}/locales`
-
-// The packs root (task 14, e2e journey): where an *installed* language pack
-// lives on disk, per `RITORNELLO_LANGUAGE_PACKS`
-// (`crate::langpack::PACKS_ROOT_ENV`) -- a tier separate from
-// `RITORNELLO_LOCALES` just above, which is the operator's own hand-written
-// layer. `docs/development.md`'s own words: "the repository's French text
-// now travels as an installed language pack instead, under a second,
-// separate root". This harness lays one pre-installed pack here, `fr`, so
-// the journey below finds a real device's baseline -- an empty
-// `RITORNELLO_LANGUAGE_PACKS` is a state this feature never actually ships
-// in, and the removal gesture (`DELETE /api/languages/fr`) needs something
-// real to remove.
 //
-// Deliberately the SAME two keys and the SAME values as the `fr` locale
-// fixture just above, not a richer, more "authentic" French translation:
-// the two layers compose (`Registry::sweep` unions every layer for a given
-// language), and the language-card journey's own French assertions ("0
-// module /4") were written against exactly two covered keys for `core`. A
-// pack that covered *more* of `core` would silently complete that module
-// for French and redden a test this change has no business touching.
+// Both arrive as installed language packs, under `RITORNELLO_LANGUAGE_PACKS`
+// (`crate::langpack::PACKS_ROOT_ENV`) -- the operator's own hand-written
+// locales layer these used to sit under was removed entirely (owner's
+// decision, 2026-09-23, no backward compatibility): nothing reads
+// `/etc/ritornello/locales` any more. This harness lays these packs down
+// pre-installed, so the journey below finds a real device's baseline -- an
+// empty `RITORNELLO_LANGUAGE_PACKS` is a state this feature never actually
+// ships in, and the removal gesture (`DELETE /api/languages/fr`) needs
+// something real to remove.
 const packsRootNative = join(configDirNative, 'language-packs')
 mkdirSync(join(packsRootNative, 'ritornello-lang-fr'), { recursive: true })
 writeFileSync(
@@ -263,6 +242,16 @@ writeFileSync(
 writeFileSync(
   join(packsRootNative, 'ritornello-lang-fr', 'core.toml'),
   'language = "Langue"\nsave = "Enregistrer"\n',
+)
+mkdirSync(join(packsRootNative, 'ritornello-lang-de'), { recursive: true })
+writeFileSync(
+  join(packsRootNative, 'ritornello-lang-de', 'pack.toml'),
+  'language = "de"\nversion = "0.2.0-beta.2"\n' +
+    'source = "https://github.com/skerdudou/ritornello"\nmodules = ["core"]\n',
+)
+writeFileSync(
+  join(packsRootNative, 'ritornello-lang-de', 'core.toml'),
+  'language = "Sprache"\nsave = "Speichern"\n',
 )
 const packsRoot = `${configDir}/language-packs`
 
@@ -421,13 +410,11 @@ const env = {
   RITORNELLO_RADIO_STATE: `${execDir}/plugin-radio.json`,
   RITORNELLO_INPUT_BINDINGS: `${execDir}/input-bindings.toml`,
   RITORNELLO_INPUT_PRESETS: `${root}/deploy/input-presets`,
-  // The partial French core pack above — default is `/etc/ritornello/
-  // locales`, which does not exist on a developer machine either, so
-  // without this the language card journey would find only `en` and never
-  // see the annotation or the fallback control it exists to exercise.
-  RITORNELLO_LOCALES: localesRoot,
-  // The pre-installed `fr` pack laid out above -- a device's OTHER root,
-  // never the operator's own.
+  // The two partial core packs laid out above (`fr`, `de`) -- default is
+  // `/etc/ritornello/language-packs`, which does not exist on a developer
+  // machine either, so without this the language card journey would find
+  // only `en` and never see the annotation or the fallback control it
+  // exists to exercise.
   RITORNELLO_LANGUAGE_PACKS: packsRoot,
   // The debug-only seam `release.rs::releases_url` reads instead of the real
   // GitHub host, so `POST /api/languages/{language}` can be driven for real

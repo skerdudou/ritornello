@@ -186,7 +186,8 @@ mod tests {
                 );
                 assert!(
                     !entry.to.contains("etc/ritornello/locales"),
-                    "{name} still writes into the operator's own locales root: {}",
+                    "{name} still writes into etc/ritornello/locales -- no component may ever ship \
+                     translated text there: {}",
                     entry.to
                 );
                 checked += 1;

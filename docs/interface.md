@@ -1474,15 +1474,7 @@ screen.
 
 The interface is multilingual. The base language is **English**, embedded
 in every binary; every other language — French included — is provided by
-external TOML text, decentralized per component, read from **two roots**
-that are never the same directory and that never write into each other:
-
-    /etc/ritornello/locales/                # the operator's own layer
-      common/fr.toml   # shared vocabulary (play/pause/stop/error…)
-      core/fr.toml     # core text + config page
-      radio/fr.toml    # radio plugin + admin page
-      cd/fr.toml       # cd plugin
-      <third-party-plugin>/fr.toml
+external TOML text, decentralized per component, read from **one root**:
 
     /etc/ritornello/language-packs/          # installed packs
       ritornello-lang-fr/
@@ -1492,12 +1484,9 @@ that are never the same directory and that never write into each other:
         radio.toml
         cd.toml
 
-- The first root is what a person edits **by hand**, configurable through
-  `RITORNELLO_LOCALES` (default `/etc/ritornello/locales`); nothing the
-  core does ever writes into it.
-- The second is what an **install** writes: one whole directory per pack,
-  named after the pack's own id (`ritornello-lang-<language>`), replaced
-  wholesale by every install and never merged
+- What an **install** writes: one whole directory per pack, named after the
+  pack's own id (`ritornello-lang-<language>`), replaced wholesale by every
+  install and never merged
   (`crates/ritornello-core/src/langpack/store.rs::install`), configurable
   through `RITORNELLO_LANGUAGE_PACKS` (default
   `/etc/ritornello/language-packs`). The sweep (`inventory`) enforces the
@@ -1508,19 +1497,25 @@ that are never the same directory and that never write into each other:
   language the release's own pack already covers, one that no Remove
   button can ever act on (`store::remove` looks the directory up by the
   same id it should have been named).
-- Both roots are swept by the same registry, and the operator's own layer
-  resolves **first** — see the resolution chain below.
+- **There used to be a second root**, `/etc/ritornello/locales/`: a
+  hand-written layer an operator edited directly, which outranked every
+  installed pack and which an update could never overwrite. The owner
+  judged the "my own manual corrections" feature not worth its weight and
+  removed it entirely (2026-09-23, no backward compatibility): nothing
+  reads that path any more, and a component archive that carries it is
+  refused like any other unknown shape
+  (`update::archive::ETC_PREFIXES`). A device deployed before this
+  delivery may delete `/etc/ritornello/locales` by hand.
 - **The resolution chain, per key: chosen language → the device's
   fallback language → English → the key itself.** Each of the first three
-  is itself a small stack — the operator's own disk file, before an
-  installed pack, before the module's embedded text (`Registry::sources_for`
-  enumerates the three, strongest first) — and the module's own vocabulary
-  is itself tried before `common`'s. Three tiers, times two vocabularies,
-  times three languages: up to **eighteen** layers can be consulted for one
-  key, in that fixed order (`Registry::chain_for`). **The chosen language
-  wins over specificity, deliberately**: a generic word `common` happens to
-  carry in the chosen language is preferred over a well-chosen,
-  module-specific word from the
+  is itself a small stack — an installed pack, before the module's
+  embedded text (`Registry::sources_for` enumerates the two, strongest
+  first) — and the module's own vocabulary is itself tried before
+  `common`'s. Two tiers, times two vocabularies, times three languages: up
+  to **twelve** layers can be consulted for one key, in that fixed order
+  (`Registry::chain_for`). **The chosen language wins over specificity,
+  deliberately**: a generic word `common` happens to carry in the chosen
+  language is preferred over a well-chosen, module-specific word from the
   fallback language — someone who asked for a language gets that
   language's vocabulary exhausted before any other language is even
   tried. A missing key never errors: it degrades one language at a time,
@@ -1529,8 +1524,8 @@ that are never the same directory and that never write into each other:
 - Language **picker** on the config page (`/config`): it lists `en` plus
   the **union of every language at least one module — the core or a
   connected plugin — translates** (`GET /api/locale`'s `locales`,
-  `ritornello_i18n::union_of_languages` over every module's disk pack and
-  announced catalogue), each shown by its name in its own language
+  `ritornello_i18n::union_of_languages` over every module's installed pack
+  and announced catalogue), each shown by its name in its own language
   ("Français", "English"). This replaced an earlier version that listed
   only the core's own `core/<lang>.toml` packs — the origin defect this
   chantier was opened to fix: a plugin could ship a language the core had
@@ -1563,20 +1558,16 @@ that are never the same directory and that never write into each other:
   Picking `en` itself as the fallback changes nothing over the chosen
   language alone, so this line stays empty rather than repeating the
   completeness annotation right above it.
-- **Adding a language**: the ordinary way is a gesture on the config page,
-  not a file copy any more. Right under the language picker,
-  `LanguagePacksRow.vue` lists every language a pack is offered or already
-  installed for, and turns "Install" / "Update" / "Remove" into
-  `POST`/`DELETE /api/languages/{language}` — the update worker fetches,
-  verifies and writes the pack itself (see
-  [Update card](#update-card)). Writing a `<component>/<lang>.toml` by
-  hand under `RITORNELLO_LOCALES` is still how the **operator's own
-  layer** is filled in — an override, or a language nobody has published a
-  pack for yet — and it resolves ahead of any installed pack (see the two
-  roots above). A missing key or module automatically falls back through
-  the chain above (per-key degradation, never an error). A file that is
-  present but unreadable (permissions, invalid TOML), on either root, is
-  ignored **with a trace in the logs**.
+- **Adding a language**: a gesture on the config page, not a file copy.
+  Right under the language picker, `LanguagePacksRow.vue` lists every
+  language a pack is offered or already installed for, and turns "Install" /
+  "Update" / "Remove" into `POST`/`DELETE /api/languages/{language}` — the
+  update worker fetches, verifies and writes the pack itself (see
+  [Update card](#update-card)). There is no other route: a language nobody
+  has published a pack for cannot be added by hand any more. A missing key
+  or module automatically falls back through the chain above (per-key
+  degradation, never an error). A pack file that is present but unreadable
+  (permissions, invalid TOML) is ignored **with a trace in the logs**.
 - The initial French pack is built from `deploy/locales/` by
   `scripts/package-release.sh --languages` — the same path the release
   workflow uses to publish every pack — and `deploy/deploy.sh` places the
@@ -1586,31 +1577,28 @@ that are never the same directory and that never write into each other:
   archive carries any translated text at all any more
   (`scripts/packaging.py` stages no locale file for the core or a plugin):
   installing or updating a component writes nothing under
-  `etc/ritornello/locales/` or `etc/ritornello/language-packs/`, so a
-  hand-edited `fr.toml` under the operator's own root now survives every
-  update of the component it covers — **this used to be false, and was the
-  defect the whole language-packs chantier was opened to remove.** A
-  language pack's own update is contained the same way: installing
-  `ritornello-lang-<language>` replaces only that one pack's own directory
-  under `/etc/ritornello/language-packs`
-  (`langpack::store::install` removes the old directory first, then writes
-  the new one whole) and never touches the operator's own locales root —
-  the two roots exist precisely so an install can never overwrite what a
-  person wrote by hand.
-- **What picks up an edited pack.** The registry sweeps the pack root once,
-  at startup, and again on every `Registry::resweep_async` — which
-  `Core::set_locale` and `Core::set_fallback` call. **The config page does
-  not call either just because it was saved**: `ConfigView.vue`'s
+  `/etc/ritornello/language-packs/`, so a component update never touches
+  translated text at all — **this used to be false, and was the defect the
+  whole language-packs chantier was opened to remove.** A language pack's
+  own update is contained: installing `ritornello-lang-<language>` replaces
+  only that one pack's own directory under
+  `/etc/ritornello/language-packs` (`langpack::store::install` removes the
+  old directory first, then writes the new one whole), never any other
+  pack's.
+- **What picks up an installed or removed pack.** The registry sweeps the
+  pack root once, at startup, and again on every `Registry::resweep_async`
+  — which `Core::set_locale` and `Core::set_fallback` call. **The config
+  page does not call either just because it was saved**: `ConfigView.vue`'s
   `saveDisplay` compares the picked language (and, only while it is
   incomplete, the fallback) against what was last loaded and sends nothing
-  to `PUT /api/locale` when neither moved — an operator who edits a pack
-  and re-picks the language already selected sees a success toast and no
-  resweep at all. Two gestures actually resweep: `sudo systemctl restart
-  ritornello`, or an **actual** change of the interface language (or, for
-  an incomplete language, the fallback) — even briefly switching away and
-  back counts, since each direction is a real change the page does submit.
-  There is no third gesture, and re-selecting the language already in
-  force is not the second one.
+  to `PUT /api/locale` when neither moved — an operator who hand-edits a
+  pack's file directly and re-picks the language already selected sees a
+  success toast and no resweep at all. Two gestures actually resweep: `sudo
+  systemctl restart ritornello`, or an **actual** change of the interface
+  language (or, for an incomplete language, the fallback) — even briefly
+  switching away and back counts, since each direction is a real change the
+  page does submit. There is no third gesture, and re-selecting the
+  language already in force is not the second one.
 - **A plugin page's catalog is asked for in an explicit language**, and the
   request waits for `/api/status` — the answer that carries the selected
   language. Asked without it, the core falls back to its own current

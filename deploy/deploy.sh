@@ -72,14 +72,11 @@ ssh "${SSHOPTS[@]}" "$PI" 'id -u ritornello >/dev/null 2>&1 \
 # rather than merges, for the same reason -- a module a new version drops
 # must stop answering, not linger).
 #
-# The operator's own locales root (/etc/ritornello/locales) is created if
-# it is absent and then left **strictly alone**: in the resolution order it
-# comes before every installed pack (Registry::sources_for), so anything
-# this script wrote there would permanently shadow every future pack
-# update -- exactly the trap language packs exist to remove. Before this
-# change, this block copied deploy/locales/ in whole into that root, which
-# was precisely that trap on a hand-deployed device.
-ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/locales /etc/ritornello/language-packs'
+# /etc/ritornello/locales is no longer read by anything: the operator's own
+# locales layer was removed (2026-09-23, no backward compatibility). A
+# device deployed before this delivery may delete it by hand; this script
+# creates only the packs root below.
+ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/language-packs'
 ./scripts/package-release.sh --languages
 ssh "${SSHOPTS[@]}" "$PI" 'rm -rf /tmp/language-packs && mkdir -p /tmp/language-packs'
 for archive in release/languages/ritornello-lang-*.tar.gz; do
