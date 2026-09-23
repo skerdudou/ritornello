@@ -372,10 +372,24 @@ const testReleasesUrl = `http://127.0.0.1:${FAKE_REPO_PORT}/releases.json`
 // Windows launch branch below, which starts `python3` *inside* WSL.
 const fakeRepoDir = `${configDir}/fake-repo`
 
-writeFileSync(
-  join(configDirNative, 'stations.toml'),
-  '[[stations]]\nname = "FIP"\nurl = "http://icecast.radiofrance.fr/fip-midfi.mp3"\npreset = 1\n',
-)
+// The radio plugin's own data directory now holds its fixture -- one
+// directory per plugin under `RITORNELLO_PLUGIN_DATA_ROOT` (env, below),
+// which is `${execDir}/plugins` here. Under native Linux `execDir` is a
+// plain path this same Node process already writes to (it equals
+// `configDir`), so the file lands here directly; under Windows `execDir` is
+// WSL-native (`/tmp/...`, unreachable from this Windows-side process), so
+// the equivalent write is instead embedded, base64-encoded, into
+// `lancer.sh` below, run *inside* WSL ahead of `exec`.
+const stationsToml =
+  '[[stations]]\nname = "FIP"\nurl = "http://icecast.radiofrance.fr/fip-midfi.mp3"\npreset = 1\n'
+if (!isWindows) {
+  mkdirSync(join(execDir, 'plugins', 'radio'), { recursive: true })
+  writeFileSync(join(execDir, 'plugins', 'radio', 'stations.toml'), stationsToml)
+}
+// Base64, not a heredoc: a multi-line inline script crossing Node ->
+// wsl.exe -> bash has already been measured to get corrupted on quoting
+// (see the header) -- base64 has no character that crossing is sensitive to.
+const stationsTomlB64 = Buffer.from(stationsToml, 'utf8').toString('base64')
 
 // mpv gets its own configuration directory, with a null audio output in it.
 //
@@ -406,9 +420,12 @@ const env = {
   RITORNELLO_STATE: `${execDir}/state.json`,
   RITORNELLO_RUNTIME_DIR: execDir,
   RITORNELLO_MPV_SOCKET: `${execDir}/mpv.sock`,
-  RITORNELLO_RADIO_STATIONS: `${configDir}/stations.toml`,
-  RITORNELLO_RADIO_STATE: `${execDir}/plugin-radio.json`,
-  RITORNELLO_INPUT_BINDINGS: `${execDir}/input-bindings.toml`,
+  // One directory per plugin, all under this single root: the core joins it
+  // with each plugin's bare name and creates the result itself before that
+  // plugin's first launch (`stations.toml` above therefore only needs its
+  // own subdirectory to already exist, not the plugins' state/settings
+  // files, which start out simply absent -- the normal case).
+  RITORNELLO_PLUGIN_DATA_ROOT: `${execDir}/plugins`,
   RITORNELLO_INPUT_PRESETS: `${root}/deploy/input-presets`,
   // The two partial core packs laid out above (`fr`, `de`) -- default is
   // `/etc/ritornello/language-packs`, which does not exist on a developer
@@ -420,17 +437,10 @@ const env = {
   // GitHub host, so `POST /api/languages/{language}` can be driven for real
   // against the fake repository this harness serves.
   RITORNELLO_TEST_RELEASES_URL: testReleasesUrl,
-  // Every file the `files` plugin writes goes to the throwaway execution
-  // directory. Its defaults are `/etc/ritornello` and `/var/lib/ritornello`:
-  // left alone, a journey run on a machine where Ritornello is installed would
-  // overwrite the owner's roots table, playlist and saved lists. The directory
-  // itself is created by the core before any plugin starts (the plugin sockets
-  // live there), so none of these paths needs pre-creating here.
-  RITORNELLO_FILES_ROOTS: `${execDir}/media-roots.toml`,
-  RITORNELLO_FILES_CREDENTIALS: `${execDir}/media-credentials`,
-  RITORNELLO_FILES_STATE: `${execDir}/plugin-files.json`,
-  RITORNELLO_FILES_MPV_PLAYLIST: `${execDir}/plugin-files.m3u`,
-  RITORNELLO_FILES_PLAYLISTS: `${execDir}/playlists`,
+  // Every file the `files` plugin writes goes to its own subdirectory of the
+  // throwaway execution directory (`RITORNELLO_PLUGIN_DATA_ROOT`, above):
+  // left alone, a journey run on a machine where Ritornello is installed
+  // would overwrite the owner's roots table, playlist and saved lists.
   RITORNELLO_FILES_PROC_MOUNTS: procMounts,
   // Read by mpv, not by the core (which knows only its own
   // `RITORNELLO_*`): this is what hands it the `ao=null` written just
@@ -479,9 +489,16 @@ if (isWindows) {
   const fakeRepoLine =
     `env FAKE_REPO_MARKER='${execDir}' python3 -m http.server ${FAKE_REPO_PORT} ` +
     `--directory '${fakeRepoDir}' >/dev/null 2>&1 &\n`
+  // The radio fixture, written *inside* WSL (see `stationsTomlB64`'s own
+  // comment above): `execDir` is not yet reachable from this Windows-side
+  // process, but it is a plain path once this script runs inside WSL, ahead
+  // of `exec`.
+  const stationsLine =
+    `mkdir -p '${execDir}/plugins/radio'\n` +
+    `echo '${stationsTomlB64}' | base64 -d > '${execDir}/plugins/radio/stations.toml'\n`
   writeFileSync(
     scriptLancementNative,
-    `#!/usr/bin/env bash\necho $$ > '${pidFile}'\nexport PATH='${fakeBinDir}':"$PATH"\n${fakeRepoLine}exec env ${affectations} '${root}/target/debug/ritornello-core'\n`,
+    `#!/usr/bin/env bash\necho $$ > '${pidFile}'\nexport PATH='${fakeBinDir}':"$PATH"\n${stationsLine}${fakeRepoLine}exec env ${affectations} '${root}/target/debug/ritornello-core'\n`,
   )
   chmodSync(scriptLancementNative, 0o755)
   writeFileSync(

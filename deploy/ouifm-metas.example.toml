@@ -12,9 +12,11 @@
 #      embedded table, so declaring the same `stream` here takes precedence;
 #   2. ADD a stream missing from the bundled table.
 #
-# Copy it to /etc/ritornello/ouifm-metas.toml (or point elsewhere with
-# RITORNELLO_OUIFM_METAS). Missing file: the normal case, nothing is logged.
-# Invalid file: a warning, and the embedded table carries on alone.
+# Copy it to /var/lib/ritornello/plugins/ouifm-metas/ouifm-metas.toml (the
+# plugin's own data directory — see RITORNELLO_PLUGIN_DATA_ROOT in
+# docs/development.md to move it elsewhere). Missing file: the normal case,
+# nothing is logged. Invalid file: a warning, and the embedded table carries
+# on alone.
 #
 # HOW TO COLLECT THE TWO IDENTIFIERS (one minute):
 #   1. open https://www.ouifm.fr/player, view the page source;

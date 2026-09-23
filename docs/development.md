@@ -11,7 +11,14 @@ a Pi and without installing anything under `/etc`.
 
 ### 1. Configuration files, once
 
-    mkdir -p /tmp/rp/playlists /tmp/rp/credentials
+Every plugin keeps its data — settings, state, caches — in its own
+directory under one root (`RITORNELLO_PLUGIN_DATA_ROOT`; see [Where a
+plugin keeps its data](plugins.md#where-a-plugin-keeps-its-data)). The core
+creates each plugin's directory itself on launch, so only the one below —
+needed ahead of the first `cargo run`, to have a station to play — has to
+exist beforehand:
+
+    mkdir -p /tmp/rp/plugins/radio
 
     # The plugin list. Only `name` and `exec` are ever needed: each binary
     # announces its own kinds (source, metadata, input, display) and whether
@@ -62,21 +69,24 @@ a Pi and without installing anything under `/etc`.
 
     # A station, to have something to play. The radio page writes this file
     # afterwards; two lines are enough to start.
-    cat > /tmp/rp/stations.toml <<'STATIONS'
+    cat > /tmp/rp/plugins/radio/stations.toml <<'STATIONS'
     [[stations]]
     name = "FIP"
     url = "http://icecast.radiofrance.fr/fip-midfi.mp3"
     preset = 1
     STATIONS
 
-Nothing else has to exist. The `files` roots (`/tmp/rp/media-roots.toml`),
-the remote-control bindings (`/tmp/rp/input-bindings.toml`) and the two
-optional metadata override tables are all written by their own page; a
-missing file is the normal case — at most a `WARN` naming the page to use,
-never a failure to start. To start from a local folder without going
-through the page:
+Nothing else has to exist. The `files` roots
+(`/tmp/rp/plugins/files/media-roots.toml`), the remote-control bindings
+(`/tmp/rp/plugins/generic-input/input-bindings.toml`) and the two optional
+metadata override tables are all written by their own page (each into its
+own plugin's directory, created by the core the first time that plugin
+launches); a missing file is the normal case — at most a `WARN` naming the
+page to use, never a failure to start. To start from a local folder without
+going through the page:
 
-    cat > /tmp/rp/media-roots.toml <<'ROOTS'
+    mkdir -p /tmp/rp/plugins/files
+    cat > /tmp/rp/plugins/files/media-roots.toml <<'ROOTS'
     [[root]]
     name = "usb"
     kind = "local"
@@ -92,26 +102,19 @@ the single `cargo run` line, whichever binary ends up reading it.
     RITORNELLO_MPV_SOCKET=/tmp/rp/mpv.sock RITORNELLO_RUNTIME_DIR=/tmp/rp \
     RITORNELLO_HTTP=127.0.0.1:8080 \
     RITORNELLO_CONSOLE_TTY=/dev/stdout \
-    RITORNELLO_RADIO_STATIONS=/tmp/rp/stations.toml RITORNELLO_RADIO_STATE=/tmp/rp/plugin-radio.json \
-    RITORNELLO_FILES_ROOTS=/tmp/rp/media-roots.toml \
-    RITORNELLO_FILES_CREDENTIALS=/tmp/rp/credentials \
-    RITORNELLO_FILES_STATE=/tmp/rp/plugin-files.json \
-    RITORNELLO_FILES_MPV_PLAYLIST=/tmp/rp/plugin-files.m3u \
-    RITORNELLO_FILES_PLAYLISTS=/tmp/rp/playlists \
-    RITORNELLO_INPUT_BINDINGS=/tmp/rp/input-bindings.toml RITORNELLO_INPUT_PRESETS=deploy/input-presets \
-    RITORNELLO_OUIFM_METAS=/tmp/rp/ouifm-metas.toml \
-    RITORNELLO_RADIOFRANCE_METAS=/tmp/rp/radiofrance-metas.toml \
-    RITORNELLO_NRJ_METAS=/tmp/rp/nrj-metas.toml \
+    RITORNELLO_PLUGIN_DATA_ROOT=/tmp/rp/plugins \
+    RITORNELLO_INPUT_PRESETS=deploy/input-presets \
     cargo run -p ritornello-core
 
-Then <http://127.0.0.1:8080>. The `musicbrainz` plugin needs no variable at
-all, and the three `*_METAS` lines are optional: those tables are embedded in
-their binaries, the file only ever overrides an entry gone stale. Every
-other line has the same job — pointing a default that lives under `/etc` or
-`/var/lib` at `/tmp/rp`, so that a checkout writes nowhere it has no right
-to write. One of them is the exception, pointing into the checkout rather
-than at `/tmp`: `RITORNELLO_INPUT_PRESETS` names data the repository ships
-and `deploy.sh` installs.
+Then <http://127.0.0.1:8080>. A single variable now stands for every
+plugin's own settings, state and caches: `RITORNELLO_PLUGIN_DATA_ROOT`
+points a default that lives under `/var/lib/ritornello` at `/tmp/rp`, so
+that a checkout writes nowhere it has no right to write — the core joins it
+with each plugin's bare name and creates the result before launching that
+plugin (`RITORNELLO_PLUGIN_DATA_DIR`, below). `RITORNELLO_INPUT_PRESETS` is
+the one exception, pointing into the checkout rather than at `/tmp`: it
+names data the repository ships and `deploy.sh` installs, not something a
+plugin writes.
 
 Every variable, and who reads it — each default is a production path, which
 is exactly why they have to be overridden in a checkout:
@@ -127,12 +130,11 @@ is exactly why they have to be overridden in a checkout:
 | `RITORNELLO_AUDIO_BUFFER`, `RITORNELLO_NETWORK_READAHEAD` | core (mpv tuning) | built-in durations |
 | `RITORNELLO_CD_DEV` | core (mpv) **and** `cd` | `/dev/sr0` |
 | `RITORNELLO_CONSOLE_TTY` | `console` | `/dev/tty1` |
-| `RITORNELLO_RADIO_STATIONS`, `RITORNELLO_RADIO_STATE` | `radio` | `/etc/…/stations.toml`, `/var/lib/…/plugin-radio.json` |
+| `RITORNELLO_PLUGIN_DATA_ROOT` | core | `/var/lib/ritornello/plugins` |
+| `RITORNELLO_PLUGIN_DATA_DIR` | every plugin (set by the core, not by hand) | `{RITORNELLO_PLUGIN_DATA_ROOT}/<name>` |
 | `RITORNELLO_RADIO_DIRECTORY` | `radio` | the radio-browser mirrors, tried in order |
-| `RITORNELLO_FILES_ROOTS`, `_CREDENTIALS`, `_STATE`, `_MPV_PLAYLIST`, `_PLAYLISTS` | `files` | `/etc/ritornello/…`, `/var/lib/ritornello/…` |
 | `RITORNELLO_FILES_PROC_MOUNTS` | `files` | `/proc/mounts` (overridden by its tests only) |
 | `RITORNELLO_USER` | `files` (owner of the mounts) | `ritornello` |
-| `RITORNELLO_OUIFM_METAS`, `RITORNELLO_RADIOFRANCE_METAS`, `RITORNELLO_NRJ_METAS` | the three station metadata plugins | `/etc/ritornello/…` — optional file, the tables are embedded |
 
 ### 3. What a machine without the hardware will not do
 

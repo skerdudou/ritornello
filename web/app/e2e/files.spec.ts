@@ -67,9 +67,10 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   await expect(page.locator('[data-sources-pane]')).toBeVisible()
   await expect(page.locator('[data-playlist-pane]')).toBeHidden()
   // No source: the proof that the harness really redirected
-  // `RITORNELLO_FILES_ROOTS` to its throwaway directory. Without that, a run on
-  // a machine where Ritornello is installed would read — and overwrite — the
-  // owner's `/etc/ritornello/media-roots.toml`.
+  // `RITORNELLO_PLUGIN_DATA_ROOT` to its throwaway directory. Without that, a
+  // run on a machine where Ritornello is installed would read — and
+  // overwrite — the owner's
+  // `/var/lib/ritornello/plugins/files/media-roots.toml`.
   await expect(page.locator('[data-no-sources]')).toBeVisible()
 
   // --- Declare a folder of the device, through the wizard ---------------------

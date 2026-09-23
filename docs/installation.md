@@ -152,8 +152,8 @@ part of a component's archive; see [Installing a language
 pack](#installing-a-language-pack) below for that archive's own shape. They
 do not
 create the `ritornello` system user, install `mpv`/`cd-discid`/`eject`/
-`cifs-utils`, create `/var/lib/ritornello`, `/mnt/ritornello` or
-`/etc/ritornello/media-credentials`, nor enable any unit. Extracting them
+`cifs-utils`, create `/var/lib/ritornello` or `/mnt/ritornello`, nor enable
+any unit. Extracting them
 onto a virgin machine leaves a device that cannot start, and the very first
 command below (`chown -R ritornello:`) fails outright for want of that user.
 Prepare the device once as [Example: Raspberry Pi 2](#example-raspberry-pi-2)
@@ -431,11 +431,12 @@ it at all, install a key once — `ssh-keygen` if you have none, then
 Web interface: http://<host>:8080 — logs: `journalctl -u ritornello -f`.
 
 Configuration: `deploy.sh` provisions `stations.toml` and
-`input-bindings.toml` from the `deploy/*.example.toml` defaults **only
-when the file is absent** — a first installation needs no manual copy,
-and a file that exists is **never overwritten**, whatever it contains.
-Those two hold what you produced (stations added from the browser,
-learned bindings), so nothing may complete them.
+`input-bindings.toml`, each into its own plugin's data directory
+(`/var/lib/ritornello/plugins/<name>/`), from the `deploy/*.example.toml`
+defaults **only when the file is absent** — a first installation needs no
+manual copy, and a file that exists is **never overwritten**, whatever it
+contains. Those two hold what you produced (stations added from the
+browser, learned bindings), so nothing may complete them.
 
 ### The operator's own locales layer is gone
 
@@ -490,9 +491,13 @@ occurred since boot. No udev rule is needed: `/dev/vcio` already ships as
 `GET /api/system` stays `null` and the System tab shows "—" for it, the same
 as any other sensor a machine does not expose — nothing else breaks.
 `/etc/ritornello` is owned by the service
-user: the radio and generic-input plugins persist `stations.toml` and
-`input-bindings.toml` there through atomic writes (`.tmp` then rename),
-which requires write access to the directory itself.
+user: the core itself persists `plugins.toml` there through atomic writes
+(`.tmp` then rename) — enabling, moving or removing a plugin from the admin
+UI rewrites it — which requires write access to the directory itself.
+`/var/lib/ritornello` is owned the same way: every plugin keeps its own data
+directory there (`RITORNELLO_PLUGIN_DATA_ROOT`, `/var/lib/ritornello/plugins/
+<name>/` by default — see [plugins.md](plugins.md#where-a-plugin-keeps-its-data)),
+created and rewritten by the service.
 
 Installing by hand instead of through `deploy.sh`? The two commands the
 script runs for this are:
@@ -625,10 +630,11 @@ Beyond those packages, a share needs the two files `deploy.sh` puts in
 place —
 `/etc/systemd/system/ritornello-media-mount.service` and
 `/etc/polkit-1/rules.d/51-ritornello-media.rules`. The script also creates
-`/mnt/ritornello` and `/etc/ritornello/media-credentials` (mode `0700`,
-owned by the service), and enables the mount unit so shares come back
-after a reboot. On a device already in service, the `files` entry of
-`plugins.toml` is appended by the same run — see [plugins.md](plugins.md).
+`/mnt/ritornello`, and enables the mount unit so shares come back
+after a reboot. `/var/lib/ritornello/plugins/files/credentials` (mode
+`0700`, owned by the service) is not the script's doing: the plugin creates
+it itself, on first use. On a device already in service, the `files` entry
+of `plugins.toml` is appended by the same run — see [plugins.md](plugins.md).
 
 **Declaring a share** happens in the browser, at
 `http://<host>:8080/plugins/files/`. Give the server address, connect, and
@@ -640,10 +646,10 @@ share and de-duplicated, because it becomes both a directory name and a
 credentials filename — deriving it guarantees a valid one, where typing it
 allowed a refusal with no way to see why.
 
-Confirming writes `/etc/ritornello/media-roots.toml` and
-`/etc/ritornello/media-credentials/<name>.cred`, then asks systemd to run
-the mount unit on its own. The mount point is not yours to pick: it is
-always `/mnt/ritornello/<name>`.
+Confirming writes `/var/lib/ritornello/plugins/files/media-roots.toml` and
+`/var/lib/ritornello/plugins/files/credentials/<name>.cred`, then asks
+systemd to run the mount unit on its own. The mount point is not yours to
+pick: it is always `/mnt/ritornello/<name>`.
 `deploy/media-roots.example.toml` documents the file for the rare case of
 editing it by hand.
 

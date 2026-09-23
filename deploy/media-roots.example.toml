@@ -7,9 +7,10 @@
 # revalidates everything it reads. What that binary refuses is listed below,
 # and a hand-edited file that trips one of those rules mounts nothing at all.
 #
-# Copy it to /etc/ritornello/media-roots.toml (or point elsewhere with
-# RITORNELLO_FILES_ROOTS). Missing file: the normal case, nothing to mount,
-# nothing is logged as an error.
+# Copy it to /var/lib/ritornello/plugins/files/media-roots.toml (the files
+# plugin's own data directory — see RITORNELLO_PLUGIN_DATA_ROOT in
+# docs/development.md to move it elsewhere). Missing file: the normal case,
+# nothing to mount, nothing is logged as an error.
 #
 # A local folder and a share are the same thing to the rest of the plugin; the
 # mount is only a detail of `kind = "smb"`.
@@ -25,8 +26,9 @@ user = "steven"
 domain = ""             # optional
 writable = false        # default; set to true only to save playlists on the share
 # THE PASSWORD IS NOT IN THIS FILE. It lives in
-# /etc/ritornello/media-credentials/nas.cred (mode 0600, owned by the service
-# user, one file per root, named after it), in the format mount.cifs expects:
+# /var/lib/ritornello/plugins/files/credentials/nas.cred (mode 0600, owned by
+# the service user, one file per root, named after it), in the format
+# mount.cifs expects:
 #
 #     username=steven
 #     password=...

@@ -2,6 +2,8 @@ mod audio_output;
 mod admin;
 mod core;
 mod cover;
+#[cfg(test)]
+mod data_dirs_guard;
 mod i18n;
 mod metadata;
 mod docs_map;

@@ -217,12 +217,13 @@ scp "${SSHOPTS[@]}" "${PLUGINS[@]/#/$OUT/ritornello-plugin-}" "$PI:/tmp/"
 scp "${SSHOPTS[@]}" deploy/ritornello.service deploy/50-ritornello-power.rules "$PI:/tmp/"
 
 # After every copy into /etc/ritornello, which would hand them back to
-# root: the directory belongs to the service, because the radio and
-# generic-input plugins persist stations.toml and input-bindings.toml
-# there through atomic writes (.tmp then rename), which requires write
-# access to the directory itself. /var/lib/ritornello is taken over too:
-# a previous root installation left state files there that the service
-# could no longer rewrite.
+# root: the directory belongs to the service, because the core itself
+# persists plugins.toml there through atomic writes (.tmp then rename) —
+# enabling, moving or removing a plugin from the admin UI rewrites it —
+# which requires write access to the directory itself. /var/lib/ritornello
+# is taken over too: every plugin now keeps its own data directory there
+# (RITORNELLO_PLUGIN_DATA_ROOT), and the service must be able to create
+# and rewrite each one.
 ssh "${SSHOPTS[@]}" "$PI" 'sudo chown -R ritornello: /etc/ritornello \
   && if [ -d /var/lib/ritornello ]; then sudo chown -R ritornello: /var/lib/ritornello; fi'
 
