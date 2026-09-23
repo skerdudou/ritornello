@@ -171,16 +171,11 @@ stage_plugin() {
   # whose block nobody adds means a plugin that ships and never starts, in
   # silence — a mistake this repository's own documentation records making
   # three times.
-  # Filtered through tr first for the same CRLF reason as above: an
-  # unstripped source would make `$0 == "name = \"" n "\""` miss every match
-  # (the line actually ends in a carriage return) and leave the fragment
-  # empty, which the guard below would then also catch.
-  tr -d '\r' < deploy/plugins.example.toml | awk -v n="$name" '
-    /^\[\[plugin\]\]/ { blk=""; keep=0 }
-    { blk = blk $0 "\n" }
-    $0 == "name = \"" n "\"" { keep=1 }
-    /^exec/ && keep { printf "%s", blk; keep=0 }
-  ' > "$dir/plugins.toml.fragment"
+  # Extracted by packaging.py's plugin_block(), the same function
+  # install-inventory.py publishes as the component's `block`: the fragment
+  # an archive carries and the block the inventory announces are one reading
+  # of plugins.example.toml, not two.
+  python3 scripts/packaging.py fragment "$name" > "$dir/plugins.toml.fragment"
   [ -s "$dir/plugins.toml.fragment" ] || { echo "no plugins.toml block for $name" >&2; exit 1; }
 }
 
