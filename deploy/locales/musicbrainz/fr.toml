@@ -1,6 +1,6 @@
-# Page d'admin du greffon musicbrainz : les motifs de découpage ICY appris,
-# une entrée par station. L'anglais est embarqué dans le binaire ; ce pack-ci
-# est livré à part, et un test de parité des clés interdit qu'ils divergent.
+# Admin page of the musicbrainz plugin: the ICY split patterns it has learned,
+# one entry per station. English is embedded in the binary; this French pack
+# ships separately, and a key-parity test forbids them to diverge.
 title = "Motifs de découpage ICY"
 intro = "Une entrée par station que l'appareil a sondée. Le format ICY est une propriété de la station et non du morceau : le motif est donc appris une fois, puis appliqué localement."
 col_station = "Flux"

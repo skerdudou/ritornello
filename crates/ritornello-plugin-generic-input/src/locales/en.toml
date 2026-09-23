@@ -1,17 +1,17 @@
-# messages de validation
+# validation messages
 duplicate_code = "code {code} is bound twice on {device}"
 select_out_of_range = "preset {n} out of range 0-9 on {device}"
 unknown_command = "unknown command bound to code {code} on {device}"
 unknown_preset = "unknown preset: {preset}"
 bad_request = "invalid request: {detail}"
 save_failed = "the save failed"
-# validation a chaud, cote client : le meme conflit que `duplicate_code`,
-# mais detecte avant l'aller-retour serveur.
+# live validation, client side: the same conflict as `duplicate_code`,
+# but detected before the round trip to the server.
 conflict_code = "code {code} is already assigned to {action}"
 conflict_dup = "code {code} is entered twice"
 save_conflicts = "Resolve the duplicate key codes before saving"
 
-# page d'admin
+# admin page
 admin_title = "input bindings"
 device_label = "Device"
 btn_refresh = "Refresh"
@@ -35,7 +35,7 @@ save_error = "Error: {cause}"
 load_error = "Loading error: {cause}"
 no_device = "No input device detected"
 
-# les 23 actions
+# the 23 actions
 act_select_1 = "Preset 1"
 act_select_2 = "Preset 2"
 act_select_3 = "Preset 3"
@@ -46,20 +46,20 @@ act_select_7 = "Preset 7"
 act_select_8 = "Preset 8"
 act_select_9 = "Preset 9"
 act_select_0 = "Key 0"
-# « Presets » plutot qu'un simple « +10 » : cette touche decale le chiffre
-# suivant de dix (+10 puis 4 selectionne la station 14), elle ne deplace pas
-# la lecture. Sans ce mot, elle se lit comme « +10 secondes » des que les
-# actions de deplacement partagent la meme liste — ce qui est exactement ce
-# qui s'est produit.
+# "Presets" rather than a bare "+10": this key shifts the next digit by ten
+# (+10 then 4 selects station 14), it does not move playback. Without that
+# word it reads as "+10 seconds" as soon as the seek actions share the same
+# list — which is exactly
+# what happened.
 act_plus10 = "Presets +10"
 act_volume_up = "Volume +"
 act_volume_down = "Volume -"
 act_mute = "Mute"
 act_play_pause = "Play/pause"
 act_stop = "Stop"
-# « in track » les distingue de « Previous »/« Next », qui changent de piste.
-# Pas de chiffre dans le libelle : le pas est reglable depuis la page de
-# configuration, et « 10 s » deviendrait un mensonge.
+# "in track" tells them apart from "Previous"/"Next", which change track.
+# No number in the label: the step is adjustable from the configuration page,
+# and "10 s" would become a lie.
 act_seek_back = "Rewind in track"
 act_seek_forward = "Fast forward in track"
 act_next = "Next"

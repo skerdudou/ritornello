@@ -266,7 +266,7 @@ presets_label = "Presets"
 presets_prev_page = "Previous presets"
 presets_next_page = "Next presets"
 
-# refus HTTP (422/502/500)
+# HTTP refusals (422/502/500)
 audio_output_name_empty = "empty audio output name"
 settings_initial_delay_out_of_range = "initial delay out of range ({min}-{max} ms)"
 settings_repeat_interval_out_of_range = "repeat interval out of range ({min}-{max} ms)"

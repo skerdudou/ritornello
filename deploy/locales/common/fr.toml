@@ -2,7 +2,7 @@ play = "Lecture"
 pause = "Pause"
 stop = "Arrêt"
 error = "Erreur"
-# Chargement d'une IHM de plugin (voir le commentaire de common_en.toml).
+# Loading a plugin's UI (see the comment in common_en.toml).
 loading = "Chargement…"
 plugin_unavailable = "IHM du plugin indisponible."
 plugin_unavailable_cause = "IHM du plugin indisponible : {cause}"

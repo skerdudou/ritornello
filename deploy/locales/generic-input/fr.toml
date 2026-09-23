@@ -4,8 +4,8 @@ unknown_command = "commande inconnue liée au code {code} sur {device}"
 unknown_preset = "preset inconnu : {preset}"
 bad_request = "requête invalide : {detail}"
 save_failed = "l'enregistrement a échoué"
-# validation a chaud, cote client : le meme conflit que `duplicate_code`,
-# mais detecte avant l'aller-retour serveur.
+# live validation, client side: the same conflict as `duplicate_code`,
+# but detected before the round trip to the server.
 conflict_code = "le code {code} est déjà affecté à {action}"
 conflict_dup = "le code {code} est saisi deux fois"
 save_conflicts = "Corrigez les codes en double avant d’enregistrer"
@@ -43,19 +43,20 @@ act_select_7 = "Présélection 7"
 act_select_8 = "Présélection 8"
 act_select_9 = "Présélection 9"
 act_select_0 = "Touche 0"
-# « Présélections » et non un « +10 » nu : cette touche décale le chiffre
-# suivant d'une dizaine (+10 puis 4 donne la station 14), elle ne déplace
-# pas la lecture. Sans ce mot, elle se lit comme « +10 secondes » dès que
-# les commandes de déplacement figurent dans la même liste — c'est arrivé.
+# "Presets" rather than a bare "+10": this key shifts the next digit by ten
+# (+10 then 4 selects station 14), it does not move playback. Without that
+# word it reads as "+10 seconds" as soon as the seek actions share the same
+# list — which is exactly
+# what happened.
 act_plus10 = "Présélections +10"
 act_volume_up = "Volume +"
 act_volume_down = "Volume -"
 act_mute = "Muet"
 act_play_pause = "Lecture/pause"
 act_stop = "Stop"
-# « dans la piste » distingue ces deux touches de « Précédent »/« Suivant »,
-# qui changent de piste. Aucun nombre dans le libellé : le pas est réglable
-# sur la page de configuration, et « 10 s » deviendrait faux.
+# "in track" tells them apart from "Previous"/"Next", which change track.
+# No number in the label: the step is adjustable from the configuration page,
+# and "10 s" would become a lie.
 act_seek_back = "Reculer dans la piste"
 act_seek_forward = "Avancer dans la piste"
 act_next = "Suivant"
@@ -66,8 +67,8 @@ act_toggle_random = "Aléatoire"
 act_toggle_repeat_all = "Tout répéter"
 act_power = "Veille"
 
-# lignes de raccourci vers une source, ajoutees a la fin du tableau (une par
-# source annoncee par le coeur via `/api/presets`, plus une pour une source
-# encore liee mais qui n'est plus installee)
+# source shortcut rows, appended at the end of the table (one per source the
+# core announces via `/api/presets`, plus one for a source still bound but
+# no longer installed)
 act_select_source = "Source : {source}"
 act_select_source_unknown = "Source : {source} (absente)"

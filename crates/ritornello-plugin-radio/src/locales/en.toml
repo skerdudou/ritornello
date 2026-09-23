@@ -6,7 +6,7 @@ bad_request = "invalid request: {detail}"
 search_error = "Directory search failed: {detail}"
 save_failed = "the save failed"
 
-# page d'admin
+# admin page
 admin_title = "stations"
 col_num = "N°"
 col_name = "Name"
@@ -18,13 +18,13 @@ saved = "Saved ✓"
 save_error = "Error: {cause}"
 limit_reached = "99 presets maximum — remove one first"
 
-# annuaire en ligne
+# online directory
 search_title = "Add from the online directory"
 search_placeholder = "Station name"
 country_label = "Country"
-# Les noms de pays ne sont **pas** traduits ici : l'IHM les rend avec
-# `Intl.DisplayNames` depuis le code ISO, dans la langue du navigateur. Une table
-# de 241 pays à tenir dans chaque pack de langue n'aurait aucun sens.
+# Country names are **not** translated here: the UI renders them with
+# `Intl.DisplayNames` from the ISO code, in the browser's language. A table
+# of 241 countries to maintain in every language pack would make no sense.
 country_all = "All countries"
 country_filter_placeholder = "Country or code"
 country_none = "No matching country"

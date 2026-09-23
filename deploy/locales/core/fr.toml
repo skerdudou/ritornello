@@ -57,25 +57,25 @@ overlay_ms_label = "Durée d'affichage (volume, messages) (ms)"
 tens_window_ms_label = "Fenêtre de saisie du cumul +10 (ms)"
 language = "Langue"
 display_card_title = "Langue et affichage"
-# Clés de phrase entière à paramètres nommés (tâche 14, chantier des packs de
-# langue ; les six clés `locale_completeness_*` de la première tournée de
-# retouches) : un nombre collé à un libellé n'est pas traduisible — le piège
-# que le plan lui-même nomme (« cœur + 3 greffons sur 7 »). Les six clés
-# `locale_completeness_*` annotent une langue incomplète dans le sélecteur,
-# nommant « cœur » quand il fait partie des modules couverts, et l'unité
-# (« greffons », ou « module » pour le cas nul depuis la deuxième tournée —
-# voir le constat E) sinon — chaque combinaison de « cœur couvert ? » x
-# « combien d'autres, 0 / 1 / plusieurs » (le découpage 0/1, et non un simple
-# suffixe pluriel, est ce qui garde le français grammatical : voir
-# `locale_completeness_core_plugin` vs `_plugins`). `locale_fallback_result`/
-# `_one`/`_none` sont ce que montre le contrôle de repli une fois un vrai
-# repli choisi — « la seule façon de savoir si le repli a servi » — avec le
-# même découpage singulier/pluriel, pour la même raison ; l'unité y est
-# « modules » et non « greffons », puisque l'ensemble encore non couvert peut
-# inclure le cœur lui-même. `_none` (deuxième tournée, constat C) est le cas
-# de réussite, « plus rien en anglais » : avant son ajout, `remaining === 0`
-# faisait taire la ligne, indiscernable à l'écran d'un « aucun repli choisi »
-# — le silence, précisément dans le seul cas que la ligne existe pour dire.
+# Whole-sentence phrase keys with named parameters (task 14, language-packs
+# chantier; the six `locale_completeness_*` keys added in fix round 1): a
+# number concatenated to a label is not translatable, and this is the exact
+# trap the chantier's own plan names ("cœur + 3 greffons sur 7"). The six
+# `locale_completeness_*` keys annotate one incomplete language in the
+# selector, naming `core` when it is among the covered modules and the unit
+# ("plugins", or "module" for the none case since fix round 2 — see finding
+# E) otherwise — every combination of "core covered?" x "how many others,
+# 0 / 1 / many" (the 0/1 split, not a plural suffix, is what keeps the
+# French forms grammatical: see `locale_completeness_core_plugin` vs
+# `_plugins`). `locale_fallback_result`/`_one`/`_none` are what the fallback
+# control shows once a real fallback is chosen — "the only way to know if
+# the fallback served" — with the same singular/plural split for the same
+# reason; the unit there is "modules" rather than "plugins", since the set
+# still uncovered can include `core` itself. `_none` (fix round 2, finding
+# C) is the success case, "nothing left in English": before it existed,
+# `remaining === 0` suppressed the line entirely, indistinguishable on
+# screen from "no fallback chosen" — silence in the one case the line
+# exists to report.
 locale_completeness_core = "cœur /{total}"
 locale_completeness_core_plugin = "cœur + 1 greffon /{total}"
 locale_completeness_core_plugins = "cœur + {plugins} greffons /{total}"
@@ -101,12 +101,11 @@ remote_power = "Veille"
 remote_random = "Aléatoire"
 remote_repeat_all = "Tout répéter"
 seek_step_label = "Pas de déplacement (s)"
-# Pochettes d'album. Une seule carte : la mémoire que le cache peut occuper
-# (un budget, pas un compte), puis les plafonds de ce que le cœur accepte de
-# lire, puis l'interrupteur de réencodage et les quatre réglages qui décrivent
-# la vignette. Le plafond de la source reste actif quoi que dise
-# l'interrupteur : c'est la seule garde qui subsiste quand le réencodage est
-# décoché.
+# Album covers. One card: the memory the cache may occupy (a budget, not a
+# count), then the ceilings on what the core agrees to read, then the
+# re-encoding switch and the four settings describing the thumbnail. The
+# source ceiling stays live whatever the switch says: it is the only guard
+# left when re-encoding is off.
 cover_card_title = "Pochettes d'album"
 cover_cache_budget_label = "Budget mémoire (Mio)"
 cover_cache_budget_help = "Borne les octets des pochettes téléchargées depuis internet et les vignettes gardées prêtes à servir. Une pochette locale — un fichier à côté du morceau, ou intégré à celui-ci — ne coûte qu'un chemin, jamais ces octets."
@@ -126,36 +125,32 @@ cover_passthrough_max_label = "Ne pas réencoder en dessous de (Kio)"
 cover_passthrough_max_help = "Une pochette déjà plus légère que ça, et pas plus large que le côté ci-dessous, part exactement telle quelle : la réencoder ne l'allégerait pas. C'est aussi la règle qui fait accepter sans y toucher une vignette fournie par un greffon."
 cover_max_pixels_label = "Plafond de décodage (Mpx)"
 cover_max_pixels_help = "Lu dans l'en-tête avant toute allocation : l x h x 4 octets de tampon, donc 16 Mpx font 64 Mio. Un PNG de 200 Kio peut annoncer 30000 x 30000 pixels."
-# Derrière le « (?) » posé sur le titre de la carte — et non plus à côté de
-# l'estimation, où il se lisait comme une note de bas de page sur cette seule
-# phrase : ce qu'il ouvre est l'état du cache que toute la carte règle.
-# Le titre dit « mémoire » et non « ce que le cache contient » : le panneau ne
-# compte que des octets, et une pochette locale, qui ne coûte qu'un chemin,
-# n'y figure nulle part.
+# Behind the "(?)" set on the card's own title — no longer beside the estimate,
+# where it read as a footnote on that one sentence: what it opens is the state
+# of the cache the whole card configures.
+# The title says "memory" rather than "what the cache holds": the panel counts
+# bytes only, and a local cover, which costs a path, appears nowhere in it.
 cover_cache_open = "Voir la mémoire occupée par les pochettes"
 cover_cache_title = "Mémoire occupée par les pochettes"
 cover_cache_hint = "Relevé au moment de l'ouverture."
-# Deux lignes, et tout ce qui est détenu tombe sur l'une des deux : les deux
-# poids font l'occupé. Le panneau listait auparavant des *mécanismes* —
-# vignettes produites, vignettes fournies, pleins formats téléchargés — et sur
-# un appareil qui écoute la radio les trois affichaient zéro pendant que la
-# mémoire montait, une pochette annoncée par une seule URL n'étant aucun des
-# trois.
+# Two lines, and everything held is on one of them: the two weights add up to
+# what is occupied. The panel used to list *mechanisms* instead — renditions
+# produced, thumbnails supplied, full sizes downloaded — and on a device
+# playing radio all three read zero while the memory climbed, because a cover
+# announced as a single URL is none of the three.
 cover_cache_thumbnails = "Vignettes"
 cover_cache_full_sizes = "Pleins formats"
-# Des passages de l'encodeur depuis le démarrage, et non des vignettes
-# détenues : dit si l'appareil dépense du calcul, ce qu'aucune quantité
-# *détenue* ne peut dire.
+# Encoder runs since boot, and not thumbnails held: this says whether the
+# appliance is spending CPU re-encoding, which nothing the cache *holds* can.
 cover_cache_renditions = "Réencodages"
 cover_cache_used = "Occupé"
-# L'unité voyage avec son nombre, jamais collée à un libellé : chaque langue
-# les place où elle veut, et toutes ne mettent pas l'unité en dernier.
+# The unit travels with its number, never glued to a label: a language places
+# both where it wants, and some do not put the unit last.
 cover_cache_kio = "{n} Kio"
 cover_cache_mio = "{n} Mio"
 cover_cache_used_value = "{used} sur {budget}"
-# « En mémoire », et non « vide » : une bibliothèque de pochettes locales tient
-# des centaines d'entrées qui ne coûtent qu'un chemin, et les dire vides serait
-# faux.
+# "In memory", not "empty": a library of local covers holds hundreds of
+# entries that cost a path and no bytes, and calling that empty would be false.
 cover_cache_empty = "Aucune pochette en mémoire."
 cover_cache_failed = "Relevé indisponible."
 position_label = "Position"
@@ -268,7 +263,7 @@ presets_label = "Présélections"
 presets_prev_page = "Présélections précédentes"
 presets_next_page = "Présélections suivantes"
 
-# refus HTTP (422/502/500)
+# HTTP refusals (422/502/500)
 audio_output_name_empty = "nom de sortie audio vide"
 settings_initial_delay_out_of_range = "délai initial hors bornes ({min}-{max} ms)"
 settings_repeat_interval_out_of_range = "intervalle de répétition hors bornes ({min}-{max} ms)"
