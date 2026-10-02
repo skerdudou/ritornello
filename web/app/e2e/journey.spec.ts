@@ -21,10 +21,14 @@ test('navigation between the home page, the config and the plugin pages', async 
   await page.goto('/config')
   // `getByText('radio')` alone is ambiguous: the header also lists the admin
   // plugins by name (see App.vue), so "radio" shows up there in addition to
-  // the status table cell — hence targeting by role. And `exact`: the switch
-  // cell is named "Enable or disable radio", which the partial name also
-  // caught.
-  await expect(page.getByRole('cell', { name: 'radio', exact: true })).toBeVisible()
+  // the status table — hence scoping to the table. And `exact`: the switch
+  // is named "Enable or disable radio", which the partial name also caught.
+  // Not by the cell's role any more: the name cell also holds the admin icon
+  // link and the order arrows, so its accessible name is no longer the
+  // plugin's name alone.
+  await expect(
+    page.locator('[data-plugins-table]').getByText('radio', { exact: true }),
+  ).toBeVisible()
 
   // The update card, now the one card holding every control the second,
   // merged-away card used to own too: Check, Install, the beta switch, the
@@ -80,11 +84,12 @@ test('navigation between the home page, the config and the plugin pages', async 
   // The plugins table's columns, against a real core. Nothing here counted
   // them before, so the Version column could have been added — or dropped
   // again — without a single test noticing, while the design assumed this
-  // journey was the barrier that kept them in sync. Eight headers, exact —
-  // the six pre-existing ones plus the order arrows and the install/uninstall
-  // gestures (task 18) — is what makes it a lock rather than a lower bound.
+  // journey was the barrier that kept them in sync. Six headers, exact:
+  // the admin link and the order arrows sit in the plugin cell, which is what
+  // lets the card fit a phone. Exact is what makes it a lock rather than a
+  // lower bound.
   const pluginsTable = page.locator('[data-plugins-table]')
-  await expect(pluginsTable.locator('thead th')).toHaveCount(8)
+  await expect(pluginsTable.locator('thead th')).toHaveCount(6)
   // And the cell under it carries a real version. Asserted as "not the em
   // dash placeholder" rather than as a fixed string: the SDK derives the
   // number from the plugin crate's own `CARGO_PKG_VERSION`, so a version is
@@ -708,25 +713,37 @@ test('installing a language pack from the config page reaches the installed stat
 }) => {
   await page.goto('/config')
 
-  // The one real network round trip this suite makes:
+  // Nothing has ever checked this device (the first test above asserts it).
+  // Opening "Add a plugin" must run the check by itself, rather than show an
+  // empty list a person would read as "nothing published". This is the one
+  // real network round trip this suite makes:
   // `update::release::releases_url()` reads `RITORNELLO_TEST_RELEASES_URL`
   // in this debug build and addresses the fake repository `serve.mjs` built
-  // and now serves, instead of the real, fixed GitHub host. Waited on
-  // through the real API rather than a fixed delay — the same "wait for
-  // what the response carries" rule the rest of this file follows.
-  await page.locator('[data-update-check]').click()
+  // and now serves, instead of the real, fixed GitHub host. The spinner
+  // lasts at least one poll (2 s), so it is observable; what the check
+  // leaves is then read from the real API rather than a fixed delay — the
+  // same "wait for what the response carries" rule the rest of this file
+  // follows.
+  await page.locator('[data-installables-open]').click()
+  await expect(page.locator('[data-check-running]')).toBeVisible()
   await expect
     .poll(async () => (await (await request.get('/api/update')).json()).outcome.kind)
     .not.toBe('never_checked')
+  await expect(page.locator('[data-check-running]')).toHaveCount(0, { timeout: 15_000 })
+  // An answer, whichever it is: rows, or "nothing to add" after a real look.
+  await expect(
+    page.locator('[data-installable-row], [data-installables-empty]').first(),
+  ).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-installables-dialog]')).toHaveCount(0)
 
-  // `/api/locale` is only read once, on mount (`ConfigView.vue`'s own
-  // `onMounted`) — a reload is what a person reopening this page after the
-  // device's own nightly check would see. It is the only step here that is
-  // not itself under test; the gesture and its settling are what follow.
-  await page.reload()
-
+  // The page re-read `/api/locale` itself once the check landed, so the pack
+  // the release offers is there without a reload. That check is fresh now:
+  // this second dialog does not run another one.
+  await page.locator('[data-add-language-open]').click()
   const install = page.locator('[data-pack-install="es"]')
   await expect(install).toBeVisible()
+  await expect(page.locator('[data-check-running]')).toHaveCount(0)
   await install.click()
 
   // 202 and a queue, not a synchronous success: the row must say so before
@@ -752,9 +769,17 @@ test('installing a language pack from the config page reaches the installed stat
   // Put the harness back the way it was found, the same courtesy the
   // language-card journey above pays: a `DELETE`, confirmed through the
   // real dialog, then the same poll-driven wait in reverse.
+  // The dialog stays open over the card while a pack lands (its row is what
+  // says "installing"); it is closed before the card is used.
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-add-language-dialog]')).toHaveCount(0)
   await remove.click()
   await page.locator('[data-language-pack-remove-confirm]').click()
-  await expect(install).toBeVisible({ timeout: 25_000 })
+  // Removed, and offered again: back in the "Add a language" dialog, which is
+  // where a pack that is not installed lives.
+  await expect(remove).toHaveCount(0, { timeout: 25_000 })
+  await page.locator('[data-add-language-open]').click()
+  await expect(install).toBeVisible()
   const afterRemove = await (await request.get('/api/locale')).json()
   const removedRow = afterRemove.packs.find((p: { language: string }) => p.language === 'es')
   expect(removedRow?.installed ?? null).toBeNull()

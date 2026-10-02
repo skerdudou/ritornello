@@ -255,7 +255,7 @@ request, on Ubuntu, in five jobs — the last two only on a tag:
 - `publish` — also on a tag: keeps only the components whose own version
   moved since the last **finished** release, checks the notes, generates
   `catalogue.json` (the kind and description of every installable
-  component, read by the update page's "Add a component" dialog), writes
+  component, read by the "Add a plugin" dialog), writes
   one `SHA256SUMS` for every asset including it, and creates the release as
   a **draft**. A tag carrying a prerelease suffix (`v0.2.1-beta.1`) makes it
   a prerelease.

@@ -798,6 +798,20 @@ separate program that installs and removes a component's privileged
 parts along with the rest of it. The core enforces the same rule
 itself, independently of this page, so the sentence is not merely a
 courtesy: asking directly for either gesture is refused the same way.
+**Updating one is allowed, when its privileged files are unchanged.**
+A privileged plugin that `plugins.toml` declares is offered in the update
+dialog like any other. Once its archive is downloaded, the core compares
+each privileged file it carries (units under `etc/systemd/system/`, rules
+under `etc/polkit-1/rules.d/`, a helper under `usr/local/lib/ritornello/`)
+with the sha256 `ritornello-install` recorded when it placed that file,
+in `/var/lib/ritornello-install/installed.toml`, which it reads and never
+writes. If every hash matches, and the archive carries exactly the
+recorded files (none added, none missing), only the plugin binary is
+placed, through the same privileged step as any plugin. The root-owned
+files stay as they are, since they are byte-identical. Anything else — no
+registry (a device deployed by `deploy.sh`), a registry written before
+hashes were recorded, one changed file — is refused with a sentence naming
+`ritornello-install`, and the row stays refused for that version.
 Which plugins are privileged is a short list the core carries and
 checks against `deploy/packaging.toml` (see
 [plugins.md](plugins.md#ritornello-plugin-files--audio-files-local-or-on-a-share)),
@@ -1578,9 +1592,16 @@ external TOML text, decentralized per component, read from **one root**:
   language alone, so this line stays empty rather than repeating the
   completeness annotation right above it.
 - **Adding a language**: a gesture on the config page, not a file copy.
-  Right under the language picker, `LanguagePacksRow.vue` lists every
-  language a pack is offered or already installed for, and turns "Install" /
-  "Update" / "Remove" into `POST`/`DELETE /api/languages/{language}` — the
+  Right under the language picker, `LanguagePacksRow.vue` lists the
+  languages a pack is installed for, with "Update" and "Remove", and the
+  "Add a language" button opens `AddLanguageDialog.vue`, its mirror of the
+  "Add a plugin" dialog, listing the packs the release offers and the
+  device does not have. Both dialogs run the update check themselves when
+  they open (`useUpdateCheck.ts`): nothing when the last check is under an
+  hour old and succeeded, one `POST /api/update/check` otherwise, a wait
+  and no second enqueue when a job is already running, and a Retry button
+  on a failure or a full queue. "Install" / "Update" / "Remove" are
+  `POST`/`DELETE /api/languages/{language}` — the
   update worker fetches, verifies and writes the pack itself (see
   [Update card](#update-card)). There is no other route: a language nobody
   has published a pack for cannot be added by hand any more. A missing key

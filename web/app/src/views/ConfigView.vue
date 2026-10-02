@@ -4,8 +4,12 @@ import {
   DialogDescription, DialogHeader, DialogTitle, Input,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, toast,
 } from '@ritornello/ui'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import {
+  DesktopIcon, DiscIcon, GearIcon, InfoCircledIcon, KeyboardIcon, QuestionMarkCircledIcon,
+} from '@radix-icons/vue'
+import { computed, onMounted, onUnmounted, ref, type Component } from 'vue'
 import { RouterLink } from 'vue-router'
+import AddLanguageDialog from '../components/AddLanguageDialog.vue'
 import CoverCacheDetails from '../components/CoverCacheDetails.vue'
 import InstallablesDialog from '../components/InstallablesDialog.vue'
 import LanguageCard from '../components/LanguageCard.vue'
@@ -318,7 +322,9 @@ onMounted(loadAll)
 
 interface PluginRow {
   name: string
-  kinds: string
+  /** The real kinds this plugin announced, raw wire words, in arrival order —
+   * empty while none has been announced. The cell draws one icon for each. */
+  kinds: string[]
   connected: boolean
   stalled: boolean
   starting: boolean
@@ -461,29 +467,17 @@ const plugins = computed<PluginRow[]>(() => {
     // "not yet announced" rows and an `undeclared_binary` line get the same
     // dash (review of task 18, M6).
     const realKinds = acc.receivedKinds.filter((k) => k !== 'unknown')
-    // Through the same `plugin_kind_*` catalog keys `InstallablesDialog.vue`
-    // uses for the same four words (m5): this column used to show the raw
-    // wire string (`source`, `display`…) while the dialog already translated
-    // it, the one surface in a French interface still speaking English.
-    // A template literal, not concatenation, for the same reason as there:
-    // `i18nKeysUsed.test.ts`'s literal-key scanner only recognises a quoted
-    // string immediately after `t(`, and the four keys are already on its
-    // explicit list.
-    //
-    // A kind outside the closed vocabulary still renders its raw
-    // `plugin_kind_<word>` catalog key here, exactly as it would in the
-    // dialog (F4): filtering it would need the same closed list hard-coded a
-    // fourth time (`plugin_catalogue_declaration.rs`, the scanner's
-    // allow-list, and the four locale keys already are three), which is F6's
-    // question to answer once, not this fix's to answer again here.
-    const kinds = realKinds.length > 0 ? realKinds.map((k) => t.value(`plugin_kind_${k}`)).join(', ') : '—'
+    // The words are translated at render time (`kindLabel`), through the same
+    // `plugin_kind_*` catalog keys `InstallablesDialog.vue` uses for the same
+    // four words (m5). Kept raw here: the icon is chosen by the wire word, the
+    // title by its translation.
     // Looked up by name rather than carried through the accumulator: the
     // offer lives on a wholly different payload (`/api/update`), read once
     // here rather than threaded through every accumulator field above.
     const offer = update.value.components.find((c) => c.name === acc.name)
     return {
       name: acc.name,
-      kinds,
+      kinds: realKinds,
       connected: acc.connected,
       stalled: acc.stalled,
       starting: acc.starting,
@@ -531,6 +525,33 @@ const plugins = computed<PluginRow[]>(() => {
   // add" live on two different surfaces.
   return declaredRows
 })
+
+/**
+ * One icon per plugin kind, so that the kind column costs a few pixels instead
+ * of a word. Chosen for what each kind IS for the listener: a `source` is where
+ * the music comes from (a disc), a `display` is a screen, an `input` is a
+ * remote or keyboard, `metadata` is information about what plays.
+ */
+const KIND_ICONS: Record<string, Component> = {
+  source: DiscIcon,
+  display: DesktopIcon,
+  input: KeyboardIcon,
+  metadata: InfoCircledIcon,
+}
+/** A kind outside the closed vocabulary still gets an icon, and its raw
+ * `plugin_kind_<word>` key as title, exactly as the dialog shows it (F4):
+ * filtering it would need the same closed list hard-coded a fourth time, which
+ * is F6's question to answer once. */
+const FALLBACK_KIND_ICON: Component = QuestionMarkCircledIcon
+/** A template literal, not concatenation: `i18nKeysUsed.test.ts`'s
+ * literal-key scanner only recognises a quoted string immediately after
+ * `t(`, and the four keys are already on its explicit list. */
+const kindLabel = (kind: string) => t.value(`plugin_kind_${kind}`)
+
+/** DOM id of the screen-reader copy of the privileged sentence a row's
+ * disabled buttons point at. `encodeURIComponent`: a plugin name is
+ * operator-typed and an `id` cannot hold a space. */
+const privilegedNoteId = (name: string) => `plugin-privileged-note-${encodeURIComponent(name)}`
 
 /** Position of every row that `plugins.toml` actually declares, among
  * themselves only: an `undeclared_binary` row never carries an arrow, so it
@@ -935,10 +956,25 @@ async function onUpdateCheck() {
 
 const showInstallDialog = ref(false)
 /** The installables dialog (`InstallablesDialog.vue`), behind its own
- * button: choosing to add a component the device does not have is a
+ * button: choosing to add a plugin the device does not have is a
  * different question from managing the ones it runs, so it does not share
  * `showInstallDialog`. */
 const showInstallablesDialog = ref(false)
+/** "Add a language" (`AddLanguageDialog.vue`), its mirror in the language
+ * card: the packs a release offers and the device does not have. */
+const showAddLanguageDialog = ref(false)
+
+/**
+ * Both add-dialogs run the update check themselves when they open
+ * (`useUpdateCheck`) and say so here once it has landed: the rows they list
+ * come from `update.components` and `locale.packs`, and a check changes both,
+ * so both are read again — the language payload too, whose `offered`
+ * versions are what the check just learned.
+ */
+async function onCheckSettled() {
+  await refreshUpdate()
+  locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
+}
 
 async function onConfirmInstall(names: string[]) {
   showInstallDialog.value = false
@@ -1227,9 +1263,7 @@ function goTo(id: string) {
                   <th class="text-left font-normal">{{ t('col_kind') }}</th>
                   <th class="text-left font-normal">{{ t('col_version') }}</th>
                   <th class="text-left font-normal">{{ t('col_state') }}</th>
-                  <th class="text-left font-normal">{{ t('col_admin') }}</th>
                   <th class="text-left font-normal">{{ t('col_enabled') }}</th>
-                  <th class="text-left font-normal">{{ t('col_order') }}</th>
                   <th class="text-left font-normal">{{ t('col_actions') }}</th>
                 </tr>
               </thead>
@@ -1240,10 +1274,11 @@ function goTo(id: string) {
                   attributes are conditional on `p.declared` — an
                   `undeclared_binary` or `missing_binary` row's arrows are
                   already hidden the same way. `dragover.prevent` is
-                  essential, or the browser refuses the drop. The handle
-                  lives inside the name cell rather than a column of its
-                  own, so the header count this table is locked to in the
-                  e2e journey does not change.
+                  essential, or the browser refuses the drop. The handle,
+                  the admin link and the order arrows live inside the
+                  plugin cell rather than in columns of their own: that is
+                  what brought the table from eight columns down to six,
+                  and the e2e journey locks the header at six.
                 -->
                 <tr
                   v-for="p in plugins"
@@ -1261,13 +1296,14 @@ function goTo(id: string) {
                     <!-- The handle sits beside the name, not inside
                          `[data-plugin-name]`: that attribute is the name's
                          own text everywhere else it is queried, and must
-                         keep meaning only that. `aria-hidden` for the same
-                         reason at the accessibility layer: the cell's own
-                         accessible name (what the config journey looks the
-                         row up by) must stay the plugin's name alone —
-                         dragging is decorative and keyboard-inaccessible
-                         either way, the arrows are the real affordance for
-                         anyone not using a pointer. -->
+                         keep meaning only that (the unit tests look a row up
+                         by it and the journey by the name's exact text, never
+                         by the cell's accessible name: that name now also
+                         carries the admin link's word and the arrows' labels). The
+                         handle is `aria-hidden` because dragging is
+                         decorative and keyboard-inaccessible either way —
+                         the arrows are the real affordance for anyone not
+                         using a pointer. -->
                     <span
                       v-if="p.declared"
                       class="cursor-grab select-none pr-1"
@@ -1276,8 +1312,70 @@ function goTo(id: string) {
                       data-plugin-drag-handle
                     >⠿</span>
                     <span data-plugin-name>{{ p.name }}</span>
+                    <!-- The admin page, as an icon beside the name: it used
+                         to be a column of its own, mostly dashes. Named by
+                         its title and by screen-reader text — the glyph is
+                         `aria-hidden`, so the link's accessible name is the
+                         word alone. -->
+                    <RouterLink
+                      v-if="p.admin"
+                      :to="`/plugins/${p.name}/`"
+                      data-admin-link
+                      :title="t('admin_link')"
+                      class="ml-1 inline-flex align-middle text-muted-foreground hover:text-foreground"
+                    >
+                      <span aria-hidden="true" class="inline-flex"><GearIcon /></span>
+                      <span class="sr-only">{{ t('admin_link') }}</span>
+                    </RouterLink>
+                    <!-- The order arrows, folded in from their own column.
+                         Arrows write `/etc/ritornello/plugins.toml` and only
+                         a truly declared name has a line in it for
+                         `move_entry` to act on. Disabled, not hidden, at
+                         either end: `move_entry` refuses out of range rather
+                         than clamping, and an arrow that can be pressed and
+                         always fails is worse than a greyed one. The
+                         alternative to the drag handle: neither the keyboard
+                         nor a touchscreen fares well with drag-and-drop, the
+                         same reasoning the radio station table already
+                         carries. `data-plugin-order` keeps the wrapper the
+                         hooks were found through. -->
+                    <span v-if="p.declared" data-plugin-order class="ml-1 inline-flex align-middle">
+                      <Button
+                        variant="ghost" size="icon" data-plugin-up
+                        class="size-6"
+                        :disabled="isFirstDeclared(p.name) || inProgress.has(p.name)"
+                        :aria-label="t('plugin_move_up')"
+                        @click="movePlugin(p.name, declaredIndex(p.name) - 1)"
+                      >▲</Button>
+                      <Button
+                        variant="ghost" size="icon" data-plugin-down
+                        class="size-6"
+                        :disabled="isLastDeclared(p.name) || inProgress.has(p.name)"
+                        :aria-label="t('plugin_move_down')"
+                        @click="movePlugin(p.name, declaredIndex(p.name) + 1)"
+                      >▼</Button>
+                    </span>
                   </td>
-                  <td data-plugin-kind>{{ p.kinds }}</td>
+                  <td data-plugin-kind>
+                    <!-- One icon per kind, its translated name as the native
+                         title and as screen-reader text (the glyph itself is
+                         hidden from them). A plugin that has announced no real
+                         kind yet keeps the dash the column always showed. -->
+                    <template v-if="p.kinds.length > 0">
+                      <span
+                        v-for="k in p.kinds"
+                        :key="k"
+                        data-kind-icon
+                        :data-kind-icon-name="k"
+                        :title="kindLabel(k)"
+                        class="mr-1 inline-flex align-middle text-muted-foreground"
+                      >
+                        <span aria-hidden="true" class="inline-flex"><component :is="KIND_ICONS[k] ?? FALLBACK_KIND_ICON" /></span>
+                        <span class="sr-only">{{ kindLabel(k) }}</span>
+                      </span>
+                    </template>
+                    <template v-else>—</template>
+                  </td>
                   <td data-plugin-version>{{ p.version ?? '—' }}</td>
                   <td data-plugin-state>
                     <Badge
@@ -1378,12 +1476,6 @@ function goTo(id: string) {
                     </Badge>
                   </td>
                   <td>
-                    <RouterLink v-if="p.admin" :to="`/plugins/${p.name}/`" data-admin-link class="underline">
-                      {{ t('admin_link') }}
-                    </RouterLink>
-                    <span v-else>-</span>
-                  </td>
-                  <td>
                     <!-- No confirmation: the action is reversible from this
                          same row, and the notification says what happened.
                          Only a declared row has anything to enable or
@@ -1397,33 +1489,6 @@ function goTo(id: string) {
                       :aria-label="t('toggle_plugin', { name: p.name })"
                       @click="togglePlugin(p)"
                     />
-                    <span v-else>-</span>
-                  </td>
-                  <td data-plugin-order>
-                    <!-- Arrows write `/etc/ritornello/plugins.toml` and only
-                         a truly declared name has a line in it for
-                         `move_entry` to act on. Disabled, not hidden, at
-                         either end: `move_entry` refuses out of range rather
-                         than clamping, and an arrow that can be pressed and
-                         always fails is worse than a greyed one. -->
-                    <div v-if="p.declared" class="flex gap-1">
-                      <!-- Alternative to the drag handle: neither the
-                           keyboard nor a touchscreen fares well with
-                           drag-and-drop, the same reasoning the radio
-                           station table already carries. -->
-                      <Button
-                        variant="ghost" size="icon" data-plugin-up
-                        :disabled="isFirstDeclared(p.name) || inProgress.has(p.name)"
-                        :aria-label="t('plugin_move_up')"
-                        @click="movePlugin(p.name, declaredIndex(p.name) - 1)"
-                      >▲</Button>
-                      <Button
-                        variant="ghost" size="icon" data-plugin-down
-                        :disabled="isLastDeclared(p.name) || inProgress.has(p.name)"
-                        :aria-label="t('plugin_move_down')"
-                        @click="movePlugin(p.name, declaredIndex(p.name) + 1)"
-                      >▼</Button>
-                    </div>
                     <span v-else>-</span>
                   </td>
                   <td data-plugin-actions>
@@ -1448,7 +1513,7 @@ function goTo(id: string) {
                          release does not currently carry, or an
                          `undeclared_binary` row with nothing to declare it
                          from, must not offer a button that can only fail. -->
-                    <div class="flex gap-1">
+                    <div class="flex flex-wrap gap-1">
                       <!-- Privileged (`files` today): every gesture below —
                            Install, Declare, Remove the binary, Uninstall —
                            stops being this table's job, in **every** state
@@ -1456,50 +1521,93 @@ function goTo(id: string) {
                            Its packaging places a root service, a systemd
                            unit and a polkit rule this page has no way to
                            touch — `ritornello-install` is the one program
-                           that can. Showing the sentence beside a working
-                           Install (a `missing_binary` row) or beside Declare
-                           and "Remove the binary" (an `undeclared_binary`
-                           row) would leave the operator a gesture that
-                           downloads the archive only to have
-                           `installable_from_ui` refuse it, or one that
-                           erases the plugin binary and leaves the root
+                           that can. A working Install (a `missing_binary`
+                           row) would download the archive only to have
+                           `installable_from_ui` refuse it, and Declare or
+                           "Remove the binary" (an `undeclared_binary` row)
+                           would erase the plugin binary and leave the root
                            helper, its unit and its polkit rule behind — the
-                           exact half-finished job this change exists to
-                           close, reached from a different row shape. -->
+                           half-finished job this exists to close.
+
+                           So the row shows the very buttons an ordinary one
+                           would, **disabled**, and says why in each one's
+                           `title` (the sentence used to take a whole line
+                           here, which is what made the card too wide). Three
+                           choices, each for a reason:
+                           - a real `disabled` button rather than
+                             `aria-disabled` with a no-op click: nothing can
+                             fire, whatever a future edit does to the handler,
+                             and the tab order skips it;
+                           - the `title` on the wrapper span only, the button
+                             being `pointer-events-none`: a disabled button
+                             gets no hover event in some browsers, so its own
+                             `title` may never show, and the wrapper's does.
+                             Never on the button as well: a screen reader
+                             would then announce the sentence twice, once as
+                             the title and once as the description;
+                           - `aria-describedby` on the button to a
+                             screen-reader-only copy of the sentence, so
+                             "why" is read out — once. -->
+                      <span v-if="p.privileged" :id="privilegedNoteId(p.name)" class="sr-only">{{
+                        t('plugin_privileged_note')
+                      }}</span>
                       <span
-                        v-if="p.privileged"
-                        data-plugin-privileged-note
-                        class="text-xs text-muted-foreground"
-                      >{{ t('plugin_privileged_note') }}</span>
-                      <template v-else>
+                        v-if="p.missing_binary"
+                        :title="p.privileged ? t('plugin_privileged_note') : undefined"
+                        class="inline-flex"
+                      >
                         <Button
-                          v-if="p.missing_binary"
                           variant="outline" size="xs" data-plugin-install
-                          :disabled="p.offered === null || inProgress.has(p.name)"
+                          :class="p.privileged ? 'pointer-events-none' : ''"
+                          :aria-describedby="p.privileged ? privilegedNoteId(p.name) : undefined"
+                          :disabled="p.privileged || p.offered === null || inProgress.has(p.name)"
                           @click="installPlugin(p.name)"
                         >{{ t('plugin_install') }}</Button>
-                        <!-- Both gestures this state licenses are withheld while
-                             the binary is already being erased: declaring a file
-                             that is about to vanish, or asking a second time for
-                             the erasure in flight, are the two ways this row used
-                             to mislead. The row says what is happening instead. -->
+                      </span>
+                      <!-- Both gestures this state licenses are withheld while
+                           the binary is already being erased: declaring a file
+                           that is about to vanish, or asking a second time for
+                           the erasure in flight, are the two ways this row used
+                           to mislead. The row says what is happening instead. -->
+                      <span
+                        v-if="p.undeclared_binary && !p.removal_pending"
+                        :title="p.privileged ? t('plugin_privileged_note') : undefined"
+                        class="inline-flex"
+                      >
                         <Button
-                          v-if="p.undeclared_binary && !p.removal_pending"
                           variant="outline" size="xs" data-plugin-declare
-                          :disabled="p.offered === null || inProgress.has(p.name)"
+                          :class="p.privileged ? 'pointer-events-none' : ''"
+                          :aria-describedby="p.privileged ? privilegedNoteId(p.name) : undefined"
+                          :disabled="p.privileged || p.offered === null || inProgress.has(p.name)"
                           @click="installPlugin(p.name)"
                         >{{ t('plugin_declare') }}</Button>
+                      </span>
+                      <span
+                        v-if="p.undeclared_binary && !p.removal_pending"
+                        :title="p.privileged ? t('plugin_privileged_note') : undefined"
+                        class="inline-flex"
+                      >
                         <Button
-                          v-if="p.undeclared_binary && !p.removal_pending"
                           variant="outline" size="xs" data-plugin-remove-binary
+                          :class="p.privileged ? 'pointer-events-none' : ''"
+                          :aria-describedby="p.privileged ? privilegedNoteId(p.name) : undefined"
+                          :disabled="p.privileged"
                           @click="removeBinaryTarget = p.binary_file ?? p.name"
                         >{{ t('plugin_remove_binary') }}</Button>
+                      </span>
+                      <span
+                        v-if="!p.undeclared_binary"
+                        :title="p.privileged ? t('plugin_privileged_note') : undefined"
+                        class="inline-flex"
+                      >
                         <Button
-                          v-if="!p.undeclared_binary"
                           variant="outline" size="xs" data-plugin-uninstall
+                          :class="p.privileged ? 'pointer-events-none' : ''"
+                          :aria-describedby="p.privileged ? privilegedNoteId(p.name) : undefined"
+                          :disabled="p.privileged"
                           @click="uninstallTarget = p.name"
                         >{{ t('plugin_uninstall') }}</Button>
-                      </template>
+                      </span>
                     </div>
                   </td>
                 </tr>
@@ -1525,6 +1633,7 @@ function goTo(id: string) {
           :busy="update.busy"
           @update:open="(v: boolean) => (showInstallablesDialog = v)"
           @install="installPlugin"
+          @refresh="onCheckSettled"
         />
 
         <!-- One shared dialog for the whole table, keyed by `uninstallTarget`
@@ -1634,6 +1743,28 @@ function goTo(id: string) {
               :busy="packBusy"
               @install="installLanguage"
               @remove="askRemoveLanguage"
+            />
+
+            <!-- Adding a language nobody installed yet: its own dialog, the
+                 mirror of "Add a plugin". The installed ones are the row
+                 above. -->
+            <div>
+              <Button
+                variant="outline" size="sm" data-add-language-open
+                @click="showAddLanguageDialog = true"
+              >{{ t('languages_add_title') }}</Button>
+            </div>
+
+            <AddLanguageDialog
+              :open="showAddLanguageDialog"
+              :packs="locale.packs"
+              :outcome="update.outcome"
+              :last-check-unix-s="update.last_check_unix_s"
+              :busy="update.busy"
+              :pack-busy="packBusy"
+              @update:open="(v: boolean) => (showAddLanguageDialog = v)"
+              @install="installLanguage"
+              @refresh="onCheckSettled"
             />
 
             <!-- Date and time. Two separate settings, at the owner's request: the

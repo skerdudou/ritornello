@@ -11,7 +11,8 @@ const CATALOG = {
   update_row_core_not_selected:
     '{component} will move while the core stays behind — this may make them incompatible.',
   update_confirm: 'Install selected',
-  plugin_privileged_note: 'Privileged component: install or uninstall it with ritornello-install.',
+  plugin_privileged_note:
+    'Privileged component: install or uninstall it with ritornello-install. An update that leaves its root-owned files unchanged can be made from here.',
 }
 
 beforeEach(async () => {
@@ -236,6 +237,34 @@ describe('UpdateDialog', () => {
     await row('radio')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
     await flushPromises()
     expect(isChecked('radio')).toBe('false')
+  })
+
+  // Follow-up C, the other half of the test above: a privileged plugin the
+  // device declares may be updated from here when its privileged files are
+  // unchanged, which the core only learns from the archive. Until an attempt
+  // is refused, its row carries no `installable` at all, and the switch must
+  // follow that flag rather than the plugin's name: enabled, pre-checked like
+  // any update, and without the privileged sentence.
+  it('lets an installed privileged plugin be updated while nothing says otherwise', async () => {
+    mountDialog([
+      {
+        name: 'files',
+        kind: 'plugin',
+        declared: true,
+        binary_present: true,
+        installed: '0.2.0',
+        offered: '0.3.0',
+        availability: 'update_available',
+      },
+    ])
+    await flushPromises()
+    const check = row('files')!.querySelector<HTMLElement>('[data-update-row-check]')!
+    expect(check.hasAttribute('disabled')).toBe(false)
+    expect(isChecked('files')).toBe('true')
+    expect(row('files')?.querySelector('[data-update-row-warning]')).toBeNull()
+    await check.click()
+    await flushPromises()
+    expect(isChecked('files')).toBe('false')
   })
 
   it('leaves a third-party plugin unchecked and shows where it comes from', async () => {

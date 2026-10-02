@@ -485,7 +485,12 @@ fn install_or_update(
             }
         }
         if !privileged.is_empty() {
-            new_registry.insert(c.name.clone(), Recorded { version: c.version.clone(), privileged });
+            // Hashes are filled by `record_hashes`, once the archives are
+            // in memory: the plan itself never sees a byte of them.
+            new_registry.insert(
+                c.name.clone(),
+                Recorded { version: c.version.clone(), privileged, sha256: BTreeMap::new() },
+            );
         }
         let was_there = if c.name == inv.core.name { dev.core_present } else { declared.contains(c.name.as_str()) };
         if was_there {
@@ -632,7 +637,11 @@ fn provisional(old: &BTreeMap<String, Recorded>, new: &BTreeMap<String, Recorded
     for (name, rec) in new {
         let entry = components
             .entry(name.clone())
-            .or_insert_with(|| Recorded { version: rec.version.clone(), privileged: Vec::new() });
+            .or_insert_with(|| Recorded {
+                version: rec.version.clone(),
+                privileged: Vec::new(),
+                sha256: BTreeMap::new(),
+            });
         entry.version = rec.version.clone();
         for p in &rec.privileged {
             if !entry.privileged.contains(p) {
@@ -641,6 +650,100 @@ fn provisional(old: &BTreeMap<String, Recorded>, new: &BTreeMap<String, Recorded
         }
     }
     Registry { format: 1, components }
+}
+
+/// Fills the `sha256` of both registries from the archives, once they are
+/// in memory: `main` calls it after every archive is fetched and verified,
+/// and before `script::bundle` renders the registries. Still pure — bytes
+/// in, a plan out — but kept apart from `compute`, which decides from the
+/// inventory and the survey alone and never sees an archive.
+///
+/// **The hash is of the exact bytes `put` copies**: the member
+/// `archive_path` of `archive`, as `extract` unpacks it (a leading `./`
+/// lands at the same path, and a name carried twice ends as the last one
+/// extracted, so the last one read here wins too).
+///
+/// What each registry may claim differs, because they describe different
+/// moments:
+///
+/// - the **final** registry is written once every `put` has run: each
+///   privileged dest this plan places gets the hash of what was placed.
+///   A record this plan does not place (a third-party entry kept as it
+///   was) keeps its own hashes, since its files were not touched;
+/// - the **provisional** registry is what a run stopping halfway leaves
+///   behind, when a dest may still hold the old bytes or already the new
+///   ones. It keeps a hash only where both answers are the same bytes: the
+///   old record's hash, and only when this plan places nothing there or
+///   places exactly those bytes again. Anything else is left without a
+///   hash, which the core reads as "cannot prove unchanged" and refuses on.
+///   A dest this plan removes loses its hash too: a record of bytes that
+///   may be gone would let the core skip placing a file that is missing.
+pub fn record_hashes(plan: &mut Plan, archives: &BTreeMap<String, Vec<u8>>) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let recorded: BTreeSet<String> = plan
+        .registry
+        .iter()
+        .chain(plan.provisional_registry.iter())
+        .flat_map(|r| r.components.values())
+        .flat_map(|c| c.privileged.iter().cloned())
+        .collect();
+    // archive -> member -> dest, for every privileged dest this plan places.
+    let mut wanted: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
+    for p in plan.puts.iter().filter(|p| recorded.contains(&p.dest)) {
+        wanted.entry(p.archive.as_str()).or_default().insert(p.archive_path.as_str(), p.dest.as_str());
+    }
+    let mut placed: BTreeMap<String, String> = BTreeMap::new();
+    for (archive, members) in &wanted {
+        let bytes = archives.get(*archive).with_context(|| format!("the plan needs {archive}, which was not downloaded"))?;
+        let hashes = member_hashes(bytes, &members.keys().copied().collect())
+            .with_context(|| format!("reading {archive}"))?;
+        for (member, dest) in members {
+            let hash = hashes.get(*member).with_context(|| format!("{archive} carries no {member}"))?;
+            placed.insert(dest.to_string(), hash.clone());
+        }
+    }
+    let removed = &plan.remove_files;
+    if let Some(registry) = &mut plan.registry {
+        for rec in registry.components.values_mut() {
+            for p in &rec.privileged {
+                if let Some(hash) = placed.get(p) {
+                    rec.sha256.insert(p.clone(), hash.clone());
+                }
+            }
+        }
+    }
+    if let Some(registry) = &mut plan.provisional_registry {
+        for rec in registry.components.values_mut() {
+            rec.sha256
+                .retain(|dest, old| !removed.contains(dest) && placed.get(dest).is_none_or(|new| new == old));
+        }
+    }
+    Ok(())
+}
+
+/// The lowercase hex sha256 of each regular member of a `.tar.gz` whose
+/// name, a leading `./` stripped, is in `wanted`.
+fn member_hashes(gz: &[u8], wanted: &BTreeSet<&str>) -> anyhow::Result<BTreeMap<String, String>> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+    let mut out = BTreeMap::new();
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(gz));
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let raw = entry.path()?.to_string_lossy().to_string();
+        let name = raw.strip_prefix("./").unwrap_or(&raw).to_string();
+        if !wanted.contains(name.as_str()) {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        let digest = Sha256::digest(&bytes);
+        out.insert(name, digest.iter().map(|b| format!("{b:02x}")).collect());
+    }
+    Ok(out)
 }
 
 fn remove_all(inv: &Inventory, dev: &DeviceState, erase_data: bool) -> Result<Plan, PlanError> {
@@ -851,6 +954,7 @@ pub(crate) mod tests {
                         Recorded {
                             version: "0.2.0-beta.1".to_string(),
                             privileged: paths.iter().map(|p| p.to_string()).collect(),
+                            sha256: BTreeMap::new(),
                         },
                     )
                 })
@@ -1770,5 +1874,143 @@ pub(crate) mod tests {
             PlanError::DataNotAsked("/var/lib/ritornello/plugins/cd/x".into()),
             &["\"/var/lib/ritornello/plugins/cd/x\"", "installed.toml"],
         );
+    }
+
+    // --- The hashes the core compares an update of `files` against ------
+
+    fn sha(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A `.tar.gz` with each member written under its raw name — `./` kept,
+    /// as `package-release.sh`'s `tar -C <dir> … .` writes it, and as
+    /// `tar::Builder::append_data` would silently drop.
+    fn targz_raw(members: &[(String, Vec<u8>)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, data) in members {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, data.as_slice()).unwrap();
+        }
+        let tar = builder.into_inner().unwrap();
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar).unwrap();
+        gz.finish().unwrap()
+    }
+
+    /// What a member of `archive` holds in these tests: its own name, so two
+    /// members never share bytes and a hash taken from the wrong one shows.
+    fn content(archive: &str, member: &str) -> Vec<u8> {
+        format!("{archive} / {member}\n").into_bytes()
+    }
+
+    /// Every archive the plan names, each carrying exactly the members its
+    /// puts copy, under `./`.
+    fn archives_for(plan: &Plan) -> BTreeMap<String, Vec<u8>> {
+        plan.archives
+            .iter()
+            .map(|a| {
+                let members: Vec<(String, Vec<u8>)> = plan
+                    .puts
+                    .iter()
+                    .filter(|p| &p.archive == a)
+                    .map(|p| (format!("./{}", p.archive_path), content(a, &p.archive_path)))
+                    .collect();
+                (a.clone(), targz_raw(&members))
+            })
+            .collect()
+    }
+
+    const FILES_ARCHIVE: &str = "ritornello-plugin-files-0.2.0-beta.2-arm64.tar.gz";
+
+    /// The final registry records, for every privileged dest, the hash of
+    /// the very member `put` copies there — nothing for a dest that is not
+    /// privileged, and a member carried twice counted as `tar -x` leaves it:
+    /// the last one.
+    ///
+    /// **[MUTATION]**: in `member_hashes`, stop stripping the leading `./`
+    /// — this test fails ("carries no …"). **[MUTATION]**: hash the member's
+    /// name instead of its bytes — this test fails.
+    #[test]
+    fn the_recorded_hashes_are_those_of_the_members_put_places() {
+        let mut plan = compute(&inv(), &dev(&[], None, &[], &[]), &install(&["radio", "files"], &[], &[])).unwrap();
+        let mut archives = archives_for(&plan);
+        // `files` carries its rule twice: first stale bytes, then the real
+        // ones. The device ends with the last.
+        let rule_member = MEDIA_RULE.trim_start_matches('/');
+        let mut members: Vec<(String, Vec<u8>)> = vec![(format!("./{rule_member}"), b"stale\n".to_vec())];
+        for p in plan.puts.iter().filter(|p| p.archive == FILES_ARCHIVE) {
+            members.push((format!("./{}", p.archive_path), content(FILES_ARCHIVE, &p.archive_path)));
+        }
+        archives.insert(FILES_ARCHIVE.to_string(), targz_raw(&members));
+
+        record_hashes(&mut plan, &archives).unwrap();
+
+        let reg = plan.registry.as_ref().unwrap();
+        let expected: BTreeMap<String, String> = [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER]
+            .iter()
+            .map(|d| (d.to_string(), sha(&content(FILES_ARCHIVE, d.trim_start_matches('/')))))
+            .collect();
+        assert_eq!(reg.components["files"].sha256, expected);
+        let core_archive = "ritornello-core-0.2.0-beta.2-arm64.tar.gz";
+        let core_unit = "/etc/systemd/system/ritornello.service";
+        assert_eq!(
+            reg.components[CORE].sha256,
+            [(core_unit.to_string(), sha(&content(core_archive, core_unit.trim_start_matches('/'))))].into()
+        );
+        // A fresh device had nothing before: halfway through, a dest may
+        // hold nothing or the new bytes, so nothing is claimed.
+        let prov = plan.provisional_registry.as_ref().unwrap();
+        assert!(prov.components.values().all(|r| r.sha256.is_empty()), "{prov:?}");
+    }
+
+    /// The provisional registry — what a run stopping halfway leaves —
+    /// claims a hash only where the old bytes and the new are the same, so
+    /// whichever the dest holds, the claim is true. A dest this plan
+    /// removes claims nothing at all, in either registry.
+    ///
+    /// **[MUTATION]**: drop `placed.get(dest).is_none_or(|new| new == old)`
+    /// from the provisional retain — this test fails (the rule keeps its
+    /// old hash). **[MUTATION]**: drop `!removed.contains(dest)` from the
+    /// provisional retain — this test fails (the stale unit keeps its hash).
+    #[test]
+    fn the_provisional_registry_keeps_a_hash_only_where_both_halves_of_a_run_agree() {
+        let stale_unit = "/etc/systemd/system/ritornello-media-old.service";
+        let mut reg = registry(&[(CORE, &[]), ("files", &[MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER, stale_unit])]);
+        let unit_hash = sha(&content(FILES_ARCHIVE, MEDIA_UNIT.trim_start_matches('/')));
+        reg.components.get_mut("files").unwrap().sha256 = [
+            (MEDIA_UNIT.to_string(), unit_hash.clone()),
+            (MEDIA_RULE.to_string(), "0".repeat(64)),
+            (stale_unit.to_string(), "1".repeat(64)),
+        ]
+        .into();
+        let device = dev(&[("radio", RADIO_EXEC), ("files", FILES_EXEC)], Some(reg), &[], &[]);
+        let mut plan = compute(&inv(), &device, &install(&["radio", "files"], &[], &[])).unwrap();
+        assert!(has(&plan.remove_files, stale_unit), "the fixture must remove the stale unit");
+
+        let archives = archives_for(&plan);
+        record_hashes(&mut plan, &archives).unwrap();
+
+        let prov = &plan.provisional_registry.as_ref().unwrap().components["files"];
+        assert_eq!(prov.sha256, [(MEDIA_UNIT.to_string(), unit_hash)].into(), "{prov:?}");
+        let fin = &plan.registry.as_ref().unwrap().components["files"];
+        assert_eq!(fin.sha256.len(), 3, "the final registry knows every placed dest: {fin:?}");
+        assert!(!fin.sha256.contains_key(stale_unit));
+    }
+
+    /// An archive that lacks a member the plan places stops the run before
+    /// anything is sent, rather than recording a registry without it.
+    #[test]
+    fn a_member_the_archive_lacks_is_named() {
+        let mut plan = compute(&inv(), &dev(&[], None, &[], &[]), &install(&["files"], &[], &[])).unwrap();
+        let mut archives = archives_for(&plan);
+        archives.insert(FILES_ARCHIVE.to_string(), targz_raw(&[]));
+        let err = record_hashes(&mut plan, &archives).unwrap_err();
+        assert!(format!("{err:#}").contains("carries no"), "{err:#}");
     }
 }

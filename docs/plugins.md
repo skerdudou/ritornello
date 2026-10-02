@@ -1245,7 +1245,13 @@ this repository's privileged plugins
 (`crates/ritornello-core/src/plugins/mod.rs::PRIVILEGED_PLUGINS`) — a
 list, not something a plugin announces about itself, since a plugin
 that never announces at all (disabled, crashed, not yet started) could
-not have said so either way. **Adding a privileged plugin to this
+not have said so either way. **Updating `files` from the page is
+allowed** when the new archive leaves every privileged file
+byte-identical: the core compares their sha256 with the ones
+`ritornello-install` recorded in `/var/lib/ritornello-install/installed.toml`
+(same set of files, same hashes) and then places the plugin binary alone.
+An update that changes the unit, the rule or the helper, or a device with
+no such registry, is refused and sent to `ritornello-install`. **Adding a privileged plugin to this
 repository means declaring its privileged files in
 `deploy/packaging.toml`** (an `extra_binaries` entry, or a `tree`
 destination under `etc/systemd/system/` or `etc/polkit-1/rules.d/`) —

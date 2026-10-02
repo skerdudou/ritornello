@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
- * One line per language a pack is installed or offered for, sitting right
- * under `LanguageCard`'s selector: the language chooser used to only
- * *announce* what was missing (`LanguageCard`'s completeness annotation, "2
- * greffons /7") — this row is the remedy for it, one gesture per language,
- * everything published for it at once, never plugin by plugin.
+ * One line per language a pack is installed for, sitting right under
+ * `LanguageCard`'s selector: what is on the device, with Update and Remove.
+ * Adding a language that is only offered is `AddLanguageDialog`'s job — one
+ * gesture per language, everything published for it at once, never plugin by
+ * plugin.
  *
  * A pure render component, exactly like `LanguageCard`: props in, events
  * out, **no API call here**. `ConfigView.vue` owns `POST`/`DELETE
@@ -12,7 +12,7 @@
  * "Remove" — this component only ever emits the language code.
  *
  * **The card's arbitrated rule**: nothing is shown where there is no news.
- * A language with no pack offered and none installed renders no line at
+ * A language with no pack installed renders no line at
  * all — the same convention `LanguageCard`'s own `annotation()` uses for a
  * complete language.
  */
@@ -44,16 +44,12 @@ const emit = defineEmits<{ install: [string]; remove: [string] }>()
 const { t } = useCatalog()
 
 /**
- * The rows worth a line. `installed`/`offered` both `null` never actually
- * reaches `LocalePayload.packs` (`status::locales::language_pack_rows`
- * builds a row from one or the other), but filtering defensively is what the
- * brief's own arbitrated rule ("nothing shown where there is no news") is
- * stated as, and it is what keeps this component correct even if a future
- * caller ever hands it a looser payload.
+ * The rows worth a line: the packs on disk. A pack that is only *offered* is
+ * `AddLanguageDialog`'s row, not this one — listing it here as well would put
+ * the same gesture in two places, and this list would grow with every
+ * language a release publishes whether or not the owner wants it.
  */
-const rows = computed<PackRow[]>(() =>
-  props.payload.packs.filter((p) => p.installed !== null || p.offered !== null),
-)
+const rows = computed<PackRow[]>(() => props.payload.packs.filter((p) => p.installed !== null))
 
 /** A pack is on disk, and the release currently offers a different version. */
 function updateAvailable(row: PackRow): boolean {
@@ -90,15 +86,7 @@ function busyLabel(row: PackRow): string {
       <span v-if="isBusy(row)" class="text-xs text-muted-foreground" data-pack-busy>
         {{ busyLabel(row) }}
       </span>
-      <!-- Only a language with nothing on disk yet can be installed. -->
-      <Button
-        v-if="row.installed === null"
-        variant="outline" size="xs"
-        :data-pack-install="row.language"
-        :disabled="isBusy(row)"
-        @click="emit('install', row.language)"
-      >{{ t('language_pack_install') }}</Button>
-      <!-- Same route as Install (`ConfigView`'s `installLanguage`): the core
+      <!-- Same route as a first install (`ConfigView`'s `installLanguage`): the core
            does not distinguish a first install from a reinstall over a
            newer offer. -->
       <Button

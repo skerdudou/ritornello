@@ -4,7 +4,9 @@ import {
 } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
+import { checkFailure, hasUsableCheck, useUpdateCheck } from '../composables/useUpdateCheck'
 import type { ComponentOffer, UpdatePayload } from '../types'
+import UpdateCheckStatus from './UpdateCheckStatus.vue'
 
 const props = defineProps<{
   open: boolean
@@ -17,8 +19,25 @@ const props = defineProps<{
    *  already does this). */
   busy: string | null
 }>()
-const emit = defineEmits<{ 'update:open': [boolean]; install: [string] }>()
+const emit = defineEmits<{ 'update:open': [boolean]; install: [string]; refresh: [] }>()
 const { t } = useCatalog()
+
+/**
+ * Opening this dialog looks for components by itself: an empty list on a
+ * device nobody had checked yet used to read as "there is nothing", and the
+ * operator had to know to go and press Check first. The page reloads its
+ * update state on `refresh`, which is what fills `components`.
+ */
+const check = useUpdateCheck({
+  open: () => props.open,
+  state: () => ({
+    outcome: props.outcome,
+    lastCheckUnixS: props.lastCheckUnixS,
+    busy: props.busy,
+  }),
+  onSettled: () => emit('refresh'),
+})
+const failure = computed(() => checkFailure(check.phase.value, check.error.value, props.outcome))
 
 /** What the release says about its components, `null` until asked. */
 const catalogue = ref<Record<string, { kinds: string[]; description: string }> | null>(null)
@@ -33,12 +52,13 @@ const asked = ref(false)
  * pack never rides the components' install path — so a row here whose
  * "Install" called `installPlugin()` produced "nothing published for
  * ritornello-lang-fr" even though the very same row showed an offered
- * version. `LanguagePacksRow.vue` (`ConfigView`'s "Language and display"
- * card) is the one place a pack installs from, because it is the only one
- * that knows the right route (`POST /api/languages/{language}`). This was
- * once going to be a second category inside this same dialog; it never
- * happened, and it will not: the two gestures need two different routes,
- * so they stay two different surfaces.
+ * version. `AddLanguageDialog.vue` (opened from `ConfigView`'s "Language and
+ * display" card) is the one place a pack is first installed from, because
+ * it is the only one that knows the right route (`POST
+ * /api/languages/{language}`). This was once going to be a second category
+ * inside this same dialog; it never happened, and it will not: the two
+ * gestures need two different routes, so they stay two different surfaces
+ * — this one is "Add a plugin", that one its mirror.
  */
 const rows = computed(() =>
   props.components
@@ -71,33 +91,9 @@ const rows = computed(() =>
  */
 const noCatalogue = computed(() => Object.keys(catalogue.value ?? {}).length === 0)
 
-/**
- * Whether the last check actually looked, and can therefore be trusted to
- * mean "nothing to add" when `rows` comes back empty.
- *
- * `never_checked`, `no_release` and `only_prereleases` always rebuild every
- * component against an empty published list server-side (`component_offers`
- * called with `&[]`, see `update/mod.rs`'s `check`), so every row resolves to
- * `unknown` and `rows` is empty regardless of what the appliance actually has
- * — an empty `rows` there is silence, not completeness.
- *
- * `failed` is not always that kind of silence (N3). It is published both for
- * a failed check (`publish_failure`, which leaves `components` exactly as an
- * earlier successful check left them) and for a *refused install* that
- * followed a successful check (`install_report`/`conclude_install`, which
- * re-checks before installing) — in both cases the rows on screen, and this
- * `lastCheckUnixS`, are still the real ones from that earlier success. Only a
- * `failed` on a device that has genuinely **never** succeeded — `null` here —
- * is the silent kind. `ok` and `installed` (the transient report right after
- * a successful install, still built from a real release) are never silent
- * either way.
- */
-const hasUsableCheck = computed(
-  () =>
-    props.outcome.kind === 'ok'
-    || props.outcome.kind === 'installed'
-    || (props.outcome.kind === 'failed' && props.lastCheckUnixS !== null),
-)
+/** See `hasUsableCheck`: whether an empty `rows` means "nothing to add". */
+const usableCheck = computed(() => hasUsableCheck(props.outcome, props.lastCheckUnixS))
+
 
 // Generation counter, as `PluginRoute.vue` does for a plugin catalogue: the
 // request is asynchronous, and a dialog closed and reopened must not have a
@@ -148,8 +144,13 @@ watch(
         <DialogDescription>{{ t('installables_description') }}</DialogDescription>
       </DialogHeader>
 
+      <UpdateCheckStatus :phase="check.phase.value" :failure="failure" @retry="check.retry()" />
+
+      <!-- While the check runs the list is not shown at all, not even as
+           "nothing to add": it would be an answer nobody has given yet. -->
+      <template v-if="check.phase.value === 'checking'" />
       <p
-        v-if="rows.length === 0 && !hasUsableCheck"
+        v-else-if="rows.length === 0 && !usableCheck"
         data-installables-unknown
         class="text-sm text-muted-foreground"
       >

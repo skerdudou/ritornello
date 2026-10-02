@@ -43,12 +43,25 @@ beforeEach(async () => {
 })
 
 describe('LanguagePacksRow', () => {
-  it('offers install for a language the device does not have, and remove for one it has', async () => {
+  // Follow-up B: a pack that is only offered moved to `AddLanguageDialog`.
+  // Both halves: the installed rows are all there, and the offered-only one
+  // is nowhere in this list — a mutant that filters nothing, or hides
+  // everything, fails one of the two.
+  it('lists only the packs on disk, with remove, and never a pack that is only offered', async () => {
     const w = await mountRow()
-    expect(w.find('[data-pack-install="de"]').exists()).toBe(true)
-    expect(w.find('[data-pack-remove="de"]').exists()).toBe(false)
+    expect(w.findAll('[data-pack-row]').map((r) => r.find('[data-pack-remove]').attributes('data-pack-remove')))
+      .toEqual(['fr', 'es'])
     expect(w.find('[data-pack-remove="fr"]').exists()).toBe(true)
-    expect(w.find('[data-pack-install="fr"]').exists()).toBe(false)
+    expect(w.find('[data-pack-remove="es"]').exists()).toBe(true)
+    expect(w.text()).not.toContain('Deutsch')
+    expect(w.find('[data-pack-remove="de"]').exists()).toBe(false)
+    expect(w.find('[data-pack-install="de"]').exists()).toBe(false)
+    expect(w.find('[data-pack-install]').exists()).toBe(false)
+  })
+
+  it('shows nothing when every pack is only offered', async () => {
+    const w = await mountRow({ ...BASE, packs: [{ language: 'de', installed: null, offered: '0.2.1' }] })
+    expect(w.find('[data-language-packs]').exists()).toBe(false)
   })
 
   it('offers update, and says so, only when the offered version differs', async () => {
@@ -67,8 +80,8 @@ describe('LanguagePacksRow', () => {
 
   it('emits the language, and never calls the API itself', async () => {
     const w = await mountRow()
-    await w.find('[data-pack-install="de"]').trigger('click')
-    expect(w.emitted('install')).toEqual([['de']])
+    await w.find('[data-pack-update="es"]').trigger('click')
+    expect(w.emitted('install')).toEqual([['es']])
     await w.find('[data-pack-remove="fr"]').trigger('click')
     expect(w.emitted('remove')).toEqual([['fr']])
   })
@@ -77,8 +90,9 @@ describe('LanguagePacksRow', () => {
   /// the one clicked: two installs racing would both be enqueued, and the
   /// queue holds four.
   it('disables the row whose gesture is in flight', async () => {
-    const w = await mountRow(BASE, { language: 'de', action: 'install' })
-    expect(w.find('[data-pack-install="de"]').attributes('disabled')).toBeDefined()
+    const w = await mountRow(BASE, { language: 'es', action: 'install' })
+    expect(w.find('[data-pack-update="es"]').attributes('disabled')).toBeDefined()
+    expect(w.find('[data-pack-remove="es"]').attributes('disabled')).toBeDefined()
     expect(w.find('[data-pack-remove="fr"]').attributes('disabled')).toBeUndefined()
   })
 

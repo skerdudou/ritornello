@@ -95,10 +95,13 @@ const coreLeftBehind = computed(() => coreRow.value?.availability === 'update_av
 
 /** `null` when a row has nothing to say. */
 function warningFor(c: ComponentOffer): string | null {
-  // Fix round 1, M1: `installable === false` names a privileged plugin
-  // (`files` today) — its packaging places a root service, a systemd unit
-  // or a polkit rule this dialog cannot install, exactly the archive shape
-  // `installable_from_ui` refuses. The switch is disabled below for the
+  // Fix round 1, M1: `installable === false` names a component whose archive
+  // needs a root step this dialog cannot take — for a privileged plugin
+  // (`files` today), an update that changes its systemd unit, polkit rule or
+  // root-run helper. Follow-up C: an installed privileged plugin is NOT
+  // refused from its name; the core leaves `installable` unset until an
+  // archive has actually changed one of those files, so the switch follows
+  // the flag and nothing else. The switch is disabled below for the
   // same reason `offered === null` already disables one (Ruling 88); this
   // is the sentence that tells the operator why, the same one `ConfigView`'s
   // table and `InstallablesDialog` show in place of a button.

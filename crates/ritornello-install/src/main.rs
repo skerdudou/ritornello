@@ -222,7 +222,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
     };
 
     // 7. The plan: a refusal is said in one sentence, and nothing is sent.
-    let plan = plan::compute(&inv, &dev, &intent).map_err(|e| anyhow!("{e} (nothing was sent to the device)"))?;
+    let mut plan = plan::compute(&inv, &dev, &intent).map_err(|e| anyhow!("{e} (nothing was sent to the device)"))?;
 
     // 8. The summary, and its confirmation.
     ui::show_summary(&plan, &inv.product, &source.label(), &host);
@@ -244,6 +244,9 @@ fn run(args: &Args) -> anyhow::Result<()> {
         eprintln!("Fetching {name}...");
         archives.insert(name.clone(), source.archive(name)?);
     }
+    // The registries record the hash of every privileged file from the very
+    // bytes the script places, before they are rendered into the bundle.
+    plan::record_hashes(&mut plan, &archives)?;
     let script = script::render(&plan)?;
     let bundle = script::bundle(&plan, &script, &archives)?;
 

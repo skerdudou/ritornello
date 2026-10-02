@@ -1,5 +1,5 @@
 import { api, Select, SelectItem, toast } from '@ritornello/ui'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import type { LocalePayload } from '../types'
@@ -21,8 +21,8 @@ vi.mock('@ritornello/ui', async () => {
 const CATALOGUE = {
   config_title: 'Configuration',
   plugins_title: 'Plugins',
-  col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_admin: 'Admin', col_enabled: 'Actif',
-  col_version: 'Version', col_order: 'Ordre', col_actions: 'Actions',
+  col_plugin: 'Plugin', col_kind: 'Genre', col_state: 'État', col_enabled: 'Actif',
+  col_version: 'Version', col_actions: 'Actions',
   connected: 'connecté', unavailable: 'unavailable', stalled: 'figé', disabled: 'désactivé',
   starting: 'démarrage', busy: 'occupé',
   plugin_incompatible: 'Compilé pour le protocole {found} ; ce cœur parle le {expected}',
@@ -108,6 +108,12 @@ const CATALOGUE = {
   language_pack_update_available: 'Un greffon plus récent est disponible',
   language_pack_installing: 'Installation de {language}…',
   language_pack_removing: 'Retrait de {language}…',
+  languages_add_title: 'Ajouter une langue',
+  languages_add_description: 'Langues que cette version publie.',
+  languages_add_empty: 'Rien à ajouter.',
+  installables_title: 'Ajouter un greffon',
+  installables_checking: 'Recherche des composants…',
+  installables_retry: 'Réessayer',
   language_pack_remove_confirm:
     "Retirer le greffon {language} ? L'interface repasse en anglais si c'est la langue utilisée.",
 }
@@ -197,6 +203,34 @@ function localeWithPacks(
     fallback_candidates: ['en'],
     packs,
   }
+}
+
+/**
+ * A check that landed a minute ago: the two add-dialogs then open without
+ * running one of their own (`useUpdateCheck`), which is what the gesture tests
+ * below are about. The dialogs' own check is covered where it is the subject.
+ */
+function freshUpdate(): unknown {
+  return {
+    outcome: { kind: 'ok' },
+    release_version: '1.0.0',
+    release_url: null,
+    last_check_unix_s: Math.floor(Date.now() / 1000) - 60,
+    components: [],
+    busy: null,
+    last_rollback: null,
+  }
+}
+
+/** The dialog's content is teleported, so it is found from the body. */
+function inDialog<T extends HTMLElement = HTMLElement>(selector: string): T | null {
+  return document.body.querySelector<T>(selector)
+}
+
+/** Opens "Add a language" from the language card. */
+async function openAddLanguage(w: VueWrapper) {
+  await w.find('[data-add-language-open]').trigger('click')
+  await flushPromises()
 }
 
 // jsdom does not implement IntersectionObserver: the view needs it for the
@@ -295,6 +329,11 @@ async function mountWithStatus(status: unknown) {
   return w
 }
 
+/** The kind names a row's icons carry as `title`, in order. */
+function kindTitles(row: { findAll: (s: string) => Array<{ attributes: (n: string) => string | undefined }> }) {
+  return row.findAll('[data-kind-icon]').map((i) => i.attributes('title'))
+}
+
 function resetMocks() {
   vi.unstubAllGlobals()
   vi.mocked(toast.error).mockClear()
@@ -312,21 +351,64 @@ function resetMocks() {
 describe('ConfigView — plugin table', () => {
   beforeEach(resetMocks)
 
-  it('renders one row per plugin with its eight columns', async () => {
+  it('renders one row per plugin with its six columns', async () => {
     const { w } = await mountView()
     const rows = w.findAll('[data-plugin-row]')
     expect(rows).toHaveLength(2)
     expect(rows[0]!.find('[data-plugin-name]').text()).toBe('radio')
-    expect(rows[0]!.find('[data-plugin-kind]').text()).toBe('source')
+    expect(kindTitles(rows[0]!)).toEqual(['source'])
     expect(rows[1]!.find('[data-plugin-name]').text()).toBe('cd')
-    expect(rows[1]!.find('[data-plugin-kind]').text()).toBe('source')
-    // The eight headers are translated from the core catalog: the six
-    // pre-existing ones, plus the order arrows and the install/uninstall
-    // gestures this task adds.
+    expect(kindTitles(rows[1]!)).toEqual(['source'])
+    // Six headers, translated from the core catalog. The admin link and the
+    // order arrows used to have a column each; they now sit in the plugin's
+    // own cell, so that the card fits a phone. A header coming back here is
+    // the card growing wider again.
     const headers = w.findAll('th').map((h) => h.text())
-    expect(headers).toEqual([
-      'Plugin', 'Genre', 'Version', 'État', 'Admin', 'Actif', 'Ordre', 'Actions',
+    expect(headers).toEqual(['Plugin', 'Genre', 'Version', 'État', 'Actif', 'Actions'])
+    // And every row has exactly as many cells as there are headers.
+    for (const r of rows) expect(r.findAll('td')).toHaveLength(6)
+  })
+
+  // The kind is an icon, named by its translated word twice over: as the
+  // native `title` (the sighted reader's hover) and as screen-reader text (the
+  // icon itself is `aria-hidden`). Both halves: four different kinds render
+  // four different icons — a table that drew one glyph for everything would
+  // pass a title-only assertion — and each carries its own word.
+  it('draws one icon per kind, titled and read out with the translated kind name', async () => {
+    const w = await mountWithStatus({
+      plugins: [
+        { name: 'a', kind: 'source', connected: true, admin: false },
+        { name: 'b', kind: 'display', connected: true, admin: false },
+        { name: 'c', kind: 'input', connected: true, admin: false },
+        { name: 'd', kind: 'metadata', connected: true, admin: false },
+      ],
+      active_source: '',
+    })
+    const cells = w.findAll('[data-plugin-kind]')
+    const icon = (i: number) => cells[i]!.get('[data-kind-icon]')
+    expect(cells.map((c) => c.get('[data-kind-icon]').attributes('title'))).toEqual([
+      'source', 'affichage', 'entrée', 'métadonnées',
     ])
+    expect(cells.map((c) => c.get('[data-kind-icon]').attributes('data-kind-icon-name'))).toEqual([
+      'source', 'display', 'input', 'metadata',
+    ])
+    for (let i = 0; i < 4; i++) {
+      // Screen-reader text, and the glyph itself hidden from them.
+      expect(icon(i).get('.sr-only').text()).toBe(icon(i).attributes('title'))
+      expect(icon(i).find('[aria-hidden="true"] svg').exists()).toBe(true)
+    }
+    // Four kinds, four drawings.
+    const drawings = cells.map((c) => c.get('svg').html())
+    expect(new Set(drawings).size).toBe(4)
+  })
+
+  it('draws no icon, only a dash, for a plugin whose kind is not known yet', async () => {
+    const w = await mountWithStatus({
+      plugins: [{ name: 'mpd', kind: 'unknown', connected: false, admin: false }],
+      active_source: '',
+    })
+    expect(w.find('[data-kind-icon]').exists()).toBe(false)
+    expect(w.get('[data-plugin-kind]').text()).toBe('—')
   })
 
   it('distinguishes the connected state from the unavailable state', async () => {
@@ -392,14 +474,18 @@ describe('ConfigView — plugin table', () => {
     const rows = w.findAll('[data-plugin-row]')
     const link = rows[0]!.find('[data-admin-link]')
     expect(link.exists()).toBe(true)
+    // It is in the plugin's own cell now, beside the name.
+    expect(rows[0]!.findAll('td')[0]!.find('[data-admin-link]').exists()).toBe(true)
     // The canonical form with a trailing slash: it is the history URL, pinned
     // on the core side too (`serves_shell("/plugins/radio/")`) and now the only
     // one the router lets live.
     expect(link.attributes('href')).toBe('/plugins/radio/')
-    expect(link.text()).toBe('admin')
-    // "cd" is not admin: no link, a dash in its place.
+    // An icon, named by its title and by screen-reader text, not by a word.
+    expect(link.attributes('title')).toBe('admin')
+    expect(link.get('.sr-only').text()).toBe('admin')
+    expect(link.find('[aria-hidden="true"] svg').exists()).toBe(true)
+    // "cd" is not admin: no link at all.
     expect(rows[1]!.find('[data-admin-link]').exists()).toBe(false)
-    expect(rows[1]!.text()).toContain('-')
   })
 
   it('an empty plugin table does not break the rendering', async () => {
@@ -418,7 +504,7 @@ describe('ConfigView — plugin table', () => {
         outcome: { kind: 'ok' },
         release_version: '1.0.0',
         release_url: null,
-        last_check_unix_s: 1,
+        last_check_unix_s: Math.floor(Date.now() / 1000),
         components: [
           {
             name: 'console', kind: 'plugin', declared: false, binary_present: false,
@@ -460,7 +546,7 @@ describe('ConfigView — plugin table', () => {
     expect(rows).toHaveLength(2)
     // Translated (m5), not the raw wire words: 'source, metadata' would pass
     // a French reader by, silently, exactly the inconsistency this closes.
-    expect(rows[0]!.find('[data-plugin-kind]').text()).toBe('source, métadonnées')
+    expect(kindTitles(rows[0]!)).toEqual(['source', 'métadonnées'])
   })
 
   it('toggles a plugin and reloads', async () => {
@@ -497,7 +583,7 @@ describe('ConfigView — plugin table', () => {
       ],
       active_source: '',
     })
-    expect(wrapper.find('[data-plugin-kind]').text()).toBe('source')
+    expect(kindTitles(wrapper)).toEqual(['source'])
   })
 
   it('never shows unknown next to a real kind: unknown then real', async () => {
@@ -508,7 +594,7 @@ describe('ConfigView — plugin table', () => {
       ],
       active_source: '',
     })
-    expect(wrapper.find('[data-plugin-kind]').text()).toBe('source')
+    expect(kindTitles(wrapper)).toEqual(['source'])
   })
 
   it('a half-connected plugin does not read as connected', async () => {
@@ -716,90 +802,211 @@ describe('ConfigView — plugin table', () => {
     expect(row.get('[data-plugin-state]').text()).toBe('Effacement du binaire…')
   })
 
-  // Both halves in one test (a one-sided assertion here would pass against a
-  // page that never renders the sentence, or one that always renders it): a
-  // privileged plugin loses the Uninstall button and gains the sentence, and
-  // an ordinary one on the very same page keeps its button untouched.
-  it('replaces Uninstall with the ritornello-install sentence for a privileged plugin, and only that one', async () => {
+  // A privileged component (`files` today) is installed and removed by
+  // `ritornello-install`, never by this table, in every state its row can be
+  // in. The row used to say so with a sentence in the actions cell, which is
+  // what made the card too wide to fit. It now shows the very buttons an
+  // ordinary row would, disabled, each carrying the sentence as its native
+  // `title`. Three choices, all pinned below:
+  //  - a **disabled real button**, so that no gesture can fire (a disabled
+  //    button emits no click, is skipped by the tab order, and a screen reader
+  //    announces it as unavailable);
+  //  - wrapped in a span that carries the same `title`, because a disabled
+  //    button receives no hover event in some browsers and the tooltip would
+  //    never show; the button itself is `pointer-events-none` so that the
+  //    hover lands on the span;
+  //  - `aria-describedby` on the button, pointing at a screen-reader-only copy
+  //    of the sentence, so that "why" is read out and not only shown.
+  // Each test has both halves: the privileged row is disabled and explained,
+  // the ordinary row on the very same page is enabled and silent, and the
+  // click is pressed on both — a click that fires on a privileged row is the
+  // one thing this must never allow.
+  const NOTE = 'Composant privilégié : installez-le ou désinstallez-le avec ritornello-install.'
+
+  /** One `/api/update` payload offering every named component at 1.0.0. */
+  function offering(...names: string[]) {
+    return {
+      outcome: { kind: 'ok' },
+      release_version: '1.0.0',
+      release_url: null,
+      last_check_unix_s: 1,
+      components: names.map((name) => ({
+        name, kind: 'plugin', declared: true, binary_present: false,
+        installed: null, offered: '1.0.0', availability: 'binary_missing',
+      })),
+      busy: null,
+      last_rollback: null,
+    }
+  }
+
+  function rowOf(w: VueWrapper, name: string) {
+    return w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === name)!
+  }
+
+  /** What a privileged gesture must look like: unavailable, and saying why. */
+  function expectExplainedDisabled(button: Pick<DOMWrapper<Element>, 'attributes' | 'element'>) {
+    expect(button.attributes('disabled')).toBeDefined()
+    // M3: the sentence is on the wrapper only (it is what shows on hover over
+    // a disabled button) and reaches a screen reader through
+    // `aria-describedby` — a `title` on the button too made it read twice.
+    expect(button.attributes('title')).toBeUndefined()
+    expect(button.element.parentElement!.getAttribute('title')).toBe(NOTE)
+    const describedBy = button.attributes('aria-describedby')!
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy)!.textContent).toBe(NOTE)
+  }
+
+  /** What an ordinary gesture must look like: available, and not explained. */
+  function expectPlainEnabled(button: Pick<DOMWrapper<Element>, 'attributes' | 'element'>) {
+    expect(button.attributes('disabled')).toBeUndefined()
+    expect(button.attributes('title')).toBeUndefined()
+    expect(button.attributes('aria-describedby')).toBeUndefined()
+  }
+
+  it('shows Uninstall disabled and explained for a privileged plugin, enabled for an ordinary one', async () => {
+    const { w, posts, deletes } = await mountView({
+      '/api/status': {
+        plugins: [
+          { name: 'files', kind: 'source', connected: true, admin: false, privileged: true },
+          { name: 'radio', kind: 'source', connected: true, admin: false },
+        ],
+        active_source: 'radio',
+        protocol: 1,
+      },
+    })
+    const files = rowOf(w, 'files')
+    const radio = rowOf(w, 'radio')
+
+    // The sentence no longer sits in the row.
+    expect(files.find('[data-plugin-privileged-note]').exists()).toBe(false)
+
+    const filesButton = files.get('[data-plugin-uninstall]')
+    expectExplainedDisabled(filesButton)
+    expect(filesButton.text()).toBe('Désinstaller')
+    await filesButton.trigger('click')
+    ;(filesButton.element as HTMLElement).click()
+    await flushPromises()
+    expect(document.body.querySelector('[data-plugin-uninstall-dialog]')).toBeNull()
+    expect(posts).toEqual([])
+    expect(deletes).toEqual([])
+
+    const radioButton = radio.get('[data-plugin-uninstall]')
+    expectPlainEnabled(radioButton)
+    await radioButton.trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('[data-plugin-uninstall-dialog]')).not.toBeNull()
+  })
+
+  // The same again for a row whose binary is missing: Install must be the
+  // button, disabled, even though the release offers `files` — without the
+  // offer it would be disabled anyway, and the test would prove nothing.
+  it('shows Install disabled and explained on a privileged missing_binary row, enabled on an ordinary one', async () => {
+    const { w, posts } = await mountView({
+      '/api/status': {
+        plugins: [
+          { name: 'files', kind: 'unknown', connected: false, admin: false, missing_binary: true, privileged: true },
+          { name: 'mpd', kind: 'unknown', connected: false, admin: false, missing_binary: true },
+        ],
+        active_source: 'radio',
+        protocol: 1,
+      },
+      '/api/update': offering('files', 'mpd'),
+    })
+    const files = rowOf(w, 'files')
+    const mpd = rowOf(w, 'mpd')
+
+    expect(files.find('[data-plugin-privileged-note]').exists()).toBe(false)
+    const filesButton = files.get('[data-plugin-install]')
+    expectExplainedDisabled(filesButton)
+    expect(filesButton.text()).toBe('Installer')
+    await filesButton.trigger('click')
+    ;(filesButton.element as HTMLElement).click()
+    await flushPromises()
+    expect(posts).toEqual([])
+
+    const mpdButton = mpd.get('[data-plugin-install]')
+    expectPlainEnabled(mpdButton)
+    await mpdButton.trigger('click')
+    await flushPromises()
+    expect(posts).toContainEqual({ url: '/api/update/install', body: { components: ['mpd'] } })
+  })
+
+  // And for an undeclared binary, which offers two gestures: Declare (the
+  // same download-then-refuse as Install) and "Remove the binary" (which
+  // would erase the plugin binary alone and leave the root helper, its unit
+  // and its polkit rule behind). Both are shown, both disabled.
+  it('shows Declare and Remove the binary disabled and explained on a privileged undeclared_binary row', async () => {
+    const { w, posts, deletes } = await mountView({
+      '/api/status': {
+        plugins: [
+          {
+            name: 'files', kind: 'unknown', connected: false, admin: false,
+            undeclared_binary: true, binary_file: 'ritornello-plugin-files', privileged: true,
+          },
+          {
+            name: 'mpd', kind: 'unknown', connected: false, admin: false,
+            undeclared_binary: true, binary_file: 'ritornello-plugin-mpd',
+          },
+        ],
+        active_source: 'radio',
+        protocol: 1,
+      },
+      '/api/update': offering('files', 'mpd'),
+    })
+    const files = rowOf(w, 'files')
+    const mpd = rowOf(w, 'mpd')
+
+    expect(files.find('[data-plugin-privileged-note]').exists()).toBe(false)
+    const declare = files.get('[data-plugin-declare]')
+    const remove = files.get('[data-plugin-remove-binary]')
+    expectExplainedDisabled(declare)
+    expectExplainedDisabled(remove)
+    for (const b of [declare, remove]) {
+      await b.trigger('click')
+      ;(b.element as HTMLElement).click()
+    }
+    await flushPromises()
+    expect(posts).toEqual([])
+    expect(deletes).toEqual([])
+    expect(document.body.querySelector('[data-plugin-remove-binary-dialog]')).toBeNull()
+
+    expectPlainEnabled(mpd.get('[data-plugin-declare]'))
+    expectPlainEnabled(mpd.get('[data-plugin-remove-binary]'))
+    await mpd.get('[data-plugin-remove-binary]').trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('[data-plugin-remove-binary-dialog]')).not.toBeNull()
+  })
+
+  // The order arrows moved into the plugin's own cell, beside the drag
+  // handle, when their column went. They must still be found there, and
+  // still sit apart from the name (`[data-plugin-name]` is the name alone).
+  it('keeps the order arrows in the first cell, beside the name', async () => {
     const w = await mountWithStatus({
       plugins: [
-        { name: 'files', kind: 'source', connected: true, admin: false, privileged: true },
         { name: 'radio', kind: 'source', connected: true, admin: false },
+        { name: 'cd', kind: 'source', connected: false, admin: false },
       ],
       active_source: 'radio',
-      protocol: 1,
     })
-    const rows = w.findAll('[data-plugin-row]')
-    const files = rows.find((r) => r.get('[data-plugin-name]').text() === 'files')!
-    const radio = rows.find((r) => r.get('[data-plugin-name]').text() === 'radio')!
-
-    expect(files.find('[data-plugin-uninstall]').exists()).toBe(false)
-    expect(files.get('[data-plugin-privileged-note]').text()).toContain('ritornello-install')
-
-    expect(radio.find('[data-plugin-privileged-note]').exists()).toBe(false)
-    expect(radio.find('[data-plugin-uninstall]').exists()).toBe(true)
+    const first = w.findAll('[data-plugin-row]')[0]!.findAll('td')[0]!
+    expect(first.find('[data-plugin-up]').exists()).toBe(true)
+    expect(first.find('[data-plugin-down]').exists()).toBe(true)
+    expect(first.get('[data-plugin-name]').text()).toBe('radio')
   })
 
-  // Fix round 1, I1: the sentence above only replaced Uninstall, so a
-  // privileged plugin whose binary happens to be missing still showed a
-  // working Install button beside it — clicking it downloads the archive
-  // only to have `installable_from_ui` refuse it, exactly the "button that
-  // then fails" this whole change exists to remove. Both halves again: the
-  // sentence for `files`, the Install button still there for an ordinary
-  // `missing_binary` row (`mpd`) on the same page.
-  it('replaces Install with the ritornello-install sentence on a privileged missing_binary row, and only that one', async () => {
+  // An undeclared binary has no line in `plugins.toml` to move, so it has no
+  // arrows — and, now that they share the first cell, no gap where they were.
+  it('shows no order arrows for an undeclared binary', async () => {
     const w = await mountWithStatus({
       plugins: [
-        { name: 'files', kind: 'unknown', connected: false, admin: false, missing_binary: true, privileged: true },
-        { name: 'mpd', kind: 'unknown', connected: false, admin: false, missing_binary: true },
+        { name: 'radio', kind: 'source', connected: true, admin: false },
+        { name: 'mpd', kind: 'unknown', connected: false, admin: false, undeclared_binary: true },
       ],
       active_source: 'radio',
-      protocol: 1,
     })
-    const rows = w.findAll('[data-plugin-row]')
-    const files = rows.find((r) => r.get('[data-plugin-name]').text() === 'files')!
-    const mpd = rows.find((r) => r.get('[data-plugin-name]').text() === 'mpd')!
-
-    expect(files.find('[data-plugin-install]').exists()).toBe(false)
-    expect(files.get('[data-plugin-privileged-note]').text()).toContain('ritornello-install')
-
-    expect(mpd.find('[data-plugin-privileged-note]').exists()).toBe(false)
-    expect(mpd.find('[data-plugin-install]').exists()).toBe(true)
-  })
-
-  // Fix round 1, I1, the second gap: an `undeclared_binary` row showed
-  // Declare (the same download-then-refuse as Install) and "Remove the
-  // binary", which erases the plugin binary alone and leaves the root
-  // helper, its unit and its polkit rule behind — the half-uninstall this
-  // change exists to close, reached from a different row shape. Both
-  // halves: `files` loses both gestures and gains the sentence, `mpd` keeps
-  // both gestures on the same page.
-  it('replaces Declare and Remove the binary with the sentence on a privileged undeclared_binary row, and only that one', async () => {
-    const w = await mountWithStatus({
-      plugins: [
-        {
-          name: 'files', kind: 'unknown', connected: false, admin: false,
-          undeclared_binary: true, binary_file: 'ritornello-plugin-files', privileged: true,
-        },
-        {
-          name: 'mpd', kind: 'unknown', connected: false, admin: false,
-          undeclared_binary: true, binary_file: 'ritornello-plugin-mpd',
-        },
-      ],
-      active_source: 'radio',
-      protocol: 1,
-    })
-    const rows = w.findAll('[data-plugin-row]')
-    const files = rows.find((r) => r.get('[data-plugin-name]').text() === 'files')!
-    const mpd = rows.find((r) => r.get('[data-plugin-name]').text() === 'mpd')!
-
-    expect(files.find('[data-plugin-declare]').exists()).toBe(false)
-    expect(files.find('[data-plugin-remove-binary]').exists()).toBe(false)
-    expect(files.get('[data-plugin-privileged-note]').text()).toContain('ritornello-install')
-
-    expect(mpd.find('[data-plugin-privileged-note]').exists()).toBe(false)
-    expect(mpd.find('[data-plugin-declare]').exists()).toBe(true)
-    expect(mpd.find('[data-plugin-remove-binary]').exists()).toBe(true)
+    expect(rowOf(w, 'radio').find('[data-plugin-up]').exists()).toBe(true)
+    expect(rowOf(w, 'mpd').find('[data-plugin-up]').exists()).toBe(false)
+    expect(rowOf(w, 'mpd').find('[data-plugin-down]').exists()).toBe(false)
   })
 
   it('disables the up arrow on the first row and the down arrow on the last', async () => {
@@ -1336,9 +1543,11 @@ describe('ConfigView — language and display', () => {
   it('installs a language pack: posts to the right route, acknowledges, and reloads the locale', async () => {
     const { w, spy, posts } = await mountView({
       '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+      '/api/update': freshUpdate(),
     })
     const before = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
-    await w.find('[data-pack-install="de"]').trigger('click')
+    await openAddLanguage(w)
+    inDialog('[data-pack-install="de"]')!.click()
     await flushPromises()
     expect(posts).toContainEqual({ url: '/api/languages/de', body: {} })
     // Fix round 1, finding 2: some acknowledgment, not silence, for a
@@ -1351,16 +1560,87 @@ describe('ConfigView — language and display', () => {
 
   it('toasts the refusal from a language install and releases the busy row', async () => {
     const { w } = await mountView(
-      { '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]) },
+      {
+        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/update': freshUpdate(),
+      },
       undefined,
       'nothing published for ritornello-lang-de',
     )
-    await w.find('[data-pack-install="de"]').trigger('click')
+    await openAddLanguage(w)
+    inDialog('[data-pack-install="de"]')!.click()
     await flushPromises()
     expect(toast.error).toHaveBeenCalledWith('nothing published for ritornello-lang-de')
     // Released, not stuck: a handler that surfaces the error but leaves the
     // row disabled forever is the same dead end in a different costume.
-    expect(w.find('[data-pack-install="de"]').attributes('disabled')).toBeUndefined()
+    expect(inDialog<HTMLButtonElement>('[data-pack-install="de"]')!.disabled).toBe(false)
+  })
+
+  // Follow-up B: the language card lists what is installed, and what is only
+  // offered sits behind "Add a language". Both halves.
+  it('lists installed packs in the card, and offers the others only through the Add a language dialog', async () => {
+    const { w } = await mountView({
+      '/api/locale': localeWithPacks([
+        { language: 'fr', installed: '0.2.1', offered: '0.2.1' },
+        { language: 'de', installed: null, offered: '0.2.1' },
+      ]),
+      '/api/update': freshUpdate(),
+    })
+    expect(w.find('[data-pack-remove="fr"]').exists()).toBe(true)
+    expect(w.find('[data-pack-install="de"]').exists()).toBe(false)
+    expect(inDialog('[data-add-language-dialog]')).toBeNull()
+
+    await openAddLanguage(w)
+    expect(inDialog('[data-add-language-dialog]')).not.toBeNull()
+    expect(inDialog('[data-add-language-row][data-language="de"]')).not.toBeNull()
+    expect(inDialog('[data-add-language-row][data-language="fr"]')).toBeNull()
+  })
+
+  it('does not queue a second check when the update card\'s Check is already running as a dialog opens', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, posts, table } = await mountView()
+      // The device is running the check the card's button just queued.
+      ;(table as Record<string, unknown>)['/api/update'] = {
+        ...(freshUpdate() as object), outcome: { kind: 'never_checked' }, last_check_unix_s: null, busy: 'Checking…',
+      }
+      await w.find('[data-update-check]').trigger('click')
+      await flushPromises()
+      expect(posts.filter((p) => p.url === '/api/update/check')).toHaveLength(1)
+
+      await openAddLanguage(w)
+      expect(posts.filter((p) => p.url === '/api/update/check')).toHaveLength(1)
+      expect(inDialog('[data-check-running]')).not.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('runs one check when Add a language opens on a never-checked device, then re-reads the update state and the packs', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      // The default fixture: `never_checked`, no timestamp, no pack offered.
+      const { w, spy, posts, table } = await mountView()
+      await openAddLanguage(w)
+      expect(posts.filter((p) => p.url === '/api/update/check')).toHaveLength(1)
+      expect(inDialog('[data-check-running]')).not.toBeNull()
+      expect(inDialog('[data-add-language-row]')).toBeNull()
+
+      // The check lands: a timestamp, and the release now offers German.
+      ;(table as Record<string, unknown>)['/api/update'] = freshUpdate()
+      ;(table as Record<string, unknown>)['/api/locale'] =
+        localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }])
+      const localeReads = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+
+      expect(spy.mock.calls.filter((c) => c[0] === '/api/locale').length).toBeGreaterThan(localeReads)
+      expect(inDialog('[data-check-running]')).toBeNull()
+      expect(inDialog('[data-add-language-row][data-language="de"]')).not.toBeNull()
+      expect(posts.filter((p) => p.url === '/api/update/check')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('removes a language pack through its confirmation: deletes the right route, acknowledges, and reloads', async () => {
@@ -2147,23 +2427,25 @@ describe('ConfigView — language pack polling', () => {
     try {
       const { w, table } = await mountView({
         '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/update': freshUpdate(),
       })
-      await w.find('[data-pack-install="de"]').trigger('click')
+      await openAddLanguage(w)
+      inDialog('[data-pack-install="de"]')!.click()
       await flushPromises()
       // Right after the enqueue: the worker has not touched the pack yet,
       // so `/api/locale` (read once by `loadAll`) still shows it
       // uninstalled — but the row must not look idle, or the operator has
       // no idea anything is happening.
-      expect(w.find('[data-pack-install="de"]').attributes('disabled')).toBeDefined()
-      expect(w.get('[data-pack-busy]').text()).toContain('Installation de')
+      expect(inDialog<HTMLButtonElement>('[data-pack-install="de"]')!.disabled).toBe(true)
+      expect(inDialog('[data-pack-busy]')!.textContent).toContain('Installation de')
 
       // The worker catches up one tick later.
       ;(table as Record<string, unknown>)['/api/locale'] =
         localeWithPacks([{ language: 'de', installed: '0.2.1', offered: '0.2.1' }])
       await vi.advanceTimersByTimeAsync(2000)
 
-      expect(w.find('[data-pack-busy]').exists()).toBe(false)
-      expect(w.find('[data-pack-install="de"]').exists()).toBe(false)
+      expect(inDialog('[data-pack-busy]')).toBeNull()
+      expect(inDialog('[data-pack-install="de"]')).toBeNull()
       expect(w.get('[data-pack-remove="de"]').attributes('disabled')).toBeUndefined()
     } finally {
       vi.useRealTimers()
@@ -2175,20 +2457,22 @@ describe('ConfigView — language pack polling', () => {
     try {
       const { w, spy, table } = await mountView({
         '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/update': freshUpdate(),
       })
-      await w.find('[data-pack-install="de"]').trigger('click')
+      await openAddLanguage(w)
+      inDialog('[data-pack-install="de"]')!.click()
       await flushPromises()
       // Still busy right after the click: a mutant that clears `packBusy`
       // as soon as the enqueue resolves (round 1's own shape, before this
       // fix) would already have nothing left to settle here, and the
       // "silence afterwards" proof below would hold vacuously.
-      expect(w.get('[data-pack-busy]').text()).toContain('Installation de')
+      expect(inDialog('[data-pack-busy]')!.textContent).toContain('Installation de')
       const callsRightAfterClick = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
 
       ;(table as Record<string, unknown>)['/api/locale'] =
         localeWithPacks([{ language: 'de', installed: '0.2.1', offered: '0.2.1' }])
       await vi.advanceTimersByTimeAsync(2000)
-      expect(w.find('[data-pack-busy]').exists()).toBe(false)
+      expect(inDialog('[data-pack-busy]')).toBeNull()
       const callsAfterSettle = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
       // The row went from busy to settled only because the poll actually
       // asked again and saw the change — not because it was never busy to
@@ -2212,15 +2496,17 @@ describe('ConfigView — language pack polling', () => {
       // this page's point of view.
       const { w, spy } = await mountView({
         '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/update': freshUpdate(),
       })
-      await w.find('[data-pack-install="de"]').trigger('click')
+      await openAddLanguage(w)
+      inDialog('[data-pack-install="de"]')!.click()
       await flushPromises()
-      expect(w.get('[data-pack-busy]').text()).toContain('Installation de')
+      expect(inDialog('[data-pack-busy]')!.textContent).toContain('Installation de')
 
       // Ten ticks at 2 s (the poll's own ceiling) — bounded, not indefinite.
       await vi.advanceTimersByTimeAsync(20_000)
-      expect(w.find('[data-pack-busy]').exists()).toBe(false)
-      expect(w.find('[data-pack-install="de"]').attributes('disabled')).toBeUndefined()
+      expect(inDialog('[data-pack-busy]')).toBeNull()
+      expect(inDialog<HTMLButtonElement>('[data-pack-install="de"]')!.disabled).toBe(false)
       const callsAtCeiling = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
 
       // And it really has stopped, not merely gone quiet for one interval.
@@ -2299,8 +2585,10 @@ describe('ConfigView — language pack polling', () => {
     try {
       const { w, spy } = await mountView({
         '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/update': freshUpdate(),
       })
-      await w.find('[data-pack-install="de"]').trigger('click')
+      await openAddLanguage(w)
+      inDialog('[data-pack-install="de"]')!.click()
       await flushPromises()
       w.unmount()
       const before = spy.mock.calls.filter((c) => c[0] === '/api/locale').length

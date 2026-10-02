@@ -61,7 +61,7 @@ while the all-plugins bundle carries the release's own number. There is
 nowhere else to look it up — read it where it already sits, in the name of
 the file attached to the release page. The release also carries
 `catalogue.json`, a description (kind and one-line summary) of every
-installable component, read by the update page's "Add a component" dialog —
+installable component, read by the "Add a plugin" dialog —
 not a per-architecture archive, so there is only one, whatever the
 architecture. A single `SHA256SUMS` covers every archive of the release plus
 `catalogue.json`, whatever the architecture. A release is installed with
@@ -889,6 +889,12 @@ been observed for real:
 - systemd restarting `ritornello.service` after an update, rather than a
   test process exiting on its own;
 - the rollback firing;
+- updating a privileged plugin (`files`) from the web UI because its
+  privileged files are unchanged. The comparison of the archive's sha256
+  with those `ritornello-install` recorded in `installed.toml` has only run
+  against test archives and a test registry. No real release has gone
+  through it, and no device has yet read a registry an actual installer
+  run wrote;
 - the note of what an install placed being written **before** the process
   leaves. On a device that write is followed by an exit that does not
   return, and the note is what stops a release that fails to start from

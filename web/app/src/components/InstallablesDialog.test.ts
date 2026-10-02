@@ -5,13 +5,18 @@ import type { ComponentOffer, UpdatePayload } from '../types'
 import InstallablesDialog from './InstallablesDialog.vue'
 
 const CATALOG = {
-  installables_title: 'Add a component',
-  installables_description: 'Components this release publishes and this appliance does not have.',
+  installables_title: 'Add a plugin',
+  installables_description: 'Plugins this release publishes and this appliance does not have.',
   installables_empty: 'Nothing to add: this appliance has everything this release publishes.',
   installables_unknown: 'Not known yet: no usable check has run so far.',
   installables_no_catalogue:
     'This release does not publish a description of its components, or it could not be read; only their names are known.',
   installables_install: 'Install',
+  installables_checking: 'Looking for components…',
+  installables_queue_busy: 'The appliance is busy, try again in a moment.',
+  installables_retry: 'Retry',
+  installables_slow: 'Still looking, this is taking longer than usual.',
+  update_last_attempt_failed: 'The last attempt failed',
   plugin_privileged_note: 'Privileged component: install or uninstall it with ritornello-install.',
   plugin_kind_display: 'affichage',
   plugin_kind_source: 'source',
@@ -36,18 +41,43 @@ function stubCatalogue(response: { components: Record<string, { kinds: string[];
   catalogueResponse = response
 }
 
+// A check the dialog itself runs on opening (follow-up B). What the fake core
+// answers `POST /api/update/check` with, and `GET /api/update` afterwards.
+const NOW_S = Math.floor(Date.now() / 1000)
+let checkStatus = 202
+let checkPosts = 0
+let served: UpdatePayload
+
 beforeEach(async () => {
   resetCatalog()
+  checkStatus = 202
+  checkPosts = 0
+  served = {
+    outcome: { kind: 'ok' },
+    release_version: null,
+    release_url: null,
+    last_check_unix_s: NOW_S,
+    components: [],
+    busy: null,
+    last_rollback: null,
+  }
+  // Only the interval is faked: `flushPromises` needs the real timers.
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
   stubCatalogue({
     components: { console: { kinds: ['display'], description: 'A tty or small display.' } },
   })
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (url: string) => {
+    vi.fn(async (url: string, init?: RequestInit) => {
       if (url === '/api/i18n') return new Response(JSON.stringify(CATALOG), { status: 200 })
       if (url === '/api/update/catalogue') {
         return new Response(JSON.stringify(catalogueResponse), { status: 200 })
       }
+      if (url === '/api/update/check' && init?.method === 'POST') {
+        checkPosts += 1
+        return new Response('', { status: checkStatus })
+      }
+      if (url === '/api/update') return new Response(JSON.stringify(served), { status: 200 })
       return new Response('', { status: 404 })
     }),
   )
@@ -55,6 +85,7 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   document.body.innerHTML = ''
 })
@@ -81,9 +112,12 @@ function offer(overrides: Partial<ComponentOffer> & { name: string }): Component
 function mountDialog(
   components: ComponentOffer[],
   outcome: UpdatePayload['outcome'] = { kind: 'ok' },
-  lastCheckUnixS: number | null = null,
+  lastCheckUnixS: number | null = NOW_S,
   busy: string | null = null,
 ) {
+  // The dialog decides on what the device answers when it opens, so the
+  // device says what the page was handed; a test of a stale page overrides it.
+  served = { ...served, outcome, last_check_unix_s: lastCheckUnixS, busy }
   return mount(InstallablesDialog, {
     props: { open: true, components, outcome, lastCheckUnixS, busy },
     attachTo: document.body,
@@ -145,7 +179,10 @@ describe('InstallablesDialog', () => {
       { kind: 'failed', detail: 'boom' },
     ]
     for (const outcome of outcomes) {
-      const w = mountDialog([], outcome)
+      // A `failed` with no timestamp is the never-succeeded kind, and the recheck
+      // the dialog runs on opening cannot be queued here either.
+      checkStatus = 500
+      const w = mountDialog([], outcome, outcome.kind === 'failed' ? null : NOW_S)
       await flushPromises()
       expect(document.body.querySelector('[data-installables-unknown]')).not.toBeNull()
       expect(document.body.querySelector('[data-installables-empty]')).toBeNull()
@@ -162,6 +199,7 @@ describe('InstallablesDialog', () => {
   // `installables_unknown` ("no usable check has run so far") on a device
   // that had, in fact, just looked.
   it('says nothing to add, not that it cannot know, when a failed outcome follows a real check', async () => {
+    checkStatus = 500 // the recheck on opening cannot be queued: the rows stay as they were
     mountDialog([], { kind: 'failed', detail: 'boom' }, 1_760_000_000)
     await flushPromises()
     expect(document.body.querySelector('[data-installables-empty]')).not.toBeNull()
@@ -173,6 +211,7 @@ describe('InstallablesDialog', () => {
     // device, distinguished from the case above by `last_check_unix_s`
     // alone. Kept as its own test so a mutant that ignores `lastCheckUnixS`
     // entirely (always usable, or never) cannot survive either assertion.
+    checkStatus = 500
     mountDialog([], { kind: 'failed', detail: 'boom' }, null)
     await flushPromises()
     expect(document.body.querySelector('[data-installables-unknown]')).not.toBeNull()
@@ -184,12 +223,14 @@ describe('InstallablesDialog', () => {
   // in-flight install re-enqueued a second `Job::Install` of the same
   // component.
   it('disables Install while a job is running', async () => {
-    mountDialog(
-      [offer({ name: 'console', availability: 'not_installed' })],
-      { kind: 'ok' },
-      null,
-      'Installing console…',
-    )
+    // The job starts while the dialog is already open (an Install pressed in
+    // it): opening on a running job would only wait, see the checks below.
+    const w = mountDialog([offer({ name: 'console', availability: 'not_installed' })])
+    await flushPromises()
+    expect(
+      document.body.querySelector<HTMLButtonElement>('[data-installable-install]')?.disabled,
+    ).toBe(false)
+    await w.setProps({ busy: 'Installing console…' })
     await flushPromises()
     expect(
       document.body.querySelector<HTMLButtonElement>('[data-installable-install]')?.disabled,
@@ -297,5 +338,126 @@ describe('InstallablesDialog', () => {
     document.body.querySelector<HTMLButtonElement>('[data-installable-install]')!.click()
     await flushPromises()
     expect(w.emitted('install')).toEqual([['console']])
+  })
+
+  // Follow-up B: opening the dialog runs the check itself.
+  describe('the check it runs on opening', () => {
+    const NEVER: UpdatePayload['outcome'] = { kind: 'never_checked' }
+    const q = (sel: string) => document.body.querySelector(sel)
+
+    it('enqueues exactly one check on a never-checked state, shows the spinner and no list, then the rows once it lands', async () => {
+      const w = mountDialog([], NEVER, null)
+      await flushPromises()
+      expect(checkPosts).toBe(1)
+      expect(q('[data-check-running]')?.textContent).toContain('Looking for components')
+      // Neither answer is given while nobody has looked.
+      expect(q('[data-installables-unknown]')).toBeNull()
+      expect(q('[data-installables-empty]')).toBeNull()
+
+      // The check lands: the page (ConfigView) reloads and hands the rows down.
+      served = {
+        ...served,
+        outcome: { kind: 'ok' },
+        last_check_unix_s: NOW_S,
+        components: [offer({ name: 'console', availability: 'not_installed', offered: '0.2.1' })],
+      }
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+      expect(w.emitted('refresh')).toHaveLength(1)
+      await w.setProps({
+        components: served.components,
+        outcome: { kind: 'ok' },
+        lastCheckUnixS: NOW_S,
+      })
+      await flushPromises()
+      expect(q('[data-check-running]')).toBeNull()
+      expect(q('[data-installable-row][data-name="console"]')).not.toBeNull()
+      expect(checkPosts).toBe(1)
+    })
+
+    it('does not enqueue after a check under an hour old, and enqueues after an older one', async () => {
+      mountDialog([], { kind: 'ok' }, NOW_S - 3000)
+      await flushPromises()
+      expect(checkPosts).toBe(0)
+      expect(q('[data-check-running]')).toBeNull()
+      document.body.innerHTML = ''
+
+      mountDialog([], { kind: 'ok' }, NOW_S - 4000)
+      await flushPromises()
+      expect(checkPosts).toBe(1)
+      expect(q('[data-check-running]')).not.toBeNull()
+    })
+
+    it('only waits when a check is already running: no second enqueue, and the spinner shows', async () => {
+      mountDialog([], NEVER, null, 'Checking…')
+      await flushPromises()
+      expect(checkPosts).toBe(0)
+      expect(q('[data-check-running]')).not.toBeNull()
+    })
+
+    it('does not enqueue when the device is already running a check the page has not learnt of', async () => {
+      // The page's props say idle and never checked (its poll has not read
+      // the update card's Check yet); the device says a check is running.
+      const w = mountDialog([], NEVER, null)
+      w.unmount()
+      document.body.innerHTML = ''
+      checkPosts = 0
+      served = { ...served, busy: 'Checking…' }
+      mount(InstallablesDialog, {
+        props: { open: true, components: [], outcome: NEVER, lastCheckUnixS: null, busy: null },
+        attachTo: document.body,
+      })
+      await flushPromises()
+      expect(checkPosts).toBe(0)
+      expect(q('[data-check-running]')).not.toBeNull()
+    })
+
+    it('says it is still looking after the ceiling, with a Retry, and keeps the list', async () => {
+      const w = mountDialog(
+        [offer({ name: 'console', availability: 'not_installed', offered: '0.2.1' })],
+        NEVER,
+        null,
+      )
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(2000 * 9)
+      expect(q('[data-check-slow]')).toBeNull()
+      expect(q('[data-check-running]')).not.toBeNull()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(q('[data-check-slow]')?.textContent).toContain('Still looking')
+      expect(q('[data-check-retry]')).not.toBeNull()
+      expect(q('[data-check-running]')).toBeNull()
+      expect(q('[data-installable-row][data-name="console"]')).not.toBeNull()
+      // A late landing clears it and tells the page.
+      served = { ...served, last_check_unix_s: NOW_S, outcome: { kind: 'ok' } }
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+      expect(q('[data-check-slow]')).toBeNull()
+      expect(w.emitted('refresh')).toHaveLength(1)
+    })
+
+    it('shows the failure with a Retry that enqueues again', async () => {
+      checkStatus = 500
+      mountDialog([], NEVER, null)
+      await flushPromises()
+      expect(checkPosts).toBe(1)
+      expect(q('[data-check-failed]')?.textContent).toContain('The last attempt failed')
+      expect(q('[data-check-running]')).toBeNull()
+
+      checkStatus = 202
+      q('[data-check-retry]')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushPromises()
+      expect(checkPosts).toBe(2)
+      expect(q('[data-check-running]')).not.toBeNull()
+      expect(q('[data-check-failed]')).toBeNull()
+    })
+
+    it('shows "busy, try again" on a 429 and not the failure', async () => {
+      checkStatus = 429
+      mountDialog([], NEVER, null)
+      await flushPromises()
+      expect(q('[data-check-queue-full]')?.textContent).toContain('busy')
+      expect(q('[data-check-failed]')).toBeNull()
+      expect(q('[data-check-running]')).toBeNull()
+    })
   })
 })

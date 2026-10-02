@@ -18,6 +18,7 @@ pub mod download;
 pub mod state;
 pub mod schedule;
 pub mod placed;
+pub mod install_registry;
 
 pub mod routes;
 
@@ -231,7 +232,14 @@ fn carries(published: &Published, name: &str) -> bool {
 ///   what is installed stays the operator's decision;
 /// - a component already known to need a manual step is not attempted again
 ///   every night, which would download the same archive daily to refuse it
-///   for the same reason;
+///   for the same reason. A privileged plugin the device **has** is not
+///   known to need one in advance: its update is allowed when its
+///   privileged files are unchanged (`privileged_update_allowed`), which
+///   only the archive can tell, so it is tried once per offered version and
+///   `remember_manual_step` marks it when that archive changes them. One
+///   the device does not have is marked from its name alone
+///   (`deny_privileged_install`) and never tried: adding it is
+///   `ritornello-install`'s job;
 /// - a component whose **installed version is unknown and that this updater
 ///   has never placed** is left alone. That is not caution for its own sake: a
 ///   plugin switched off, or dead, or predating the version field never
@@ -441,6 +449,57 @@ fn archive_allowed(is_core: bool, third_party: bool, entries: &[String]) -> bool
     installable_from_ui(entries)
 }
 
+/// The one way a privileged plugin (`plugins::PRIVILEGED_PLUGINS`) is
+/// updated from the UI: when its new archive changes **nothing** root owns.
+///
+/// Consulted only after `archive_allowed` refused, and true only when all of
+/// these hold:
+///
+/// - the plugin is ours and privileged — a third-party component is never
+///   judged here, whatever its name;
+/// - it is **declared** — an update, not a first install: installing it is
+///   `ritornello-install`'s job, since that is what places the privileged
+///   files in the first place;
+/// - `ritornello-install` recorded it (`registry`);
+/// - once its privileged members are set aside, the archive passes
+///   `installable_from_ui`: every other entry is one the core writes itself,
+///   and there is exactly one binary;
+/// - its privileged members are **exactly** the dests recorded — none added,
+///   none missing — and each one's hash is the one recorded for that dest.
+///
+/// Then the privileged files on the device are byte-identical to the
+/// archive's, so there is nothing to rewrite: `install_one` places the
+/// binary alone, through the same unchanged `PlacePlugin` action as for any
+/// other plugin, and the privileged updater still forms only its two paths.
+/// A registry that is absent, unreadable, written before hashes were
+/// recorded, or silent about one dest proves nothing, and the answer is the
+/// refusal that existed before this function did.
+fn privileged_update_allowed(
+    name: &str,
+    third_party: bool,
+    declared: bool,
+    contents: &archive::Contents,
+    registry: Option<&install_registry::InstallRegistry>,
+) -> bool {
+    if third_party || !crate::plugins::is_privileged(name) || !declared {
+        return false;
+    }
+    let Some(recorded) = registry.and_then(|r| r.components.get(name)) else {
+        return false;
+    };
+    let hashes = &contents.privileged_hashes;
+    let rest: Vec<String> =
+        contents.entries.iter().filter(|e| !hashes.contains_key(&format!("/{e}"))).cloned().collect();
+    if !installable_from_ui(&rest) {
+        return false;
+    }
+    let recorded_dests: std::collections::BTreeSet<&str> =
+        recorded.privileged.iter().map(String::as_str).collect();
+    let archive_dests: std::collections::BTreeSet<&str> = hashes.keys().map(String::as_str).collect();
+    recorded_dests == archive_dests
+        && hashes.iter().all(|(dest, hash)| recorded.sha256.get(dest) == Some(hash))
+}
+
 /// Carries a remembered "cannot be installed from here" across a check.
 ///
 /// Installability is read off the archive, so it is only ever learnt at the
@@ -461,27 +520,38 @@ fn carry_installable(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) 
 }
 
 /// Forces `installable: Some(false)` for every row naming a plugin
-/// `plugins::PRIVILEGED_PLUGINS` lists — decided by the plugin's **identity**
-/// alone, the one fact this check never has to fetch an archive to learn,
-/// unlike everything else `installable` can carry.
+/// `plugins::PRIVILEGED_PLUGINS` lists **that `plugins.toml` does not
+/// declare** — decided by the plugin's identity and the device's own file,
+/// the two facts this check never has to fetch an archive to learn, unlike
+/// everything else `installable` can carry.
+///
+/// **A declared one is left alone.** Installing a privileged plugin is
+/// `ritornello-install`'s job, but updating one is allowed from here when
+/// its new archive leaves every privileged file byte-identical
+/// (`privileged_update_allowed`) — a fact about the archive, known only
+/// once it is downloaded. So the row keeps whatever `carry_installable`
+/// carried (`None` until an attempt, `Some(false)` after a refused one,
+/// set by `remember_manual_step`), and the download-time check is the
+/// gate. `declared` and not `installed`: `install_one` tells an update
+/// from an installation by the same `plugins.toml` declaration, and a
+/// switched-off plugin, which announces no version, is still an update.
 ///
 /// **Called last**, after `carry_installable`, and not folded into it: that
 /// function's whole job is carrying a *previous* answer forward, and on the
 /// very first check a device ever runs `previous` is empty — folding this
 /// rule into the same assignment would have `carry_installable` overwrite it
 /// with `None` before anyone ever saw `Some(false)`. Calling this afterwards
-/// means the privileged answer always wins, on the first check exactly as on
-/// the hundredth.
+/// means the privileged answer always wins for an undeclared row, on the
+/// first check exactly as on the hundredth.
 ///
 /// This is what lets `InstallablesDialog.vue` show its sentence instead of an
-/// Install button for a **never-installed** privileged plugin, and what
-/// closes the gap `automatic_install_list`'s own `installable != Some(false)`
-/// filter used to have: until this ran, an unattended device would try the
-/// files plugin's update once, fail it, and only then remember to stop
-/// trying — this makes that first attempt never happen at all.
+/// Install button for a **never-installed** privileged plugin. For a declared
+/// one, the automatic policy may now try the update once per offered
+/// version: that is the price of learning from the archive whether it
+/// changes a privileged file, and a refusal is remembered for that version.
 fn deny_privileged_install(components: &mut [ComponentOffer]) {
     for row in components.iter_mut() {
-        if crate::plugins::is_privileged(&row.name) {
+        if crate::plugins::is_privileged(&row.name) && !row.declared {
             row.installable = Some(false);
         }
     }
@@ -1869,7 +1939,25 @@ impl Worker {
         // exempt**: only its own binary, nothing for `/etc/ritornello` and no
         // `[[plugin]]` block. See `archive_allowed`, which holds all three
         // answers, and `only_its_own_binary` for what this refusal stops.
-        if !archive_allowed(is_core, third_party, &contents.entries) {
+        //
+        // **A privileged plugin's update has one more way through**, asked
+        // only once the ordinary rule has refused: its privileged files are
+        // byte-identical to what `ritornello-install` recorded placing, so
+        // nothing root owns changes and the binary alone is placed below.
+        // The registry is read here, from the worker, never from a route.
+        let allowed = archive_allowed(is_core, third_party, &contents.entries) || {
+            let declared = !is_core && self.declared(name);
+            let registry = install_registry::read(&self.root);
+            let unchanged =
+                privileged_update_allowed(name, third_party, declared, &contents, registry.as_ref());
+            if unchanged {
+                tracing::info!(
+                    "update: {name}: its privileged files are unchanged since ritornello-install placed them; placing its binary alone"
+                );
+            }
+            unchanged
+        };
+        if !allowed {
             self.remember_manual_step(name).await;
             return Err(if third_party {
                 Refusal::ThirdPartyArchive
@@ -3416,9 +3504,33 @@ mod tests {
     #[test]
     fn a_never_checked_privileged_plugin_is_still_refused() {
         let mut fresh = vec![row("files", ComponentKind::Plugin, Availability::NotInstalled)];
+        fresh[0].declared = false;
         fresh[0].installable = None;
         deny_privileged_install(&mut fresh);
         assert_eq!(fresh[0].installable, Some(false));
+    }
+
+    /// Follow-up C: a privileged plugin the device **declares** may be
+    /// updated from the UI when its privileged files are unchanged, which
+    /// only its archive can tell. So the row keeps what it carried — `None`
+    /// before any attempt, `Some(false)` after a refused one — and the
+    /// download-time check is the gate.
+    ///
+    /// **[MUTATION]**: drop `&& !row.declared` from `deny_privileged_install`
+    /// — this test fails (the declared row is forced to `Some(false)`).
+    #[test]
+    fn a_declared_privileged_plugin_keeps_what_it_carried() {
+        let mut fresh = vec![row("files", ComponentKind::Plugin, Availability::UpdateAvailable)];
+        assert!(fresh[0].declared, "the fixture is the update of a declared plugin");
+        deny_privileged_install(&mut fresh);
+        assert_eq!(fresh[0].installable, None, "nothing is known before the archive is read");
+
+        let mut previous = row("files", ComponentKind::Plugin, Availability::UpdateAvailable);
+        previous.installable = Some(false);
+        let mut fresh = vec![row("files", ComponentKind::Plugin, Availability::UpdateAvailable)];
+        carry_installable(&[previous], &mut fresh);
+        deny_privileged_install(&mut fresh);
+        assert_eq!(fresh[0].installable, Some(false), "a refusal of this version is remembered");
     }
 
     /// The counterpart: an ordinary plugin is not touched by this rule at
@@ -3430,21 +3542,196 @@ mod tests {
         let mut fresh = vec![row("radio", ComponentKind::Plugin, Availability::UpdateAvailable)];
         deny_privileged_install(&mut fresh);
         assert_eq!(fresh[0].installable, None);
+        // Undeclared too: an ordinary plugin the device does not have stays
+        // installable from the UI. Without this half, dropping the
+        // `is_privileged` operand (refusing every undeclared row) stayed green.
+        let mut fresh = vec![row("radio", ComponentKind::Plugin, Availability::NotInstalled)];
+        fresh[0].declared = false;
+        deny_privileged_install(&mut fresh);
+        assert_eq!(fresh[0].installable, None);
     }
 
     /// `carry_installable` runs first in every real call site and must not be
     /// allowed to win: a stale `previous` row (there should never be one, but
     /// the ordering is what guarantees it, not the data) must not un-refuse a
-    /// privileged plugin.
+    /// privileged plugin the device does not declare.
     #[test]
     fn deny_privileged_install_overrides_whatever_carry_installable_set() {
-        let mut previous = row("files", ComponentKind::Plugin, Availability::UpdateAvailable);
+        let mut previous = row("files", ComponentKind::Plugin, Availability::NotInstalled);
+        previous.declared = false;
         previous.installable = Some(true);
-        let mut fresh = vec![row("files", ComponentKind::Plugin, Availability::UpdateAvailable)];
+        let mut fresh = vec![row("files", ComponentKind::Plugin, Availability::NotInstalled)];
+        fresh[0].declared = false;
         carry_installable(&[previous], &mut fresh);
         assert_eq!(fresh[0].installable, Some(true), "carry_installable alone would leave this wrong");
         deny_privileged_install(&mut fresh);
         assert_eq!(fresh[0].installable, Some(false), "deny_privileged_install must win, called last");
+    }
+
+    // ---- Follow-up C: a privileged plugin's update with unchanged files --
+
+    const MEDIA_UNIT: &str = "/etc/systemd/system/ritornello-media-mount.service";
+    const MEDIA_RULE: &str = "/etc/polkit-1/rules.d/51-ritornello-media.rules";
+    const MEDIA_HELPER: &str = "/usr/local/lib/ritornello/ritornello-media-mount";
+    const FILES_BINARY: &str = "usr/local/lib/ritornello/plugins/ritornello-plugin-files";
+
+    /// The bytes of each privileged file in these tests: its own path, so a
+    /// hash compared against the wrong dest shows.
+    fn privileged_bytes(dest: &str) -> Vec<u8> {
+        format!("privileged {dest}\n").into_bytes()
+    }
+
+    /// The files plugin's archive in its real shape — binary, helper, unit,
+    /// rule, an example and the fragment — plus `extra` members.
+    fn files_archive(extra: &[(&str, &[u8])]) -> Vec<u8> {
+        let (unit, rule, helper) =
+            (privileged_bytes(MEDIA_UNIT), privileged_bytes(MEDIA_RULE), privileged_bytes(MEDIA_HELPER));
+        let mut members: Vec<(&str, &[u8])> = vec![
+            (FILES_BINARY, &b"ELF new"[..]),
+            (&MEDIA_HELPER[1..], helper.as_slice()),
+            (&MEDIA_UNIT[1..], unit.as_slice()),
+            (&MEDIA_RULE[1..], rule.as_slice()),
+            ("examples/media-roots.example.toml", &b"# roots\n"[..]),
+            ("plugins.toml.fragment", &b"[[plugin]]\nname = \"files\"\n"[..]),
+        ];
+        members.extend_from_slice(extra);
+        targz(&members)
+    }
+
+    fn files_contents(extra: &[(&str, &[u8])]) -> archive::Contents {
+        archive::read(&files_archive(extra), DECOMPRESSED_MAX).expect("reads")
+    }
+
+    /// What `ritornello-install` records for `component` after placing the
+    /// three files as `files_archive` carries them.
+    fn recorded(component: &str) -> install_registry::InstallRegistry {
+        let dests = [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER];
+        install_registry::InstallRegistry {
+            format: 1,
+            components: [(
+                component.to_string(),
+                install_registry::Recorded {
+                    privileged: dests.iter().map(|d| d.to_string()).collect(),
+                    sha256: dests.iter().map(|d| (d.to_string(), digest_hex(&privileged_bytes(d)))).collect(),
+                },
+            )]
+            .into(),
+        }
+    }
+
+    /// The one shape that passes: declared, recorded, every privileged
+    /// member hashed as recorded, the same set on both sides.
+    ///
+    /// **[MUTATION]**: stop setting the privileged members aside before
+    /// `installable_from_ui` (`rest` = every entry) — this test fails.
+    #[test]
+    fn an_update_whose_privileged_files_are_unchanged_is_allowed() {
+        let c = files_contents(&[]);
+        assert!(!archive_allowed(false, false, &c.entries), "the ordinary rule refuses this shape");
+        assert!(privileged_update_allowed("files", false, true, &c, Some(&recorded("files"))));
+    }
+
+    /// **[MUTATION]**: drop the hash comparison (`recorded_dests ==
+    /// archive_dests` alone) — this test fails.
+    #[test]
+    fn one_changed_hash_refuses_the_update() {
+        let c = files_contents(&[]);
+        let mut reg = recorded("files");
+        reg.components.get_mut("files").unwrap().sha256.insert(MEDIA_RULE.to_string(), "0".repeat(64));
+        assert!(!privileged_update_allowed("files", false, true, &c, Some(&reg)));
+    }
+
+    /// An archive that ships one more unit than was recorded. Refused twice
+    /// over — the unit has no recorded hash, and the sets differ — so no
+    /// single mutation reddens this test alone; it pins the case the brief
+    /// names. `a_missing_member_refuses_the_update` is the half only the set
+    /// equality sees.
+    #[test]
+    fn an_added_member_refuses_the_update() {
+        let c = files_contents(&[("etc/systemd/system/ritornello-extra.service", b"[Unit]\n")]);
+        assert!(!privileged_update_allowed("files", false, true, &c, Some(&recorded("files"))));
+    }
+
+    /// The half only the set equality sees: every member the archive
+    /// carries is hashed as recorded, and a recorded dest is simply absent —
+    /// placing the binary alone would leave a file the new version no
+    /// longer ships, which is `ritornello-install`'s job to remove.
+    ///
+    /// **[MUTATION]**: drop the set equality — this test fails.
+    #[test]
+    fn a_missing_member_refuses_the_update() {
+        let c = files_contents(&[]);
+        let mut reg = recorded("files");
+        let files = reg.components.get_mut("files").unwrap();
+        let gone = "/etc/polkit-1/rules.d/50-ritornello-gone.rules";
+        files.privileged.push(gone.to_string());
+        files.sha256.insert(gone.to_string(), "1".repeat(64));
+        assert!(!privileged_update_allowed("files", false, true, &c, Some(&reg)));
+    }
+
+    /// **[MUTATION]**: answer `true` when `registry` is `None` — this test
+    /// fails.
+    #[test]
+    fn an_absent_registry_refuses_the_update() {
+        let c = files_contents(&[]);
+        assert!(!privileged_update_allowed("files", false, true, &c, None));
+    }
+
+    /// A registry that records other components and not this one.
+    #[test]
+    fn a_registry_silent_about_the_plugin_refuses_the_update() {
+        let c = files_contents(&[]);
+        assert!(!privileged_update_allowed("files", false, true, &c, Some(&recorded("core"))));
+    }
+
+    /// A registry written before the installer recorded hashes: the dests
+    /// are there, the hashes are not, and nothing is proved.
+    #[test]
+    fn a_registry_without_hashes_refuses_the_update() {
+        let c = files_contents(&[]);
+        let mut reg = recorded("files");
+        reg.components.get_mut("files").unwrap().sha256.clear();
+        assert!(!privileged_update_allowed("files", false, true, &c, Some(&reg)));
+    }
+
+    /// A first install: nothing declares the plugin, so placing the binary
+    /// alone would be an installation without its privileged files.
+    ///
+    /// **[MUTATION]**: drop `|| !declared` — this test fails.
+    #[test]
+    fn a_first_install_is_refused_even_with_unchanged_files() {
+        let c = files_contents(&[]);
+        assert!(!privileged_update_allowed("files", false, false, &c, Some(&recorded("files"))));
+    }
+
+    /// **[MUTATION]**: drop `third_party ||` — this test fails.
+    #[test]
+    fn a_third_party_component_is_never_judged_here() {
+        let c = files_contents(&[]);
+        assert!(!privileged_update_allowed("files", true, true, &c, Some(&recorded("files"))));
+    }
+
+    /// A plugin that is not privileged gets no second way through, even
+    /// with a registry that would match: it behaves exactly as before.
+    ///
+    /// **[MUTATION]**: drop `|| !crate::plugins::is_privileged(name)` — this
+    /// test fails.
+    #[test]
+    fn a_plugin_that_is_not_privileged_gets_no_second_way() {
+        let c = files_contents(&[]);
+        assert!(!privileged_update_allowed("radio", false, true, &c, Some(&recorded("radio"))));
+    }
+
+    /// Setting the privileged members aside leaves the ordinary rule
+    /// standing for everything else: here, an operator's file under
+    /// `/etc/ritornello` a release has no business shipping.
+    ///
+    /// **[MUTATION]**: drop the `installable_from_ui(&rest)` check — this
+    /// test fails.
+    #[test]
+    fn anything_else_the_ordinary_rule_refuses_still_refuses_the_update() {
+        let c = files_contents(&[("etc/ritornello/plugins.toml", b"# not yours\n")]);
+        assert!(!privileged_update_allowed("files", false, true, &c, Some(&recorded("files"))));
     }
 
     /// The three shapes `SHA256SUMS` can take for one archive, and only one
@@ -5334,6 +5621,155 @@ mod tests {
             "a fresh install must place the archive's initial configuration under the \
              installing component's own name, not any other plugin's"
         );
+    }
+
+    /// A worker whose `plugins.toml` also declares `files`, its binary in
+    /// place, and — when `registry` is given — `ritornello-install`'s
+    /// registry at the path the installer writes it, below the same root.
+    fn files_worker(root: &Path, declared: bool, registry: Option<&str>) -> Worker {
+        let worker = worker_at(root, one_line(PluginStatus::startup("files")));
+        if declared {
+            let exec = plugins_dir(root).join("ritornello-plugin-files");
+            std::fs::write(&exec, b"ELF old").unwrap();
+            let mut manifest = std::fs::read_to_string(&worker.manifest).unwrap();
+            manifest.push_str(&format!("\n[[plugin]]\nname = \"files\"\nexec = {:?}\n", exec.to_string_lossy()));
+            std::fs::write(&worker.manifest, manifest).unwrap();
+        }
+        if let Some(text) = registry {
+            let path = install_registry::path(root);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        worker
+    }
+
+    /// `recorded("files")`, rendered as `ritornello-install` writes it, with
+    /// the rule's hash replaced by `rule_hash` when one is given.
+    fn files_registry_text(rule_hash: Option<&str>) -> String {
+        let reg = recorded("files");
+        let rec = &reg.components["files"];
+        let privileged: Vec<String> = rec.privileged.iter().map(|p| format!("{p:?}")).collect();
+        let mut text = format!(
+            "format = 1\n\n[components.files]\nversion = \"0.2.0\"\nprivileged = [{}]\n\n[components.files.sha256]\n",
+            privileged.join(", ")
+        );
+        for (dest, hash) in &rec.sha256 {
+            let hash = if dest == MEDIA_RULE { rule_hash.unwrap_or(hash) } else { hash };
+            text.push_str(&format!("{dest:?} = {hash:?}\n"));
+        }
+        text
+    }
+
+    async fn install_files(worker: &Worker) -> Result<Placed, Refusal> {
+        let published = served("files", &files_archive(&[])).await;
+        let client = client().unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install_one(&client, "files", &published, false),
+        )
+        .await
+        .expect("install_one hung")
+    }
+
+    /// **The allowed update, driven through the real `install_one`.** The
+    /// privileged files are unchanged, so root is asked for exactly one
+    /// thing — the plugin's binary, through the unchanged `PlacePlugin` —
+    /// and nothing of the unit, the rule or the helper is written anywhere.
+    ///
+    /// **[MUTATION]**: remove the `|| { … privileged_update_allowed … }`
+    /// branch in `install_one` — this test fails (`NeedsManualStep`).
+    #[tokio::test]
+    async fn an_allowed_update_asks_root_for_the_binary_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = files_worker(dir.path(), true, Some(&files_registry_text(None)));
+        let _privileged = Privileged::answers(Ok(()));
+
+        let outcome = install_files(&worker).await;
+        assert!(matches!(outcome, Ok(Placed::Plugin)), "{:?}", outcome.as_ref().err());
+
+        let request: Request =
+            serde_json::from_str(&std::fs::read_to_string(worker.staging.join("request.json")).unwrap()).unwrap();
+        assert_eq!(request.actions.len(), 1, "{:?}", request.actions);
+        match &request.actions[0] {
+            Action::PlacePlugin { file, .. } => assert_eq!(file, "ritornello-plugin-files"),
+            other => panic!("expected PlacePlugin, got {other:?}"),
+        }
+        for dest in [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER] {
+            assert!(!dir.path().join(&dest[1..]).exists(), "{dest} was written");
+        }
+    }
+
+    /// The same gesture with the rule changed since the installer placed
+    /// it: refused before anything is staged, and remembered on the row.
+    #[tokio::test]
+    async fn an_update_that_changes_a_privileged_file_is_refused_before_anything_is_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = files_worker(dir.path(), true, Some(&files_registry_text(Some(&"0".repeat(64)))));
+        worker.state.write().await.components.push(row("files", ComponentKind::Plugin, Availability::UpdateAvailable));
+
+        let outcome = install_files(&worker).await;
+        assert!(matches!(outcome, Err(Refusal::NeedsManualStep)), "{:?}", outcome.as_ref().err());
+        assert!(!worker.staging.join("request.json").exists());
+        let state = worker.state.read().await;
+        let files = state.components.iter().find(|c| c.name == "files").unwrap();
+        assert_eq!(files.installable, Some(false), "the refusal is remembered for this version");
+    }
+
+    /// No registry on the device — one deployed by `deploy.sh`, say: the
+    /// refusal that existed before.
+    #[tokio::test]
+    async fn without_the_installer_s_registry_the_update_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = files_worker(dir.path(), true, None);
+        let outcome = install_files(&worker).await;
+        assert!(matches!(outcome, Err(Refusal::NeedsManualStep)), "{:?}", outcome.as_ref().err());
+        assert!(!worker.staging.join("request.json").exists());
+    }
+
+    /// A first install, through the real `install_one`, with a registry that
+    /// would match: `plugins.toml` does not declare `files`, so it stays
+    /// `ritornello-install`'s job.
+    ///
+    /// **[MUTATION]**: pass `true` for `declared` at the call site in
+    /// `install_one` — this test fails.
+    #[tokio::test]
+    async fn a_first_install_of_a_privileged_plugin_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = files_worker(dir.path(), false, Some(&files_registry_text(None)));
+        let _privileged = Privileged::answers(Ok(()));
+        let outcome = install_files(&worker).await;
+        assert!(matches!(outcome, Err(Refusal::NeedsManualStep)), "{:?}", outcome.as_ref().err());
+        assert!(!worker.staging.join("request.json").exists());
+    }
+
+    /// An ordinary plugin whose archive carries a unit is refused exactly as
+    /// before, even with a registry that records that unit's very bytes.
+    #[tokio::test]
+    async fn an_ordinary_plugin_carrying_a_unit_is_refused_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), one_line(PluginStatus::startup("radio")));
+        let unit = b"[Unit]\n";
+        let path = install_registry::path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "format = 1\n[components.radio]\nversion = \"0.2.0\"\nprivileged = [\"/etc/systemd/system/r.service\"]\n\
+                 [components.radio.sha256]\n\"/etc/systemd/system/r.service\" = {:?}\n",
+                digest_hex(unit)
+            ),
+        )
+        .unwrap();
+        let _privileged = Privileged::answers(Ok(()));
+        let archive = targz(&[
+            ("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
+            ("etc/systemd/system/r.service", unit),
+        ]);
+        let published = served("radio", &archive).await;
+        let client = client().unwrap();
+        let outcome = worker.install_one(&client, "radio", &published, false).await;
+        assert!(matches!(outcome, Err(Refusal::NeedsManualStep)), "{:?}", outcome.as_ref().err());
+        assert!(!worker.staging.join("request.json").exists());
     }
 
     /// The declaration is written **from the archive's own fragment**, and
