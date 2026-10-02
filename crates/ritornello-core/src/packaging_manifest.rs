@@ -19,11 +19,53 @@ mod tests {
     struct Packaging {
         core: Component,
         plugins: HashMap<String, Component>,
+        /// Components that ship beside a plugin (`with`), in an archive of
+        /// their own, placed only by `ritornello-install`: where a plugin's
+        /// privileged files live. See the comment above `[companions]` in
+        /// packaging.toml.
+        companions: HashMap<String, Component>,
+    }
+
+    impl Packaging {
+        /// Every section, named: the core, each plugin, each companion. The
+        /// walks that hold for any archive go through this, so a companion
+        /// cannot escape a rule by being the newest kind of section.
+        fn all(&self) -> Vec<(&str, &Component)> {
+            std::iter::once(("core", &self.core))
+                .chain(self.plugins.iter().map(|(k, v)| (k.as_str(), v)))
+                .chain(self.companions.iter().map(|(k, v)| (k.as_str(), v)))
+                .collect()
+        }
+    }
+
+    /// Whether a section places a file only a privileged install can place:
+    /// a root-run binary outside the plugins directory (`extra_binaries`), or
+    /// a `tree` destination that is a systemd unit, a polkit rule, or a
+    /// root-run location (`usr/local/bin/`, or `usr/local/lib/ritornello/`
+    /// outside `plugins/`). A tree entry there would be a root-run file
+    /// under another name, and a plugin archive carrying it one the web UI
+    /// must refuse. The same rule as `install-inventory.py`'s `privileged`
+    /// flag.
+    fn places_privileged_file(c: &Component) -> bool {
+        !c.extra_binaries.is_empty() || c.tree.iter().any(|e| privileged_dest(&e.to))
+    }
+
+    fn privileged_dest(to: &str) -> bool {
+        to.starts_with("etc/systemd/system/")
+            || to.starts_with("etc/polkit-1/rules.d/")
+            || to.starts_with("usr/local/bin/")
+            || (to.starts_with("usr/local/lib/ritornello/") && !to.starts_with("usr/local/lib/ritornello/plugins/"))
     }
 
     #[derive(serde::Deserialize, Default)]
     #[serde(default, deny_unknown_fields)]
     struct Component {
+        /// The plugin a companion ships beside. Set on every
+        /// `[companions.X]` and on nothing else
+        /// (`with_is_set_exactly_on_companions`), so that one struct can
+        /// describe all three kinds of section and every walk below reads
+        /// them alike.
+        with: Option<String>,
         tree: Vec<TreeEntry>,
         extra_binaries: Vec<ExtraBinary>,
         examples: Vec<String>,
@@ -110,7 +152,7 @@ mod tests {
             assert!(root.join(rel).exists(), "packaging.toml names a path that does not exist: {rel}");
             checked += 1;
         };
-        for c in std::iter::once(&m.core).chain(m.plugins.values()) {
+        for (_, c) in m.all() {
             for e in &c.tree {
                 check(&e.from);
             }
@@ -126,44 +168,73 @@ mod tests {
 
     /// The core's own list of privileged plugins
     /// (`crate::plugins::PRIVILEGED_PLUGINS`) and this manifest must agree in
-    /// **both directions**: a plugin whose entry places a privileged file
+    /// **both directions**. A plugin is privileged exactly when some
+    /// companion declares `with = <that plugin>` and places a privileged file
     /// (an `extra_binaries` entry, or a `tree` destination under
-    /// `etc/systemd/system/` or `etc/polkit-1/rules.d/`) but is not in the
-    /// list would be uninstallable from the UI in name only — the route
+    /// `etc/systemd/system/` or `etc/polkit-1/rules.d/`): the plugin's own
+    /// archive carries none any more, but installing or removing the plugin
+    /// still installs or removes its companion, which only
+    /// `ritornello-install` can place.
+    ///
+    /// A plugin whose companion places a privileged file but which is not in
+    /// the list would be uninstallable from the UI in name only — the route
     /// refusal in `plugin_status::plugin_delete` reads the list, not this
     /// file, so a plugin missing from it would still have its declaration
-    /// erased and its privileged parts left behind, the exact defect this
-    /// whole change closes. The reverse drift is just as real: a plugin
-    /// named in the list that places nothing privileged would be needlessly
-    /// sent to `ritornello-install` for an ordinary uninstall it could do
-    /// itself.
+    /// erased and its companion's privileged parts left behind. The reverse
+    /// drift is just as real: a plugin named in the list with no privileged
+    /// companion would be needlessly sent to `ritornello-install` for an
+    /// ordinary uninstall it could do itself.
     ///
-    /// Only `m.plugins` is walked, deliberately: `PRIVILEGED_PLUGINS` never
-    /// names `core` (it is not a plugin, and a third-party plugin can never
-    /// be privileged either — see the constant's own doc), so the core's
-    /// entry would only ever be a false positive here.
+    /// And a `[plugins.X]` table itself must never place a privileged file:
+    /// that is a companion's job now. A plugin archive carrying a unit, a
+    /// rule or a root-run binary is one the web UI must refuse to install as
+    /// an update, which is the very situation companions exist to end.
+    ///
+    /// Only `m.plugins` is walked for the list, deliberately:
+    /// `PRIVILEGED_PLUGINS` never names `core` (it is not a plugin, and a
+    /// third-party plugin can never be privileged either — see the
+    /// constant's own doc), so the core's entry would only ever be a false
+    /// positive here.
+    ///
+    /// **[MUTATION]**, one per direction and one for the plugin-table rule:
+    /// - remove `"files"` from `PRIVILEGED_PLUGINS` — red, "add \"files\"";
+    /// - add `"radio"` to `PRIVILEGED_PLUGINS` — red, "remove \"radio\"";
+    /// - move the unit's `tree` entry back into `[plugins.files]` — red,
+    ///   "places the privileged".
     #[test]
     fn every_privileged_plugin_agrees_with_packaging_toml() {
         let m = manifest();
         let mut checked = 0;
         for (name, c) in &m.plugins {
-            let places_privileged_file = !c.extra_binaries.is_empty()
-                || c.tree.iter().any(|e| {
-                    e.to.starts_with("etc/systemd/system/") || e.to.starts_with("etc/polkit-1/rules.d/")
-                });
+            assert!(
+                !places_privileged_file(c),
+                "[plugins.{name}] places the privileged file(s) {:?} -- a plugin's own archive \
+                 never carries a unit, a polkit rule or a root-run binary: move them to a \
+                 [companions.X] with `with = \"{name}\"`",
+                c.extra_binaries
+                    .iter()
+                    .map(|e| e.to.as_str())
+                    .chain(c.tree.iter().map(|e| e.to.as_str()))
+                    .collect::<Vec<_>>()
+            );
+            let places_privileged_file = m
+                .companions
+                .values()
+                .any(|k| k.with.as_deref() == Some(name.as_str()) && places_privileged_file(k));
             let listed = crate::plugins::PRIVILEGED_PLUGINS.contains(&name.as_str());
             assert_eq!(
                 listed, places_privileged_file,
-                "{name}: packaging.toml places a privileged file = {places_privileged_file}, but \
-                 PRIVILEGED_PLUGINS lists it as privileged = {listed} -- {}",
+                "{name}: a companion with = \"{name}\" places a privileged file = \
+                 {places_privileged_file}, but PRIVILEGED_PLUGINS lists it as privileged = \
+                 {listed} -- {}",
                 if places_privileged_file {
                     format!(
                         "add \"{name}\" to PRIVILEGED_PLUGINS in crates/ritornello-core/src/plugins/mod.rs"
                     )
                 } else {
                     format!(
-                        "remove \"{name}\" from PRIVILEGED_PLUGINS, or its packaging.toml entry is \
-                         missing the privileged file that justified adding it"
+                        "remove \"{name}\" from PRIVILEGED_PLUGINS, or its companion in packaging.toml \
+                         is missing the privileged file that justified adding it"
                     )
                 }
             );
@@ -190,6 +261,102 @@ mod tests {
         assert!(checked > 0, "checked nothing — the walk is not looking where it should");
     }
 
+    /// The core's own list of companions (`crate::plugins::COMPANIONS`) and
+    /// this manifest's `[companions.X] with = …` must name the same pairs, in
+    /// **both directions**.
+    ///
+    /// A companion packaged here and missing from the list is the dangerous
+    /// drift: the core would not know `files` ships with one, and would update
+    /// it from the web UI whatever the release did to the companion — a new
+    /// plugin binary beside an old root-run helper, which is exactly what the
+    /// version comparison exists to refuse. The reverse drift is a pair the
+    /// core waits for and no release ever publishes, so that plugin could
+    /// never be updated from the UI again.
+    ///
+    /// **[MUTATION]**, one per direction:
+    /// - empty `COMPANIONS` — red, "add (\"files\", \"files-mount\")";
+    /// - add `("radio", "radio-helper")` to `COMPANIONS` — red, "remove".
+    #[test]
+    fn every_companion_agrees_with_packaging_toml() {
+        let m = manifest();
+        let mut packaged: Vec<(String, String)> = m
+            .companions
+            .iter()
+            .map(|(name, c)| {
+                let with = c.with.clone().unwrap_or_else(|| panic!("[companions.{name}] declares no `with`"));
+                (with, name.clone())
+            })
+            .collect();
+        packaged.sort();
+        let mut listed: Vec<(String, String)> =
+            crate::plugins::COMPANIONS.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        listed.sort();
+        for pair in &packaged {
+            assert!(
+                listed.contains(pair),
+                "packaging.toml ships [companions.{}] with = {:?}, which COMPANIONS does not list -- \
+                 add ({:?}, {:?}) to COMPANIONS in crates/ritornello-core/src/plugins/mod.rs",
+                pair.1, pair.0, pair.0, pair.1
+            );
+        }
+        for pair in &listed {
+            assert!(
+                packaged.contains(pair),
+                "COMPANIONS lists ({:?}, {:?}), which packaging.toml does not ship as \
+                 [companions.{}] with = {:?} -- remove it from COMPANIONS, or add the table",
+                pair.0, pair.1, pair.1, pair.0
+            );
+        }
+        assert!(!listed.is_empty(), "checked nothing — the files plugin's companion is gone from both");
+    }
+
+    /// `with` is what makes a section a companion, and it must name a plugin
+    /// this manifest packages: a companion whose `with` names nothing (a
+    /// typo, a renamed plugin) would ship an archive that no installation of
+    /// any plugin ever places. And `with` anywhere else would mean nothing,
+    /// so it is refused there rather than silently ignored.
+    ///
+    /// **[MUTATION]**: set the companion's `with = "file"` — red, naming it.
+    #[test]
+    fn with_is_set_exactly_on_companions() {
+        let m = manifest();
+        assert!(!m.companions.is_empty(), "no companion at all: the files plugin's helper has no home");
+        for (name, c) in &m.companions {
+            let with = c.with.as_deref().unwrap_or_else(|| panic!("[companions.{name}] declares no `with`"));
+            assert!(
+                m.plugins.contains_key(with),
+                "[companions.{name}] ships with {with:?}, which has no [plugins.{with}] table"
+            );
+        }
+        for (name, c) in std::iter::once(("core", &m.core)).chain(m.plugins.iter().map(|(k, v)| (k.as_str(), v))) {
+            assert!(c.with.is_none(), "{name} declares `with`, which only a companion may");
+        }
+    }
+
+    /// A companion is not a plugin, so the catalogue, which lists what the
+    /// web UI can offer to install, must never describe one: a row for the
+    /// mount helper would be an offer only `ritornello-install` can honour.
+    /// `plugin-catalogue.py` reads `plugins.example.toml` and never this
+    /// file; this pins that it stays so.
+    #[test]
+    fn the_catalogue_describes_no_companion() {
+        let out = std::process::Command::new("python3")
+            .arg("scripts/plugin-catalogue.py")
+            .current_dir(repo_root())
+            .output()
+            .expect("python3 is available");
+        assert!(out.status.success(), "plugin-catalogue.py failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        let catalogue: serde_json::Value = serde_json::from_slice(&out.stdout).expect("catalogue.json is JSON");
+        let components = catalogue["components"].as_object().expect("components is an object");
+        assert!(components.contains_key("files"), "the walk is wrong: not even files is described");
+        let m = manifest();
+        for name in m.companions.keys() {
+            for key in [name.clone(), format!("ritornello-{name}")] {
+                assert!(!components.contains_key(&key), "the catalogue describes the companion {key}");
+            }
+        }
+    }
+
     /// **No component archive carries translated text any more.**
     ///
     /// The rule with no list to keep: a component that shipped its own
@@ -201,9 +368,7 @@ mod tests {
     fn no_component_archive_carries_a_locale_directory() {
         let m = manifest();
         let mut checked = 0;
-        for (name, c) in std::iter::once(("core".to_string(), &m.core))
-            .chain(m.plugins.iter().map(|(k, v)| (k.clone(), v)))
-        {
+        for (name, c) in m.all() {
             for entry in &c.tree {
                 assert!(
                     !entry.from.starts_with("deploy/locales"),
@@ -232,7 +397,7 @@ mod tests {
     fn every_enabled_unit_is_placed_by_its_own_component() {
         let m = manifest();
         let mut checked = 0;
-        for (name, c) in std::iter::once(("core", &m.core)).chain(m.plugins.iter().map(|(k, v)| (k.as_str(), v))) {
+        for (name, c) in m.all() {
             for unit in &c.enable {
                 assert!(
                     c.tree.iter().any(|e| e.to == format!("etc/systemd/system/{unit}")),
@@ -277,9 +442,10 @@ mod tests {
     }
 
     /// What `ritornello-install` will act on, read the way it will read it:
-    /// the reference order, the files plugin's unit and mount root, the
-    /// presets expanded file by file, and no privileged file anywhere an
-    /// update could reach.
+    /// the reference order, the files-mount companion's unit and mount root
+    /// (and the files plugin's entry holding none of it), the presets
+    /// expanded file by file, and no privileged file anywhere an update
+    /// could reach.
     #[test]
     fn the_install_inventory_says_what_the_installer_needs() {
         let out = run_install_inventory(&[]);
@@ -300,9 +466,35 @@ mod tests {
                 .find(|p| p["name"] == name)
                 .unwrap_or_else(|| panic!("no {name} in the inventory"))
         };
+        let companions = inv["companions"].as_array().expect("companions is an array");
+        let companion = |name: &str| {
+            companions
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap_or_else(|| panic!("no companion {name} in the inventory"))
+        };
+        let mount = companion("files-mount");
+        assert_eq!(mount["with"], "files");
+        assert_eq!(mount["mount_root"], "/mnt/ritornello");
+        assert_eq!(mount["enable"], serde_json::json!(["ritornello-media-mount.service"]));
+        assert_eq!(mount["block"], serde_json::Value::Null);
+        assert_eq!(mount["initial_config"], serde_json::json!([]));
+        // Named after its own crate and its own version, as
+        // package-release.sh builds it.
+        let cargo: toml::Value = toml::from_str(
+            &std::fs::read_to_string(repo_root().join("crates/ritornello-files-mount/Cargo.toml")).unwrap(),
+        )
+        .unwrap();
+        let version = cargo["package"]["version"].as_str().expect("the companion declares its own version");
+        assert_eq!(mount["archive"], format!("ritornello-files-mount-{version}-{{arch}}.tar.gz"));
+        // The files plugin's own entry: its binary, and nothing privileged,
+        // nothing to enable, nothing to unmount.
         let files = plugin("files");
-        assert_eq!(files["mount_root"], "/mnt/ritornello");
-        assert_eq!(files["enable"], serde_json::json!(["ritornello-media-mount.service"]));
+        assert_eq!(files["mount_root"], serde_json::Value::Null);
+        assert_eq!(files["enable"], serde_json::json!([]));
+        let files_files: Vec<&str> =
+            files["files"].as_array().unwrap().iter().map(|f| f["dest"].as_str().unwrap()).collect();
+        assert_eq!(files_files, vec!["/usr/local/lib/ritornello/plugins/ritornello-plugin-files"]);
 
         // Every preset, one entry per file, owned by the unprivileged core
         // that rewrites them on update.
@@ -349,10 +541,14 @@ mod tests {
         // declared destination.
         let m = manifest();
         let mut extra = 0;
-        for (name, c) in std::iter::once(("core", &m.core))
-            .chain(m.plugins.iter().map(|(n, c)| (n.as_str(), c)))
-        {
-            let placed = if name == "core" { &inv["core"] } else { plugin(name) };
+        for (name, c) in m.all() {
+            let placed = if name == "core" {
+                &inv["core"]
+            } else if m.companions.contains_key(name) {
+                companion(name)
+            } else {
+                plugin(name)
+            };
             for e in &c.extra_binaries {
                 let dest = format!("/{}", e.to);
                 assert!(
@@ -365,7 +561,7 @@ mod tests {
         assert!(extra > 0, "saw no extra binary — the walk is wrong");
 
         let mut privileged = 0;
-        for c in std::iter::once(&inv["core"]).chain(plugins.iter()) {
+        for c in std::iter::once(&inv["core"]).chain(plugins.iter()).chain(companions.iter()) {
             for f in c["files"].as_array().unwrap() {
                 let dest = f["dest"].as_str().unwrap();
                 assert!(
@@ -391,6 +587,13 @@ mod tests {
             }
         }
         assert!(privileged >= 9, "saw only {privileged} privileged files — the walk is wrong");
+        // No plugin's own entry is privileged: that is what lets the web UI
+        // update a plugin archive, and its companion's job instead.
+        for p in plugins {
+            for f in p["files"].as_array().unwrap() {
+                assert_ne!(f["privileged"], true, "{}: places the privileged {}", p["name"], f["dest"]);
+            }
+        }
     }
 
     /// Fix round 1, R14: `deploy/mpd.example.toml` carried a literal

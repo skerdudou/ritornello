@@ -34,6 +34,13 @@ mod tests {
         "mpd",
     ];
 
+    /// Components that ship beside a plugin and are versioned on their own,
+    /// but are not plugins: no `ritornello-plugin-` prefix, no entry in
+    /// `plugins.example.toml`. Each is a crate that declares its own literal
+    /// version, and every rule below that walks the shipped components walks
+    /// these too.
+    const SHIPPED_COMPANIONS: &[&str] = &["ritornello-files-mount"];
+
     /// Crates that legitimately keep inheriting the product number: no
     /// archive is named after them. `ritornello-updater` is here because it
     /// travels inside the core's archive rather than as its own component.
@@ -52,6 +59,19 @@ mod tests {
         // that delivery's own decision, not this one's.
         "ritornello-install",
     ];
+
+    /// Every crate whose version names an archive: the core, the plugins and
+    /// the companions. One list, so a rule cannot forget one of the three.
+    fn shipped_crate_names() -> Vec<String> {
+        let mut names = vec!["ritornello-core".to_string()];
+        names.extend(
+            SHIPPED_PLUGINS
+                .iter()
+                .map(|p| format!("ritornello-plugin-{p}")),
+        );
+        names.extend(SHIPPED_COMPANIONS.iter().map(|c| c.to_string()));
+        names
+    }
 
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -189,12 +209,7 @@ mod tests {
 
     #[test]
     fn every_shipped_component_declares_its_own_version() {
-        let mut names = vec!["ritornello-core".to_string()];
-        names.extend(
-            SHIPPED_PLUGINS
-                .iter()
-                .map(|p| format!("ritornello-plugin-{p}")),
-        );
+        let names = shipped_crate_names();
         for name in names {
             let declared = declared_version(&crate_manifest(&name));
             assert!(
@@ -208,12 +223,7 @@ mod tests {
     #[test]
     fn every_shipped_component_stays_on_the_product_generation() {
         let product = generation(&product_version());
-        let mut names = vec!["ritornello-core".to_string()];
-        names.extend(
-            SHIPPED_PLUGINS
-                .iter()
-                .map(|p| format!("ritornello-plugin-{p}")),
-        );
+        let names = shipped_crate_names();
         for name in names {
             let version = declared_version(&crate_manifest(&name))
                 .unwrap_or_else(|| panic!("{name} declares no version of its own"));
@@ -297,12 +307,7 @@ mod tests {
             return; // a finished product: the rule above already covers it
         };
         let finished = product.split('-').next().unwrap_or(&product);
-        let mut names = vec!["ritornello-core".to_string()];
-        names.extend(
-            SHIPPED_PLUGINS
-                .iter()
-                .map(|p| format!("ritornello-plugin-{p}")),
-        );
+        let names = shipped_crate_names();
         for name in names {
             let version = declared_version(&crate_manifest(&name))
                 .unwrap_or_else(|| panic!("{name} declares no version of its own"));
@@ -488,12 +493,7 @@ mod tests {
     fn a_prerelease_suffix_is_the_products_own_or_absent() {
         let product = product_version();
         let expected = prerelease(&product);
-        let mut names = vec!["ritornello-core".to_string()];
-        names.extend(
-            SHIPPED_PLUGINS
-                .iter()
-                .map(|p| format!("ritornello-plugin-{p}")),
-        );
+        let names = shipped_crate_names();
         for name in names {
             let version = declared_version(&crate_manifest(&name))
                 .unwrap_or_else(|| panic!("{name} declares no version of its own"));
@@ -595,5 +595,36 @@ mod tests {
             "plugins.example.toml and SHIPPED_PLUGINS disagree — a plugin \
              was added or removed without its own version being decided"
         );
+    }
+
+    /// A companion is a component of its own: it is not one of the internal
+    /// crates (those inherit the product number and no archive is named after
+    /// them) and not one of the plugins (`plugins.example.toml` lists what the
+    /// core loads, and a helper the core never loads must not be in it).
+    #[test]
+    fn a_companion_is_neither_an_internal_crate_nor_a_plugin() {
+        let example = read(&repo_root().join("deploy").join("plugins.example.toml"));
+        for companion in SHIPPED_COMPANIONS {
+            assert!(
+                !INTERNAL_CRATES.contains(companion),
+                "{companion} is a companion and also listed as an internal \
+                 crate: it would have to inherit the product number"
+            );
+            assert!(
+                !companion.starts_with("ritornello-plugin-"),
+                "{companion} carries the plugin prefix, so every tool that \
+                 scans plugins by name would take it for one"
+            );
+            let bare = companion.trim_start_matches("ritornello-");
+            assert!(
+                !example.contains(&format!("name = \"{bare}\"")),
+                "{companion} appears in plugins.example.toml: a companion is \
+                 not a plugin and the core must never be told to load it"
+            );
+            assert!(
+                declared_version(&crate_manifest(companion)).is_some(),
+                "{companion} inherits the product version"
+            );
+        }
     }
 }

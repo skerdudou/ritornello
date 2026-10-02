@@ -497,7 +497,7 @@ fn declared_test_only_module(line: &str) -> Option<&str> {
 /// (Ruling R20, N4) — true only for the four shapes `rustc` itself resolves
 /// that way: `main.rs`, `lib.rs`, `mod.rs`, or any file directly under a
 /// `src/bin/` directory (every plugin's own binary entry point, and the
-/// `files` plugin's `media-mount.rs` helper). For anything else — a plain
+/// `files` companion's `media-mount.rs` helper). For anything else — a plain
 /// module file `foo.rs` — a child module resolves to `foo/name.rs` (or
 /// `foo/name/mod.rs`), never beside `foo.rs` itself; getting this wrong
 /// would make the guard exclude the WRONG file outright — a production
@@ -702,14 +702,20 @@ fn no_plugin_spells_a_data_path_of_its_own() {
     // flagged, which a flat, file-independent allow-list cannot express.
     let allowed: [(&str, String); 2] = [
         ("ritornello-plugin-generic-input/src/main.rs", ["/etc/ritornello/", "input-presets"].concat()),
-        ("ritornello-plugin-files/src/bin/media-mount.rs", ["/var/lib/ritornello/plugins/", "files"].concat()),
+        ("ritornello-files-mount/src/bin/media-mount.rs", ["/var/lib/ritornello/plugins/", "files"].concat()),
     ];
     let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut offenders = Vec::new();
     let mut scanned = 0;
     for entry in std::fs::read_dir(crates).unwrap().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("ritornello-plugin-") || name == "ritornello-plugin-sdk" {
+        // The `files` companion is scanned as well as the plugins: it is not a
+        // plugin (its name does not carry the prefix), but it runs as root and
+        // writes into the files plugin's data directory, so a path it spelled
+        // out itself would be the very drift this guard exists to refuse.
+        let scanned_crate = (name.starts_with("ritornello-plugin-") && name != "ritornello-plugin-sdk")
+            || name == "ritornello-files-mount";
+        if !scanned_crate {
             continue;
         }
         let files = walk(&entry.path().join("src"));
@@ -759,6 +765,98 @@ fn no_plugin_spells_a_data_path_of_its_own() {
          not safely delimit):\n{}",
         offenders.join("\n")
     );
+}
+
+/// What the root mount helper may read from its environment: nothing but
+/// `RITORNELLO_USER`, and never through `read_proc_mounts`.
+///
+/// The helper (`crates/ritornello-files-mount/src/bin/media-mount.rs`) runs
+/// as root, started by systemd with no environment of ours, and a path it
+/// trusts must not come from one. `read_proc_mounts` lives in the same crate
+/// and honours `RITORNELLO_FILES_PROC_MOUNTS` — a test seam the unprivileged
+/// plugin needs, which in the helper would let whoever sets the variable
+/// choose the mount table root acts on. So the helper reads the table itself
+/// and must never call that function, and its one environment read is the
+/// account name `env_or("RITORNELLO_USER", …)` asks for.
+///
+/// Scans the file's production lines (`production_lines`, so its test module
+/// is left out) with patterns assembled at runtime, so this file does not
+/// match itself. Returns one line per offence, empty when the file is clean.
+fn helper_env_offenders(text: &str) -> Vec<String> {
+    let (kept, undelimited) = production_lines(text);
+    let mut offenders: Vec<String> = undelimited
+        .iter()
+        .map(|l| format!("cannot delimit the #[cfg(test)] item at line {}", l + 1))
+        .collect();
+    // Every mention of the identifier `env` — `std::env::var(`, `var_os`,
+    // `vars`, `env!(`, `use std::env::var;`, `use std::{env, …}` alike — and
+    // not `env_or` or "environment": the characters on either side must not
+    // continue an identifier. Exactly one is allowed, the one in `env_or`'s
+    // own body, so an import that would make a bare `var("X")` possible is
+    // caught at the import.
+    let env = ["e", "nv"].concat();
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    // The body of `env_or`, its single read, parameterised by the key.
+    let the_one_read = ["std::env::", "var(key)"].concat();
+    let env_or = ["env_", "or("].concat();
+    let allowed_call = [env_or.as_str(), "\"RITORNELLO_", "USER\""].concat();
+    let proc_mounts = ["read_proc", "_mounts"].concat();
+    let (mut reads, mut calls) = (0, 0);
+    for (line_no, line) in kept {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        let mut offend = |why: &str| offenders.push(format!("line {line_no}: {why}: {}", line.trim()));
+        if line.contains(&proc_mounts) {
+            offend("calls read_proc_mounts, which honours an environment override");
+        }
+        let one_read = line.matches(&the_one_read).count();
+        reads += one_read;
+        let env_tokens = line
+            .match_indices(&env)
+            .filter(|(at, _)| {
+                !line[..*at].chars().next_back().is_some_and(ident)
+                    && !line[at + env.len()..].chars().next().is_some_and(ident)
+            })
+            .count();
+        if env_tokens > one_read {
+            offend("reads the environment other than through env_or(\"RITORNELLO_USER\", …)");
+        }
+        for (at, _) in line.match_indices(&env_or) {
+            if line[..at].ends_with("fn ") {
+                continue;
+            }
+            if line[at..].starts_with(&allowed_call) {
+                calls += 1;
+            } else {
+                offend("env_or asks for a key other than RITORNELLO_USER");
+            }
+        }
+    }
+    if reads != 1 {
+        offenders.push(format!("env_or's single read `{the_one_read}` found {reads} times, expected once"));
+    }
+    if calls == 0 {
+        offenders.push("no env_or(\"RITORNELLO_USER\", …) call found: the scan is not looking at the helper".to_string());
+    }
+    offenders
+}
+
+/// **[MUTATION]**, each on the real helper source, each red:
+/// - add `let _ = std::env::var("PATH");` to `main` — "reads the environment";
+/// - change `env_or("RITORNELLO_USER", …)` to `env_or("HOME", …)` — "a key other";
+/// - add `let _ = ritornello_files_mount::mounts::read_proc_mounts();` —
+///   "calls read_proc_mounts";
+/// - add `let _ = std::env::var_os("X");` — "reads the environment";
+/// - add `use std::env::var;` — "reads the environment", caught at the
+///   import, before any bare `var("X")` could follow.
+#[test]
+fn the_mount_helper_reads_only_ritornello_user_from_its_environment() {
+    let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ritornello-files-mount/src/bin/media-mount.rs");
+    let text = std::fs::read_to_string(&helper).unwrap();
+    let offenders = helper_env_offenders(&text);
+    assert!(offenders.is_empty(), "{}:\n{}", helper.display(), offenders.join("\n"));
 }
 
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

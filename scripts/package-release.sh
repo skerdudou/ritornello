@@ -354,9 +354,43 @@ for p in "${PLUGINS[@]}"; do
   pack "$D" "ritornello-plugin-$p" "$(crate_version "ritornello-plugin-$p")"
 done
 
+# --- one archive per companion -------------------------------------------
+# A companion ships beside a plugin, in an archive of its own named after its
+# own crate and its own version (see [companions] in deploy/packaging.toml).
+# The names come from packaging.py, which reads that file: this script reads
+# no TOML section with sed. No plugins.toml fragment: a companion is not a
+# plugin, and the core never launches it.
+#
+# Through a command substitution, not `mapfile < <(...)`: a failure inside a
+# process substitution escapes `set -e`, and an empty list would then build
+# no companion archive and a bundle without the mount helper, in silence.
+COMPANIONS_TXT=$(python3 scripts/packaging.py companions)
+COMPANIONS=()
+[ -z "$COMPANIONS_TXT" ] || mapfile -t COMPANIONS < <(printf '%s\n' "$COMPANIONS_TXT" | cut -d' ' -f1)
+if tr -d '\r' < deploy/packaging.toml | grep -q '^\[companions\.' && [ "${#COMPANIONS[@]}" -eq 0 ]; then
+  echo "deploy/packaging.toml declares [companions.*] but packaging.py companions listed none" >&2
+  exit 1
+fi
+stage_companion() { # <name> <staging dir>
+  python3 scripts/packaging.py stage-companion "$1" "$2" "$BIN"
+  # An empty archive under a real component's name would publish nothing
+  # and look like a delivery.
+  [ -n "$(find "$2" -type f -print -quit)" ] || { echo "companion $1 stages no file" >&2; exit 1; }
+}
+for c in "${COMPANIONS[@]}"; do
+  D=$(mktemp -d)
+  stage_companion "$c" "$D"
+  pack "$D" "ritornello-$c" "$(crate_version "ritornello-$c")"
+done
+
 # --- the bundle of all plugins -------------------------------------------
+# Every plugin (binary, tree, examples) AND every companion, so that a first
+# installation from this one archive still carries the files plugin's mount
+# helper, its unit and its rule. No plugins.toml fragment: the complete
+# plugins.example.toml sits under examples/ instead.
 ALL=$(mktemp -d)
 for p in "${PLUGINS[@]}"; do stage_plugin "$p" "$ALL"; done
+for c in "${COMPANIONS[@]}"; do stage_companion "$c" "$ALL"; done
 rm -f "$ALL/plugins.toml.fragment"
 mkdir -p "$ALL/examples"
 cp deploy/plugins.example.toml "$ALL/examples/"

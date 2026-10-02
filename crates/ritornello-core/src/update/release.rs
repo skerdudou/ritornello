@@ -87,6 +87,13 @@ pub enum Offer {
     /// by component so a failure names one thing — but recognised so it is not
     /// mistaken for a plugin.
     Bundle,
+    /// A plugin's companion (`crate::plugins::COMPANIONS`): the companion's
+    /// own name, `files-mount` today. **Never a row and never placed from
+    /// here** — only `ritornello-install` places a companion — but its
+    /// version is what decides whether the plugin it ships with may be
+    /// updated from the web UI (`update::companion_allows`), so the fold keeps
+    /// it like any other component.
+    Companion(String),
 }
 
 /// The endpoint listing releases, newest first, one page.
@@ -618,6 +625,16 @@ pub fn classify_asset(name: &str, arch: &str) -> Option<(Offer, String)> {
     if let Some(version) = stem.strip_prefix("ritornello-plugins-") {
         return is_version(version).then(|| (Offer::Bundle, version.to_string()));
     }
+    // A companion's archive, `ritornello-<companion>-<version>-<arch>`, and
+    // only for a companion `COMPANIONS` names: its name is not a plugin's
+    // (`ritornello-files-mount-…`, not `ritornello-plugin-…`), so the branch
+    // below would answer `None` for it. Before that branch, which returns
+    // through `?`.
+    for (_, companion) in crate::plugins::COMPANIONS {
+        if let Some(version) = stem.strip_prefix(&format!("ritornello-{companion}-")) {
+            return is_version(version).then(|| (Offer::Companion(companion.to_string()), version.to_string()));
+        }
+    }
     let rest = stem.strip_prefix("ritornello-plugin-")?;
     for (dash, _) in rest.match_indices('-') {
         let (plugin, version) = (&rest[..dash], &rest[dash + 1..]);
@@ -682,6 +699,8 @@ pub fn download_name(offer: &Offer) -> Option<String> {
         // component" rather than "installed, but not through staging".
         Offer::LanguagePack(lang) => Some(format!("staged-lang-{lang}")),
         Offer::Bundle => None,
+        // Placed by `ritornello-install` alone, never staged by the core.
+        Offer::Companion(_) => None,
     }
 }
 
@@ -791,6 +810,53 @@ mod tests {
             classify_asset("ritornello-plugins-0.2.7-armv7.tar.gz", "armv7"),
             Some((Offer::Bundle, "0.2.7".to_string()))
         );
+    }
+
+    /// The companion's archive, in the name `scripts/package-release.sh`
+    /// gives it, is recognised as the companion with its own version — never
+    /// as nothing, and never as a plugin. A prerelease version keeps its
+    /// dash, and an arch-less or unversioned name is still nothing.
+    ///
+    /// **[MUTATION]**: remove the companion loop in `classify_asset` — red
+    /// (`None`).
+    #[test]
+    fn the_companion_s_archive_is_recognised_as_the_companion() {
+        assert_eq!(
+            classify_asset("ritornello-files-mount-0.2.0-beta.2-armv7.tar.gz", "armv7"),
+            Some((Offer::Companion("files-mount".to_string()), "0.2.0-beta.2".to_string()))
+        );
+        assert_eq!(
+            classify_asset("ritornello-files-mount-0.2.3-armv7.tar.gz", "armv7"),
+            Some((Offer::Companion("files-mount".to_string()), "0.2.3".to_string()))
+        );
+        assert_eq!(classify_asset("ritornello-files-mount-armv7.tar.gz", "armv7"), None);
+        assert_eq!(classify_asset("ritornello-files-mount-0.2.3.tar.gz", "armv7"), None);
+        // A name that merely resembles one is not a companion.
+        assert_eq!(classify_asset("ritornello-other-mount-0.2.3-armv7.tar.gz", "armv7"), None);
+        assert_eq!(download_name(&Offer::Companion("files-mount".to_string())), None);
+    }
+
+    /// Folded like any component: the newest release carrying it wins, so a
+    /// release that did not move the companion still leaves its version
+    /// known, from the release where it last changed.
+    #[test]
+    fn the_companion_is_folded_from_the_release_that_last_carried_it() {
+        let text = body(&[
+            rel("v0.2.1", "2026-09-08T10:00:00Z", false, false, &[
+                "ritornello-plugin-files-0.2.1-armv7.tar.gz",
+            ]),
+            rel("v0.2.0", "2026-08-01T10:00:00Z", false, false, &[
+                "ritornello-plugin-files-0.2.0-armv7.tar.gz",
+                "ritornello-files-mount-0.2.0-armv7.tar.gz",
+            ]),
+        ]
+        .join(","));
+        let folded = fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7");
+        let companion = folded
+            .iter()
+            .find(|p| p.offer == Offer::Companion("files-mount".to_string()))
+            .expect("the companion is folded");
+        assert_eq!((companion.version.as_str(), companion.release_tag.as_str()), ("0.2.0", "v0.2.0"));
     }
 
     /// The case the whole extraction rule exists for: some plugin names in

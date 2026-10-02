@@ -64,8 +64,6 @@ fn useful_fs(fstype: &str) -> bool {
     !PSEUDO_FS.contains(&fstype)
 }
 
-const PROC_MOUNTS: &str = "/proc/mounts";
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Volume {
     pub path: PathBuf,
@@ -135,16 +133,9 @@ pub fn browsable(proc_mounts: &str, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Contents of `/proc/mounts`.
-///
-/// The path can be overridden with `RITORNELLO_FILES_PROC_MOUNTS`: that is
-/// what lets the end-to-end journey describe volumes without mounting any, on
-/// a machine where the test has no privileges.
-pub fn read_proc_mounts() -> String {
-    let path =
-        std::env::var("RITORNELLO_FILES_PROC_MOUNTS").unwrap_or_else(|_| PROC_MOUNTS.to_string());
-    std::fs::read_to_string(path).unwrap_or_default()
-}
+// `read_proc_mounts` lives in `ritornello-files-mount`, next to the parsing the
+// root helper shares; it is re-exported so the plugin keeps one path to it.
+pub use ritornello_files_mount::mounts::read_proc_mounts;
 
 /// Diversion of `/proc/mounts` for the library's tests.
 ///

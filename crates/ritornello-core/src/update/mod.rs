@@ -32,7 +32,8 @@ use crate::update::download::{
 };
 use crate::update::release::{
     differs, download_name, fold, newest_catalogue_url, origin, parse_checksums, parse_releases,
-    releases_url, releases_url_for, Channel, Offer, Origin, Published, ReleasesError, ARCH, REPO,
+    releases_url, releases_url_for, Channel, Offer, Origin, Published, Release, ReleasesError, ARCH,
+    REPO,
 };
 use crate::update::state::{
     component_offers, Availability, CheckOutcome, ComponentKind, ComponentOffer, Installed,
@@ -218,6 +219,9 @@ fn carries(published: &Published, name: &str) -> bool {
         // Never installed component by component, and `download_name` already
         // answers `None` for it.
         Offer::Bundle => false,
+        // Only `ritornello-install` places a companion: a name that reached
+        // here as one must resolve to nothing rather than to its archive.
+        Offer::Companion(_) => false,
     }
 }
 
@@ -233,13 +237,12 @@ fn carries(published: &Published, name: &str) -> bool {
 /// - a component already known to need a manual step is not attempted again
 ///   every night, which would download the same archive daily to refuse it
 ///   for the same reason. A privileged plugin the device **has** is not
-///   known to need one in advance: its update is allowed when its
-///   privileged files are unchanged (`privileged_update_allowed`), which
-///   only the archive can tell, so it is tried once per offered version and
-///   `remember_manual_step` marks it when that archive changes them. One
-///   the device does not have is marked from its name alone
-///   (`deny_privileged_install`) and never tried: adding it is
-///   `ritornello-install`'s job;
+///   marked in advance: its update is allowed while its companion does not
+///   move (`companion_allows`), so it is tried once per offered version —
+///   refused before any download when the companion moved — and
+///   `remember_manual_step` marks it then. One the device does not have is
+///   marked from its name alone (`deny_privileged_install`) and never tried:
+///   adding it is `ritornello-install`'s job;
 /// - a component whose **installed version is unknown and that this updater
 ///   has never placed** is left alone. That is not caution for its own sake: a
 ///   plugin switched off, or dead, or predating the version field never
@@ -449,55 +452,41 @@ fn archive_allowed(is_core: bool, third_party: bool, entries: &[String]) -> bool
     installable_from_ui(entries)
 }
 
-/// The one way a privileged plugin (`plugins::PRIVILEGED_PLUGINS`) is
-/// updated from the UI: when its new archive changes **nothing** root owns.
+/// Whether a plugin that ships with a companion (`plugins::COMPANIONS`) may
+/// be updated from the UI: only when the version the release offers for the
+/// companion is **the very one** `ritornello-install` recorded placing.
 ///
-/// Consulted only after `archive_allowed` refused, and true only when all of
-/// these hold:
+/// The plugin's own archive carries nothing root owns any more — the helper,
+/// its unit and its rule are the companion's — so its update is an ordinary
+/// `PlacePlugin`. What that placement must never do is put a new plugin
+/// beside a companion it no longer matches: the two are built from one
+/// shared crate (`ritornello-files-mount`), and a release that moves one
+/// moves the other (`scripts/changed-components.sh`'s coupled-change guard).
+/// So a companion version that moved means "this update also changes the
+/// companion", which only `ritornello-install` can place, and the plugin
+/// waits for it.
 ///
-/// - the plugin is ours and privileged — a third-party component is never
-///   judged here, whatever its name;
-/// - it is **declared** — an update, not a first install: installing it is
-///   `ritornello-install`'s job, since that is what places the privileged
-///   files in the first place;
-/// - `ritornello-install` recorded it (`registry`);
-/// - once its privileged members are set aside, the archive passes
-///   `installable_from_ui`: every other entry is one the core writes itself,
-///   and there is exactly one binary;
-/// - its privileged members are **exactly** the dests recorded — none added,
-///   none missing — and each one's hash is the one recorded for that dest.
-///
-/// Then the privileged files on the device are byte-identical to the
-/// archive's, so there is nothing to rewrite: `install_one` places the
-/// binary alone, through the same unchanged `PlacePlugin` action as for any
-/// other plugin, and the privileged updater still forms only its two paths.
-/// A registry that is absent, unreadable, written before hashes were
-/// recorded, or silent about one dest proves nothing, and the answer is the
-/// refusal that existed before this function did.
-fn privileged_update_allowed(
-    name: &str,
-    third_party: bool,
-    declared: bool,
-    contents: &archive::Contents,
-    registry: Option<&install_registry::InstallRegistry>,
-) -> bool {
-    if third_party || !crate::plugins::is_privileged(name) || !declared {
-        return false;
+/// **Equality, never order**, like every version comparison on a device.
+/// And every unknown refuses: a release that carries no companion (dropped
+/// out of the hundred-release window), a registry that is absent, unreadable
+/// or silent about the companion (a device deployed by `deploy.sh`) — none
+/// of them proves the two stay in step, and the answer is to send the
+/// operator to the program that can place both.
+fn companion_allows(offered: Option<&str>, installed: Option<&str>) -> bool {
+    match (offered, installed) {
+        (Some(offered), Some(installed)) => offered == installed,
+        _ => false,
     }
-    let Some(recorded) = registry.and_then(|r| r.components.get(name)) else {
-        return false;
-    };
-    let hashes = &contents.privileged_hashes;
-    let rest: Vec<String> =
-        contents.entries.iter().filter(|e| !hashes.contains_key(&format!("/{e}"))).cloned().collect();
-    if !installable_from_ui(&rest) {
-        return false;
-    }
-    let recorded_dests: std::collections::BTreeSet<&str> =
-        recorded.privileged.iter().map(String::as_str).collect();
-    let archive_dests: std::collections::BTreeSet<&str> = hashes.keys().map(String::as_str).collect();
-    recorded_dests == archive_dests
-        && hashes.iter().all(|(dest, hash)| recorded.sha256.get(dest) == Some(hash))
+}
+
+/// The version our release offers for `plugin`'s companion, when `plugin`
+/// has one and the release carries it. Read off the same fold as every
+/// other component (`Offer::Companion`), so no second request is made.
+fn companion_offered<'a>(ours: &'a [Published], plugin: &str) -> Option<&'a str> {
+    let companion = crate::plugins::companion_of(plugin)?;
+    ours.iter()
+        .find(|p| matches!(&p.offer, Offer::Companion(c) if c == companion))
+        .map(|p| p.version.as_str())
 }
 
 /// Carries a remembered "cannot be installed from here" across a check.
@@ -510,11 +499,20 @@ fn privileged_update_allowed(
 ///
 /// Keyed on the **offered version** as well as the name: a new version of a
 /// component is a new archive, and nothing is known about it yet.
+///
+/// **A companion's refusal is not carried.** A row refused because its
+/// companion moved (`needs_companion` set, by `deny_moved_companion` or by
+/// `install_one`'s own backstop) is decided afresh at every check from the
+/// release and the registry, both of which can change within one offered
+/// version — `ritornello-install` run in between, or a registry read that
+/// failed once. Carrying that `Some(false)` would keep a row refused for a
+/// fact that no longer holds.
 fn carry_installable(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) {
     for row in fresh.iter_mut() {
         row.installable = previous
             .iter()
             .find(|p| p.name == row.name && p.offered == row.offered)
+            .filter(|p| p.needs_companion.is_none())
             .and_then(|p| p.installable);
     }
 }
@@ -526,15 +524,15 @@ fn carry_installable(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) 
 /// everything else `installable` can carry.
 ///
 /// **A declared one is left alone.** Installing a privileged plugin is
-/// `ritornello-install`'s job, but updating one is allowed from here when
-/// its new archive leaves every privileged file byte-identical
-/// (`privileged_update_allowed`) — a fact about the archive, known only
-/// once it is downloaded. So the row keeps whatever `carry_installable`
-/// carried (`None` until an attempt, `Some(false)` after a refused one,
-/// set by `remember_manual_step`), and the download-time check is the
-/// gate. `declared` and not `installed`: `install_one` tells an update
-/// from an installation by the same `plugins.toml` declaration, and a
-/// switched-off plugin, which announces no version, is still an update.
+/// `ritornello-install`'s job, since its companion goes in with it, but
+/// updating one is allowed from here while the companion does not move
+/// (`companion_allows`) — a fact `install_one` settles, from the worker, at
+/// the gesture. So the row keeps whatever `carry_installable` carried
+/// (`None` until an attempt, `Some(false)` after a refused one, set by
+/// `remember_manual_step`). `declared` and not `installed`: `install_one`
+/// tells an update from an installation by the same `plugins.toml`
+/// declaration, and a switched-off plugin, which announces no version, is
+/// still an update.
 ///
 /// **Called last**, after `carry_installable`, and not folded into it: that
 /// function's whole job is carrying a *previous* answer forward, and on the
@@ -546,13 +544,65 @@ fn carry_installable(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) 
 ///
 /// This is what lets `InstallablesDialog.vue` show its sentence instead of an
 /// Install button for a **never-installed** privileged plugin. For a declared
-/// one, the automatic policy may now try the update once per offered
-/// version: that is the price of learning from the archive whether it
-/// changes a privileged file, and a refusal is remembered for that version.
+/// one, the automatic policy may try the update once per offered version; a
+/// companion that moved refuses it before anything is downloaded, and the
+/// refusal is remembered for that version.
 fn deny_privileged_install(components: &mut [ComponentOffer]) {
     for row in components.iter_mut() {
         if crate::plugins::is_privileged(&row.name) && !row.declared {
             row.installable = Some(false);
+        }
+    }
+}
+
+/// What `ritornello-install` recorded for each companion
+/// (`plugins::COMPANIONS`): `(companion, installed version)`, `None` when
+/// unknown. One small local read per companion, from the worker — `check`
+/// and `conclude_install` call it before they take the state lock, and no
+/// route ever does.
+fn installed_companions(root: &Path) -> Vec<(&'static str, Option<String>)> {
+    crate::plugins::COMPANIONS
+        .iter()
+        .map(|(_, companion)| (*companion, install_registry::companion_version(root, companion)))
+        .collect()
+}
+
+/// Marks, **at the check**, every row the companion rule would refuse at
+/// the gesture: `installable: Some(false)` and `needs_companion` naming the
+/// companion, so the page says "this update also changes the mount helper:
+/// update with ritornello-install" before anyone presses anything, and the
+/// automatic policy never spends an attempt on it.
+///
+/// A row is marked when it is one of ours (`ComponentKind::Plugin`),
+/// declared, ships with a companion, has something on offer
+/// (`UpdateAvailable` or `BinaryMissing`) — and `companion_allows` refuses
+/// the release's companion version against the installed one. An undeclared
+/// one is `deny_privileged_install`'s: installing it is a different sentence.
+///
+/// Recomputed on every check and called after `carry_installable`, which
+/// never carries a companion's refusal: a registry `ritornello-install`
+/// has since updated, or a read that failed once, is seen afresh. It only
+/// ever marks, never clears: a row it leaves alone keeps what the other
+/// rules decided. `install_one` still asks the same question at the
+/// gesture, since the registry can change between the check and the press.
+fn deny_moved_companion(
+    components: &mut [ComponentOffer],
+    published: &[Published],
+    installed: &[(&'static str, Option<String>)],
+) {
+    for row in components.iter_mut() {
+        let Some(companion) = crate::plugins::companion_of(&row.name) else { continue };
+        if row.kind != ComponentKind::Plugin
+            || !row.declared
+            || !matches!(row.availability, Availability::UpdateAvailable | Availability::BinaryMissing)
+        {
+            continue;
+        }
+        let installed_version =
+            installed.iter().find(|(c, _)| *c == companion).and_then(|(_, v)| v.as_deref());
+        if !companion_allows(companion_offered(published, &row.name), installed_version) {
+            row.installable = Some(false);
+            row.needs_companion = Some(companion.to_string());
         }
     }
 }
@@ -644,6 +694,16 @@ enum Refusal {
     NoDigest,
     DigestMismatch,
     NeedsManualStep,
+    /// A plugin that ships with a companion (`plugins::COMPANIONS`), which
+    /// this page may not place: an update whose companion moved or cannot be
+    /// shown not to have (`companion_allows`), or an installation, which
+    /// places the companion too. Carries the companion's name.
+    ///
+    /// Its own variant and not `NeedsManualStep`, whose sentence explains an
+    /// archive holding a unit, a rule or a root-run binary: the plugin's
+    /// archive holds none of them, and that sentence would send the operator
+    /// looking for something that is not there.
+    NeedsCompanionStep(&'static str),
     /// A **third-party** archive carrying anything besides its own binary: a
     /// unit, a polkit rule, a nested path, an input preset, an initial
     /// configuration, a `[[plugin]]` block, a second binary.
@@ -710,6 +770,9 @@ impl std::fmt::Display for Refusal {
             Self::NeedsManualStep => {
                 write!(f, "the archive carries something the core may not install")
             }
+            Self::NeedsCompanionStep(companion) => {
+                write!(f, "it ships with {companion}, which only ritornello-install places")
+            }
             Self::ThirdPartyArchive => {
                 write!(f, "a third-party archive may carry nothing but its own binary")
             }
@@ -734,25 +797,24 @@ impl std::fmt::Display for Refusal {
 /// languages) applies to this path as much as to any other, and a `format!`
 /// here would reach a French screen in English.
 fn refusal_message(catalog: &Chain, component: &str, why: &Refusal) -> String {
-    let (key, detail) = match why {
+    let (key, param): (&str, Option<(&str, &str)>) = match why {
         Refusal::NoRoom => ("update_no_room", None),
         Refusal::NoDigest => ("update_no_digest", None),
         Refusal::DigestMismatch => ("update_digest_mismatch", None),
         Refusal::NeedsManualStep => ("update_needs_manual_step", None),
+        Refusal::NeedsCompanionStep(c) => ("update_needs_companion_step", Some(("companion", *c))),
         Refusal::ThirdPartyArchive => ("update_third_party_archive", None),
-        Refusal::NotItsOwnFile(d) => ("update_wrong_file", Some(d)),
+        Refusal::NotItsOwnFile(d) => ("update_wrong_file", Some(("detail", d.as_str()))),
         Refusal::ThirdPartyUnchecked => ("update_third_party_unchecked", None),
         Refusal::NoFragment => ("update_no_fragment", None),
-        Refusal::Download(d) => ("update_download_failed", Some(d)),
-        Refusal::Prepare(d) => ("update_install_failed", Some(d)),
-        Refusal::Privileged(d) => ("update_privileged_failed", Some(d)),
-        Refusal::Pack(d) => ("update_pack_refused", Some(d)),
+        Refusal::Download(d) => ("update_download_failed", Some(("detail", d.as_str()))),
+        Refusal::Prepare(d) => ("update_install_failed", Some(("detail", d.as_str()))),
+        Refusal::Privileged(d) => ("update_privileged_failed", Some(("detail", d.as_str()))),
+        Refusal::Pack(d) => ("update_pack_refused", Some(("detail", d.as_str()))),
         Refusal::NothingPublished => ("update_nothing_published", None),
     };
     let mut params: Vec<(&str, &str)> = vec![("component", component)];
-    if let Some(d) = detail {
-        params.push(("detail", d.as_str()));
-    }
+    params.extend(param);
     ritornello_i18n::interpolate(catalog.get(key), params)
 }
 
@@ -1659,17 +1721,29 @@ impl Worker {
                 return None;
             }
         };
-        let published = fold(&releases, ARCH);
+        self.settle_check(client, &releases).await
+    }
+
+    /// The rest of a check, once our release list has been read and parsed:
+    /// the rows, and every rule that marks them. Split from `check` only so a
+    /// test can drive this whole half — the registry read included — with a
+    /// release list of its own, since `check` itself fetches from GitHub.
+    async fn settle_check(&self, client: &reqwest::Client, releases: &[Release]) -> Option<Checked> {
+        let published = fold(releases, ARCH);
         let installed = self.installed_when_settled().await;
         let theirs = self.third_party_offers(client, &third_party_targets(&installed)).await;
         let installed_packs = self.installed_packs().await;
         let mut components =
             component_offers(self.core_version, &published, &theirs, &installed, &installed_packs);
         let core = published.iter().find(|p| p.offer == Offer::Core);
+        // Read before the state lock is taken: a file read has no business
+        // holding the lock every route reads through.
+        let companions = installed_companions(&self.root);
         let mut state = self.state.write().await;
         carry_installable(&state.components, &mut components);
         carry_core_notes(&state.components, &mut components);
         deny_privileged_install(&mut components);
+        deny_moved_companion(&mut components, &published, &companions);
         state.outcome = CheckOutcome::Ok;
         state.release_version = core.map(|p| p.version.clone());
         state.release_url = core.map(|p| release_page(&p.release_tag));
@@ -1780,7 +1854,8 @@ impl Worker {
             };
             self.set_busy(Some(self.message_for("update_installing", &name).await))
                 .await;
-            match self.install_one(client, &name, offered, third_party).await {
+            let companion = if third_party { None } else { companion_offered(&checked.ours, &name) };
+            match self.install_one(client, &name, offered, third_party, companion).await {
                 Ok(Placed::Plugin) => {
                     self.restart_plugin(&name).await;
                     placed.push(Placement {
@@ -1858,10 +1933,12 @@ impl Worker {
                 &installed,
                 &installed_packs,
             );
+            let companions = installed_companions(&self.root);
             let mut state = self.state.write().await;
             carry_installable(&state.components, &mut components);
             carry_core_notes(&state.components, &mut components);
             deny_privileged_install(&mut components);
+            deny_moved_companion(&mut components, &checked.ours, &companions);
             state.components = components;
         }
         let report = {
@@ -1882,14 +1959,60 @@ impl Worker {
     /// Refuses with a `Refusal` and never with a sentence: the sentence comes
     /// from the catalog, and this function is not where the catalog lock
     /// belongs. `install` builds it, once, for whatever comes back.
+    ///
+    /// `companion_offered` is the version our release offers for this
+    /// plugin's companion (`companion_offered`, `None` when the plugin has
+    /// none or the release carries none): it is what `companion_allows`
+    /// compares with the version `ritornello-install` recorded.
     async fn install_one(
         &self,
         client: &reqwest::Client,
         name: &str,
         offered: &Published,
         third_party: bool,
+        companion_offered: Option<&str>,
     ) -> Result<Placed, Refusal> {
         let is_core = offered.offer == Offer::Core;
+        // **A privileged plugin's companion is `ritornello-install`'s**, and
+        // both questions about it are answered before a byte is downloaded:
+        // neither needs the archive.
+        //
+        // - Installing one from here is refused whatever its archive holds —
+        //   its companion goes in with it (`deny_privileged_install` gives
+        //   the row the same answer from the plugin's name).
+        // - Updating one of ours is allowed while its companion does not
+        //   move (`companion_allows`). A third-party plugin that happens to
+        //   bear the name is judged by `only_its_own_binary` alone: our
+        //   release's companion says nothing about a stranger's binary.
+        //
+        // The registry is read here, from the worker, never from a route.
+        if !is_core && let Some(companion) = crate::plugins::companion_of(name) {
+            let refused = if !self.declared(name) {
+                true
+            } else if third_party {
+                false
+            } else {
+                let installed = install_registry::companion_version(&self.root, companion);
+                let allowed = companion_allows(companion_offered, installed.as_deref());
+                tracing::info!(
+                    "update: {name}: its companion {companion} is offered at {} and installed at {} -- {}",
+                    companion_offered.unwrap_or("nothing"),
+                    installed.as_deref().unwrap_or("an unknown version"),
+                    if allowed { "placing its binary alone" } else { "refused, ritornello-install places both" }
+                );
+                !allowed
+            };
+            if refused {
+                self.remember_companion_step(name, companion).await;
+                return Err(Refusal::NeedsCompanionStep(companion));
+            }
+        } else if !is_core && crate::plugins::is_privileged(name) && !self.declared(name) {
+            // A privileged plugin with no companion cannot exist
+            // (`every_privileged_plugin_agrees_with_packaging_toml`); refused
+            // all the same rather than trusted to be impossible.
+            self.remember_manual_step(name).await;
+            return Err(Refusal::NeedsManualStep);
+        }
         let root = self.root.to_string_lossy().to_string();
         if !enough_room(crate::system::disk_usage(&root), offered.size as usize) {
             return Err(Refusal::NoRoom);
@@ -1939,25 +2062,7 @@ impl Worker {
         // exempt**: only its own binary, nothing for `/etc/ritornello` and no
         // `[[plugin]]` block. See `archive_allowed`, which holds all three
         // answers, and `only_its_own_binary` for what this refusal stops.
-        //
-        // **A privileged plugin's update has one more way through**, asked
-        // only once the ordinary rule has refused: its privileged files are
-        // byte-identical to what `ritornello-install` recorded placing, so
-        // nothing root owns changes and the binary alone is placed below.
-        // The registry is read here, from the worker, never from a route.
-        let allowed = archive_allowed(is_core, third_party, &contents.entries) || {
-            let declared = !is_core && self.declared(name);
-            let registry = install_registry::read(&self.root);
-            let unchanged =
-                privileged_update_allowed(name, third_party, declared, &contents, registry.as_ref());
-            if unchanged {
-                tracing::info!(
-                    "update: {name}: its privileged files are unchanged since ritornello-install placed them; placing its binary alone"
-                );
-            }
-            unchanged
-        };
-        if !allowed {
+        if !archive_allowed(is_core, third_party, &contents.entries) {
             self.remember_manual_step(name).await;
             return Err(if third_party {
                 Refusal::ThirdPartyArchive
@@ -2298,6 +2403,17 @@ impl Worker {
                 tracing::warn!("update: reading {}: {e:#}", self.manifest.display());
                 false
             }
+        }
+    }
+
+    /// `remember_manual_step` for a companion's refusal: the row also names
+    /// the companion, so the page says what to do about it, and the next
+    /// check recomputes it rather than carrying it (`carry_installable`).
+    async fn remember_companion_step(&self, name: &str, companion: &str) {
+        let mut state = self.state.write().await;
+        for row in state.components.iter_mut().filter(|c| c.name == name) {
+            row.installable = Some(false);
+            row.needs_companion = Some(companion.to_string());
         }
     }
 
@@ -3076,6 +3192,7 @@ mod tests {
             installable: None,
             third_party_repo: None,
             not_installed_files: None,
+            needs_companion: None,
         }
     }
 
@@ -3510,11 +3627,10 @@ mod tests {
         assert_eq!(fresh[0].installable, Some(false));
     }
 
-    /// Follow-up C: a privileged plugin the device **declares** may be
-    /// updated from the UI when its privileged files are unchanged, which
-    /// only its archive can tell. So the row keeps what it carried — `None`
-    /// before any attempt, `Some(false)` after a refused one — and the
-    /// download-time check is the gate.
+    /// A privileged plugin the device **declares** may be updated from the
+    /// UI while its companion does not move, which `install_one` settles at
+    /// the gesture. So the row keeps what it carried — `None` before any
+    /// attempt, `Some(false)` after a refused one.
     ///
     /// **[MUTATION]**: drop `&& !row.declared` from `deny_privileged_install`
     /// — this test fails (the declared row is forced to `Some(false)`).
@@ -3568,170 +3684,44 @@ mod tests {
         assert_eq!(fresh[0].installable, Some(false), "deny_privileged_install must win, called last");
     }
 
-    // ---- Follow-up C: a privileged plugin's update with unchanged files --
+    // ---- A plugin with a companion: updated while the companion stays ----
 
-    const MEDIA_UNIT: &str = "/etc/systemd/system/ritornello-media-mount.service";
-    const MEDIA_RULE: &str = "/etc/polkit-1/rules.d/51-ritornello-media.rules";
-    const MEDIA_HELPER: &str = "/usr/local/lib/ritornello/ritornello-media-mount";
-    const FILES_BINARY: &str = "usr/local/lib/ritornello/plugins/ritornello-plugin-files";
-
-    /// The bytes of each privileged file in these tests: its own path, so a
-    /// hash compared against the wrong dest shows.
-    fn privileged_bytes(dest: &str) -> Vec<u8> {
-        format!("privileged {dest}\n").into_bytes()
+    /// **[MUTATION]**: `offered == installed` replaced by `true` — red.
+    #[test]
+    fn a_companion_that_moved_refuses_the_update() {
+        assert!(companion_allows(Some("0.2.0"), Some("0.2.0")));
+        assert!(!companion_allows(Some("0.2.1"), Some("0.2.0")));
     }
 
-    /// The files plugin's archive in its real shape — binary, helper, unit,
-    /// rule, an example and the fragment — plus `extra` members.
-    fn files_archive(extra: &[(&str, &[u8])]) -> Vec<u8> {
-        let (unit, rule, helper) =
-            (privileged_bytes(MEDIA_UNIT), privileged_bytes(MEDIA_RULE), privileged_bytes(MEDIA_HELPER));
-        let mut members: Vec<(&str, &[u8])> = vec![
-            (FILES_BINARY, &b"ELF new"[..]),
-            (&MEDIA_HELPER[1..], helper.as_slice()),
-            (&MEDIA_UNIT[1..], unit.as_slice()),
-            (&MEDIA_RULE[1..], rule.as_slice()),
-            ("examples/media-roots.example.toml", &b"# roots\n"[..]),
-            ("plugins.toml.fragment", &b"[[plugin]]\nname = \"files\"\n"[..]),
-        ];
-        members.extend_from_slice(extra);
-        targz(&members)
+    /// **[MUTATION]**: the catch-all arm answers `true` — red on both.
+    #[test]
+    fn an_unknown_companion_version_on_either_side_refuses_the_update() {
+        assert!(!companion_allows(Some("0.2.0"), None), "installed version unknown");
+        assert!(!companion_allows(None, Some("0.2.0")), "the release carries no companion");
+        assert!(!companion_allows(None, None));
     }
 
-    fn files_contents(extra: &[(&str, &[u8])]) -> archive::Contents {
-        archive::read(&files_archive(extra), DECOMPRESSED_MAX).expect("reads")
-    }
-
-    /// What `ritornello-install` records for `component` after placing the
-    /// three files as `files_archive` carries them.
-    fn recorded(component: &str) -> install_registry::InstallRegistry {
-        let dests = [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER];
-        install_registry::InstallRegistry {
-            format: 1,
-            components: [(
-                component.to_string(),
-                install_registry::Recorded {
-                    privileged: dests.iter().map(|d| d.to_string()).collect(),
-                    sha256: dests.iter().map(|d| (d.to_string(), digest_hex(&privileged_bytes(d)))).collect(),
-                },
-            )]
-            .into(),
-        }
-    }
-
-    /// The one shape that passes: declared, recorded, every privileged
-    /// member hashed as recorded, the same set on both sides.
+    /// The offered version is read off the fold, for the plugin's own
+    /// companion only — another companion listed first is not it.
     ///
-    /// **[MUTATION]**: stop setting the privileged members aside before
-    /// `installable_from_ui` (`rest` = every entry) — this test fails.
+    /// **[MUTATION]**: match any `Offer::Companion(_)` — red on `files`
+    /// (the other companion's version). **[MUTATION]**: fall back on a
+    /// companion for a plugin that has none — red on `radio`.
     #[test]
-    fn an_update_whose_privileged_files_are_unchanged_is_allowed() {
-        let c = files_contents(&[]);
-        assert!(!archive_allowed(false, false, &c.entries), "the ordinary rule refuses this shape");
-        assert!(privileged_update_allowed("files", false, true, &c, Some(&recorded("files"))));
-    }
-
-    /// **[MUTATION]**: drop the hash comparison (`recorded_dests ==
-    /// archive_dests` alone) — this test fails.
-    #[test]
-    fn one_changed_hash_refuses_the_update() {
-        let c = files_contents(&[]);
-        let mut reg = recorded("files");
-        reg.components.get_mut("files").unwrap().sha256.insert(MEDIA_RULE.to_string(), "0".repeat(64));
-        assert!(!privileged_update_allowed("files", false, true, &c, Some(&reg)));
-    }
-
-    /// An archive that ships one more unit than was recorded. Refused twice
-    /// over — the unit has no recorded hash, and the sets differ — so no
-    /// single mutation reddens this test alone; it pins the case the brief
-    /// names. `a_missing_member_refuses_the_update` is the half only the set
-    /// equality sees.
-    #[test]
-    fn an_added_member_refuses_the_update() {
-        let c = files_contents(&[("etc/systemd/system/ritornello-extra.service", b"[Unit]\n")]);
-        assert!(!privileged_update_allowed("files", false, true, &c, Some(&recorded("files"))));
-    }
-
-    /// The half only the set equality sees: every member the archive
-    /// carries is hashed as recorded, and a recorded dest is simply absent —
-    /// placing the binary alone would leave a file the new version no
-    /// longer ships, which is `ritornello-install`'s job to remove.
-    ///
-    /// **[MUTATION]**: drop the set equality — this test fails.
-    #[test]
-    fn a_missing_member_refuses_the_update() {
-        let c = files_contents(&[]);
-        let mut reg = recorded("files");
-        let files = reg.components.get_mut("files").unwrap();
-        let gone = "/etc/polkit-1/rules.d/50-ritornello-gone.rules";
-        files.privileged.push(gone.to_string());
-        files.sha256.insert(gone.to_string(), "1".repeat(64));
-        assert!(!privileged_update_allowed("files", false, true, &c, Some(&reg)));
-    }
-
-    /// **[MUTATION]**: answer `true` when `registry` is `None` — this test
-    /// fails.
-    #[test]
-    fn an_absent_registry_refuses_the_update() {
-        let c = files_contents(&[]);
-        assert!(!privileged_update_allowed("files", false, true, &c, None));
-    }
-
-    /// A registry that records other components and not this one.
-    #[test]
-    fn a_registry_silent_about_the_plugin_refuses_the_update() {
-        let c = files_contents(&[]);
-        assert!(!privileged_update_allowed("files", false, true, &c, Some(&recorded("core"))));
-    }
-
-    /// A registry written before the installer recorded hashes: the dests
-    /// are there, the hashes are not, and nothing is proved.
-    #[test]
-    fn a_registry_without_hashes_refuses_the_update() {
-        let c = files_contents(&[]);
-        let mut reg = recorded("files");
-        reg.components.get_mut("files").unwrap().sha256.clear();
-        assert!(!privileged_update_allowed("files", false, true, &c, Some(&reg)));
-    }
-
-    /// A first install: nothing declares the plugin, so placing the binary
-    /// alone would be an installation without its privileged files.
-    ///
-    /// **[MUTATION]**: drop `|| !declared` — this test fails.
-    #[test]
-    fn a_first_install_is_refused_even_with_unchanged_files() {
-        let c = files_contents(&[]);
-        assert!(!privileged_update_allowed("files", false, false, &c, Some(&recorded("files"))));
-    }
-
-    /// **[MUTATION]**: drop `third_party ||` — this test fails.
-    #[test]
-    fn a_third_party_component_is_never_judged_here() {
-        let c = files_contents(&[]);
-        assert!(!privileged_update_allowed("files", true, true, &c, Some(&recorded("files"))));
-    }
-
-    /// A plugin that is not privileged gets no second way through, even
-    /// with a registry that would match: it behaves exactly as before.
-    ///
-    /// **[MUTATION]**: drop `|| !crate::plugins::is_privileged(name)` — this
-    /// test fails.
-    #[test]
-    fn a_plugin_that_is_not_privileged_gets_no_second_way() {
-        let c = files_contents(&[]);
-        assert!(!privileged_update_allowed("radio", false, true, &c, Some(&recorded("radio"))));
-    }
-
-    /// Setting the privileged members aside leaves the ordinary rule
-    /// standing for everything else: here, an operator's file under
-    /// `/etc/ritornello` a release has no business shipping.
-    ///
-    /// **[MUTATION]**: drop the `installable_from_ui(&rest)` check — this
-    /// test fails.
-    #[test]
-    fn anything_else_the_ordinary_rule_refuses_still_refuses_the_update() {
-        let c = files_contents(&[("etc/ritornello/plugins.toml", b"# not yours\n")]);
-        assert!(!privileged_update_allowed("files", false, true, &c, Some(&recorded("files"))));
+    fn the_offered_companion_is_the_plugin_s_own() {
+        let companion = |name: &str, version: &str| Published {
+            offer: Offer::Companion(name.to_string()),
+            version: version.to_string(),
+            url: String::new(),
+            size: 0,
+            release_tag: "v0.2.0-beta.2".to_string(),
+            checksums_url: None,
+            catalogue_url: None,
+        };
+        let ours = vec![companion("other-mount", "9.9.9"), companion("files-mount", "0.2.0-beta.2")];
+        assert_eq!(companion_offered(&ours, "files"), Some("0.2.0-beta.2"));
+        assert_eq!(companion_offered(&ours, "radio"), None);
+        assert_eq!(companion_offered(&[], "files"), None);
     }
 
     /// The three shapes `SHA256SUMS` can take for one archive, and only one
@@ -3819,6 +3809,7 @@ mod tests {
             Refusal::NoDigest,
             Refusal::DigestMismatch,
             Refusal::NeedsManualStep,
+            Refusal::NeedsCompanionStep("files-mount"),
             Refusal::ThirdPartyArchive,
             Refusal::NotItsOwnFile("it is declared to run /a/b, and the archive carries c".to_string()),
             Refusal::ThirdPartyUnchecked,
@@ -4737,6 +4728,7 @@ mod tests {
             installable: Some(true),
             third_party_repo: None,
             not_installed_files: None,
+            needs_companion: None,
         });
 
         rig.worker.install_language(&rig.checked, "fr").await.expect("the pack installs");
@@ -5208,7 +5200,7 @@ mod tests {
         let client = client().unwrap();
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client, "radio", &published, true),
+            worker.install_one(&client, "radio", &published, true, None),
         )
         .await
         .expect("install_one hung");
@@ -5263,7 +5255,7 @@ mod tests {
         let client = client().unwrap();
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client, "theirs", &published, true),
+            worker.install_one(&client, "theirs", &published, true, None),
         )
         .await
         .expect("install_one hung");
@@ -5613,7 +5605,7 @@ mod tests {
         let published = served("newsource", &archive).await;
         let client = client().unwrap();
 
-        worker.install_one(&client, "newsource", &published, false).await.unwrap();
+        worker.install_one(&client, "newsource", &published, false, None).await.unwrap();
 
         assert_eq!(
             std::fs::read(worker.plugin_data_root.join("newsource").join("stations.toml")).unwrap(),
@@ -5624,9 +5616,10 @@ mod tests {
     }
 
     /// A worker whose `plugins.toml` also declares `files`, its binary in
-    /// place, and — when `registry` is given — `ritornello-install`'s
-    /// registry at the path the installer writes it, below the same root.
-    fn files_worker(root: &Path, declared: bool, registry: Option<&str>) -> Worker {
+    /// place, and — when `companion` is given — `ritornello-install`'s
+    /// registry recording `files-mount` at that version, at the path the
+    /// installer writes it, below the same root.
+    fn files_worker(root: &Path, declared: bool, companion: Option<&str>) -> Worker {
         let worker = worker_at(root, one_line(PluginStatus::startup("files")));
         if declared {
             let exec = plugins_dir(root).join("ritornello-plugin-files");
@@ -5635,56 +5628,57 @@ mod tests {
             manifest.push_str(&format!("\n[[plugin]]\nname = \"files\"\nexec = {:?}\n", exec.to_string_lossy()));
             std::fs::write(&worker.manifest, manifest).unwrap();
         }
-        if let Some(text) = registry {
+        if let Some(version) = companion {
             let path = install_registry::path(root);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
+            std::fs::write(
+                path,
+                format!(
+                    "format = 1\n\n[components.files]\nversion = \"0.2.0\"\nprivileged = []\n\n\
+                     [components.files-mount]\nversion = {version:?}\nprivileged = [\"{MEDIA_HELPER}\"]\n"
+                ),
+            )
+            .unwrap();
         }
         worker
     }
 
-    /// `recorded("files")`, rendered as `ritornello-install` writes it, with
-    /// the rule's hash replaced by `rule_hash` when one is given.
-    fn files_registry_text(rule_hash: Option<&str>) -> String {
-        let reg = recorded("files");
-        let rec = &reg.components["files"];
-        let privileged: Vec<String> = rec.privileged.iter().map(|p| format!("{p:?}")).collect();
-        let mut text = format!(
-            "format = 1\n\n[components.files]\nversion = \"0.2.0\"\nprivileged = [{}]\n\n[components.files.sha256]\n",
-            privileged.join(", ")
-        );
-        for (dest, hash) in &rec.sha256 {
-            let hash = if dest == MEDIA_RULE { rule_hash.unwrap_or(hash) } else { hash };
-            text.push_str(&format!("{dest:?} = {hash:?}\n"));
-        }
-        text
+    const MEDIA_HELPER: &str = "/usr/local/lib/ritornello/ritornello-media-mount";
+
+    /// The files plugin's archive in its shape since the companion: its
+    /// binary, an example and the fragment — nothing root owns.
+    fn files_archive() -> Vec<u8> {
+        targz(&[
+            ("usr/local/lib/ritornello/plugins/ritornello-plugin-files", b"ELF new"),
+            ("examples/media-roots.example.toml", b"# roots\n"),
+            ("plugins.toml.fragment", b"[[plugin]]\nname = \"files\"\n"),
+        ])
     }
 
-    async fn install_files(worker: &Worker) -> Result<Placed, Refusal> {
-        let published = served("files", &files_archive(&[])).await;
+    async fn install_files(worker: &Worker, companion_offered: Option<&str>) -> Result<Placed, Refusal> {
+        let published = served("files", &files_archive()).await;
         let client = client().unwrap();
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client, "files", &published, false),
+            worker.install_one(&client, "files", &published, false, companion_offered),
         )
         .await
         .expect("install_one hung")
     }
 
     /// **The allowed update, driven through the real `install_one`.** The
-    /// privileged files are unchanged, so root is asked for exactly one
-    /// thing — the plugin's binary, through the unchanged `PlacePlugin` —
-    /// and nothing of the unit, the rule or the helper is written anywhere.
+    /// companion offered is the one installed, so root is asked for exactly
+    /// one thing — the plugin's binary, through the unchanged `PlacePlugin`.
     ///
-    /// **[MUTATION]**: remove the `|| { … privileged_update_allowed … }`
-    /// branch in `install_one` — this test fails (`NeedsManualStep`).
+    /// **[MUTATION]**: refuse every plugin that has a companion (`refused =
+    /// true`) — this test fails (`NeedsCompanionStep`).
     #[tokio::test]
-    async fn an_allowed_update_asks_root_for_the_binary_alone() {
+    async fn an_equal_companion_version_allows_the_update_with_one_place_plugin() {
         let dir = tempfile::tempdir().unwrap();
-        let worker = files_worker(dir.path(), true, Some(&files_registry_text(None)));
+        let worker = files_worker(dir.path(), true, Some("0.2.0-beta.2"));
         let _privileged = Privileged::answers(Ok(()));
 
-        let outcome = install_files(&worker).await;
+        let outcome = install_files(&worker, Some("0.2.0-beta.2")).await;
         assert!(matches!(outcome, Ok(Placed::Plugin)), "{:?}", outcome.as_ref().err());
 
         let request: Request =
@@ -5694,21 +5688,23 @@ mod tests {
             Action::PlacePlugin { file, .. } => assert_eq!(file, "ritornello-plugin-files"),
             other => panic!("expected PlacePlugin, got {other:?}"),
         }
-        for dest in [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER] {
-            assert!(!dir.path().join(&dest[1..]).exists(), "{dest} was written");
-        }
     }
 
-    /// The same gesture with the rule changed since the installer placed
-    /// it: refused before anything is staged, and remembered on the row.
+    /// A release that moves the companion: refused before anything is
+    /// downloaded or staged, remembered on the row, and the sentence names
+    /// the companion.
+    ///
+    /// **[MUTATION]**: pass `None` for the installed version at the call
+    /// site — the equal test above fails; pass `companion_offered` for it —
+    /// this one fails.
     #[tokio::test]
-    async fn an_update_that_changes_a_privileged_file_is_refused_before_anything_is_staged() {
+    async fn a_differing_companion_version_refuses_the_update() {
         let dir = tempfile::tempdir().unwrap();
-        let worker = files_worker(dir.path(), true, Some(&files_registry_text(Some(&"0".repeat(64)))));
+        let worker = files_worker(dir.path(), true, Some("0.2.0-beta.2"));
         worker.state.write().await.components.push(row("files", ComponentKind::Plugin, Availability::UpdateAvailable));
 
-        let outcome = install_files(&worker).await;
-        assert!(matches!(outcome, Err(Refusal::NeedsManualStep)), "{:?}", outcome.as_ref().err());
+        let outcome = install_files(&worker, Some("0.2.0-beta.3")).await;
+        assert!(matches!(outcome, Err(Refusal::NeedsCompanionStep("files-mount"))), "{:?}", outcome.as_ref().err());
         assert!(!worker.staging.join("request.json").exists());
         let state = worker.state.read().await;
         let files = state.components.iter().find(|c| c.name == "files").unwrap();
@@ -5716,60 +5712,356 @@ mod tests {
     }
 
     /// No registry on the device — one deployed by `deploy.sh`, say: the
-    /// refusal that existed before.
+    /// installed version is unknown, and that refuses.
     #[tokio::test]
-    async fn without_the_installer_s_registry_the_update_is_refused() {
+    async fn an_unknown_installed_companion_version_refuses_the_update() {
         let dir = tempfile::tempdir().unwrap();
         let worker = files_worker(dir.path(), true, None);
-        let outcome = install_files(&worker).await;
-        assert!(matches!(outcome, Err(Refusal::NeedsManualStep)), "{:?}", outcome.as_ref().err());
+        let outcome = install_files(&worker, Some("0.2.0-beta.2")).await;
+        assert!(matches!(outcome, Err(Refusal::NeedsCompanionStep(_))), "{:?}", outcome.as_ref().err());
         assert!(!worker.staging.join("request.json").exists());
     }
 
-    /// A first install, through the real `install_one`, with a registry that
-    /// would match: `plugins.toml` does not declare `files`, so it stays
-    /// `ritornello-install`'s job.
-    ///
-    /// **[MUTATION]**: pass `true` for `declared` at the call site in
-    /// `install_one` — this test fails.
+    /// A release that carries no companion at all.
     #[tokio::test]
-    async fn a_first_install_of_a_privileged_plugin_is_still_refused() {
+    async fn a_companion_absent_from_the_release_refuses_the_update() {
         let dir = tempfile::tempdir().unwrap();
-        let worker = files_worker(dir.path(), false, Some(&files_registry_text(None)));
-        let _privileged = Privileged::answers(Ok(()));
-        let outcome = install_files(&worker).await;
-        assert!(matches!(outcome, Err(Refusal::NeedsManualStep)), "{:?}", outcome.as_ref().err());
+        let worker = files_worker(dir.path(), true, Some("0.2.0-beta.2"));
+        let outcome = install_files(&worker, None).await;
+        assert!(matches!(outcome, Err(Refusal::NeedsCompanionStep(_))), "{:?}", outcome.as_ref().err());
         assert!(!worker.staging.join("request.json").exists());
     }
 
-    /// An ordinary plugin whose archive carries a unit is refused exactly as
-    /// before, even with a registry that records that unit's very bytes.
+    /// A first install, through the real `install_one`, with a registry and
+    /// a release that would match: `plugins.toml` does not declare `files`,
+    /// so it stays `ritornello-install`'s job — its archive alone no longer
+    /// says so.
+    ///
+    /// **[MUTATION]**: drop the `!self.declared(name)` branch — this test
+    /// fails.
     #[tokio::test]
-    async fn an_ordinary_plugin_carrying_a_unit_is_refused_as_before() {
+    async fn a_first_install_of_a_plugin_with_a_companion_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = files_worker(dir.path(), false, Some("0.2.0-beta.2"));
+        let _privileged = Privileged::answers(Ok(()));
+        let outcome = install_files(&worker, Some("0.2.0-beta.2")).await;
+        assert!(matches!(outcome, Err(Refusal::NeedsCompanionStep(_))), "{:?}", outcome.as_ref().err());
+        assert!(!worker.staging.join("request.json").exists());
+    }
+
+    /// The wiring, through the real `install`: the companion's version is
+    /// read off the same check's fold and reaches `install_one`. With the
+    /// release's companion at the installed version, the binary is placed.
+    ///
+    /// **[MUTATION]**: pass `None` instead of `companion_offered(…)` in
+    /// `install` — this test fails (the gesture is refused).
+    #[tokio::test]
+    async fn install_hands_the_release_s_companion_version_to_install_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = files_worker(dir.path(), true, Some("0.2.0-beta.2"));
+        let _privileged = Privileged::answers(Ok(()));
+        let plugin = served("files", &files_archive()).await;
+        let companion = Published {
+            offer: Offer::Companion("files-mount".to_string()),
+            version: "0.2.0-beta.2".to_string(),
+            url: "http://127.0.0.1:9/never-fetched".to_string(),
+            size: 0,
+            release_tag: "v0.2.0-beta.2".to_string(),
+            checksums_url: None,
+            catalogue_url: None,
+        };
+        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![] };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            worker.install(&client().unwrap(), &checked, &["files".to_string()]),
+        )
+        .await
+        .expect("install() hung");
+        let request: Request =
+            serde_json::from_str(&std::fs::read_to_string(worker.staging.join("request.json")).unwrap()).unwrap();
+        assert!(
+            matches!(request.actions.as_slice(), [Action::PlacePlugin { file, .. }] if file == "ritornello-plugin-files"),
+            "{:?}",
+            request.actions
+        );
+    }
+
+    // ---- R71: the row says the companion moved, at the check ----
+
+    /// A companion's offer, as the fold yields one.
+    fn companion_offer(version: &str) -> Published {
+        Published {
+            offer: Offer::Companion("files-mount".to_string()),
+            version: version.to_string(),
+            url: "http://127.0.0.1:9/never-fetched".to_string(),
+            size: 0,
+            release_tag: format!("v{version}"),
+            checksums_url: None,
+            catalogue_url: None,
+        }
+    }
+
+    fn installed_files_mount(version: Option<&str>) -> Vec<(&'static str, Option<String>)> {
+        vec![("files-mount", version.map(str::to_string))]
+    }
+
+    fn files_update_row() -> ComponentOffer {
+        let mut r = row("files", ComponentKind::Plugin, Availability::UpdateAvailable);
+        r.installed = Some("0.2.0".to_string());
+        r.offered = Some("0.3.0".to_string());
+        r
+    }
+
+    /// Both halves: a companion the release moves marks the row, naming it;
+    /// the same companion at the installed version leaves the row alone.
+    ///
+    /// **[MUTATION]**: drop the `!` before `companion_allows` in
+    /// `deny_moved_companion` — red on both halves.
+    #[test]
+    fn a_moved_companion_marks_the_row_at_the_check() {
+        let mut rows = vec![files_update_row()];
+        deny_moved_companion(&mut rows, &[companion_offer("0.3.0")], &installed_files_mount(Some("0.2.0")));
+        assert_eq!(rows[0].installable, Some(false));
+        assert_eq!(rows[0].needs_companion.as_deref(), Some("files-mount"));
+
+        let mut rows = vec![files_update_row()];
+        deny_moved_companion(&mut rows, &[companion_offer("0.2.0")], &installed_files_mount(Some("0.2.0")));
+        assert_eq!((rows[0].installable, rows[0].needs_companion.as_deref()), (None, None));
+    }
+
+    /// Either side unknown marks the row: no registry record, or a release
+    /// that carries no companion.
+    ///
+    /// **[MUTATION]**: read the installed version from the companion's
+    /// offer instead (`installed` ignored) — red on the first half.
+    #[test]
+    fn an_unknown_companion_version_marks_the_row() {
+        let mut rows = vec![files_update_row()];
+        deny_moved_companion(&mut rows, &[companion_offer("0.3.0")], &installed_files_mount(None));
+        assert_eq!(rows[0].needs_companion.as_deref(), Some("files-mount"));
+
+        let mut rows = vec![files_update_row()];
+        deny_moved_companion(&mut rows, &[], &installed_files_mount(Some("0.2.0")));
+        assert_eq!(rows[0].needs_companion.as_deref(), Some("files-mount"));
+    }
+
+    /// **[MUTATION]**: `let Some(companion) = …` falling back on
+    /// `"files-mount"` for any plugin — red.
+    #[test]
+    fn a_plugin_without_a_companion_is_never_marked() {
+        let mut rows = vec![row("radio", ComponentKind::Plugin, Availability::UpdateAvailable)];
+        deny_moved_companion(&mut rows, &[], &installed_files_mount(None));
+        assert_eq!((rows[0].installable, rows[0].needs_companion.as_deref()), (None, None));
+    }
+
+    /// Only a declared update of ours is this rule's. Each case would be
+    /// marked but for one operand.
+    ///
+    /// **[MUTATION]**, one per operand, each red on its own case:
+    /// - drop `row.kind != ComponentKind::Plugin` — the third-party row;
+    /// - drop `!row.declared` — the undeclared row;
+    /// - drop the availability test — the aligned row;
+    /// - narrow it to `UpdateAvailable` alone — the missing-binary row.
+    #[test]
+    fn only_a_declared_update_of_ours_is_marked() {
+        let moved = [companion_offer("0.3.0")];
+        let installed = installed_files_mount(Some("0.2.0"));
+        let mark = |r: ComponentOffer| {
+            let mut rows = vec![r];
+            deny_moved_companion(&mut rows, &moved, &installed);
+            rows.remove(0).needs_companion
+        };
+        let mut third = files_update_row();
+        third.kind = ComponentKind::ThirdParty;
+        assert_eq!(mark(third), None, "a stranger's binary under the name");
+        let mut undeclared = files_update_row();
+        undeclared.declared = false;
+        assert_eq!(mark(undeclared), None, "an installation, deny_privileged_install's sentence");
+        let mut aligned = files_update_row();
+        aligned.availability = Availability::Aligned;
+        assert_eq!(mark(aligned), None, "nothing on offer");
+        let mut missing = files_update_row();
+        missing.availability = Availability::BinaryMissing;
+        assert_eq!(mark(missing).as_deref(), Some("files-mount"), "placing the binary again is an update");
+    }
+
+    /// A companion's refusal is recomputed, never carried: the row refused
+    /// at the last check is cleared once `ritornello-install` has updated the
+    /// companion — within the same offered version — while a refusal for
+    /// another reason is still carried.
+    ///
+    /// **[MUTATION]**: drop `.filter(|p| p.needs_companion.is_none())` from
+    /// `carry_installable` — red on the first half.
+    #[test]
+    fn a_companion_refusal_is_recomputed_not_carried() {
+        let mut previous = files_update_row();
+        previous.installable = Some(false);
+        previous.needs_companion = Some("files-mount".to_string());
+        let mut fresh = vec![files_update_row()];
+        carry_installable(&[previous], &mut fresh);
+        deny_moved_companion(&mut fresh, &[companion_offer("0.3.0")], &installed_files_mount(Some("0.3.0")));
+        assert_eq!((fresh[0].installable, fresh[0].needs_companion.as_deref()), (None, None));
+
+        let mut previous = files_update_row();
+        previous.installable = Some(false);
+        let mut fresh = vec![files_update_row()];
+        carry_installable(&[previous], &mut fresh);
+        deny_moved_companion(&mut fresh, &[companion_offer("0.3.0")], &installed_files_mount(Some("0.3.0")));
+        assert_eq!(fresh[0].installable, Some(false), "another refusal of this version is remembered");
+    }
+
+    /// Declares `files` on `worker` with a settled status line at 0.2.0, and
+    /// records `files-mount` at `companion` in the registry (or removes it).
+    async fn files_announced(worker: &Worker, root: &Path, companion: Option<&str>) {
+        worker.status.write().await.plugins = vec![PluginStatus {
+            version: Some("0.2.0".to_string()),
+            ..PluginStatus::kind("files", "source", true, false)
+        }];
+        let path = install_registry::path(root);
+        match companion {
+            Some(version) => {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(
+                    &path,
+                    format!("format = 1\n[components.files-mount]\nversion = {version:?}\nprivileged = []\n"),
+                )
+                .unwrap();
+            }
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    fn files_row(worker_state: &UpdateState) -> ComponentOffer {
+        worker_state.components.iter().find(|c| c.name == "files").expect("a files row").clone()
+    }
+
+    /// **Through the check itself** (`settle_check`, the half of `check` after
+    /// the release list is fetched): the registry is read, the row is marked
+    /// before anyone presses anything, and the next check — once
+    /// `ritornello-install` has recorded the new companion — unmarks it.
+    ///
+    /// **[MUTATION]**: remove the `deny_moved_companion` call in
+    /// `settle_check` — red on the first half.
+    #[tokio::test]
+    async fn a_check_marks_the_row_before_any_press_and_the_next_one_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = files_worker(dir.path(), true, None);
+        files_announced(&worker, dir.path(), Some("0.2.0")).await;
+        let body = releases_body(&[
+            &asset_for("files", "0.3.0"),
+            &format!("ritornello-files-mount-0.3.0-{ARCH}.tar.gz"),
+        ]);
+        let releases = parse_releases(std::str::from_utf8(&body).unwrap(), Channel::Stable).unwrap();
+        let client = client().unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(30), worker.settle_check(&client, &releases))
+            .await
+            .expect("settle_check hung");
+        let files = files_row(&*worker.state.read().await);
+        assert_eq!(files.availability, Availability::UpdateAvailable, "{files:?}");
+        assert_eq!((files.installable, files.needs_companion.as_deref()), (Some(false), Some("files-mount")));
+
+        files_announced(&worker, dir.path(), Some("0.3.0")).await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), worker.settle_check(&client, &releases))
+            .await
+            .expect("settle_check hung");
+        let files = files_row(&*worker.state.read().await);
+        assert_eq!((files.installable, files.needs_companion.as_deref()), (None, None));
+    }
+
+    /// The same marking after an install pass (`conclude_install` rebuilds
+    /// the rows): another plugin placed, `files` still waits for its
+    /// companion, and its row says so.
+    ///
+    /// **[MUTATION]**: remove the `deny_moved_companion` call in
+    /// `conclude_install` — red.
+    #[tokio::test]
+    async fn an_install_pass_keeps_the_moved_companion_on_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = files_worker(dir.path(), true, None);
+        files_announced(&worker, dir.path(), Some("0.2.0")).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let radio =
+            served("radio", &targz(&[("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF")])).await;
+        let mut files_offer = radio.clone();
+        files_offer.offer = Offer::Plugin("files".to_string());
+        files_offer.version = "0.3.0".to_string();
+        let checked = Checked {
+            ours: vec![radio, files_offer, companion_offer("0.3.0")],
+            theirs: vec![],
+            third_party: vec![],
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            worker.install(&client().unwrap(), &checked, &["radio".to_string()]),
+        )
+        .await
+        .expect("install() hung");
+        let files = files_row(&*worker.state.read().await);
+        assert_eq!((files.installable, files.needs_companion.as_deref()), (Some(false), Some("files-mount")));
+    }
+
+    /// The backstop at the gesture names the companion on the row too, so
+    /// the page says the same thing a check would have.
+    #[tokio::test]
+    async fn the_gesture_s_refusal_names_the_companion_on_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = files_worker(dir.path(), true, Some("0.2.0-beta.2"));
+        worker.state.write().await.components.push(row("files", ComponentKind::Plugin, Availability::UpdateAvailable));
+        let outcome = install_files(&worker, Some("0.2.0-beta.3")).await;
+        assert!(matches!(outcome, Err(Refusal::NeedsCompanionStep(_))), "{:?}", outcome.as_ref().err());
+        let state = worker.state.read().await;
+        assert_eq!(files_row(&state).needs_companion.as_deref(), Some("files-mount"));
+    }
+
+    /// M3: a declared **third-party** plugin that happens to be named `files`
+    /// is judged by `only_its_own_binary` alone — our release's companion
+    /// says nothing about a stranger's binary.
+    ///
+    /// **[MUTATION]**: `else if third_party { false }` → `true` — red.
+    #[tokio::test]
+    async fn a_declared_third_party_plugin_named_like_ours_is_not_held_to_our_companion() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = files_worker(dir.path(), true, None);
+        let _privileged = Privileged::answers(Ok(()));
+        let archive = targz(&[("usr/local/lib/ritornello/plugins/ritornello-plugin-files", b"THEIRS")]);
+        let published = served("files", &archive).await;
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install_one(&client().unwrap(), "files", &published, true, None),
+        )
+        .await
+        .expect("install_one hung");
+        assert!(matches!(outcome, Ok(Placed::Plugin)), "{:?}", outcome.as_ref().err());
+    }
+
+    /// M7: a name that is a companion's resolves to nothing, even with its
+    /// archive in our release — only `ritornello-install` places it.
+    ///
+    /// **[MUTATION]**: `Offer::Companion(c) => c == name` in `carries` — red.
+    #[test]
+    fn a_companion_s_name_resolves_to_nothing() {
+        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![] };
+        assert_eq!(resolve(&checked, "files-mount"), Resolved::Nothing);
+    }
+
+    /// A plugin with no companion is updated as before, with no registry and
+    /// no companion in the release.
+    ///
+    /// **[MUTATION]**: apply the companion rule to every plugin (`companion_of`
+    /// answering `Some` for any name) — this test fails.
+    #[tokio::test]
+    async fn a_plugin_without_a_companion_is_updated_as_before() {
         let dir = tempfile::tempdir().unwrap();
         let worker = worker_at(dir.path(), one_line(PluginStatus::startup("radio")));
-        let unit = b"[Unit]\n";
-        let path = install_registry::path(dir.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            format!(
-                "format = 1\n[components.radio]\nversion = \"0.2.0\"\nprivileged = [\"/etc/systemd/system/r.service\"]\n\
-                 [components.radio.sha256]\n\"/etc/systemd/system/r.service\" = {:?}\n",
-                digest_hex(unit)
-            ),
-        )
-        .unwrap();
         let _privileged = Privileged::answers(Ok(()));
-        let archive = targz(&[
-            ("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF"),
-            ("etc/systemd/system/r.service", unit),
-        ]);
+        let archive = targz(&[("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF")]);
         let published = served("radio", &archive).await;
         let client = client().unwrap();
-        let outcome = worker.install_one(&client, "radio", &published, false).await;
-        assert!(matches!(outcome, Err(Refusal::NeedsManualStep)), "{:?}", outcome.as_ref().err());
-        assert!(!worker.staging.join("request.json").exists());
+        let outcome = worker.install_one(&client, "radio", &published, false, None).await;
+        assert!(matches!(outcome, Ok(Placed::Plugin)), "{:?}", outcome.as_ref().err());
     }
 
     /// The declaration is written **from the archive's own fragment**, and

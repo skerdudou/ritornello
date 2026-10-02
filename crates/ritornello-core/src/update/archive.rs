@@ -127,34 +127,6 @@ pub struct Contents {
     /// `(bare name, bytes)`. Written **only if the target is absent**.
     pub initial_config: Vec<(String, Vec<u8>)>,
     pub fragment: Option<String>,
-    /// Per privileged member (see `privileged_member`), keyed by the path it
-    /// lands at on the device — the entry with a leading `/` — the lowercase
-    /// hex sha256 of its bytes. **The bytes themselves are never kept**:
-    /// nothing on this side places a privileged file, and this is only what
-    /// `update::privileged_update_allowed` compares against what
-    /// `ritornello-install` recorded placing.
-    pub privileged_hashes: std::collections::BTreeMap<String, String>,
-}
-
-/// Where a systemd unit lands inside an archive.
-const SYSTEMD_PREFIX: &str = "etc/systemd/system/";
-/// Where a polkit rule lands inside an archive.
-const POLKIT_PREFIX: &str = "etc/polkit-1/rules.d/";
-/// Where a root-run helper lands: a bare name here, outside `plugins/`
-/// (`ritornello-media-mount` today).
-const HELPER_PREFIX: &str = "usr/local/lib/ritornello/";
-
-/// A member only root may place: a systemd unit, a polkit rule, or a bare
-/// file directly under `usr/local/lib/ritornello/` — never the plugins
-/// directory, whose entries `installable_from_ui` already judges.
-///
-/// Hashed by `read` and compared, never placed: this is the whole set of
-/// shapes a privileged plugin's archive carries beyond what the core itself
-/// writes.
-pub fn privileged_member(path: &str) -> bool {
-    path.starts_with(SYSTEMD_PREFIX)
-        || path.starts_with(POLKIT_PREFIX)
-        || path.strip_prefix(HELPER_PREFIX).is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
 }
 
 /// True when everything the archive carries is something the core can install
@@ -468,30 +440,6 @@ pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
         }
         out.entries.push(path.clone());
 
-        if privileged_member(&path) {
-            // Streamed through the hash and dropped, a buffer at a time: the
-            // bytes are never kept. They still spend the same budget as a
-            // kept entry's, `+ 1` for the same reason as below.
-            use sha2::Digest as _;
-            let mut hasher = sha2::Sha256::new();
-            let mut limited = entry.by_ref().take((cap as u64).saturating_add(1));
-            let mut buf = [0u8; 8192];
-            loop {
-                let n = limited.read(&mut buf).map_err(|e| unreadable(e, &tripped, cap))?;
-                if n == 0 {
-                    break;
-                }
-                total += n;
-                if total > cap {
-                    return Err(ArchiveError::TooLarge(cap));
-                }
-                hasher.update(&buf[..n]);
-            }
-            let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
-            out.privileged_hashes.insert(format!("/{path}"), hex);
-            continue;
-        }
-
         let want = path == CORE_BINARY
             || path.starts_with(PLUGINS_PREFIX)
             || ETC_PREFIXES.iter().any(|p| path.starts_with(p))
@@ -768,71 +716,6 @@ mod tests {
         ]);
         let c = read(&gz, DECOMPRESSED_MAX).expect("reads");
         assert!(!installable_from_ui(&c.entries));
-    }
-
-    /// The same shape, read for what an update compares: the unit, the rule
-    /// and the helper are hashed under the path they land at on the device,
-    /// and none of their bytes is kept anywhere in `Contents`. The binary,
-    /// under `plugins/`, and the example are not privileged and not hashed.
-    ///
-    /// **[MUTATION]**: drop any one of the three operands of
-    /// `privileged_member` — this test fails on that member's missing hash.
-    /// **[MUTATION]**: hash the name instead of the bytes — it fails on the
-    /// values.
-    #[test]
-    fn a_unit_a_rule_and_the_helper_are_hashed_and_never_kept() {
-        let (unit, rule, helper): (&[u8], &[u8], &[u8]) =
-            (b"UNIT-BYTES-7f3a\n", b"RULE-BYTES-91c2\n", b"HELPER-BYTES-44d0");
-        let gz = targz(&[
-            ("./usr/local/lib/ritornello/plugins/ritornello-plugin-files", b"ELF"),
-            ("./usr/local/lib/ritornello/ritornello-media-mount", helper),
-            ("./etc/systemd/system/ritornello-media-mount.service", unit),
-            ("./etc/polkit-1/rules.d/51-ritornello-media.rules", rule),
-            ("./examples/media-roots.example.toml", b"# roots\n"),
-        ]);
-        let c = read(&gz, DECOMPRESSED_MAX).expect("reads");
-        let hex = crate::update::download::digest_hex;
-        let expected: std::collections::BTreeMap<String, String> = [
-            ("/usr/local/lib/ritornello/ritornello-media-mount".to_string(), hex(helper)),
-            ("/etc/systemd/system/ritornello-media-mount.service".to_string(), hex(unit)),
-            ("/etc/polkit-1/rules.d/51-ritornello-media.rules".to_string(), hex(rule)),
-        ]
-        .into();
-        assert_eq!(c.privileged_hashes, expected);
-        // Still listed, so the page and the rules see them.
-        assert_eq!(c.entries.len(), 5, "{:?}", c.entries);
-        let mut kept: Vec<&[u8]> = Vec::new();
-        kept.extend(c.binary.iter().map(|(_, b)| b.as_slice()));
-        kept.extend(c.core_binary.iter().map(Vec::as_slice));
-        kept.extend(c.etc_files.iter().map(|(_, b)| b.as_slice()));
-        kept.extend(c.initial_config.iter().map(|(_, b)| b.as_slice()));
-        kept.extend(c.fragment.iter().map(|f| f.as_bytes()));
-        for secret in [unit, rule, helper] {
-            assert!(
-                !kept.iter().any(|k| k.windows(secret.len()).any(|w| w == secret)),
-                "the bytes of a privileged member were kept"
-            );
-        }
-    }
-
-    /// A privileged member spends the decompressed budget like any kept
-    /// entry, although its bytes are dropped.
-    #[test]
-    fn a_privileged_member_over_the_budget_is_refused() {
-        let gz = targz(&[("./etc/systemd/system/big.service", &[b'x'; 64][..])]);
-        let err = read(&gz, 32).expect_err("64 bytes against a 32-byte cap");
-        assert!(matches!(err, ArchiveError::TooLarge(32)), "{err:?}");
-    }
-
-    /// A member nested below the helper directory, or inside `plugins/`, is
-    /// not a helper: the one is refused by `installable_from_ui` and the
-    /// other is its binary.
-    #[test]
-    fn only_a_bare_name_beside_the_plugins_directory_is_a_helper() {
-        assert!(privileged_member("usr/local/lib/ritornello/ritornello-media-mount"));
-        assert!(!privileged_member("usr/local/lib/ritornello/plugins/ritornello-plugin-files"));
-        assert!(!privileged_member("usr/local/lib/ritornello/"));
-        assert!(!privileged_member("usr/local/bin/ritornello-core"));
     }
 
     /// The three tests below each carry ONE disqualifying entry, because the

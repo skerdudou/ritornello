@@ -51,8 +51,8 @@ def entries(section: dict, bindir: Path) -> list[Entry]:
                 out.append(Entry(f"{entry['to']}/{rel}", f, "tree"))
         else:
             out.append(Entry(entry["to"], src, "tree"))
-    # Extra binaries: the files plugin's root mount helper and the core's
-    # updater, which live outside the plugins directory on purpose.
+    # Extra binaries: the files-mount companion's root mount helper and the
+    # core's updater, which live outside the plugins directory on purpose.
     for entry in section.get("extra_binaries", []):
         out.append(Entry(entry["to"], bindir / entry["name"], "binary"))
     # Initial configuration: the same shape as `examples`, in its own
@@ -78,6 +78,13 @@ def stage(section: dict, out: Path, bindir: Path) -> None:
         dst = out / e.archive_path
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(e.source, dst)
+
+
+def companions() -> dict:
+    """The `[companions.<name>]` tables of deploy/packaging.toml, in the
+    file's order. A companion ships beside the plugin its `with` names, in an
+    archive of its own; see the comment above that section."""
+    return MANIFEST.get("companions", {})
 
 
 def plugin_block(name: str) -> str:
@@ -116,6 +123,34 @@ def main() -> int:
     elif cmd == "stage":
         name, out, bindir = sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4])
         stage(MANIFEST["plugins"].get(name, {}), out, bindir)
+    elif cmd == "stage-companion":
+        # No `.get(name, {})` here, unlike `stage`: a plugin with no table is
+        # a plugin that carries only its binary, while a companion with no
+        # table is a name nothing declares, and staging nothing for it would
+        # publish an empty archive under a real component's name.
+        name, out, bindir = sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4])
+        section = companions().get(name)
+        if section is None:
+            print(f"no [companions.{name}] in deploy/packaging.toml", file=sys.stderr)
+            return 2
+        stage(section, out, bindir)
+    elif cmd == "companions":
+        # One line per companion, `<name> <with>`, in the file's order: what
+        # package-release.sh builds an archive for and what
+        # changed-components.sh couples to its plugin. Printed from here so
+        # that neither shell script reads TOML with sed.
+        for name, section in companions().items():
+            sys.stdout.buffer.write(f"{name} {section['with']}\n".encode("utf-8"))
+    elif cmd == "companion-sources":
+        # The repository paths a companion's `tree` is built from (its unit
+        # and its rule), one per line: what changed-components.sh watches so
+        # that a change to them cannot ship under the companion's old number.
+        section = companions().get(sys.argv[2])
+        if section is None:
+            print(f"no [companions.{sys.argv[2]}] in deploy/packaging.toml", file=sys.stderr)
+            return 2
+        for entry in section.get("tree", []):
+            sys.stdout.buffer.write(f"{entry['from']}\n".encode("utf-8"))
     elif cmd == "fragment":
         # Written to stdout as bytes: a text-mode stdout on Windows would
         # turn every "\n" back into the CRLF this function just removed.

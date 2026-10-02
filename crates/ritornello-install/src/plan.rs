@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::device::DeviceState;
-use crate::inventory::{Component, Inventory};
+use crate::inventory::{Companion, Component, Inventory};
 use crate::names::{self, DATA_ROOT, PACKS_ROOT, PLUGINS_DIR};
 use crate::registry::{Recorded, Registry};
 
@@ -147,6 +147,9 @@ pub enum PlanError {
     /// A path under the data tree would go without its plugin's data having
     /// been named for erasure.
     DataNotAsked(String),
+    /// `plugins.toml` declares a plugin under the name of a component that
+    /// ships beside a plugin (`files-mount`), which is never a plugin.
+    DeclaredUnderCompanionName(String),
 }
 
 /// One sentence per refusal, naming what is refused and what to do about
@@ -211,6 +214,13 @@ impl std::fmt::Display for PlanError {
                  the device's {} or the release names it, so inspect that file before running again",
                 names::REGISTRY
             ),
+            Self::DeclaredUnderCompanionName(n) => write!(
+                f,
+                "{} declares a plugin named {n:?}, which is the name of a component Ritornello installs \
+                 beside a plugin, never a plugin: remove that [[plugin]] block from {} by hand, then run again",
+                names::PLUGINS_TOML,
+                names::PLUGINS_TOML
+            ),
         }
     }
 }
@@ -225,6 +235,12 @@ pub fn compute(inv: &Inventory, dev: &DeviceState, intent: &Intent) -> Result<Pl
     }
     let arch = dev.arch_label().ok_or_else(|| PlanError::UnknownArch(dev.machine.clone()))?;
     validate_inventory(inv)?;
+    // A companion's name is its registry key: a `plugins.toml` entry of the
+    // same name would be taken for a third-party plugin, and keeping it
+    // would carry the companion's record over after its files are gone.
+    if let Some(d) = dev.declared.iter().find(|d| inv.companions.iter().any(|c| c.name == d.name)) {
+        return Err(PlanError::DeclaredUnderCompanionName(d.name.clone()));
+    }
     match intent {
         Intent::RemoveAll { erase_data } => remove_all(inv, dev, *erase_data),
         Intent::InstallOrUpdate { plugins, packs, erase_data } => {
@@ -264,7 +280,29 @@ fn in_plugins_dir(exec: &str) -> bool {
 /// `systemctl` and its mount roots reach `umount`/`rmdir` as root: both are
 /// held to the shapes Ritornello actually ships before anything is planned.
 fn validate_inventory(inv: &Inventory) -> Result<(), PlanError> {
-    for c in std::iter::once(&inv.core).chain(inv.plugins.iter()) {
+    // A companion's name keys its registry record, and its `with` decides
+    // when it is placed and when removed: a name another component already
+    // uses would merge two records into one, and a `with` naming no plugin
+    // of the release would leave it placed by nothing and removed by nothing.
+    for c in &inv.companions {
+        if !names::valid_plugin_name(&c.name) {
+            return Err(PlanError::InvalidInventory(format!("companion name {:?}", c.name)));
+        }
+        let taken = c.name == inv.core.name
+            || inv.plugin(&c.name).is_some()
+            || inv.companions.iter().filter(|o| o.name == c.name).count() > 1;
+        if taken {
+            return Err(PlanError::InvalidInventory(format!("companion {:?}: its name is already another component's", c.name)));
+        }
+        if inv.plugin(&c.with).is_none() {
+            return Err(PlanError::InvalidInventory(format!(
+                "companion {:?}: ships with {:?}, which the release does not ship",
+                c.name, c.with
+            )));
+        }
+    }
+    let companions: Vec<Component> = inv.companions.iter().map(Companion::as_component).collect();
+    for c in std::iter::once(&inv.core).chain(inv.plugins.iter()).chain(companions.iter()) {
         for u in &c.enable {
             // `deletable_file` under the systemd directory is exactly the
             // unit-name shape (`ritornello.service`, `ritornello-<x>.service`).
@@ -421,11 +459,15 @@ fn install_or_update(
     // it** (R30): one whose block was removed by hand, or by an older UI,
     // still has its root unit enabled at boot and its polkit rule granting,
     // and only the registry remembers them.
+    // A plugin whose privileged files moved to a companion records nothing
+    // itself: the companion's record is what remembers it.
     let kept_ours: Vec<&Component> = inv.plugins.iter().filter(|p| plugins.contains(&p.name)).collect();
+    let companion_recorded =
+        |plugin: &str| inv.companions.iter().any(|c| c.with == plugin && recorded.contains_key(&c.name));
     let removed_ours: Vec<&Component> = inv
         .plugins
         .iter()
-        .filter(|p| declared.contains(p.name.as_str()) || recorded.contains_key(&p.name))
+        .filter(|p| declared.contains(p.name.as_str()) || recorded.contains_key(&p.name) || companion_recorded(&p.name))
         .filter(|p| !plugins.contains(&p.name))
         .collect();
     let kept_third: Vec<&str> = dev
@@ -446,12 +488,31 @@ fn install_or_update(
         return Err(PlanError::EraseNotRemoved(kept.clone()));
     }
 
+    // A companion follows its plugin, and is never chosen on its own: it is
+    // placed whenever its plugin is kept, and goes whenever its plugin goes
+    // (a recorded companion puts its plugin among those that go, above).
+    let companions: Vec<(Component, &str)> =
+        inv.companions.iter().map(|c| (c.as_component(), c.with.as_str())).collect();
+    let with_of: BTreeMap<&str, &str> = companions.iter().map(|(c, w)| (c.name.as_str(), *w)).collect();
+    // Each plugin, followed by its companions.
+    let mut placed: Vec<&Component> = vec![&inv.core];
+    for p in &kept_ours {
+        placed.push(p);
+        placed.extend(companions.iter().filter(|(_, w)| *w == p.name).map(|(c, _)| c));
+    }
+    let mut going: Vec<&Component> = Vec::new();
+    for p in &removed_ours {
+        going.push(p);
+        going.extend(companions.iter().filter(|(_, w)| *w == p.name).map(|(c, _)| c));
+    }
+
     let mut plan = Plan::default();
     let mut remove_files = BTreeSet::new();
     let mut new_registry = BTreeMap::new();
 
-    // 4. The core and every kept plugin of ours: placed in full.
-    for c in std::iter::once(&inv.core).chain(kept_ours.iter().copied()) {
+    // 4. The core, every kept plugin of ours and each one's companions:
+    // placed in full.
+    for c in placed {
         let archive = c.archive_for(arch);
         plan.archives.insert(archive.clone());
         for f in &c.files {
@@ -485,14 +546,16 @@ fn install_or_update(
             }
         }
         if !privileged.is_empty() {
-            // Hashes are filled by `record_hashes`, once the archives are
-            // in memory: the plan itself never sees a byte of them.
-            new_registry.insert(
-                c.name.clone(),
-                Recorded { version: c.version.clone(), privileged, sha256: BTreeMap::new() },
-            );
+            new_registry.insert(c.name.clone(), Recorded { version: c.version.clone(), privileged });
         }
-        let was_there = if c.name == inv.core.name { dev.core_present } else { declared.contains(c.name.as_str()) };
+        // A companion was there with its plugin, or on its own record.
+        let was_there = if c.name == inv.core.name {
+            dev.core_present
+        } else if let Some(with) = with_of.get(c.name.as_str()) {
+            declared.contains(with) || recorded.contains_key(&c.name)
+        } else {
+            declared.contains(c.name.as_str())
+        };
         if was_there {
             plan.summary.updated.push(c.name.clone());
         } else {
@@ -505,8 +568,9 @@ fn install_or_update(
     // the file may be gone already, and the script's `rm -f` does not mind)
     // and what the registry recorded, plus every binary a declared `exec`
     // names for it — which is what the core actually ran, once per entry
-    // when the name is declared twice.
-    for c in &removed_ours {
+    // when the name is declared twice. Each one's companions go with it, in
+    // the same way.
+    for c in going {
         for u in &c.enable {
             push_unique(&mut plan.disable_units, u);
         }
@@ -537,7 +601,9 @@ fn install_or_update(
 
     // A recorded component nothing keeps any more — gone from the release
     // and not a third-party plugin still chosen — loses its files. One that
-    // is still chosen as a third-party plugin keeps its entry as it was.
+    // is still chosen as a third-party plugin keeps its entry as it was. (A
+    // companion whose plugin goes lands here too, and its recorded files are
+    // already in `remove_files`.)
     for (name, old) in &recorded {
         if new_registry.contains_key(name) || name == &inv.core.name || ours.contains(name.as_str()) {
             continue;
@@ -637,11 +703,7 @@ fn provisional(old: &BTreeMap<String, Recorded>, new: &BTreeMap<String, Recorded
     for (name, rec) in new {
         let entry = components
             .entry(name.clone())
-            .or_insert_with(|| Recorded {
-                version: rec.version.clone(),
-                privileged: Vec::new(),
-                sha256: BTreeMap::new(),
-            });
+            .or_insert_with(|| Recorded { version: rec.version.clone(), privileged: Vec::new() });
         entry.version = rec.version.clone();
         for p in &rec.privileged {
             if !entry.privileged.contains(p) {
@@ -652,106 +714,13 @@ fn provisional(old: &BTreeMap<String, Recorded>, new: &BTreeMap<String, Recorded
     Registry { format: 1, components }
 }
 
-/// Fills the `sha256` of both registries from the archives, once they are
-/// in memory: `main` calls it after every archive is fetched and verified,
-/// and before `script::bundle` renders the registries. Still pure — bytes
-/// in, a plan out — but kept apart from `compute`, which decides from the
-/// inventory and the survey alone and never sees an archive.
-///
-/// **The hash is of the exact bytes `put` copies**: the member
-/// `archive_path` of `archive`, as `extract` unpacks it (a leading `./`
-/// lands at the same path, and a name carried twice ends as the last one
-/// extracted, so the last one read here wins too).
-///
-/// What each registry may claim differs, because they describe different
-/// moments:
-///
-/// - the **final** registry is written once every `put` has run: each
-///   privileged dest this plan places gets the hash of what was placed.
-///   A record this plan does not place (a third-party entry kept as it
-///   was) keeps its own hashes, since its files were not touched;
-/// - the **provisional** registry is what a run stopping halfway leaves
-///   behind, when a dest may still hold the old bytes or already the new
-///   ones. It keeps a hash only where both answers are the same bytes: the
-///   old record's hash, and only when this plan places nothing there or
-///   places exactly those bytes again. Anything else is left without a
-///   hash, which the core reads as "cannot prove unchanged" and refuses on.
-///   A dest this plan removes loses its hash too: a record of bytes that
-///   may be gone would let the core skip placing a file that is missing.
-pub fn record_hashes(plan: &mut Plan, archives: &BTreeMap<String, Vec<u8>>) -> anyhow::Result<()> {
-    use anyhow::Context as _;
-    let recorded: BTreeSet<String> = plan
-        .registry
-        .iter()
-        .chain(plan.provisional_registry.iter())
-        .flat_map(|r| r.components.values())
-        .flat_map(|c| c.privileged.iter().cloned())
-        .collect();
-    // archive -> member -> dest, for every privileged dest this plan places.
-    let mut wanted: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
-    for p in plan.puts.iter().filter(|p| recorded.contains(&p.dest)) {
-        wanted.entry(p.archive.as_str()).or_default().insert(p.archive_path.as_str(), p.dest.as_str());
-    }
-    let mut placed: BTreeMap<String, String> = BTreeMap::new();
-    for (archive, members) in &wanted {
-        let bytes = archives.get(*archive).with_context(|| format!("the plan needs {archive}, which was not downloaded"))?;
-        let hashes = member_hashes(bytes, &members.keys().copied().collect())
-            .with_context(|| format!("reading {archive}"))?;
-        for (member, dest) in members {
-            let hash = hashes.get(*member).with_context(|| format!("{archive} carries no {member}"))?;
-            placed.insert(dest.to_string(), hash.clone());
-        }
-    }
-    let removed = &plan.remove_files;
-    if let Some(registry) = &mut plan.registry {
-        for rec in registry.components.values_mut() {
-            for p in &rec.privileged {
-                if let Some(hash) = placed.get(p) {
-                    rec.sha256.insert(p.clone(), hash.clone());
-                }
-            }
-        }
-    }
-    if let Some(registry) = &mut plan.provisional_registry {
-        for rec in registry.components.values_mut() {
-            rec.sha256
-                .retain(|dest, old| !removed.contains(dest) && placed.get(dest).is_none_or(|new| new == old));
-        }
-    }
-    Ok(())
-}
-
-/// The lowercase hex sha256 of each regular member of a `.tar.gz` whose
-/// name, a leading `./` stripped, is in `wanted`.
-fn member_hashes(gz: &[u8], wanted: &BTreeSet<&str>) -> anyhow::Result<BTreeMap<String, String>> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read as _;
-    let mut out = BTreeMap::new();
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(gz));
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        let raw = entry.path()?.to_string_lossy().to_string();
-        let name = raw.strip_prefix("./").unwrap_or(&raw).to_string();
-        if !wanted.contains(name.as_str()) {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
-        let digest = Sha256::digest(&bytes);
-        out.insert(name, digest.iter().map(|b| format!("{b:02x}")).collect());
-    }
-    Ok(out)
-}
-
 fn remove_all(inv: &Inventory, dev: &DeviceState, erase_data: bool) -> Result<Plan, PlanError> {
     let mut plan = Plan { stop_service: dev.core_present, ..Plan::default() };
     let mut remove_files = BTreeSet::new();
     let ours: BTreeSet<&str> = inv.plugins.iter().map(|p| p.name.as_str()).collect();
+    let companions: Vec<Component> = inv.companions.iter().map(Companion::as_component).collect();
 
-    for c in std::iter::once(&inv.core).chain(inv.plugins.iter()) {
+    for c in std::iter::once(&inv.core).chain(inv.plugins.iter()).chain(companions.iter()) {
         for u in &c.enable {
             push_unique(&mut plan.disable_units, u);
         }
@@ -798,6 +767,13 @@ fn remove_all(inv: &Inventory, dev: &DeviceState, erase_data: bool) -> Result<Pl
         plan.summary.removed.push(inv.core.name.clone());
     }
     plan.summary.removed.extend(dev.declared.iter().map(|d| d.name.clone()));
+    // A companion was on the device with its plugin, or on its own record.
+    let recorded = |n: &str| dev.registry.as_ref().is_some_and(|r| r.components.contains_key(n));
+    for c in &inv.companions {
+        if dev.declared.iter().any(|d| d.name == c.with) || recorded(&c.name) {
+            plan.summary.removed.push(c.name.clone());
+        }
+    }
 
     let none = BTreeSet::new();
     let data = if erase_data { DataScope::All } else { DataScope::Only(&none) };
@@ -823,6 +799,9 @@ pub(crate) mod tests {
     const MEDIA_UNIT: &str = "/etc/systemd/system/ritornello-media-mount.service";
     const MEDIA_RULE: &str = "/etc/polkit-1/rules.d/51-ritornello-media.rules";
     const MEDIA_HELPER: &str = "/usr/local/lib/ritornello/ritornello-media-mount";
+    /// The files plugin's companion, and its registry key.
+    const MOUNT: &str = "files-mount";
+    const MOUNT_ARCHIVE: &str = "ritornello-files-mount-0.2.0-beta.2-arm64.tar.gz";
 
     /// One `files` entry in `install-inventory.py`'s own shape.
     fn file(path: &str, mode: &str, owner: &str, privileged: bool) -> Value {
@@ -891,20 +870,27 @@ pub(crate) mod tests {
                     Value::Null,
                 ),
                 simple("cd"),
-                plugin(
-                    "files",
-                    vec![
-                        file("etc/systemd/system/ritornello-media-mount.service", "0644", "root:root", true),
-                        file("etc/polkit-1/rules.d/51-ritornello-media.rules", "0644", "root:root", true),
-                        file("usr/local/lib/ritornello/ritornello-media-mount", "0755", "root:root", true),
-                    ],
-                    json!([]),
-                    json!(["ritornello-media-mount.service"]),
-                    json!("/mnt/ritornello"),
-                ),
+                simple("files"),
                 simple("nrj-metas"),
                 simple("musicbrainz"),
             ],
+            // The files plugin's root helper, its unit and its rule ship
+            // beside it, in an archive of their own.
+            "companions": [{
+                "name": "files-mount",
+                "version": "0.2.0-beta.2",
+                "archive": "ritornello-files-mount-0.2.0-beta.2-{arch}.tar.gz",
+                "files": [
+                    file("etc/systemd/system/ritornello-media-mount.service", "0644", "root:root", true),
+                    file("etc/polkit-1/rules.d/51-ritornello-media.rules", "0644", "root:root", true),
+                    file("usr/local/lib/ritornello/ritornello-media-mount", "0755", "root:root", true),
+                ],
+                "initial_config": [],
+                "enable": ["ritornello-media-mount.service"],
+                "mount_root": "/mnt/ritornello",
+                "block": null,
+                "with": "files",
+            }],
             "packs": [
                 { "language": "fr", "version": "0.2.0-beta.2", "archive": "ritornello-lang-fr-0.2.0-beta.2.tar.gz" },
             ],
@@ -954,7 +940,6 @@ pub(crate) mod tests {
                         Recorded {
                             version: "0.2.0-beta.1".to_string(),
                             privileged: paths.iter().map(|p| p.to_string()).collect(),
-                            sha256: BTreeMap::new(),
                         },
                     )
                 })
@@ -1085,10 +1070,12 @@ pub(crate) mod tests {
 
     // --- 6 ---------------------------------------------------------------
 
+    /// The files plugin's root files are recorded under its companion: the
+    /// plugin itself places nothing privileged.
     fn files_registry() -> Registry {
         registry(&[
             (CORE, &["/etc/systemd/system/ritornello.service"]),
-            ("files", &[MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER]),
+            (MOUNT, &[MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER]),
         ])
     }
 
@@ -1102,9 +1089,11 @@ pub(crate) mod tests {
             assert!(has(&plan.remove_files, p), "{p}: {:?}", plan.remove_files);
         }
         let reg = plan.registry.as_ref().unwrap();
-        assert!(!reg.components.contains_key("files"), "{reg:?}");
+        assert!(!reg.components.contains_key("files") && !reg.components.contains_key(MOUNT), "{reg:?}");
         assert!(reg.components.contains_key(CORE));
         assert!(!plan.enable_units.iter().any(|u| u.contains("media")), "{:?}", plan.enable_units);
+        assert!(!plan.archives.contains(MOUNT_ARCHIVE), "{:?}", plan.archives);
+        assert_eq!(plan.summary.removed, vec!["files", MOUNT]);
     }
 
     // --- 7 ---------------------------------------------------------------
@@ -1112,7 +1101,7 @@ pub(crate) mod tests {
     #[test]
     fn a_file_the_old_version_placed_and_the_new_one_forgot_is_removed_too() {
         let old = "/etc/polkit-1/rules.d/50-ritornello-old.rules";
-        let reg = registry(&[(CORE, &[]), ("files", &[MEDIA_UNIT, old])]);
+        let reg = registry(&[(CORE, &[]), (MOUNT, &[MEDIA_UNIT, old])]);
         let device = dev(&[("radio", RADIO_EXEC), ("files", FILES_EXEC)], Some(reg), &[], &[]);
         let plan = compute(&inv(), &device, &install(&["radio"], &[], &[])).unwrap();
         assert!(has(&plan.remove_files, old), "{:?}", plan.remove_files);
@@ -1131,7 +1120,7 @@ pub(crate) mod tests {
         let stale_rule = "/etc/polkit-1/rules.d/50-ritornello-legacy.rules";
         let reg = registry(&[
             (CORE, &["/etc/systemd/system/ritornello.service", stale_rule]),
-            ("files", &[MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER, stale_unit]),
+            (MOUNT, &[MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER, stale_unit]),
         ]);
         let device = dev(&[("radio", RADIO_EXEC), ("files", FILES_EXEC)], Some(reg), &[], &[]);
         let plan = compute(&inv(), &device, &install(&["radio", "files"], &[], &[])).unwrap();
@@ -1141,7 +1130,7 @@ pub(crate) mod tests {
         assert_eq!(plan.disable_units, vec!["ritornello-media-old.service"]);
         let new = plan.registry.as_ref().unwrap();
         assert_eq!(
-            new.components.get("files").map(|r| r.privileged.clone()),
+            new.components.get(MOUNT).map(|r| r.privileged.clone()),
             Some(vec![MEDIA_UNIT.to_string(), MEDIA_RULE.to_string(), MEDIA_HELPER.to_string()])
         );
         assert!(plan.unmount_roots.is_empty(), "files is kept: nothing unmounts");
@@ -1184,10 +1173,13 @@ pub(crate) mod tests {
 
     // --- fix round 1 -----------------------------------------------------
 
-    /// C1 / R30: `files` recorded by the registry but no longer declared
-    /// (its block removed by hand, or by an older UI). Its root unit is
-    /// still enabled at boot and its rule still grants: it must be removed
-    /// with the full treatment, binary by the inventory's `dest`.
+    /// C1 / R30: `files` no longer declared (its block removed by hand, or
+    /// by an older UI), and remembered only by its companion's record. Its
+    /// root unit is still enabled at boot and its rule still grants: it must
+    /// be removed with the full treatment, binary by the inventory's `dest`.
+    ///
+    /// **[MUTATION]**: drop `|| companion_recorded(&p.name)` from
+    /// `removed_ours` — this test fails (nothing of `files` goes).
     #[test]
     fn a_recorded_plugin_no_longer_declared_is_still_removed_with_its_units() {
         let device = dev(&[("radio", RADIO_EXEC)], Some(files_registry()), &[], &[]);
@@ -1197,8 +1189,9 @@ pub(crate) mod tests {
         for p in [MEDIA_HELPER, MEDIA_UNIT, MEDIA_RULE, FILES_EXEC] {
             assert!(has(&plan.remove_files, p), "{p}: {:?}", plan.remove_files);
         }
-        assert!(!plan.registry.as_ref().unwrap().components.contains_key("files"));
-        assert_eq!(plan.summary.removed, vec!["files"]);
+        let reg = plan.registry.as_ref().unwrap();
+        assert!(!reg.components.contains_key("files") && !reg.components.contains_key(MOUNT), "{reg:?}");
+        assert_eq!(plan.summary.removed, vec!["files", MOUNT]);
         assert_eq!(plan.plugins_toml, device.plugins_toml, "no block to remove: the file is left as it was");
     }
 
@@ -1211,9 +1204,9 @@ pub(crate) mod tests {
         let plan = compute(&inv(), &device, &install(&["radio"], &[], &[])).unwrap();
         let prov = plan.provisional_registry.as_ref().expect("an install writes a provisional registry");
         let fin = plan.registry.as_ref().unwrap();
-        assert!(!fin.components.contains_key("files"));
+        assert!(!fin.components.contains_key(MOUNT));
         let old = files_registry();
-        assert_eq!(prov.components.get("files"), old.components.get("files"), "a removed plugin stays recorded until the end");
+        assert_eq!(prov.components.get(MOUNT), old.components.get(MOUNT), "a removed companion stays recorded until the end");
         assert!(!fin.components.is_empty());
         for (name, rec) in &fin.components {
             let p = prov.components.get(name).unwrap_or_else(|| panic!("{name} missing"));
@@ -1236,10 +1229,13 @@ pub(crate) mod tests {
         assert!(dests(&plan).contains(&MEDIA_UNIT));
         assert!(plan.remove_files.is_empty() && plan.disable_units.is_empty(), "{plan:?}");
         assert!(has(&plan.enable_units, "ritornello-media-mount.service"));
-        let rec = plan.registry.as_ref().unwrap().components.get("files").cloned().unwrap();
+        let reg = plan.registry.as_ref().unwrap();
+        assert!(!reg.components.contains_key("files"), "files places nothing privileged: {reg:?}");
+        let rec = reg.components.get(MOUNT).cloned().unwrap();
         assert_eq!(rec.version, "0.2.0-beta.2");
         assert_eq!(rec.privileged, vec![MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER]);
         assert_eq!(plan.summary.installed, vec!["files"]);
+        assert!(has(&plan.summary.updated, MOUNT), "its record says it was there: {:?}", plan.summary);
     }
 
     /// I1 / R31: a third party's `remote2` runs the very binary `cd` runs.
@@ -1265,7 +1261,7 @@ pub(crate) mod tests {
         );
         let plan = compute(&inv(), &device, &install(&["radio", "x"], &[], &[])).unwrap();
         assert!(has(&plan.remove_files, MEDIA_RULE), "{:?}", plan.remove_files);
-        assert!(!plan.registry.as_ref().unwrap().components.contains_key("files"));
+        assert!(!plan.registry.as_ref().unwrap().components.contains_key(MOUNT));
     }
 
     /// N1 / R35, the stale-unit variant: an R27 stale unit, whose only way
@@ -1273,7 +1269,7 @@ pub(crate) mod tests {
     #[test]
     fn a_kept_exec_naming_a_stale_unit_does_not_keep_it_enabled() {
         let stale_unit = "/etc/systemd/system/ritornello-media-old.service";
-        let reg = registry(&[(CORE, &[]), ("files", &[MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER, stale_unit])]);
+        let reg = registry(&[(CORE, &[]), (MOUNT, &[MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER, stale_unit])]);
         let device = dev(&[("radio", RADIO_EXEC), ("files", FILES_EXEC), ("x", stale_unit)], Some(reg), &[], &[]);
         let plan = compute(&inv(), &device, &install(&["radio", "files", "x"], &[], &[])).unwrap();
         assert!(has(&plan.remove_files, stale_unit), "{:?}", plan.remove_files);
@@ -1425,22 +1421,280 @@ pub(crate) mod tests {
         let mut bad = inv();
         bad.core.enable = vec!["sshd.service".to_string()];
         assert!(matches!(compute(&bad, &device, &install(&[], &[], &[])), Err(PlanError::InvalidInventory(_))));
+        // The companion's unit and mount root are held to the same shapes:
+        // they are what actually reaches `systemctl` and `umount` today.
+        let mut bad = inv();
+        bad.companions[0].enable = vec!["sshd.service".to_string()];
+        assert!(matches!(compute(&bad, &device, &install(&[], &[], &[])), Err(PlanError::InvalidInventory(_))));
         for root in ["/", "/mnt", "/mnt/ritornello/../..", "/mnt/ritornello/a/b", "/mnt/ritornellox", "/mnt/ritornello/"] {
             let mut bad = inv();
-            bad.plugins.iter_mut().find(|p| p.name == "files").unwrap().mount_root = Some(root.to_string());
+            bad.companions[0].mount_root = Some(root.to_string());
             assert!(
                 matches!(compute(&bad, &device, &Intent::RemoveAll { erase_data: false }), Err(PlanError::InvalidInventory(_))),
                 "{root:?}"
             );
+            let mut bad = inv();
+            bad.plugins.iter_mut().find(|p| p.name == "files").unwrap().mount_root = Some(root.to_string());
+            assert!(
+                matches!(compute(&bad, &device, &Intent::RemoveAll { erase_data: false }), Err(PlanError::InvalidInventory(_))),
+                "a plugin's {root:?}"
+            );
         }
         // R40: a sub-root is refused too, however well formed.
         let mut leaf = inv();
-        leaf.plugins.iter_mut().find(|p| p.name == "files").unwrap().mount_root = Some("/mnt/ritornello/nas-1".to_string());
+        leaf.companions[0].mount_root = Some("/mnt/ritornello/nas-1".to_string());
         assert!(matches!(
             compute(&leaf, &device, &Intent::RemoveAll { erase_data: false }),
             Err(PlanError::InvalidInventory(_))
         ));
         assert!(compute(&inv(), &device, &Intent::RemoveAll { erase_data: false }).is_ok());
+    }
+
+    /// A companion's name keys its registry record and its `with` decides
+    /// when it is placed: a `with` naming no plugin of the release, a name
+    /// that is not bare, or a name another component already uses is not
+    /// trusted.
+    ///
+    /// **[MUTATION]**, one per branch of `validate_inventory`'s companion
+    /// checks, each reddening this test: drop the `valid_plugin_name` check;
+    /// drop `c.name == inv.core.name`; drop `inv.plugin(&c.name).is_some()`;
+    /// drop the duplicate count; drop the `inv.plugin(&c.with)` check.
+    #[test]
+    fn a_companion_that_follows_no_plugin_or_takes_another_s_name_is_refused() {
+        let device = dev(&[], None, &[], &[]);
+        let refused = |edit: &dyn Fn(&mut Inventory)| {
+            let mut bad = inv();
+            edit(&mut bad);
+            compute(&bad, &device, &install(&["radio"], &[], &[]))
+        };
+        let invalid = |r: Result<Plan, PlanError>, what: &str| {
+            assert!(matches!(r, Err(PlanError::InvalidInventory(_))), "{what}: {r:?}")
+        };
+        invalid(refused(&|i| i.companions[0].with = "nas".to_string()), "a with the release does not ship");
+        invalid(refused(&|i| i.companions[0].with = "core".to_string()), "the core is not a plugin");
+        invalid(refused(&|i| i.companions[0].name = "../files-mount".to_string()), "a name that is not bare");
+        invalid(refused(&|i| i.companions[0].name = "core".to_string()), "the core's name");
+        invalid(refused(&|i| i.companions[0].name = "cd".to_string()), "a plugin's name");
+        invalid(
+            refused(&|i| {
+                let twin = i.companions[0].clone();
+                i.companions.push(twin);
+            }),
+            "two companions of one name",
+        );
+        assert!(refused(&|_| {}).is_ok());
+    }
+
+    // --- The companion ---------------------------------------------------
+
+    /// `files` chosen on a fresh device brings its companion, from the
+    /// companion's own archive, with its unit enabled and its own record.
+    /// Without `files`, nothing of the companion is planned.
+    ///
+    /// **[MUTATION]**: stop pushing a kept plugin's companions onto
+    /// `placed` — this test fails.
+    #[test]
+    fn a_companion_is_placed_whenever_its_plugin_is() {
+        let plan = compute(&inv(), &dev(&[], None, &[], &[]), &install(&["radio", "files"], &[], &[])).unwrap();
+        for d in [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER] {
+            let p = plan.puts.iter().find(|p| p.dest == d).unwrap_or_else(|| panic!("{d} is not placed"));
+            assert_eq!(p.archive, MOUNT_ARCHIVE, "{d}");
+        }
+        assert!(plan.archives.contains(MOUNT_ARCHIVE));
+        assert!(has(&plan.enable_units, "ritornello-media-mount.service"));
+        let reg = plan.registry.as_ref().unwrap();
+        assert_eq!(reg.components[MOUNT].privileged, vec![MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER]);
+        assert!(!reg.components.contains_key("files"));
+        assert_eq!(plan.summary.installed, vec!["core", "radio", "files", MOUNT]);
+        assert_eq!(declared_in(&plan), vec!["radio", "files"], "a companion is never declared");
+
+        let without = compute(&inv(), &dev(&[], None, &[], &[]), &install(&["radio"], &[], &[])).unwrap();
+        assert!(!without.archives.contains(MOUNT_ARCHIVE), "{:?}", without.archives);
+        assert!(!dests(&without).contains(&MEDIA_UNIT));
+        assert!(without.enable_units.iter().all(|u| u == "ritornello.service"), "{:?}", without.enable_units);
+    }
+
+    /// An update of `files` updates its companion, and the summary says so.
+    #[test]
+    fn an_update_of_a_plugin_updates_its_companion() {
+        let device = dev(&[("radio", RADIO_EXEC), ("files", FILES_EXEC)], Some(files_registry()), &[], &[]);
+        let plan = compute(&inv(), &device, &install(&["radio", "files"], &[], &[])).unwrap();
+        assert_eq!(plan.summary.updated, vec!["core", "radio", "files", MOUNT]);
+        assert!(plan.summary.installed.is_empty());
+        assert!(plan.remove_files.is_empty() && plan.disable_units.is_empty() && plan.unmount_roots.is_empty(), "{plan:?}");
+    }
+
+    /// The preselection is what `plugins.toml` declares: a companion, never
+    /// declared, is never in it, even when the registry records it. Fed back,
+    /// it keeps the companion through its plugin.
+    #[test]
+    fn the_preselection_never_lists_a_companion() {
+        let device = dev(&[("radio", RADIO_EXEC), ("files", FILES_EXEC)], Some(files_registry()), &[], &[]);
+        let (plugins, packs) = preselection(&inv(), &device);
+        assert_eq!(plugins, set(&["radio", "files"]));
+        let plan = compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() }).unwrap();
+        assert!(dests(&plan).contains(&MEDIA_HELPER));
+    }
+
+    /// R66: a `plugins.toml` entry under a companion's name is refused
+    /// before anything is planned, whatever the choice. Kept as a third
+    /// party while `files` goes, it would carry the companion's record over
+    /// the removal of the very files that record names.
+    ///
+    /// **[MUTATION]**: drop the declared-under-a-companion-name check from
+    /// `compute` — this test fails (the kept entry plans, and the record
+    /// survives).
+    #[test]
+    fn a_plugin_declared_under_a_companion_s_name_is_refused() {
+        let impostor = "/usr/local/lib/ritornello/plugins/files-mount";
+        let device = dev(
+            &[("radio", RADIO_EXEC), ("files", FILES_EXEC), (MOUNT, impostor)],
+            Some(files_registry()),
+            &[],
+            &[],
+        );
+        let refused = Err(PlanError::DeclaredUnderCompanionName(MOUNT.to_string()));
+        assert_eq!(compute(&inv(), &device, &install(&["radio", MOUNT], &[], &[])), refused);
+        assert_eq!(compute(&inv(), &device, &install(&["radio", "files"], &[], &[])), refused);
+        assert_eq!(compute(&inv(), &device, &Intent::RemoveAll { erase_data: false }), refused);
+        let (plugins, packs) = preselection(&inv(), &device);
+        assert_eq!(
+            compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() }),
+            refused
+        );
+    }
+
+    #[test]
+    fn a_plugin_under_a_companion_s_name_says_to_remove_its_block() {
+        says(
+            PlanError::DeclaredUnderCompanionName("files-mount".into()),
+            &["\"files-mount\"", "remove that [[plugin]] block from /etc/ritornello/plugins.toml by hand"],
+        );
+    }
+
+    /// A companion is not a plugin: it cannot be chosen by name.
+    #[test]
+    fn a_companion_cannot_be_chosen_on_its_own() {
+        assert_eq!(
+            compute(&inv(), &dev(&[], None, &[], &[]), &install(&[MOUNT], &[], &[])),
+            Err(PlanError::UnknownPlugin(MOUNT.to_string()))
+        );
+    }
+
+    /// The owner's Pi, `installed.toml` verbatim as the installer wrote it
+    /// before the companion existed: the helper, its unit and its rule are
+    /// recorded under `files`.
+    const PI_REGISTRY: &str = r#"format = 1
+
+[components.core]
+version = "0.2.0-beta.2"
+privileged = [
+    "/etc/systemd/system/ritornello.service",
+    "/etc/systemd/system/ritornello-update.service",
+    "/etc/systemd/system/ritornello-rollback.service",
+    "/etc/polkit-1/rules.d/50-ritornello-power.rules",
+    "/etc/polkit-1/rules.d/52-ritornello-update.rules",
+    "/usr/local/lib/ritornello/ritornello-update",
+]
+
+[components.files]
+version = "0.2.0-beta.2"
+privileged = [
+    "/etc/systemd/system/ritornello-media-mount.service",
+    "/etc/polkit-1/rules.d/51-ritornello-media.rules",
+    "/usr/local/lib/ritornello/ritornello-media-mount",
+]
+"#;
+
+    /// The Pi as surveyed: every plugin of the real release declared, the
+    /// core there, and the registry above.
+    fn the_pi(real: &Inventory) -> DeviceState {
+        let declared: Vec<(String, String)> = real
+            .plugins
+            .iter()
+            .map(|p| (p.name.clone(), format!("{PLUGINS_DIR}/ritornello-plugin-{}", p.name)))
+            .collect();
+        let declared: Vec<(&str, &str)> = declared.iter().map(|(n, e)| (n.as_str(), e.as_str())).collect();
+        let registry = Registry::parse(PI_REGISTRY).expect("the Pi's registry parses");
+        dev(&declared, Some(registry), &["ritornello-lang-fr"], &[])
+    }
+
+    /// The migration the owner's next `deploy.sh` performs, with the real
+    /// inventory: the three root files change owner in the registry, from
+    /// `files` to `files-mount`, and nothing of them is removed, disabled or
+    /// unmounted on the way — the new archive places them where they are.
+    ///
+    /// **[MUTATION]**: drop `!placed.contains(f.as_str())` from `finish`'s
+    /// retain (R31 no longer applies) — this test fails: R27 on `files` puts
+    /// the three paths in `remove_files` and the unit in `disable_units`.
+    #[test]
+    fn a_registry_from_before_the_companion_moves_its_files_without_removing_them() {
+        let real = crate::inventory::tests::real_inventory();
+        let device = the_pi(&real);
+        let (plugins, packs) = preselection(&real, &device);
+        assert!(plugins.contains("files"));
+        let plan = compute(&real, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() })
+            .expect("the Pi's registry plans");
+
+        let moved = [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER];
+        for p in moved {
+            assert!(!has(&plan.remove_files, p), "{p} removed: {:?}", plan.remove_files);
+        }
+        assert!(plan.disable_units.is_empty(), "nothing is disabled: {:?}", plan.disable_units);
+        assert!(plan.unmount_roots.is_empty(), "{:?}", plan.unmount_roots);
+        assert!(plan.remove_mount_roots.is_empty());
+        assert!(plan.remove_trees.is_empty(), "no tree goes: {:?}", plan.remove_trees);
+        let mount = real.companions.iter().find(|c| c.name == MOUNT).unwrap();
+        for p in moved {
+            let put = plan.puts.iter().find(|x| x.dest == p).unwrap_or_else(|| panic!("{p} not placed"));
+            assert_eq!(put.archive, mount.as_component().archive_for("arm64"), "{p}");
+        }
+        assert!(has(&plan.enable_units, "ritornello-media-mount.service"));
+
+        let reg = plan.registry.as_ref().unwrap();
+        let rec = reg.components.get(MOUNT).expect("files-mount is recorded");
+        let mut recorded = rec.privileged.clone();
+        recorded.sort();
+        let mut want: Vec<String> = moved.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(recorded, want);
+        assert_eq!(rec.version, mount.version);
+        assert!(!reg.components.contains_key("files"), "files records nothing privileged any more: {reg:?}");
+        // What the core recorded is placed again: nothing of it goes either.
+        assert!(plan.remove_files.is_empty(), "no removal at all: {:?}", plan.remove_files);
+        assert!(has(&plan.summary.updated, "files") && has(&plan.summary.updated, MOUNT), "{:?}", plan.summary);
+        // Halfway through, the registry still knows every root file under
+        // one record or the other.
+        let prov = plan.provisional_registry.as_ref().unwrap();
+        for p in moved {
+            assert!(prov.components[MOUNT].privileged.iter().any(|x| x == p), "{p}");
+        }
+    }
+
+    /// The same Pi, with `files` unchecked: the three files the old registry
+    /// recorded under `files` go, the unit is disabled, the shares unmounted.
+    ///
+    /// **[MUTATION]**: stop pushing a removed plugin's companions onto
+    /// `going` — this test fails (nothing unmounts). The three paths
+    /// themselves are removed twice over, by the old `files` record and by
+    /// the companion's inventory entry: the union rule.
+    #[test]
+    fn a_registry_from_before_the_companion_loses_its_files_when_files_goes() {
+        let real = crate::inventory::tests::real_inventory();
+        let device = the_pi(&real);
+        let (mut plugins, packs) = preselection(&real, &device);
+        plugins.remove("files");
+        let plan = compute(&real, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() })
+            .expect("the Pi without files plans");
+        for p in [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER, FILES_EXEC] {
+            assert!(has(&plan.remove_files, p), "{p}: {:?}", plan.remove_files);
+        }
+        assert!(has(&plan.disable_units, "ritornello-media-mount.service"), "{:?}", plan.disable_units);
+        assert_eq!(plan.unmount_roots, vec!["/mnt/ritornello"]);
+        assert!(!dests(&plan).contains(&MEDIA_HELPER));
+        let reg = plan.registry.as_ref().unwrap();
+        assert!(!reg.components.contains_key("files") && !reg.components.contains_key(MOUNT), "{reg:?}");
+        assert!(has(&plan.summary.removed, "files") && has(&plan.summary.removed, MOUNT), "{:?}", plan.summary);
     }
 
     // --- 8 ---------------------------------------------------------------
@@ -1594,6 +1848,19 @@ pub(crate) mod tests {
     #[test]
     fn total_removal_keeps_the_data_and_the_account_unless_told_otherwise() {
         let plan = compute(&inv(), &full_device(), &Intent::RemoveAll { erase_data: false }).unwrap();
+        // No registry at all: the inventory alone still names the
+        // companion's files, unit and mount root.
+        let mut unrecorded = full_device();
+        unrecorded.registry = None;
+        let bare = compute(&inv(), &unrecorded, &Intent::RemoveAll { erase_data: false }).unwrap();
+        assert!(has(&bare.remove_files, MEDIA_HELPER) && has(&bare.disable_units, "ritornello-media-mount.service"), "{bare:?}");
+        assert!(has(&bare.summary.removed, MOUNT), "there with its declared plugin: {:?}", bare.summary);
+        // The companion's record alone says it is there, too.
+        let recorded_only = dev(&[("radio", RADIO_EXEC)], Some(files_registry()), &[], &[]);
+        let gone = compute(&inv(), &recorded_only, &Intent::RemoveAll { erase_data: false }).unwrap();
+        assert!(has(&gone.summary.removed, MOUNT), "there on its own record: {:?}", gone.summary);
+        let neither = compute(&inv(), &dev(&[("radio", RADIO_EXEC)], None, &[], &[]), &Intent::RemoveAll { erase_data: false });
+        assert!(!has(&neither.unwrap().summary.removed, MOUNT), "never there, never said to go");
         for t in ["/etc/ritornello", "/usr/local/lib/ritornello", "/var/lib/ritornello-update", "/var/lib/ritornello-install"] {
             assert!(has(&plan.remove_trees, t), "{t}: {:?}", plan.remove_trees);
         }
@@ -1614,6 +1881,8 @@ pub(crate) mod tests {
         assert!(plan.remove_plugins_toml && plan.plugins_toml.is_none());
         assert!(plan.summary.erased.is_empty());
         assert!(has(&plan.summary.removed, "theirs") && has(&plan.summary.removed, "core"));
+        assert!(has(&plan.summary.removed, MOUNT), "the companion goes with everything: {:?}", plan.summary);
+        assert!(has(&plan.remove_files, MEDIA_HELPER), "{:?}", plan.remove_files);
     }
 
     // --- 14 --------------------------------------------------------------
@@ -1775,6 +2044,8 @@ pub(crate) mod tests {
         )
         .expect("the real inventory plans on a fresh device");
         assert_eq!(declared_in(&plan), real.reference_order);
+        assert!(dests(&plan).contains(&MEDIA_HELPER), "the files plugin brings its companion");
+        assert!(plan.registry.as_ref().unwrap().components.contains_key(MOUNT));
 
         let declared: Vec<(String, String)> = real
             .plugins
@@ -1874,143 +2145,5 @@ pub(crate) mod tests {
             PlanError::DataNotAsked("/var/lib/ritornello/plugins/cd/x".into()),
             &["\"/var/lib/ritornello/plugins/cd/x\"", "installed.toml"],
         );
-    }
-
-    // --- The hashes the core compares an update of `files` against ------
-
-    fn sha(bytes: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
-    }
-
-    /// A `.tar.gz` with each member written under its raw name — `./` kept,
-    /// as `package-release.sh`'s `tar -C <dir> … .` writes it, and as
-    /// `tar::Builder::append_data` would silently drop.
-    fn targz_raw(members: &[(String, Vec<u8>)]) -> Vec<u8> {
-        let mut builder = tar::Builder::new(Vec::new());
-        for (name, data) in members {
-            let mut header = tar::Header::new_gnu();
-            header.set_entry_type(tar::EntryType::Regular);
-            header.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
-            header.set_size(data.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            builder.append(&header, data.as_slice()).unwrap();
-        }
-        let tar = builder.into_inner().unwrap();
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        std::io::Write::write_all(&mut gz, &tar).unwrap();
-        gz.finish().unwrap()
-    }
-
-    /// What a member of `archive` holds in these tests: its own name, so two
-    /// members never share bytes and a hash taken from the wrong one shows.
-    fn content(archive: &str, member: &str) -> Vec<u8> {
-        format!("{archive} / {member}\n").into_bytes()
-    }
-
-    /// Every archive the plan names, each carrying exactly the members its
-    /// puts copy, under `./`.
-    fn archives_for(plan: &Plan) -> BTreeMap<String, Vec<u8>> {
-        plan.archives
-            .iter()
-            .map(|a| {
-                let members: Vec<(String, Vec<u8>)> = plan
-                    .puts
-                    .iter()
-                    .filter(|p| &p.archive == a)
-                    .map(|p| (format!("./{}", p.archive_path), content(a, &p.archive_path)))
-                    .collect();
-                (a.clone(), targz_raw(&members))
-            })
-            .collect()
-    }
-
-    const FILES_ARCHIVE: &str = "ritornello-plugin-files-0.2.0-beta.2-arm64.tar.gz";
-
-    /// The final registry records, for every privileged dest, the hash of
-    /// the very member `put` copies there — nothing for a dest that is not
-    /// privileged, and a member carried twice counted as `tar -x` leaves it:
-    /// the last one.
-    ///
-    /// **[MUTATION]**: in `member_hashes`, stop stripping the leading `./`
-    /// — this test fails ("carries no …"). **[MUTATION]**: hash the member's
-    /// name instead of its bytes — this test fails.
-    #[test]
-    fn the_recorded_hashes_are_those_of_the_members_put_places() {
-        let mut plan = compute(&inv(), &dev(&[], None, &[], &[]), &install(&["radio", "files"], &[], &[])).unwrap();
-        let mut archives = archives_for(&plan);
-        // `files` carries its rule twice: first stale bytes, then the real
-        // ones. The device ends with the last.
-        let rule_member = MEDIA_RULE.trim_start_matches('/');
-        let mut members: Vec<(String, Vec<u8>)> = vec![(format!("./{rule_member}"), b"stale\n".to_vec())];
-        for p in plan.puts.iter().filter(|p| p.archive == FILES_ARCHIVE) {
-            members.push((format!("./{}", p.archive_path), content(FILES_ARCHIVE, &p.archive_path)));
-        }
-        archives.insert(FILES_ARCHIVE.to_string(), targz_raw(&members));
-
-        record_hashes(&mut plan, &archives).unwrap();
-
-        let reg = plan.registry.as_ref().unwrap();
-        let expected: BTreeMap<String, String> = [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER]
-            .iter()
-            .map(|d| (d.to_string(), sha(&content(FILES_ARCHIVE, d.trim_start_matches('/')))))
-            .collect();
-        assert_eq!(reg.components["files"].sha256, expected);
-        let core_archive = "ritornello-core-0.2.0-beta.2-arm64.tar.gz";
-        let core_unit = "/etc/systemd/system/ritornello.service";
-        assert_eq!(
-            reg.components[CORE].sha256,
-            [(core_unit.to_string(), sha(&content(core_archive, core_unit.trim_start_matches('/'))))].into()
-        );
-        // A fresh device had nothing before: halfway through, a dest may
-        // hold nothing or the new bytes, so nothing is claimed.
-        let prov = plan.provisional_registry.as_ref().unwrap();
-        assert!(prov.components.values().all(|r| r.sha256.is_empty()), "{prov:?}");
-    }
-
-    /// The provisional registry — what a run stopping halfway leaves —
-    /// claims a hash only where the old bytes and the new are the same, so
-    /// whichever the dest holds, the claim is true. A dest this plan
-    /// removes claims nothing at all, in either registry.
-    ///
-    /// **[MUTATION]**: drop `placed.get(dest).is_none_or(|new| new == old)`
-    /// from the provisional retain — this test fails (the rule keeps its
-    /// old hash). **[MUTATION]**: drop `!removed.contains(dest)` from the
-    /// provisional retain — this test fails (the stale unit keeps its hash).
-    #[test]
-    fn the_provisional_registry_keeps_a_hash_only_where_both_halves_of_a_run_agree() {
-        let stale_unit = "/etc/systemd/system/ritornello-media-old.service";
-        let mut reg = registry(&[(CORE, &[]), ("files", &[MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER, stale_unit])]);
-        let unit_hash = sha(&content(FILES_ARCHIVE, MEDIA_UNIT.trim_start_matches('/')));
-        reg.components.get_mut("files").unwrap().sha256 = [
-            (MEDIA_UNIT.to_string(), unit_hash.clone()),
-            (MEDIA_RULE.to_string(), "0".repeat(64)),
-            (stale_unit.to_string(), "1".repeat(64)),
-        ]
-        .into();
-        let device = dev(&[("radio", RADIO_EXEC), ("files", FILES_EXEC)], Some(reg), &[], &[]);
-        let mut plan = compute(&inv(), &device, &install(&["radio", "files"], &[], &[])).unwrap();
-        assert!(has(&plan.remove_files, stale_unit), "the fixture must remove the stale unit");
-
-        let archives = archives_for(&plan);
-        record_hashes(&mut plan, &archives).unwrap();
-
-        let prov = &plan.provisional_registry.as_ref().unwrap().components["files"];
-        assert_eq!(prov.sha256, [(MEDIA_UNIT.to_string(), unit_hash)].into(), "{prov:?}");
-        let fin = &plan.registry.as_ref().unwrap().components["files"];
-        assert_eq!(fin.sha256.len(), 3, "the final registry knows every placed dest: {fin:?}");
-        assert!(!fin.sha256.contains_key(stale_unit));
-    }
-
-    /// An archive that lacks a member the plan places stops the run before
-    /// anything is sent, rather than recording a registry without it.
-    #[test]
-    fn a_member_the_archive_lacks_is_named() {
-        let mut plan = compute(&inv(), &dev(&[], None, &[], &[]), &install(&["files"], &[], &[])).unwrap();
-        let mut archives = archives_for(&plan);
-        archives.insert(FILES_ARCHIVE.to_string(), targz_raw(&[]));
-        let err = record_hashes(&mut plan, &archives).unwrap_err();
-        assert!(format!("{err:#}").contains("carries no"), "{err:#}");
     }
 }

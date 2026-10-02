@@ -186,9 +186,13 @@ a non-root uid is a local privilege escalation. The same reasoning covers
 Replacing a single plugin (an upgrade, or a fix confined to one binary) is
 the same two commands with that plugin's own archive in place of the bundle.
 
-One plugin needs a unit enabled by hand the first time it is installed from
-an archive — `files`, whose archive carries
-`ritornello-media-mount.service`:
+One plugin needs a second archive and a unit enabled by hand the first time
+it is installed this way — `files`. Its own archive carries only the plugin
+binary; the root mount helper `ritornello-media-mount`, its unit and its
+polkit rule ship in the companion archive
+`ritornello-files-mount-<version>-<arch>.tar.gz` (the bundle carries both).
+Installing `ritornello-plugin-files-*.tar.gz` alone leaves network shares
+unable to mount. Extract the companion the same way, then:
 
     sudo systemctl enable ritornello-media-mount.service
 
@@ -507,6 +511,18 @@ and on a total removal a file or hidden entry sitting directly in it.
 update, a removal and a change of channel are computed from; do not edit it
 by hand. If it no longer parses, the installer says so and stops: restore
 it from a backup rather than deleting it.
+
+It is also the one file the core reads from `ritornello-install`, for one
+field: the version of `files-mount`, the companion that carries the root
+mount helper, its unit and its polkit rule. `ritornello-install` alone
+installs, updates and removes that companion, always together with
+`files`. The web UI updates `files` only when the release offers
+`files-mount` at **the same version** as the one recorded here; any other
+answer, including no registry or no record of it, sends you to
+`ritornello-install`, which updates both (see
+[interface.md](interface.md#plugins-table)). A release that changes the
+helper therefore says **Action required** in its notes
+(`scripts/release-notes-guard.sh` watches `crates/ritornello-files-mount`).
 
 Configuration is provisioned only **when the file is absent** — a first
 installation needs no manual copy, and a file that exists is **never
@@ -889,12 +905,20 @@ been observed for real:
 - systemd restarting `ritornello.service` after an update, rather than a
   test process exiting on its own;
 - the rollback firing;
-- updating a privileged plugin (`files`) from the web UI because its
-  privileged files are unchanged. The comparison of the archive's sha256
-  with those `ritornello-install` recorded in `installed.toml` has only run
-  against test archives and a test registry. No real release has gone
-  through it, and no device has yet read a registry an actual installer
-  run wrote;
+- updating `files` from the web UI on the Pi, while its companion
+  `files-mount` keeps its version. The comparison of the release's
+  companion version with the one `ritornello-install` recorded in
+  `installed.toml` has only run against a test release and a test
+  registry, and no device has yet read a registry an actual installer run
+  wrote;
+- a real release carrying a companion. No published release has yet
+  shipped `ritornello-files-mount-<version>-<arch>.tar.gz`, so the core
+  has never recognised one in GitHub's own listing, nor `ritornello-install`
+  placed one fetched from a release;
+- `ritornello-install` removing a plugin on the Pi (unchecking it) and then
+  placing it again (checking it back). Each direction is covered by tests
+  that run the generated script for real, but the round trip has not been
+  run on the device;
 - the note of what an install placed being written **before** the process
   leaves. On a device that write is followed by an exit that does not
   return, and the note is what stops a release that fails to start from

@@ -97,15 +97,22 @@ const coreLeftBehind = computed(() => coreRow.value?.availability === 'update_av
 function warningFor(c: ComponentOffer): string | null {
   // Fix round 1, M1: `installable === false` names a component whose archive
   // needs a root step this dialog cannot take — for a privileged plugin
-  // (`files` today), an update that changes its systemd unit, polkit rule or
-  // root-run helper. Follow-up C: an installed privileged plugin is NOT
+  // (`files` today), an update whose companion (`files-mount`, the root-run
+  // mount helper with its unit and polkit rule) moved, which only
+  // ritornello-install places. An installed privileged plugin is NOT
   // refused from its name; the core leaves `installable` unset until an
-  // archive has actually changed one of those files, so the switch follows
-  // the flag and nothing else. The switch is disabled below for the
+  // attempt has been refused, so the switch follows the flag and nothing
+  // else. The switch is disabled below for the
   // same reason `offered === null` already disables one (Ruling 88); this
   // is the sentence that tells the operator why, the same one `ConfigView`'s
   // table and `InstallablesDialog` show in place of a button.
   if (c.installable === false) {
+    // The core says which companion, when that is the reason: the sentence
+    // then tells the operator what to do about this very update, rather
+    // than restating the privileged plugin's general rule.
+    if (c.needs_companion) {
+      return t.value('update_row_needs_companion', { companion: c.needs_companion })
+    }
     return t.value('plugin_privileged_note')
   }
   if (c.kind === 'third_party') {

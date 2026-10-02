@@ -140,6 +140,10 @@ jobs:
       - run: cargo build --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: The release-notes guard, on its own cases
+        # The guard itself only runs at release time; this is what proves,
+        # on every push, that each path it watches still makes it refuse.
+        run: ./scripts/release-notes-guard.sh --self-test
 
   e2e:
     name: End-to-end journeys (Playwright)
@@ -297,7 +301,17 @@ jobs:
           prev=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')
           echo "previous published release: ${prev:-none}"
           echo "prev=$prev" >> "$GITHUB_OUTPUT"
-          ./scripts/changed-components.sh $prev > changed.txt
+          # A different question gets a different baseline: the coupled-change
+          # guard of the companions (see changed-components.sh, run_guard)
+          # asks whether each rebuilt archive carries a number devices do not
+          # already run, so it compares against the newest PUBLISHED release,
+          # prereleases INCLUDED. Drafts excluded: a tag whose release was
+          # refused or abandoned was never delivered. Asked of GitHub, not of
+          # git, for the reason given above. Empty only when nothing was ever
+          # published, which the guard reports.
+          published=$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // empty')
+          echo "newest published release, prereleases included: ${published:-none}"
+          ./scripts/changed-components.sh --guard-baseline "$published" $prev > changed.txt
           cat changed.txt
           mkdir keep
           while read -r c; do

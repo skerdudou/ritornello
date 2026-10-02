@@ -1389,6 +1389,7 @@ mod tests {
                 installable: None,
                 third_party_repo: None,
                 not_installed_files: None,
+                needs_companion: None,
             }],
             ..UpdateState::initial("0.2.0", &[])
         }));

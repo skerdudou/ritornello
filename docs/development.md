@@ -147,7 +147,7 @@ say so rather than failing:
   then `0 input device(s) opened` where there is no `/dev/input` — the
   usual case under WSL. Both are `WARN`, and its page still works, so
   bindings can be edited without a remote;
-- **`files`** mounts nothing: mounting is done by a root helper through
+- **`files`** mounts nothing: mounting is done by a root helper (the `ritornello-files-mount` crate, not part of the plugin) through
   `ritornello-media-mount.service`, which a checkout does not have. Local
   roots work, SMB shares do not.
 

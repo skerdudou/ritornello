@@ -9,9 +9,9 @@
 //! user.
 
 use anyhow::{Context, Result};
-use ritornello_plugin_files::mount::{is_mounted_in, mount_points};
-use ritornello_plugin_files::mount_options::mount_command;
-use ritornello_plugin_files::roots::{RootKind, Roots, MOUNT_ROOT};
+use ritornello_files_mount::mount_options::mount_command;
+use ritornello_files_mount::mounts::{is_mounted_in, mount_points};
+use ritornello_files_mount::roots::{RootKind, Roots, MOUNT_ROOT};
 use std::path::{Path, PathBuf};
 
 fn env_or(key: &str, default: &str) -> String {

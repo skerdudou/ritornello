@@ -18,16 +18,6 @@ pub struct Recorded {
     /// trusting a stale or absent inventory to still describe a component
     /// it may have moved past.
     pub privileged: Vec<String>,
-    /// Per privileged dest, the lowercase hex sha256 of the exact bytes this
-    /// installer placed there: the archive member `put` copied. The core
-    /// reads it, and only reads it, to prove that an update of a privileged
-    /// plugin leaves every root-owned file byte-identical — the one case in
-    /// which the web UI may update such a plugin (see the core's
-    /// `update::privileged_update_allowed`). A dest with no hash here proves
-    /// nothing, so the core refuses; that is what a registry written before
-    /// this field existed parses to (`default`: an empty map).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sha256: BTreeMap<String, String>,
 }
 
 /// `/var/lib/ritornello-install/installed.toml`: everything the installer
@@ -68,51 +58,27 @@ mod tests {
         let mut components = BTreeMap::new();
         components.insert(
             "radio".to_string(),
-            Recorded { version: "0.2.0".to_string(), privileged: vec![], sha256: BTreeMap::new() },
+            Recorded { version: "0.2.0".to_string(), privileged: vec![] },
         );
         components.insert(
-            "files".to_string(),
+            "files-mount".to_string(),
             Recorded {
                 version: "0.2.1".to_string(),
                 privileged: vec![
                     "/etc/systemd/system/ritornello-media-mount.service".to_string(),
                     "/etc/polkit-1/rules.d/51-ritornello-media.rules".to_string(),
                 ],
-                sha256: [
-                    ("/etc/systemd/system/ritornello-media-mount.service".to_string(), "a".repeat(64)),
-                    ("/etc/polkit-1/rules.d/51-ritornello-media.rules".to_string(), "b".repeat(64)),
-                ]
-                .into(),
             },
         );
         Registry { format: 1, components }
     }
 
-    /// The hashes survive the trip too: a render that dropped them would
-    /// leave the core nothing to compare, and every update of `files`
-    /// refused from the UI without a word of why.
     #[test]
     fn a_registry_round_trips_through_render_and_parse() {
         let original = sample();
         let rendered = original.render();
         let parsed = Registry::parse(&rendered).expect("a freshly rendered registry parses");
         assert_eq!(parsed, original);
-        assert_eq!(parsed.components["files"].sha256.len(), 2, "{rendered}");
-    }
-
-    /// A registry written before the hashes existed still parses, with an
-    /// empty map: the core then reads it as "cannot prove unchanged" and
-    /// refuses, exactly as before this field.
-    ///
-    /// **[MUTATION]**: drop `default` from the `sha256` field — this test
-    /// fails, since the field would then be required.
-    #[test]
-    fn a_registry_written_before_the_hashes_still_parses() {
-        let text = "format = 1\n\n[components.files]\nversion = \"0.2.0\"\n\
-                    privileged = [\"/etc/systemd/system/ritornello-media-mount.service\"]\n";
-        let parsed = Registry::parse(text).expect("an older registry parses");
-        assert!(parsed.components["files"].sha256.is_empty());
-        assert_eq!(parsed.components["files"].privileged.len(), 1);
     }
 
     /// **[MUTATION]**: drop the `format == 1` check from `Registry::parse`

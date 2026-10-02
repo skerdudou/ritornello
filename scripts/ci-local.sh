@@ -28,6 +28,7 @@ if [ "$stage" = all ] || [ "$stage" = rust ]; then
   cargo build --workspace
   cargo clippy --workspace --all-targets -- -D warnings
   cargo test --workspace
+  ./scripts/release-notes-guard.sh --self-test
 fi
 
 if [ "$stage" = all ] || [ "$stage" = e2e ]; then

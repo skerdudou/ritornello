@@ -95,6 +95,49 @@ impl Component {
     }
 }
 
+/// A component that ships beside a plugin, in an archive of its own: the
+/// files plugin's root mount helper, its unit and its polkit rule
+/// (`[companions.files-mount]` in `deploy/packaging.toml`). The same fields
+/// as a [`Component`], plus `with`, the plugin it is installed and removed
+/// with; `block` is always `null`, since a companion is not a plugin.
+///
+/// It is never offered as a choice: the plan places it whenever its plugin
+/// is placed or kept, and removes it whenever that plugin goes. Its registry
+/// key is its own name.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Companion {
+    pub name: String,
+    pub version: String,
+    pub archive: String,
+    pub files: Vec<FileEntry>,
+    pub initial_config: Vec<InitialConfig>,
+    pub enable: Vec<String>,
+    #[serde(deserialize_with = "required_some")]
+    pub mount_root: Option<String>,
+    #[serde(deserialize_with = "required_some")]
+    pub block: Option<String>,
+    /// The plugin this companion ships beside.
+    pub with: String,
+}
+
+impl Companion {
+    /// The same component, seen the way the plan places and removes every
+    /// other one: all its fields but `with`.
+    pub fn as_component(&self) -> Component {
+        Component {
+            name: self.name.clone(),
+            version: self.version.clone(),
+            archive: self.archive.clone(),
+            files: self.files.clone(),
+            initial_config: self.initial_config.clone(),
+            enable: self.enable.clone(),
+            mount_root: self.mount_root.clone(),
+            block: self.block.clone(),
+        }
+    }
+}
+
 /// One language pack the release ships.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,6 +156,7 @@ pub struct Inventory {
     pub reference_order: Vec<String>,
     pub core: Component,
     pub plugins: Vec<Component>,
+    pub companions: Vec<Companion>,
     pub packs: Vec<Pack>,
 }
 
@@ -193,6 +237,34 @@ pub(crate) mod tests {
                 p.name
             );
         }
+        assert!(!inv.companions.is_empty(), "no companion: the files plugin's mount helper is described by nothing");
+        for c in &inv.companions {
+            assert!(inv.plugin(&c.with).is_some(), "{} ships with {}, which the release does not ship", c.name, c.with);
+            assert!(c.block.is_none(), "{}: a companion is not a plugin and carries no block", c.name);
+            assert_eq!(c.archive, format!("ritornello-{}-{}-{{arch}}.tar.gz", c.name, c.version));
+            assert!(c.initial_config.is_empty(), "{}: a companion writes no initial configuration", c.name);
+        }
+        // What the plan acts on: the files plugin's unit and mount root
+        // moved here, off the plugin's entry.
+        let mount = inv.companions.iter().find(|c| c.name == "files-mount").expect("files-mount is shipped");
+        assert_eq!(mount.with, "files");
+        assert_eq!(mount.enable, vec!["ritornello-media-mount.service"]);
+        assert_eq!(mount.mount_root.as_deref(), Some("/mnt/ritornello"));
+        let files = inv.plugin("files").expect("files is shipped");
+        assert!(files.enable.is_empty() && files.mount_root.is_none(), "{files:?}");
+        assert!(files.files.iter().all(|f| !f.privileged), "{files:?}");
+    }
+
+    /// **[MUTATION]**: drop `#[serde(deny_unknown_fields)]` from `Companion`
+    /// — this test fails.
+    #[test]
+    fn an_unknown_companion_field_is_refused_rather_than_silently_dropped() {
+        let real = run_install_inventory();
+        let anchor = "\"with\": \"files\"";
+        assert_eq!(real.matches(anchor).count(), 1, "expected exactly one companion with = files");
+        let mutated = real.replacen(anchor, &format!("{anchor}, \"a_future_field\": true"), 1);
+        assert_ne!(mutated, real);
+        assert!(Inventory::parse(&mutated).is_err());
     }
 
     #[test]

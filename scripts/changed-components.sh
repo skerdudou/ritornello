@@ -13,12 +13,21 @@
 # gesture, and forgetting to bump publishes nothing — a loud failure rather
 # than a silent one.
 #
-# Usage: changed-components.sh [ref] | --self-test
+# Usage: changed-components.sh [--guard-baseline <tag>] [ref | --guard-only]
+#        changed-components.sh --self-test
 #   with a ref    — the components whose declared version differs from it
 #   without a ref — every component (the first release, or an unknown history)
+#   Either way, the coupled-change guard (run_guard) runs first, against its
+#   own baseline: the newest PUBLISHED release, prereleases included, which
+#   ci.yml passes as --guard-baseline ("" when none was ever published).
+#   Without --guard-baseline (a local run) it falls back to git describe,
+#   and says so.
+#   --guard-only  — that guard alone, and its verdict as the exit code
 #   --self-test   — the language-pack decision and naming, against a table of
 #                    cases and against what package-release.sh actually
-#                    builds; see the block guarded by $SELF_TEST below. Called
+#                    builds, and the coupled-change guard run for real inside
+#                    throwaway git repositories; see the block guarded by
+#                    $SELF_TEST below. Called
 #                    by the Rust suite (version_coherence.rs), for the same
 #                    reason package-release.sh --self-test is: this script's
 #                    only other exercise is the release job, which fires on a
@@ -28,14 +37,32 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SELF_TEST=
+GUARD_ONLY=
 PREV=
+# The coupled-change guard's baseline (see run_guard below). GUARD_BASELINE_SET
+# tells "given, and empty" (there has never been a published release) apart
+# from "not given" (a local run, which falls back to git describe).
+GUARD_BASELINE=
+GUARD_BASELINE_SET=
 if [ "${1:-}" = "--self-test" ]; then
   SELF_TEST=1
 else
-  PREV="${1:-}"
-  if [ -n "$PREV" ] && ! git rev-parse --verify -q "$PREV^{commit}" >/dev/null; then
-    echo "$PREV is not a commit — pass a release tag, or no argument for a first release" >&2
-    exit 1
+  if [ "${1:-}" = "--guard-baseline" ]; then
+    [ "$#" -ge 2 ] || { echo "--guard-baseline needs a tag, or \"\" when no release was ever published" >&2; exit 1; }
+    GUARD_BASELINE="$2" GUARD_BASELINE_SET=1
+    shift 2
+  fi
+  if [ "${1:-}" = "--guard-only" ]; then
+    # Runs the coupled-change guard alone (see run_guard below) and exits
+    # with its verdict. What --self-test drives inside throwaway
+    # repositories, so that the test exercises the real check, git and all.
+    GUARD_ONLY=1
+  else
+    PREV="${1:-}"
+    if [ -n "$PREV" ] && ! git rev-parse --verify -q "$PREV^{commit}" >/dev/null; then
+      echo "$PREV is not a commit — pass a release tag, or no argument for a first release" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -91,6 +118,24 @@ mapfile -t PLUGINS < <(sed -n 's/^name = "\(.*\)"/\1/p' deploy/plugins.example.t
 CRATES=(ritornello-core)
 for p in "${PLUGINS[@]}"; do CRATES+=("ritornello-plugin-$p"); done
 
+# Companions: components that ship beside a plugin, in an archive of their
+# own named after their own crate, `ritornello-<name>` (see [companions] in
+# deploy/packaging.toml). One `<name> <with>` line each, from packaging.py,
+# so that this script reads no TOML section with sed. Each is a component
+# like the others for the loop below: published when its version moves.
+#
+# Through a command substitution, not `mapfile < <(...)`: a failure inside a
+# process substitution escapes `set -e`, and an empty list would then mean
+# "no companion" — nothing published for it, and a guard checking nothing.
+COMPANIONS_TXT=$(python3 scripts/packaging.py companions)
+COMPANIONS=()
+[ -z "$COMPANIONS_TXT" ] || mapfile -t COMPANIONS <<< "$COMPANIONS_TXT"
+if tr -d '\r' < deploy/packaging.toml | grep -q '^\[companions\.' && [ "${#COMPANIONS[@]}" -eq 0 ]; then
+  echo "deploy/packaging.toml declares [companions.*] but packaging.py companions listed none" >&2
+  exit 1
+fi
+for line in "${COMPANIONS[@]}"; do CRATES+=("ritornello-${line%% *}"); done
+
 # The version a manifest declares, or the literal `inherited` when it uses
 # `version.workspace = true`. Two distinct answers, because a component that
 # inherits is a component from before this scheme: it must count as changed so
@@ -101,6 +146,173 @@ version_in() { # <manifest text on stdin>
   [ -n "$v" ] || v=absent
   printf '%s\n' "$v"
 }
+
+# --- the coupled-change guard ----------------------------------------------
+# It CLOSES the shared-crate trap for a companion and its plugin, rather than
+# warning about it. A device installs on version inequality alone, so an
+# archive rebuilt with new bytes under its old number is fetched by no
+# device, silently: the release looks complete and delivers part of the
+# change. The rules, for each companion and the plugin its `with` names:
+#
+# - a change to the companion's own binary (crates/ritornello-<c>/src/bin/)
+#   or to what its `tree` is built from (its unit and its rule under
+#   deploy/) changes only the companion's archive: the COMPANION must move;
+# - a change anywhere else in its crate (its library, its Cargo.toml beyond
+#   the version line) is also linked into the plugin: BOTH must move.
+#
+# The version line is set aside on purpose: bumping the companion alone is
+# the gesture the first rule asks for, and must not itself count as a
+# library change that then demands a bump of the plugin. Only the
+# `version =` line of the `[package]` table, though: a table-form dependency
+# (`[dependencies.toml]` / `version = "1.1"`) states its requirement on a
+# line of the same shape, and moving it is a library change.
+#
+# Its baseline is NOT the PREV this script is given. PREV answers "what to
+# republish" and is the last stable release (see ci.yml); the guard asks
+# whether each rebuilt archive carries a number the devices do not already
+# run. That is the NEWEST PUBLISHED release, prereleases included (devices on
+# the beta channel run it) and drafts excluded: a tag whose release the
+# guard refused, or a draft abandoned with its tag left behind, was never
+# delivered, and taking it as the baseline would hide the very change that
+# was refused. Only GitHub knows what was published, so ci.yml asks it and
+# passes the answer as --guard-baseline; "" there means no release was ever
+# published, the one case with nothing to compare.
+#
+# Without --guard-baseline (a local run), the baseline falls back to the
+# nearest `v*` tag reachable from HEAD^ (which leaves out a tag on HEAD
+# itself), and the guard says it is a fallback: it cannot tell a published
+# tag from a refused one. It also follows first parents only, so on a merge
+# commit a tag that sits only on the merged branch is missed (R68: tags are
+# placed on main after a merge, and CI passes the published baseline, which
+# makes this moot there).
+#
+# Fail closed: a baseline that does not resolve, a HEAD^ that does not exist
+# (a shallow clone), a describe that finds nothing, or a git that cannot read
+# the repository, all refuse, rather than reading as "nothing to compare".
+
+# Sets GUARD_BASE, or GUARD_BASE="" for the explicit no-published-release
+# case. Returns 1, having said why, when no baseline can be trusted.
+resolve_guard_baseline() {
+  if [ -n "$GUARD_BASELINE_SET" ]; then
+    GUARD_BASE="$GUARD_BASELINE"
+    if [ -z "$GUARD_BASE" ]; then
+      echo "coupled-change guard: no release has ever been published, so nothing to compare against; not checked" >&2
+      return 0
+    fi
+    if ! git rev-parse --verify -q "$GUARD_BASE^{commit}" >/dev/null; then
+      echo "coupled-change guard: the baseline $GUARD_BASE does not resolve to a commit here (a tag not fetched?); refusing" >&2
+      return 1
+    fi
+    echo "coupled-change guard: baseline $GUARD_BASE, the newest published release" >&2
+    return 0
+  fi
+  if ! git rev-parse --verify -q 'HEAD^{commit}' >/dev/null; then
+    echo "coupled-change guard: git cannot read this repository; refusing" >&2
+    return 1
+  fi
+  if ! git rev-parse --verify -q 'HEAD^^{commit}' >/dev/null; then
+    echo "coupled-change guard: HEAD^ does not exist (a shallow clone, or a single commit); pass --guard-baseline; refusing" >&2
+    return 1
+  fi
+  if ! GUARD_BASE=$(git describe --tags --abbrev=0 --match 'v*' 'HEAD^' 2>/dev/null) || [ -z "$GUARD_BASE" ]; then
+    echo "coupled-change guard: no v* tag reachable from HEAD^ (tags not fetched?); pass --guard-baseline \"\" if no release was ever published; refusing" >&2
+    return 1
+  fi
+  echo "coupled-change guard: LOCAL FALLBACK baseline $GUARD_BASE (git describe HEAD^; it cannot tell a published tag from a refused one, CI passes --guard-baseline)" >&2
+  return 0
+}
+
+manifest_minus_version() { # <manifest text on stdin>
+  tr -d '\r' | awk '/^\[/ { section = $0 } !(section == "[package]" && /^version = /)'
+}
+
+# Prints one `<crate>: <why>` line per component of the pair that should have
+# moved and did not, and nothing when the pair is fine. A git failure prints
+# a `GUARD-ERROR` line instead, which run_guard turns into a refusal: this
+# runs inside a command substitution, where `set -e` does not reach.
+coupled_problems() { # <baseline> <companion> <plugin> <companion tree source>...
+  local base="$1" companion="ritornello-$2" plugin="ritornello-plugin-$3"
+  shift 3
+  local dir="crates/$companion" lib=no own=no f now then_ changed rc
+  if ! changed=$(git diff --name-only "$base" -- "$dir"); then
+    echo "GUARD-ERROR: git diff $base -- $dir failed"
+    return 0
+  fi
+  for f in $changed; do
+    case "$f" in
+      "$dir"/src/bin/*) own=yes ;;
+      "$dir"/Cargo.toml)
+        if [ "$(git show "$base:$f" 2>/dev/null | manifest_minus_version)" != "$(manifest_minus_version < "$f")" ]; then
+          lib=yes
+        fi
+        ;;
+      *) lib=yes ;;
+    esac
+  done
+  if [ "$#" -gt 0 ]; then
+    rc=0
+    git diff --quiet "$base" -- "$@" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) own=yes ;;
+      *) echo "GUARD-ERROR: git diff $base -- $* failed"; return 0 ;;
+    esac
+  fi
+  moved() { # <crate>
+    now=$(version_in < "crates/$1/Cargo.toml")
+    then_=$(git show "$base:crates/$1/Cargo.toml" 2>/dev/null | version_in || true)
+    [ "$now" != "$then_" ]
+  }
+  if [ "$lib" = yes ] && ! moved "$companion"; then
+    echo "$companion: its library changed ($dir outside src/bin/), and its archive would be republished under its old number"
+  elif [ "$own" = yes ] && ! moved "$companion"; then
+    echo "$companion: its binary, unit or rule changed, and its archive would be republished under its old number"
+  fi
+  if [ "$lib" = yes ] && ! moved "$plugin"; then
+    echo "$plugin: it links the library of $dir, which changed, so its rebuilt binary would be published under its old number"
+  fi
+  return 0
+}
+
+# Returns 1, after naming every problem, when a pair did not move as it must,
+# or when no baseline can be trusted.
+run_guard() {
+  local line name with srcs problems=""
+  GUARD_BASE=
+  resolve_guard_baseline || return 1
+  [ -n "$GUARD_BASE" ] || return 0
+  for line in "${COMPANIONS[@]}"; do
+    name="${line%% *}" with="${line#* }"
+    if ! srcs=$(python3 scripts/packaging.py companion-sources "$name"); then
+      echo "coupled-change guard: packaging.py companion-sources $name failed" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2086 # one repository path per line, none with spaces
+    problems+=$(coupled_problems "$GUARD_BASE" "$name" "$with" $srcs)
+    problems+=$'\n'
+  done
+  problems=$(printf '%s' "$problems" | sed '/^$/d')
+  # A `case`, not `printf | grep -q`: under pipefail, grep leaving early can
+  # SIGPIPE the printf and turn a match into a miss.
+  if case $'\n'"$problems" in *$'\n'GUARD-ERROR*) true ;; *) false ;; esac; then
+    printf '%s\n' "$problems" | sed -n 's/^GUARD-ERROR: /coupled-change guard: /p' >&2
+    echo "coupled-change guard: refusing, since the comparison itself failed" >&2
+    return 1
+  fi
+  if [ -n "$problems" ]; then
+    while IFS= read -r line; do
+      echo "coupled-change guard: $line (since $GUARD_BASE). Bump the version in crates/${line%%:*}/Cargo.toml." >&2
+    done <<< "$problems"
+    return 1
+  fi
+  echo "coupled-change guard: every companion and its plugin moved as their changes require, since $GUARD_BASE" >&2
+  return 0
+}
+
+if [ -n "$GUARD_ONLY" ]; then
+  run_guard
+  exit $?
+fi
 
 # Language packs: one version per `[language]` section of
 # deploy/language-packs.toml, which is the file's only home for that number
@@ -200,10 +412,151 @@ if [ -n "$SELF_TEST" ]; then
   done
   rm -rf release/languages
 
+  # The coupled-change guard, through the REAL check: this very script, run
+  # with --guard-only inside a throwaway git repository that holds a copy of
+  # it, of packaging.py and of the manifests it reads, plus a stand-in
+  # companion crate (with a table-form dependency, as a real Cargo.toml may
+  # have) and plugin crate. Each case commits a baseline tagged v0.1.0, makes
+  # one change, commits it and tags it v0.1.1 as a release would, then reads
+  # the verdict: its exit code, which crates it names, and what it says.
+  # git runs with no global or system configuration, so no hook, signing
+  # rule or default of the machine can change what the test measures.
+  guard_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$R" -c user.name=self-test -c user.email=self-test@invalid -c init.defaultBranch=main "$@"; }
+  guard_repo() { # sets R to a fresh repository whose one commit is tagged v0.1.0
+    R=$(mktemp -d)
+    mkdir -p "$R/scripts" "$R/deploy" "$R/crates/ritornello-files-mount/src/bin" "$R/crates/ritornello-plugin-files/src"
+    cp scripts/changed-components.sh scripts/packaging.py "$R/scripts/"
+    cp deploy/plugins.example.toml deploy/language-packs.toml deploy/packaging.toml "$R/deploy/"
+    while IFS= read -r src; do printf 'original\n' > "$R/$src"; done < <(python3 scripts/packaging.py companion-sources files-mount)
+    printf '[package]\nname = "ritornello-files-mount"\nversion = "0.1.0"\n\n[dependencies.toml]\nversion = "1.1"\n' > "$R/crates/ritornello-files-mount/Cargo.toml"
+    printf 'pub fn grammar() {}\n' > "$R/crates/ritornello-files-mount/src/lib.rs"
+    printf 'fn main() {}\n' > "$R/crates/ritornello-files-mount/src/bin/media-mount.rs"
+    printf '[package]\nname = "ritornello-plugin-files"\nversion = "0.1.0"\n' > "$R/crates/ritornello-plugin-files/Cargo.toml"
+    printf 'fn main() {}\n' > "$R/crates/ritornello-plugin-files/src/main.rs"
+    guard_git init -q
+    guard_git add -A
+    guard_git commit -q -m baseline
+    guard_git tag v0.1.0
+  }
+  # Moves the [package] version only, never a dependency's.
+  guard_bump() { # <crate> [version]
+    local f="$R/crates/$1/Cargo.toml"
+    awk -v v="${2:-0.1.1}" '/^\[/ { section = $0 } section == "[package]" && /^version = / { $0 = "version = \"" v "\"" } { print }' "$f" > "$f.tmp"
+    mv "$f.tmp" "$f"
+  }
+  guard_release() { guard_git add -A; guard_git commit -q -m change; guard_git tag "${1:-v0.1.1}"; }
+  expect_guard() { # <exit> <crates named, space-separated> <stderr must contain, or ""> <why> [args, default: --guard-baseline v0.1.0]
+    local want_exit="$1" want="$2" say="$3" why="$4" got_exit=0 got
+    shift 4
+    # No argument: the published baseline v0.1.0. A lone `--`: none at all,
+    # the local fallback.
+    if [ "$#" -eq 0 ]; then set -- --guard-baseline v0.1.0; elif [ "$1" = "--" ]; then shift; fi
+    bash "$R/scripts/changed-components.sh" "$@" --guard-only > "$R.out" 2> "$R.err" || got_exit=$?
+    got=$(sed -n 's/^coupled-change guard: \(ritornello-[a-z-]*\): .*/\1/p' "$R.err" | sort | tr '\n' ' ')
+    got="${got% }"
+    if [ "$got_exit" != "$want_exit" ] || [ "$got" != "$want" ] || { [ -n "$say" ] && ! grep -qF -- "$say" "$R.err"; }; then
+      echo "self-test: coupled guard [$*] -> exit $got_exit naming [$got], expected exit $want_exit naming [$want]${say:+ saying \"$say\"} ($why)" >&2
+      sed 's/^/    /' "$R.err" >&2
+      fails=$((fails + 1))
+    fi
+    rm -rf "$R" "$R.out" "$R.err"
+  }
+
+  guard_repo
+  printf 'pub fn grammar() { /* v2 */ }\n' > "$R/crates/ritornello-files-mount/src/lib.rs"
+  guard_bump ritornello-files-mount; guard_bump ritornello-plugin-files; guard_release
+  expect_guard 0 "" "" "library changed, both moved"
+
+  guard_repo
+  printf 'pub fn grammar() { /* v2 */ }\n' > "$R/crates/ritornello-files-mount/src/lib.rs"
+  guard_bump ritornello-files-mount; guard_release
+  expect_guard 1 "ritornello-plugin-files" "" "library changed, only the companion moved: the plugin links it"
+
+  guard_repo
+  printf 'pub fn grammar() { /* v2 */ }\n' > "$R/crates/ritornello-files-mount/src/lib.rs"
+  guard_bump ritornello-plugin-files; guard_release
+  expect_guard 1 "ritornello-files-mount" "" "library changed, only the plugin moved"
+
+  guard_repo
+  printf 'fn main() { /* v2 */ }\n' > "$R/crates/ritornello-files-mount/src/bin/media-mount.rs"
+  guard_bump ritornello-files-mount; guard_release
+  expect_guard 0 "" "" "binary-only change with the companion moved: files is not forced to move"
+
+  guard_repo
+  printf 'fn main() { /* v2 */ }\n' > "$R/crates/ritornello-files-mount/src/bin/media-mount.rs"
+  guard_release
+  expect_guard 1 "ritornello-files-mount" "" "binary-only change, nothing moved"
+
+  guard_repo
+  printf 'changed\n' > "$R/deploy/ritornello-media-mount.service"
+  guard_release
+  expect_guard 1 "ritornello-files-mount" "" "the companion's unit changed without a bump"
+
+  guard_repo
+  sed 's/^version = "1.1"$/version = "1.2"/' "$R/crates/ritornello-files-mount/Cargo.toml" > "$R/m" && mv "$R/m" "$R/crates/ritornello-files-mount/Cargo.toml"
+  guard_bump ritornello-files-mount; guard_release
+  expect_guard 1 "ritornello-plugin-files" "" "a table-form dependency's version moved: a library change, not the [package] version line"
+
+  # Repo D of the re-review: v0.1.1 is refused and never published, then an
+  # unrelated commit is tagged v0.1.2. Passed the newest PUBLISHED release
+  # (still v0.1.0), the guard must still refuse; the refused tag is not a
+  # baseline.
+  guard_repo
+  printf 'pub fn grammar() { /* v2 */ }\n' > "$R/crates/ritornello-files-mount/src/lib.rs"
+  guard_bump ritornello-files-mount; guard_release v0.1.1
+  printf 'unrelated\n' > "$R/README"; guard_release v0.1.2
+  expect_guard 1 "ritornello-plugin-files" "since v0.1.0" "a refused tag v0.1.1 must not become the baseline once the published one is passed in"
+
+  # The local fallback: no --guard-baseline, git describe HEAD^, said so.
+  guard_repo
+  printf 'pub fn grammar() { /* v2 */ }\n' > "$R/crates/ritornello-files-mount/src/lib.rs"
+  guard_bump ritornello-files-mount; guard_release
+  expect_guard 1 "ritornello-plugin-files" "LOCAL FALLBACK baseline v0.1.0" "the local fallback finds v0.1.0 and says it is a fallback" --
+
+  # The one case that passes unchecked: told that nothing was ever published.
+  guard_repo
+  printf 'pub fn grammar() { /* v2 */ }\n' > "$R/crates/ritornello-files-mount/src/lib.rs"
+  guard_release
+  expect_guard 0 "" "no release has ever been published" "an explicit empty baseline: nothing was ever published" --guard-baseline ""
+
+  # Fail closed.
+  guard_repo
+  printf 'pub fn grammar() { /* v2 */ }\n' > "$R/crates/ritornello-files-mount/src/lib.rs"
+  guard_release
+  expect_guard 1 "" "does not resolve" "a baseline that does not resolve refuses" --guard-baseline v9.9.9
+
+  guard_repo
+  expect_guard 1 "" "HEAD^ does not exist" "local fallback with no HEAD^ (a shallow clone) refuses" --
+
+  guard_repo
+  guard_git tag -d v0.1.0 >/dev/null
+  printf 'pub fn grammar() { /* v2 */ }\n' > "$R/crates/ritornello-files-mount/src/lib.rs"
+  guard_release
+  expect_guard 1 "" "no v* tag reachable from HEAD^" "local fallback where describe finds nothing refuses" --
+
+  guard_repo
+  rm -rf "$R/.git"
+  expect_guard 1 "" "git cannot read this repository" "local fallback outside any repository refuses" --
+
+  # The pairs the real check walks, read from packaging.toml.
+  found_pair=no
+  for line in "${COMPANIONS[@]}"; do
+    if [ "$line" = "files-mount files" ]; then found_pair=yes; fi
+  done
+  if [ "$found_pair" = no ]; then
+    echo "self-test: packaging.py companions does not list 'files-mount files': the coupled guard would check nothing" >&2
+    fails=$((fails + 1))
+  fi
+
   [ "$fails" -eq 0 ] || { echo "self-test: $fails case(s) wrong" >&2; exit 1; }
-  echo "self-test: language-pack change detection ok"
+  echo "self-test: language-pack change detection and the coupled-change guard ok"
   exit 0
 fi
+
+# The coupled-change guard (see run_guard above), against its own baseline.
+# Checked before anything is printed, so a refused release leaves no half
+# list on stdout.
+run_guard || exit 1
 
 changed=0
 for c in "${CRATES[@]}"; do

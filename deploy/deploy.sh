@@ -53,6 +53,19 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 cp release/"$ARCH"/*.tar.gz release/languages/*.tar.gz "$OUT"/
 python3 scripts/install-inventory.py > "$OUT/inventory.json"
+# Every archive the inventory names must be here: this directory holds every
+# component, so a name nothing was built under is caught before the device is
+# reached rather than by ritornello-install halfway through its fetches.
+python3 - "$OUT" "$ARCH" <<'EOF'
+import json, pathlib, sys
+out, arch = pathlib.Path(sys.argv[1]), sys.argv[2]
+inv = json.loads((out / "inventory.json").read_text(encoding="utf-8"))
+names = [inv["core"]["archive"]] + [c["archive"] for c in inv["plugins"] + inv["companions"]]
+names = [n.replace("{arch}", arch) for n in names] + [p["archive"] for p in inv["packs"]]
+missing = [n for n in names if not (out / n).is_file()]
+if missing:
+    sys.exit("deploy.sh: inventory.json names archives that were not built: " + ", ".join(missing))
+EOF
 ( cd "$OUT" && sha256sum *.tar.gz inventory.json > SHA256SUMS )
 
 # The installer runs on THIS machine, not on the device: a host build, never

@@ -111,6 +111,15 @@ pub struct ComponentOffer {
     /// here, by design (see `installable_from_ui`'s own doc comment).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_installed_files: Option<Vec<String>>,
+    /// A plugin that ships with a companion (`plugins::COMPANIONS`) only:
+    /// the companion's name when this release's companion version differs
+    /// from, or cannot be compared with, the one `ritornello-install`
+    /// recorded (`update::deny_moved_companion`). The row is then
+    /// `installable: Some(false)` and the page says why, naming it, before
+    /// anyone presses anything. Said by the core, which knows, rather than
+    /// inferred by the page from the plugin's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_companion: Option<String>,
 }
 
 /// Declared plugins first, **in file order** — that order is the priority, for
@@ -145,7 +154,9 @@ pub fn component_offers(
             // A pack gets its own loop below, keyed by pack id rather than
             // by name, and judged against `installed_packs` rather than
             // `installed`: neither list here is the right one for it.
-            Offer::Core | Offer::Bundle | Offer::LanguagePack(_) => None,
+            // A companion is never a row either: only `ritornello-install`
+            // places it, and a row would invite a gesture that does not exist.
+            Offer::Core | Offer::Bundle | Offer::LanguagePack(_) | Offer::Companion(_) => None,
         })
         .collect();
 
@@ -167,6 +178,7 @@ pub fn component_offers(
         // Only ever filled in by `Worker::install_one`, once a core install
         // has actually read an archive — `component_offers` never sees one.
         not_installed_files: None,
+        needs_companion: None,
     });
 
     for plugin in installed {
@@ -230,6 +242,7 @@ pub fn component_offers(
             // A plugin's own row, never the core's: this field is a fact
             // about the core's archive alone.
             not_installed_files: None,
+            needs_companion: None,
         });
     }
 
@@ -248,6 +261,7 @@ pub fn component_offers(
             installable: None,
             third_party_repo: None,
             not_installed_files: None,
+            needs_companion: None,
         });
     }
 
@@ -277,6 +291,7 @@ pub fn component_offers(
             installable: Some(true),
             third_party_repo: None,
             not_installed_files: None,
+            needs_companion: None,
         });
     }
     out
@@ -675,6 +690,19 @@ mod tests {
             &[],
         );
         assert!(offers.iter().all(|o| o.name != "plugins"), "{offers:#?}");
+    }
+
+    /// **[MUTATION]**: map `Offer::Companion(name)` to `Some(name)` in
+    /// `component_offers` — red, a `files-mount` row appears.
+    #[test]
+    fn a_companion_is_never_offered_as_a_component() {
+        let offers = offers(
+            "0.2.0",
+            &[published(Offer::Companion("files-mount".to_string()), "0.2.0")],
+            &[],
+        );
+        assert!(offers.iter().all(|o| o.name != "files-mount"), "{offers:#?}");
+        assert_eq!(offers.len(), 1, "the core's row alone: {offers:#?}");
     }
 
     #[test]

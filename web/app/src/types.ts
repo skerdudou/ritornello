@@ -134,6 +134,14 @@ export interface ComponentOffer {
    * something here by design.
    */
   not_installed_files?: string[]
+  /**
+   * A plugin that ships with a companion only (`files` → `files-mount`): the
+   * companion's name when this release moves it, or the device cannot tell
+   * which version it has. The row is then `installable: false`, and the reason
+   * is this, not the plugin being privileged: the update must go through
+   * ritornello-install.
+   */
+  needs_companion?: string
 }
 
 /** Left by the rollback unit, mirroring `ritornello_updater::rollback::Report`. */

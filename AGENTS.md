@@ -94,8 +94,13 @@ something.
   without cargo, since the release job runs without our toolchain.
 - `scripts/changed-components.sh` — exits 2 when no component moved, rather
   than publishing an empty release that looks like success.
+- `scripts/changed-components.sh`'s coupled-change guard — refuses a change
+  to a companion (`files-mount`) that did not move its version, and its
+  plugin's too when their shared crate changed: the shared-crate trap above,
+  closed for that pair.
 - `scripts/release-notes-guard.sh` — refuses a release that changed a unit,
-  a polkit rule or the updater while the notes still say "Nothing to do".
+  a polkit rule, the updater or the mount helper while the notes still say
+  "Nothing to do".
 - `check-dist.mjs` / `check-plugin-dist.mjs` — the import map and a single
   Vue runtime, after every npm build.
 

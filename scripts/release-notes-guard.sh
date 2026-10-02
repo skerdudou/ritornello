@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Refuses to draft a release whose notes still say "Nothing to do" when a
-# systemd unit, a polkit rule or the privileged updater changed since the
-# previous published release. This is the one place in the whole system that
+# systemd unit, a polkit rule, the privileged updater or the files mount
+# helper (crates/ritornello-files-mount) changed since the previous published
+# release. This is the one place in the whole system that
 # *knows* such a file moved, and until this guard existed it said nothing
 # about it: a release that changed only a unit could publish no archive at
 # all (none of those paths moves a component's declared version) and still
@@ -13,7 +14,7 @@
 # by pushing a tag. The release workflow has never run in this repository.
 #
 # The rule: when `git diff <ref> -- deploy/*.service deploy/*.rules
-# crates/ritornello-updater` is non-empty (or there is no previous release to
+# crates/ritornello-updater crates/ritornello-files-mount` is non-empty (or there is no previous release to
 # diff against), .github/release-notes-template.md must already open with
 # "**Action required**". A human edits that file before tagging; this only
 # checks the edit was made. No auto-fill, no templating: a default that
@@ -21,24 +22,88 @@
 # be worse than the silence it replaces — a loud stop is the design here, the
 # same choice changed-components.sh makes when nothing moved.
 #
+# **Why the mount helper is watched.** It is the companion `files-mount`: a
+# root-run binary that only `ritornello-install` places, never the web UI.
+# A release that changes it moves the companion's version, and the web UI
+# then refuses to update `files` until the operator has run
+# `ritornello-install` — which is exactly an action by hand the notes must
+# name. Its crate is watched whole, library included: the helper binary is
+# built from it.
+#
 # Usage: release-notes-guard.sh [ref]
-#   with a ref    — compare deploy/*.service, deploy/*.rules and
-#                   crates/ritornello-updater against it
+#   with a ref    — compare deploy/*.service, deploy/*.rules,
+#                   crates/ritornello-updater and crates/ritornello-files-mount
+#                   against it
 #   without a ref — first release: nothing to compare against, so the guard
 #                   requires the same opening line unconditionally
+#   --self-test   — runs the guard itself inside throwaway git repositories,
+#                   one per branch of its decision, and checks each verdict
 #
 # What this deliberately does NOT cover: any other privileged file a future
-# component might introduce outside these three paths (say, a new file
+# component might introduce outside these four paths (say, a new file
 # staged by deploy/packaging.toml) trips no alarm here. Ruling 52 named
 # exactly this set, on purpose — a wider net would also fire on changes that
 # need no action by hand and teach everyone to click past the warning. Its
 # silence on anything else is a scope, not a guarantee.
 set -euo pipefail
 
+if [ "${1:-}" = "--self-test" ]; then
+  # Each case: a baseline commit, one change on top of it, the notes' first
+  # line, and the exit code the guard must give against the baseline. Run
+  # for real, on a copy of this very script, so a WATCHED entry dropped or
+  # mistyped reddens the case that needs it.
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  failures=0
+  check() { # <name> <changed path> <notes first line> <expected exit>
+    local name=$1 path=$2 notes=$3 want=$4 dir got
+    dir=$(mktemp -d)
+    (
+      cd "$dir"
+      git init -q
+      # Not the machine's own setting: on Windows it floods every case with
+      # line-ending warnings that say nothing about the guard.
+      git config core.autocrlf false
+      git config user.email self-test@example.invalid
+      git config user.name self-test
+      mkdir -p scripts .github deploy crates/ritornello-updater crates/ritornello-files-mount/src crates/other
+      cp "$self" scripts/release-notes-guard.sh
+      echo 'Nothing to do' > .github/release-notes-template.md
+      for f in deploy/a.service deploy/a.rules crates/ritornello-updater/x.rs \
+        crates/ritornello-files-mount/src/x.rs crates/other/x.rs; do
+        echo base > "$f"
+      done
+      git add -A && git commit -qm base && git tag base
+      echo changed > "$path"
+      echo "$notes" > .github/release-notes-template.md
+      git add -A && git commit -qm change
+    )
+    set +e
+    (cd "$dir" && ./scripts/release-notes-guard.sh base >/dev/null 2>&1)
+    got=$?
+    set -e
+    rm -rf "$dir"
+    if [ "$got" = "$want" ]; then
+      echo "ok   $name (exit $got)"
+    else
+      echo "FAIL $name: exit $got, expected $want" >&2
+      failures=$((failures + 1))
+    fi
+  }
+  check "a unit changed, notes say nothing" deploy/a.service 'Nothing to do' 1
+  check "a rule changed, notes say nothing" deploy/a.rules 'Nothing to do' 1
+  check "the updater changed, notes say nothing" crates/ritornello-updater/x.rs 'Nothing to do' 1
+  check "the mount helper changed, notes say nothing" crates/ritornello-files-mount/src/x.rs 'Nothing to do' 1
+  check "the mount helper changed, notes say what to do" crates/ritornello-files-mount/src/x.rs '**Action required** — run ritornello-install' 0
+  check "nothing watched changed" crates/other/x.rs 'Nothing to do' 0
+  [ "$failures" = 0 ] || exit 1
+  echo "release-notes-guard.sh --self-test: all cases pass"
+  exit 0
+fi
+
 cd "$(dirname "$0")/.."
 PREV="${1:-}"
 TEMPLATE=".github/release-notes-template.md"
-WATCHED=(deploy/*.service deploy/*.rules crates/ritornello-updater)
+WATCHED=(deploy/*.service deploy/*.rules crates/ritornello-updater crates/ritornello-files-mount)
 
 if [ -n "$PREV" ] && ! git rev-parse --verify -q "$PREV^{commit}" >/dev/null; then
   echo "$PREV is not a commit — pass a release tag, or no argument for a first release" >&2
@@ -46,7 +111,7 @@ if [ -n "$PREV" ] && ! git rev-parse --verify -q "$PREV^{commit}" >/dev/null; th
 fi
 
 if [ -n "$PREV" ] && git diff --quiet "$PREV" -- "${WATCHED[@]}"; then
-  echo "no unit, rule or updater change since $PREV — no guard to enforce"
+  echo "no unit, rule, updater or mount helper change since $PREV — no guard to enforce"
   exit 0
 fi
 
@@ -59,7 +124,7 @@ case "$opening" in
 esac
 
 {
-  echo "a systemd unit, a polkit rule or the updater changed since ${PREV:-the start (first release)}, but $TEMPLATE still opens with:"
+  echo "a systemd unit, a polkit rule, the updater or the mount helper changed since ${PREV:-the start (first release)}, but $TEMPLATE still opens with:"
   echo "  $opening"
   echo "The updater cannot write any of those, by design (see"
   echo "docs/installation.md#enabling-automatic-updates-once-by-hand)."

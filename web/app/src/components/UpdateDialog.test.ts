@@ -12,7 +12,9 @@ const CATALOG = {
     '{component} will move while the core stays behind — this may make them incompatible.',
   update_confirm: 'Install selected',
   plugin_privileged_note:
-    'Privileged component: install or uninstall it with ritornello-install. An update that leaves its root-owned files unchanged can be made from here.',
+    'Privileged component: install or uninstall it with ritornello-install. An update that leaves its root-run companion unchanged can be made from here.',
+  update_row_needs_companion:
+    'This update also changes the mount helper ({companion}): update with ritornello-install.',
 }
 
 beforeEach(async () => {
@@ -239,9 +241,40 @@ describe('UpdateDialog', () => {
     expect(isChecked('radio')).toBe('false')
   })
 
-  // Follow-up C, the other half of the test above: a privileged plugin the
-  // device declares may be updated from here when its privileged files are
-  // unchanged, which the core only learns from the archive. Until an attempt
+  // A row the core refused because its companion moved says so, naming the
+  // companion — what to do about this very update — and a row refused for
+  // another reason keeps the privileged sentence. Both halves, compared
+  // exactly: both sentences name ritornello-install, so a `toContain` on
+  // that could not tell them apart.
+  it('says the companion moved when the core says so, and the privileged rule otherwise', async () => {
+    const files: ComponentOffer = {
+      name: 'files',
+      kind: 'plugin',
+      declared: true,
+      binary_present: true,
+      installed: '0.2.0',
+      offered: '0.3.0',
+      availability: 'update_available',
+      installable: false,
+    }
+    const first = mountDialog([{ ...files, needs_companion: 'files-mount' }])
+    await flushPromises()
+    expect(row('files')?.querySelector('[data-update-row-warning]')?.textContent?.trim()).toBe(
+      'This update also changes the mount helper (files-mount): update with ritornello-install.',
+    )
+    expect(isChecked('files')).toBe('false')
+    first.unmount()
+
+    mountDialog([files])
+    await flushPromises()
+    expect(row('files')?.querySelector('[data-update-row-warning]')?.textContent?.trim()).toBe(
+      CATALOG.plugin_privileged_note,
+    )
+  })
+
+  // The other half of the test above: a privileged plugin the device
+  // declares may be updated from here while its companion does not move,
+  // which the core settles at the gesture. Until an attempt
   // is refused, its row carries no `installable` at all, and the switch must
   // follow that flag rather than the plugin's name: enabled, pre-checked like
   // any update, and without the privileged sentence.

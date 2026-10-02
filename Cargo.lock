@@ -1353,6 +1353,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ritornello-files-mount"
+version = "0.2.0-beta.2"
+dependencies = [
+ "anyhow",
+ "ritornello-plugin-sdk",
+ "ritornello-proto",
+ "serde",
+ "tempfile",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ritornello-i18n"
 version = "0.2.0-beta.2"
 dependencies = [
@@ -1434,6 +1448,7 @@ dependencies = [
  "async-trait",
  "lofty",
  "rand",
+ "ritornello-files-mount",
  "ritornello-i18n",
  "ritornello-plugin-sdk",
  "ritornello-proto",

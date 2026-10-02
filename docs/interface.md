@@ -787,9 +787,10 @@ there" instead of inviting a press that can only fail.
 **A privileged plugin has neither Install nor Uninstall on this page —
 in any of the four states above.** Today that means the files plugin
 alone: installing or uninstalling it is more than placing or erasing a
-binary in the plugins directory, since its packaging also carries a
-root-run helper outside that directory, a systemd unit and a polkit
-rule, and this page can place or erase none of those. Doing only the
+binary in the plugins directory, since it ships with a *companion*,
+`files-mount` — a component of its own carrying a root-run helper outside
+that directory, a systemd unit and a polkit rule — which goes in and out
+with it, and this page can place or erase none of those. Doing only the
 unprivileged half used to be exactly the defect this closed — an
 uninstall that stopped the plugin and forgot it, while its helper, its
 unit and its polkit rule stayed enabled at boot. In place of the
@@ -798,21 +799,29 @@ separate program that installs and removes a component's privileged
 parts along with the rest of it. The core enforces the same rule
 itself, independently of this page, so the sentence is not merely a
 courtesy: asking directly for either gesture is refused the same way.
-**Updating one is allowed, when its privileged files are unchanged.**
-A privileged plugin that `plugins.toml` declares is offered in the update
-dialog like any other. Once its archive is downloaded, the core compares
-each privileged file it carries (units under `etc/systemd/system/`, rules
-under `etc/polkit-1/rules.d/`, a helper under `usr/local/lib/ritornello/`)
-with the sha256 `ritornello-install` recorded when it placed that file,
-in `/var/lib/ritornello-install/installed.toml`, which it reads and never
-writes. If every hash matches, and the archive carries exactly the
-recorded files (none added, none missing), only the plugin binary is
-placed, through the same privileged step as any plugin. The root-owned
-files stay as they are, since they are byte-identical. Anything else — no
-registry (a device deployed by `deploy.sh`), a registry written before
-hashes were recorded, one changed file — is refused with a sentence naming
-`ritornello-install`, and the row stays refused for that version.
-Which plugins are privileged is a short list the core carries and
+**Updating one is allowed, while its companion does not move.** The
+plugin's own archive carries nothing but its binary, so a privileged
+plugin that `plugins.toml` declares is offered in the update dialog like
+any other and placed through the same privileged step. The one condition:
+the version the release offers for its companion (the archive
+`ritornello-files-mount-<version>-<arch>.tar.gz`, never a row of its own)
+must be **equal** to the version `ritornello-install` recorded placing, in
+`/var/lib/ritornello-install/installed.toml`, which the core reads and
+never writes. A release that moves the companion — the two are built
+from one shared crate, and a release guard makes a change to it move
+both — means the update also changes the mount helper, which only
+`ritornello-install` can place. That, and every unknown (no registry, as
+on a device deployed before `ritornello-install` existed; a registry
+silent about the companion; a release that carries no companion), is
+known at the check: the row is disabled from then on, with a sentence
+naming the companion and saying to update with `ritornello-install`. It is
+decided again at every check, so the row comes back once
+`ritornello-install` has updated the companion, and a registry that could
+not be read once does not keep it refused. The core asks the same question
+again at the press, before anything is downloaded, since the registry can
+change in between.
+Which plugins are privileged, and which companion each ships with, are two
+short lists the core carries and
 checks against `deploy/packaging.toml` (see
 [plugins.md](plugins.md#ritornello-plugin-files--audio-files-local-or-on-a-share)),
 never something a plugin announces about itself.

@@ -112,7 +112,7 @@ bundled remote-control presets the repository ships and `deploy.sh`
 installs, read by `generic-input` but never written by it. The `files`
 plugin's own data directory is also the root helper's one fixed, documented
 location (`/var/lib/ritornello/plugins/files`, `FILES_DATA_DIR` in
-`media-mount.rs`), spelled out rather than derived at runtime because the
+`crates/ritornello-files-mount/src/bin/media-mount.rs`), spelled out rather than derived at runtime because the
 helper consumes no archive, and no environment except `RITORNELLO_USER`: it
 reads `media-roots.toml` under that one fixed path, `/etc/passwd` (to turn
 `RITORNELLO_USER` into the `uid`/`gid` the mounts get) and `/proc/mounts`
@@ -1087,6 +1087,14 @@ no D-Bus dependency in Rust). A polkit rule,
 `deploy/51-ritornello-media.rules`, grants the `ritornello` user
 `manage-units` **on that one unit**.
 
+The helper is not part of the plugin's crate. It is the binary of
+`crates/ritornello-files-mount`, a crate with a version of its own (a
+*companion*: it ships beside the plugin and is not a plugin — its name carries
+no `ritornello-plugin-` prefix, and `plugins.example.toml` does not list it).
+That crate also holds what the two sides must read identically: the declared
+roots (`roots`), the mount options (`mount_options`) and the `/proc/mounts`
+table (`mounts`). The plugin depends on it as a library and re-exports `roots`.
+
 Said plainly: whoever reaches the web UI decides what root mounts. So the
 validation that counts lives on the **privileged side** — the plugin
 validates too, but only as a courtesy to whoever is typing. The mount
@@ -1234,7 +1242,9 @@ refused, in both directions**, and shown as a sentence naming
 `ritornello-install` where an Install or an Uninstall button sits for
 every other plugin (see [interface.md](interface.md#plugins-table)). The
 page can place or erase only a binary in the plugins directory; this
-plugin's own packaging also carries `ritornello-media-mount` outside
+plugin ships with a companion, `files-mount`
+(`ritornello-files-mount-<version>-<arch>.tar.gz`, `[companions.files-mount]`
+in `deploy/packaging.toml`), which carries `ritornello-media-mount` outside
 that directory, its unit and its polkit rule, none of which the page
 has any way to touch — doing only the unprivileged half used to leave
 the root helper, the unit (enabled at boot) and the polkit rule behind
@@ -1245,19 +1255,31 @@ this repository's privileged plugins
 (`crates/ritornello-core/src/plugins/mod.rs::PRIVILEGED_PLUGINS`) — a
 list, not something a plugin announces about itself, since a plugin
 that never announces at all (disabled, crashed, not yet started) could
-not have said so either way. **Updating `files` from the page is
-allowed** when the new archive leaves every privileged file
-byte-identical: the core compares their sha256 with the ones
-`ritornello-install` recorded in `/var/lib/ritornello-install/installed.toml`
-(same set of files, same hashes) and then places the plugin binary alone.
-An update that changes the unit, the rule or the helper, or a device with
-no such registry, is refused and sent to `ritornello-install`. **Adding a privileged plugin to this
-repository means declaring its privileged files in
-`deploy/packaging.toml`** (an `extra_binaries` entry, or a `tree`
-destination under `etc/systemd/system/` or `etc/polkit-1/rules.d/`) —
-`packaging_manifest.rs`'s own guard then checks the list against that
-declaration in both directions and names exactly which entry to add or
-remove if the two ever disagree.
+not have said so either way.
+
+**Updating `files` from the page is allowed, while `files-mount` does
+not move.** The plugin's archive carries its binary alone, so an update is
+an ordinary plugin placement. The core only checks that the release's
+`files-mount` version is **equal** to the one `ritornello-install` recorded
+in `/var/lib/ritornello-install/installed.toml`; a different version, an
+unknown one (no registry, or none recorded for the companion), or a
+release that carries no companion refuses the update and sends the
+operator to `ritornello-install`, which places both. The pairing is a
+second list in the core, `plugins::COMPANIONS`. **`ritornello-install`
+alone installs, updates and removes the companion**, always together with
+`files`. Because the plugin and the helper share the library crate
+`ritornello-files-mount`, `scripts/changed-components.sh` refuses a release
+that changes that crate without moving the versions it must move, so a
+changed helper can never reach a device under an old number.
+
+**Adding a privileged plugin to this repository means giving it a
+companion in `deploy/packaging.toml`** — a `[companions.<name>]` table with
+`with = "<plugin>"`, holding its privileged files (an `extra_binaries`
+entry, or a `tree` destination under `etc/systemd/system/` or
+`etc/polkit-1/rules.d/`), never in the plugin's own table. The guards in
+`packaging_manifest.rs` then check both lists against that declaration in
+both directions, and name exactly which entry to add or remove if they
+ever disagree.
 
 ## `ritornello-plugin-console` — the display
 

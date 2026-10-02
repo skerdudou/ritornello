@@ -406,15 +406,14 @@ fn fresh_install() -> (Plan, BTreeMap<String, Vec<u8>>) {
             format: 1,
             components: [(
                 "core".to_string(),
-                Recorded { version: "0.2.0-beta.2".into(), privileged: privileged.clone(), sha256: BTreeMap::new() },
+                Recorded { version: "0.2.0-beta.2".into(), privileged: privileged.clone() },
             )]
             .into(),
         }),
         // A fresh device recorded nothing: the union is the new record.
         provisional_registry: Some(Registry {
             format: 1,
-            components: [("core".to_string(), Recorded { version: "0.2.0-beta.2".into(), privileged, sha256: BTreeMap::new() })]
-                .into(),
+            components: [("core".to_string(), Recorded { version: "0.2.0-beta.2".into(), privileged })].into(),
         }),
         enable_units: vec!["ritornello.service".into()],
         start_service: true,
@@ -451,7 +450,8 @@ fn remove_everything(erase_data: bool) -> Plan {
     }
 }
 
-/// Removing the files plugin, whose shares live under `/mnt/ritornello`.
+/// Removing the files plugin and its companion `files-mount`, whose shares
+/// live under `/mnt/ritornello`.
 fn remove_files_plugin() -> Plan {
     Plan {
         stop_service: true,
@@ -914,6 +914,61 @@ fn a_file_both_removed_and_placed_is_there_at_the_end() {
     let removing = run.stdout.find(&format!("removing {moved}")).unwrap();
     let placing = run.stdout.find(&format!("placing {moved}")).unwrap();
     assert!(removing < placing, "{}", run.stdout);
+}
+
+/// The plan `compute` makes for a device whose registry predates the
+/// companion — the helper, its unit and its rule recorded under `files` —
+/// run for real: the companion's own archive places the three files over
+/// the old ones, nothing is removed, disabled or unmounted on the way, the
+/// unit is enabled, and the registry written names `files-mount`.
+#[test]
+fn a_companion_moves_the_files_an_older_registry_recorded_under_its_plugin() {
+    use crate::plan::{Intent, compute, tests as p};
+    let files_exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-files";
+    let moved = [
+        "/etc/systemd/system/ritornello-media-mount.service",
+        "/etc/polkit-1/rules.d/51-ritornello-media.rules",
+        "/usr/local/lib/ritornello/ritornello-media-mount",
+    ];
+    let old = p::registry(&[("core", &["/etc/systemd/system/ritornello.service"]), ("files", &moved)]);
+    let device = p::dev(&[("files", files_exec)], Some(old), &[], &[]);
+    let intent = Intent::InstallOrUpdate { plugins: p::set(&["files"]), packs: p::set(&[]), erase_data: p::set(&[]) };
+    let plan = compute(&p::inv(), &device, &intent).expect("the plan computes");
+    let mount_archive = "ritornello-files-mount-0.2.0-beta.2-arm64.tar.gz";
+    assert!(plan.archives.contains(mount_archive), "{:?}", plan.archives);
+
+    let archives: BTreeMap<String, Vec<u8>> = plan
+        .archives
+        .iter()
+        .map(|a| {
+            let dests: Vec<&str> = plan.puts.iter().filter(|x| &x.archive == a).map(|x| x.dest.as_str()).collect();
+            (a.clone(), release_tar(&files_of(&dests)))
+        })
+        .collect();
+    let rig = Rig::new();
+    for f in moved.iter().chain([&files_exec]) {
+        rig.write(f, "old\n");
+    }
+    rig.write("/etc/ritornello/plugins.toml", device.plugins_toml.as_deref().unwrap());
+    // A share mounted under the root, holding a file: a wrong unmount would
+    // log `umount` and `rmdir` it, which is what this run must never do.
+    rig.write("/mnt/ritornello/nas/music.flac", "a song\n");
+    let mounted = rig.at("/mnt/ritornello/nas").display().to_string();
+    let run = rig.run(&plan, &archives, &[("SHIM_MOUNTED", mounted)]);
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(rig.read("/mnt/ritornello/nas/music.flac"), "a song\n", "the share is untouched");
+    assert!(!run.log.lines().any(|l| l.starts_with("umount")), "{}", run.log);
+
+    for f in moved {
+        assert_eq!(rig.read(f), content_of(f), "{f}");
+        assert!(!run.stdout.contains(&format!("removing {f}")), "{f}: {}", run.stdout);
+    }
+    assert_eq!(mode(&rig.at(moved[2])), 0o755);
+    assert!(run.logged("systemctl enable ritornello-media-mount.service"), "{}", run.log);
+    assert!(!run.log.lines().any(|l| l.starts_with("systemctl disable")), "{}", run.log);
+    let written = crate::registry::Registry::parse(&rig.read("/var/lib/ritornello-install/installed.toml")).unwrap();
+    assert_eq!(written.components["files-mount"].privileged, moved);
+    assert!(!written.components.contains_key("files"), "{written:?}");
 }
 
 // --- R23: archive members and sources ------------------------------------

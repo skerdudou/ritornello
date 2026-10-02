@@ -17,11 +17,8 @@ repository.workspace = true
 kinds = ["source"]
 description = "Plays audio files from a local folder or a mounted network share."
 
-# A `lib` target is indispensable here: two `[[bin]]` of the same crate do not
-# share their modules. Without it, the root mount binary could not use
-# `roots.rs`, and the argument that justifies housing them together — the
-# privileged side and the side that writes the configuration read exactly the
-# same grammar — would fall apart.
+# What the plugin has in common with the root mount helper lives in
+# `ritornello-files-mount`, which ships as a component of its own.
 [lib]
 name = "ritornello_plugin_files"
 path = "src/lib.rs"
@@ -30,14 +27,11 @@ path = "src/lib.rs"
 name = "ritornello-plugin-files"
 path = "src/main.rs"
 
-[[bin]]
-name = "ritornello-media-mount"
-path = "src/bin/media-mount.rs"
-
 [dependencies]
 ritornello-proto = { path = "../ritornello-proto" }
 ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
 ritornello-i18n = { path = "../ritornello-i18n" }
+ritornello-files-mount = { path = "../ritornello-files-mount" }
 anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

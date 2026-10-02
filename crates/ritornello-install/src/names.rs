@@ -276,6 +276,14 @@ mod tests {
                 checked += 1;
             }
         }
+        // The companions too: the files plugin's helper, unit and rule live
+        // there now, and a walk of the plugins alone would no longer see them.
+        for c in &inv.companions {
+            for f in &c.files {
+                assert!(deletable_file(&f.dest), "{}: {} is not deletable", c.name, f.dest);
+                checked += 1;
+            }
+        }
         assert!(checked > 0, "checked no file at all — the walk is wrong");
     }
 }

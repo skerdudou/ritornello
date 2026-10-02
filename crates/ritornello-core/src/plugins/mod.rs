@@ -359,13 +359,17 @@ pub fn spawn(
 /// from a web page waiting for the answer.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
-/// Plugins of this repository whose packaging places files a privileged
-/// install alone can place: a root-run binary **outside** the plugins
-/// directory (`extra_binaries` in `deploy/packaging.toml`), a systemd unit, or
-/// a polkit rule (a `tree` destination under `etc/systemd/system/` or
-/// `etc/polkit-1/rules.d/`). Installing or uninstalling one of these from the
-/// web UI can only ever do half the job — the privileged half is
-/// `ritornello-install`'s, a separate program shipped in the same release.
+/// Plugins of this repository that ship with a **companion** — a component
+/// of its own, placed only by `ritornello-install` — which places files a
+/// privileged install alone can place: a root-run binary **outside** the
+/// plugins directory (`extra_binaries` in `deploy/packaging.toml`), a systemd
+/// unit, or a polkit rule (a `tree` destination under `etc/systemd/system/`
+/// or `etc/polkit-1/rules.d/`). The plugin's own archive carries none of
+/// them, so the web UI updates it like any other plugin, under the one
+/// condition `COMPANIONS` states. **Installing or uninstalling** one of these
+/// from the web UI could still only ever do half the job: its companion goes
+/// in and out with it, and that half is `ritornello-install`'s, a separate
+/// program shipped in the same release.
 ///
 /// **A list, not an announcement.** The owner first considered having each
 /// plugin announce that it is privileged, then chose this list instead: a
@@ -377,9 +381,9 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// `deploy/packaging.toml` is the authority this list is checked against, in
 /// **both** directions, by
 /// `packaging_manifest::tests::every_privileged_plugin_agrees_with_packaging_toml`:
-/// a name here that packaging.toml does not privilege, or a privileged
-/// packaging.toml entry not named here, is a red test — never a silent drift
-/// between the two.
+/// a name here with no companion placing a privileged file, or a plugin whose
+/// companion places one and which is not named here, is a red test — never a
+/// silent drift between the two.
 ///
 /// A third-party plugin can never be privileged: its archive is refused by
 /// `update::archive::only_its_own_binary`, which allows nothing but its own
@@ -394,6 +398,30 @@ pub const PRIVILEGED_PLUGINS: &[&str] = &["files"];
 /// never disagree with each other about one plugin.
 pub fn is_privileged(name: &str) -> bool {
     PRIVILEGED_PLUGINS.contains(&name)
+}
+
+/// `(plugin, companion)`: each plugin of this repository that ships with a
+/// companion, and that companion's name — its `[companions.X]` table in
+/// `deploy/packaging.toml`, its key in `ritornello-install`'s registry, and
+/// its archive `ritornello-<companion>-<version>-<arch>.tar.gz`.
+///
+/// **What it decides.** The web UI updates such a plugin like any other,
+/// through the same `PlacePlugin`, **only while its companion does not
+/// move**: the version the release offers for the companion must equal the
+/// one `ritornello-install` recorded placing. Any other answer — a different
+/// version, an unknown one on either side, a release that carries no
+/// companion at all — is sent to `ritornello-install`, which places the two
+/// together (`update::companion_allows`).
+///
+/// A list and not an announcement, for the reason `PRIVILEGED_PLUGINS` gives,
+/// and checked against `[companions.X] with = …` in `deploy/packaging.toml`
+/// in **both** directions by
+/// `packaging_manifest::tests::every_companion_agrees_with_packaging_toml`.
+pub const COMPANIONS: &[(&str, &str)] = &[("files", "files-mount")];
+
+/// The companion `plugin` ships with, if it ships with one.
+pub fn companion_of(plugin: &str) -> Option<&'static str> {
+    COMPANIONS.iter().find(|(p, _)| *p == plugin).map(|(_, c)| *c)
 }
 
 /// Terminates a plugin: `SIGTERM`, then `SIGKILL` if it lingers beyond

@@ -526,40 +526,6 @@ mod tests {
         assert_eq!(r.root[0].base_dir(), PathBuf::from("/mnt/ritornello/nas/Albums"));
     }
 
-    #[test]
-    fn every_refusal_names_a_key_that_exists_in_the_embedded_catalog() {
-        // The plugin no longer resolves its own refusals (no `Catalog` left
-        // — language-packs chantier, task 9): resolution moved to the core.
-        // What this test still owns is that the key named here is not a
-        // typo. `Catalog::get` used to fall back silently on an unknown key,
-        // which is exactly the failure this test caught before there was
-        // anything left here to resolve.
-        let known = ritornello_i18n::try_parse(crate::FILES_EN).unwrap();
-        let texts = [
-            RootError::BadName { name: "x/y".into() }.text(),
-            RootError::BadHost { host: "a,b".into() }.text(),
-            RootError::BadShare { share: "a,b".into() }.text(),
-            RootError::BadSubpath { subpath: "..".into() }.text(),
-            RootError::DuplicateName { name: "nas".into() }.text(),
-            RootError::RelativeLocalPath { path: "media/usb".into() }.text(),
-        ];
-        for t in &texts {
-            match t {
-                Text::Keyed { key, .. } => assert!(known.contains_key(key), "unknown key: {key}"),
-                Text::Verbatim(s) => panic!("a root refusal must be a key, not verbatim text: {s}"),
-            }
-        }
-        // And the interpolation parameter travels, ready for the core to
-        // substitute — never a collage of strings here (the trap `AGENTS.md`
-        // names for a number glued to a label, the same trap for a value).
-        match (RootError::BadHost { host: "nas,uid=0".into() }).text() {
-            Text::Keyed { params, .. } => {
-                assert_eq!(params.get("host").map(String::as_str), Some("nas,uid=0"));
-            }
-            Text::Verbatim(_) => panic!("expected a keyed text"),
-        }
-    }
-
     fn smb(share: &str) -> Root {
         Root {
             name: "nas".into(),

@@ -58,10 +58,37 @@ initial_config = ["deploy/stations.example.toml"]
 [plugins.cd]
 
 [plugins.files]
-# The second [[bin]] of the files crate. It is installed OUTSIDE the plugins
-# directory on purpose: the core launches everything it finds there, and this
-# one is launched by systemd, as root. A split by `ritornello-plugin-*` would
-# drop it and ship a source that cannot mount anything.
+# Only the plugin's own binary (added by package-release.sh), its example and
+# its plugins.toml fragment. Everything privileged the plugin needs — the root
+# mount helper, its unit and its polkit rule — belongs to the companion
+# `files-mount` below, so that this archive is an ordinary plugin archive the
+# web UI can install as an update. packaging_manifest.rs refuses a
+# `[plugins.X]` table that places a privileged file.
+examples = ["deploy/media-roots.example.toml"]
+
+# ---------------------------------------------------------------------------
+# Companions.
+#
+# A companion is a component that ships BESIDE a plugin (`with`): it has its
+# own crate, its own version and its own archive,
+# `ritornello-<name>-<version>-<arch>.tar.gz`, built from crates/ritornello-<name>.
+# It is never a plugin: the core does not launch it and it is not in
+# plugins.example.toml or in the catalogue. It is placed only by
+# ritornello-install, never by an update from the web UI, and it is installed
+# and removed together with its plugin.
+#
+# This is where the privileged files a plugin needs live: a plugin is
+# privileged (crate::plugins::PRIVILEGED_PLUGINS) exactly when a companion
+# declares `with = <that plugin>` and places a privileged file.
+# packaging_manifest.rs checks both directions.
+#
+# The keys are a component's keys, plus `with`.
+
+[companions.files-mount]
+with = "files"
+# The binary of crates/ritornello-files-mount. It is installed OUTSIDE the
+# plugins directory on purpose: the core launches everything it finds there,
+# and this one is launched by systemd, as root.
 extra_binaries = [
   { name = "ritornello-media-mount", to = "usr/local/lib/ritornello/ritornello-media-mount" },
 ]
@@ -69,13 +96,13 @@ tree = [
   { from = "deploy/ritornello-media-mount.service", to = "etc/systemd/system/ritornello-media-mount.service" },
   { from = "deploy/51-ritornello-media.rules", to = "etc/polkit-1/rules.d/51-ritornello-media.rules" },
 ]
-examples = ["deploy/media-roots.example.toml"]
-# Enabled, not started, as deploy.sh does: a oneshot that reconciles the
-# declared shares at boot; the plugin starts it on demand the rest of the time.
+# Enabled, not started: a oneshot that reconciles the declared shares at
+# boot; the plugin starts it on demand the rest of the time.
 enable = ["ritornello-media-mount.service"]
-# Where this plugin mounts shares. Removing it unmounts everything under this
-# root first, then removes the empty mount points — never recursively: a
-# recursive delete of a mounted share would delete the NAS's content.
+# Where the helper mounts the files plugin's shares. Removing the companion
+# unmounts everything under this root first, then removes the empty mount
+# points — never recursively: a recursive delete of a mounted share would
+# delete the NAS's content.
 mount_root = "/mnt/ritornello"
 
 [plugins.ouifm-metas]

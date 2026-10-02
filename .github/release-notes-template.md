@@ -43,6 +43,8 @@ its own privileged half exactly once, and this is that once.
      - a systemd unit (`deploy/*.service`)
      - a polkit rule (`deploy/*.rules`)
      - `ritornello-media-mount`, the helper root runs for network shares
+       (the `files-mount` companion archive, which only ritornello-install
+       places)
 
      The updater cannot write any of those, by design. Say so here, with the
      command, or the device will update its binaries and silently keep the
@@ -99,8 +101,11 @@ each plugin travel beside the tree, to be copied by hand.
 
 Replacing a single plugin is the same two commands with that plugin's archive.
 
-The `files` plugin brings a unit of its own. After installing
-`ritornello-plugin-files` (or the bundle) for the first time:
+The `files` plugin needs its companion, `ritornello-files-mount`, which
+carries the root mount helper, its unit and its polkit rule: the plugin's own
+archive does not. After installing `ritornello-plugin-files` together with
+`ritornello-files-mount` (or the bundle, which carries both) for the first
+time:
 
 ```sh
 sudo systemctl enable ritornello-media-mount.service

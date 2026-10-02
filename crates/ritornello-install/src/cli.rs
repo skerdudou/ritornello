@@ -161,16 +161,18 @@ fn list(items: &[String], flag: &'static str) -> Result<BTreeSet<String>, ArgErr
 
 /// The plugins that would go if `wanted` were chosen — everything the
 /// device declares, and every plugin of ours only its registry records
-/// (the plan removes those too, R30) — minus `wanted`. Only these may have
-/// their data erased (`PlanError::EraseNotRemoved` otherwise).
+/// (the plan removes those too, R30), or whose companion it records —
+/// minus `wanted`. Only these may have their data erased
+/// (`PlanError::EraseNotRemoved` otherwise).
 pub fn removed_by(inv: &Inventory, dev: &DeviceState, wanted: &BTreeSet<String>) -> BTreeSet<String> {
     let declared = dev.declared.iter().map(|d| d.name.clone());
-    let recorded = dev
-        .registry
-        .iter()
-        .flat_map(|r| r.components.keys())
-        .filter(|n| inv.plugin(n).is_some())
-        .cloned();
+    let recorded = dev.registry.iter().flat_map(|r| r.components.keys()).filter_map(|n| {
+        if inv.plugin(n).is_some() {
+            Some(n.clone())
+        } else {
+            inv.companions.iter().find(|c| &c.name == n).map(|c| c.with.clone())
+        }
+    });
     declared.chain(recorded).filter(|n| !wanted.contains(n)).collect()
 }
 
@@ -331,6 +333,23 @@ mod tests {
     fn purge_data_reaches_a_plugin_only_the_registry_records() {
         let device = dev(&[("radio", RADIO_EXEC)], Some(registry(&[("cd", &[])])), &[], &["cd"]);
         assert_eq!(intent(&["--plugins", "radio", "--purge-data"], &device), Ok(install(&["radio"], &[], &["cd"])));
+    }
+
+    /// The same for a plugin only its companion's record remembers: `files`
+    /// records nothing itself, `files-mount` does, and the plan removes
+    /// `files` for it — so its data may go too.
+    ///
+    /// **[MUTATION]**: make `removed_by` ignore a recorded companion (the
+    /// `else` branch answering `None`) — this test fails.
+    #[test]
+    fn purge_data_reaches_a_plugin_only_its_companion_s_record_remembers() {
+        let device = dev(&[("radio", RADIO_EXEC)], Some(registry(&[("files-mount", &[])])), &[], &["files"]);
+        assert_eq!(
+            intent(&["--plugins", "radio", "--purge-data"], &device),
+            Ok(install(&["radio"], &[], &["files"]))
+        );
+        let intent = intent(&["--plugins", "radio", "--purge-data"], &device).unwrap().unwrap();
+        assert!(plan::compute(&inv(), &device, &intent).is_ok(), "the plan agrees that files goes");
     }
 
     #[test]

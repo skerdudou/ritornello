@@ -1,0 +1,37 @@
+[package]
+name = "ritornello-files-mount"
+# Its own version, not the product's and not the files plugin's: this is the
+# root helper that ships beside the `files` plugin (a "companion"), and it is
+# published and compared for equality on its own. The name deliberately does
+# NOT start with `ritornello-plugin-`: it is not a plugin, and a tool that
+# scans plugins by prefix must not mistake it for one. Major and minor stay on
+# the product generation; version_coherence.rs asserts it.
+version = "0.2.0-beta.2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A `lib` target is indispensable: two `[[bin]]` of one crate do not share
+# their modules, and what justifies housing these together is that the
+# privileged helper and the plugin that writes the configuration read exactly
+# the same grammar (`roots`), the same /proc/mounts table and the same mount
+# options. The plugin depends on this library; it never runs this binary.
+[lib]
+name = "ritornello_files_mount"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ritornello-media-mount"
+path = "src/bin/media-mount.rs"
+
+[dependencies]
+ritornello-proto = { path = "../ritornello-proto" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
+tempfile = "3"
