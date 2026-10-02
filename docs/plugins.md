@@ -342,20 +342,22 @@ genuinely nothing to translate simply never calls `texts(...)` at all —
 the SDK still announces `catalog: Some({})` for it, which the config page
 reads as "confided nothing", never as a broken announcement.
 
-**Your own keys travel inside your binary, never as a disk pack.** A
+**Your own keys travel inside your binary, never as a language pack.** A
 third-party archive carries your plugin binary and nothing else (see point
-3 above) — no `locales/` directory ships with it. What you embed at compile
+3 above) — no translated text ships with it. What you embed at compile
 time is what you pass to `Runtime::texts(...)`, one map per language —
 the core folds it into the same registry as everyone else's, so **you are
 not limited to English**: `Runtime::texts([("en", MY_EN), ("nl", MY_NL)])?`
 confides both at once, unlike every bundled plugin today, which embeds
-English alone and leaves its other languages to disk packs shipped
-separately in `deploy/locales/` — a choice specific to how *this
-project's own* plugins are packaged, not a limit the SDK imposes on
-yours. An operator can still drop `<lang>.toml` files of
-their own under `/etc/ritornello/locales/<your-name>/`, exactly as for a
-bundled plugin (see [interface.md](interface.md)); that path is simply
-never yours to populate from an archive.
+English alone and leaves its other languages to the language packs this
+project itself builds and publishes from `deploy/locales/` — a choice
+specific to how *this project's own* plugins are packaged, not a limit
+the SDK imposes on yours. There is no third-party language-pack workflow
+today: the only packs a device ever installs come from this project's own
+release feed (`update::release::REPO`), so a language you did not embed
+yourself reaches your plugin's admin page only if this project's own pack
+for that language happens to cover your module's name — otherwise your
+page falls back to whatever you embedded (see the paragraph below).
 
 **The common vocabulary — "Play", "Loading", the generic error
 sentences — travels with the core, not with you.** Your own keys resolve
@@ -1119,9 +1121,9 @@ Variables: `RITORNELLO_FILES_ROOTS`, `RITORNELLO_FILES_CREDENTIALS` and
 outside the service's environment), `RITORNELLO_FILES_STATE`,
 `RITORNELLO_FILES_MPV_PLAYLIST`, `RITORNELLO_FILES_PLAYLISTS` (where
 playlists saved "internally" live, as opposed to those written onto a
-root). `RITORNELLO_LOCALES` is read by the **core**, not this plugin —
-the core sweeps that root itself and layers what it finds over the
-plugin's confided English (see "A plugin's UI", below, and
+root). `RITORNELLO_LANGUAGE_PACKS` is read by the **core**, not this
+plugin — the core sweeps that root itself and layers what it finds over
+the plugin's confided English (see "A plugin's UI", below, and
 [development.md](development.md)).
 
 **Saving onto a share needs one extra word.** Shares are mounted `ro`, so
@@ -2599,16 +2601,16 @@ the full contract and a third-party author's obligations).
 **Every bundled plugin today confides only English this way** —
 `Runtime::texts([("en", MY_EN)])?`, next to the crate's own
 `include_str!("locales/en.toml")` constant — and leaves every other
-shipped language to a plain `.toml` file under the deployment's packs
-root (see [installation.md](installation.md)): the core sweeps that root
-itself (`RITORNELLO_LOCALES`, see [development.md](development.md) and
+shipped language to an installed language pack (see
+[installation.md](installation.md)): the core sweeps that root itself
+(`RITORNELLO_LANGUAGE_PACKS`, see [development.md](development.md) and
 [interface.md](interface.md)) and layers what it finds over the confided
 English. **That is this project's own arrangement, not a limit
 `Runtime::texts` imposes**: the method takes any number of `(lang,
 source)` pairs, so a plugin — including a third-party one, which cannot
-ship a disk pack of its own at all — may confide several languages at
-once, e.g. `Runtime::texts([("en", MY_EN), ("nl", MY_NL)])?`. The view
-then reads the resolved catalog from
+ship a language pack of its own at all today — may confide several
+languages at once, e.g. `Runtime::texts([("en", MY_EN), ("nl", MY_NL)])?`.
+The view then reads the resolved catalog from
 `GET /plugins/<name>/api/i18n[?lang=<l>]`, an ordinary core-served HTTP
 route backed by that layering — never a round trip to the plugin,
 whichever tier a given language came from.

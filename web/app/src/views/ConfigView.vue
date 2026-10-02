@@ -9,12 +9,16 @@ import { RouterLink } from 'vue-router'
 import CoverCacheDetails from '../components/CoverCacheDetails.vue'
 import InstallablesDialog from '../components/InstallablesDialog.vue'
 import LanguageCard from '../components/LanguageCard.vue'
+import LanguagePacksRow from '../components/LanguagePacksRow.vue'
 import UpdateCard from '../components/UpdateCard.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
 import { predictedThumbnailBytes } from '../composables/coverWeight'
+import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
-import type { AudioPayload, LocalePayload, SettingsPayload, UpdatePayload } from '../types'
+import type {
+  AudioPayload, LanguageBusy, LanguagePackRow, LocalePayload, SettingsPayload, UpdatePayload,
+} from '../types'
 
 const { t, reload } = useCatalog()
 // The plugin state comes from the module, not from a local `ref`: the top
@@ -35,6 +39,7 @@ const locale = ref<LocalePayload>({
   completeness: [],
   fallback_current: 'en',
   fallback_candidates: ['en'],
+  packs: [],
 })
 const device = ref('')
 const lang = ref('')
@@ -810,6 +815,105 @@ function pollUpdateWhileBusy() {
   }, 2000)
 }
 
+/**
+ * Ceiling for `pollLanguageWhileBusy`, in ticks of its own 2 s interval — 20 s
+ * total. Not a measured worst case: a language pack is a small, text-only
+ * archive, and an ordinary install or removal settles in well under this.
+ * The ceiling exists so the poll cannot run forever if a job never reaches a
+ * terminal state at all (the worker restarting mid-job, say) — the same
+ * "no route may block, no page may wait on one" rule that gives the admin
+ * protocol its own 5 s deadline, applied here on the polling side instead.
+ */
+const MAX_LANGUAGE_POLL_ATTEMPTS = 10
+
+let languagePoll: ReturnType<typeof setInterval> | null = null
+
+function stopLanguagePoll() {
+  if (languagePoll !== null) {
+    clearInterval(languagePoll)
+    languagePoll = null
+  }
+}
+
+/**
+ * Whether `packs` already reflects `busy`'s outcome.
+ *
+ * **Remove** keeps its own rule, unrelated to the install one below: the
+ * row is gone entirely — the language was not offered by the release
+ * either, so `language_pack_rows` (`status::locales`) has nothing left to
+ * say about it — or present with `installed: null`.
+ *
+ * **Install compares against the value `installed` held the moment the
+ * gesture started (`installedAtStart`), not against a fixed shape** (fix
+ * round 3 of the review: F4). `LanguagePacksRow`'s "Install" and "Update"
+ * both call `installLanguage`, i.e. both produce `busy.action === 'install'`
+ * — but a row only ever offers "Update" when `installed` is *already*
+ * non-null, so the round-2 rule (`row.installed !== null`) was satisfied on
+ * the very first read for an update, before the reinstall had landed: it
+ * was only ever correct for a fresh install, whose `installedAtStart` is
+ * `null`. "The value changed since the click" is the one rule that covers
+ * both without a special case — a fresh install moves from `null` to a
+ * version, an update moves from the old version to the new one.
+ *
+ * **A reinstall of the identical version can never satisfy this rule.**
+ * That is not a defect in the rule: it is an outcome this predicate cannot
+ * observe by construction (the row looks the same before and after), and
+ * the ceiling in `pollLanguageWhileBusy` is exactly the backstop for a
+ * gesture whose completion is unobservable this way — not a sign that
+ * something is broken when it fires for that case.
+ */
+function languageGestureSettled(
+  packs: LanguagePackRow[],
+  busy: LanguageBusy,
+  installedAtStart: string | null,
+): boolean {
+  const row = packs.find((p) => p.language === busy.language)
+  if (busy.action === 'remove') return !row || row.installed === null
+  return !!row && row.installed !== installedAtStart
+}
+
+/**
+ * Refreshes `/api/locale` (and, for good measure, `/api/update`) until
+ * `LanguagePacksRow`'s own payload reflects what `busy` describes, or the
+ * ceiling above is reached — whichever comes first. Either way, `packBusy`
+ * clears here, not in `installLanguage`/`confirmRemoveLanguage`'s own
+ * `finally`: the row keeps showing the in-flight verb, and its buttons stay
+ * disabled, for the whole window the operator would otherwise see nothing
+ * happen in.
+ *
+ * **Why not just extend `pollUpdateWhileBusy`.** That poll stops on
+ * `!update.value.busy`, which does not track a language job the way it
+ * tracks a component install: `Job::RemoveLanguage` never calls `set_busy`
+ * at all (`remove_language`, `update/mod.rs`), and `Job::InstallLanguage`
+ * sets it only for the brief `check()` call ahead of the download — neither
+ * shape stays "busy" for as long as the pack actually takes to land or
+ * leave. Polling the payload this row actually reads, against a completion
+ * predicate this component can state precisely (`languageGestureSettled`),
+ * is what proves the row is right, rather than hoping a signal built for a
+ * different job shape happens to still be true.
+ *
+ * `installedAtStart` is read by the caller from `locale.value.packs` at the
+ * moment the gesture is enqueued, before anything here can have changed it
+ * — see `languageGestureSettled`'s own doc for why an install needs it and
+ * a remove does not.
+ */
+function pollLanguageWhileBusy(busy: LanguageBusy, installedAtStart: string | null) {
+  stopLanguagePoll()
+  let attempts = 0
+  languagePoll = setInterval(async () => {
+    attempts += 1
+    await refreshUpdate()
+    locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
+    if (
+      languageGestureSettled(locale.value.packs, busy, installedAtStart)
+      || attempts >= MAX_LANGUAGE_POLL_ATTEMPTS
+    ) {
+      stopLanguagePoll()
+      packBusy.value = null
+    }
+  }, 2000)
+}
+
 async function onUpdateCheck() {
   // `api.post` never rejects: a network failure comes back as the error
   // string, exactly like a refused check would.
@@ -913,6 +1017,118 @@ async function saveDisplay() {
 }
 
 /**
+ * The language gesture currently in flight — the language **and** which of
+ * "install" or "remove" started it — or `null`. A single value, not a `Set`
+ * like `inProgress`: `LanguagePacksRow` disables one row at a time, and only
+ * one confirmation can be open at once (`removeLanguageTarget`, right
+ * below).
+ *
+ * **Named here, not guessed downstream** (fix round 1, finding 3 of task
+ * 10's review). `LanguagePacksRow` used to receive just the language and
+ * infer the verb from `row.installed` — wrong today, not only in some
+ * future refactor: a row that licenses both "Update" and "Remove" (a pack
+ * already installed, with a newer one offered) keeps `row.installed`
+ * non-null while an **install** (the reinstall-over-existing that "Update"
+ * triggers) is in flight, so the old guess said "removing" for an install.
+ * `ConfigView` already knows which button was pressed; it now says so.
+ */
+const packBusy = ref<LanguageBusy | null>(null)
+
+/**
+ * Installs every pack the release currently publishes for `language`, or
+ * reinstalls it over an already-installed one that carries an older
+ * version — `POST /api/languages/{language}` does not distinguish the two
+ * (task 9's own route doc), so `LanguagePacksRow`'s "Install" and "Update"
+ * buttons both call this.
+ *
+ * **Acknowledges success** (fix round 1, finding 2): the route answers 202
+ * on enqueue only, so a message claiming the pack is installed would be
+ * false — `confirmUninstall`'s "OK" is honest for its own route (a bare,
+ * synchronous 204), but copying it here would claim a completion that has
+ * not happened yet. Reusing `language_pack_installing` — the same sentence
+ * `LanguagePacksRow` shows next to the busy row — states only what is true
+ * at this point: the gesture was accepted and is under way.
+ *
+ * **`packBusy` outlives this function on the success path** (fix round 2,
+ * the reviewer's own follow-up on finding 2): it used to clear in a
+ * `finally` here, which released the row after the enqueue round trip alone
+ * — long before the worker had actually installed anything, and nothing
+ * afterwards ever told the row to look again. `pollLanguageWhileBusy` is
+ * what clears it now, once the row's own payload says the pack really
+ * landed (or the poll's ceiling gives up). On a refusal, though, there is
+ * nothing to wait for, so `packBusy` is released immediately, right here.
+ *
+ * **Captures `installedAtStart` before the request goes out** (fix round 3,
+ * F4): `languageGestureSettled` needs the value `installed` held at the
+ * moment of the click, not a fixed shape — a row already installed is
+ * exactly the "Update" case, and comparing against `null` would have
+ * declared it settled before the reinstall had even begun.
+ */
+async function installLanguage(language: string) {
+  if (packBusy.value) return
+  const busy: LanguageBusy = { language, action: 'install' }
+  const installedAtStart = locale.value.packs.find((p) => p.language === language)?.installed ?? null
+  packBusy.value = busy
+  const err = await api.post(`/api/languages/${encodeURIComponent(language)}`, {})
+  if (err) {
+    toast.error(err)
+    packBusy.value = null
+    return
+  }
+  toast.success(t.value('language_pack_installing', { language: languageName(language) }))
+  pollLanguageWhileBusy(busy, installedAtStart)
+  await loadAll()
+}
+
+/** Language a remove confirmation is open for, or `null` when the dialog is
+ * closed — same shared-dialog pattern as `uninstallTarget`. */
+const removeLanguageTarget = ref<string | null>(null)
+
+/**
+ * Opens the remove confirmation for `language` — never straight to
+ * `DELETE /api/languages/{language}`: the sentence read there
+ * (`language_pack_remove_confirm`) is the one place the owner learns the
+ * interface itself may fall back to English if it is the language in use.
+ */
+function askRemoveLanguage(language: string) {
+  if (packBusy.value) return
+  removeLanguageTarget.value = language
+}
+
+/**
+ * Retires every pack installed for the confirmed language. Same
+ * confirmation idiom as `confirmUninstall` — except for the success
+ * message, which cannot honestly be `confirmUninstall`'s "OK": this route,
+ * like `installLanguage`'s, only enqueues (202), it does not report the
+ * pack gone. `language_pack_removing` says what is actually true right now.
+ *
+ * **`packBusy` outlives this function on the success path**, exactly like
+ * `installLanguage` — see that function's own doc. `Job::RemoveLanguage`
+ * never even sets the server's own `busy` field (`remove_language`,
+ * `update/mod.rs`, calls no `set_busy`), which is precisely why
+ * `pollLanguageWhileBusy` watches this row's own payload instead of that
+ * signal.
+ */
+async function confirmRemoveLanguage() {
+  const language = removeLanguageTarget.value
+  removeLanguageTarget.value = null
+  if (!language || packBusy.value) return
+  const busy: LanguageBusy = { language, action: 'remove' }
+  packBusy.value = busy
+  const err = await api.del(`/api/languages/${encodeURIComponent(language)}`)
+  if (err) {
+    toast.error(err)
+    packBusy.value = null
+    return
+  }
+  toast.success(t.value('language_pack_removing', { language: languageName(language) }))
+  // `null`: `languageGestureSettled`'s `remove` branch never reads this
+  // parameter, it only exists for the `install` branch (see its own doc).
+  pollLanguageWhileBusy(busy, null)
+  await loadAll()
+}
+
+/**
  * The table of contents: one entry per card, in template order. It is data
  * (like REMOTE_ROWS for the remote control): the view walks it for the nav AND
  * for the scroll observation.
@@ -956,6 +1172,7 @@ onMounted(() => {
 onUnmounted(() => {
   observer?.disconnect()
   stopUpdatePoll()
+  stopLanguagePoll()
 })
 
 function goTo(id: string) {
@@ -1378,6 +1595,13 @@ function goTo(id: string) {
               @update:fallback="(v) => (fallback = v)"
             />
 
+            <LanguagePacksRow
+              :payload="locale"
+              :busy="packBusy"
+              @install="installLanguage"
+              @remove="askRemoveLanguage"
+            />
+
             <!-- Date and time. Two separate settings, at the owner's request: the
                  order of a date and the 12/24 h format do not vary together from one
                  country to another. No time zone setting — the display runs on the
@@ -1428,6 +1652,35 @@ function goTo(id: string) {
             <Button data-display-change @click="saveDisplay">{{ t('save') }}</Button>
           </CardContent>
         </Card>
+
+        <!-- Same shared-dialog pattern as `uninstallTarget`: only one
+             confirmation is ever open at a time. The sentence
+             (`language_pack_remove_confirm`) is the one place the owner
+             learns the interface itself may fall back to English. -->
+        <Dialog
+          :open="removeLanguageTarget !== null"
+          @update:open="(v: boolean) => { if (!v) removeLanguageTarget = null }"
+        >
+          <DialogContent data-language-pack-remove-dialog>
+            <DialogHeader>
+              <DialogTitle>{{ t('language_pack_remove') }}</DialogTitle>
+              <DialogDescription>
+                {{
+                  removeLanguageTarget
+                    ? t('language_pack_remove_confirm', { language: languageName(removeLanguageTarget) })
+                    : ''
+                }}
+              </DialogDescription>
+            </DialogHeader>
+            <Button
+              variant="destructive" data-language-pack-remove-confirm
+              :disabled="removeLanguageTarget !== null && packBusy?.language === removeLanguageTarget"
+              @click="confirmRemoveLanguage"
+            >
+              {{ t('language_pack_remove') }}
+            </Button>
+          </DialogContent>
+        </Dialog>
       </section>
 
       <section id="startup" class="scroll-mt-6">

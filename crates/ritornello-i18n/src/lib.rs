@@ -36,11 +36,16 @@ mod chain;
 mod coverage;
 mod interpolate;
 mod layer;
+mod pack;
 
 pub use chain::{common_embedded, Chain};
 pub use coverage::{coverage, union_of_languages, Coverage, ModuleCoverage};
 pub use interpolate::{interpolate, params_in};
 pub use layer::{shipped_language_packs, try_parse, Layer, ModuleLayers};
+pub use pack::{
+    parse_manifest, valid_pack_id, valid_pack_name, validate, PackError, PackManifest, MAX_BYTES,
+    MAX_FILES,
+};
 
 // Only the crate's own tests (unmodified below) reach for the embedded
 // common pack directly; outside `cfg(test)` nothing needs it by name.

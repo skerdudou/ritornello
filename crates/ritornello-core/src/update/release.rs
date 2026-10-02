@@ -41,6 +41,22 @@ pub const ARCH: &str = if cfg!(target_arch = "arm") {
     "x86_64"
 };
 
+/// The closed set of architecture labels an archive name may carry — every
+/// value `ARCH` can ever be, on any device, not only this one's own.
+///
+/// A language pack carries **none** of them: it is text, not a binary, so no
+/// name it can legitimately take ends in one of these labels. That is what
+/// makes this set device-independent where `ARCH` alone is not — the same
+/// archive name must classify identically whichever device reads it, since
+/// this whole delivery scheme rests on every device seeing the same
+/// catalogue (`differs` compares by equality, never by order, for the same
+/// reason). A guard written against `ARCH` alone would refuse
+/// `ritornello-lang-fr-0.2.1-arm64.tar.gz` only on an `arm64` device and
+/// silently accept it as a pack named "fr" at version "0.2.1-arm64" on an
+/// `armv7` one — a name-dependent rule turned into a device-dependent one,
+/// which produces a bug report nobody else can reproduce.
+pub const ARCHES: [&str; 3] = ["armv7", "arm64", "x86_64"];
+
 /// GitHub requires a User-Agent and answers 403 without one. Same convention
 /// as the six other outbound clients in this repository.
 pub const USER_AGENT: &str = concat!(
@@ -61,6 +77,12 @@ pub struct Asset {
 pub enum Offer {
     Core,
     Plugin(String),
+    /// A language pack: the language it carries. **No architecture** -- it
+    /// is text, and publishing the same bytes three times over would be a
+    /// lie about what a pack is. That is also why the release workflow
+    /// builds packs in a job of its own rather than inside the per-arch
+    /// matrix, where three runs would collide on one file name.
+    LanguagePack(String),
     /// Every plugin at once. Never used by the updater — it installs component
     /// by component so a failure names one thing — but recognised so it is not
     /// mistaken for a plugin.
@@ -77,7 +99,38 @@ pub enum Offer {
 /// One hundred is the API's maximum for a single page, and the depth this
 /// feature accepts: a component not published in the last hundred deliveries
 /// would drop out of the catalogue. Written down rather than suffered.
+///
+/// **The one seam this endpoint has, and it does not reach a shipped
+/// device.** Every earlier task that wrote a test against `check()` left
+/// this function untouched and said so in a comment (see `update::mod`'s
+/// `Job::InstallLanguage` arm), because there was no way to drive the real
+/// worker end to end without addressing the real GitHub host. Task 14 (the
+/// e2e journey) needed exactly that: an uninstalled language pack actually
+/// offered, actually downloaded, through the real `POST /api/languages/
+/// {language}` route rather than a `Checked` built by hand. `TEST_RELEASES_URL_ENV`
+/// is that seam, and it is drawn as narrowly as this problem allows:
+/// - `#[cfg(debug_assertions)]` means the branch below is not merely
+///   inactive in a release build, it is **absent from the compiled binary**
+///   — the same guarantee `REPO` itself relies on, extended to this one
+///   override rather than contradicted by it. `deploy/build.sh`'s shipped
+///   artifact is `cross build --release`, and `scripts/package-release.sh`
+///   only ever packages a `target/<triple>/release` binary; neither can
+///   read this variable because neither contains the code that would.
+/// - It overrides the **list endpoint only**. Every URL `check()` reaches
+///   afterwards — an archive, its `SHA256SUMS` — comes from the parsed
+///   response itself (`Published::url`/`checksums_url`), so a test fixture
+///   only ever has to control the one address it is read from, not every
+///   address it names.
+/// - It cannot touch `releases_url_for`, so a third-party plugin's own
+///   repository is still read exactly where its manifest announced it.
+#[cfg(debug_assertions)]
+pub const TEST_RELEASES_URL_ENV: &str = "RITORNELLO_TEST_RELEASES_URL";
+
 pub fn releases_url() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(url) = std::env::var(TEST_RELEASES_URL_ENV) {
+        return url;
+    }
     releases_url_for(REPO)
 }
 
@@ -522,6 +575,42 @@ fn is_version(s: &str) -> bool {
 /// readable, the name's and the version's: the first candidate that parses is
 /// the boundary, because a plugin name cannot itself end in a version.
 pub fn classify_asset(name: &str, arch: &str) -> Option<(Offer, String)> {
+    // **Before the arch suffix is stripped, deliberately.** A pack name
+    // carries none, so the strip below would answer `None` for it and this
+    // branch would never be reached.
+    if let Some(rest) = name
+        .strip_suffix(".tar.gz")
+        .and_then(|s| s.strip_prefix(crate::langpack::store::PACK_ID_PREFIX))
+    {
+        for (dash, _) in rest.match_indices('-') {
+            let (language, version) = (&rest[..dash], &rest[dash + 1..]);
+            if language.is_empty()
+                || language.starts_with('-')
+                || !is_version(version)
+                // A pack carries no architecture at all, so a version-shaped
+                // string that itself ends in ANY of the closed set of arch
+                // labels an archive name can carry (`ARCHES`) is not one a
+                // pack archive can legitimately produce -- almost certainly
+                // a name that meant to carry an architecture the way a
+                // plugin's does, on a component that has none. `is_version`
+                // alone cannot catch this: "armv7" is, by shape,
+                // indistinguishable from a genuine single-word prerelease
+                // identifier, so the version-only grammar would otherwise
+                // accept `0.2.1-armv7` as a whole, valid version.
+                //
+                // Checked against the whole closed set, not just this
+                // call's own `arch`: the name must classify the same way on
+                // every device, and a guard scoped to the caller's own
+                // architecture would let a name refused here slip through
+                // as a pack on a device running a different one.
+                || ARCHES.iter().any(|label| version.ends_with(&format!("-{label}")))
+            {
+                continue;
+            }
+            return Some((Offer::LanguagePack(language.to_string()), version.to_string()));
+        }
+        return None;
+    }
     let stem = name.strip_suffix(&format!("-{arch}.tar.gz"))?;
     if let Some(version) = stem.strip_prefix("ritornello-core-") {
         return is_version(version).then(|| (Offer::Core, version.to_string()));
@@ -584,6 +673,14 @@ pub fn download_name(offer: &Offer) -> Option<String> {
     match offer {
         Offer::Core => Some("staged-core".to_string()),
         Offer::Plugin(name) => Some(format!("staged-plugin-{name}")),
+        // Never actually called for a pack: installing one takes no
+        // privileged step, so nothing is ever placed in the staging area
+        // this name would address. The arm exists so the match stays
+        // exhaustive and nobody is tempted to answer `None` here believing
+        // that is the safe default -- `None` is `Bundle`'s answer, and it
+        // means something different: "never installed component by
+        // component" rather than "installed, but not through staging".
+        Offer::LanguagePack(lang) => Some(format!("staged-lang-{lang}")),
         Offer::Bundle => None,
     }
 }
@@ -591,6 +688,94 @@ pub fn download_name(offer: &Offer) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The seam's safety, asserted rather than merely true.** Two facts
+    /// together are what keep `TEST_RELEASES_URL_ENV` off a shipped device:
+    /// the line that reads it is compiled only under
+    /// `#[cfg(debug_assertions)]` (so a release binary does not contain the
+    /// code that would read it at all), and nothing in this workspace ever
+    /// turns `debug_assertions` on inside a release profile, which would
+    /// defeat the first guarantee even with the attribute left untouched.
+    /// The second fact is checked in three places a `[profile.release]`
+    /// override could hide: `Cargo.toml` itself, `.cargo/config.toml` (which
+    /// cargo merges the same way), and `Cross.toml` (which can pass the same
+    /// override through to the cross-compiled release build) — the last two
+    /// read at runtime rather than `include_str!`ed, since neither exists in
+    /// this workspace today.
+    ///
+    /// Built from concatenated pieces, exactly like `langpack::archive`'s
+    /// own `the_pack_reader_and_the_component_reader_never_call_each_other`
+    /// (its own comment explains why): a search pattern spelled out whole
+    /// in this test's source would make this very line one of its own
+    /// matches, which `here.lines().position(...)` -- taking the *first*
+    /// line that contains it -- would then find *this test* rather than the
+    /// real seam were the two ever to collide.
+    #[test]
+    fn the_debug_only_seam_cannot_reach_a_release_build() {
+        let here = include_str!("release.rs");
+        let lines: Vec<&str> = here.lines().collect();
+        let read_pattern = ["std::env::var(", "TEST_RELEASES_URL_ENV", ")"].concat();
+        let read_line = lines.iter().position(|l| l.contains(&read_pattern)).expect(
+            "the seam's own read call must still exist, unchanged, for this guard to mean anything",
+        );
+        let guard_pattern = ["#[cfg(", "debug_assertions", ")]"].concat();
+        let guarded = lines[..read_line].iter().rev().take(3).any(|l| l.contains(&guard_pattern));
+        assert!(
+            guarded,
+            "the line reading {read_pattern:?} must be immediately preceded by {guard_pattern:?}, \
+             or a release build could read RITORNELLO_TEST_RELEASES_URL"
+        );
+
+        // The other half: a release *profile* that re-enables debug
+        // assertions would let a shipped `--release` binary read the seam
+        // even though the source line above stays correctly annotated —
+        // `#[cfg(debug_assertions)]` follows the *profile* setting, not the
+        // `--release`/`--debug` flag by name.
+        let workspace_toml = include_str!("../../../../Cargo.toml");
+        assert!(
+            !workspace_toml.contains("debug-assertions"),
+            "a [profile.release] debug-assertions key would defeat the seam's own guard"
+        );
+        // The same override could also live outside `Cargo.toml`: cargo
+        // merges a `[profile.release]` table found in `.cargo/config.toml`
+        // exactly as if it were written here, and `Cross.toml` can pass
+        // arbitrary environment or cargo flags through to the `cross build
+        // --release` invocation `deploy/build.sh` and `ci.yml` both run.
+        // Neither file exists in this workspace today, which is exactly why
+        // `include_str!` is the wrong tool for them: it refuses to compile
+        // the moment either is absent, so a copy of the check above pointed
+        // at them would have to be written (and deleted, and rewritten) in
+        // lockstep with whether the file happens to exist -- easy to forget
+        // the day one is added for an unrelated reason. A runtime read has
+        // no such day: an absent file reads as `""`, `"".contains(..)` is
+        // `false`, and the assertion holds the same way it does for a
+        // workspace with no override at all, while a file that exists and
+        // does carry the key still reddens this test.
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for relative in [".cargo/config.toml", "Cross.toml"] {
+            let text = std::fs::read_to_string(repo_root.join(relative)).unwrap_or_default();
+            assert!(
+                !text.contains("debug-assertions"),
+                "{relative} must not re-enable debug assertions in a release profile -- \
+                 it would defeat the seam's own guard the same way a [profile.release] \
+                 key written directly in Cargo.toml would"
+            );
+        }
+        // And the two places that actually build what ships must still ask
+        // for `--release` at all — a workspace with no release profile in
+        // sight but a build chain that quietly stopped using `--release`
+        // would make the first two checks vacuous.
+        let build_sh = include_str!("../../../../deploy/build.sh");
+        assert!(
+            build_sh.contains("cross build --release"),
+            "deploy/build.sh must still build the shipped artifact in release mode"
+        );
+        let ci_yml = include_str!("../../../../.github/workflows/ci.yml");
+        assert!(
+            ci_yml.contains("cross build --release"),
+            "ci.yml's release job must still build the shipped artifact in release mode"
+        );
+    }
 
     #[test]
     fn an_asset_name_yields_its_component_and_its_own_version() {
@@ -709,6 +894,96 @@ mod tests {
         ] {
             assert_eq!(classify_asset(name, "armv7"), None, "{name}");
         }
+    }
+
+    /// A pack carries text, so it has no architecture. The branch runs
+    /// **before** the arch suffix is stripped: `classify_asset` cuts
+    /// `-<arch>.tar.gz` first, so a name without one would otherwise be
+    /// rejected before it was ever examined.
+    #[test]
+    fn a_language_pack_asset_is_recognised_without_an_architecture() {
+        assert_eq!(
+            classify_asset("ritornello-lang-fr-0.2.1.tar.gz", "armv7"),
+            Some((Offer::LanguagePack("fr".to_string()), "0.2.1".to_string()))
+        );
+        assert_eq!(
+            classify_asset("ritornello-lang-pt-BR-0.2.1-beta.1.tar.gz", "armv7"),
+            Some((Offer::LanguagePack("pt-BR".to_string()), "0.2.1-beta.1".to_string())),
+            "a regionalised code splits like a plugin name does"
+        );
+    }
+
+    /// **The coupling itself, not a restatement of it.** `pack_id` (the
+    /// prefix a pack is published and stored under) and `classify_asset`
+    /// (the prefix a release's own asset list is read back through) must
+    /// agree on the same string -- fix round 1 gave both a single home,
+    /// `langpack::store::PACK_ID_PREFIX`, and this test is what actually
+    /// exercises the agreement: the asset name is *built* from `pack_id`,
+    /// never spelled out again, so a version of this test that hard-coded
+    /// `"ritornello-lang-fr"` would go on passing even if `classify_asset`
+    /// quietly read its own, different literal -- proving nothing about
+    /// whether the two sides still agree.
+    #[test]
+    fn classify_asset_recognises_a_name_built_from_pack_id() {
+        let name = format!("{}-0.2.1.tar.gz", crate::langpack::store::pack_id("fr"));
+        assert_eq!(
+            classify_asset(&name, "armv7"),
+            Some((Offer::LanguagePack("fr".to_string()), "0.2.1".to_string()))
+        );
+        // A regionalised code, since that exact pairing (a dash inside the
+        // language code, read back by the same left-to-right dash scan a
+        // plugin name uses) has already caused one defect in this plan.
+        let name = format!("{}-0.2.1.tar.gz", crate::langpack::store::pack_id("pt-BR"));
+        assert_eq!(
+            classify_asset(&name, "armv7"),
+            Some((Offer::LanguagePack("pt-BR".to_string()), "0.2.1".to_string()))
+        );
+    }
+
+    /// The same shapes the plugin branch already refuses, restated for this
+    /// one: an empty language, a lone dash, and an arch where a version
+    /// belongs.
+    #[test]
+    fn a_malformed_language_pack_asset_is_not_classified() {
+        for name in [
+            "ritornello-lang--0.2.1.tar.gz",
+            // A lone dash as the language, reached on the loop's SECOND
+            // dash rather than its first: `language.starts_with('-')` is
+            // what refuses it. Fix round 1's review measured that this
+            // clause held no test of its own -- mutating it to `false` left
+            // the whole `update::` suite green, twice -- because every
+            // other malformed name above is already excluded earlier by
+            // `language.is_empty()` before this guard is ever reached.
+            "ritornello-lang---0.2.1.tar.gz",
+            "ritornello-lang-fr.tar.gz",
+            "ritornello-lang-fr-armv7.tar.gz",
+            "ritornello-lang-0.2.1.tar.gz",
+            "ritornello-lang-fr-0.2.1-armv7.tar.gz",
+        ] {
+            assert_eq!(classify_asset(name, "armv7"), None, "{name}");
+        }
+    }
+
+    /// **Device-independent, not caller-arch-dependent.** The same archive
+    /// name must classify identically whichever device reads it -- an
+    /// `arm64` label in the name is refused even when the *caller* is
+    /// `armv7`, because the guard checks the name against the whole closed
+    /// set `ARCHES`, not against this one call's own `arch` parameter. Fix
+    /// round 1's review named the failure mode a caller-scoped guard would
+    /// produce: the same bytes accepted as a pack on one device and refused
+    /// on another, which nothing could ever reproduce from a bug report.
+    #[test]
+    fn a_language_pack_asset_is_refused_for_any_arch_label_not_only_the_callers() {
+        assert_eq!(classify_asset("ritornello-lang-fr-0.2.1-arm64.tar.gz", "armv7"), None);
+        assert_eq!(classify_asset("ritornello-lang-fr-0.2.1-x86_64.tar.gz", "arm64"), None);
+    }
+
+    /// The drift guard: `ARCHES` is a second statement of the labels `ARCH`
+    /// can ever take, so nothing keeps the two in step but a test that reads
+    /// both.
+    #[test]
+    fn arch_is_always_one_of_the_labels_arches_names() {
+        assert!(ARCHES.contains(&ARCH));
     }
 
     fn body(releases: &str) -> String {
@@ -1241,7 +1516,19 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
             releases_url_for("someone/their-plugin"),
             "https://api.github.com/repos/someone/their-plugin/releases?per_page=100"
         );
-        // And ours is the same function applied to the compile-time anchor.
-        assert_eq!(releases_url(), releases_url_for(REPO));
+        // And ours is the same function applied to the compile-time anchor
+        // -- checked against `releases_url_for(REPO)` directly, deliberately
+        // never through `releases_url()` itself (fix round 1, item 3):
+        // that wrapper reads `RITORNELLO_TEST_RELEASES_URL` when it is set
+        // (the debug-only e2e seam, see that constant's own doc), so a
+        // developer whose shell still carries it from an earlier e2e run
+        // would otherwise see this unrelated test fail for a reason it
+        // says nothing about. The property under test -- "ours takes the
+        // same path as a stranger's, just with a different argument" --
+        // does not need the wrapper at all to be checked.
+        assert_eq!(
+            releases_url_for(REPO),
+            "https://api.github.com/repos/skerdudou/ritornello/releases?per_page=100"
+        );
     }
 }

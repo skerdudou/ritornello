@@ -107,6 +107,77 @@ mod tests {
         read(&repo_root().join("crates").join(name).join("Cargo.toml"))
     }
 
+    /// The packs declared in `deploy/language-packs.toml`, as
+    /// `(language, version)`. Their version has no Cargo.toml to live in --
+    /// a pack is not a crate -- so this file is the one place it is written,
+    /// and this guard is what keeps it on the same rails as every component.
+    ///
+    /// Deliberately textual, like `declared_version` above: a `[section]`
+    /// header names the language and the `version = "..."` line that follows
+    /// it names its number, and a full TOML parse is more machinery than two
+    /// line shapes deserve.
+    fn declared_packs() -> Vec<(String, String)> {
+        let text = read(&repo_root().join("deploy").join("language-packs.toml"));
+        let mut packs = Vec::new();
+        let mut current: Option<String> = None;
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r').trim();
+            if let Some(lang) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                current = Some(lang.to_string());
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("version = \"") {
+                let version = rest
+                    .strip_suffix('"')
+                    .unwrap_or_else(|| panic!("malformed version line: {line}"));
+                let lang = current
+                    .clone()
+                    .unwrap_or_else(|| panic!("version line before any [language] section"));
+                packs.push((lang, version.to_string()));
+            }
+        }
+        assert!(
+            !packs.is_empty(),
+            "deploy/language-packs.toml declares no language pack at all"
+        );
+        packs
+    }
+
+    /// The languages `deploy/locales` carries text for: every module
+    /// directory it holds, deduplicated. A module without a given language's
+    /// `.toml` is normal -- not every plugin needs its own strings -- so this
+    /// asks only which languages exist anywhere under `deploy/locales`, not
+    /// which modules a language completes.
+    fn languages_on_disk() -> Vec<String> {
+        let root = repo_root().join("deploy").join("locales");
+        let mut languages = std::collections::BTreeSet::new();
+        for module in std::fs::read_dir(&root)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()))
+        {
+            let module = module.expect("readable directory entry").path();
+            if !module.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&module)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", module.display()))
+            {
+                let entry = entry.expect("readable directory entry").path();
+                if entry.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    let lang = entry
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_else(|| panic!("non-UTF8 file name: {}", entry.display()));
+                    languages.insert(lang.to_string());
+                }
+            }
+        }
+        assert!(
+            !languages.is_empty(),
+            "deploy/locales carries no language file at all"
+        );
+        languages.into_iter().collect()
+    }
+
     #[test]
     fn every_shipped_component_declares_its_own_version() {
         let mut names = vec!["ritornello-core".to_string()];
@@ -142,6 +213,25 @@ mod tests {
                 product,
                 "{name} is {version}, off the product generation {}.{}; \
                  only the third number is free",
+                product.0,
+                product.1
+            );
+        }
+    }
+
+    /// The same generation rule, for language packs: they have no
+    /// Cargo.toml, so `deploy/language-packs.toml` is the one place their
+    /// number is written, and this is what keeps it on the same rails as
+    /// every crate-shaped component.
+    #[test]
+    fn every_language_pack_stays_on_the_product_generation() {
+        let product = generation(&product_version());
+        for (lang, version) in declared_packs() {
+            assert_eq!(
+                generation(&version),
+                product,
+                "language pack [{lang}] is {version}, off the product \
+                 generation {}.{}; only the third number is free",
                 product.0,
                 product.1
             );
@@ -217,6 +307,112 @@ mod tests {
         }
     }
 
+    /// The same trap as `a_prerelease_ships_no_component_under_the_finished_number`,
+    /// for language packs: a pack declaring the bare `0.2.1` inside product
+    /// `0.2.1-beta.1` carries no suffix at all, so it would slip past a
+    /// suffix check. The device compares versions for equality, so a pack
+    /// installed from the beta under `0.2.1` and shipped again unmoved in the
+    /// finished `v0.2.1` looks identical to a device that already has it: the
+    /// newer archive -- if the finished release even carries a newer one --
+    /// is never fetched.
+    #[test]
+    fn a_prerelease_ships_no_language_pack_under_the_finished_number() {
+        let product = product_version();
+        let Some(_) = prerelease(&product) else {
+            return; // a finished product: the generation rule above covers it
+        };
+        let finished = product.split('-').next().unwrap_or(&product);
+        for (lang, version) in declared_packs() {
+            assert_ne!(
+                version, finished,
+                "language pack [{lang}] is {version} inside prerelease \
+                 {product}: the finished {finished} will carry that same \
+                 number, and a device compares versions for equality, so \
+                 whoever installs it here keeps the beta's bytes for ever"
+            );
+        }
+    }
+
+    /// Every language `deploy/locales` carries has a pack declared for it,
+    /// and no pack is declared for a language nothing translates. Without
+    /// this, adding `de.toml` files would ship nothing and removing a
+    /// language would leave a pack naming an empty archive.
+    #[test]
+    fn the_declared_packs_are_exactly_the_languages_on_disk() {
+        let mut declared: Vec<String> = declared_packs().into_iter().map(|(l, _)| l).collect();
+        declared.sort_unstable();
+        declared.dedup();
+        let on_disk = languages_on_disk();
+        for lang in &on_disk {
+            assert!(
+                declared.contains(lang),
+                "deploy/locales carries text for [{lang}], but \
+                 deploy/language-packs.toml declares no pack for it -- that \
+                 text would never reach a device"
+            );
+        }
+        for lang in &declared {
+            assert!(
+                on_disk.contains(lang),
+                "deploy/language-packs.toml declares a pack for [{lang}], \
+                 but deploy/locales carries no text for it -- that pack \
+                 would name an archive with nothing in it"
+            );
+        }
+    }
+
+    /// **F2 of the whole-branch review.** No declared language may be a
+    /// `-`-prefix of another declared language: the `publish` job of
+    /// `.github/workflows/ci.yml` keeps each changed component's archive
+    /// with `mv assets/"$c"-*.tar.gz keep/`, one `mv` per name
+    /// `changed-components.sh` printed. With `pt` and `pt-BR` both
+    /// declared and both changed, the `mv` for `pt` also matches
+    /// `pt-BR`'s archive (its glob is `pt-*.tar.gz`, and
+    /// `ritornello-lang-pt-BR-0.2.1.tar.gz` fits that shape), so the first
+    /// `mv` silently takes both files and the second one fails `cannot
+    /// stat` -- under the Actions default shell
+    /// (`bash --noprofile --norc -eo pipefail`) that failure exits the
+    /// step, and if only `pt` had been the one actually needing
+    /// publication, `pt-BR`'s unchanged archive would have been quietly
+    /// republished under its old number, never fetched by a device.
+    ///
+    /// Dormant today -- exactly one language is declared -- which is
+    /// exactly why this guard exists rather than waiting to be found the
+    /// day a second, related language ships: none of the three guards this
+    /// chantier added can see it, because each checks one language against
+    /// itself.
+    ///
+    /// **Not anchored on a digit.** A first version of this rule tried
+    /// "language, then a dash, then a digit", on the theory that a version
+    /// suffix is what actually collides with the glob. `es-419` is a real
+    /// BCP 47 language tag with no dash-prefix relationship to `es` at
+    /// all, and it would pass that anchor by coincidence (`4` is a digit)
+    /// while meaning something completely different -- the exact shape of
+    /// mistake this project has already paid for once by inferring a
+    /// field instead of asserting the rule it actually means: "no declared
+    /// language is a longer declared language's own stem".
+    #[test]
+    fn no_declared_language_is_a_dash_prefix_of_another() {
+        let declared: Vec<String> = declared_packs().into_iter().map(|(l, _)| l).collect();
+        for a in &declared {
+            for b in &declared {
+                if a == b {
+                    continue;
+                }
+                assert!(
+                    !b.starts_with(&format!("{a}-")),
+                    "declared languages [{a}] and [{b}]: the publish job's \
+                     `mv assets/\"$c\"-*.tar.gz keep/` for [{a}] also matches \
+                     [{b}]'s archive ([{b}] starts with \"{a}-\"), so keeping \
+                     [{a}] then [{b}] fails the second mv, and keeping only \
+                     [{a}] would republish [{b}]'s unchanged archive under its \
+                     old number without a word -- see the publish job of \
+                     .github/workflows/ci.yml"
+                );
+            }
+        }
+    }
+
     /// The same generation rule, in the other language that enforces it.
     ///
     /// `scripts/package-release.sh` names every archive of a release and
@@ -242,6 +438,39 @@ mod tests {
         assert!(
             out.status.success(),
             "package-release.sh --self-test failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The same shape as the test above, for `changed-components.sh`'s
+    /// language-pack decision and naming -- and the closer of a real gap:
+    /// the `publish` job of `.github/workflows/ci.yml` keeps only
+    /// `assets/"$c"-*.tar.gz` for every name `changed-components.sh` prints,
+    /// then `rm -rf assets`. So this script's stdout is not informative --
+    /// it decides what survives that deletion. Its own `--self-test` proves
+    /// both halves of the version-diff decision (a pack whose number moved
+    /// is named, one that did not is not) and, separately, that the bare
+    /// token it would emit for a pack is exactly the prefix
+    /// `package-release.sh` actually built an archive under -- by building
+    /// one for real and checking the file exists, rather than comparing two
+    /// copies of the same literal string.
+    ///
+    /// Run here rather than only manually, for the same reason as its
+    /// neighbour above: this script's only other exercise is the `publish`
+    /// job, which fires on a tag, and a workflow change is never testable
+    /// from its own branch.
+    #[test]
+    fn changed_components_agrees_about_language_pack_naming() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let out = std::process::Command::new("bash")
+            .arg("scripts/changed-components.sh")
+            .arg("--self-test")
+            .current_dir(&root)
+            .output()
+            .expect("bash is available: the Rust suite runs on Linux here and in CI");
+        assert!(
+            out.status.success(),
+            "changed-components.sh --self-test failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
     }

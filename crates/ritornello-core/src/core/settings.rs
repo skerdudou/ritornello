@@ -46,9 +46,9 @@ impl<P: Player> Core<P> {
     /// `Registry::chain_for`.
     ///
     /// A real locale change is also the registry's refresh gesture: the
-    /// registry's disk tier is swept once (at startup) and never re-read on
-    /// its own, so resweeping here is what lets an operator who edited a
-    /// pack on disk see it without restarting the service. **This method
+    /// registry's pack tier is swept once (at startup) and never re-read on
+    /// its own, so resweeping here is what lets an operator who installed
+    /// or removed a pack see it without restarting the service. **This method
     /// must actually run for that to happen** — `ConfigView.vue`'s
     /// `saveDisplay` short-circuits before `PUT /api/locale` when the
     /// picked language (and, while it is incomplete, the fallback) is
@@ -306,8 +306,13 @@ mod tests {
         // hardcoded "en" — only from the fallback tier `set_fallback` wires
         // in, proving the chain actually reaches it.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("core")).unwrap();
-        std::fs::write(dir.path().join("core/nl.toml"), "standby = \"SLAAP\"\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("packs/ritornello-lang-nl")).unwrap();
+        std::fs::write(
+            dir.path().join("packs/ritornello-lang-nl/pack.toml"),
+            "language = \"nl\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"core\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("packs/ritornello-lang-nl/core.toml"), "standby = \"SLAAP\"\n").unwrap();
         let player = FakePlayer::default();
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));
@@ -323,7 +328,7 @@ mod tests {
         let manifest_order = declared_order(&sources);
         let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
-        // No `core/fr.toml` on disk, and this rig's registry is a bare
+        // No installed pack for `fr`, and this rig's registry is a bare
         // sweep (no embedded English seed) — so before any fallback is set,
         // nothing in the chain defines "standby" and `Chain::get` falls
         // back to the raw key, its own documented safety net.
@@ -374,8 +379,13 @@ mod tests {
         // *during* standby therefore left the word displayed in the old
         // language until the next Power cycle.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("core")).unwrap();
-        std::fs::write(dir.path().join("core/fr.toml"), "standby = \"VEILLE\"\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("packs/ritornello-lang-fr")).unwrap();
+        std::fs::write(
+            dir.path().join("packs/ritornello-lang-fr/pack.toml"),
+            "language = \"fr\"\nversion = \"0.2.0\"\nsource = \"x\"\nmodules = [\"core\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("packs/ritornello-lang-fr/core.toml"), "standby = \"VEILLE\"\n").unwrap();
         let player = FakePlayer::default();
         let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
         sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }));

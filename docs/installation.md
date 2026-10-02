@@ -147,7 +147,10 @@ release where it last changed, and that is where the device installs or
 repairs it from.
 
 **This is an upgrade path, not a fresh install.** The archives carry
-binaries, units, polkit rules and language packs — nothing else. They do not
+binaries, units and polkit rules — nothing else. A language pack is never
+part of a component's archive; see [Installing a language
+pack](#installing-a-language-pack) below for that archive's own shape. They
+do not
 create the `ritornello` system user, install `mpv`/`cd-discid`/`eject`/
 `cifs-utils`, create `/var/lib/ritornello`, `/mnt/ritornello` or
 `/etc/ritornello/media-credentials`, nor enable any unit. Extracting them
@@ -195,9 +198,41 @@ shares](#network-shares)). `deploy.sh` does this for you; an archive cannot,
 so a `files` plugin installed from a release and never enabled this way stops
 reconciling shares at the next reboot, in silence.
 
+### Installing a language pack
+
+Not by the recipe above. A language pack's archive is **flat** —
+`pack.toml` plus one `<module>.toml` per plugin it covers, no leading
+path at all — because it is meant to be read by the core's own pack
+reader (`crates/ritornello-core/src/langpack/archive.rs`), never
+extracted directly onto a device. Running the same
+`sudo tar --no-same-owner -C / -xzf ritornello-lang-<language>-<version>.tar.gz`
+against it drops `pack.toml` and every module file straight into `/`,
+which is not a mistake this project's own tooling ever makes and not one
+this recipe should invite either.
+
+The ordinary way to install one is from the config page, where the core
+fetches, verifies and writes it itself — no privileged step at all (see
+[interface.md](interface.md)). A device with no French installed simply
+reads its interface in English until that gesture is made, which is the
+correct and unremarkable state of a fresh install, not a fault to chase.
+
+Installed by hand instead — for a device with no network path to
+GitHub — a pack extracts into its own directory under
+`/etc/ritornello/language-packs/ritornello-lang-<language>/`, replacing
+whatever was there, and **never at `/`**:
+
+    sudo mkdir -p /etc/ritornello/language-packs/ritornello-lang-<language>
+    sudo tar --no-same-owner -C /etc/ritornello/language-packs/ritornello-lang-<language> \
+      -xzf ritornello-lang-<language>-<version>.tar.gz
+    sudo chown -R ritornello: /etc/ritornello/language-packs/ritornello-lang-<language>
+
+The core picks it up at its next sweep of that directory (a restart, or
+the same resweep an install or removal from the page already triggers);
+nothing needs to be declared anywhere else for it.
+
 ### Enabling automatic updates (once, by hand)
 
-An update can replace binaries and locale catalogs. It can never write a
+An update can replace binaries. It can never write a
 systemd unit or a polkit rule — that is what stops a forged archive from
 gaining root, and it is why this feature's own installation is manual.
 
@@ -234,7 +269,7 @@ Without the `OnFailure=` line everything works and there is no safety net.
 
 **Why a blind `sudo tar -C /` cannot clobber a configuration.** Each
 archive's tree holds files only at the exact path they occupy on the
-device — the binary, its systemd unit, its polkit rule, its language packs —
+device — the binary, its systemd unit, its polkit rule —
 and never `stations.toml`, `input-bindings.toml` or `plugins.toml`, the
 three files that hold what an operator produced (stations added from the
 browser, bindings learned, which plugins to launch). Those are structurally
@@ -401,6 +436,12 @@ when the file is absent** — a first installation needs no manual copy,
 and a file that exists is **never overwritten**, whatever it contains.
 Those two hold what you produced (stations added from the browser,
 learned bindings), so nothing may complete them.
+
+### The operator's own locales layer is gone
+
+`/etc/ritornello/locales` is no longer read by anything (owner's decision,
+2026-09-23, no backward compatibility): a device deployed before this
+delivery may delete it by hand.
 
 `plugins.toml` is the exception, because it holds no such thing: it lists
 which of the binaries just installed the core is to launch. It is
@@ -794,6 +835,22 @@ report on this project described as broken, and nobody has yet watched its
 `no disc` become `pas de disque` on the real screen after a language
 change — until that observation is made, this line stays, per this
 project's own rule against shrinking this section on faith.
+
+**No language pack has ever been installed on the device.** Building one,
+publishing it, fetching it, verifying its digest, refusing a malformed one,
+writing it, resweeping the registry and removing it are all covered by
+tests that fake the network and use a temporary directory; none has run on
+a Pi, and the pack job of the release workflow has never run at all — like
+the rest of that workflow.
+
+**The removal of the operator's own locales layer has been exercised on
+exactly one device, by hand, and nowhere else.** The owner deleted
+`/etc/ritornello/locales` on the one real Raspberry Pi this project has
+(verified); the code and script changes that make that path unreadable
+and unwritable everywhere else — the narrowed archive rule
+(`update::archive::ETC_PREFIXES`), the trimmed `deploy.sh`, a fresh
+deployment never creating that directory at all — have run only in this
+repository's own test suite, never against a real deployment from scratch.
 
 **Known edges and debts in the code, recorded here rather than fixed or
 dressed up as design:**

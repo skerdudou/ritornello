@@ -5,6 +5,7 @@ mod cover;
 mod i18n;
 mod metadata;
 mod docs_map;
+mod langpack;
 mod packaging_manifest;
 mod plugin_catalogue_declaration;
 mod version_coherence;
@@ -1697,17 +1698,19 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading {}", plugins_path.display()))?;
     let persisted = state::load(&state_path);
 
-    let locales_root = PathBuf::from(env_or("RITORNELLO_LOCALES", "/etc/ritornello/locales"));
-    // The one registry for the whole process: swept from disk once here,
-    // seeded with the core's own module and `common`'s, then grown by one
-    // `insert_announced` per plugin announcement (initial wiring loop and
-    // `hotplug`, below) and shrunk by `forget` (`admin::forget_page`) as
-    // plugins disconnect — see `crate::i18n::Shared`'s doc. `locales_root`'s
-    // only other reader, `AppState.locales_root`, was removed once every
-    // route that used it moved onto this same registry (`Registry::
-    // core_languages` — task 12) instead of a second, independent disk
-    // read, so this is now its last use.
-    let registry: i18n::Shared = Arc::new(RwLock::new(i18n::seeded_registry(locales_root)));
+    let packs_root =
+        PathBuf::from(env_or(crate::langpack::PACKS_ROOT_ENV, crate::langpack::DEFAULT_PACKS_ROOT));
+    // The one registry for the whole process: swept from the packs root
+    // once here, seeded with the core's own module and `common`'s, then
+    // grown by one `insert_announced` per plugin announcement (initial
+    // wiring loop and `hotplug`, below) and shrunk by `forget`
+    // (`admin::forget_page`) as plugins disconnect — see
+    // `crate::i18n::Shared`'s doc.
+    // Cloned before the move below: `update::Worker` writes into this same
+    // root (`install_language`/`remove_language`) and must never compose a
+    // second `PathBuf` of its own for it — see `Worker.packs_root`'s doc.
+    let worker_packs_root = packs_root.clone();
+    let registry: i18n::Shared = Arc::new(RwLock::new(i18n::seeded_registry(packs_root)));
     // The device's own persisted fallback (task 13), or "en" on a device
     // that has never set one — see `i18n::core_catalog`'s doc.
     let catalog = Arc::new(RwLock::new(i18n::core_catalog(
@@ -2241,6 +2244,10 @@ async fn main() -> Result<()> {
         root: PathBuf::from("/"),
         core_version: env!("CARGO_PKG_VERSION"),
         restart: restart_hook.clone(),
+        registry: registry.clone(),
+        packs_root: worker_packs_root,
+        locale_tx: locale_tx.clone(),
+        locale_current: locale_current.clone(),
     };
     // Read off the `Worker` actually built, not a second `PathBuf::from("/")`
     // literal: `status::PluginsControl.root` (below) must be the exact same
@@ -3355,7 +3362,7 @@ mod toggle_tests {
         // tokio `RwLock` this crate uses elsewhere has no synchronous
         // reader safe to call from inside a `#[tokio::test]`'s worker
         // thread.
-        let registry_val = crate::i18n::seeded_registry(root.clone());
+        let registry_val = crate::i18n::seeded_registry(root.join("packs"));
         let catalog = Arc::new(RwLock::new(crate::i18n::core_catalog(&registry_val, "en", "en")));
         let registry: crate::i18n::Shared = Arc::new(RwLock::new(registry_val));
 
@@ -4785,7 +4792,7 @@ mod toggle_tests {
     async fn startup_wiring_puts_an_announced_catalog_into_the_registry() {
         let dir = tempfile::tempdir().unwrap();
         let registry: i18n::Shared =
-            std::sync::Arc::new(tokio::sync::RwLock::new(i18n::seeded_registry(dir.path().to_path_buf())));
+            std::sync::Arc::new(tokio::sync::RwLock::new(i18n::seeded_registry(dir.path().join("packs"))));
         let mut catalog = HashMap::new();
         catalog.insert("en".to_string(), HashMap::from([("greeting".to_string(), "Hi there".to_string())]));
         let a = Announcement {
@@ -4814,7 +4821,7 @@ mod toggle_tests {
     async fn startup_wiring_leaves_the_module_absent_when_the_announcement_has_no_catalog() {
         let dir = tempfile::tempdir().unwrap();
         let registry: i18n::Shared =
-            std::sync::Arc::new(tokio::sync::RwLock::new(i18n::seeded_registry(dir.path().to_path_buf())));
+            std::sync::Arc::new(tokio::sync::RwLock::new(i18n::seeded_registry(dir.path().join("packs"))));
         let a = Announcement {
             name: "mpd".into(),
             kinds: vec![PluginKind::Display],

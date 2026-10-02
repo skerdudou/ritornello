@@ -697,8 +697,9 @@ mod tests {
     /// - **The plugin list is derived, not hardcoded.** It comes from
     ///   `deploy/locales/*` (minus `core` and `common`, which are not
     ///   plugins) — the same source of truth the four-textless-plugin guard
-    ///   (`packaging_manifest.rs::a_plugin_without_locales_is_normal`) reads.
-    ///   A hardcoded list here could silently drift from that one exactly
+    ///   (`shipped_language_packs_of_an_absent_module_directory_is_empty` in
+    ///   `crates/ritornello-i18n/src/layer.rs`) reads. A hardcoded list here
+    ///   could silently drift from that one exactly
     ///   the way the "three plugins have no text" claim drifted from it in
     ///   three doc comments before this commit; deriving both from the same
     ///   directory listing makes that drift structurally impossible, and a

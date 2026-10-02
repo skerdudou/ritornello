@@ -106,7 +106,7 @@ export type Availability =
  */
 export interface ComponentOffer {
   name: string
-  kind: 'core' | 'plugin' | 'third_party'
+  kind: 'core' | 'plugin' | 'third_party' | 'language_pack'
   declared: boolean
   binary_present: boolean
   installed: string | null
@@ -209,6 +209,43 @@ export interface LocalePayload {
   fallback_current: string
   /** The core's own installed languages only — never the plugin union. */
   fallback_candidates: string[]
+  /**
+   * One row per language a pack is installed or offered for, mirroring
+   * `status::locales::LanguagePackRow`. Keyed by **language**, not by pack
+   * id: livraison 2, where several packs may carry one language, is the
+   * single place that will need to widen this into a list per language.
+   */
+  packs: LanguagePackRow[]
+}
+
+/**
+ * One entry of `LocalePayload.packs`, mirroring
+ * `status::locales::LanguagePackRow` field for field. Both `installed` and
+ * `offered` are `Option<T>` without `skip_serializing_if` on the Rust side,
+ * so they serialize as `null` and are typed `T | null` here, not `T?` —
+ * "known to be absent", not "field omitted".
+ */
+export interface LanguagePackRow {
+  language: string
+  installed: string | null
+  offered: string | null
+}
+
+/**
+ * The language gesture `ConfigView` currently has enqueued, and which one it
+ * is — fix round 1, finding 3 of task 10's review. `LanguagePacksRow` used to
+ * receive just the busy language and guess the verb from `row.installed`
+ * (installed → "removing", not installed → "installing"), which happened to
+ * work only because the one thing ever writing that field was this same
+ * component's own click. A row that licenses both "Update" and "Remove" (a
+ * pack installed, with a newer one offered) makes that guess wrong for an
+ * Update in flight — `row.installed` stays non-null, so the guess said
+ * "removing" for an install. Named by the side that starts the gesture
+ * (`ConfigView`), never reconstructed by the side that only renders it.
+ */
+export interface LanguageBusy {
+  language: string
+  action: 'install' | 'remove'
 }
 export interface ThemePayload { theme: string; mode: Mode }
 export interface LogsPayload { lines: string[] }
