@@ -1,0 +1,159 @@
+# Spanish pack of the `files` plugin.
+#
+# Its key set must stay **identical** to that of the embedded English catalog
+# (`crates/ritornello-plugin-files/src/locales/en.toml`): a parity test checks
+# it, and a key missing here would show English without warning.
+
+# Statuses shown by the Source.
+status_files = "ARCHIVOS"
+no_playlist = "SIN LISTA"
+empty_track = "PISTA INEXISTENTE"
+
+# Root validation refusals.
+bad_root_name = "nombre de raíz no válido «{name}»: usa solo minúsculas, dígitos y guiones, empezando por una letra o un dígito"
+bad_host = "dirección de servidor no válida «{host}»: sin comas, espacios ni «..»"
+bad_share = "nombre de recurso compartido no válido «{share}»: sin comas, espacios ni «..»"
+bad_subpath = "subcarpeta no válida «{path}»: debe ser relativa y no debe subir de nivel"
+duplicate_root = "ya existe una raíz llamada «{name}»"
+relative_local_path = "la carpeta local «{path}» debe ser una ruta absoluta"
+
+# Recursive scan refusals.
+too_many_tracks = "esta carpeta contiene más de {cap} pistas: acótala o añade sus subcarpetas una a una"
+scan_io_error = "no se pudo leer «{path}»: comprueba que todavía existe y que Ritornello tiene permiso para leerla"
+
+# Saved playlist store refusals.
+bad_playlist_name = "nombre de lista no válido «{name}»: sin barras, y no debe empezar por un punto"
+read_only_root = "la raíz «{name}» está montada en solo lectura: permite la escritura en ella para guardar listas allí"
+unknown_root = "no hay ninguna raíz llamada «{name}»"
+store_io_error = "no se pudo escribir ni leer «{path}»"
+
+# Admin half refusals.
+bad_request = "la página envió algo que este complemento no entendió ({detail})"
+# A background task (scan, browse, search) was interrupted before reporting
+# anything — a `tokio::task::JoinHandle` error, never seen in practice
+# outside a panic or a shutdown. Not translated from any specific cause,
+# unlike every refusal above: `{detail}` carries whatever the runtime says.
+internal_task_error = "se interrumpió una tarea interna: {detail}"
+
+# Management page labels.
+root_label = "Raíz"
+kind_local = "carpeta local"
+kind_smb = "recurso compartido de red"
+mounted_yes = "montado"
+mounted_no = "no montado"
+writable_label = "permitir escritura"
+archive_covers_label = "guardar aquí las carátulas encontradas"
+ph_host = "servidor"
+ph_share = "recurso compartido"
+ph_subpath = "subcarpeta (opcional)"
+ph_user = "usuario"
+ph_password = "contraseña"
+ph_domain = "dominio de Windows (opcional)"
+btn_add_share = "Declarar un recurso compartido"
+
+browse_title = "Explorar"
+search_placeholder = "buscar"
+btn_search = "Buscar"
+no_results = "Sin resultados"
+search_truncated = "Solo se muestran los {count} primeros: acota la búsqueda."
+search_gave_up = "la búsqueda se detuvo antes de recorrer toda esta carpeta: abre una subcarpeta y busca allí."
+empty_folder = "Carpeta vacía"
+btn_add_current_folder = "Añadir esta carpeta"
+search_scope = "La búsqueda abarca {path}"
+scan_progress = "Analizando {dir}: {found} pistas encontradas"
+
+playlist_title = "Lista actual"
+col_num = "N.º"
+col_track = "Pista"
+col_duration = "Duración"
+empty_playlist = "Lista vacía"
+missing_badge = "no encontrado"
+reorder_hint = "Arrastra para reordenar"
+btn_move_up = "Subir la pista"
+btn_move_down = "Bajar la pista"
+btn_remove_track = "Quitar la pista"
+btn_clear = "Vaciar la lista"
+page_range = "{from}–{to} de {total}"
+unresolved_title = "No se encontraron {count} entradas"
+unresolved_title_one = "No se encontró 1 entrada"
+ph_playlist_name = "nombre de la lista"
+dest_label = "Destino"
+dest_internal = "almacenamiento interno"
+btn_save_playlist = "Guardar la lista"
+no_saved = "No hay listas guardadas"
+load_playlist_label = "Lista que cargar"
+btn_load_playlist = "Cargar"
+load_error = "Error: {cause}"
+
+# --- Declared sources ---
+sources_title = "Fuentes"
+no_sources = "Todavía no hay ninguna fuente declarada. Añade una carpeta o un recurso compartido de red para empezar."
+btn_add_device = "Añadir una carpeta de este dispositivo"
+btn_add_to_playlist = "Añadir a la lista"
+btn_remove_source = "Quitar esta fuente"
+btn_retry_mount = "Reintentar el montaje"
+mount_error_title = "El último intento de montaje falló:"
+# `{detail}` is `systemctl`'s own raw output, never translated (see
+# `mount::reconcile`'s doc: a polkit refusal is explicit there, and a
+# home-made sentence would make it opaque) — the same shape `share_not_declared`
+# already carries.
+mount_retry_failed = "el intento de montaje falló: {detail}"
+share_not_declared = "el recurso compartido no se montó, así que no se ha declarado: {detail}"
+# Whole-sentence key, not `share_not_declared` nested inside itself: the
+# fallback used to be a *resolved* sentence handed to `share_not_declared` as
+# its own `{detail}`, which is exactly the two-levels-of-resolution shape
+# this chantier moved away from (language-packs chantier, task 9). Composed
+# once, in each language, instead.
+share_not_declared_silent = "el recurso compartido no se montó, así que no se ha declarado: systemd indicó éxito pero falta el punto de montaje: comprueba el nombre del recurso compartido, las credenciales y que cifs-utils esté instalado; consulta journalctl -u ritornello-media-mount para ver la causa exacta"
+
+# --- Wizard: folder from this device ---
+dlg_device_title = "Añadir una carpeta de este dispositivo"
+dlg_device_desc = "Elige un volumen, baja hasta la carpeta que contiene tu música y confirma."
+volumes_label = "Volumen"
+no_volumes = "No se encontró ningún volumen utilizable."
+audio_here = "{count} archivos de audio aquí"
+audio_here_none = "No hay archivos de audio aquí"
+audio_here_one = "1 archivo de audio aquí"
+btn_choose_folder = "Usar esta carpeta"
+btn_up = "Subir un nivel"
+ph_manual_path = "o escribe una ruta absoluta"
+btn_go = "Abrir"
+btn_cancel = "Cancelar"
+
+# --- Wizard: network share ---
+dlg_share_title = "Añadir un recurso compartido de red"
+dlg_share_desc = "Indica la dirección del equipo, conéctate, elige un recurso compartido y baja hasta una carpeta. No se monta nada hasta que confirmes."
+btn_connect = "Conectar"
+connecting = "Conectando…"
+shares_label = "Recurso compartido"
+btn_manual = "Introducir los datos manualmente"
+btn_assistant = "Volver al asistente"
+smb_unavailable = "El asistente de red necesita el paquete smbclient. Sin él, aún puedes declarar un recurso compartido introduciendo sus datos manualmente."
+
+# --- smbclient refusals ---
+smb_not_installed = "smbclient no está instalado: instala el paquete smbclient para explorar un recurso compartido de red."
+smb_bad_credentials = "El equipo rechazó estas credenciales. Comprueba el nombre de usuario y la contraseña."
+smb_access_denied = "El equipo aceptó la conexión pero denegó el acceso. Puede que esta cuenta no tenga permiso en este recurso compartido."
+smb_unreachable = "El equipo {host} no respondió. Comprueba la dirección y que la máquina esté encendida."
+smb_not_found = "Este recurso compartido o esta carpeta ya no existe en el equipo."
+smb_timeout = "El equipo {host} tardó demasiado en responder."
+smb_unreadable_output = "smbclient respondió algo que esta versión no sabe leer. Salida sin procesar: {detail}"
+
+# --- Source refusals ---
+bad_local_path = "Esta ruta no se puede explorar: {path}"
+unknown_source = "Fuente desconocida: {name}"
+duplicate_source = "Esta carpeta ya está declarada como fuente."
+
+not_a_playlist = "«{path}» no es un archivo de lista de reproducción (.m3u o .m3u8)"
+btn_load_m3u = "Cargar esta lista"
+duration_progress = "Leyendo la duración de las pistas ({done} de {total})"
+
+# --- Unresponsive mount points ---
+#
+# Distinct from `bad_local_path` and from `missing_badge` on purpose: a share
+# that stopped answering is neither an invalid path nor a deleted file, and
+# saying either sends the user looking for the fault in the wrong place.
+root_unresponsive = "«{path}» no responde: puede que el recurso compartido esté en reposo o inaccesible. No se ha cambiado nada."
+unresponsive_title = "Estos puntos de montaje no responden:"
+unresponsive_hint = "La información que se muestra sobre ellos estará incompleta hasta que vuelvan a responder. La reproducción de las fuentes locales no se ve afectada."
+missing_unknown = "desconocido"

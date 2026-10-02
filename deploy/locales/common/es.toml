@@ -1,0 +1,12 @@
+play = "Reproducir"
+pause = "Pausa"
+stop = "Detener"
+error = "Error"
+# Loading a plugin's UI (the SPA shell, web/app/src/views/PluginView.ts).
+# These keys live in the `common` layer — inherited by ALL catalogues —
+# and not in the core's: the shell resolves first in the plugin's catalogue,
+# which is empty precisely when the plugin is unreachable.
+loading = "Cargando…"
+plugin_unavailable = "Interfaz del complemento no disponible."
+plugin_unavailable_cause = "Interfaz del complemento no disponible: {cause}"
+plugin_contract_mismatch = "La interfaz de este complemento debe recompilarse: no corresponde al contrato de interfaz actual."

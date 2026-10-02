@@ -35,6 +35,20 @@ defineEmits<{ descend: [name: string]; goUp: [] }>()
  * not to hide it.
  */
 const shortPath = computed(() => truncateStart(props.path))
+
+/**
+ * The audio count of the open level, as a sentence whose grammatical number
+ * agrees with it. A single "{count} audio files" key read "1 audio files"
+ * (and "0 fichiers" in French, where zero takes the singular), so the zero
+ * and the one each get a key of their own — the same shape as the core's
+ * `locale_fallback_result_none` / `_one`.
+ */
+const audioLine = computed(() => {
+  const count = props.exploration.audioCount
+  if (count === 0) return props.t('audio_here_none')
+  if (count === 1) return props.t('audio_here_one')
+  return props.t('audio_here', { count })
+})
 </script>
 
 <template>
@@ -101,7 +115,7 @@ const shortPath = computed(() => truncateStart(props.path))
            are in the right place. Without it, a folder is chosen while
            hoping. -->
       <p class="text-sm text-muted-foreground" data-audio-count>
-        {{ t('audio_here', { count: exploration.audioCount }) }}
+        {{ audioLine }}
       </p>
     </template>
   </div>

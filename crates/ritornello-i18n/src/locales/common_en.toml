@@ -2,10 +2,10 @@ play = "Play"
 pause = "Pause"
 stop = "Stop"
 error = "Error"
-# Chargement d'une IHM de plugin (shell de la SPA, web/app/src/views/PluginView.ts).
-# Ces clés vivent dans la couche `common` — héritée par TOUS les catalogues —
-# et non dans celui du cœur : le shell résout d'abord dans le catalogue du
-# plugin, qui est vide précisément quand le plugin est injoignable.
+# Loading a plugin's UI (the SPA shell, web/app/src/views/PluginView.ts).
+# These keys live in the `common` layer — inherited by EVERY catalog —
+# and not in the core's: the shell resolves first against the plugin's
+# catalog, which is empty precisely when the plugin is unreachable.
 loading = "Loading…"
 plugin_unavailable = "Plugin interface unavailable."
 plugin_unavailable_cause = "Plugin interface unavailable: {cause}"

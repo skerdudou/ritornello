@@ -972,6 +972,15 @@ tests that fake the network and use a temporary directory; none has run on
 a Pi, and the pack job of the release workflow has never run at all — like
 the rest of that workflow.
 
+**The German, Spanish and Italian packs have not been reviewed by a native
+speaker.** They were translated from the English catalogs, with the French
+pack as a reference for meaning, and the only thing checked mechanically is
+what the parity tests check: the same keys as English, the same `{named}`
+parameters in every value. Wording, register and terminology (what a
+preset, a source or a plugin is called) are unverified, and so is whether
+the short status words still fit the twenty-column console display. The
+first native reader to open one of these interfaces is its first review.
+
 **The removal of the operator's own locales layer has been exercised on
 exactly one device, by hand, and nowhere else.** The owner deleted
 `/etc/ritornello/locales` on the one real Raspberry Pi this project has

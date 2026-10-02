@@ -1608,7 +1608,9 @@ external TOML text, decentralized per component, read from **one root**:
   or module automatically falls back through the chain above (per-key
   degradation, never an error). A pack file that is present but unreadable
   (permissions, invalid TOML) is ignored **with a trace in the logs**.
-- The initial French pack is built from `deploy/locales/` by
+- The packs this project ships — French, German, Spanish and Italian,
+  one `[<language>]` section each in `deploy/language-packs.toml` — are
+  built from `deploy/locales/` by
   `scripts/package-release.sh --languages` — the same path the release
   workflow uses to publish every pack — and `deploy/deploy.sh` places the
   packs it builds under `/etc/ritornello/language-packs/`, exactly as an

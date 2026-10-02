@@ -1,0 +1,40 @@
+empty_preset = "leerer Favorit"
+preset_out_of_range = "Favorit {p} außerhalb des Bereichs 1-99 ({name})"
+preset_duplicate = "Favorit {p} doppelt vergeben"
+bad_url = "ungültige URL für {name}: {url}"
+bad_request = "ungültige Anfrage: {detail}"
+search_error = "Suche im Verzeichnis fehlgeschlagen: {detail}"
+save_failed = "Speichern fehlgeschlagen"
+
+# admin page
+admin_title = "Sender"
+col_num = "Nr."
+col_name = "Name"
+col_url = "Stream-URL"
+btn_add = "+ Hinzufügen"
+btn_save = "Speichern"
+load_error = "Fehler beim Laden der Sender ({cause}) — stations.toml korrigieren, dann neu laden"
+saved = "Gespeichert ✓"
+save_error = "Fehler: {cause}"
+limit_reached = "Maximal 99 Favoriten — zuerst einen entfernen"
+
+# online directory
+search_title = "Aus dem Online-Verzeichnis hinzufügen"
+search_placeholder = "Sendername"
+country_label = "Land"
+# Country names are **not** translated here: the UI renders them with
+# `Intl.DisplayNames` from the ISO code, in the browser's language. A table
+# of 241 countries to maintain in every language pack would make no sense.
+country_all = "Alle Länder"
+country_filter_placeholder = "Land oder Code"
+country_none = "Kein passendes Land"
+country_loading = "Länder werden geladen…"
+reorder_hint = "Zum Umsortieren ziehen"
+move_up = "Nach oben"
+move_down = "Nach unten"
+remove_station = "Sender entfernen"
+btn_search = "Suchen"
+btn_add_result = "Hinzufügen"
+searching = "Suche läuft…"
+no_results = "Kein Sender gefunden"
+empty_query = "Geben Sie einen Suchbegriff ein"

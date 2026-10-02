@@ -392,7 +392,11 @@ function load(): void {
       class="space-y-1 rounded-md border border-border p-2"
     >
       <p class="text-sm font-medium">
-        {{ t('unresolved_title', { count: data.unresolved.length }) }}
+        {{
+          data.unresolved.length === 1
+            ? t('unresolved_title_one')
+            : t('unresolved_title', { count: data.unresolved.length })
+        }}
       </p>
       <ul class="text-xs text-muted-foreground">
         <li v-for="u in data.unresolved" :key="u" data-unresolved-row>{{ u }}</li>
