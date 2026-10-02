@@ -22,8 +22,9 @@ use tokio::sync::RwLock as AsyncRwLock;
 
 pub(crate) const RADIO_EN: &str = include_str!("locales/en.toml");
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+/// Where this plugin keeps its files, relative to its data directory.
+fn paths_in(data: &std::path::Path) -> (PathBuf, PathBuf) {
+    (data.join("stations.toml"), data.join("state.json"))
 }
 
 struct RadioSource {
@@ -258,8 +259,9 @@ impl SourcePlugin for RadioSource {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let stations_path = PathBuf::from(env_or("RITORNELLO_RADIO_STATIONS", "/etc/ritornello/stations.toml"));
-    let state_path = PathBuf::from(env_or("RITORNELLO_RADIO_STATE", "/var/lib/ritornello/plugin-radio.json"));
+    // Everything this plugin writes lives in its own data directory — see
+    // `ritornello_plugin_sdk::DATA_DIR_ENV` for why there is exactly one.
+    let (stations_path, state_path) = paths_in(&ritornello_plugin_sdk::data_dir());
 
     let stations = Stations::load(&stations_path).unwrap_or_else(|e| {
         tracing::warn!("stations.toml invalid or missing ({e}): starting without stations");
@@ -312,6 +314,15 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use ritornello_plugin_sdk::AdminPlugin;
+
+    #[test]
+    fn every_file_lives_in_the_plugin_s_own_directory() {
+        let d = std::path::Path::new("/x/plugins/radio");
+        let (stations, state) = paths_in(d);
+        assert!(stations.starts_with(d) && state.starts_with(d));
+        assert_eq!(stations.file_name().unwrap(), "stations.toml");
+        assert_eq!(state.file_name().unwrap(), "state.json");
+    }
 
     #[tokio::test]
     async fn selecting_an_empty_preset_carries_a_key_not_a_resolved_text() {

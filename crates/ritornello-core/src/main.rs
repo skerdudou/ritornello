@@ -2,6 +2,8 @@ mod audio_output;
 mod admin;
 mod core;
 mod cover;
+#[cfg(test)]
+mod data_dirs_guard;
 mod i18n;
 mod metadata;
 mod docs_map;
@@ -734,6 +736,10 @@ fn kill_incompatible_plugins(
 
 struct HotPlugChildren {
     sockets_dir: PathBuf,
+    /// Where a hot-launched plugin's data directory is created, joined with
+    /// its name (`plugins::data_dir_for`) — the same root the startup loop
+    /// reads once from `plugins::PLUGIN_DATA_ROOT_ENV`.
+    plugin_data_root: PathBuf,
     /// Manifest names in file order: the authority on accepted names, and
     /// the arbitration priority of the `metadata` plugins.
     manifest_order: Vec<String>,
@@ -1355,7 +1361,14 @@ async fn relaunch(
     kill_triggers: &mut HashMap<String, tokio::sync::oneshot::Sender<()>>,
 ) -> Option<PluginExit> {
     let prefix = children.sockets_dir.join(name);
-    match plugins::spawn(exec, register_path, name, &prefix) {
+    let Some(data_dir) = plugins::data_dir_for(&children.plugin_data_root, name) else {
+        tracing::warn!("plugin {name:?}: not a bare name, not launched");
+        return None;
+    };
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        tracing::warn!("plugin {name}: creating {}: {e}", data_dir.display());
+    }
+    match plugins::spawn(exec, register_path, name, &prefix, &data_dir) {
         Ok(child) => {
             tracing::info!("plugin {name} re-enabled, launched again");
             let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1693,6 +1706,10 @@ async fn main() -> Result<()> {
     let cd_dev = env_or("RITORNELLO_CD_DEV", "/dev/sr0");
     let http_addr = env_or("RITORNELLO_HTTP", "0.0.0.0:8080");
     let runtime_dir = env_or("RITORNELLO_RUNTIME_DIR", "/run/ritornello");
+    let plugin_data_root = PathBuf::from(env_or(
+        plugins::PLUGIN_DATA_ROOT_ENV,
+        plugins::DEFAULT_PLUGIN_DATA_ROOT,
+    ));
 
     let manifest = PluginManifest::load(&plugins_path)
         .with_context(|| format!("loading {}", plugins_path.display()))?;
@@ -1862,7 +1879,18 @@ async fn main() -> Result<()> {
             continue;
         }
         let prefix = sockets_dir.join(&p.name);
-        match plugins::spawn(&p.exec, &register_path, &p.name, &prefix) {
+        let Some(data_dir) = plugins::data_dir_for(&plugin_data_root, &p.name) else {
+            tracing::warn!("plugin {:?}: not a bare name, not launched", p.name);
+            // Same treatment as a `spawn` failure that is not "binary
+            // missing" (see `status_for_spawn_failure`): there is no launch
+            // error to downcast here, since `spawn` was never called.
+            plugin_statuses.push(PluginStatus::unknown_kind(&p.name, false));
+            continue;
+        };
+        if let Err(e) = std::fs::create_dir_all(&data_dir) {
+            tracing::warn!("plugin {}: creating {}: {e}", p.name, data_dir.display());
+        }
+        match plugins::spawn(&p.exec, &register_path, &p.name, &prefix, &data_dir) {
             Ok(child) => {
                 let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
                 kill_triggers.insert(p.name.clone(), kill_tx);
@@ -2242,6 +2270,11 @@ async fn main() -> Result<()> {
         settings: settings_current.clone(),
         staging: staging_dir,
         root: PathBuf::from("/"),
+        // Cloned, not read a second time from `RITORNELLO_PLUGIN_DATA_ROOT`:
+        // `plugin_data_root` above is already the root the startup loop
+        // launches every plugin with, and `Worker.plugin_data_root`'s doc
+        // says why the two must never drift apart.
+        plugin_data_root: plugin_data_root.clone(),
         core_version: env!("CARGO_PKG_VERSION"),
         restart: restart_hook.clone(),
         registry: registry.clone(),
@@ -2436,6 +2469,7 @@ async fn main() -> Result<()> {
     // update worker has just appended to.
     let mut hot_children = HotPlugChildren {
         sockets_dir: sockets_dir.clone(),
+        plugin_data_root: plugin_data_root.clone(),
         manifest_order,
         source_update_tx: source_update_tx.clone(),
         cmd_tx: cmd_tx.clone(),
@@ -3393,6 +3427,7 @@ mod toggle_tests {
 
         let children = HotPlugChildren {
             sockets_dir: root.clone(),
+            plugin_data_root: root.join("plugin-data"),
             manifest_order,
             source_update_tx: mpsc::channel(4).0,
             cmd_tx: mpsc::channel(4).0,

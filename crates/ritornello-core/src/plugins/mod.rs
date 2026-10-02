@@ -1,9 +1,4 @@
-// No caller yet: `append_block`, `remove_entry` and `move_entry` get their
-// first caller in a later task. Until then only this module's own tests
-// reach its public items, and a binary crate (unlike a library) does not
-// treat `pub` as "reachable from outside" on its own.
-#[allow(dead_code)]
-pub mod edit;
+pub use ritornello_manifest as edit;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -309,8 +304,25 @@ pub fn prepare_sockets_dir(runtime_dir: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Where the core puts every plugin's data directory, and the variable that
+/// moves it (the end-to-end harness, a development run).
+pub const PLUGIN_DATA_ROOT_ENV: &str = "RITORNELLO_PLUGIN_DATA_ROOT";
+pub const DEFAULT_PLUGIN_DATA_ROOT: &str = "/var/lib/ritornello/plugins";
+
+/// `root` joined with `name`, or `None` when `name` is not a bare plugin name.
+///
+/// The name comes from `plugins.toml`, a file the operator edits by hand: it is
+/// validated before it forms a path, with the privileged side's own grammar
+/// (`ritornello_updater::request::valid_name`), so one rule names a plugin
+/// everywhere.
+pub fn data_dir_for(root: &Path, name: &str) -> Option<PathBuf> {
+    ritornello_updater::request::valid_name(name).then(|| root.join(name))
+}
+
 /// Launches a plugin, telling it where to announce itself, under which name,
-/// and with which socket prefix.
+/// with which socket prefix, and its own data directory
+/// (`ritornello_plugin_sdk::DATA_DIR_ENV`) — the one directory it is to write
+/// into, created by the caller before this is called.
 ///
 /// No file pre-deletion here: `prepare_sockets_dir` wiped the whole directory
 /// before the first launch.
@@ -326,11 +338,13 @@ pub fn spawn(
     register: &Path,
     name: &str,
     prefix: &Path,
+    data_dir: &Path,
 ) -> Result<tokio::process::Child> {
     let mut cmd = tokio::process::Command::new(exec);
     cmd.arg("--register").arg(register);
     cmd.arg("--name").arg(name);
     cmd.arg("--socket-prefix").arg(prefix);
+    cmd.env(ritornello_plugin_sdk::DATA_DIR_ENV, data_dir);
     // The path is named in the error: "No such file or directory" alone leaves
     // one guessing **which** of the `plugins.toml` paths is at fault, and the
     // most common confusion is precisely there — a deployment `exec`
@@ -344,6 +358,43 @@ pub fn spawn(
 /// Two seconds: no plugin has any cleanup to do today, and the toggle comes
 /// from a web page waiting for the answer.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// Plugins of this repository whose packaging places files a privileged
+/// install alone can place: a root-run binary **outside** the plugins
+/// directory (`extra_binaries` in `deploy/packaging.toml`), a systemd unit, or
+/// a polkit rule (a `tree` destination under `etc/systemd/system/` or
+/// `etc/polkit-1/rules.d/`). Installing or uninstalling one of these from the
+/// web UI can only ever do half the job — the privileged half is
+/// `ritornello-install`'s, a separate program shipped in the same release.
+///
+/// **A list, not an announcement.** The owner first considered having each
+/// plugin announce that it is privileged, then chose this list instead: a
+/// plugin that has never announced itself — disabled, crashed, or never
+/// started — could not have said so, and the UI would then have had no way
+/// to refuse touching it for exactly that reason (2026-09-23 decision). The
+/// plugin protocol carries no such field and never will.
+///
+/// `deploy/packaging.toml` is the authority this list is checked against, in
+/// **both** directions, by
+/// `packaging_manifest::tests::every_privileged_plugin_agrees_with_packaging_toml`:
+/// a name here that packaging.toml does not privilege, or a privileged
+/// packaging.toml entry not named here, is a red test — never a silent drift
+/// between the two.
+///
+/// A third-party plugin can never be privileged: its archive is refused by
+/// `update::archive::only_its_own_binary`, which allows nothing but its own
+/// plugin binary. So this list only ever needs to name plugins that ship
+/// from this repository.
+pub const PRIVILEGED_PLUGINS: &[&str] = &["files"];
+
+/// Whether `name` is one of `PRIVILEGED_PLUGINS` — the single place both the
+/// route refusals (`status::plugin_status::plugin_delete`) and the
+/// status/update payloads (`PluginStatus::privileged`,
+/// `update::deny_privileged_install`) ask the question, so the three can
+/// never disagree with each other about one plugin.
+pub fn is_privileged(name: &str) -> bool {
+    PRIVILEGED_PLUGINS.contains(&name)
+}
 
 /// Terminates a plugin: `SIGTERM`, then `SIGKILL` if it lingers beyond
 /// `grace`.
@@ -377,6 +428,73 @@ pub async fn terminate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The variable reaches the plugin: proven by launching a real process
+    /// that writes what it received, not by reading `spawn`'s source.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_launched_plugin_receives_its_data_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("seen");
+        let exec = dir.path().join("fake-plugin");
+        std::fs::write(
+            &exec,
+            format!("#!/bin/sh\nprintf '%s' \"$RITORNELLO_PLUGIN_DATA_DIR\" > '{}'\n", out.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let data = dir.path().join("plugins/radio");
+        let mut child = spawn(
+            exec.to_str().unwrap(),
+            &dir.path().join("register.sock"),
+            "radio",
+            &dir.path().join("prefix"),
+            &data,
+        )
+        .unwrap();
+        child.wait().await.unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), data.to_str().unwrap());
+    }
+
+    /// `DEFAULT_PLUGIN_DATA_ROOT` (this crate's own default) must name the
+    /// exact same directory as `ritornello_plugin_sdk::default_data_dir`
+    /// (the plugin side's own default, used when a plugin is launched by
+    /// hand without the core setting `RITORNELLO_PLUGIN_DATA_DIR`).
+    /// `ritornello-core` does depend on `ritornello-plugin-sdk` — but a
+    /// dependency edge only lets the compiler catch two sides disagreeing
+    /// about a *type*; these are two independently-written string literals,
+    /// each free to drift from the other with nothing red to show for it,
+    /// which is exactly what this test is for.
+    ///
+    /// This does not reach the `files` root helper's own `FILES_DATA_DIR`
+    /// (`media-mount.rs`) directly: `ritornello-core` does not depend on
+    /// `ritornello-plugin-files`, and never should — the whole point of the
+    /// helper reading a fixed, hard-coded location is that it consumes no
+    /// environment and no archive at all. The chain closes one hop at a
+    /// time instead: this test ties core to the SDK, and
+    /// `media_mount::tests` (in that crate) ties the helper's constant to
+    /// the same SDK default — see its own assertion, right beside
+    /// `FILES_DATA_DIR`'s definition.
+    ///
+    /// Proven by mutation: changing `DEFAULT_PLUGIN_DATA_ROOT` to anything
+    /// else reddens this test, naming both sides of the mismatch.
+    #[test]
+    fn the_default_root_agrees_with_the_sdks_default_data_dir() {
+        assert_eq!(
+            std::path::Path::new(DEFAULT_PLUGIN_DATA_ROOT).join("files"),
+            ritornello_plugin_sdk::default_data_dir("files"),
+        );
+    }
+
+    #[test]
+    fn a_plugin_name_that_is_not_bare_forms_no_data_directory() {
+        let root = std::path::Path::new("/var/lib/ritornello/plugins");
+        assert_eq!(data_dir_for(root, "radio"), Some(root.join("radio")));
+        for bad in ["", "..", "a/b", "../etc", "Radio", ".hidden"] {
+            assert_eq!(data_dir_for(root, bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn loads_a_toml_manifest() {
@@ -460,6 +578,7 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
             &dir.path().join("register.sock"),
             "dummy",
             &dir.path().join("dummy"),
+            &dir.path().join("data/dummy"),
         )
         .expect_err("a missing executable must fail");
         let message = format!("{e:#}");

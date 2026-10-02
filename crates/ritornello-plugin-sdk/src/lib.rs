@@ -4,7 +4,10 @@ pub mod declare;
 pub mod runtime;
 pub mod server;
 
-pub use args::{admin_socket, socket_kind, plugin_name, register_socket, socket_prefix};
+pub use args::{
+    admin_socket, data_dir, default_data_dir, plugin_name, register_socket, socket_kind,
+    socket_prefix, DATA_DIR_ENV,
+};
 pub use client::{
     run_input_client, run_metadata_client, AdminClient, AdminIpcError, DisplayClient, SourceClient,
     SourceUpdate,

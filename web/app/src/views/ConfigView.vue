@@ -366,6 +366,9 @@ interface PluginRow {
    * job left half done.
    */
   removal_pending: boolean
+  /** This plugin is privileged (`PluginStatus.privileged`): install and
+   * uninstall are the job of `ritornello-install`, never of this table. */
+  privileged: boolean
 }
 
 /** Intermediate accumulator: the raw kinds, before we decide what must stay in
@@ -387,6 +390,7 @@ interface PluginAccumulator {
   undeclared_binary: boolean
   binary_file?: string
   removal_pending: boolean
+  privileged: boolean
 }
 
 /**
@@ -418,6 +422,7 @@ const plugins = computed<PluginRow[]>(() => {
         undeclared_binary: !!p.undeclared_binary,
         binary_file: p.binary_file,
         removal_pending: !!p.removal_pending,
+        privileged: !!p.privileged,
       })
       continue
     }
@@ -442,6 +447,7 @@ const plugins = computed<PluginRow[]>(() => {
     acc.undeclared_binary = acc.undeclared_binary || !!p.undeclared_binary
     acc.binary_file = acc.binary_file ?? p.binary_file
     acc.removal_pending = acc.removal_pending || !!p.removal_pending
+    acc.privileged = acc.privileged || !!p.privileged
   }
   const declaredRows: PluginRow[] = [...byName.values()].map((acc) => {
     // "unknown" is never shown next to a real kind: we only keep it when it is
@@ -497,6 +503,7 @@ const plugins = computed<PluginRow[]>(() => {
       offered: offer?.offered ?? null,
       binary_file: acc.binary_file,
       removal_pending: acc.removal_pending,
+      privileged: acc.privileged,
     }
   })
 
@@ -1430,7 +1437,10 @@ function goTo(id: string) {
                          offered by the release) used to be a third state
                          here with only Install to offer; that row shape now
                          lives in `InstallablesDialog.vue` instead, so this
-                         table never renders it any more. -->
+                         table never renders it any more. A privileged plugin
+                         (`p.privileged`) overrides all of the above, in
+                         every one of these states: see the comment further
+                         down, beside the sentence itself. -->
                     <!-- Ruling 88, applied here for the same reason it
                          applies to `UpdateDialog`'s switch: `offered ===
                          null` (never `kind`) is the guard, and it is
@@ -1439,33 +1449,57 @@ function goTo(id: string) {
                          `undeclared_binary` row with nothing to declare it
                          from, must not offer a button that can only fail. -->
                     <div class="flex gap-1">
-                      <Button
-                        v-if="p.missing_binary"
-                        variant="outline" size="xs" data-plugin-install
-                        :disabled="p.offered === null || inProgress.has(p.name)"
-                        @click="installPlugin(p.name)"
-                      >{{ t('plugin_install') }}</Button>
-                      <!-- Both gestures this state licenses are withheld while
-                           the binary is already being erased: declaring a file
-                           that is about to vanish, or asking a second time for
-                           the erasure in flight, are the two ways this row used
-                           to mislead. The row says what is happening instead. -->
-                      <Button
-                        v-if="p.undeclared_binary && !p.removal_pending"
-                        variant="outline" size="xs" data-plugin-declare
-                        :disabled="p.offered === null || inProgress.has(p.name)"
-                        @click="installPlugin(p.name)"
-                      >{{ t('plugin_declare') }}</Button>
-                      <Button
-                        v-if="p.undeclared_binary && !p.removal_pending"
-                        variant="outline" size="xs" data-plugin-remove-binary
-                        @click="removeBinaryTarget = p.binary_file ?? p.name"
-                      >{{ t('plugin_remove_binary') }}</Button>
-                      <Button
-                        v-if="!p.undeclared_binary"
-                        variant="outline" size="xs" data-plugin-uninstall
-                        @click="uninstallTarget = p.name"
-                      >{{ t('plugin_uninstall') }}</Button>
+                      <!-- Privileged (`files` today): every gesture below —
+                           Install, Declare, Remove the binary, Uninstall —
+                           stops being this table's job, in **every** state
+                           the row can be in, not only the ordinary one.
+                           Its packaging places a root service, a systemd
+                           unit and a polkit rule this page has no way to
+                           touch — `ritornello-install` is the one program
+                           that can. Showing the sentence beside a working
+                           Install (a `missing_binary` row) or beside Declare
+                           and "Remove the binary" (an `undeclared_binary`
+                           row) would leave the operator a gesture that
+                           downloads the archive only to have
+                           `installable_from_ui` refuse it, or one that
+                           erases the plugin binary and leaves the root
+                           helper, its unit and its polkit rule behind — the
+                           exact half-finished job this change exists to
+                           close, reached from a different row shape. -->
+                      <span
+                        v-if="p.privileged"
+                        data-plugin-privileged-note
+                        class="text-xs text-muted-foreground"
+                      >{{ t('plugin_privileged_note') }}</span>
+                      <template v-else>
+                        <Button
+                          v-if="p.missing_binary"
+                          variant="outline" size="xs" data-plugin-install
+                          :disabled="p.offered === null || inProgress.has(p.name)"
+                          @click="installPlugin(p.name)"
+                        >{{ t('plugin_install') }}</Button>
+                        <!-- Both gestures this state licenses are withheld while
+                             the binary is already being erased: declaring a file
+                             that is about to vanish, or asking a second time for
+                             the erasure in flight, are the two ways this row used
+                             to mislead. The row says what is happening instead. -->
+                        <Button
+                          v-if="p.undeclared_binary && !p.removal_pending"
+                          variant="outline" size="xs" data-plugin-declare
+                          :disabled="p.offered === null || inProgress.has(p.name)"
+                          @click="installPlugin(p.name)"
+                        >{{ t('plugin_declare') }}</Button>
+                        <Button
+                          v-if="p.undeclared_binary && !p.removal_pending"
+                          variant="outline" size="xs" data-plugin-remove-binary
+                          @click="removeBinaryTarget = p.binary_file ?? p.name"
+                        >{{ t('plugin_remove_binary') }}</Button>
+                        <Button
+                          v-if="!p.undeclared_binary"
+                          variant="outline" size="xs" data-plugin-uninstall
+                          @click="uninstallTarget = p.name"
+                        >{{ t('plugin_uninstall') }}</Button>
+                      </template>
                     </div>
                   </td>
                 </tr>

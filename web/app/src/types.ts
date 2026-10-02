@@ -59,6 +59,12 @@ export interface PluginStatus {
    * again, and the probe stays armed until it clears. Optional: absent when
    * false. */
   removal_pending?: boolean
+  /** This plugin is one of the repository's privileged plugins: its
+   * packaging places files a privileged install alone can place (a root
+   * service, a systemd unit, a polkit rule), so installing or uninstalling
+   * it from this page can only ever do half the job. Optional: absent when
+   * false. */
+  privileged?: boolean
 }
 export interface StatusPayload {
   plugins: PluginStatus[]

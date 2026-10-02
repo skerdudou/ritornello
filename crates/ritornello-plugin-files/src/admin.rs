@@ -203,6 +203,19 @@ pub enum Op {
     LoadM3u { root: String, path: String },
 }
 
+/// The credentials directory, created on first use with mode 0700: nobody but
+/// the service account may read it (the root mount helper reads everything).
+/// It used to be created by `deploy.sh`; the plugin owns its directory now.
+fn ensure_credentials_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 impl FilesAdmin {
     /// A bare key, no parameters — unresolved, the core resolving it
     /// against this plugin's announced catalog (language-packs chantier,
@@ -290,12 +303,21 @@ impl FilesAdmin {
 
     /// Writes the credentials file consumed by `mount.cifs`.
     ///
-    /// The permissions are set **at creation**, not afterwards: creating
-    /// then restricting would leave a window during which the passphrase
-    /// would be readable by everyone.
+    /// The **file**'s permissions are set at creation, not afterwards:
+    /// creating then restricting would leave a window during which the
+    /// passphrase would be readable by everyone (the `mode(0o600)` below is
+    /// atomic with the `open`). The **directory**'s are not — `ensure_
+    /// credentials_dir` creates it, then `chmod`s it, a plain
+    /// `create_dir_all` under a different name — so a window does exist
+    /// there, between the two calls, during which the directory carries
+    /// whatever mode the process's own `umask` gives a fresh directory. What
+    /// still makes this safe is that nothing sensitive is written *into* it
+    /// during that window: this function, called right after, is what puts
+    /// the file there, and the file's own permissions are the ones that
+    /// carry the guarantee.
     fn write_credentials(path: &Path, user: &str, password: &str, domain: &str) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            ensure_credentials_dir(parent)?;
         }
         let tmp = path.with_extension("cred.tmp");
         #[cfg(unix)]
@@ -1707,6 +1729,16 @@ mod tests {
         admin.set_data(add_share("secret")).await.unwrap();
         let meta = std::fs::metadata(admin.creds_dir.join("musique.cred")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_credentials_directory_is_created_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let c = d.path().join("credentials");
+        ensure_credentials_dir(&c).unwrap();
+        assert_eq!(std::fs::metadata(&c).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
     #[tokio::test]

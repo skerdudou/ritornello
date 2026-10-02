@@ -168,10 +168,11 @@ PI=pi@raspberrypi.local ./deploy/deploy.sh     # builds everything and installs 
 ```
 
 `deploy.sh` copies the binaries, language packs and remote presets,
-installs the hardened systemd unit and provisions `/etc/ritornello` from
-the example TOML files (without overwriting yours). The web UI is then at
-`http://<host>:8080`. The step-by-step details, for a Pi or a plain Linux
-PC, are in [docs/installation.md](docs/installation.md).
+installs the hardened systemd unit and provisions `plugins.toml` and every
+plugin's own data directory from the example TOML files (without
+overwriting yours). The web UI is then at `http://<host>:8080`. The
+step-by-step details, for a Pi or a plain Linux PC, are in
+[docs/installation.md](docs/installation.md).
 
 To try it **without any hardware**, a local instance runs in five minutes:
 [docs/development.md](docs/development.md).

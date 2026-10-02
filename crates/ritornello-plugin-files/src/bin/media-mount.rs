@@ -18,6 +18,19 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// The files plugin's data directory. Fixed rather than read from the
+/// environment: this binary is started by systemd, as root, with no
+/// environment of ours, and a path it trusts should not come from one anyway.
+/// The same directory the core hands the plugin (`plugins::data_dir_for`).
+const FILES_DATA_DIR: &str = "/var/lib/ritornello/plugins/files";
+
+/// Where this helper reads the declared roots and the stored credentials,
+/// relative to the plugin's data directory. A pure function so the paths it
+/// derives can be checked without touching the real, root-owned location.
+fn paths_in(data: &Path) -> (PathBuf, PathBuf) {
+    (data.join("media-roots.toml"), data.join("credentials"))
+}
+
 /// Reads the `uid` and `gid` of the service user from `/etc/passwd`.
 ///
 /// A file read rather than a dependency on `nix` or `libc`: it is three lines,
@@ -60,21 +73,20 @@ fn cifs_help<F: Fn(&str) -> bool>(exists: F) -> Option<&'static str> {
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let roots_path = env_or("RITORNELLO_FILES_ROOTS", "/etc/ritornello/media-roots.toml");
-    let creds_dir = env_or("RITORNELLO_FILES_CREDENTIALS", "/etc/ritornello/media-credentials");
+    let (roots_path, creds_dir) = paths_in(Path::new(FILES_DATA_DIR));
     let user = env_or("RITORNELLO_USER", "ritornello");
 
-    let roots = match Roots::load(Path::new(&roots_path)) {
+    let roots = match Roots::load(&roots_path) {
         Ok(r) => r,
         Err(e) => {
             // No configuration = nothing to mount, not a failure: the service
             // is activated at machine boot, before any share has ever been
             // declared.
-            if !Path::new(&roots_path).exists() {
-                tracing::info!("{roots_path} does not exist yet: nothing to mount");
+            if !roots_path.exists() {
+                tracing::info!("{} does not exist yet: nothing to mount", roots_path.display());
                 return Ok(());
             }
-            return Err(e).with_context(|| format!("reading {roots_path}"));
+            return Err(e).with_context(|| format!("reading {}", roots_path.display()));
         }
     };
     // Belt and braces: `load` already validates, but this line is what makes
@@ -150,7 +162,7 @@ fn main() -> Result<()> {
             tracing::error!("creating {}: {e}", point.display());
             continue;
         }
-        let cmd = mount_command(r, Path::new(&creds_dir), uid, gid);
+        let cmd = mount_command(r, &creds_dir, uid, gid);
         match std::process::Command::new(&cmd[0]).args(&cmd[1..]).output() {
             // A failure does not fail the service: the other shares must be
             // mounted anyway, and the user will see the state from the page.
@@ -231,5 +243,20 @@ proc /proc proc rw,relatime 0 0
         // The case that cost one hour on the device: `cifs-utils` not
         // installed, and a "cannot mount … read-only" that did not say so.
         assert_eq!(cifs_help(|_| false), None);
+    }
+
+    #[test]
+    fn the_helper_and_the_plugin_agree_on_the_data_directory() {
+        // Two independent binaries, one path: a helper reading a directory of
+        // its own would silently stop finding what the plugin just wrote.
+        assert_eq!(Path::new(FILES_DATA_DIR), ritornello_plugin_sdk::default_data_dir("files"));
+    }
+
+    #[test]
+    fn the_helper_reads_the_table_and_the_credentials_from_its_data_directory() {
+        let d = Path::new("/x/plugins/files");
+        let (roots, creds) = paths_in(d);
+        assert_eq!(roots, d.join("media-roots.toml"));
+        assert_eq!(creds, d.join("credentials"));
     }
 }

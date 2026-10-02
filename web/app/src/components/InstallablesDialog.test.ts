@@ -12,6 +12,7 @@ const CATALOG = {
   installables_no_catalogue:
     'This release does not publish a description of its components, or it could not be read; only their names are known.',
   installables_install: 'Install',
+  plugin_privileged_note: 'Privileged component: install or uninstall it with ritornello-install.',
   plugin_kind_display: 'affichage',
   plugin_kind_source: 'source',
 }
@@ -264,6 +265,27 @@ describe('InstallablesDialog', () => {
     await flushPromises()
     expect(document.body.querySelector('[data-installable-row][data-name="ritornello-lang-fr"]')).toBeNull()
     expect(document.body.querySelector('[data-installable-row][data-name="console"]')).not.toBeNull()
+  })
+
+  // Both halves in one test: a privileged plugin's row (`installable: false`,
+  // set by the core from its own name, never from an archive read here) loses
+  // the Install button and gains the sentence, and an ordinary row on the
+  // same dialog keeps its button — a one-sided assertion would pass against a
+  // dialog that renders the sentence everywhere, or nowhere.
+  it('shows the ritornello-install sentence instead of Install for a privileged plugin, and only that one', async () => {
+    mountDialog([
+      offer({ name: 'files', availability: 'not_installed', offered: '0.2.1', installable: false }),
+      offer({ name: 'console', availability: 'not_installed', offered: '0.2.1' }),
+    ])
+    await flushPromises()
+    const filesRow = document.body.querySelector('[data-installable-row][data-name="files"]')!
+    const consoleRow = document.body.querySelector('[data-installable-row][data-name="console"]')!
+
+    expect(filesRow.querySelector('[data-installable-install]')).toBeNull()
+    expect(filesRow.querySelector('[data-installable-privileged]')?.textContent).toContain('ritornello-install')
+
+    expect(consoleRow.querySelector('[data-installable-privileged]')).toBeNull()
+    expect(consoleRow.querySelector('[data-installable-install]')).not.toBeNull()
   })
 
   it('emits install for one row at a time', async () => {

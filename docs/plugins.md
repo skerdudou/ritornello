@@ -79,6 +79,51 @@ and the next derived field then costs nothing at ten call sites.
 `protocol` is `ritornello_proto::PROTOCOL_VERSION` as the plugin was built, a
 single number shared by the whole protocol crate, not one per message kind.
 
+### Where a plugin keeps its data
+
+**One directory per plugin, and nothing written anywhere else.** The core
+launches every plugin with `RITORNELLO_PLUGIN_DATA_DIR` set to
+`{RITORNELLO_PLUGIN_DATA_ROOT}/<name>` — `/var/lib/ritornello/plugins/<name>`
+by default — and creates that directory before the plugin's first launch.
+A plugin reads it with `ritornello_plugin_sdk::data_dir()` and writes every
+file it owns underneath: its settings, what the operator produced through
+its admin page, its state, its caches. Nothing else — no other path under
+`/etc/ritornello` or `/var/lib/ritornello` — is a plugin's to spell.
+
+This is a convention, not a lock: every plugin runs under the same account,
+in the same sandbox, and nothing at the OS level stops one from writing
+elsewhere. It is held instead by `ritornello-core`'s own test suite
+(`no_plugin_spells_a_data_path_of_its_own`), which scans every plugin
+crate's production source for a literal path under either root and fails,
+naming the file and the line, the day one appears outside
+`ritornello_plugin_sdk::data_dir()`.
+
+**One directory, and removing a plugin's data is removing it.** This is why
+it matters beyond tidiness: a third-party plugin uninstalled from the admin
+UI, or a bundled one whose data an operator wants gone, is one `rm -rf`
+away — not a hunt through `/etc/ritornello` for files nobody remembers the
+name of.
+
+Two things are not plugin data, and stay where they have always been:
+`plugins.toml` (`/etc/ritornello/plugins.toml`), which the *core* reads and
+rewrites — it says which binaries to launch, not what a plugin produced —
+and `RITORNELLO_INPUT_PRESETS` (`/etc/ritornello/input-presets`), the
+bundled remote-control presets the repository ships and `deploy.sh`
+installs, read by `generic-input` but never written by it. The `files`
+plugin's own data directory is also the root helper's one fixed, documented
+location (`/var/lib/ritornello/plugins/files`, `FILES_DATA_DIR` in
+`media-mount.rs`), spelled out rather than derived at runtime because the
+helper consumes no environment and no archive at all — it reads
+`media-roots.toml` and `credentials/` from underneath that one fixed path,
+`/etc/passwd` (the service user's `uid`/`gid`) and `/proc/mounts` (what is
+already mounted), and forms the one other path that is its to form,
+`/mnt/ritornello/<name>` (never read from `media-roots.toml`, see [The
+privilege boundary](#the-privilege-boundary) below) — unlike the updater,
+it is not limited to two path shapes overall, only to this one, fixed
+starting point.
+
+Each plugin's own files, below, in its section.
+
 ### Writing a plugin of your own
 
 A plugin built outside this repository is a **third-party** plugin, and the
@@ -459,7 +504,7 @@ appends to the end of the list, deleting renumbers the following ones;
 beyond 99, adding is refused. The highest preset number in use is declared
 to the core as `preset_count` — through the admin page presets are
 contiguous 1..N, so this doubles as a plain station count in the normal
-case. A hand-edited, sparse `RITORNELLO_RADIO_STATIONS` file breaks that
+case. A hand-edited, sparse `stations.toml` file breaks that
 equivalence: stations at 1 and 40 declare `preset_count: 40`, and the
 console display then reads "RADIO  1/40" — not a bug, the field's contract
 is the highest number in use, not a count of how many exist (see
@@ -534,7 +579,7 @@ populated by the directory itself (241 countries at the last count, with
 each one's station count). Names are rendered by the browser from the ISO
 code — no country table to translate in the language packs. The list is
 only requested when the picker opens, never on page load, and the choice
-is **remembered by the plugin** (in `plugin-radio.json`, next to the
+is **remembered by the plugin** (in its own `state.json`, next to the
 current preset): it follows the device, not the browser.
 
 Directory unreachable ⇒ error message on the page, current playback and
@@ -559,10 +604,11 @@ qualifies `status_text`: it feeds a passing overlay message and leaves
 whatever a source has permanently declared untouched underneath, ready to
 reappear once the message's time is up.
 
-Variables: `RITORNELLO_RADIO_STATIONS`, `RITORNELLO_RADIO_STATE`,
-`RITORNELLO_RADIO_DIRECTORY` (**pins** a directory server: it becomes the
-only one tried, to impose your own mirror without recompiling; when
-unset, the built-in list applies).
+Its data — `stations.toml` and `state.json` — lives in its own directory
+(see [Where a plugin keeps its data](#where-a-plugin-keeps-its-data)).
+Variable: `RITORNELLO_RADIO_DIRECTORY` (**pins** a directory server: it
+becomes the only one tried, to impose your own mirror without recompiling;
+when unset, the built-in list applies).
 
 ## `ritornello-plugin-cd` — the CD player
 
@@ -581,8 +627,8 @@ in for stations.
 
 The plugin serves an admin page carrying its one setting: what happens when
 this source is arrived at. Three values — play nothing (the default), start at
-track 1, resume the track last played — stored in
-`/var/lib/ritornello/plugin-cd.json` (`RITORNELLO_CD_STATE`).
+track 1, resume the track last played — stored in its own `state.json` (see
+[Where a plugin keeps its data](#where-a-plugin-keeps-its-data)).
 
 **One value governs both ways of arriving**, the source key (`Activate`) and a
 boot or standby exit (`Wake`). That is the point of the setting, and it
@@ -788,14 +834,14 @@ Its page, `http://<host>:8080/plugins/files/`, is where roots are
 declared (host, share, subfolder, user, password, domain, whether writing
 is allowed), where a folder is browsed and added recursively to the
 current playlist, and where a playlist is saved and loaded again.
-Declaring a share writes two things: the root into
-`/etc/ritornello/media-roots.toml` (see `deploy/media-roots.example.toml`)
-and its password into `/etc/ritornello/media-credentials/<name>.cred`
-(mode `0600`) — the password is deliberately kept out of the roots file.
+Declaring a share writes two things: the root into the plugin's own
+`media-roots.toml` (see `deploy/media-roots.example.toml`) and its password
+into its own `credentials/<name>.cred` (mode `0600`) — the password is
+deliberately kept out of the roots file.
 
 **mpv holds the playlist**, the plugin only drives the index: it hands
-over a generated `.m3u` (`/var/lib/ritornello/plugin-files.m3u`, never
-shown to anyone) and a starting index. Automatic advance therefore comes
+over a generated `.m3u` (the plugin's own `playlist.m3u`, never shown to
+anyone) and a starting index. Automatic advance therefore comes
 back through `SourceReq::PlayerTrack`, exactly as for a disc, and the
 plugin has nothing to pace itself. The `Play` it issues is marked
 `finite`: a list of files ends normally, and without that word mpv going
@@ -1116,14 +1162,20 @@ mpv's `metadata` property (see the `metadata` section below), and the
 name without its extension — makes sure the screen is never mute even
 with no tags at all.
 
-Variables: `RITORNELLO_FILES_ROOTS`, `RITORNELLO_FILES_CREDENTIALS` and
-`RITORNELLO_USER` (read by the **mount binary**, which runs on its own,
-outside the service's environment), `RITORNELLO_FILES_STATE`,
-`RITORNELLO_FILES_MPV_PLAYLIST`, `RITORNELLO_FILES_PLAYLISTS` (where
-playlists saved "internally" live, as opposed to those written onto a
-root). `RITORNELLO_LANGUAGE_PACKS` is read by the **core**, not this
-plugin — the core sweeps that root itself and layers what it finds over
-the plugin's confided English (see "A plugin's UI", below, and
+Its data lives in its own directory (see [Where a plugin keeps its
+data](#where-a-plugin-keeps-its-data)): `media-roots.toml`, `credentials/`
+(consumed by `mount.cifs` itself, given as a `credentials=<path>` mount
+option by the **mount binary**, which runs on its own, outside the
+service's environment — see `RITORNELLO_USER` below), `state.json`,
+`playlist.m3u`, and `playlists/` (where playlists saved "internally" live,
+as opposed to those written onto a root). `RITORNELLO_USER` names the
+account whose `uid`/`gid` (looked up in `/etc/passwd`) the mount binary
+passes as the mount's own `uid=`/`gid=` options — not an ownership check,
+but what makes the mounted files show up as owned by the service account
+rather than by whatever the share reports.
+`RITORNELLO_LANGUAGE_PACKS` is read by the **core**, not this plugin — the
+core sweeps that root itself and layers what it finds over the plugin's
+confided English (see "A plugin's UI", below, and
 [development.md](development.md)).
 
 **Saving onto a share needs one extra word.** Shares are mounted `ro`, so
@@ -1176,6 +1228,30 @@ missing (it never rewrites what is already there — see [Declaring the
 plugins](#declaring-the-plugins)). The unit, the polkit rule,
 `/mnt/ritornello` and the credentials directory are installed by the same
 run, so the source is usable straight after a deployment.
+
+**Installing or uninstalling `files` from the web configuration page is
+refused, in both directions**, and shown as a sentence naming
+`ritornello-install` where an Install or an Uninstall button sits for
+every other plugin (see [interface.md](interface.md#plugins-table)). The
+page can place or erase only a binary in the plugins directory; this
+plugin's own packaging also carries `ritornello-media-mount` outside
+that directory, its unit and its polkit rule, none of which the page
+has any way to touch — doing only the unprivileged half used to leave
+the root helper, the unit (enabled at boot) and the polkit rule behind
+after an uninstall. `ritornello-install`, a separate program shipped in
+the same release, does the whole job instead. The core refuses the same
+two gestures itself, independently of the page, against a short list of
+this repository's privileged plugins
+(`crates/ritornello-core/src/plugins/mod.rs::PRIVILEGED_PLUGINS`) — a
+list, not something a plugin announces about itself, since a plugin
+that never announces at all (disabled, crashed, not yet started) could
+not have said so either way. **Adding a privileged plugin to this
+repository means declaring its privileged files in
+`deploy/packaging.toml`** (an `extra_binaries` entry, or a `tree`
+destination under `etc/systemd/system/` or `etc/polkit-1/rules.d/`) —
+`packaging_manifest.rs`'s own guard then checks the list against that
+declaration in both directions and names exactly which entry to add or
+remove if the two ever disagree.
 
 ## `ritornello-plugin-console` — the display
 
@@ -1334,13 +1410,17 @@ through `bluetoothctl` will show up there automatically once exposed by
 
 It opens **all** readable evdev devices (non-exclusively: the keyboard
 keeps working normally) and translates keys into commands according to
-`/etc/ritornello/input-bindings.toml`. Its page
+its own `input-bindings.toml` (see [Where a plugin keeps its
+data](#where-a-plugin-keeps-its-data)). Its page
 `http://<host>:8080/plugins/generic-input/` lists the detected devices,
 lets you learn the key — or the keys — of each action, load a bundled preset
 (`mce`, `keyboard`) and save; it also lets you import a preset from an
 uploaded `.toml` file and export the selected device's current bindings to
-such a file. Variables: `RITORNELLO_INPUT_BINDINGS`,
-`RITORNELLO_INPUT_PRESETS`.
+such a file. Variable: `RITORNELLO_INPUT_PRESETS` (the bundled presets
+themselves — data the repository ships and `deploy.sh` installs, read by
+this plugin but never written by it, hence installed system-wide rather
+than kept in its own data directory; see [Where a plugin keeps its
+data](#where-a-plugin-keeps-its-data) above).
 
 Learning listens for thirty seconds, in a dialog naming the action and the
 device; the four ways out of that dialog — its "Cancel", the cross, Escape,
@@ -1597,8 +1677,9 @@ withheld rather than granted by that logic: `kill` is **refused**, not
 ignored, because shutting the appliance down from the network without
 authentication is something no remote in the room can do.
 
-Settings live in `/etc/ritornello/mpd.toml` (`RITORNELLO_MPD_CONFIG` moves
-the path), two keys, `listen` and `port`. No file has to be provisioned: the
+Settings live in its own `mpd.toml` (see [Where a plugin keeps its
+data](#where-a-plugin-keeps-its-data)), two keys, `listen` and `port`. No
+file has to be provisioned: the
 defaults are exactly what `deploy/mpd.example.toml` contains, and a file
 that is missing, unreadable or refused by validation falls back to those
 defaults **with a log line** rather than refusing to start — a plugin that
@@ -1969,8 +2050,9 @@ without anything being lost: the entries already there are not touched.
   after. The lookup already asks for `release-groups` — the same block that
   resolves an album-level cover — so this costs no extra request. It also splits a radio's single metadata string into artist and
   title, learning each station's format — see [Splitting the ICY
-  string](#splitting-the-icy-string) below, which is where its one variable
-  (`RITORNELLO_MUSICBRAINZ_STATE`) and its admin page are described.
+  string](#splitting-the-icy-string) below, which is where its own
+  `state.json` (see [Where a plugin keeps its
+  data](#where-a-plugin-keeps-its-data)) and its admin page are described.
 - `ritornello-plugin-ouifm-metas` reads the metadata feed of OUI FM's
   webradios. **Nothing to configure**: the table of 21 streams is
   embedded in the binary (`src/webradios.toml`), taken from the site's
@@ -1988,11 +2070,10 @@ without anything being lost: the entries already there are not touched.
   — the latter is the form met in practice, long published, hence
   referenced by directories and copied around by users.
 
-  The optional `/etc/ritornello/ouifm-metas.toml` file
-  (`RITORNELLO_OUIFM_METAS` variable, example in `deploy/`) is there for
-  the day OUI FM changes something: its entries are consulted **before**
-  the embedded table, which allows fixing a mapping gone stale or adding
-  one, without recompiling.
+  The optional `ouifm-metas.toml` file, in the plugin's own data directory
+  (example in `deploy/`), is there for the day OUI FM changes something:
+  its entries are consulted **before** the embedded table, which allows
+  fixing a mapping gone stale or adding one, without recompiling.
 - `ritornello-plugin-radiofrance-metas` reads the *live* endpoint of Radio
   France's stations. **Nothing to configure**: the table of the 74 stations
   is embedded in the binary (`src/stations.toml`) — the six national brands,
@@ -2054,10 +2135,10 @@ without anything being lost: the entries already there are not touched.
   file from those sources (with `--verifier`, it reports a drift without
   writing anything).
 
-  The optional `/etc/ritornello/radiofrance-metas.toml` file
-  (`RITORNELLO_RADIOFRANCE_METAS` variable, example in `deploy/`) works exactly
-  like OUI FM's: consulted **before** the embedded table, to fix an entry gone
-  stale or add one without recompiling.
+  The optional `radiofrance-metas.toml` file, in the plugin's own data
+  directory (example in `deploy/`), works exactly like OUI FM's: consulted
+  **before** the embedded table, to fix an entry gone stale or add one
+  without recompiling.
 
   The plugin's own
   [README](../crates/ritornello-plugin-radiofrance-metas/README.md) lists every
@@ -2092,10 +2173,10 @@ without anything being lost: the entries already there are not touched.
   station rather than waiting for a change of code that a blank ICY can
   never produce.
 
-  The optional `/etc/ritornello/nrj-metas.toml` file
-  (`RITORNELLO_NRJ_METAS` variable, example in `deploy/`) works exactly
-  like the other two: consulted **before** the embedded table, to fix an
-  entry gone stale or add one without recompiling.
+  The optional `nrj-metas.toml` file, in the plugin's own data directory
+  (example in `deploy/`), works exactly like the other two: consulted
+  **before** the embedded table, to fix an entry gone stale or add one
+  without recompiling.
 
   The plugin's own
   [README](../crates/ritornello-plugin-nrj-metas/README.md) details the
@@ -2135,9 +2216,10 @@ staleness guard expires nothing and a new `StreamTitle` does not clear
 enrichments — without the raw field, the plugin would split exactly once per
 session and then go blind.
 
-**What is remembered**, one entry per probed station, in
-`/var/lib/ritornello/plugin-musicbrainz.json` (`RITORNELLO_MUSICBRAINZ_STATE`,
-written atomically): the pattern — a separator and an order, or "do not split" —
+**What is remembered**, one entry per probed station, in its own
+`state.json` (see [Where a plugin keeps its
+data](#where-a-plugin-keeps-its-data), written atomically): the pattern — a
+separator and an order, or "do not split" —
 its origin (standard confirmed, learned deviation, or manual), the last time it
 was used, and how many titles it has split. That count is not decoration: a
 pattern with two hundred hits and one with a single hit do not deserve the same

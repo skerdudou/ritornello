@@ -27,8 +27,9 @@ use std::path::PathBuf;
 use table::Table;
 use tokio::sync::mpsc;
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+/// Where this plugin keeps its settings, relative to its data directory.
+fn config_path_in(data: &std::path::Path) -> PathBuf {
+    data.join("radiofrance-metas.toml")
 }
 
 /// URL of a stream identity, if it is one.
@@ -192,10 +193,10 @@ impl MetadataPlugin for RadioFranceMetas {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    let table_path = PathBuf::from(env_or(
-        "RITORNELLO_RADIOFRANCE_METAS",
-        "/etc/ritornello/radiofrance-metas.toml",
-    ));
+    // The table is data this plugin produces, so it lives in its own data
+    // directory (see `ritornello_plugin_sdk::DATA_DIR_ENV`); its absence
+    // keeps the current behaviour (the embedded table only).
+    let table_path = config_path_in(&ritornello_plugin_sdk::data_dir());
     let table = Table::load(&table_path);
     tracing::info!("{} station(s) known (bundled table + {})", table.stations.len(), table_path.display());
     ritornello_plugin_sdk::declare_runtime!()?.metadata(RadioFranceMetas::new(table))?.run().await
@@ -205,6 +206,14 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn every_file_lives_in_the_plugin_s_own_directory() {
+        let d = std::path::Path::new("/x/plugins/radiofrance-metas");
+        let config = config_path_in(d);
+        assert!(config.starts_with(d));
+        assert_eq!(config.file_name().unwrap(), "radiofrance-metas.toml");
+    }
 
     /// Real stream URL of FIP Groove, as a directory publishes it.
     const URL: &str = "https://icecast.radiofrance.fr/fipgroove-midfi.mp3";

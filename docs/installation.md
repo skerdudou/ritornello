@@ -152,8 +152,8 @@ part of a component's archive; see [Installing a language
 pack](#installing-a-language-pack) below for that archive's own shape. They
 do not
 create the `ritornello` system user, install `mpv`/`cd-discid`/`eject`/
-`cifs-utils`, create `/var/lib/ritornello`, `/mnt/ritornello` or
-`/etc/ritornello/media-credentials`, nor enable any unit. Extracting them
+`cifs-utils`, create `/var/lib/ritornello` or `/mnt/ritornello`, nor enable
+any unit. Extracting them
 onto a virgin machine leaves a device that cannot start, and the very first
 command below (`chown -R ritornello:`) fails outright for want of that user.
 Prepare the device once as [Example: Raspberry Pi 2](#example-raspberry-pi-2)
@@ -362,11 +362,12 @@ On **Raspberry Pi OS Lite**:
     amixer set PCM 100%
 
 No configuration to copy: on first deployment, `deploy.sh` provisions
-`/etc/ritornello` with the defaults (all bundled plugins, two starter
-stations, MCE remote bindings — the `deploy/*.example.toml` files), then
-everything is adjusted from the browser or by editing those files. An
-existing configuration is never overwritten (see
-[Deploying](#deploying)).
+`/etc/ritornello/plugins.toml` and every bundled plugin's own data
+directory under `/var/lib/ritornello/plugins/` with the defaults (all
+bundled plugins declared, two starter stations, MCE remote bindings — the
+`deploy/*.example.toml` files), then everything is adjusted from the
+browser or by editing those files. An existing configuration is never
+overwritten (see [Deploying](#deploying)).
 
 Wifi: `sudo raspi-config` (System Options > Wireless LAN).
 
@@ -431,11 +432,40 @@ it at all, install a key once — `ssh-keygen` if you have none, then
 Web interface: http://<host>:8080 — logs: `journalctl -u ritornello -f`.
 
 Configuration: `deploy.sh` provisions `stations.toml` and
-`input-bindings.toml` from the `deploy/*.example.toml` defaults **only
-when the file is absent** — a first installation needs no manual copy,
-and a file that exists is **never overwritten**, whatever it contains.
-Those two hold what you produced (stations added from the browser,
-learned bindings), so nothing may complete them.
+`input-bindings.toml`, each into its own plugin's data directory
+(`/var/lib/ritornello/plugins/<name>/`), from the `deploy/*.example.toml`
+defaults **only when the file is absent** — a first installation needs no
+manual copy, and a file that exists is **never overwritten**, whatever it
+contains. Those two hold what you produced (stations added from the
+browser, learned bindings), so nothing may complete them.
+
+### Moving data by hand
+
+**There is no automatic migration, and none is planned.** A device
+deployed before every plugin moved to its own data directory keeps its
+files exactly where they were — `deploy.sh` and the plugins never delete
+anything on their own — but nothing reads them from there any more, and a
+plugin restarted after an upgrade starts as if it had never run: an empty
+station list, no learned bindings, no saved playlist. Move each file by
+hand, with the service stopped, before restarting it:
+
+| Old location | New location |
+|---|---|
+| `/etc/ritornello/stations.toml` | `/var/lib/ritornello/plugins/radio/stations.toml` |
+| `/etc/ritornello/input-bindings.toml` | `/var/lib/ritornello/plugins/generic-input/input-bindings.toml` |
+| `/etc/ritornello/mpd.toml` | `/var/lib/ritornello/plugins/mpd/mpd.toml` |
+| `/etc/ritornello/ouifm-metas.toml`, `radiofrance-metas.toml`, `nrj-metas.toml` | the same file name, under `/var/lib/ritornello/plugins/<plugin-name>/` |
+| `/etc/ritornello/media-roots.toml` | `/var/lib/ritornello/plugins/files/media-roots.toml` |
+| `/etc/ritornello/media-credentials/` | `/var/lib/ritornello/plugins/files/credentials/` |
+| `/var/lib/ritornello/plugin-radio.json`, `plugin-cd.json`, `plugin-musicbrainz.json` | `/var/lib/ritornello/plugins/<plugin-name>/state.json` |
+| `/var/lib/ritornello/plugin-files.json` | `/var/lib/ritornello/plugins/files/state.json` |
+| `/var/lib/ritornello/plugin-files.m3u` | `/var/lib/ritornello/plugins/files/playlist.m3u` |
+| `/var/lib/ritornello/playlists/` | `/var/lib/ritornello/plugins/files/playlists/` |
+
+`chown -R ritornello:` the whole of `/var/lib/ritornello/plugins` after
+moving anything into it by hand as root — the same command `deploy.sh`
+itself runs on every deployment — since a plugin cannot write into a
+directory it does not own.
 
 ### The operator's own locales layer is gone
 
@@ -490,9 +520,13 @@ occurred since boot. No udev rule is needed: `/dev/vcio` already ships as
 `GET /api/system` stays `null` and the System tab shows "—" for it, the same
 as any other sensor a machine does not expose — nothing else breaks.
 `/etc/ritornello` is owned by the service
-user: the radio and generic-input plugins persist `stations.toml` and
-`input-bindings.toml` there through atomic writes (`.tmp` then rename),
-which requires write access to the directory itself.
+user: the core itself persists `plugins.toml` there through atomic writes
+(`.tmp` then rename) — enabling, moving or removing a plugin from the admin
+UI rewrites it — which requires write access to the directory itself.
+`/var/lib/ritornello` is owned the same way: every plugin keeps its own data
+directory there (`RITORNELLO_PLUGIN_DATA_ROOT`, `/var/lib/ritornello/plugins/
+<name>/` by default — see [plugins.md](plugins.md#where-a-plugin-keeps-its-data)),
+created and rewritten by the service.
 
 Installing by hand instead of through `deploy.sh`? The two commands the
 script runs for this are:
@@ -625,10 +659,11 @@ Beyond those packages, a share needs the two files `deploy.sh` puts in
 place —
 `/etc/systemd/system/ritornello-media-mount.service` and
 `/etc/polkit-1/rules.d/51-ritornello-media.rules`. The script also creates
-`/mnt/ritornello` and `/etc/ritornello/media-credentials` (mode `0700`,
-owned by the service), and enables the mount unit so shares come back
-after a reboot. On a device already in service, the `files` entry of
-`plugins.toml` is appended by the same run — see [plugins.md](plugins.md).
+`/mnt/ritornello`, and enables the mount unit so shares come back
+after a reboot. `/var/lib/ritornello/plugins/files/credentials` (mode
+`0700`, owned by the service) is not the script's doing: the plugin creates
+it itself, on first use. On a device already in service, the `files` entry
+of `plugins.toml` is appended by the same run — see [plugins.md](plugins.md).
 
 **Declaring a share** happens in the browser, at
 `http://<host>:8080/plugins/files/`. Give the server address, connect, and
@@ -640,10 +675,10 @@ share and de-duplicated, because it becomes both a directory name and a
 credentials filename — deriving it guarantees a valid one, where typing it
 allowed a refusal with no way to see why.
 
-Confirming writes `/etc/ritornello/media-roots.toml` and
-`/etc/ritornello/media-credentials/<name>.cred`, then asks systemd to run
-the mount unit on its own. The mount point is not yours to pick: it is
-always `/mnt/ritornello/<name>`.
+Confirming writes `/var/lib/ritornello/plugins/files/media-roots.toml` and
+`/var/lib/ritornello/plugins/files/credentials/<name>.cred`, then asks
+systemd to run the mount unit on its own. The mount point is not yours to
+pick: it is always `/mnt/ritornello/<name>`.
 `deploy/media-roots.example.toml` documents the file for the rare case of
 editing it by hand.
 
@@ -851,6 +886,36 @@ and unwritable everywhere else — the narrowed archive rule
 (`update::archive::ETC_PREFIXES`), the trimmed `deploy.sh`, a fresh
 deployment never creating that directory at all — have run only in this
 repository's own test suite, never against a real deployment from scratch.
+
+**The privileged-plugin refusal has never been seen on the Pi.** Refusing
+to install or uninstall `files` from the web UI — the route returning
+403 before it stops the plugin, the archive check refusing its download,
+the table and the dialogs showing the sentence instead of a button — is
+covered entirely by unit and component tests built against fakes; nobody
+has clicked "Uninstall" for the files plugin on the real device to watch
+it stay running and declared, nor tried installing it from a release
+archive to watch the refusal actually name `ritornello-install`. That
+program does not exist in this repository yet, so nothing about the
+hand-off to it — not even that it exists to be handed off to — has been
+verified either.
+
+**The move to one data directory per plugin has never run on a device.**
+Every plugin now writes only inside its own
+`/var/lib/ritornello/plugins/<name>/`, in place of the mix of fixed
+`/etc/ritornello/*.toml` files and `/var/lib/ritornello/plugin-*.json`
+files it used before — covered by the Rust test suite (including the
+static guard that scans every plugin crate's own source for a stray path
+outside that scheme) and by the end-to-end harness, never by a real
+upgrade. In particular: `deploy.sh` creating each plugin's directory
+(`mkdir -p`) and copying its default configuration into it **only when
+absent**, an update archive's `initial-config/` entries landing in the
+plugin's own directory rather than the old fixed locations, and the core
+actually creating `/var/lib/ritornello/plugins/<name>` before a plugin's
+first launch in service — none of it has been watched happening on a
+Raspberry Pi, on a fresh install or an upgrade from an older release. See
+[Moving data by hand](#moving-data-by-hand) below for what an operator
+upgrading an already-deployed device would need to do themselves: there is
+no automatic migration, and none is planned.
 
 **Known edges and debts in the code, recorded here rather than fixed or
 dressed up as design:**

@@ -36,7 +36,8 @@ the new plugin at the end of `/etc/ritornello/plugins.toml`, which puts it
 otherwise MusicBrainz's guess wins over the station's own answer. A fresh
 install already has the right order.
 
-An optional `/etc/ritornello/nrj-metas.toml` (see
+An optional `nrj-metas.toml`, in this plugin's own data directory
+(`/var/lib/ritornello/plugins/nrj-metas/` by default — see
 [the example](../../deploy/nrj-metas.example.toml)) lets you correct a station
 or add one without rebuilding, should the group ever change a stream address.
 

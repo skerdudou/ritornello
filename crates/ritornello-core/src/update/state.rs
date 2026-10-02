@@ -93,8 +93,12 @@ pub struct ComponentOffer {
     pub installed: Option<String>,
     pub offered: Option<String>,
     pub availability: Availability,
-    /// Derived from the archive's contents once it has been fetched, so absent
-    /// until a check has read it. `Some(false)` is the files plugin.
+    /// `Some(false)` for a plugin `plugins::PRIVILEGED_PLUGINS` names (today,
+    /// only the files plugin), stated straight away by
+    /// `update::deny_privileged_install` because that is a fact about the
+    /// plugin's identity, never one an archive has to be fetched to learn.
+    /// For every other component, derived from the archive's contents once
+    /// one has actually been fetched, so absent until a check has read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -23,7 +23,8 @@ the album where it can find it.
 Deploy as usual and any Radio France station already set up on the device
 starts showing titles.
 
-An optional `/etc/ritornello/radiofrance-metas.toml` (see
+An optional `radiofrance-metas.toml`, in this plugin's own data directory
+(`/var/lib/ritornello/plugins/radiofrance-metas/` by default — see
 [the example](../../deploy/radiofrance-metas.example.toml)) lets you correct a
 station or add one without rebuilding, should Radio France ever change a stream
 address.

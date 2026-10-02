@@ -70,6 +70,32 @@ pub fn admin_socket(prefix: &std::path::Path) -> PathBuf {
     PathBuf::from(format!("{}-admin.sock", prefix.display()))
 }
 
+/// The environment variable the core sets for every plugin it launches: the
+/// one directory that plugin writes into — its settings, what the operator
+/// produced through the UI, its state, its caches.
+///
+/// **One directory per plugin, and nothing written anywhere else**, so that
+/// removing a plugin's data is removing one directory, for our plugins and a
+/// third party's alike. A convention rather than a lock: every plugin runs
+/// under the same account, in the same sandbox, and nothing at the OS level
+/// stops one from writing elsewhere. This accessor makes the right path the
+/// easy one; `docs/plugins.md` makes it the contract.
+pub const DATA_DIR_ENV: &str = "RITORNELLO_PLUGIN_DATA_DIR";
+
+/// The production location of `name`'s data directory, which is also where
+/// a plugin launched by hand, without the variable, writes.
+pub fn default_data_dir(name: &str) -> PathBuf {
+    PathBuf::from("/var/lib/ritornello/plugins").join(name)
+}
+
+/// This plugin's data directory: [`DATA_DIR_ENV`] when the core set it,
+/// otherwise [`default_data_dir`] of this plugin's `--name`.
+pub fn data_dir() -> PathBuf {
+    std::env::var_os(DATA_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_data_dir(&plugin_name()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +139,14 @@ mod tests {
             arg_value(&a, "--socket-prefix"),
             Some(PathBuf::from("/run/ritornello/sockets/radio"))
         );
+    }
+
+    /// Production never sets the variable for a plugin launched by hand, so
+    /// the default is what a hand-run plugin gets: the same directory the
+    /// core would have given it.
+    #[test]
+    fn the_default_data_dir_is_the_production_layout() {
+        assert_eq!(default_data_dir("radio"), PathBuf::from("/var/lib/ritornello/plugins/radio"));
     }
 
     #[test]

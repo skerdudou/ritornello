@@ -26,6 +26,18 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Where this plugin keeps its bindings, relative to its data directory.
+fn bindings_path_in(data: &std::path::Path) -> PathBuf {
+    data.join("input-bindings.toml")
+}
+
+/// Where the input presets are installed — an installed tree, not data this
+/// plugin produces, so it does **not** derive from the data directory (see
+/// `RITORNELLO_INPUT_PRESETS`).
+fn presets_root() -> PathBuf {
+    PathBuf::from(env_or("RITORNELLO_INPUT_PRESETS", "/etc/ritornello/input-presets"))
+}
+
 /// Input half: consumes the mpsc fed by all the evdev playback tasks,
 /// regardless of the originating device.
 struct EvdevInput {
@@ -46,10 +58,11 @@ impl InputPlugin for EvdevInput {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let bindings_path =
-        PathBuf::from(env_or("RITORNELLO_INPUT_BINDINGS", "/etc/ritornello/input-bindings.toml"));
-    let presets_root =
-        PathBuf::from(env_or("RITORNELLO_INPUT_PRESETS", "/etc/ritornello/input-presets"));
+    // The bindings are data this plugin produces, so they live in its own
+    // data directory (see `ritornello_plugin_sdk::DATA_DIR_ENV`). The presets
+    // are installed files, not data this plugin writes, and stay put.
+    let bindings_path = bindings_path_in(&ritornello_plugin_sdk::data_dir());
+    let presets_root = presets_root();
 
     let (tx, rx) = mpsc::channel(32);
     let hub = Hub::new(Bindings::load(&bindings_path), tx);
@@ -77,6 +90,22 @@ mod tests {
     #[test]
     fn embedded_generic_input_en_is_non_empty() {
         assert!(!ritornello_i18n::try_parse(GENERIC_INPUT_EN).unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_file_lives_in_the_plugin_s_own_directory() {
+        let d = std::path::Path::new("/x/plugins/generic-input");
+        let bindings = bindings_path_in(d);
+        assert!(bindings.starts_with(d));
+        assert_eq!(bindings.file_name().unwrap(), "input-bindings.toml");
+    }
+
+    #[test]
+    fn the_input_presets_are_installed_files_not_data() {
+        // Cleaning zeal would otherwise move installed files that an install
+        // put under /etc/ritornello: the presets are never derived from the
+        // plugin's data directory.
+        assert_eq!(presets_root(), PathBuf::from("/etc/ritornello/input-presets"));
     }
 
     #[tokio::test]

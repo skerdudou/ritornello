@@ -11,6 +11,7 @@ const CATALOG = {
   update_row_core_not_selected:
     '{component} will move while the core stays behind — this may make them incompatible.',
   update_confirm: 'Install selected',
+  plugin_privileged_note: 'Privileged component: install or uninstall it with ritornello-install.',
 }
 
 beforeEach(async () => {
@@ -189,6 +190,54 @@ describe('UpdateDialog', () => {
     expect(isChecked('radio')).toBe('true')
   })
 
+  // Fix round 1, M1: `defaultChecked` already left `files` unticked (the
+  // test above), but the switch itself stayed enabled, so an operator could
+  // still tick it by hand and confirm — reaching `installable_from_ui`'s
+  // refusal after a download, the exact "button that then fails" this whole
+  // change exists to remove. Both halves: `files`'s switch refuses the
+  // click and shows the sentence, `radio`'s switch on the same page still
+  // takes the click and shows nothing.
+  it('refuses a hand click on a privileged plugin and explains why, leaving an ordinary one untouched', async () => {
+    mountDialog([
+      {
+        name: 'files',
+        kind: 'plugin',
+        declared: true,
+        binary_present: true,
+        installed: '0.2.0',
+        offered: '0.3.0',
+        availability: 'update_available',
+        installable: false,
+      },
+      {
+        name: 'radio',
+        kind: 'plugin',
+        declared: true,
+        binary_present: true,
+        installed: '0.2.0',
+        offered: '0.3.0',
+        availability: 'update_available',
+      },
+    ])
+    await flushPromises()
+    expect(isChecked('files')).toBe('false')
+    await row('files')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
+    await flushPromises()
+    expect(isChecked('files')).toBe('false')
+    expect(row('files')?.querySelector('[data-update-row-warning]')?.textContent).toContain(
+      'ritornello-install',
+    )
+
+    expect(row('radio')?.querySelector('[data-update-row-warning]')).toBeNull()
+    // `radio` is `update_available` and not privileged, so it is pre-checked
+    // by default; a hand click still takes effect (untoggling it), unlike
+    // `files`'s switch above, which never moved at all.
+    expect(isChecked('radio')).toBe('true')
+    await row('radio')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
+    await flushPromises()
+    expect(isChecked('radio')).toBe('false')
+  })
+
   it('leaves a third-party plugin unchecked and shows where it comes from', async () => {
     mountDialog([
       core('aligned'),
@@ -261,12 +310,13 @@ describe('UpdateDialog', () => {
 
   it('does not warn about an unchecked plugin, even while the core is left behind', async () => {
     // The operand the "warns when a plugin is checked" test title promises
-    // but, on its own, does not pin: `files` here is never checked (it needs
-    // a manual step, same exclusion as in "leaves a component known to need
-    // a manual step unchecked"), yet the core ends up left behind exactly as
-    // in the warning test above. Without the `checked.value.has(c.name)`
-    // guard, every plugin row would warn whenever the core is left behind,
-    // checked or not.
+    // but, on its own, does not pin: `files` here is unchecked by hand, not
+    // by `installable: false` (fix round 1, M1 gave that flag its own
+    // warning, which would otherwise sit in this row and defeat the "no
+    // warning at all" assertion below for an unrelated reason) — yet the
+    // core ends up left behind exactly as in the warning test above.
+    // Without the `checked.value.has(c.name)` guard, every plugin row would
+    // warn whenever the core is left behind, checked or not.
     mountDialog([
       core(),
       {
@@ -277,9 +327,14 @@ describe('UpdateDialog', () => {
         installed: '0.2.0',
         offered: '0.3.0',
         availability: 'update_available',
-        installable: false,
       },
     ])
+    await flushPromises()
+    // Pre-checked by default, like `core` and `radio` above; unchecked here
+    // by hand so the row is genuinely unchecked without needing
+    // `installable: false`.
+    expect(isChecked('files')).toBe('true')
+    await row('files')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
     await flushPromises()
     expect(isChecked('files')).toBe('false')
 

@@ -10,8 +10,9 @@
 // included. The check is what keeps the grant proportionate to the need.
 //
 // The unit it does grant runs a root binary that mounts what
-// /etc/ritornello/media-roots.toml declares -- and that file is written by an
-// unprivileged process, from the web page. Whoever reaches the web UI
+// /var/lib/ritornello/plugins/files/media-roots.toml declares -- and that
+// file is written by an unprivileged process, from the web page. Whoever
+// reaches the web UI
 // therefore decides what root mounts, which is why the binary revalidates
 // everything it reads rather than trusting the validation done on the writing
 // side: forced mount point (/mnt/ritornello/<name>, never read from the

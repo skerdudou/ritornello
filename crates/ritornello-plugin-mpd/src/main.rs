@@ -26,8 +26,9 @@ use tokio::sync::mpsc;
 
 pub(crate) const MPD_EN: &str = include_str!("locales/en.toml");
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+/// Where this plugin keeps its settings, relative to its data directory.
+fn config_path_in(data: &std::path::Path) -> PathBuf {
+    data.join("mpd.toml")
 }
 
 /// `display` half: receives each frame from the core and drops it into the
@@ -100,7 +101,10 @@ impl InputPlugin for MpdInput {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_target(false).init();
-    let path = PathBuf::from(env_or("RITORNELLO_MPD_CONFIG", "/etc/ritornello/mpd.toml"));
+    // The settings are data this plugin produces, so they live in its own
+    // data directory (see `ritornello_plugin_sdk::DATA_DIR_ENV`); their
+    // absence keeps the current behaviour (the built-in defaults).
+    let path = config_path_in(&ritornello_plugin_sdk::data_dir());
     let config = Config::load(&path);
 
     // **Bound before the announcement.** This is the same doctrine the SDK
@@ -142,6 +146,14 @@ mod tests {
     #[test]
     fn embedded_mpd_en_is_not_empty() {
         assert!(!ritornello_i18n::try_parse(MPD_EN).unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_file_lives_in_the_plugin_s_own_directory() {
+        let d = std::path::Path::new("/x/plugins/mpd");
+        let config = config_path_in(d);
+        assert!(config.starts_with(d));
+        assert_eq!(config.file_name().unwrap(), "mpd.toml");
     }
 
     #[tokio::test]

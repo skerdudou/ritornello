@@ -6,4 +6,3 @@
 # editable from the plugin's page at http://<host>:8080/plugins/mpd/.
 listen = "0.0.0.0"
 port = 6600
-</content>

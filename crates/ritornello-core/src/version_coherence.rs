@@ -42,6 +42,9 @@ mod tests {
         "ritornello-i18n",
         "ritornello-plugin-sdk",
         "ritornello-updater",
+        // Shared plugins.toml editing: it inherits the product number and no
+        // archive is named after it.
+        "ritornello-manifest",
     ];
 
     fn repo_root() -> PathBuf {

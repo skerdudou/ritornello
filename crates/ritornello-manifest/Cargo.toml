@@ -1,0 +1,12 @@
+[package]
+name = "ritornello-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `toml` can read, but cannot rewrite without flattening everything:
+# `plugins.toml` is made of comments (what each plugin is for), and `deploy.sh`
+# adds commented blocks to it. `toml_edit` preserves formatting and comments.
+toml_edit = "0.25"
