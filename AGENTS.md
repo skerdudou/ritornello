@@ -55,7 +55,7 @@ validated bare name — and reads no archive at all. Read
 `crates/ritornello-updater/src/target.rs` before touching anything near it;
 adding a third location is a design decision, not an oversight. An update
 can never write a systemd unit or a polkit rule: those are placed by
-`deploy/deploy.sh` or by hand. A plugin archive carrying a unit, a polkit
+`ritornello-install` or by hand. A plugin archive carrying a unit, a polkit
 rule, a nested path or a binary that is not the plugin's own is refused.
 **The core is exempt from that last rule; no third-party component ever is.**
 
@@ -88,8 +88,8 @@ something.
 - `version_coherence.rs` — the three numbers above, including what a
   prerelease may and may not declare.
 - `packaging_manifest.rs` — `deploy/packaging.toml` against reality, and
-  against `deploy/deploy.sh`: the two installation paths must agree on every
-  privileged file.
+  against the inventory `ritornello-install` reads. `deploy/deploy.sh` is only
+  a wrapper around it, so there is no second installation path to agree with.
 - `scripts/package-release.sh --self-test` — the same generation rules
   without cargo, since the release job runs without our toolchain.
 - `scripts/changed-components.sh` — exits 2 when no component moved, rather

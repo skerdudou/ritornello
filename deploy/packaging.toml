@@ -36,6 +36,14 @@ tree = [
   { from = "deploy/50-ritornello-power.rules", to = "etc/polkit-1/rules.d/50-ritornello-power.rules" },
   { from = "deploy/52-ritornello-update.rules", to = "etc/polkit-1/rules.d/52-ritornello-update.rules" },
 ]
+# Units the installer enables after placing them. Declared here, beside the
+# files they belong to, rather than known to the installer by name.
+#
+# Only this one, as deploy.sh does: ritornello-update.service is a oneshot the
+# core starts on demand, and ritornello-rollback.service is reached only by
+# OnFailure= on ritornello.service. Enabling either would give it a caller it
+# must not have.
+enable = ["ritornello.service"]
 
 [plugins.radio]
 examples = ["deploy/stations.example.toml"]
@@ -62,6 +70,13 @@ tree = [
   { from = "deploy/51-ritornello-media.rules", to = "etc/polkit-1/rules.d/51-ritornello-media.rules" },
 ]
 examples = ["deploy/media-roots.example.toml"]
+# Enabled, not started, as deploy.sh does: a oneshot that reconciles the
+# declared shares at boot; the plugin starts it on demand the rest of the time.
+enable = ["ritornello-media-mount.service"]
+# Where this plugin mounts shares. Removing it unmounts everything under this
+# root first, then removes the empty mount points — never recursively: a
+# recursive delete of a mounted share would delete the NAS's content.
+mount_root = "/mnt/ritornello"
 
 [plugins.ouifm-metas]
 examples = ["deploy/ouifm-metas.example.toml"]

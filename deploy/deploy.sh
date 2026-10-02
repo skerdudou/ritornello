@@ -1,38 +1,36 @@
 #!/usr/bin/env bash
+# Development wrapper: build everything, package it exactly as a release
+# would, then install it with the same program a user runs against a
+# published release. One installation path, whether fed from GitHub or from
+# this checkout.
+#
+#   RITORNELLO_HOST=dietpi@192.168.0.57 ./deploy/deploy.sh [ritornello-install options]
+#
+# TARGET names the device's architecture (see docs/installation.md).
+# DEPLOY_STOP_BEFORE_INSTALL=1 stops once the directory handed to
+# ritornello-install is complete and the installer is built, without running
+# it: what a developer uses to inspect the directory, and what proves the
+# chain without a device.
+#
+# Not a second installer: nothing here places a file on a device. Every
+# privileged path, unit and rule comes from inventory.json, which is
+# generated from deploy/packaging.toml like the archives are.
 set -euo pipefail
-# TARGET examples: armv7-unknown-linux-gnueabihf (Raspberry Pi 2, 32-bit),
-# aarch64-unknown-linux-gnu (Pi 3/4/5 or other 64-bit ARM board), x86_64-unknown-linux-gnu.
-PI="${PI:-pi@raspberrypi.local}"
-TARGET="${TARGET:-armv7-unknown-linux-gnueabihf}"
-OUT="target/$TARGET/release"
 
 # Always from the repository root: every path below depends on it, and the
 # script must be launchable from anywhere.
 cd "$(dirname "$0")/.."
 
-# The plugin list drives the scp then the remote mv. It is derived from
-# deploy/plugins.example.toml — the core's side of the same set — so the two
-# cannot diverge: a plugin declared there without a binary built here gives the
-# core an exec that does not exist, and one built here but absent there ships a
-# plugin nothing launches. Both were the mistake of a plugin added in a hurry,
-# and both were silent; deriving the list removes the second, and the scp below
-# fails loudly on the first (no such file in target/).
-mapfile -t PLUGINS < <(sed -n 's|^exec *= *".*/ritornello-plugin-\([^"]*\)".*|\1|p' \
-  deploy/plugins.example.toml | sort)
-if [ "${#PLUGINS[@]}" -eq 0 ]; then
-  echo "deploy.sh: no plugin found in deploy/plugins.example.toml" >&2
-  exit 1
-fi
-
-# One password prompt for the whole run: every ssh/scp call below shares a
-# single master connection (ControlMaster), opened by the first call and
-# closed by the trap. Without an SSH key, the password is asked once
-# instead of once per call; with a key or an agent, it is simply faster.
-# %C is a hash of user/host/port — short (Unix sockets cap path length)
-# and stable across the calls of one run.
-SSHOPTS=(-o ControlMaster=auto -o 'ControlPath=/tmp/ritornello-deploy-%C' -o ControlPersist=yes)
-fermer_liaison() { ssh "${SSHOPTS[@]}" -O exit "$PI" 2>/dev/null || true; }
-trap fermer_liaison EXIT
+# TARGET examples: armv7-unknown-linux-gnueabihf (Raspberry Pi 2, 32-bit),
+# aarch64-unknown-linux-gnu (Pi 3/4/5 or other 64-bit ARM board),
+# x86_64-unknown-linux-gnu.
+TARGET="${TARGET:-armv7-unknown-linux-gnueabihf}"
+case "$TARGET" in
+  armv7-*) ARCH=armv7 ;;
+  aarch64-*) ARCH=arm64 ;;
+  x86_64-*) ARCH=x86_64 ;;
+  *) echo "deploy.sh: unknown TARGET $TARGET" >&2; exit 1 ;;
+esac
 
 if ! command -v cross >/dev/null; then
   # No `2>/dev/null || true`: if the installation fails, its diagnostic is
@@ -41,266 +39,30 @@ if ! command -v cross >/dev/null; then
 fi
 
 # The full build, npm included: `cross build` alone would embed whatever
-# `web/app/dist` sits on disk — a placeholder on a fresh clone ("Web
-# interface not built" shipped to the device), or worse a stale UI, with
-# no warning at all. build.sh runs the steps in the right order.
+# `web/app/dist` sits on disk. build.sh runs the steps in the right order.
 ./deploy/build.sh
 
-ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /usr/local/lib/ritornello/plugins /etc/ritornello'
-
-# The service runs unprivileged: a dedicated system user, created on first
-# deployment (device access comes through the groups declared in the unit,
-# not through useradd -G). Its home is the state directory, the only place
-# a subprocess (mpv) could want to write to.
-ssh "${SSHOPTS[@]}" "$PI" 'id -u ritornello >/dev/null 2>&1 \
-  || sudo useradd --system --home-dir /var/lib/ritornello --no-create-home \
-       --shell /usr/sbin/nologin ritornello'
-
-# Language packs: built by scripts/package-release.sh's --languages path,
-# the same one the release job calls, rather than a second copy of how a
-# pack is made here. The tar ownership/mode invariants that path asserts
-# (see _pack_archive in that script) are a security property, not
-# formatting, and a second copy would be a second thing to keep in step --
-# the one that drifted would place a pack the core refuses.
-#
-# Each archive is flat (a pack.toml plus one <module>.toml, no leading
-# path -- see crates/ritornello-core/src/langpack/archive.rs), so it is
-# extracted straight into its own directory under
-# /etc/ritornello/language-packs/<pack-id>/, replacing whatever was there:
-# the same shape a device gives itself when it installs a pack on its own
-# (crates/ritornello-core/src/langpack/store.rs::install also replaces
-# rather than merges, for the same reason -- a module a new version drops
-# must stop answering, not linger).
-#
-# /etc/ritornello/locales is no longer read by anything: the operator's own
-# locales layer was removed (2026-09-23, no backward compatibility). A
-# device deployed before this delivery may delete it by hand; this script
-# creates only the packs root below.
-ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/language-packs'
+# The same two calls the release job makes, so what is installed here is
+# what a release would install.
+./scripts/package-release.sh "$TARGET" "$ARCH"
 ./scripts/package-release.sh --languages
-ssh "${SSHOPTS[@]}" "$PI" 'rm -rf /tmp/language-packs && mkdir -p /tmp/language-packs'
-for archive in release/languages/ritornello-lang-*.tar.gz; do
-  base=$(basename "$archive")
-  # The pack's own id is `ritornello-lang-<language>`, and `language` is
-  # read from the archive's own pack.toml -- never reconstructed from the
-  # archive's file name. A language code can itself contain a dash
-  # followed by digits (`es-419`, a real CLDR region `valid_locale`
-  # accepts), which no name-splitting rule can tell apart from the version
-  # that follows it: a `sed` cut at the first "-<digit>" used to land here
-  # and filed `ritornello-lang-es-419-0.2.0.tar.gz` under `ritornello-lang-es`,
-  # silently dropping the region -- measured, not assumed (see
-  # task-13-report.md, Fix round 1). This is this repository's standing
-  # rule applied to itself: a field is declared by the component that
-  # knows it, never inferred by the one that only reads the archive.
-  # Not wrapped in its own EXIT trap: this script already sets one, at the
-  # top, to close the shared ssh control connection (`fermer_liaison`), and
-  # a second `trap ... EXIT` here would replace it rather than add to it,
-  # leaking that connection on every run. A scratch directory left behind
-  # by a mid-loop failure is harmless -- `mktemp -d` never reuses a name --
-  # so a plain `rm -rf` on the success path is enough.
-  scratch=$(mktemp -d)
-  tar -xzf "$archive" -C "$scratch"
-  language=$(python3 - "$scratch/pack.toml" <<'PY'
-import sys, tomllib
-with open(sys.argv[1], "rb") as f:
-    print(tomllib.load(f)["language"])
-PY
-)
-  rm -rf "$scratch"
-  [ -n "$language" ] || { echo "deploy.sh: $base declares no language in pack.toml" >&2; exit 1; }
-  id="ritornello-lang-$language"
-  scp "${SSHOPTS[@]}" "$archive" "$PI:/tmp/language-packs/$base"
-  # `sudo tar -xzf` here extracts an archive built moments earlier, in this
-  # same invocation, from a `mktemp -d` staging directory that
-  # `pack_language()` (scripts/package-release.sh) fills only with
-  # `pack.toml` and files copied from a locally enumerated
-  # `deploy/locales/*/` -- no externally reachable input ever enters it,
-  # so no `../` or absolute entry can exist. The trust rests entirely on
-  # *how the archive was built*, not on this extraction: never reuse this
-  # line for an archive that arrived over the network, where
-  # `langpack::archive::read` (a reader, not an extractor) is the only
-  # thing allowed to open it.
-  ssh "${SSHOPTS[@]}" "$PI" "sudo rm -rf /etc/ritornello/language-packs/$id \
-    && sudo mkdir -p /etc/ritornello/language-packs/$id \
-    && sudo tar -C /etc/ritornello/language-packs/$id -xzf /tmp/language-packs/$base \
-    && rm -f /tmp/language-packs/$base"
-done
 
-ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /etc/ritornello/input-presets && rm -rf /tmp/input-presets'
-scp "${SSHOPTS[@]}" -r deploy/input-presets "$PI:/tmp/input-presets"
-ssh "${SSHOPTS[@]}" "$PI" 'sudo cp -r /tmp/input-presets/. /etc/ritornello/input-presets/ && rm -rf /tmp/input-presets'
+# One directory. SHA256SUMS covers every file in it.
+OUT=release/install
+rm -rf "$OUT"
+mkdir -p "$OUT"
+cp release/"$ARCH"/*.tar.gz release/languages/*.tar.gz "$OUT"/
+python3 scripts/install-inventory.py > "$OUT/inventory.json"
+( cd "$OUT" && sha256sum *.tar.gz inventory.json > SHA256SUMS )
 
-# Default configuration, provisioned from the example files ONLY when the
-# target file is absent: a first installation works without any manual
-# copy, and an existing configuration (stations added from the browser,
-# learned bindings) is never overwritten. These files hold what the user
-# produced, so nothing here has any business completing them. Each one lands
-# in its own plugin's data directory (/var/lib/ritornello/plugins/<name>),
-# never under /etc/ritornello — the core moved to the same directory for the
-# same file when it installs a plugin over the network.
-#
-# The files that double as an initial configuration are read from the
-# packaging manifest instead of being repeated here: the release installer
-# honours the same declaration when it installs a plugin the device does not
-# have yet, and two lists drift. The plugin name travels alongside each path
-# so the remote side knows whose directory a file belongs to.
-NAMES=()
-FILES=()
-while IFS=' ' read -r n p; do
-  NAMES+=("$n")
-  FILES+=("$p")
-done < <(python3 - <<'PY'
-import tomllib, pathlib
-m = tomllib.loads(pathlib.Path("deploy/packaging.toml").read_text())
-for name, section in m.get("plugins", {}).items():
-    for p in section.get("initial_config", []):
-        print(f"{name} {p}")
-PY
-)
-if [ "${#FILES[@]}" -eq 0 ]; then
-  echo "deploy.sh: no initial_config declared in deploy/packaging.toml" >&2
-  exit 1
+# The installer runs on THIS machine, not on the device: a host build, never
+# the cross target. (build.sh already cross-builds it for ARM with the rest
+# of the workspace; that copy is useless here and the separate host build is
+# on purpose.)
+cargo build --release -p ritornello-install
+
+if [ -n "${DEPLOY_STOP_BEFORE_INSTALL:-}" ]; then
+  echo "deploy.sh: $OUT is ready; not installing (DEPLOY_STOP_BEFORE_INSTALL)"
+  exit 0
 fi
-scp "${SSHOPTS[@]}" "${FILES[@]}" "$PI:/tmp/"
-# `<name>.example.toml` becomes `<name>.toml`, the same rule the core applies
-# to the `initial-config/` entries of an archive. The pairs are built here, by
-# the local shell; everything escaped below is for the remote one.
-PAIRS=()
-for i in "${!FILES[@]}"; do
-  PAIRS+=("${NAMES[$i]}:$(basename "${FILES[$i]}")")
-done
-ssh "${SSHOPTS[@]}" "$PI" "set -e
-  for pair in ${PAIRS[*]}; do
-    nom=\${pair%%:*}
-    f=\${pair#*:}
-    d=/var/lib/ritornello/plugins/\$nom
-    t=\$d/\${f%.example.toml}.toml
-    sudo mkdir -p \"\$d\"
-    [ -e \"\$t\" ] || sudo cp \"/tmp/\$f\" \"\$t\"
-    rm -f \"/tmp/\$f\"
-  done"
-
-# plugins.toml is the one configuration file the deployment also COMPLETES
-# instead of merely provisioning. It is not user data: it says which of the
-# binaries just installed the core is to launch. An entry missing there
-# means a plugin shipped and never started — silently, and for as long as
-# nobody happens to read the documentation. Every plugin added since a
-# device went into service (the `files` source, `radiofrance-metas`, the
-# metadata plugins split out of `cd`) needed a hand-written entry on that
-# device to exist at all, a step documented three times over precisely
-# because it kept being missed.
-#
-# Only the blocks whose `name` is absent are appended, never a rewrite: a
-# hand-edited exec (the mce -> generic-input migration), a metadata chain
-# reordered on purpose and any locally added plugin all survive untouched.
-# What this cannot read is intent — a plugin deliberately deleted from the
-# file comes back on the next deployment — so what gets appended is named
-# on the console rather than applied in silence.
-scp "${SSHOPTS[@]}" deploy/plugins.example.toml deploy/missing-plugins.awk "$PI:/tmp/"
-ssh "${SSHOPTS[@]}" "$PI" 'set -e
-  if [ -e /etc/ritornello/plugins.toml ]; then
-    awk -f /tmp/missing-plugins.awk /etc/ritornello/plugins.toml \
-      /tmp/plugins.example.toml > /tmp/plugins.ajouts
-    if [ -s /tmp/plugins.ajouts ]; then
-      sudo tee -a /etc/ritornello/plugins.toml < /tmp/plugins.ajouts > /dev/null
-      echo "plugins.toml completed with:$(sed -n "s/^name = \"\(.*\)\"/ \1/p" \
-        /tmp/plugins.ajouts | tr -d "\n")"
-    fi
-  else
-    sudo cp /tmp/plugins.example.toml /etc/ritornello/plugins.toml
-    echo "plugins.toml provisioned from the defaults"
-  fi
-  rm -f /tmp/plugins.example.toml /tmp/missing-plugins.awk /tmp/plugins.ajouts'
-
-scp "${SSHOPTS[@]}" "$OUT/ritornello-core" "$PI:/tmp/ritornello-core"
-scp "${SSHOPTS[@]}" "${PLUGINS[@]/#/$OUT/ritornello-plugin-}" "$PI:/tmp/"
-scp "${SSHOPTS[@]}" deploy/ritornello.service deploy/50-ritornello-power.rules "$PI:/tmp/"
-
-# After every copy into /etc/ritornello, which would hand them back to
-# root: the directory belongs to the service, because the core itself
-# persists plugins.toml there through atomic writes (.tmp then rename) —
-# enabling, moving or removing a plugin from the admin UI rewrites it —
-# which requires write access to the directory itself. /var/lib/ritornello
-# is taken over too: every plugin now keeps its own data directory there
-# (RITORNELLO_PLUGIN_DATA_ROOT), and the service must be able to create
-# and rewrite each one.
-ssh "${SSHOPTS[@]}" "$PI" 'sudo chown -R ritornello: /etc/ritornello \
-  && if [ -d /var/lib/ritornello ]; then sudo chown -R ritornello: /var/lib/ritornello; fi'
-
-# The mount binary of the `files` source. It lands OUTSIDE the plugins
-# directory on purpose: the core launches everything it finds there, and this
-# one is not launched by the core but by systemd, as root.
-scp "${SSHOPTS[@]}" "$OUT/ritornello-media-mount" "$PI:/tmp/ritornello-media-mount"
-scp "${SSHOPTS[@]}" deploy/ritornello-media-mount.service deploy/51-ritornello-media.rules "$PI:/tmp/"
-ssh "${SSHOPTS[@]}" "$PI" 'sudo install -m 0755 -o root -g root \
-    /tmp/ritornello-media-mount /usr/local/lib/ritornello/ritornello-media-mount \
-  && sudo mkdir -p /etc/polkit-1/rules.d \
-  && sudo install -m 0644 -o root -g root \
-    /tmp/ritornello-media-mount.service /etc/systemd/system/ \
-  && sudo install -m 0644 -o root -g root \
-    /tmp/51-ritornello-media.rules /etc/polkit-1/rules.d/ \
-  && rm -f /tmp/ritornello-media-mount /tmp/ritornello-media-mount.service \
-    /tmp/51-ritornello-media.rules'
-
-# The updater: its privileged binary, the two units and the polkit rule that
-# lets the unprivileged core ask for the one it is allowed to start.
-#
-# A release archive cannot place these four files — an update is refused any
-# systemd unit and any polkit rule, which is exactly what stops a forged
-# archive from gaining root — so installing them is a privileged gesture, and
-# deploy.sh is where the privileged gestures live. Without them the update
-# card still checks and still reports, and every install fails with
-# systemctl's own refusal (`Access denied`, `Interactive authentication
-# required`), naming nothing; and `OnFailure=` in ritornello.service points at
-# an absent unit, so a core that will not start is never put back.
-#
-# The binary lands outside the plugins directory, like ritornello-media-mount
-# and for the same reason: the core launches everything it finds there, and
-# this one is started by systemd, as root.
-#
-# Neither unit is enabled. ritornello-update.service is a oneshot the core
-# starts on demand through the polkit grant, and ritornello-rollback.service
-# is reached only by OnFailure= on ritornello.service — systemd is its only
-# caller, deliberately (see 52-ritornello-update.rules).
-scp "${SSHOPTS[@]}" "$OUT/ritornello-update" "$PI:/tmp/ritornello-update"
-scp "${SSHOPTS[@]}" deploy/ritornello-update.service deploy/ritornello-rollback.service \
-  deploy/52-ritornello-update.rules "$PI:/tmp/"
-ssh "${SSHOPTS[@]}" "$PI" 'sudo install -m 0755 -o root -g root \
-    /tmp/ritornello-update /usr/local/lib/ritornello/ritornello-update \
-  && sudo mkdir -p /etc/polkit-1/rules.d \
-  && sudo install -m 0644 -o root -g root \
-    /tmp/ritornello-update.service /tmp/ritornello-rollback.service \
-    /etc/systemd/system/ \
-  && sudo install -m 0644 -o root -g root \
-    /tmp/52-ritornello-update.rules /etc/polkit-1/rules.d/ \
-  && rm -f /tmp/ritornello-update /tmp/ritornello-update.service \
-    /tmp/ritornello-rollback.service /tmp/52-ritornello-update.rules'
-
-# The mount point of a share is imposed (/mnt/ritornello/<name>), never read
-# from the configuration. The credentials directory is no longer provisioned
-# here: it lives under the files plugin's own data directory now, and the
-# plugin creates it itself (see `ensure_credentials_dir`), readable by nobody
-# else.
-ssh "${SSHOPTS[@]}" "$PI" 'sudo mkdir -p /mnt/ritornello'
-
-# Enabled, not started: the unit is a `oneshot` that reconciles the declared
-# shares, and what it is enabled for is the boot of the machine. The plugin
-# starts it on demand the rest of the time.
-ssh "${SSHOPTS[@]}" "$PI" 'sudo systemctl daemon-reload \
-  && sudo systemctl enable ritornello-media-mount.service'
-
-DEPLACE_PLUGINS=$(printf '/tmp/ritornello-plugin-%s ' "${PLUGINS[@]}")
-ssh "${SSHOPTS[@]}" "$PI" "sudo mv /tmp/ritornello-core /usr/local/bin/ritornello-core \
-  && sudo mv $DEPLACE_PLUGINS /usr/local/lib/ritornello/plugins/ \
-  && sudo chmod +x /usr/local/lib/ritornello/plugins/* \
-  && sudo rm -f /usr/local/lib/ritornello/plugins/ritornello-plugin-mce \
-  && sudo mv /tmp/ritornello.service /etc/systemd/system/ \
-  && sudo mkdir -p /etc/polkit-1/rules.d \
-  && sudo mv /tmp/50-ritornello-power.rules /etc/polkit-1/rules.d/ \
-  && sudo chown root: /etc/polkit-1/rules.d/50-ritornello-power.rules \
-  && sudo chmod 644 /etc/polkit-1/rules.d/50-ritornello-power.rules \
-  && sudo systemctl daemon-reload \
-  && sudo systemctl enable ritornello \
-  && sudo systemctl restart ritornello \
-  && systemctl status ritornello --no-pager"
-echo "OK — logs: ssh $PI journalctl -u ritornello -f"
+exec target/release/ritornello-install --from-dir "$OUT" "$@"

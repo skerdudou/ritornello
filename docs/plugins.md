@@ -113,14 +113,14 @@ installs, read by `generic-input` but never written by it. The `files`
 plugin's own data directory is also the root helper's one fixed, documented
 location (`/var/lib/ritornello/plugins/files`, `FILES_DATA_DIR` in
 `media-mount.rs`), spelled out rather than derived at runtime because the
-helper consumes no environment and no archive at all — it reads
-`media-roots.toml` and `credentials/` from underneath that one fixed path,
-`/etc/passwd` (the service user's `uid`/`gid`) and `/proc/mounts` (what is
-already mounted), and forms the one other path that is its to form,
+helper consumes no archive, and no environment except `RITORNELLO_USER`: it
+reads `media-roots.toml` under that one fixed path, `/etc/passwd` (to turn
+`RITORNELLO_USER` into the `uid`/`gid` the mounts get) and `/proc/mounts`
+(what is already mounted), hands `credentials/<name>.cred` to `mount.cifs`
+as an option — it is `mount.cifs` itself that reads that file's content,
+never the helper — and forms the one other path that is its to form,
 `/mnt/ritornello/<name>` (never read from `media-roots.toml`, see [The
-privilege boundary](#the-privilege-boundary) below) — unlike the updater,
-it is not limited to two path shapes overall, only to this one, fixed
-starting point.
+privilege boundary](#the-privilege-boundary) below).
 
 Each plugin's own files, below, in its section.
 
@@ -444,7 +444,7 @@ The file's order keeps arbitrating `metadata` priority even for a
 plugin currently switched off: a plugin turned back on regains the
 place its line occupies in the file, not the end of the queue.
 
-`deploy/deploy.sh` treats `plugins.toml` as installed state, not user
+`ritornello-install` treats `plugins.toml` as installed state, not user
 data. On a device with no such file, it provisions
 `deploy/plugins.example.toml` whole. On a device already in service, it
 **completes** the file: the blocks of the reference list whose `name` is
@@ -1222,7 +1222,7 @@ written into the wrong folder would win over the network for good, so the
 module would rather say nothing at all than guess.
 
 **Updating an existing installation.** As for every other plugin,
-`deploy.sh` installs the binary and, on a device already in service,
+`ritornello-install` installs the binary and, on a device already in service,
 appends the `files` entry to `/etc/ritornello/plugins.toml` if it is
 missing (it never rewrites what is already there — see [Declaring the
 plugins](#declaring-the-plugins)). The unit, the polkit rule,
@@ -1457,10 +1457,11 @@ never sends held repeats can keep returning a bare `Command` — the wire
 format stays backward compatible either way.
 
 **Updating an existing installation** (old hard-coded-keyboard
-`ritornello-plugin-mce`): `deploy/deploy.sh` removes the old
-`ritornello-plugin-mce` binary from the target, so it does not keep
-running after an update, and appends the `generic-input` entry to
-`/etc/ritornello/plugins.toml` if it is absent. What it does **not** do
+`ritornello-plugin-mce`): the old `deploy.sh` removed the
+`ritornello-plugin-mce` binary, but `ritornello-install` knows nothing of it,
+so delete `/usr/local/lib/ritornello/plugins/ritornello-plugin-mce` by hand or
+it keeps running after an update. The installer appends the `generic-input`
+entry to `/etc/ritornello/plugins.toml` if it is absent. What it does **not** do
 is delete the old entry — it never removes anything (see [Declaring the
 plugins](#declaring-the-plugins)) — and that entry now names a binary
 that no longer exists, which the core reports at every startup. Delete
@@ -2019,7 +2020,7 @@ request/response cycle of `Play`. A Source's own declaration reaches
 this to announce a `folder.jpg` without making playback wait on an SMB
 `readdir`.
 
-**Updating an existing installation.** `deploy/deploy.sh` installs the
+**Updating an existing installation.** `ritornello-install` installs the
 new binaries and appends the missing `metadata` plugin entries to an
 existing `/etc/ritornello/plugins.toml` (see [Declaring the
 plugins](#declaring-the-plugins)), so a device already in service keeps

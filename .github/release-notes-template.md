@@ -2,9 +2,9 @@
 privileged file at once: the updater's binary, two new systemd units, a new
 polkit rule, and a `ritornello.service` that gained the start limit and the
 `OnFailure=` line arming the rollback. An update can write none of those, by
-design, so they are placed by hand or by `deploy.sh`.
+design, so they are placed by hand or by `ritornello-install`.
 
-On a device deployed with `deploy/deploy.sh`, nothing to do: the script
+On a device installed with `ritornello-install`, nothing to do: it
 places all four and reloads systemd.
 
 On a device installed from these archives, after extracting the core's:

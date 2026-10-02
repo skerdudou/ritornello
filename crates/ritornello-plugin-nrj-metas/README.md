@@ -30,7 +30,7 @@ artist and the title come already separated, with a cover image alongside.
 Deploy as usual and any NRJ-group station already set up on the device starts
 showing titles.
 
-One case needs a hand: **on a device already in service**, `deploy.sh` appends
+One case needs a hand: **on a device already in service**, `ritornello-install` appends
 the new plugin at the end of `/etc/ritornello/plugins.toml`, which puts it
 *after* `musicbrainz`. Move the `nrj-metas` block above `musicbrainz` by hand —
 otherwise MusicBrainz's guess wins over the station's own answer. A fresh

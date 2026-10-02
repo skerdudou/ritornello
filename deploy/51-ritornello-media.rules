@@ -12,14 +12,13 @@
 // The unit it does grant runs a root binary that mounts what
 // /var/lib/ritornello/plugins/files/media-roots.toml declares -- and that
 // file is written by an unprivileged process, from the web page. Whoever
-// reaches the web UI
-// therefore decides what root mounts, which is why the binary revalidates
-// everything it reads rather than trusting the validation done on the writing
-// side: forced mount point (/mnt/ritornello/<name>, never read from the
-// configuration), a closed option list with no pass-through to `mount -o`, and
-// no comma, space or ".." allowed in a host or share name -- mount.cifs
-// options being comma-separated, a host "nas,uid=0" would otherwise inject an
-// option into the line root executes.
+// reaches the web UI therefore decides what root mounts, which is why the
+// binary revalidates everything it reads rather than trusting the validation
+// done on the writing side: forced mount point (/mnt/ritornello/<name>, never
+// read from the configuration), a closed option list with no pass-through to
+// `mount -o`, and no comma, space or ".." allowed in a host or share name --
+// mount.cifs options being comma-separated, a host "nas,uid=0" would
+// otherwise inject an option into the line root executes.
 //
 // Deliberately NOT merged into 50-ritornello-power.rules: that file grants the
 // power actions and says so. Keeping this grant separate means each file can

@@ -47,11 +47,15 @@ RuntimeDirectory=ritornello
 StateDirectory=ritornello
 Environment=RITORNELLO_STATE=/var/lib/ritornello/state.json
 # Hardening. ProtectSystem=strict mounts everything read-only except the
-# two directories above — /etc/ritornello must stay writable: the radio
-# and generic-input plugins persist stations.toml and input-bindings.toml
-# there (atomic write: .tmp then rename, hence write access to the
-# directory itself, set up by deploy.sh). No PrivateDevices: the whole
-# point of the groups above is /dev access.
+# two directories above — /etc/ritornello must stay writable too: the core
+# itself rewrites plugins.toml there (atomic write: .tmp then rename) when a
+# plugin is enabled, moved or removed from the admin UI, extracts a
+# language pack into language-packs/ on install, and — during a self-update
+# — extracts any input-presets/ entries a release archive carries
+# (`update::archive::ETC_PREFIXES`). No plugin writes under /etc/ritornello
+# any more: each keeps its own data (stations.toml, input-bindings.toml, …)
+# under /var/lib/ritornello, covered by StateDirectory above. No
+# PrivateDevices: the whole point of the groups above is /dev access.
 #
 # PrivateTmp=true is what makes `strict` liveable: it mounts /tmp read-only
 # too, and mpv's PulseAudio probe writes there before falling back to ALSA —

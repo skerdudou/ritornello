@@ -35,6 +35,12 @@ mod tests {
         /// No `#[serde(default)]` of its own: the container above already
         /// carries one.
         initial_config: Vec<String>,
+        /// Units the installer enables after placing them. Each must be one
+        /// of this component's own `tree` destinations under
+        /// `etc/systemd/system/`.
+        enable: Vec<String>,
+        /// Where the component mounts things (the files plugin's shares).
+        mount_root: Option<String>,
     }
 
     #[derive(serde::Deserialize)]
@@ -79,7 +85,7 @@ mod tests {
 
     #[test]
     fn every_launched_plugin_has_a_packaging_entry() {
-        // Derived from the same file deploy.sh derives its list from, so a
+        // Derived from the same file package-release.sh derives its list from, so a
         // plugin added in a hurry cannot ship without an archive — and an
         // entry naming a plugin nothing launches cannot linger either.
         let m = manifest();
@@ -116,52 +122,6 @@ mod tests {
             }
         }
         assert!(checked > 0, "checked nothing — the walk is not looking where it should");
-    }
-
-    #[test]
-    fn every_privileged_file_a_release_carries_is_also_placed_by_deploy_sh() {
-        // The two installation paths must agree on the privileged files, and
-        // nothing else makes them: `packaging.toml` says what a release
-        // archive carries, `deploy.sh` says what an SSH deployment places,
-        // and they are written months apart. The auto-update work added four
-        // files to the first and none to the second, which left every
-        // development device checking for updates and refusing to install
-        // one — `Access denied`, naming nothing.
-        //
-        // Only units, polkit rules and the binaries systemd runs as root are
-        // held to this. Ordinary plugin binaries are derived from
-        // plugins.example.toml by both sides already, and locale directories
-        // are copied wholesale.
-        let m = manifest();
-        let deploy = std::fs::read_to_string(deploy_dir().join("deploy.sh")).unwrap();
-        let mut checked = 0;
-        for c in std::iter::once(&m.core).chain(m.plugins.values()) {
-            for e in &c.tree {
-                if !e.to.starts_with("etc/systemd/system/")
-                    && !e.to.starts_with("etc/polkit-1/rules.d/")
-                {
-                    continue;
-                }
-                assert!(
-                    deploy.contains(&e.from),
-                    "{} ships in a release archive and deploy.sh never places it",
-                    e.from
-                );
-                checked += 1;
-            }
-            for e in &c.extra_binaries {
-                // The destination path, not the binary name: `ritornello-update`
-                // is a substring of `ritornello-update.service`, so a name
-                // search would pass on the strength of the unit alone.
-                assert!(
-                    deploy.contains(&format!("/{}", e.to)),
-                    "{} is run as root and deploy.sh never installs it",
-                    e.to
-                );
-                checked += 1;
-            }
-        }
-        assert!(checked >= 9, "checked only {checked} privileged files — the walk is wrong");
     }
 
     /// The core's own list of privileged plugins
@@ -262,9 +222,180 @@ mod tests {
         assert!(checked > 0, "checked nothing — the walk is not looking where it should");
     }
 
+    /// A unit named in `enable` that the same component does not place would
+    /// have the installer run `systemctl enable` on a unit that is absent —
+    /// or, worse, on one another component owns, which removing this one
+    /// would then leave enabled. And a relative `mount_root` would be
+    /// resolved against whatever directory the installer happens to run in,
+    /// the one path it unmounts and removes under.
+    #[test]
+    fn every_enabled_unit_is_placed_by_its_own_component() {
+        let m = manifest();
+        let mut checked = 0;
+        for (name, c) in std::iter::once(("core", &m.core)).chain(m.plugins.iter().map(|(k, v)| (k.as_str(), v))) {
+            for unit in &c.enable {
+                assert!(
+                    c.tree.iter().any(|e| e.to == format!("etc/systemd/system/{unit}")),
+                    "{name} enables {unit}, which its own tree does not place under etc/systemd/system/"
+                );
+                checked += 1;
+            }
+            if let Some(root) = &c.mount_root {
+                assert!(
+                    root.starts_with('/') && root.len() > 1 && !root.contains(".."),
+                    "{name}: mount_root {root:?} must be an absolute path other than /"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 3, "checked only {checked} enable/mount_root entries — the walk is wrong");
+    }
+
+    fn run_install_inventory(args: &[&str]) -> std::process::Output {
+        std::process::Command::new("python3")
+            .arg("scripts/install-inventory.py")
+            .args(args)
+            .current_dir(repo_root())
+            .output()
+            .expect("python3 is available: package-release.sh already needs it, here and in CI")
+    }
+
+    /// The inventory published with each release (`inventory.json`) and the
+    /// archives it describes are produced from the same `entries()` of
+    /// `scripts/packaging.py`; the script's self-test stages every component
+    /// and compares. Run here because the script's only other exercise is
+    /// the `publish` job, which fires on a tag.
+    #[test]
+    fn the_install_inventory_agrees_with_what_the_archives_carry() {
+        let out = run_install_inventory(&["--self-test"]);
+        assert!(
+            out.status.success(),
+            "install-inventory.py --self-test failed:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// What `ritornello-install` will act on, read the way it will read it:
+    /// the reference order, the files plugin's unit and mount root, the
+    /// presets expanded file by file, and no privileged file anywhere an
+    /// update could reach.
+    #[test]
+    fn the_install_inventory_says_what_the_installer_needs() {
+        let out = run_install_inventory(&[]);
+        assert!(out.status.success(), "install-inventory.py failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        let inv: serde_json::Value = serde_json::from_slice(&out.stdout).expect("inventory.json is JSON");
+        assert_eq!(inv["format"], 1);
+        let order: Vec<String> = inv["reference_order"]
+            .as_array()
+            .expect("reference_order is an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(order, declared_plugins());
+        let plugins = inv["plugins"].as_array().expect("plugins is an array");
+        let plugin = |name: &str| {
+            plugins
+                .iter()
+                .find(|p| p["name"] == name)
+                .unwrap_or_else(|| panic!("no {name} in the inventory"))
+        };
+        let files = plugin("files");
+        assert_eq!(files["mount_root"], "/mnt/ritornello");
+        assert_eq!(files["enable"], serde_json::json!(["ritornello-media-mount.service"]));
+
+        // Every preset, one entry per file, owned by the unprivileged core
+        // that rewrites them on update.
+        let presets_dir = deploy_dir().join("input-presets");
+        let gi_files = plugin("generic-input")["files"].as_array().unwrap();
+        let mut presets = 0;
+        for entry in std::fs::read_dir(&presets_dir).unwrap().flatten() {
+            let dest = format!("/etc/ritornello/input-presets/{}", entry.file_name().to_string_lossy());
+            let f = gi_files
+                .iter()
+                .find(|f| f["dest"] == dest.as_str())
+                .unwrap_or_else(|| panic!("generic-input's inventory does not place {dest}"));
+            assert_eq!(f["owner"], "ritornello:ritornello", "{dest}");
+            presets += 1;
+        }
+        assert!(presets > 0, "read no preset at all — the walk is wrong");
+
+        // R22: where the inventory says the main binary lands is where the
+        // updater and the archive reader look for it. Both sides name these
+        // paths from `update::archive`; the inventory is generated apart, in
+        // Python, so nothing else makes them agree.
+        let core_binary = format!("/{}", crate::update::archive::CORE_BINARY);
+        assert!(
+            inv["core"]["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["dest"] == core_binary.as_str()),
+            "the core's inventory does not place its binary at {core_binary}"
+        );
+        let plugins_prefix = format!("/{}", crate::update::archive::PLUGINS_PREFIX);
+        for p in plugins {
+            let main = format!("{plugins_prefix}ritornello-plugin-{}", p["name"].as_str().unwrap());
+            assert!(
+                p["files"].as_array().unwrap().iter().any(|f| f["dest"] == main.as_str()),
+                "{}: the inventory does not place its binary at {main}",
+                p["name"]
+            );
+        }
+
+        // The root-run binaries (the updater and the like) are the one
+        // privileged thing a plugin name does not predict: each one the
+        // manifest declares must be placed by the inventory, at its
+        // declared destination.
+        let m = manifest();
+        let mut extra = 0;
+        for (name, c) in std::iter::once(("core", &m.core))
+            .chain(m.plugins.iter().map(|(n, c)| (n.as_str(), c)))
+        {
+            let placed = if name == "core" { &inv["core"] } else { plugin(name) };
+            for e in &c.extra_binaries {
+                let dest = format!("/{}", e.to);
+                assert!(
+                    placed["files"].as_array().unwrap().iter().any(|f| f["dest"] == dest.as_str()),
+                    "{name}: the inventory does not place the extra binary {dest}"
+                );
+                extra += 1;
+            }
+        }
+        assert!(extra > 0, "saw no extra binary — the walk is wrong");
+
+        let mut privileged = 0;
+        for c in std::iter::once(&inv["core"]).chain(plugins.iter()) {
+            for f in c["files"].as_array().unwrap() {
+                let dest = f["dest"].as_str().unwrap();
+                assert!(
+                    !dest.starts_with("/etc/ritornello/locales"),
+                    "{}: {dest} — translated text belongs to a language pack",
+                    c["name"]
+                );
+                if f["privileged"] != true {
+                    continue;
+                }
+                let root_run_binary = f["mode"] == "0755"
+                    && dest.starts_with("/usr/local/lib/ritornello/")
+                    && !dest.starts_with("/usr/local/lib/ritornello/plugins/");
+                assert!(
+                    dest.starts_with("/etc/systemd/system/")
+                        || dest.starts_with("/etc/polkit-1/rules.d/")
+                        || root_run_binary,
+                    "{}: {dest} is privileged but is neither a unit, a polkit rule, nor a root-run \
+                     binary outside the plugins directory",
+                    c["name"]
+                );
+                privileged += 1;
+            }
+        }
+        assert!(privileged >= 9, "saw only {privileged} privileged files — the walk is wrong");
+    }
+
     /// Fix round 1, R14: `deploy/mpd.example.toml` carried a literal
     /// `</content>` line — an editor artefact, not TOML — that would have
-    /// been copied verbatim into `mpd`'s own data directory by `deploy.sh`
+    /// been copied verbatim into `mpd`'s own data directory by `ritornello-install`
     /// on a fresh install, or by an update installing the plugin for the
     /// first time (`initial_config`), leaving the plugin unable to parse its
     /// own configuration. Every `deploy/*.example.toml` must parse as TOML;

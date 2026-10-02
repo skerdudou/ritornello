@@ -164,10 +164,11 @@ On the development machine (Node 20+, Rust stable,
 
 ```sh
 ./deploy/build.sh                              # npm, then cargo, then cross ARM
-PI=pi@raspberrypi.local ./deploy/deploy.sh     # builds everything and installs over SSH
+RITORNELLO_HOST=pi@raspberrypi.local ./deploy/deploy.sh   # builds, packages, installs over SSH
 ```
 
-`deploy.sh` copies the binaries, language packs and remote presets,
+`deploy.sh` packages what it built exactly as a release would and hands it to
+`ritornello-install`, which copies the binaries, language packs and remote presets,
 installs the hardened systemd unit and provisions `plugins.toml` and every
 plugin's own data directory from the example TOML files (without
 overwriting yours). The web UI is then at `http://<host>:8080`. The

@@ -64,11 +64,11 @@ the file attached to the release page. The release also carries
 installable component, read by the update page's "Add a component" dialog —
 not a per-architecture archive, so there is only one, whatever the
 architecture. A single `SHA256SUMS` covers every archive of the release plus
-`catalogue.json`, whatever the architecture. This is an alternative to
-`deploy.sh`, not a replacement for it: `deploy.sh` still builds from source
-over SSH and remains the development path (see [Deploying](#deploying)
-below); a release archive is for putting a specific tagged version onto a
-device with no build toolchain at all.
+`catalogue.json`, whatever the architecture. A release is installed with
+`ritornello-install`, the same program `deploy.sh` runs against a local
+directory built like a release (see [Deploying](#deploying) below); an
+archive is for putting a specific tagged version onto a device with no
+build toolchain at all.
 
 **A draft is not yet a release, and pushing the tag is therefore not the
 last step.** The workflow deliberately stops at a draft — publishing is the
@@ -393,8 +393,8 @@ cifs-utils polkitd`), and three differences to know about:
   disabled, so this step is required before anything plays; `amixer`
   comes with `alsa-utils` if missing;
 - mDNS is not installed by default: target the device by IP, e.g.
-  `PI=dietpi@192.168.1.20 ./deploy/deploy.sh` (the `dietpi` and `root`
-  users both work — the script's `sudo` calls are a no-op for root), or
+  `RITORNELLO_HOST=dietpi@192.168.1.20 ./deploy/deploy.sh` (see
+  [Deploying](#deploying)), or
   install `avahi-daemon` to keep using a `<hostname>.local` name.
 
 ## Example: generic x86_64 Linux machine
@@ -404,40 +404,116 @@ output is picked directly through `/api/audio-output`):
 
     sudo apt install mpv cd-discid eject cifs-utils
 
-Configuration is provisioned by `deploy.sh` here too (see above).
-`deploy/deploy.sh` works identically: `TARGET=x86_64-unknown-linux-gnu
-PI=user@host ./deploy/deploy.sh` (no need for `cross`/Docker for this
-target if the build machine is already x86_64 — a native `cargo build` is
-enough then; `cross` is mostly useful for changing architecture).
+Configuration is provisioned by `ritornello-install` here too (see
+[Deploying](#deploying)). `deploy/deploy.sh` works identically:
+`TARGET=x86_64-unknown-linux-gnu RITORNELLO_HOST=user@host
+./deploy/deploy.sh`. The script still runs `cross` through `build.sh`,
+whatever the target.
 
 ## Deploying
 
-    PI=pi@raspberrypi.local ./deploy/deploy.sh
+Every installation goes through one program, `ritornello-install`, which
+runs on your workstation and drives the device over ssh. It is what a user
+runs against a published release, and it is what a developer runs against
+their own checkout: there is no second way in.
 
-`PI` names any target SSH host (Pi or other Linux), and `TARGET` the
-compilation target (see [Building](#building)) — the two override
-independently, e.g. `TARGET=x86_64-unknown-linux-gnu PI=user@host
-./deploy/deploy.sh`. The script chains `build.sh` (so the npm UI build
-**then** the cross-compilation — the order guarantees the embedded SPA is
-fresh), copies the binaries, the language packs and the presets, installs
-the systemd units, the polkit rules and the privileged updater, and
-restarts the service.
+    RITORNELLO_HOST=pi@raspberrypi.local ./deploy/deploy.sh
 
-Even without an SSH key, the password is asked **once** per run, not once
-per copy: every ssh/scp call of the script shares a single master
-connection (`ControlMaster`), closed when the script exits. To not type
-it at all, install a key once — `ssh-keygen` if you have none, then
-`ssh-copy-id pi@raspberrypi.local`.
+`deploy/deploy.sh` is the development wrapper. It chains `build.sh` (the
+npm UI build **then** the cross-compilation — the order guarantees the
+embedded SPA is fresh), packages the result with the same
+`scripts/package-release.sh` calls the release job makes, writes
+`inventory.json` and `SHA256SUMS` beside the archives in `release/install/`,
+builds `ritornello-install` **for the workstation** (not for the device),
+and hands over: `ritornello-install --from-dir release/install "$@"`. Every
+argument you give the script reaches the installer. `TARGET` names the
+compilation target (see [Building](#building)) and defaults to the Pi 2's.
+`DEPLOY_STOP_BEFORE_INSTALL=1` stops once `release/install/` is complete
+and the installer built, without contacting any device. Nothing in the
+script places a file on the device: every path, unit and rule comes from
+the inventory, generated from `deploy/packaging.toml` like the archives.
 
 Web interface: http://<host>:8080 — logs: `journalctl -u ritornello -f`.
 
-Configuration: `deploy.sh` provisions `stations.toml` and
-`input-bindings.toml`, each into its own plugin's data directory
-(`/var/lib/ritornello/plugins/<name>/`), from the `deploy/*.example.toml`
-defaults **only when the file is absent** — a first installation needs no
-manual copy, and a file that exists is **never overwritten**, whatever it
-contains. Those two hold what you produced (stations added from the
-browser, learned bindings), so nothing may complete them.
+Prerequisites on the workstation: Docker running and `cross` (the script
+always goes through `build.sh`, whatever the `TARGET`, and installs `cross`
+itself when absent), npm, `python3`, `sha256sum` (GNU coreutils; absent from
+stock macOS) and `ssh`.
+
+What the device needs: the installer's script runs on the device under
+`sh` and relies on GNU coreutils and util-linux behaviour — `mv -T`,
+`rm --one-file-system`, `timeout` and `mountpoint` — plus `tar`,
+`systemctl`, `useradd`/`userdel`, and `sudo` when the account is not root.
+Debian and DietPi have all of them. A busybox-only system is not
+supported.
+
+### The options
+
+    ritornello-install [--host account@host] [--plugins a,b|none]
+        [--packs fr,de|none] [--keep] [--remove-all] [--purge-data]
+        [--version <tag>] [--from-dir <dir>] [--yes]
+
+- `--host`, or `RITORNELLO_HOST`: the device, as `account@host`.
+- `--plugins`, `--packs`: what is wanted, comma-separated; `none` is the
+  core alone, respectively no language pack. Whatever is left out is kept
+  as it is on the device.
+- `--keep`: keep exactly what is installed — a plain update.
+- `--remove-all`: remove everything Ritornello placed. `--purge-data` also
+  erases the data of what is removed.
+- `--version`: the release (a tag) to install; the newest final release by
+  default. The wrapper never uses it: it installs its own directory.
+- `--from-dir`: install from a directory of local archives instead of a
+  release. It must hold `inventory.json`, `SHA256SUMS` and the archives;
+  only files `SHA256SUMS` lists are ever read, and each is verified against
+  it first.
+- `--yes`: do not ask for confirmation.
+
+### What it asks
+
+Without arguments, in a terminal, it asks; with arguments they describe the
+state wanted. Every question comes before anything is changed on the
+device: the device address and ssh account, what to do with an installation
+that is already there, the version, the plugins and the language packs (as
+checklists), the data of anything about to be removed, a summary and its
+confirmation ("Go ahead?"), and last the sudo password when one is needed.
+When an answer is missing and no terminal is there to give it, the run
+stops and names it before anything is downloaded or sent.
+
+### Removal and total removal
+
+Removing a plugin (by leaving it out of `--plugins`) removes what the
+installer placed for it and, when asked, its data. `--remove-all` removes
+everything Ritornello placed — the core, every plugin, the units, the
+polkit rules and the packs — and `--purge-data` (or its prompt) also erases
+`/var/lib/ritornello` and the `ritornello` account. A removal is planned
+from the registry below together with the release's inventory, so it also
+removes a file an older version placed and the current one no longer lists.
+
+A total removal also removes the mount root `/mnt/ritornello` itself, after
+unmounting and removing every share under it — and only a total removal
+does: an install, an update and the removal of just the `files` plugin leave
+it in place. The root goes with `rmdir` and nothing stronger, since a
+recursive delete of a mounted share would delete the NAS's content. If the
+root is still a mount point, or holds anything, the installer stops and
+names it; a root already absent is fine. Before anything changes the
+installer also refuses a root that is itself a mount point (a share or bind
+mount placed right on `/mnt/ritornello`), for the removal of `files` as well,
+and on a total removal a file or hidden entry sitting directly in it.
+
+### The registry
+
+`/var/lib/ritornello-install/installed.toml` on the device records what
+`ritornello-install` placed, and which release it came from. It is what an
+update, a removal and a change of channel are computed from; do not edit it
+by hand. If it no longer parses, the installer says so and stops: restore
+it from a backup rather than deleting it.
+
+Configuration is provisioned only **when the file is absent** — a first
+installation needs no manual copy, and a file that exists is **never
+overwritten**, whatever it contains. That is what keeps `stations.toml`
+and `input-bindings.toml` (stations added from the browser, learned
+bindings) yours. Data written by an older layout is not moved for you:
+[Moving data by hand](#moving-data-by-hand) has the old-to-new table.
 
 ### Moving data by hand
 
@@ -462,10 +538,18 @@ hand, with the service stopped, before restarting it:
 | `/var/lib/ritornello/plugin-files.m3u` | `/var/lib/ritornello/plugins/files/playlist.m3u` |
 | `/var/lib/ritornello/playlists/` | `/var/lib/ritornello/plugins/files/playlists/` |
 
-`chown -R ritornello:` the whole of `/var/lib/ritornello/plugins` after
-moving anything into it by hand as root — the same command `deploy.sh`
-itself runs on every deployment — since a plugin cannot write into a
-directory it does not own.
+**Ownership is yours to fix after a hand move.** Neither `deploy.sh` nor
+`ritornello-install` runs a recursive `chown` over existing data: the
+installer changes the owner only of directories it creates itself, and of
+a plugin's data directory when it places an initial configuration there.
+A file or directory you moved in as root stays root's, and a plugin cannot
+write into what it does not own. So, once everything is moved, you MUST
+run
+
+    sudo chown -R ritornello:ritornello /var/lib/ritornello/plugins
+
+and keep `/var/lib/ritornello/plugins/files/credentials/` at mode `0700`
+with the files inside it at `0600`.
 
 ### The operator's own locales layer is gone
 
@@ -488,7 +572,7 @@ plugin you deleted from the file on purpose comes back, and appended
 ## Unprivileged service
 
 The service does not run as root. Nothing in the code needs root — only
-device access, which comes through groups. `deploy.sh` creates a
+device access, which comes through groups. `ritornello-install` creates a
 dedicated `ritornello` system user on first deployment, and the systemd
 unit (`deploy/ritornello.service`) grants the groups and applies the
 usual hardening (`NoNewPrivileges`, `ProtectSystem=strict`,
@@ -528,16 +612,20 @@ directory there (`RITORNELLO_PLUGIN_DATA_ROOT`, `/var/lib/ritornello/plugins/
 <name>/` by default — see [plugins.md](plugins.md#where-a-plugin-keeps-its-data)),
 created and rewritten by the service.
 
-Installing by hand instead of through `deploy.sh`? The two commands the
-script runs for this are:
+Installing by hand instead of through `ritornello-install`? The installer
+creates the user and creates the directories it needs owned by it; it never
+changes the owner of a directory that already exists. By hand, these are
+the two commands:
 
     sudo useradd --system --home-dir /var/lib/ritornello --no-create-home \
       --shell /usr/sbin/nologin ritornello
     sudo chown -R ritornello: /etc/ritornello
 
-An installation deployed before this change ran as root: the next
-`deploy.sh` migrates it (the user is created, `/etc/ritornello` and
-`/var/lib/ritornello` change owner, the new unit replaces the old one).
+An installation deployed before this change ran as root. The next
+`ritornello-install` creates the user and replaces the unit, but it does
+**not** change the owner of a tree that already exists: run
+`sudo chown -R ritornello:ritornello /etc/ritornello /var/lib/ritornello`
+yourself, or the service cannot write there.
 
 ## Shutdown and reboot from the web UI
 
@@ -556,7 +644,7 @@ the endpoint requires.
 | Shut down / restart the **system** | `systemctl poweroff` / `reboot` → logind → polkit | the polkit rule below |
 | Restart **Ritornello** | the process exits, systemd starts it again (`Restart=always` in the unit) | none |
 
-`deploy.sh` installs `deploy/50-ritornello-power.rules` into
+`ritornello-install` installs `deploy/50-ritornello-power.rules` into
 `/etc/polkit-1/rules.d/`. It grants the `ritornello` user the six logind
 actions involved — power-off and reboot, each in its plain,
 `-multiple-sessions` and `-ignore-inhibit` form. All six, because logind
@@ -567,7 +655,7 @@ connection is enough, which is the usual situation while testing) and to
 shutdown overrides shutdown inhibitors and will not wait for an
 in-progress `apt`/`dpkg` run to finish.
 
-polkit itself is not installed by `deploy.sh` — the script installs no
+polkit itself is not installed by `ritornello-install` — it installs no
 package — and it is not present everywhere:
 
 - **DietPi**: absent by default, `sudo apt install polkitd`;
@@ -791,7 +879,7 @@ plugin, and updating the core itself, all rewrite
 `ritornello-update.service` to place the files. None of the following has
 been observed for real:
 
-- `deploy.sh` placing the updater's binary, its two units and its polkit
+- `ritornello-install` placing the updater's binary, its two units and its polkit
   rule — the block exists and a test holds it to `packaging.toml`, but no
   deployment has run since it was written, so the first one is also its
   first trial;
@@ -895,9 +983,31 @@ covered entirely by unit and component tests built against fakes; nobody
 has clicked "Uninstall" for the files plugin on the real device to watch
 it stay running and declared, nor tried installing it from a release
 archive to watch the refusal actually name `ritornello-install`. That
-program does not exist in this repository yet, so nothing about the
-hand-off to it — not even that it exists to be handed off to — has been
-verified either.
+program now exists in this repository (see the next paragraph), but the
+hand-off to it has not been seen on a device either.
+
+**`ritornello-install` has never completed a cycle on a device.** It is
+built, unit-tested and driven against fakes. The full `deploy/deploy.sh`
+chain (`npm ci`, the builds, the `cross` build for armv7, packaging, the
+inventory and `SHA256SUMS`) has been run in WSL up to the hand-over and no
+further: the install step itself has not run. No install, update,
+removal or total removal has run on a real Raspberry Pi until the end of
+the delivery's own device trial, so nothing in [Deploying](#deploying) is
+proven on hardware. In particular:
+
+- it has never been launched from Windows or macOS, only from a Linux
+  workstation (WSL);
+- `sudo -S` (reading the password from its standard input) and `sudo -k`
+  (dropping the cached credential) have never been measured on a device,
+  whatever their documented behaviour;
+- the ssh `ControlMaster` socket path it builds has never been measured on
+  macOS, where the length limit on Unix socket paths is tighter;
+- `inventory.json` has never been produced by a real publish job: the
+  installer reads one generated locally by `scripts/install-inventory.py`,
+  and the release workflow's own run of that step, and the `SHA256SUMS`
+  line covering it, have not yet happened;
+- the registry, `/var/lib/ritornello-install/installed.toml`, has never
+  been written or read on a real device.
 
 **The move to one data directory per plugin has never run on a device.**
 Every plugin now writes only inside its own
@@ -913,7 +1023,7 @@ plugin's own directory rather than the old fixed locations, and the core
 actually creating `/var/lib/ritornello/plugins/<name>` before a plugin's
 first launch in service — none of it has been watched happening on a
 Raspberry Pi, on a fresh install or an upgrade from an older release. See
-[Moving data by hand](#moving-data-by-hand) below for what an operator
+[Moving data by hand](#moving-data-by-hand) above for what an operator
 upgrading an already-deployed device would need to do themselves: there is
 no automatic migration, and none is planned.
 
