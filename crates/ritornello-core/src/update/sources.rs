@@ -335,9 +335,279 @@ pub fn reports_of(targets: &[SourceTarget], answers: &[SourceAnswer]) -> Vec<(St
         .collect()
 }
 
+/// A plugin nobody on this device owns, offered by exactly one source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshOffer {
+    pub name: String,
+    /// Lowercased `owner/repo` of the one source that offers it.
+    pub repo: String,
+    pub published: Published,
+}
+
+/// A name nobody owns that two or more sources offer: none of them is
+/// believed, and the page names them all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    pub name: String,
+    /// Every repository that offered it, lowercased and sorted.
+    pub repos: Vec<String>,
+}
+
+/// A name no source may ever offer fresh, whoever owns it today.
+///
+/// - `core`: the core's own name, never a plugin's;
+/// - a plugin that ships with a companion, and the companion itself
+///   (`plugins::COMPANIONS`): only `ritornello-install` places those, together;
+/// - a privileged plugin (`plugins::is_privileged`): installed by
+///   `ritornello-install`, never from this page;
+/// - anything the privileged installer would not accept as a bare file name
+///   (`request::valid_name`): no dot, no separator, no uppercase — so no
+///   name of this list can ever spell a path.
+///
+/// Today the companion plugin and the privileged plugin are the same one
+/// (`files`), so those two operands overlap; both are kept because the two
+/// lists answer different questions and can part. That is why the rule is
+/// written over its two lists (`reserved_in`): with the real lists neither
+/// operand could be shown to bite on its own.
+pub fn reserved(name: &str) -> bool {
+    reserved_in(name, crate::plugins::COMPANIONS, crate::plugins::PRIVILEGED_PLUGINS)
+}
+
+/// `reserved`, over the lists it is given rather than the shipped ones.
+fn reserved_in(name: &str, companions: &[(&str, &str)], privileged: &[&str]) -> bool {
+    name == "core"
+        || companions.iter().any(|(plugin, companion)| *plugin == name || *companion == name)
+        || privileged.contains(&name)
+        || !ritornello_updater::request::valid_name(name)
+}
+
+/// Which plugins the sources may offer **fresh** — to a device that has no
+/// plugin of that name — and which names they contest (spec §4.1).
+///
+/// The security heart of the sources: a stranger's repository must never
+/// replace an official or an already-installed plugin by publishing its
+/// name. A name is owned, and so never offered fresh, when:
+///
+/// 1. our release publishes it (`Offer::Plugin` in `ours`) — it is ours;
+/// 2. it is on the device (`installed`: declared or not, binary or not, any
+///    origin) — it is whoever's it is, and its only update path is its own
+///    announced repository (`theirs_from`), never a fresh offer;
+/// 3. it is `reserved`;
+///
+/// and a name nobody owns that **two or more** sources offer is a
+/// `Conflict` naming every one of them, sorted, with no `FreshOffer`: which
+/// of two strangers is the real author is not a question this device can
+/// answer, so it believes neither.
+///
+/// Names and repositories are compared case-insensitively, so neither a
+/// capital letter nor a second spelling of one repository slips past a
+/// clause. `ours` must be a fold that was actually read: an empty one would
+/// make every one of our names look free (see `Checked::judge_strangers`).
+/// Offers come out in the order the sources were asked.
+pub fn fresh_offers(answers: &[SourceAnswer], ours: &[Published], installed: &[Installed]) -> (Vec<FreshOffer>, Vec<Conflict>) {
+    let owned_by_us = |name: &str| {
+        ours.iter().any(|p| matches!(&p.offer, Offer::Plugin(n) if n.eq_ignore_ascii_case(name)))
+    };
+    let on_the_device = |name: &str| installed.iter().any(|p| p.name.eq_ignore_ascii_case(name));
+    // Every unowned name, in first-offered order, with each distinct source
+    // offering it and that source's archive.
+    let mut offered: Vec<(String, Vec<(String, Published)>)> = Vec::new();
+    for answer in answers {
+        let repo = answer.repo.to_lowercase();
+        for published in &answer.published {
+            let Offer::Plugin(name) = &published.offer else { continue };
+            if owned_by_us(name) || on_the_device(name) || reserved(name) {
+                continue;
+            }
+            let at = match offered.iter().position(|(n, _)| n == name) {
+                Some(at) => at,
+                None => {
+                    offered.push((name.clone(), Vec::new()));
+                    offered.len() - 1
+                }
+            };
+            if !offered[at].1.iter().any(|(r, _)| *r == repo) {
+                offered[at].1.push((repo.clone(), published.clone()));
+            }
+        }
+    }
+    let mut fresh = Vec::new();
+    let mut conflicts = Vec::new();
+    for (name, mut by) in offered {
+        if by.len() == 1 {
+            let (repo, published) = by.remove(0);
+            fresh.push(FreshOffer { name, repo, published });
+        } else {
+            let mut repos: Vec<String> = by.into_iter().map(|(r, _)| r).collect();
+            repos.sort();
+            conflicts.push(Conflict { name, repos });
+        }
+    }
+    (fresh, conflicts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plugin(name: &str, v: &str) -> Published {
+        Published {
+            offer: Offer::Plugin(name.into()),
+            version: v.into(),
+            url: format!("https://x/{name}"),
+            size: 1,
+            release_tag: "t".into(),
+            checksums_url: Some("https://x/SHA256SUMS".into()),
+            catalogue_url: None,
+        }
+    }
+
+    fn answer(repo: &str, published: Vec<Published>) -> SourceAnswer {
+        SourceAnswer { repo: repo.into(), published }
+    }
+
+    #[test]
+    fn a_name_nobody_owns_is_offered_with_its_source() {
+        let (fresh, conflicts) = fresh_offers(&[answer("z/zed", vec![plugin("zed", "1.0.0")])], &[], &[]);
+        assert_eq!(fresh.iter().map(|f| (f.name.as_str(), f.repo.as_str())).collect::<Vec<_>>(), vec![("zed", "z/zed")]);
+        assert_eq!(fresh[0].published, plugin("zed", "1.0.0"), "the offer carries that source's own archive");
+        assert!(conflicts.is_empty());
+    }
+
+    /// Clause (1). **[MUTATION]** drop the `ours` check: red.
+    #[test]
+    fn a_name_our_release_publishes_is_never_offered_by_a_stranger() {
+        let (fresh, conflicts) = fresh_offers(&[answer("evil/fork", vec![plugin("radio", "9.9.9")])], &[plugin("radio", "0.2.0")], &[]);
+        assert!(fresh.is_empty() && conflicts.is_empty(), "{fresh:?} {conflicts:?}");
+    }
+
+    /// Clause (2), both shapes of "on the device". **[MUTATION]** drop the
+    /// `installed` check: red.
+    #[test]
+    fn a_name_already_on_the_device_is_never_offered_fresh() {
+        let installed = vec![Installed { name: "zed".into(), declared: true, binary_present: true, version: None, repository: None }];
+        let (fresh, conflicts) = fresh_offers(&[answer("z/zed", vec![plugin("zed", "1.0.0")])], &[], &installed);
+        assert!(fresh.is_empty() && conflicts.is_empty(), "{fresh:?} {conflicts:?}");
+        let undeclared = vec![Installed { name: "zed".into(), declared: false, binary_present: true, version: None, repository: None }];
+        let (fresh, _) = fresh_offers(&[answer("z/zed", vec![plugin("zed", "1.0.0")])], &[], &undeclared);
+        assert!(fresh.is_empty(), "an undeclared binary owns its name too");
+        // Declared with no binary — a stopped plugin, or one whose binary is
+        // missing — owns its name just as much.
+        let missing = vec![Installed { name: "zed".into(), declared: true, binary_present: false, version: None, repository: None }];
+        let (fresh, _) = fresh_offers(&[answer("z/zed", vec![plugin("zed", "1.0.0")])], &[], &missing);
+        assert!(fresh.is_empty(), "a declaration owns its name even without a binary");
+    }
+
+    /// Two sources both offering an installed name: still nothing, and not a
+    /// conflict either — the name is owned, so there is nothing to arbitrate.
+    #[test]
+    fn an_installed_name_offered_by_two_sources_is_neither_fresh_nor_a_conflict() {
+        let installed = vec![Installed { name: "zed".into(), declared: true, binary_present: true, version: None, repository: None }];
+        let (fresh, conflicts) = fresh_offers(
+            &[answer("a/one", vec![plugin("zed", "1.0.0")]), answer("b/two", vec![plugin("zed", "1.0.0")])],
+            &[],
+            &installed,
+        );
+        assert!(fresh.is_empty() && conflicts.is_empty(), "{fresh:?} {conflicts:?}");
+    }
+
+    /// Clause (3), through `fresh_offers`. Each name is caught by one operand
+    /// of `reserved` that the others do not cover — see the next test.
+    #[test]
+    fn a_reserved_name_is_never_offered() {
+        for name in ["core", "files", "files-mount", "Zed", "../zed", "a.b"] {
+            let (fresh, conflicts) = fresh_offers(&[answer("z/zed", vec![plugin(name, "1.0.0")])], &[], &[]);
+            assert!(fresh.is_empty() && conflicts.is_empty(), "{name}");
+        }
+    }
+
+    /// One case per operand of `reserved`, each chosen so that **only** that
+    /// operand reserves it:
+    ///
+    /// - `core` — the core's own name, a valid bare name otherwise;
+    /// - `files-mount` — a companion's name, neither a companion plugin nor
+    ///   privileged, and a valid bare name;
+    /// - `files` — a companion's plugin **and** privileged: the shipped
+    ///   lists name the same plugin, so each of those two operands is shown
+    ///   alone by the next test, over lists where they part;
+    /// - `Zed`, `../zed`, `a.b`, `""` — not a name the privileged installer
+    ///   would ever form a path from.
+    ///
+    /// And the control: an ordinary name is not reserved, or every assertion
+    /// above could pass by reserving everything.
+    #[test]
+    fn reserved_names_each_operand_and_nothing_else() {
+        for name in ["core", "files", "files-mount", "Zed", "../zed", "a.b", ""] {
+            assert!(reserved(name), "{name:?} must be reserved");
+        }
+        for name in ["zed", "radio", "my-plugin-2"] {
+            assert!(!reserved(name), "{name:?} must not be reserved");
+        }
+    }
+
+    /// The two operands the shipped lists cannot tell apart (both name
+    /// `files`), each shown alone over lists where they part: a companion's
+    /// plugin that is not privileged, and a privileged plugin with no
+    /// companion. **[MUTATION]** drop either operand: red.
+    #[test]
+    fn a_companion_plugin_and_a_privileged_plugin_are_each_reserved_on_their_own() {
+        let companions: &[(&str, &str)] = &[("cam", "cam-helper")];
+        let privileged: &[&str] = &["root-thing"];
+        assert!(reserved_in("cam", companions, privileged), "a companion's plugin");
+        assert!(reserved_in("cam-helper", companions, privileged), "a companion");
+        assert!(reserved_in("root-thing", companions, privileged), "a privileged plugin");
+        assert!(!reserved_in("zed", companions, privileged), "and nothing else");
+        // `reserved` reads the shipped lists, and no other.
+        assert!(!reserved_in("files", &[], &[]) && reserved("files"));
+    }
+
+    /// Clause (4). **[MUTATION]** keep the first offer instead of raising a
+    /// conflict: red. **[MUTATION]** leave `repos` unsorted: red (the
+    /// answers arrive `b` before `a`).
+    #[test]
+    fn two_sources_offering_one_name_offer_nothing_and_say_who() {
+        let (fresh, conflicts) =
+            fresh_offers(&[answer("b/two", vec![plugin("dup", "1.0.0")]), answer("a/one", vec![plugin("dup", "2.0.0")])], &[], &[]);
+        assert!(fresh.is_empty());
+        assert_eq!(conflicts, vec![Conflict { name: "dup".into(), repos: vec!["a/one".into(), "b/two".into()] }]);
+    }
+
+    /// A conflict does not spill onto its neighbours: a name only one of the
+    /// two sources offers is still offered fresh, from that source.
+    #[test]
+    fn a_conflict_costs_only_its_own_name() {
+        let (fresh, conflicts) = fresh_offers(
+            &[answer("a/one", vec![plugin("dup", "1.0.0"), plugin("solo", "1.0.0")]), answer("b/two", vec![plugin("dup", "1.0.0")])],
+            &[],
+            &[],
+        );
+        assert_eq!(fresh.iter().map(|f| (f.name.as_str(), f.repo.as_str())).collect::<Vec<_>>(), vec![("solo", "a/one")]);
+        assert_eq!(conflicts.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["dup"]);
+    }
+
+    /// One repository answering twice under two spellings is still one
+    /// source: no conflict with itself, and its repo stored lowercased.
+    #[test]
+    fn one_repository_in_two_spellings_is_one_source_not_a_conflict() {
+        let (fresh, conflicts) =
+            fresh_offers(&[answer("Z/Zed", vec![plugin("zed", "1.0.0")]), answer("z/zed", vec![plugin("zed", "1.0.0")])], &[], &[]);
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        assert_eq!(fresh.iter().map(|f| (f.name.as_str(), f.repo.as_str())).collect::<Vec<_>>(), vec![("zed", "z/zed")]);
+    }
+
+    /// A stranger's core, bundle, companion or language pack is never a fresh
+    /// plugin: only `Offer::Plugin` is judged here.
+    #[test]
+    fn only_plugin_offers_are_fresh_offers() {
+        let mut core = plugin("x", "1.0.0");
+        core.offer = Offer::Core;
+        let mut companion = plugin("x", "1.0.0");
+        companion.offer = Offer::Companion("zed-mount".into());
+        let mut pack = plugin("x", "1.0.0");
+        pack.offer = Offer::LanguagePack("pt".into());
+        let (fresh, conflicts) = fresh_offers(&[answer("z/zed", vec![core, companion, pack])], &[], &[]);
+        assert!(fresh.is_empty() && conflicts.is_empty(), "{fresh:?} {conflicts:?}");
+    }
 
     fn target(repo: &str) -> SourceTarget {
         SourceTarget { repo: repo.into(), url: crate::update::release::releases_url_for(repo) }

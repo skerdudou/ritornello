@@ -11,6 +11,7 @@
 //! do the wrong thing.
 
 use crate::update::release::{differs, origin, Offer, Origin, Published};
+use crate::update::sources::{Conflict, FreshOffer};
 use serde::Serialize;
 
 /// What the core knows about one plugin, before the release is consulted.
@@ -124,6 +125,14 @@ pub struct ComponentOffer {
     /// inferred by the page from the plugin's name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_companion: Option<String>,
+    /// A name nobody on this device owns that two or more sources offer
+    /// (`sources::fresh_offers`, clause 4): every one of those repositories,
+    /// lowercased and sorted. The row is then `installable: Some(false)` with
+    /// nothing offered, and the page names the repositories so the operator
+    /// can remove the one they did not mean to read. Absent on every other
+    /// row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_repos: Option<Vec<String>>,
 }
 
 /// Declared plugins first, **in file order** — that order is the priority, for
@@ -140,6 +149,8 @@ pub fn component_offers(
     third_party: &[ThirdPartyOffer],
     installed: &[Installed],
     installed_packs: &[(String, String)],
+    fresh: &[FreshOffer],
+    conflicts: &[Conflict],
 ) -> Vec<ComponentOffer> {
     let core_offered = published.iter().find(|p| p.offer == Offer::Core).map(|p| p.version.clone());
 
@@ -183,6 +194,7 @@ pub fn component_offers(
         // has actually read an archive — `component_offers` never sees one.
         not_installed_files: None,
         needs_companion: None,
+        conflict_repos: None,
     });
 
     for plugin in installed {
@@ -247,6 +259,7 @@ pub fn component_offers(
             // about the core's archive alone.
             not_installed_files: None,
             needs_companion: None,
+            conflict_repos: None,
         });
     }
 
@@ -266,6 +279,7 @@ pub fn component_offers(
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            conflict_repos: None,
         });
     }
 
@@ -296,6 +310,53 @@ pub fn component_offers(
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            conflict_repos: None,
+        });
+    }
+
+    // What the sources offer under a name nobody owns (`sources::fresh_offers`).
+    // A name that already has a row is skipped: `fresh_offers` excludes every
+    // owned name already, but a row rebuilt after an install
+    // (`conclude_install`) reuses the check's offers while the device has
+    // moved on, and the plugin just placed must keep its one row.
+    for offer in fresh {
+        if out.iter().any(|r| r.name == offer.name) {
+            continue;
+        }
+        out.push(ComponentOffer {
+            name: offer.name.clone(),
+            kind: ComponentKind::ThirdParty,
+            declared: false,
+            binary_present: false,
+            installed: None,
+            offered: Some(offer.published.version.clone()),
+            availability: Availability::NotInstalled,
+            installable: None,
+            third_party_repo: Some(offer.repo.clone()),
+            not_installed_files: None,
+            needs_companion: None,
+            conflict_repos: None,
+        });
+    }
+    // A contested name: a row, so the page can say why nothing is offered
+    // and which repositories to choose between, and nothing on it to install.
+    for conflict in conflicts {
+        if out.iter().any(|r| r.name == conflict.name) {
+            continue;
+        }
+        out.push(ComponentOffer {
+            name: conflict.name.clone(),
+            kind: ComponentKind::ThirdParty,
+            declared: false,
+            binary_present: false,
+            installed: None,
+            offered: None,
+            availability: Availability::NotInstalled,
+            installable: Some(false),
+            third_party_repo: None,
+            not_installed_files: None,
+            needs_companion: None,
+            conflict_repos: Some(conflict.repos.clone()),
         });
     }
     out
@@ -443,7 +504,9 @@ impl UpdateState {
             release_url: None,
             catalogue_url: None,
             last_check_unix_s: None,
-            components: component_offers(core_version, &[], &[], installed, &[]),
+            // No check yet: no source has answered, so no stranger offers
+            // anything and no name is contested.
+            components: component_offers(core_version, &[], &[], installed, &[], &[], &[]),
             busy: None,
             last_rollback: None,
             // Nothing can be in flight before the first HTTP request: this
@@ -535,7 +598,7 @@ mod tests {
         published: &[Published],
         installed: &[Installed],
     ) -> Vec<ComponentOffer> {
-        component_offers(core_version, published, &[], installed, &[])
+        component_offers(core_version, published, &[], installed, &[], &[], &[])
     }
 
     fn declared(name: &str, version: Option<&str>, binary: bool) -> Installed {
@@ -660,7 +723,7 @@ mod tests {
     #[test]
     fn a_published_pack_the_device_does_not_have_is_offered_for_installation() {
         let published = vec![pack_published("fr", "0.2.1")];
-        let rows = component_offers("0.2.1", &published, &[], &[], &[]);
+        let rows = component_offers("0.2.1", &published, &[], &[], &[], &[], &[]);
         let row = rows.iter().find(|r| r.name == "ritornello-lang-fr").expect("a pack row");
         assert_eq!(row.kind, ComponentKind::LanguagePack);
         assert_eq!(row.availability, Availability::NotInstalled);
@@ -671,7 +734,7 @@ mod tests {
     fn an_installed_pack_at_another_version_is_offered_for_update() {
         let published = vec![pack_published("fr", "0.2.2")];
         let installed = vec![("ritornello-lang-fr".to_string(), "0.2.1".to_string())];
-        let rows = component_offers("0.2.2", &published, &[], &[], &installed);
+        let rows = component_offers("0.2.2", &published, &[], &[], &installed, &[], &[]);
         let row = rows.iter().find(|r| r.name == "ritornello-lang-fr").unwrap();
         assert_eq!(row.availability, Availability::UpdateAvailable);
     }
@@ -689,7 +752,7 @@ mod tests {
     fn an_installed_pack_at_the_offered_version_is_aligned() {
         let published = vec![pack_published("fr", "0.2.1")];
         let installed = vec![("ritornello-lang-fr".to_string(), "0.2.1".to_string())];
-        let rows = component_offers("0.2.1", &published, &[], &[], &installed);
+        let rows = component_offers("0.2.1", &published, &[], &[], &installed, &[], &[]);
         assert_eq!(
             rows.iter().find(|r| r.name == "ritornello-lang-fr").unwrap().availability,
             Availability::Aligned
@@ -833,6 +896,8 @@ mod tests {
                 version: Some("1.4.0".to_string()),
                 repository: Some("https://github.com/someone/their-plugin".to_string()),
             }],
+            &[],
+            &[],
             &[],
         );
         let it = rows.iter().find(|o| o.name == "someones-plugin").unwrap();
@@ -1030,6 +1095,76 @@ mod tests {
 
     /// Two presses queue two jobs, and the first answer clears by value: a
     /// duplicated entry would survive it and strand the row on "erasing…".
+    /// A plugin nobody owns, offered by one source: a row the operator can
+    /// install, saying which repository it would come from.
+    #[test]
+    fn a_fresh_offer_is_a_not_installed_third_party_row_naming_its_source() {
+        let fresh = FreshOffer {
+            name: "zed".to_string(),
+            repo: "z/zed".to_string(),
+            published: published(Offer::Plugin("zed".to_string()), "1.0.0"),
+        };
+        let rows = component_offers("0.2.0", &[], &[], &[], &[], &[fresh], &[]);
+        let zed = rows.iter().find(|r| r.name == "zed").expect("a row for the fresh offer");
+        assert_eq!(zed.kind, ComponentKind::ThirdParty);
+        assert_eq!(zed.availability, Availability::NotInstalled);
+        assert_eq!((zed.declared, zed.binary_present, zed.installed.as_deref()), (false, false, None));
+        assert_eq!(zed.offered.as_deref(), Some("1.0.0"));
+        assert_eq!(zed.third_party_repo.as_deref(), Some("z/zed"));
+        assert_eq!(zed.installable, None, "decided by the archive, once one is fetched");
+        assert_eq!(zed.conflict_repos, None);
+    }
+
+    /// A contested name: a row, so the operator learns why nothing is
+    /// offered, and nothing on it to install.
+    #[test]
+    fn a_conflict_is_a_row_offering_nothing_and_naming_every_repository() {
+        let conflict = Conflict { name: "dup".to_string(), repos: vec!["a/one".to_string(), "b/two".to_string()] };
+        let rows = component_offers("0.2.0", &[], &[], &[], &[], &[], &[conflict]);
+        let dup = rows.iter().find(|r| r.name == "dup").expect("a row for the conflict");
+        assert_eq!(dup.kind, ComponentKind::ThirdParty);
+        assert_eq!(dup.availability, Availability::NotInstalled);
+        assert_eq!(dup.offered, None, "no source is believed");
+        assert_eq!(dup.installable, Some(false));
+        assert_eq!(dup.third_party_repo, None, "no one repository is its source");
+        assert_eq!(dup.conflict_repos, Some(vec!["a/one".to_string(), "b/two".to_string()]));
+    }
+
+    /// A row rebuilt after an install reuses the check's offers while the
+    /// plugin just placed is now on the device: it keeps its one row, and
+    /// that row is the installed one. **[MUTATION]** drop the skip: red.
+    #[test]
+    fn a_fresh_offer_for_a_name_already_listed_adds_no_second_row() {
+        let fresh = FreshOffer {
+            name: "zed".to_string(),
+            repo: "z/zed".to_string(),
+            published: published(Offer::Plugin("zed".to_string()), "1.0.0"),
+        };
+        let conflict = Conflict { name: "zed".to_string(), repos: vec!["a/one".to_string(), "b/two".to_string()] };
+        let installed = vec![Installed {
+            name: "zed".to_string(),
+            declared: true,
+            binary_present: true,
+            version: Some("1.0.0".to_string()),
+            repository: Some("https://github.com/z/zed".to_string()),
+        }];
+        let rows = component_offers("0.2.0", &[], &[], &installed, &[], &[fresh], &[conflict]);
+        let zeds: Vec<&ComponentOffer> = rows.iter().filter(|r| r.name == "zed").collect();
+        assert_eq!(zeds.len(), 1, "{zeds:#?}");
+        assert!(zeds[0].declared);
+    }
+
+    /// The conflict's repositories reach the wire under their own key, and an
+    /// ordinary row carries no such key at all.
+    #[test]
+    fn conflict_repos_is_on_the_wire_only_for_a_conflict() {
+        let conflict = Conflict { name: "dup".to_string(), repos: vec!["a/one".to_string()] };
+        let rows = component_offers("0.2.0", &[], &[], &[], &[], &[], &[conflict]);
+        let json = serde_json::to_value(&rows).unwrap();
+        assert_eq!(json[1]["conflict_repos"], serde_json::json!(["a/one"]));
+        assert!(json[0].get("conflict_repos").is_none(), "{}", json[0]);
+    }
+
     #[test]
     fn queueing_the_same_erasure_twice_lists_the_file_once() {
         let mut state = with_console_declared(&[]);

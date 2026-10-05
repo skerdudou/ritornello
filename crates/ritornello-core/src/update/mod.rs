@@ -417,6 +417,10 @@ enum Resolved<'a> {
     /// replaced by the official `radio` archive, installed under the plugin
     /// rule with everything that rule allows into `/etc/ritornello`.
     UncheckedThirdParty,
+    /// A plugin nobody on this device owns, which exactly one source offers
+    /// (`sources::fresh_offers`). `repo` is that source, lowercased: the key
+    /// its placement will be remembered under.
+    FreshTheirs { published: &'a Published, repo: &'a str },
     /// Nothing published carries this name at all: dropped out of the
     /// hundred-release window, or one this release never carried.
     ///
@@ -435,6 +439,14 @@ fn resolve<'a>(checked: &'a Checked, name: &str) -> Resolved<'a> {
     // stranger's row from ever being served from our release.
     if checked.third_party.iter().any(|n| n == name) {
         return Resolved::UncheckedThirdParty;
+    }
+    // After the unchecked guard: an installed stranger whose own repository
+    // did not answer must never be answered by another stranger publishing
+    // its name. Before `ours`: a fresh name cannot be ours by construction
+    // (`sources::fresh_offers`, clause 1), but which list answers must not
+    // rest on that — so the order states it rather than relying on it.
+    if let Some(offer) = checked.fresh.iter().find(|o| o.name == name) {
+        return Resolved::FreshTheirs { published: &offer.published, repo: &offer.repo };
     }
     match checked.ours.iter().find(|p| carries(p, name)) {
         Some(published) => Resolved::Ours(published),
@@ -525,7 +537,10 @@ fn companion_offered<'a>(ours: &'a [Published], plugin: &str) -> Option<&'a str>
 /// failed once. Carrying that `Some(false)` would keep a row refused for a
 /// fact that no longer holds.
 fn carry_installable(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) {
-    for row in fresh.iter_mut() {
+    // A contested name's `Some(false)` is a fact about this check's answers,
+    // stated by `component_offers`, and no earlier answer may overwrite it —
+    // on a device's first check `previous` is empty and would erase it.
+    for row in fresh.iter_mut().filter(|r| r.conflict_repos.is_none()) {
         row.installable = previous
             .iter()
             .find(|p| p.name == row.name && p.offered == row.offered)
@@ -1184,11 +1199,28 @@ struct Checked {
     third_party: Vec<String>,
     /// Every source that answered this check usably, in the order it was
     /// asked (`sources::query_sources`).
-    // Not read outside tests yet: what an added source offers beyond the
-    // installed plugins' own updates is consumed by a later task of the
-    // sources plan, which removes this allow.
-    #[cfg_attr(not(test), allow(dead_code))]
     sources: Vec<sources::SourceAnswer>,
+    /// The plugins nobody on this device owns that exactly one source offers
+    /// (`sources::fresh_offers`). Empty whenever our own release list gave no
+    /// fold to judge ownership against — see `Checked::judge_strangers`.
+    fresh: Vec<sources::FreshOffer>,
+    /// The names nobody owns that several sources offer: none is believed.
+    conflicts: Vec<sources::Conflict>,
+}
+
+impl Checked {
+    /// Decides which of the sources' plugins may be offered fresh, against
+    /// **this** check's own fold of our release (spec §4.1).
+    ///
+    /// Only ever called with a fold that was actually read. When our release
+    /// list answered nothing usable for this device (`NoRelease`,
+    /// `OnlyPrereleases`), `ours` is empty because nothing is known, not
+    /// because nothing is ours: judged against it, a stranger publishing
+    /// `radio` would look like the only owner of a name that is ours. So
+    /// that branch never calls this, and offers nothing fresh.
+    fn judge_strangers(&mut self, installed: &[Installed]) {
+        (self.fresh, self.conflicts) = sources::fresh_offers(&self.sources, &self.ours, installed);
+    }
 }
 
 /// The release's own offer for one language pack, out of an already
@@ -1712,46 +1744,17 @@ impl Worker {
                 // third-party rows — because in both cases *this* device has
                 // nothing of ours to install; they read differently because
                 // only one of them is undone by a switch its reader owns.
-                //
-                // The rows are rebuilt against an empty offer rather than
-                // left as they were: a repository that has no release offers
-                // nothing, and `component_offers` answers `Unknown` for every
-                // component — which is the truth, where a leftover
-                // "0.3.0 available" from a previous check would be a claim
-                // about a release that is no longer there.
                 let installed = self.installed_when_settled().await;
                 // Our repository publishing nothing says nothing about a
                 // stranger's, so the third-party rows are still answered.
                 let targets = self.targets_now(&installed).await;
                 let answers = self.sweep_sources(client, &targets, sources::SOURCES_DEADLINE).await;
-                let theirs = theirs_from(&installed, &answers);
-                let installed_packs = self.installed_packs().await;
-                let mut components =
-                    component_offers(self.core_version, &[], &theirs, &installed, &installed_packs);
-                let mut state = self.state.write().await;
-                carry_core_notes(&state.components, &mut components);
-                deny_privileged_install(&mut components);
-                state.outcome = match e {
-                    ReleasesError::OnlyPrereleases => CheckOutcome::OnlyPrereleases,
-                    _ => CheckOutcome::NoRelease,
-                };
-                state.release_version = None;
-                state.release_url = None;
-                state.catalogue_url = None;
-                state.last_check_unix_s = Some(now_unix_s());
-                state.components = components;
-                state.source_reports = sources::reports_of(&targets, &answers);
                 // `Some` with an empty `ours`, and not `None`: this branch has
                 // just offered third-party updates on the page, and returning
                 // `None` would make Install do nothing and say nothing about
                 // them. Our own components resolve to `Nothing` from an empty
                 // list, which is the truth here.
-                return Some(Checked {
-                    ours: Vec::new(),
-                    theirs,
-                    third_party: third_party_names(&installed),
-                    sources: answers,
-                });
+                return Some(self.settle_without_release(e, &installed, &targets, answers).await);
             }
             Err(ReleasesError::Unreadable) => {
                 let message = self
@@ -1774,11 +1777,41 @@ impl Worker {
         let installed = self.installed_when_settled().await;
         let targets = self.targets_now(&installed).await;
         let answers = self.sweep_sources(client, &targets, sources::SOURCES_DEADLINE).await;
-        let theirs = theirs_from(&installed, &answers);
+        Some(self.settle_with_release(published, &installed, &targets, answers).await)
+    }
+
+    /// A check whose release list was read, once the sources have answered:
+    /// no I/O but the registry and the companions file, so a test can hand
+    /// it the answers a sweep would have collected.
+    async fn settle_with_release(
+        &self,
+        published: Vec<Published>,
+        installed: &[Installed],
+        targets: &[sources::SourceTarget],
+        answers: Vec<sources::SourceAnswer>,
+    ) -> Checked {
+        let mut checked = Checked {
+            theirs: theirs_from(installed, &answers),
+            third_party: third_party_names(installed),
+            ours: published,
+            sources: answers,
+            fresh: Vec::new(),
+            conflicts: Vec::new(),
+        };
+        // Here and only here: `ours` is a fold that was actually read, so
+        // which names are ours is known.
+        checked.judge_strangers(installed);
         let installed_packs = self.installed_packs().await;
-        let mut components =
-            component_offers(self.core_version, &published, &theirs, &installed, &installed_packs);
-        let core = published.iter().find(|p| p.offer == Offer::Core);
+        let mut components = component_offers(
+            self.core_version,
+            &checked.ours,
+            &checked.theirs,
+            installed,
+            &installed_packs,
+            &checked.fresh,
+            &checked.conflicts,
+        );
+        let core = checked.ours.iter().find(|p| p.offer == Offer::Core);
         // Read before the state lock is taken: a file read has no business
         // holding the lock every route reads through.
         let companions = installed_companions(&self.root);
@@ -1786,20 +1819,75 @@ impl Worker {
         carry_installable(&state.components, &mut components);
         carry_core_notes(&state.components, &mut components);
         deny_privileged_install(&mut components);
-        deny_moved_companion(&mut components, &published, &companions);
+        deny_moved_companion(&mut components, &checked.ours, &companions);
         state.outcome = CheckOutcome::Ok;
         state.release_version = core.map(|p| p.version.clone());
         state.release_url = core.map(|p| release_page(&p.release_tag));
-        state.catalogue_url = newest_catalogue_url(&published);
+        state.catalogue_url = newest_catalogue_url(&checked.ours);
         state.last_check_unix_s = Some(now_unix_s());
         state.components = components;
-        state.source_reports = sources::reports_of(&targets, &answers);
-        Some(Checked {
-            ours: published,
-            theirs,
-            third_party: third_party_names(&installed),
+        state.source_reports = sources::reports_of(targets, &checked.sources);
+        drop(state);
+        checked
+    }
+
+    /// A check whose release list held nothing this device could be offered
+    /// (`NoRelease`, `OnlyPrereleases`), once the sources have answered.
+    ///
+    /// **No fresh offer and no conflict here, by construction.** `ours` is
+    /// empty because nothing of ours could be read, not because nothing is
+    /// ours: judged against it, a stranger publishing `radio` would be the
+    /// only owner of our own plugin's name, and an operator who then
+    /// installed it would have handed that name to them
+    /// (`a_stranger_is_offered_nothing_fresh_while_our_release_list_is_unread`).
+    /// The installed third-party plugins' own updates (`theirs`) are still
+    /// answered: those are judged by the plugin's own announcement, which
+    /// owes nothing to our release.
+    async fn settle_without_release(
+        &self,
+        why: ReleasesError,
+        installed: &[Installed],
+        targets: &[sources::SourceTarget],
+        answers: Vec<sources::SourceAnswer>,
+    ) -> Checked {
+        let checked = Checked {
+            ours: Vec::new(),
+            theirs: theirs_from(installed, &answers),
+            third_party: third_party_names(installed),
             sources: answers,
-        })
+            fresh: Vec::new(),
+            conflicts: Vec::new(),
+        };
+        let installed_packs = self.installed_packs().await;
+        // The rows are rebuilt against an empty offer rather than left as
+        // they were: a repository that has no release offers nothing, and
+        // `component_offers` answers `Unknown` for every component — which is
+        // the truth, where a leftover "0.3.0 available" from a previous check
+        // would be a claim about a release that is no longer there.
+        let mut components = component_offers(
+            self.core_version,
+            &[],
+            &checked.theirs,
+            installed,
+            &installed_packs,
+            &checked.fresh,
+            &checked.conflicts,
+        );
+        let mut state = self.state.write().await;
+        carry_core_notes(&state.components, &mut components);
+        deny_privileged_install(&mut components);
+        state.outcome = match why {
+            ReleasesError::OnlyPrereleases => CheckOutcome::OnlyPrereleases,
+            _ => CheckOutcome::NoRelease,
+        };
+        state.release_version = None;
+        state.release_url = None;
+        state.catalogue_url = None;
+        state.last_check_unix_s = Some(now_unix_s());
+        state.components = components;
+        state.source_reports = sources::reports_of(targets, &checked.sources);
+        drop(state);
+        checked
     }
 
     /// Installs the named components, plugins first and the core last.
@@ -1880,6 +1968,23 @@ impl Worker {
                     );
                     let catalog = self.catalog.read().await;
                     let message = refusal_message(&catalog, &name, &Refusal::ThirdPartyUnchecked);
+                    drop(catalog);
+                    first_failure.get_or_insert(message);
+                    continue;
+                }
+                Resolved::FreshTheirs { published, repo } => {
+                    // Task 6: route this to `install_one` with the `[[plugin]]`
+                    // block the core synthesises. Until then it is refused by
+                    // name and never reaches `install_one`: a third-party
+                    // archive cannot carry a block of its own
+                    // (`only_its_own_binary`), so placing it would leave a
+                    // binary nothing launches.
+                    tracing::warn!(
+                        "update: {name} {} is offered fresh by {repo}, which this core cannot declare yet",
+                        published.version
+                    );
+                    let catalog = self.catalog.read().await;
+                    let message = refusal_message(&catalog, &name, &Refusal::NoFragment);
                     drop(catalog);
                     first_failure.get_or_insert(message);
                     continue;
@@ -1988,6 +2093,8 @@ impl Worker {
                 &checked.theirs,
                 &installed,
                 &installed_packs,
+                &checked.fresh,
+                &checked.conflicts,
             );
             let companions = installed_companions(&self.root);
             let mut state = self.state.write().await;
@@ -3249,6 +3356,7 @@ mod tests {
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            conflict_repos: None,
         }
     }
 
@@ -3553,6 +3661,8 @@ mod tests {
             theirs: Vec::new(),
             third_party: names(&["radio"]),
             sources: Vec::new(),
+            fresh: Vec::new(),
+            conflicts: Vec::new(),
         };
         assert_eq!(
             resolve(&unconsulted, "radio"),
@@ -3569,6 +3679,8 @@ mod tests {
             }],
             third_party: names(&["radio"]),
             sources: Vec::new(),
+            fresh: Vec::new(),
+            conflicts: Vec::new(),
         };
         match resolve(&consulted, "radio") {
             Resolved::Theirs { published, repo } => {
@@ -4299,7 +4411,7 @@ mod tests {
             ("plugins.toml.fragment", fragment.as_bytes()),
         ]);
         let published = served_with_wrong_digest("mpd", &archive).await;
-        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![], sources: vec![] };
+        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![] };
         let client = client().unwrap();
 
         // The name **as the row itself reports it** — not hard-coded as
@@ -4415,7 +4527,7 @@ mod tests {
 
     /// A check that found only our own release, which is the ordinary shape.
     fn ours(published: Vec<Published>) -> Checked {
-        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new(), sources: Vec::new() }
+        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new(), sources: Vec::new(), fresh: Vec::new(), conflicts: Vec::new() }
     }
 
     // ---- The refusals AT THEIR CALL SITE --------------------------------
@@ -4938,6 +5050,7 @@ mod tests {
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            conflict_repos: None,
         });
 
         rig.worker.install_language(&rig.checked, "fr").await.expect("the pack installs");
@@ -5108,6 +5221,8 @@ mod tests {
             theirs: Vec::new(),
             third_party: Vec::new(),
             sources: Vec::new(),
+            fresh: Vec::new(),
+            conflicts: Vec::new(),
         };
 
         let memory = memory_at_the_exit(&mut worker, &checked)
@@ -5148,6 +5263,8 @@ mod tests {
             theirs: Vec::new(),
             third_party: Vec::new(),
             sources: Vec::new(),
+            fresh: Vec::new(),
+            conflicts: Vec::new(),
         };
 
         assert!(
@@ -5513,6 +5630,161 @@ mod tests {
         assert_eq!(
             offers.iter().map(|o| (o.name.as_str(), o.published.version.as_str(), o.repo.as_str())).collect::<Vec<_>>(),
             vec![("zed", "1.2.0", "Z/Zed")],
+        );
+    }
+
+    /// A plugin offer for `name` at `version`, as a stranger's fold would
+    /// carry it.
+    fn stranger_plugin(name: &str, version: &str) -> Published {
+        Published {
+            offer: Offer::Plugin(name.to_string()),
+            version: version.to_string(),
+            url: format!("https://x/{name}"),
+            size: 1,
+            release_tag: "v1".to_string(),
+            checksums_url: Some("https://x/SHA256SUMS".to_string()),
+            catalogue_url: None,
+        }
+    }
+
+    fn source_answer(repo: &str, published: Vec<Published>) -> sources::SourceAnswer {
+        sources::SourceAnswer { repo: repo.to_string(), published }
+    }
+
+    /// A check over our release (publishing `radio`) and three sources: a
+    /// fork republishing `radio`, a lone `zed`, and `dup` offered twice —
+    /// judged the way `settle_with_release` judges them.
+    fn checked_with_strangers() -> Checked {
+        let mut checked = Checked {
+            ours: radio_published("0.3.0"),
+            theirs: Vec::new(),
+            third_party: Vec::new(),
+            sources: vec![
+                source_answer("evil/fork", vec![stranger_plugin("radio", "9.9.9"), stranger_plugin("dup", "1.0.0")]),
+                source_answer("z/zed", vec![stranger_plugin("zed", "1.0.0")]),
+                source_answer("a/one", vec![stranger_plugin("dup", "2.0.0")]),
+            ],
+            fresh: Vec::new(),
+            conflicts: Vec::new(),
+        };
+        checked.judge_strangers(&[]);
+        checked
+    }
+
+    /// The three answers `resolve` owes the ownership rule: a fresh name is
+    /// the stranger's to offer, a contested one is nobody's, and ours stays
+    /// ours whoever else publishes it.
+    #[test]
+    fn resolve_offers_a_fresh_name_from_its_source_and_nothing_for_a_contested_one() {
+        let checked = checked_with_strangers();
+        match resolve(&checked, "zed") {
+            Resolved::FreshTheirs { published, repo } => {
+                assert_eq!((published.version.as_str(), repo), ("1.0.0", "z/zed"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(resolve(&checked, "dup"), Resolved::Nothing, "a contested name is installed from nobody");
+        match resolve(&checked, "radio") {
+            Resolved::Ours(published) => assert_eq!(published.version, "0.3.0", "never the fork's 9.9.9"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// **The order inside `resolve`.** An installed third-party `zed` whose
+    /// own repository did not answer, and another source offering `zed`
+    /// fresh. `fresh_offers` never produces that pair (an installed name is
+    /// owned), so the `Checked` is built by hand: what is pinned is that
+    /// `resolve` does not lean on that construction.
+    ///
+    /// **[MUTATION]** move the fresh lookup before the unchecked guard: red.
+    #[test]
+    fn an_unchecked_third_party_is_never_answered_by_a_fresh_offer_of_its_name() {
+        let checked = Checked {
+            ours: Vec::new(),
+            theirs: Vec::new(),
+            third_party: names(&["zed"]),
+            sources: Vec::new(),
+            fresh: vec![sources::FreshOffer {
+                name: "zed".to_string(),
+                repo: "other/zed".to_string(),
+                published: stranger_plugin("zed", "6.6.6"),
+            }],
+            conflicts: Vec::new(),
+        };
+        assert_eq!(resolve(&checked, "zed"), Resolved::UncheckedThirdParty);
+    }
+
+    /// **The rows a first check writes**, through `settle_with_release`: a
+    /// fresh row naming its source, and a contested row that stays
+    /// `installable: Some(false)` — on a device's first check there is no
+    /// earlier row for `carry_installable` to read, and it must not erase
+    /// what `component_offers` stated.
+    ///
+    /// **[MUTATION]** drop the `conflict_repos` filter in `carry_installable`:
+    /// red. **[MUTATION]** drop the `judge_strangers` call: red.
+    #[tokio::test]
+    async fn a_check_with_a_release_writes_fresh_and_contested_rows() {
+        let (worker, _dir) = worker_rig(starting_line());
+        let installed: Vec<Installed> = Vec::new();
+        let answers = vec![
+            source_answer("z/zed", vec![stranger_plugin("zed", "1.0.0")]),
+            source_answer("b/two", vec![stranger_plugin("dup", "1.0.0")]),
+            source_answer("a/one", vec![stranger_plugin("dup", "2.0.0")]),
+        ];
+        let checked = worker.settle_with_release(radio_published("0.3.0"), &installed, &[], answers).await;
+        assert_eq!(checked.fresh.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["zed"]);
+        let state = worker.state.read().await;
+        let zed = state.components.iter().find(|c| c.name == "zed").expect("a fresh row");
+        assert_eq!((zed.offered.as_deref(), zed.third_party_repo.as_deref()), (Some("1.0.0"), Some("z/zed")));
+        let dup = state.components.iter().find(|c| c.name == "dup").expect("a contested row");
+        assert_eq!(dup.installable, Some(false));
+        assert_eq!(dup.conflict_repos, Some(vec!["a/one".to_string(), "b/two".to_string()]));
+    }
+
+    /// **Preflight ruling P4.** A device on the stable channel while only
+    /// prereleases are published: our release list yields no fold, so which
+    /// names are ours is unknown, and a source publishing `radio` must not
+    /// be offered as `radio`'s owner. A lone `zed` is not offered either —
+    /// ownership cannot be judged at all without our fold, so nothing is.
+    ///
+    /// **[MUTATION]** call `judge_strangers` in `settle_without_release`:
+    /// red.
+    #[tokio::test]
+    async fn a_stranger_is_offered_nothing_fresh_while_our_release_list_is_unread() {
+        let (worker, _dir) = worker_rig(starting_line());
+        let answers = vec![
+            source_answer("evil/fork", vec![stranger_plugin("radio", "9.9.9")]),
+            source_answer("z/zed", vec![stranger_plugin("zed", "1.0.0")]),
+        ];
+        let checked = worker.settle_without_release(ReleasesError::OnlyPrereleases, &[], &[], answers).await;
+        assert!(checked.fresh.is_empty() && checked.conflicts.is_empty(), "{:?} {:?}", checked.fresh, checked.conflicts);
+        assert_eq!(resolve(&checked, "radio"), Resolved::Nothing);
+        let state = worker.state.read().await;
+        assert_eq!(state.outcome, CheckOutcome::OnlyPrereleases, "the branch this test means to drive");
+        assert!(
+            state.components.iter().all(|c| c.name != "radio" && c.name != "zed"),
+            "{:#?}",
+            state.components
+        );
+    }
+
+    /// Until Task 6 synthesises the `[[plugin]]` block, a fresh offer is
+    /// refused by name and never reaches `install_one`: the URL is not
+    /// served, so reaching it would refuse with a download failure instead.
+    #[tokio::test]
+    async fn installing_a_fresh_offer_is_refused_by_name_before_any_download() {
+        let (worker, _dir) = worker_rig(starting_line());
+        let checked = checked_with_strangers();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install(&client().unwrap(), &checked, &names(&["zed"])),
+        )
+        .await
+        .expect("install() hung");
+        let catalog = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+        assert_eq!(
+            worker.state.read().await.outcome,
+            CheckOutcome::Failed(refusal_message(&catalog, "zed", &Refusal::NoFragment))
         );
     }
 
@@ -6152,7 +6424,7 @@ mod tests {
             checksums_url: None,
             catalogue_url: None,
         };
-        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![], sources: vec![] };
+        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![] };
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
             worker.install(&client().unwrap(), &checked, &["files".to_string()]),
@@ -6375,6 +6647,8 @@ mod tests {
             theirs: vec![],
             third_party: vec![],
             sources: vec![],
+            fresh: vec![],
+            conflicts: vec![],
         };
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
@@ -6426,7 +6700,7 @@ mod tests {
     /// **[MUTATION]**: `Offer::Companion(c) => c == name` in `carries` — red.
     #[test]
     fn a_companion_s_name_resolves_to_nothing() {
-        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![], sources: vec![] };
+        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![] };
         assert_eq!(resolve(&checked, "files-mount"), Resolved::Nothing);
     }
 
