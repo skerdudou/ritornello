@@ -6,7 +6,7 @@ name = "ritornello-files-mount"
 # NOT start with `ritornello-plugin-`: it is not a plugin, and a tool that
 # scans plugins by prefix must not mistake it for one. Major and minor stay on
 # the product generation; version_coherence.rs asserts it.
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
