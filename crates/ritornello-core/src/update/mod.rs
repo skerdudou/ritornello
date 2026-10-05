@@ -3980,7 +3980,7 @@ mod tests {
     }
 
     /// **Refusal 3 of 3: a third-party component is never taken by the
-    /// automatic policy, whatever that policy is.**
+    /// automatic policy under the official-only scope.**
     ///
     /// Its own test rather than the row inside the table above, because the
     /// refusal only became load-bearing now: since a third-party plugin's own
@@ -4002,7 +4002,7 @@ mod tests {
         assert_eq!(
             automatic_install_list(&[theirs, mine], &nothing_placed(), schedule::InstallScope::Official),
             names(&["radio"]),
-            "a third-party plugin is never installed while nobody is watching, even when its own repository offers a newer version"
+            "a third-party plugin is never installed under the official-only scope, even when its own repository offers a newer version"
         );
     }
 

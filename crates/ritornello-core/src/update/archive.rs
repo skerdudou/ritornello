@@ -206,12 +206,11 @@ pub fn installable_from_ui(entries: &[String]) -> bool {
 /// and a sharper one: a `[[plugin]]` block names an `exec` path, and appending
 /// one is asking the core to launch whatever path a stranger's archive chose.
 ///
-/// A consequence worth stating rather than discovering: a third-party plugin
-/// can therefore only ever be **updated** from the UI, never freshly
-/// installed, because a fresh install is exactly the case that needs a
-/// fragment. That costs nothing in practice — a plugin is only ever known to
-/// be third-party because it ran and announced its repository, which means it
-/// was already declared by hand.
+/// A consequence worth stating rather than discovering: the archive can never
+/// declare its own plugin. A fresh install of a third-party plugin does not
+/// need a fragment from it: the core writes the `[[plugin]]` block itself,
+/// from the offered name and the plugins directory (`third_party_fragment`,
+/// the `Provenance::Fresh` path of `install_one`).
 ///
 /// **What this counts, it does not name.** Like `installable_from_ui`, it
 /// answers "exactly one binary, and in the right place" and says nothing about

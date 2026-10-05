@@ -23,10 +23,11 @@ pub enum UpdatePolicy {
     /// repository are updated too (spec section 4.4). Still never adds one.
     ///
     /// **The accepted price of a rollback:** a core older than this one does
-    /// not know the wire name `check_and_install_all`. `state::load` reads it
-    /// as `off` rather than discarding the whole file, so the device stops
-    /// updating by itself until the operator picks a policy again — a safe
-    /// direction, and the only one that does not lose the other settings.
+    /// not know the wire name `check_and_install_all`. This version's
+    /// `state::load` (and later ones) reads it as `off` rather than
+    /// discarding the whole file; a core that predates that repair has none,
+    /// and resets **every** setting to its default. Either way the device
+    /// stops updating by itself until the operator picks a policy again.
     CheckAndInstallAll,
 }
 

@@ -665,7 +665,9 @@ install.
 
 **The fourth setting has a price on rollback.** The value is written to
 `state.json` as `check_and_install_all`. A core older than the one that
-introduced it does not know that name, and its loader has no repair for an
+introduced it — reached by a rollback, or by a channel switch that installs an
+older core (unticking "Offer prereleases" once a stable release older than
+this version exists) — does not know that name, and its loader has no repair for an
 unknown policy: it discards the **whole** file and starts from the defaults,
 so the volume, the language and every other setting are lost along with the
 policy, which comes back `off`. A core of this version or later, rolled back
@@ -775,7 +777,8 @@ Three consequences, none of them accidental:
   "Check and install" *and* to prereleases installs betas on its own,
   which is the point of an edge channel and is the composition of two
   settings its owner turned on one after the other — neither implies the
-  other, and both default to the cautious answer. The net underneath is
+  other, and both default to the cautious answer. The same holds for
+  "Check and install, third-party plugins included". The net underneath is
   the same one every automatic install has: a core that fails to start is
   rolled back, and a version this device already placed once is not
   installed again by itself, so a bad beta cannot become a nightly loop.
@@ -929,7 +932,8 @@ in this order:
   `owner/repo` or a `https://github.com/owner/repo` URL, `DELETE
   /api/update/sources/{owner}/{repo}`), the only rows with a Remove button. A
   repository that is both announced and added keeps its row and its
-  announcement when the stored copy is removed.
+  announcement when the stored copy is removed; that row carries a Remove
+  button too, and the button removes only the stored copy.
 
 An addition is refused with a sentence of its own when it is not a GitHub
 repository, is the official one, is already listed, or when sixteen
@@ -1677,7 +1681,8 @@ external TOML text, decentralized per component, read from **one root**:
   was the one in use. A language with several packs lists one line per pack —
   where it comes from and its installed version, or "Not installed" — and
   offers Update when any of its installed packs has a different version on
-  offer. A third-party pack is held to its source: its `pack.toml` must name
+  offer. **Update runs the language's whole install**, so it also installs a
+  source's pack of that language the device does not have yet. A third-party pack is held to its source: its `pack.toml` must name
   the repository that published it, or it is refused (the author side is in
   [plugins.md](plugins.md#publishing-from-your-own-repository)).
   There is no other route: a language nobody
@@ -1686,7 +1691,9 @@ external TOML text, decentralized per component, read from **one root**:
   language carry the same module, the official pack speaks unless the
   operator records a preference. The language card then shows, under that
   language, one selector per shared module (`PUT
-  /api/languages/{language}/preference`, `null` to clear it). A preference is
+  /api/languages/{language}/preference`, `null` to clear it). Between two
+  third-party packs, with ours absent from the overlap, the one installed first
+  speaks, the id breaking a tie. A preference is
   accepted only for an installed pack that carries that module in that
   language, and at most 256 are stored (422 otherwise; a removal is always
   accepted). A stored preference survives its pack's removal and is simply not

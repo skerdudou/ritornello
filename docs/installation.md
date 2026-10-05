@@ -1026,7 +1026,8 @@ covered by tests that fake the network and by the web suites. Specifically:
   per-pack step neither installs nor removes them, and it removes them only
   with the rest of `/etc/ritornello` on `--remove-all`. That is unit-tested
   against a generated plan, never run on a device;
-- a core older than the one that introduced the fourth policy discards the
+- a core older than the one that introduced the fourth policy (reached by a
+  rollback, or by a channel switch that installs an older core) discards the
   whole of `state.json` when it meets that value (see [the update
   policy](interface.md#automatic-update-policy)); this has been reasoned from
   the old loader and never tried by rolling a device back.

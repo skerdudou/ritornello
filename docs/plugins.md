@@ -149,7 +149,9 @@ your `plugins.toml` entry declares. Our archives carry
 binary named anything else is refused with its cause named, not overwritten. It
 is only if you also named your binary `ritornello-plugin-radio` that ours
 replaces it. Declaring `repository` avoids the whole question, and it is one
-line. Four things follow, and they are the whole contract:
+line. Four things follow; the rest of the contract — release assets, names
+that are refused — is in [Publishing from your own
+repository](#publishing-from-your-own-repository):
 
 1. **Build the runtime with the macro**, `ritornello_plugin_sdk::declare_runtime!()?`,
    and give your crate a `repository = "https://github.com/<owner>/<repo>"` in
@@ -375,15 +377,17 @@ included:
   `[[plugin]]` block itself, from the name your repository offered and the
   device's plugins directory.
 - **A pack's `pack.toml` must name its own publisher.** Its `source` must be
-  exactly `https://github.com/<owner>/<repo>` of the repository that published
-  the archive (compared without case). A missing, unreadable or foreign
+  of the form `https://github.com/<owner>/<repo>` (a trailing `/` or `.git` is
+  read too) and name the repository that published the archive (compared
+  without case). A missing, unreadable or foreign
   `source` — ours included — is refused, and so is a `language` other than the
   one the pack was offered under. The device derives the directory from who
   answered and never from the archive: your pack lands in
   `ritornello-xlang-<language>-<12 hex digits>` (a hash of your `owner/repo`),
   so it cannot replace one of ours nor be replaced by another source's.
   Where two installed packs carry the same module, ours speaks unless the
-  operator records a preference.
+  operator records a preference; between two third-party packs, the one
+  installed first speaks, the id breaking a tie.
 - **`catalogue.json` is optional.** When present, the install dialog shows
   its description of your plugin; only the entries for names your repository
   legitimately offers are ever shown (entries for a name the device already
@@ -403,7 +407,7 @@ none of that name — only when nobody owns the name and it is none of these:
   (today `files` and `files-mount`); a privileged plugin — those are placed by
   `ritornello-install` alone;
 - a name that is not a bare lowercase name (`a-z`, `0-9`, `-`, at most 64
-  characters), and any name beginning `ritornello-lang-` or
+  characters, not starting with `-`), and any name beginning `ritornello-lang-` or
   `ritornello-xlang-`, which name language packs;
 - **a name two or more sources offer**: the device believes neither, shows the
   row as contested naming every repository, and offers no Install until the
@@ -483,7 +487,8 @@ installs one language in a single gesture from every pack on offer for it,
 each in its own directory. A language you did not embed yourself reaches
 your plugin's admin page only if an installed pack — ours, or a third
 party's — covers your module's name; where two installed packs cover it,
-ours speaks unless the operator recorded a preference. Otherwise your page
+ours speaks unless the operator recorded a preference (between two third
+parties, the one installed first). Otherwise your page
 falls back to whatever you embedded (see the paragraph below).
 
 **The common vocabulary — "Play", "Loading", the generic error
