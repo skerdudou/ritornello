@@ -208,7 +208,7 @@ describe('SourcesDialog', () => {
     )
   })
 
-  it('shows a generic message, not the browser text, when the request never reached the core', async () => {
+  it('shows the kit message inline, not swallowed, when the request never reached the core', async () => {
     postAnswer = { status: 0, body: '' }
     await mountDialog()
     const input = document.body.querySelector<HTMLInputElement>('[data-source-input]')!
@@ -218,7 +218,7 @@ describe('SourcesDialog', () => {
     document.body.querySelector<HTMLElement>('[data-source-add]')!.click()
     await flushPromises()
     expect(document.body.querySelector('[data-source-error]')!.textContent).toBe(
-      'The change could not be made. Try again.',
+      'Failed to fetch',
     )
   })
 

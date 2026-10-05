@@ -58,33 +58,15 @@ watch(
 )
 
 /**
- * A write, answered with what the operator may read. A refusal the core
- * explained carries its catalogue message as `error` and that is shown. Two
- * cases carry nothing an operator can act on and get one generic sentence
- * instead: a full write channel (429 or 500, **no body**) and a request that
- * never reached the core (the browser's raw `fetch` text, in whatever
- * language the browser speaks). The kit's `api.post` folds all three into one
- * string, so this reads the response itself to tell them apart.
+ * A refusal the core explained carries its catalogue message as `error`. A
+ * full write channel answers 429 or 500 **without a body**, which the kit
+ * reads back as `HTTP <code>` — a string no operator can act on, so that
+ * case gets a generic sentence instead of being shown raw. Anything else
+ * (including a network failure) is shown as the kit words it, as everywhere
+ * else in the app.
  */
-async function write(method: 'POST' | 'DELETE', url: string, body?: unknown): Promise<string | null> {
-  let response: Response
-  try {
-    response = await fetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    })
-  } catch {
-    return t.value('update_source_failed')
-  }
-  if (response.ok) return null
-  try {
-    const parsed = (await response.json()) as { error?: unknown }
-    if (typeof parsed.error === 'string' && parsed.error !== '') return parsed.error
-  } catch {
-    // no body, or not JSON: the generic sentence below
-  }
-  return t.value('update_source_failed')
+function explain(error: string): string {
+  return /^HTTP \d+$/.test(error) ? t.value('update_source_failed') : error
 }
 
 /**
@@ -101,9 +83,9 @@ async function add() {
   working.value = true
   failure.value = null
   try {
-    const error = await write('POST', '/api/update/sources', { repo })
+    const error = await api.post('/api/update/sources', { repo })
     if (error !== null) {
-      failure.value = error
+      failure.value = explain(error)
       return
     }
     draft.value = ''
@@ -119,9 +101,9 @@ async function remove(row: SourceRow) {
   failure.value = null
   try {
     const path = row.repo.split('/').map(encodeURIComponent).join('/')
-    const error = await write('DELETE', `/api/update/sources/${path}`)
+    const error = await api.del(`/api/update/sources/${path}`)
     if (error !== null) {
-      failure.value = error
+      failure.value = explain(error)
       return
     }
     await load()
