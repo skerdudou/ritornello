@@ -142,6 +142,8 @@ export interface ComponentOffer {
    * ritornello-install.
    */
   needs_companion?: string
+  /** A plugin announced by two or more repositories that disagree: every one of them, lowercased and sorted. Absent on every other row. */
+  conflict_repos?: string[]
 }
 
 /** Left by the rollback unit, mirroring `ritornello_updater::rollback::Report`. */
@@ -272,8 +274,34 @@ export type StartupPower = 'on' | 'standby' | 'previous'
  */
 export type DateFormat = 'day_month_year' | 'year_month_day' | 'month_day_year'
 
-/** `off`, `check`, or `check_and_install`, mirroring `update::schedule::UpdatePolicy`. */
-export type UpdatePolicy = 'off' | 'check' | 'check_and_install'
+/** `off`, `check`, `check_and_install`, or `check_and_install_all` (third-party plugins included), mirroring `update::schedule::UpdatePolicy`. */
+export type UpdatePolicy = 'off' | 'check' | 'check_and_install' | 'check_and_install_all'
+
+/** Mirrors `update::sources::SourceKind`. */
+export type SourceKind = 'official' | 'announced' | 'added'
+
+/** Mirrors `update::sources::SourceReport`: what the last check learned from one repository. */
+export interface SourceReport {
+  answered: boolean
+  plugins: string[]
+  languages: string[]
+}
+
+/** Mirrors `update::sources::SourceRow`, one row of `GET /api/update/sources`. */
+export interface SourceRow {
+  /** Lowercased `owner/repo`, or the raw announced text when it is not addressable. */
+  repo: string
+  kind: SourceKind
+  /** The plugins whose announcement named this repository. */
+  announced_by: string[]
+  /** `false`: shown, never queried. */
+  queryable: boolean
+  /** Whether the operator added it, and so can remove it. */
+  stored: boolean
+  /** `null` before any check has answered for this row. */
+  report: SourceReport | null
+}
+
 /** Mirrors `update::schedule::Weekday`. */
 export type Weekday =
   | 'sunday' | 'monday' | 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'saturday'

@@ -12,6 +12,7 @@ import { RouterLink } from 'vue-router'
 import AddLanguageDialog from '../components/AddLanguageDialog.vue'
 import CoverCacheDetails from '../components/CoverCacheDetails.vue'
 import InstallablesDialog from '../components/InstallablesDialog.vue'
+import SourcesDialog from '../components/SourcesDialog.vue'
 import LanguageCard from '../components/LanguageCard.vue'
 import LanguagePacksRow from '../components/LanguagePacksRow.vue'
 import UpdateCard from '../components/UpdateCard.vue'
@@ -960,6 +961,8 @@ const showInstallDialog = ref(false)
  * different question from managing the ones it runs, so it does not share
  * `showInstallDialog`. */
 const showInstallablesDialog = ref(false)
+/** The sources dialog (`SourcesDialog.vue`), opened from the update card. */
+const showSourcesDialog = ref(false)
 /** "Add a language" (`AddLanguageDialog.vue`), its mirror in the language
  * card: the packs a release offers and the device does not have. */
 const showAddLanguageDialog = ref(false)
@@ -1241,7 +1244,13 @@ function goTo(id: string) {
           :settings="settings"
           @check="onUpdateCheck"
           @install="showInstallDialog = true"
+          @sources="showSourcesDialog = true"
           @save="saveSettings"
+        />
+
+        <SourcesDialog
+          :open="showSourcesDialog"
+          @update:open="(v: boolean) => (showSourcesDialog = v)"
         />
 
         <UpdateDialog

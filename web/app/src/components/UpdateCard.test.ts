@@ -1,4 +1,5 @@
 import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetCatalog, useCatalog } from '../composables/useCatalog'
 import type { SettingsPayload, UpdatePayload } from '../types'
@@ -39,6 +40,8 @@ const CATALOG = {
   update_policy_off: 'Off',
   update_policy_check: 'Check only',
   update_policy_check_and_install: 'Check and install',
+  update_policy_check_and_install_all: 'Check and install, third-party plugins included',
+  update_sources_configure: 'Configure sources',
   update_hour_label: 'Hour',
   update_cadence_label: 'Cadence',
   update_cadence_daily: 'Daily',
@@ -365,5 +368,43 @@ describe('UpdateCard', () => {
     // by this card between them.
     const prereleasesLine = prereleases.closest('label')!
     expect(prereleasesLine.nextElementSibling?.contains(policy)).toBe(true)
+  })
+
+  it('offers four policies, the fourth under its own label', async () => {
+    // The options of a closed Select live in a detached fragment, so the list
+    // is opened first. Four values, in this order, each with the text of its
+    // own catalog key — a fourth item that reused the third key's label
+    // would read as a duplicate and could not be told apart.
+    const w = mount(UpdateCard, {
+      props: { update: payload(), settings: settings() },
+      attachTo: document.body,
+    })
+    await w.get('[data-update-policy]').trigger('keydown', { key: 'Enter' })
+    await nextTick()
+    const options = Array.from(document.body.querySelectorAll('[role="option"]'))
+    expect(options.map((o) => o.textContent?.trim())).toEqual([
+      'Off',
+      'Check only',
+      'Check and install',
+      'Check and install, third-party plugins included',
+    ])
+    w.unmount()
+    document.body.innerHTML = ''
+  })
+
+  it('labels the trigger with the fourth policy when it is the stored one', () => {
+    const w = mount(UpdateCard, {
+      props: { update: payload(), settings: settings({ update_policy: 'check_and_install_all' }) },
+    })
+    expect(w.get('[data-update-policy]').text()).toBe('Check and install, third-party plugins included')
+  })
+
+  it('emits sources when the configure button is pressed, and never saves', async () => {
+    const w = mountCard(payload())
+    const button = w.get('[data-update-sources]')
+    expect(button.text()).toBe('Configure sources')
+    await button.trigger('click')
+    expect(w.emitted('sources')).toHaveLength(1)
+    expect(w.emitted('save')).toBeUndefined()
   })
 })
