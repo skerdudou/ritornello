@@ -1828,8 +1828,9 @@ privileged = [
         let device = dev(&[("radio", RADIO_EXEC)], None, &[XLANG, "ritornello-lang-de"], &[]);
         let plan = compute(&inv(), &device, &install(&["radio"], &["fr"], &[])).unwrap();
         assert_eq!(plan.remove_trees, vec!["/etc/ritornello/language-packs/ritornello-lang-de"], "ours only");
-        // Not offered as one of ours either.
-        assert!(preselection(&inv(), &device).1.iter().all(|l| l == "de"));
+        // Not offered as one of ours either. The exact set, not `.all(…)`,
+        // which an empty preselection would also have passed.
+        assert_eq!(preselection(&inv(), &device).1, set(&["de"]));
     }
 
     /// Nothing looser than the exact shape is spared: each name below breaks
