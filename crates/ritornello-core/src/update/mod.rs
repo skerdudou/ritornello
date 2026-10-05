@@ -761,6 +761,12 @@ enum Refusal {
     /// reserved for ours, or a name taken on this device since the check.
     /// Carries which rule refused.
     NotItsOwnName(String),
+    /// A fresh offer whose binary is already in the plugins directory with
+    /// nothing declaring it — most likely the leftover of an earlier attempt
+    /// whose declaration failed. Its own sentence, because the operator can
+    /// act on it: the plugins page lists that file as installed but not
+    /// declared, and removes it. Carries the file's path.
+    LeftoverBinary(String),
     /// A third-party component whose own repository could not be consulted by
     /// this check — past the sources limit, unreachable, unaddressable, or
     /// publishing no archive for this architecture under this name.
@@ -821,6 +827,7 @@ impl std::fmt::Display for Refusal {
                 write!(f, "a third-party archive may carry nothing but its own binary")
             }
             Self::NotItsOwnFile(d) | Self::NotItsOwnName(d) => write!(f, "{d}"),
+            Self::LeftoverBinary(path) => write!(f, "{path} already exists and nothing declares it"),
             Self::ThirdPartyUnchecked => {
                 write!(f, "its own repository was not consulted by this check")
             }
@@ -850,6 +857,7 @@ fn refusal_message(catalog: &Chain, component: &str, why: &Refusal) -> String {
         Refusal::ThirdPartyArchive => ("update_third_party_archive", None),
         Refusal::NotItsOwnFile(d) => ("update_wrong_file", Some(("detail", d.as_str()))),
         Refusal::NotItsOwnName(d) => ("update_wrong_name", Some(("detail", d.as_str()))),
+        Refusal::LeftoverBinary(path) => ("update_leftover_binary", Some(("path", path.as_str()))),
         Refusal::ThirdPartyUnchecked => ("update_third_party_unchecked", None),
         Refusal::NoFragment => ("update_no_fragment", None),
         Refusal::Download(d) => ("update_download_failed", Some(("detail", d.as_str()))),
@@ -1217,6 +1225,25 @@ async fn run_privileged_unit() -> Result<(), String> {
     } else {
         stderr
     })
+}
+
+/// Where the archive `install_one` is handed comes from, as `resolve` decided.
+///
+/// Three values and not a `third_party: bool`, because two third-party cases
+/// are not one: **only a fresh offer** (`Resolved::FreshTheirs`) may be
+/// declared by the core. A `Theirs` update whose block is missing — removed
+/// by the operator since the check, or unreadable — is refused before any
+/// write, as it always was (`declaration_needed`): re-declaring it would undo
+/// the operator's own gesture, and under the automatic policy would be a
+/// first declaration nobody consented to (spec §4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Provenance {
+    /// Our own release.
+    Ours,
+    /// An installed third-party plugin's own repository.
+    Theirs,
+    /// A source offering a plugin nobody on this device owns.
+    Fresh,
 }
 
 /// What one component's install placed, once the privileged unit has run.
@@ -2046,9 +2073,9 @@ impl Worker {
             }
             // What the component **is** decides which list answers for it —
             // never which lookup happened to return something. See `resolve`.
-            let (offered, repo) = match resolve(checked, &name) {
-                Resolved::Theirs { published, repo } => (published, Some(repo)),
-                Resolved::Ours(published) => (published, None),
+            let (offered, repo, provenance) = match resolve(checked, &name) {
+                Resolved::Theirs { published, repo } => (published, Some(repo), Provenance::Theirs),
+                Resolved::Ours(published) => (published, None, Provenance::Ours),
                 Resolved::UncheckedThirdParty => {
                     // A named refusal and not a silent skip: the operator
                     // ticked this row, and "nothing happened" would read as a
@@ -2078,7 +2105,7 @@ impl Worker {
                     // `install_one` (`third_party_fragment`); `repo` is the
                     // key the placement is remembered under, which is the
                     // one this plugin's later updates (`Theirs`) read.
-                    (published, Some(repo))
+                    (published, Some(repo), Provenance::Fresh)
                 }
                 Resolved::Nothing => {
                     // A named refusal, not a silent skip (task 18's review,
@@ -2102,10 +2129,13 @@ impl Worker {
             // The repository that answered travels with its offer: it is the
             // placement memory's key, and the very repository the archive is
             // about to come from.
-            let third_party = repo.is_some();
-            let companion = if third_party { None } else { companion_offered(&checked.ours, &name) };
+            let companion = if provenance == Provenance::Ours {
+                companion_offered(&checked.ours, &name)
+            } else {
+                None
+            };
             match self
-                .install_one(client, &name, offered, third_party, repo, companion)
+                .install_one(client, &name, offered, provenance, repo, companion)
                 .await
             {
                 Ok(Placed::Plugin) => {
@@ -2223,11 +2253,12 @@ impl Worker {
         client: &reqwest::Client,
         name: &str,
         offered: &Published,
-        third_party: bool,
+        provenance: Provenance,
         repo: Option<&str>,
         companion_offered: Option<&str>,
     ) -> Result<Placed, Refusal> {
         let is_core = offered.offer == Offer::Core;
+        let third_party = provenance != Provenance::Ours;
         // **A privileged plugin's companion is `ritornello-install`'s**, and
         // both questions about it are answered before a byte is downloaded:
         // neither needs the archive.
@@ -2355,11 +2386,19 @@ impl Worker {
         // it. `declaration_needed` makes the core's own decision from `is_core`
         // alone.
         let declared = !is_core && self.declared(name);
-        // A third-party plugin nothing declares yet gets **the core's** block,
-        // built from the offered name and the device's plugins directory —
-        // never from the archive, which may carry nothing but its binary
-        // anyway (`archive_allowed` above). See `third_party_fragment`.
-        let fragment = if third_party && !declared {
+        // A **fresh offer**, and only a fresh offer, gets **the core's**
+        // block, built from the offered name and the device's plugins
+        // directory — never from the archive, which may carry nothing but its
+        // binary anyway (`archive_allowed` above). See `third_party_fragment`,
+        // and `Provenance` for why a `Theirs` update with no block is refused
+        // instead.
+        //
+        // Ownership is asked once more here, after the download and before
+        // any write: `install` asked before downloading, and the device may
+        // have changed in between. `still_unowned` and not `declared`, which
+        // answers `false` for an unreadable file.
+        let fragment = if provenance == Provenance::Fresh {
+            self.still_unowned(name)?;
             let Some((file, _)) = &contents.binary else {
                 return Err(Refusal::Prepare(format!(
                     "the archive of {name} carries no plugin binary"
@@ -2640,14 +2679,15 @@ impl Worker {
             Refusal::NotItsOwnName(format!("{} cannot be read: {e:#}", self.manifest.display()))
         })?;
         let target = plugins_dir(&self.root).join(format!("ritornello-plugin-{name}"));
-        if manifest.plugins.iter().any(|p| p.name == name) {
+        // Case-insensitively, as `sources::fresh_offers` judges ownership.
+        if manifest.plugins.iter().any(|p| p.name.eq_ignore_ascii_case(name)) {
             return Err(Refusal::NotItsOwnName(format!("{name} is declared on this device")));
         }
         if let Some(p) = manifest.plugins.iter().find(|p| Path::new(&p.exec) == target) {
             return Err(Refusal::NotItsOwnName(format!("{} runs {}", p.name, target.display())));
         }
         if target.exists() {
-            return Err(Refusal::NotItsOwnName(format!("{} already exists", target.display())));
+            return Err(Refusal::LeftoverBinary(target.display().to_string()));
         }
         Ok(())
     }
@@ -4263,6 +4303,7 @@ mod tests {
             Refusal::ThirdPartyArchive,
             Refusal::NotItsOwnFile("it is declared to run /a/b, and the archive carries c".to_string()),
             Refusal::NotItsOwnName("the archive carries zed, not ritornello-plugin-zed".to_string()),
+            Refusal::LeftoverBinary("/usr/local/lib/ritornello/plugins/ritornello-plugin-zed".to_string()),
             Refusal::ThirdPartyUnchecked,
             Refusal::NoFragment,
             Refusal::Download("connection reset by peer".to_string()),
@@ -6019,7 +6060,7 @@ mod tests {
         let published = served("zed", &zed_archive()).await;
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client().unwrap(), "zed", &published, true, Some("z/zed"), None),
+            worker.install_one(&client().unwrap(), "zed", &published, Provenance::Fresh, Some("z/zed"), None),
         )
         .await
         .expect("install_one hung");
@@ -6050,7 +6091,7 @@ mod tests {
         published.checksums_url = None;
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client().unwrap(), "zed", &published, true, Some("z/zed"), None),
+            worker.install_one(&client().unwrap(), "zed", &published, Provenance::Fresh, Some("z/zed"), None),
         )
         .await
         .expect("install_one hung");
@@ -6082,7 +6123,7 @@ mod tests {
         let published = served("zed", &archive).await;
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client().unwrap(), "zed", &published, true, Some("z/zed"), None),
+            worker.install_one(&client().unwrap(), "zed", &published, Provenance::Fresh, Some("z/zed"), None),
         )
         .await
         .expect("install_one hung");
@@ -6132,25 +6173,40 @@ mod tests {
     /// **The check's verdict is re-asked at the gesture.** Between the check
     /// that offered `zed` and the click, the name or its file may have been
     /// taken; installing then would replace someone's plugin with a
-    /// stranger's binary — the one thing a fresh offer must never do. Four
+    /// stranger's binary — the one thing a fresh offer must never do. Five
     /// ways it can be taken, each refused by name, before any download (the
-    /// offer's URL is never served) and with nothing written.
+    /// offer's URL is never served) and with nothing written. A name taken
+    /// under another case counts, as it does for `sources::fresh_offers`;
+    /// a binary already on disk gets the sentence that says how to clear it.
     #[tokio::test]
     async fn installing_a_fresh_offer_is_refused_once_its_name_or_file_is_taken() {
         enum Taken {
             Declared,
+            DeclaredOtherCase,
             ExecOfAnother,
             FileOnDisk,
             ManifestUnreadable,
         }
-        for taken in [Taken::Declared, Taken::ExecOfAnother, Taken::FileOnDisk, Taken::ManifestUnreadable] {
+        for taken in [
+            Taken::Declared,
+            Taken::DeclaredOtherCase,
+            Taken::ExecOfAnother,
+            Taken::FileOnDisk,
+            Taken::ManifestUnreadable,
+        ] {
             let (worker, dir) = worker_rig(announced_radio());
             let _privileged = Privileged::answers(Ok(()));
             let zed_file = plugins_dir(dir.path()).join("ritornello-plugin-zed");
             let mut manifest = std::fs::read_to_string(&worker.manifest).unwrap();
+            let catalog = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+            let leftover = matches!(taken, Taken::FileOnDisk)
+                .then(|| refusal_message(&catalog, "zed", &Refusal::LeftoverBinary(zed_file.display().to_string())));
             match taken {
                 Taken::Declared => {
                     manifest.push_str("\n[[plugin]]\nname = \"zed\"\nexec = \"/opt/zed\"\n");
+                }
+                Taken::DeclaredOtherCase => {
+                    manifest.push_str("\n[[plugin]]\nname = \"Zed\"\nexec = \"/opt/zed\"\n");
                 }
                 Taken::ExecOfAnother => {
                     manifest.push_str(&format!("\n[[plugin]]\nname = \"myzed\"\nexec = {:?}\n", zed_file.to_string_lossy()));
@@ -6168,12 +6224,80 @@ mod tests {
             .expect("install() hung");
             let outcome = worker.state.read().await.outcome.clone();
             let CheckOutcome::Failed(message) = &outcome else { panic!("{outcome:?}") };
-            let catalog = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
-            let head = refusal_message(&catalog, "zed", &Refusal::NotItsOwnName(String::new()));
-            assert!(message.starts_with(head.trim_end_matches(|c: char| !c.is_alphanumeric())), "{message}");
+            match leftover {
+                Some(expected) => assert_eq!(message, &expected),
+                None => {
+                    let head = refusal_message(&catalog, "zed", &Refusal::NotItsOwnName(String::new()));
+                    assert!(message.starts_with(head.trim_end_matches(|c: char| !c.is_alphanumeric())), "{message}");
+                }
+            }
             assert_eq!(std::fs::read_to_string(&worker.manifest).unwrap(), manifest);
             assert!(!worker.staging.join("request.json").exists());
         }
+    }
+
+    /// **Only a fresh offer is declared by the core.** A `Theirs` update
+    /// finding no block for its plugin — the file unreadable, or the block
+    /// removed by the operator since the check — is refused with
+    /// `NoFragment` before anything is written, as it was before fresh
+    /// installs existed: placing the binary first would be a
+    /// replace-then-fail on an unreadable file, and re-declaring would undo
+    /// the operator's own gesture, without a second consent under the
+    /// automatic policy (spec §4.5).
+    ///
+    /// **[MUTATION]** synthesise for any third party (`provenance !=
+    /// Provenance::Ours`) instead of `== Provenance::Fresh`: both red.
+    #[tokio::test]
+    async fn a_theirs_update_finding_no_block_is_refused_before_any_write() {
+        for unreadable in [true, false] {
+            let (worker, dir) = worker_rig(announced_radio());
+            let _privileged = Privileged::answers(Ok(()));
+            let manifest = if unreadable {
+                "[[plugin\nnot toml".to_string()
+            } else {
+                let other = plugins_dir(dir.path()).join("ritornello-plugin-other");
+                format!("[[plugin]]\nname = \"other\"\nexec = {:?}\n", other.to_string_lossy())
+            };
+            std::fs::write(&worker.manifest, &manifest).unwrap();
+            let archive = targz(&[("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"THEIRS")]);
+            let published = served("radio", &archive).await;
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                worker.install_one(&client().unwrap(), "radio", &published, Provenance::Theirs, Some("someone/radio"), None),
+            )
+            .await
+            .expect("install_one hung");
+            assert!(matches!(outcome, Err(Refusal::NoFragment)), "unreadable={unreadable}: {:?}", outcome.as_ref().err());
+            assert!(!worker.staging.join("request.json").exists(), "unreadable={unreadable}: root was asked to place it");
+            assert_eq!(std::fs::read_to_string(&worker.manifest).unwrap(), manifest, "unreadable={unreadable}");
+        }
+    }
+
+    /// **Ownership re-asked inside `install_one`**, after the download:
+    /// `install` asked before downloading, and `zed` became declared in
+    /// between — here with the very `exec` the core would have written, so
+    /// `placement_target` has nothing to object to. Refused by name, nothing
+    /// placed, nothing written.
+    ///
+    /// **[MUTATION]** drop the `still_unowned` call in `install_one`: red.
+    #[tokio::test]
+    async fn a_fresh_offer_declared_since_the_gesture_began_is_refused_before_any_write() {
+        let (worker, dir) = worker_rig(announced_radio());
+        let _privileged = Privileged::answers(Ok(()));
+        let zed_file = plugins_dir(dir.path()).join("ritornello-plugin-zed");
+        let mut manifest = std::fs::read_to_string(&worker.manifest).unwrap();
+        manifest.push_str(&format!("\n[[plugin]]\nname = \"zed\"\nexec = {:?}\n", zed_file.to_string_lossy()));
+        std::fs::write(&worker.manifest, &manifest).unwrap();
+        let published = served("zed", &zed_archive()).await;
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install_one(&client().unwrap(), "zed", &published, Provenance::Fresh, Some("z/zed"), None),
+        )
+        .await
+        .expect("install_one hung");
+        assert!(matches!(outcome, Err(Refusal::NotItsOwnName(_))), "{:?}", outcome.as_ref().err());
+        assert!(!worker.staging.join("request.json").exists());
+        assert_eq!(std::fs::read_to_string(&worker.manifest).unwrap(), manifest);
     }
 
     /// **Second consent (spec §4.5).** The first installation of a fresh
@@ -6243,7 +6367,7 @@ mod tests {
         let client = client().unwrap();
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client, "radio", &published, true, None, None),
+            worker.install_one(&client, "radio", &published, Provenance::Theirs, None, None),
         )
         .await
         .expect("install_one hung");
@@ -6298,7 +6422,7 @@ mod tests {
         let client = client().unwrap();
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client, "theirs", &published, true, None, None),
+            worker.install_one(&client, "theirs", &published, Provenance::Theirs, None, None),
         )
         .await
         .expect("install_one hung");
@@ -6685,7 +6809,7 @@ mod tests {
         let published = served("newsource", &archive).await;
         let client = client().unwrap();
 
-        worker.install_one(&client, "newsource", &published, false, None, None).await.unwrap();
+        worker.install_one(&client, "newsource", &published, Provenance::Ours, None, None).await.unwrap();
 
         assert_eq!(
             std::fs::read(worker.plugin_data_root.join("newsource").join("stations.toml")).unwrap(),
@@ -6740,7 +6864,7 @@ mod tests {
         let client = client().unwrap();
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client, "files", &published, false, None, companion_offered),
+            worker.install_one(&client, "files", &published, Provenance::Ours, None, companion_offered),
         )
         .await
         .expect("install_one hung")
@@ -7113,7 +7237,7 @@ mod tests {
         let published = served("files", &archive).await;
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client().unwrap(), "files", &published, true, None, None),
+            worker.install_one(&client().unwrap(), "files", &published, Provenance::Theirs, None, None),
         )
         .await
         .expect("install_one hung");
@@ -7143,7 +7267,7 @@ mod tests {
         let archive = targz(&[("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF")]);
         let published = served("radio", &archive).await;
         let client = client().unwrap();
-        let outcome = worker.install_one(&client, "radio", &published, false, None, None).await;
+        let outcome = worker.install_one(&client, "radio", &published, Provenance::Ours, None, None).await;
         assert!(matches!(outcome, Ok(Placed::Plugin)), "{:?}", outcome.as_ref().err());
     }
 
@@ -7154,10 +7278,10 @@ mod tests {
     /// repository to namespace by under nothing.
     #[tokio::test]
     async fn install_one_remembers_a_placement_under_the_key_its_origin_dictates() {
-        for (third_party, repo, expected) in [
-            (true, Some("someone/theirs"), Some("third-party:someone/theirs:radio")),
-            (false, None, Some("radio")),
-            (true, None, None),
+        for (provenance, repo, expected) in [
+            (Provenance::Theirs, Some("someone/theirs"), Some("third-party:someone/theirs:radio")),
+            (Provenance::Ours, None, Some("radio")),
+            (Provenance::Theirs, None, None),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let worker = worker_at(dir.path(), one_line(PluginStatus::startup("radio")));
@@ -7165,11 +7289,11 @@ mod tests {
             let archive = targz(&[("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF")]);
             let published = served("radio", &archive).await;
             let outcome = worker
-                .install_one(&client().unwrap(), "radio", &published, third_party, repo, None)
+                .install_one(&client().unwrap(), "radio", &published, provenance, repo, None)
                 .await;
             assert!(matches!(outcome, Ok(Placed::Plugin)), "{:?}", outcome.as_ref().err());
             let keys: Vec<String> = placed::read(&worker.staging).keys().cloned().collect();
-            assert_eq!(keys, expected.map(str::to_string).into_iter().collect::<Vec<_>>(), "third_party={third_party}");
+            assert_eq!(keys, expected.map(str::to_string).into_iter().collect::<Vec<_>>(), "{provenance:?}");
         }
     }
 

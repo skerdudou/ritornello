@@ -316,6 +316,7 @@ update_needs_companion_step = "{component} non può essere installato né aggior
 update_row_needs_companion = "Questo aggiornamento modifica anche l'assistente di montaggio ({companion}): aggiorna con ritornello-install."
 update_wrong_file = "{component} non può essere installato da qui: il suo archivio non contiene il file che {component} dichiara di eseguire ({detail})"
 update_wrong_name = "{component} non può essere installato con questo nome ({detail})"
+update_leftover_binary = "{component} non può essere installato: {path} è già su questo dispositivo e nulla lo dichiara — molto probabilmente è rimasto da un tentativo precedente non concluso. Nella pagina dei plugin compare come «Installato ma non dichiarato»: usa lì «Rimuovi il binario», poi installa di nuovo."
 update_third_party_unchecked = "{component} proviene da un repository di terze parti che questo controllo non ha potuto consultare, e il suo aggiornamento può arrivare solo da lì — non è stato installato nulla"
 update_third_party_archive = "{component} non può essere installato da qui: un archivio di terze parti può contenere soltanto il binario del proprio plugin — nessuna unità systemd, nessuna regola polkit, nessun file di configurazione e nessun blocco plugin."
 update_no_fragment = "{component} non può essere dichiarato: il suo archivio non contiene alcun blocco plugin"

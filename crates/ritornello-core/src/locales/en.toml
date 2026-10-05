@@ -316,6 +316,7 @@ update_needs_companion_step = "{component} cannot be installed or updated from h
 update_row_needs_companion = "This update also changes the mount helper ({companion}): update with ritornello-install."
 update_wrong_file = "{component} cannot be installed from here: its archive does not carry the file {component} is declared to run ({detail})"
 update_wrong_name = "{component} cannot be installed under this name ({detail})"
+update_leftover_binary = "{component} cannot be installed: {path} is already on this device and nothing declares it — most likely left by an earlier attempt that did not finish. On the plugins page it reads \"Installed but not declared\": use \"Remove the binary\" there, then install again."
 update_third_party_unchecked = "{component} comes from a third-party repository this check could not consult, and its update can only come from there — nothing was installed"
 update_third_party_archive = "{component} cannot be installed from here: a third-party archive may carry nothing but its own plugin binary — no systemd unit, no polkit rule, no configuration file and no plugin block."
 update_no_fragment = "{component} cannot be declared: its archive carries no plugin block"

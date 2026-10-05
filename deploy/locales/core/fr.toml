@@ -313,6 +313,7 @@ update_needs_companion_step = "{component} ne peut pas être installé ni mis à
 update_row_needs_companion = "Cette mise à jour modifie aussi l'assistant de montage ({companion}) : faites-la avec ritornello-install."
 update_wrong_file = "{component} ne peut pas être installé depuis ici : son archive ne porte pas le fichier que {component} est déclaré exécuter ({detail})"
 update_wrong_name = "{component} ne peut pas être installé sous ce nom ({detail})"
+update_leftover_binary = "{component} ne peut pas être installé : {path} est déjà sur cet appareil et rien ne le déclare — très probablement le reste d'une tentative précédente inachevée. Sur la page des greffons, il apparaît « Installé mais non déclaré » : utilisez-y « Supprimer le binaire », puis relancez l'installation."
 update_third_party_unchecked = "{component} vient d'un dépôt tiers que cette vérification n'a pas pu consulter, et sa mise à jour ne peut venir que de là — rien n'a été installé"
 update_third_party_archive = "{component} ne peut pas être installé depuis ici : une archive tierce ne peut porter que son propre binaire de greffon — ni unité systemd, ni règle polkit, ni fichier de configuration, ni bloc de greffon."
 update_no_fragment = "{component} ne peut pas être déclaré : son archive ne porte aucun bloc de greffon"

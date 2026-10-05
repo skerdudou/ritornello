@@ -316,6 +316,7 @@ update_needs_companion_step = "{component} kann nicht von hier aus installiert o
 update_row_needs_companion = "Dieses Update ändert auch das Einhängeprogramm ({companion}): Aktualisieren Sie mit ritornello-install."
 update_wrong_file = "{component} kann nicht von hier aus installiert werden: Das Archiv enthält nicht die Datei, die {component} laut Eintrag ausführt ({detail})"
 update_wrong_name = "{component} kann nicht unter diesem Namen installiert werden ({detail})"
+update_leftover_binary = "{component} kann nicht installiert werden: {path} liegt bereits auf diesem Gerät und kein Eintrag verweist darauf — vermutlich der Rest eines früheren, nicht abgeschlossenen Versuchs. Auf der Plugin-Seite steht er als „Installiert, aber nicht eingetragen“: dort „Programmdatei entfernen“ wählen und dann erneut installieren."
 update_third_party_unchecked = "{component} stammt aus einem Drittanbieter-Repository, das diese Prüfung nicht abfragen konnte, und das Update kann nur von dort kommen — es wurde nichts installiert"
 update_third_party_archive = "{component} kann nicht von hier aus installiert werden: Ein Drittanbieter-Archiv darf nur seine eigene Plugin-Programmdatei enthalten — keine systemd-Unit, keine polkit-Regel, keine Konfigurationsdatei und keinen Plugin-Block."
 update_no_fragment = "{component} kann nicht eingetragen werden: Das Archiv enthält keinen Plugin-Block"

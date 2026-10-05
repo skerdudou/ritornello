@@ -316,6 +316,7 @@ update_needs_companion_step = "{component} no se puede instalar ni actualizar de
 update_row_needs_companion = "Esta actualización también cambia el asistente de montaje ({companion}): actualiza con ritornello-install."
 update_wrong_file = "{component} no se puede instalar desde aquí: su archivo no contiene el archivo que {component} tiene declarado ejecutar ({detail})"
 update_wrong_name = "{component} no se puede instalar con este nombre ({detail})"
+update_leftover_binary = "{component} no se puede instalar: {path} ya está en este dispositivo y nada lo declara; lo más probable es que quedara de un intento anterior que no terminó. En la página de complementos aparece como «Instalado pero no declarado»: use allí «Eliminar el binario» y vuelva a instalar."
 update_third_party_unchecked = "{component} procede de un repositorio de terceros que esta comprobación no pudo consultar, y su actualización solo puede venir de allí; no se ha instalado nada"
 update_third_party_archive = "{component} no se puede instalar desde aquí: un archivo de terceros solo puede contener el binario de su propio complemento, sin unidad de systemd, sin regla de polkit, sin archivo de configuración y sin bloque de complemento."
 update_no_fragment = "{component} no se puede declarar: su archivo no contiene ningún bloque de complemento"
