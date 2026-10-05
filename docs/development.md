@@ -261,7 +261,7 @@ request, on Ubuntu, in five jobs — the last two only on a tag:
   a prerelease.
 
 Ubuntu and not Windows because the SDK tests open Unix sockets.
-`scripts/ci-local.sh [web|rust|e2e]` runs the same commands in the same
+`scripts/ci-local.sh [web|rust|installer|e2e]` runs the same commands in the same
 order from WSL — if one of the two changes, the other must follow. A known
 flaky class (a test that assumes fast execution) is fixed at the source
 when it shows up, never retried blindly.

@@ -8,6 +8,59 @@ ALSA/mpv, IPC through Unix sockets — all of which run on any Linux, x86_64
 and ARM alike. The Pi 2 is this project's historical reference hardware,
 not a technical constraint — the examples below merely illustrate it.
 
+## Installing on a device, without building anything
+
+Everything is installed, updated and removed from your own computer by one
+program, `ritornello-install`, which talks to the device over ssh. Every
+release on the project's GitHub page carries it, built for five systems.
+Take the file for yours from the newest release:
+
+| Your computer | File |
+|---|---|
+| Windows (64-bit) | `ritornello-install-<version>-x86_64-pc-windows-msvc.zip` |
+| macOS, Apple Silicon (M1 and later) | `ritornello-install-<version>-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `ritornello-install-<version>-x86_64-apple-darwin.tar.gz` |
+| Linux or WSL, x86_64 | `ritornello-install-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux, 64-bit ARM | `ritornello-install-<version>-aarch64-unknown-linux-musl.tar.gz` |
+
+The Linux builds are static: they run on any distribution, old or new. The
+release's `SHA256SUMS` lists each of these files, if you want to check the
+download.
+
+Then, in a terminal, in the directory where you extracted it:
+
+    ./ritornello-install --host dietpi@192.168.0.57      # macOS, Linux, WSL
+    .\ritornello-install.exe --host dietpi@192.168.0.57  # Windows
+
+Without other arguments it asks what to install, and fetches every archive
+it needs from GitHub itself, checking each against the release's
+`SHA256SUMS`. The [Deploying](#deploying) section below describes the same
+program in detail — its screens, its options, removal.
+
+**`--version`.** By default the newest **final** release is installed. As
+long as the project has published prereleases only, name one:
+`--version v0.2.0-beta.3`.
+
+**What the device needs**: an ssh server, an account allowed to use `sudo`,
+and a Debian-like system — GNU coreutils, util-linux and systemd; the exact
+list is under [Deploying](#deploying), and a busybox-only system is not
+supported. Debian, Raspberry Pi OS and DietPi qualify as installed. Nothing
+is compiled on the device.
+
+**On your computer**, an `ssh` client:
+
+- **Windows** ships one (the OpenSSH client, an optional feature turned on
+  by default since Windows 10 1809). There, ssh cannot keep one connection
+  open for several steps, so **without an ssh key it asks for your password
+  at each step**. Setting up a key once (`ssh-keygen`, then add the public
+  key to `~/.ssh/authorized_keys` on the device) avoids that. Windows
+  SmartScreen may warn about an unsigned program on first launch: "More
+  info", then "Run anyway".
+- **macOS** ships one. The program is not signed by Apple, so the first
+  launch is refused until the quarantine mark the browser put on it is
+  removed: `xattr -d com.apple.quarantine ./ritornello-install`.
+- **Linux** distributions ship one, or it is the `openssh-client` package.
+
 ## Building
 
 The web interface is a SPA (Vue 3 + shadcn-vue) embedded into the core
@@ -63,7 +116,10 @@ the file attached to the release page. The release also carries
 `catalogue.json`, a description (kind and one-line summary) of every
 installable component, read by the "Add a plugin" dialog —
 not a per-architecture archive, so there is only one, whatever the
-architecture. A single `SHA256SUMS` covers every archive of the release plus
+architecture. Every release also carries `ritornello-install` itself, for
+five workstation systems, whether it changed or not (see
+[Installing on a device, without building anything](#installing-on-a-device-without-building-anything)).
+A single `SHA256SUMS` covers every archive of the release plus
 `catalogue.json`, whatever the architecture. A release is installed with
 `ritornello-install`, the same program `deploy.sh` runs against a local
 directory built like a release (see [Deploying](#deploying) below); an
@@ -1035,7 +1091,19 @@ the delivery's own device trial, so nothing in [Deploying](#deploying) is
 proven on hardware. In particular:
 
 - it has never been launched from Windows or macOS, only from a Linux
-  workstation (WSL);
+  workstation (WSL). Since the `installer` job of `ci.yml`, it is
+  **compiled and unit-tested** on Windows and on Apple Silicon macOS on
+  every change (the Intel macOS build is compiled only), but never run
+  against a device from either; in particular the Windows path, where ssh
+  runs one connection per step and the terminal screens draw on the
+  Windows console, has never been seen working end to end;
+- no release has yet carried the five installer archives: the publish
+  job's step that adds them after its component filter, and the
+  `SHA256SUMS` lines that cover them, run only on a tag, and no tag has
+  been pushed since they were written — the next one is their first trial.
+  The instructions in
+  [Installing on a device, without building anything](#installing-on-a-device-without-building-anything)
+  describe files that do not exist until then;
 - `sudo -S` (reading the password from its standard input) and `sudo -k`
   (dropping the cached credential) have never been measured on a device,
   whatever their documented behaviour;

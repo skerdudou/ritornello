@@ -192,12 +192,23 @@ pub(crate) mod tests {
     /// the same script (`run_install_inventory` there): the inventory this
     /// installer will actually receive is produced by python, not
     /// hand-written here.
+    ///
+    /// `python3` first, then `python`: this crate is also tested on Windows
+    /// (the `installer` job of `ci.yml`), where the interpreter is usually
+    /// installed under the second name only. Only a missing program falls
+    /// through; any other failure is reported as it is.
     fn run_install_inventory() -> String {
-        let out = std::process::Command::new("python3")
-            .arg("scripts/install-inventory.py")
-            .current_dir(repo_root())
-            .output()
-            .expect("python3 is available: package-release.sh already needs it, here and in CI");
+        let run = |program: &str| {
+            std::process::Command::new(program)
+                .arg("scripts/install-inventory.py")
+                .current_dir(repo_root())
+                .output()
+        };
+        let out = match run("python3") {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => run("python"),
+            other => other,
+        }
+        .expect("python3 or python is available: package-release.sh already needs it, here and in CI");
         assert!(
             out.status.success(),
             "install-inventory.py failed:\n{}",

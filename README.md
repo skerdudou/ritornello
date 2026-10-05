@@ -160,7 +160,12 @@ Runtime dependencies on the target are a handful of Debian packages:
 
 ## Quick start
 
-On the development machine (Node 20+, Rust stable,
+**To install on a device without building anything**, download
+`ritornello-install` for your computer (Windows, macOS or Linux) from the
+newest release and run it against the device over ssh:
+[docs/installation.md](docs/installation.md#installing-on-a-device-without-building-anything).
+
+**To build it yourself**, on the development machine (Node 20+, Rust stable,
 [`cross`](https://github.com/cross-rs/cross) for ARM):
 
 ```sh

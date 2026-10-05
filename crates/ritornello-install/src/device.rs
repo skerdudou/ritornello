@@ -950,4 +950,11 @@ radio
             assert!(m.contains("privileged files it placed will then not be removed"), "{body:?}: {m}");
         }
     }
+
+    /// The same risk as `script::tests::the_device_script_carries_no_carriage_return`,
+    /// for the other text the device runs with `sh`.
+    #[test]
+    fn the_probe_script_carries_no_carriage_return() {
+        assert!(!probe_script("nonce").contains('\r'));
+    }
 }

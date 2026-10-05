@@ -926,4 +926,17 @@ mod tests {
         let bytes = bundle(&none, "", &archives).unwrap();
         assert_eq!(tar::Archive::new(bytes.as_slice()).entries().unwrap().count(), 2);
     }
+
+    /// The device runs this text with `sh`, and a `\r` before each newline
+    /// turns every command into one with a trailing carriage return --
+    /// `then\r` is not `then`. The script is a string inside a `.rs` file,
+    /// and a Windows checkout with `core.autocrlf=true` writes that file
+    /// with CRLF: rustc normalises line endings of the source it reads, but
+    /// this test is what says so on the platform where the risk is born
+    /// (the `installer` job of `ci.yml` runs it on Windows).
+    #[test]
+    fn the_device_script_carries_no_carriage_return() {
+        assert!(!PRELUDE.contains('\r'));
+        assert!(!render(&base()).unwrap().contains('\r'));
+    }
 }

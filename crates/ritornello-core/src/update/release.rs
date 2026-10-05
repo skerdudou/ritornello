@@ -1597,4 +1597,55 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
             "https://api.github.com/repos/skerdudou/ritornello/releases?per_page=100"
         );
     }
+
+    /// Every release now also carries the workstation installer, built for
+    /// five workstation targets, and a device reads the whole asset list.
+    /// What keeps a device from taking one of those for a component is that
+    /// their names end in a **full target triple** -- never one of the
+    /// device labels in `ARCHES`, which is the only suffix this function
+    /// strips -- and that `ritornello-install-` is no component prefix.
+    /// Checked against every label, not only the caller's: a name must
+    /// classify the same way on every device.
+    ///
+    /// Pinned because it holds by a naming choice made in `ci.yml`, not by
+    /// anything this file decides: an installer named after a device label
+    /// (`…-x86_64.tar.gz`) would still be ignored today only because no
+    /// component branch matches `ritornello-install-` -- one renamed
+    /// companion away from a device installing a workstation binary.
+    ///
+    /// The targets and the name shape are **read from ci.yml**, not restated
+    /// here: a list copied into this test would stay green while the
+    /// workflow gained a target or changed the name it packages under.
+    #[test]
+    fn an_installer_archive_is_never_a_component() {
+        let ci_yml = include_str!("../../../../.github/workflows/ci.yml").replace("\r\n", "\n");
+        let job = ci_yml
+            .split("\n  installer:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  release:\n").next())
+            .expect("ci.yml has an `installer` job followed by the `release` job");
+        let targets: Vec<&str> = job
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("target: "))
+            .collect();
+        assert_eq!(targets.len(), 5, "the installer job's matrix: {targets:?}");
+        // The naming rule itself, asserted rather than left to the loop
+        // below: with today's prefix a device label would still classify as
+        // nothing, so the loop alone would not notice the rule being broken.
+        for target in &targets {
+            assert!(!ARCHES.contains(target), "{target} is a device label, not a workstation triple");
+        }
+        assert!(
+            job.contains(r#"name="ritornello-install-$v-$TARGET""#),
+            "the installer archive is named after the product number and the full target"
+        );
+        for target in targets {
+            for ext in ["tar.gz", "zip"] {
+                let name = format!("ritornello-install-0.2.0-beta.3-{target}.{ext}");
+                for arch in ARCHES {
+                    assert_eq!(classify_asset(&name, arch), None, "{name} on {arch}");
+                }
+            }
+        }
+    }
 }
