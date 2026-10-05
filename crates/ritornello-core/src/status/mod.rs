@@ -209,6 +209,10 @@ pub struct AppState {
     /// persisted by the core through `update_sources_tx`.
     pub update_sources: Arc<RwLock<Vec<String>>>,
     pub update_sources_tx: mpsc::Sender<Vec<String>>,
+    /// The whole new list of pack preferences, towards `Core::
+    /// set_pack_preferences`. The route then writes the same list into
+    /// `registry` (the `locale_put` order), which is the handle it reads back.
+    pub pack_preferences_tx: mpsc::Sender<Vec<crate::state::PackPreference>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -244,6 +248,10 @@ pub fn router(state: AppState) -> Router {
             "/api/languages/{language}",
             axum::routing::post(crate::update::routes::language_install_post)
                 .delete(crate::update::routes::language_remove_delete),
+        )
+        .route(
+            "/api/languages/{language}/preference",
+            axum::routing::put(crate::update::routes::language_preference_put),
         )
         .route(
             "/plugins/{name}/api/data",
@@ -630,6 +638,7 @@ pub(crate) mod tests_support {
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
             update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources_tx: mpsc::channel(1).0,
+            pack_preferences_tx: mpsc::channel(1).0,
         }
     }
 
@@ -682,6 +691,7 @@ pub(crate) mod tests_support {
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
             update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources_tx: mpsc::channel(1).0,
+            pack_preferences_tx: mpsc::channel(1).0,
         };
         (state, audio_rx)
     }
@@ -736,6 +746,7 @@ pub(crate) mod tests_support {
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
             update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources_tx: mpsc::channel(1).0,
+            pack_preferences_tx: mpsc::channel(1).0,
         };
         (state, cmd_rx)
     }
@@ -822,6 +833,7 @@ pub(crate) mod tests_support {
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
             update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources_tx: mpsc::channel(1).0,
+            pack_preferences_tx: mpsc::channel(1).0,
         };
         (state, locale_rx, fallback_rx, dir)
     }

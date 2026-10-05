@@ -302,6 +302,10 @@ pub struct Core<P: Player> {
     update_last_run_day: Option<i64>,
     /// Repositories the operator added as update sources, lowercased.
     update_sources: Vec<String>,
+    /// Which pack speaks for a module in a language when several carry it
+    /// (`Registry::ordered_packs`). Kept here to be persisted; the registry
+    /// holds the copy resolution reads.
+    pack_preferences: Vec<crate::state::PackPreference>,
     /// The named presets **of each source**, indexed by source name, as each
     /// declared them (`SourceMessage::presets`).
     ///
@@ -531,6 +535,7 @@ impl<P: Player> Core<P> {
             repeat_all: persisted.repeat_all,
             update_last_run_day: persisted.update_last_run_day,
             update_sources: persisted.update_sources.clone(),
+            pack_preferences: persisted.pack_preferences.clone(),
             presets_par_source: HashMap::new(),
             pending_tens: 0,
             state_path,

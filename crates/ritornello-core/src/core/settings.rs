@@ -160,6 +160,29 @@ impl<P: Player> Core<P> {
         self.persist();
     }
 
+    /// Replaces the operator's pack preferences, retranslates and republishes
+    /// at once, and persists them — the shape of `set_fallback`, without its
+    /// resweep: a preference changes which installed pack speaks, never what
+    /// is installed, so there is nothing on disk to read again.
+    ///
+    /// Called from the `select!` loop of `main` on reception from the
+    /// `pack_preferences_rx` channel, fed by
+    /// `PUT /api/languages/{language}/preference`.
+    pub async fn set_pack_preferences(&mut self, prefs: Vec<crate::state::PackPreference>) {
+        self.pack_preferences = prefs.clone();
+        let locale = self.locale.clone().unwrap_or_else(|| "en".to_string());
+        let fallback = self.fallback.clone().unwrap_or_else(|| "en".to_string());
+        let new_catalog = {
+            let mut registry = self.registry.write().await;
+            registry.set_preferences(prefs);
+            crate::i18n::core_catalog(&registry, &locale, &fallback)
+        };
+        self.standby_status = Some(resolve_standby_status(&new_catalog));
+        *self.catalog.write().await = new_catalog;
+        self.persist();
+        self.publish_state();
+    }
+
     pub(super) fn persist(&self) {
         let st = PersistedState {
             active_source: self.active_source.clone(),
@@ -175,6 +198,7 @@ impl<P: Player> Core<P> {
             repeat_all: self.repeat_all,
             update_last_run_day: self.update_last_run_day,
             update_sources: self.update_sources.clone(),
+            pack_preferences: self.pack_preferences.clone(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistence failed: {e}");
@@ -209,6 +233,7 @@ mod tests {
             repeat_all: false,
             update_last_run_day: None,
             update_sources: Vec::new(),
+            pack_preferences: Vec::new(),
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
@@ -234,6 +259,57 @@ mod tests {
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.update_sources, vec!["z/zed".to_string()]);
         assert_eq!(core.update_sources, ["z/zed".to_string()]);
+    }
+
+    /// Two French packs carrying `core` — ours and a third party's — as an
+    /// install leaves them under the rig's packs root. Returns the third
+    /// party's id.
+    fn two_french_core_packs(root: &std::path::Path) -> String {
+        let mut theirs = String::new();
+        for (repo, word) in [(None, "Sortie ours"), (Some("z/zed"), "Sortie theirs")] {
+            let id = crate::langpack::store::pack_id_for("fr", repo);
+            let dir = root.join("packs").join(&id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let source = format!("https://github.com/{}", repo.unwrap_or(crate::update::release::REPO));
+            std::fs::write(
+                dir.join("pack.toml"),
+                format!("language = \"fr\"\nversion = \"1.0.0\"\nsource = \"{source}\"\nmodules = [\"core\"]\n"),
+            )
+            .unwrap();
+            std::fs::write(dir.join("core.toml"), format!("audio_output = \"{word}\"\n")).unwrap();
+            if repo.is_some() {
+                theirs = id;
+            }
+        }
+        theirs
+    }
+
+    /// The preference reaches what the core says at once, and is kept by a
+    /// later, unrelated write.
+    /// **[MUTATION]** drop `registry.set_preferences` from
+    /// `set_pack_preferences`: the catalog stays ours, red. **[MUTATION]**
+    /// drop the field from `persist`: red on the reload.
+    #[tokio::test]
+    async fn a_pack_preference_retranslates_at_once_and_is_persisted() {
+        let (mut core, _pc, _sc, _rx, dir) = setup();
+        let theirs = two_french_core_packs(dir.path());
+        core.set_locale("fr".into()).await.unwrap();
+        assert_eq!(core.catalog.read().await.get("audio_output"), "Sortie ours", "ours speaks by default");
+
+        let prefs = vec![crate::state::PackPreference { language: "fr".into(), module: "core".into(), pack: theirs }];
+        core.set_pack_preferences(prefs.clone()).await;
+        assert_eq!(core.catalog.read().await.get("audio_output"), "Sortie theirs");
+
+        core.set_theme(crate::theme::ThemeState { theme: "t".into(), mode: "dark".into() });
+        assert_eq!(crate::state::load(&dir.path().join("state.json")).pack_preferences, prefs);
+    }
+
+    #[tokio::test]
+    async fn the_pack_preferences_are_read_back_from_the_persisted_state_at_start() {
+        let prefs = vec![crate::state::PackPreference { language: "fr".into(), module: "core".into(), pack: "p".into() }];
+        let (core, _pc, _sc, _rx, _dir) =
+            setup_persisted(PersistedState { pack_preferences: prefs.clone(), ..Default::default() });
+        assert_eq!(core.pack_preferences, prefs);
     }
 
     #[tokio::test]

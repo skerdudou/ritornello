@@ -24,10 +24,8 @@ pub struct InstalledPack {
     /// When this pack was **first** installed, in seconds since the epoch
     /// (`INSTALLED_AT`). `0` when the file is absent or unreadable: a pack
     /// written before the file existed counts as the oldest there is, which is
-    /// what spec §5.3 needs when two third-party packs cover the same module.
-    // Temporary: written and tested here, first read in production by the
-    // pack ordering of the Sources plan's Task 8, which removes this line.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// what spec §5.3 needs when two third-party packs cover the same module
+    /// (`i18n::Registry::ordered_packs`, which never reads it for ours).
     pub installed_at: u64,
 }
 

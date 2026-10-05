@@ -365,6 +365,57 @@ pub struct PersistedState {
     /// read time (`update::sources`). Lenient at load: see `lenient_sources`.
     #[serde(default, deserialize_with = "lenient_sources", skip_serializing_if = "Vec::is_empty")]
     pub update_sources: Vec<String>,
+    /// Which pack speaks for one module in one language when several installed
+    /// packs carry it (`i18n::Registry::ordered_packs`). At most one entry per
+    /// `(language, module)` (`with_pack_preference`). Lenient at load, element
+    /// by element: see `lenient_preferences`.
+    #[serde(default, deserialize_with = "lenient_preferences", skip_serializing_if = "Vec::is_empty")]
+    pub pack_preferences: Vec<PackPreference>,
+}
+
+/// The operator's choice of `pack` (a pack id) for `module` in `language`.
+///
+/// Only a wish: it is honoured while it names an installed pack that carries
+/// that module in that language, and otherwise ignored — never an error, and
+/// never deleted on that account, so a pack removed and put back finds its
+/// preference again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackPreference {
+    pub language: String,
+    pub module: String,
+    pub pack: String,
+}
+
+/// `prefs` with the entry for `(language, module)` replaced by `pack`, or
+/// removed when `pack` is `None`. The language is compared without case, as
+/// everywhere a language is one language whatever a source spells it in.
+pub fn with_pack_preference(
+    prefs: &[PackPreference],
+    language: &str,
+    module: &str,
+    pack: Option<&str>,
+) -> Vec<PackPreference> {
+    let mut out: Vec<PackPreference> = prefs
+        .iter()
+        .filter(|p| !(p.language.eq_ignore_ascii_case(language) && p.module == module))
+        .cloned()
+        .collect();
+    if let Some(pack) = pack {
+        out.push(PackPreference { language: language.to_string(), module: module.to_string(), pack: pack.to_string() });
+    }
+    out
+}
+
+/// Keeps every array element that reads as a `PackPreference` and drops the
+/// rest; anything but an array reads as no preference at all. A hand-edited
+/// or future value must never take `load`'s all-or-nothing path, which would
+/// reset every other setting (`PersistedState.fallback`'s doc measured why).
+fn lenient_preferences<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<PackPreference>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(match v {
+        serde_json::Value::Array(items) => items.into_iter().filter_map(|i| serde_json::from_value(i).ok()).collect(),
+        _ => Vec::new(),
+    })
 }
 
 /// Anything at all, keeping only the strings: a hand-edited or future value
@@ -394,6 +445,7 @@ impl Default for PersistedState {
             repeat_all: false,
             update_last_run_day: None,
             update_sources: Vec::new(),
+            pack_preferences: Vec::new(),
         }
     }
 }
@@ -559,6 +611,7 @@ mod tests {
             repeat_all: false,
             update_last_run_day: None,
             update_sources: Vec::new(),
+            pack_preferences: Vec::new(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -591,6 +644,7 @@ mod tests {
             repeat_all: false,
             update_last_run_day: None,
             update_sources: Vec::new(),
+            pack_preferences: Vec::new(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -616,6 +670,7 @@ mod tests {
             repeat_all: false,
             update_last_run_day: None,
             update_sources: Vec::new(),
+            pack_preferences: Vec::new(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -807,6 +862,57 @@ mod tests {
         }
         std::fs::write(&path, r#"{"active_source":"cd","volume":41,"update_sources":[1,"a/b",null,"c/d"]}"#).unwrap();
         assert_eq!(load(&path).update_sources, vec!["a/b".to_string(), "c/d".to_string()]);
+    }
+
+    /// A malformed preference list must cost the preferences only, never the
+    /// other settings, and a malformed element only itself.
+    /// **[MUTATION]** read the field as a plain `Vec<PackPreference>` (no
+    /// `deserialize_with`): every shape below resets the volume, red.
+    #[test]
+    fn a_malformed_preference_list_never_resets_the_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let good = r#"{"language":"fr","module":"radio","pack":"p"}"#;
+        let mixed = format!(r#"[{{"language":"fr"}}, {good}, 3, null]"#);
+        for bad in ["\"x\"", "42", "{\"language\":\"fr\"}", mixed.as_str()] {
+            std::fs::write(&path, format!(r#"{{"active_source":"cd","volume":41,"pack_preferences":{bad}}}"#)).unwrap();
+            let st = load(&path);
+            assert_eq!((st.active_source.as_str(), st.volume), ("cd", 41), "{bad}");
+        }
+        std::fs::write(&path, format!(r#"{{"active_source":"cd","volume":41,"pack_preferences":{mixed}}}"#)).unwrap();
+        assert_eq!(
+            load(&path).pack_preferences,
+            vec![PackPreference { language: "fr".into(), module: "radio".into(), pack: "p".into() }],
+            "only the well-formed element is kept"
+        );
+    }
+
+    #[test]
+    fn the_preference_list_survives_a_round_trip_and_is_absent_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let prefs = vec![PackPreference { language: "fr".into(), module: "radio".into(), pack: "p".into() }];
+        save(&path, &PersistedState { pack_preferences: prefs.clone(), ..Default::default() }).unwrap();
+        assert_eq!(load(&path).pack_preferences, prefs);
+        save(&path, &PersistedState::default()).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("pack_preferences"));
+    }
+
+    /// One entry per `(language, module)`: a new choice replaces the old one
+    /// (the language compared without case), `None` removes it, and the other
+    /// entries are untouched.
+    #[test]
+    fn a_preference_replaces_or_removes_only_its_own_language_and_module() {
+        let pref = |l: &str, m: &str, p: &str| PackPreference { language: l.into(), module: m.into(), pack: p.into() };
+        let start = vec![pref("pt-BR", "radio", "a"), pref("pt-BR", "core", "b"), pref("de", "radio", "c")];
+        assert_eq!(
+            with_pack_preference(&start, "pt-br", "radio", Some("z")),
+            vec![pref("pt-BR", "core", "b"), pref("de", "radio", "c"), pref("pt-br", "radio", "z")]
+        );
+        assert_eq!(
+            with_pack_preference(&start, "pt-BR", "radio", None),
+            vec![pref("pt-BR", "core", "b"), pref("de", "radio", "c")]
+        );
     }
 
     #[test]

@@ -1727,7 +1727,10 @@ async fn main() -> Result<()> {
     // root (`install_language`/`remove_language`) and must never compose a
     // second `PathBuf` of its own for it — see `Worker.packs_root`'s doc.
     let worker_packs_root = packs_root.clone();
-    let registry: i18n::Shared = Arc::new(RwLock::new(i18n::seeded_registry(packs_root)));
+    // With the operator's pack preferences, before the first catalog is
+    // built (`i18n::startup_registry`).
+    let registry: i18n::Shared =
+        Arc::new(RwLock::new(i18n::startup_registry(packs_root, persisted.pack_preferences.clone())));
     // The device's own persisted fallback (task 13), or "en" on a device
     // that has never set one — see `i18n::core_catalog`'s doc.
     let catalog = Arc::new(RwLock::new(i18n::core_catalog(
@@ -1768,6 +1771,7 @@ async fn main() -> Result<()> {
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
     let (update_sources_tx, mut update_sources_rx) = mpsc::channel::<Vec<String>>(4);
+    let (pack_preferences_tx, mut pack_preferences_rx) = mpsc::channel::<Vec<state::PackPreference>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
     let (fallback_tx, mut fallback_rx) = mpsc::channel::<String>(4);
     let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
@@ -2381,6 +2385,7 @@ async fn main() -> Result<()> {
             update_catalogue_cache: Arc::new(RwLock::new(None)),
             update_sources: update_sources.clone(),
             update_sources_tx: update_sources_tx.clone(),
+            pack_preferences_tx: pack_preferences_tx.clone(),
         };
         let (app_state, core_engine) = assemble_covers_and_core(
             mpv_player,
@@ -2743,6 +2748,9 @@ async fn main() -> Result<()> {
             }
             Some(list) = update_sources_rx.recv() => {
                 core.set_update_sources(list);
+            }
+            Some(prefs) = pack_preferences_rx.recv() => {
+                core.set_pack_preferences(prefs).await;
             }
             Some(device) = audio_rx.recv() => {
                 if let Err(e) = core.set_audio_device(device).await {

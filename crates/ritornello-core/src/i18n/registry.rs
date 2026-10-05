@@ -46,12 +46,13 @@ use std::path::PathBuf;
 
 use ritornello_i18n::{Chain, Layer, ModuleLayers};
 
+use crate::langpack::store::InstalledPack;
+
 /// Registry of every module's translation layers.
 ///
 /// `packs` is populated by [`Registry::sweep`]/[`Registry::resweep_async`] —
-/// every installed language pack, strongest first among packs of the same
-/// language (a fact livraison 1 never exercises, since it installs at most
-/// one pack per language, all of them ours). `announced` is populated by
+/// every installed language pack; when several carry one module in one
+/// language, [`Registry::ordered_packs`] decides which speaks. `announced` is populated by
 /// `insert_announced` — called once per plugin announcement, and once for
 /// the core's own embedded text and for `common`'s, so that `chain_for`
 /// treats every module uniformly rather than special-casing the core.
@@ -60,10 +61,17 @@ use ritornello_i18n::{Chain, Layer, ModuleLayers};
 #[derive(Debug, Default)]
 pub struct Registry {
     packs_root: PathBuf,
-    /// The installed packs, strongest first. Livraison 1 puts at most one
-    /// pack per language here, all of them ours; livraison 2 is the single
-    /// place that will order several.
-    packs: Vec<crate::langpack::store::InstalledPack>,
+    /// The installed packs, sorted by id as the sweep found them. Which one
+    /// speaks when several carry one module in one language is decided per
+    /// `(module, language)` by [`Registry::ordered_packs`], never by this
+    /// order.
+    packs: Vec<InstalledPack>,
+    /// The operator's choices of pack (`PersistedState.pack_preferences`),
+    /// set by the core at startup and on every change
+    /// (`Core::set_pack_preferences`), and by the preference route right
+    /// after it told the core, so a read that follows the route's answer
+    /// already sees it.
+    preferences: Vec<crate::state::PackPreference>,
     announced: HashMap<String, ModuleLayers>,
 }
 
@@ -72,12 +80,72 @@ impl Registry {
     /// found, with no announced module yet.
     pub fn sweep(packs_root: PathBuf) -> Registry {
         let packs = crate::langpack::store::inventory(&packs_root);
-        Registry { packs_root, packs, announced: HashMap::new() }
+        Registry { packs_root, packs, preferences: Vec::new(), announced: HashMap::new() }
+    }
+
+    /// Replaces the operator's pack preferences. Memory only: what `chain_for`
+    /// answers next follows them, nothing is read or written.
+    pub fn set_preferences(&mut self, prefs: Vec<crate::state::PackPreference>) {
+        self.preferences = prefs;
+    }
+
+    /// The operator's pack preferences, as last set.
+    pub fn preferences(&self) -> &[crate::state::PackPreference] {
+        &self.preferences
+    }
+
+    /// The packs of `packs` that carry `module` in `lang`, **the one that
+    /// speaks first** (spec §5.3):
+    ///
+    /// 1. the pack a preference names for this `(lang, module)`, when it is
+    ///    one of them — a preference naming anything else is ignored, not an
+    ///    error: the pack may come back;
+    /// 2. the official pack (`store::language_of` reads its id), whatever its
+    ///    `installed_at` — `ritornello-install` rewrites our packs and resets
+    ///    that day, so it says nothing about ours;
+    /// 3. third-party packs, the one installed first before the others, the
+    ///    id breaking a tie (a pack with no `installed-at` reads 0, the
+    ///    oldest).
+    ///
+    /// The language is compared without case on both sides: `pt-br` from a
+    /// source and `pt-BR` from us are one language, as they are one gesture
+    /// (`update::offered_packs`). A pure calculation, so `/api/locale` can
+    /// show the same order this registry resolves through.
+    pub fn ordered_packs<'a>(
+        packs: &'a [InstalledPack],
+        prefs: &[crate::state::PackPreference],
+        module: &str,
+        lang: &str,
+    ) -> Vec<&'a InstalledPack> {
+        let preferred = prefs
+            .iter()
+            .find(|p| p.language.eq_ignore_ascii_case(lang) && p.module == module)
+            .map(|p| p.pack.as_str());
+        let mut out: Vec<&InstalledPack> = packs
+            .iter()
+            .filter(|p| p.manifest.language.eq_ignore_ascii_case(lang) && p.layers.iter().any(|(m, _)| m == module))
+            .collect();
+        // Rank, then the day of a third party's first install (ours carries
+        // 0 there: its day is not compared), then the id.
+        let rank = |p: &InstalledPack| {
+            if Some(p.id.as_str()) == preferred {
+                0
+            } else if crate::langpack::store::language_of(&p.id).is_some() {
+                1
+            } else {
+                2
+            }
+        };
+        out.sort_by(|a, b| {
+            let day = |p: &InstalledPack| if rank(p) == 2 { p.installed_at } else { 0 };
+            (rank(a), day(a), &a.id).cmp(&(rank(b), day(b), &b.id))
+        });
+        out
     }
 
     /// Every installed language pack, in the order `sources_for` consults
     /// them.
-    pub fn installed_packs(&self) -> &[crate::langpack::store::InstalledPack] {
+    pub fn installed_packs(&self) -> &[InstalledPack] {
         &self.packs
     }
 
@@ -132,7 +200,7 @@ impl Registry {
     /// `inventory` already takes for a root that cannot be read at all —
     /// rather than losing every plugin's pack-sourced text over one bad
     /// sweep.
-    async fn walk(shared: &crate::i18n::Shared) -> Option<Vec<crate::langpack::store::InstalledPack>> {
+    async fn walk(shared: &crate::i18n::Shared) -> Option<Vec<InstalledPack>> {
         let packs_root = { shared.read().await.packs_root.clone() };
         match tokio::task::spawn_blocking(move || crate::langpack::store::inventory(&packs_root)).await {
             Ok(packs) => Some(packs),
@@ -437,15 +505,14 @@ impl Registry {
     /// language and this module. Several packs can each answer, so this
     /// returns an iterator rather than the single `Option<Layer>` the other
     /// two source accessors do.
+    ///
+    /// In the order [`Registry::ordered_packs`] decides, so the first layer
+    /// answers a key several packs define and a later one fills a key the
+    /// first lacks (spec §6.1: packs compose, they do not replace).
     fn pack_layers(&self, module: &str, lang: &str) -> impl Iterator<Item = Layer> + '_ {
+        let ordered = Self::ordered_packs(&self.packs, &self.preferences, module, lang);
         let module = module.to_string();
-        let lang = lang.to_string();
-        self.packs.iter().filter_map(move |p| {
-            if p.manifest.language != lang {
-                return None;
-            }
-            p.layers.iter().find(|(m, _)| *m == module).map(|(_, l)| l.clone())
-        })
+        ordered.into_iter().filter_map(move |p| p.layers.iter().find(|(m, _)| *m == module).map(|(_, l)| l.clone()))
     }
 
     fn announced_layer(&self, module: &str, lang: &str) -> Option<Layer> {
@@ -482,6 +549,150 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join(format!("{module}.toml")), body).unwrap();
+    }
+
+    /// Writes a pack the way an install leaves it: ours when `repo` is `None`,
+    /// a third party's (`ritornello-xlang-<lang>-<h12>`) otherwise, with its
+    /// `installed-at` file when `installed_at` is given, and one
+    /// `<module>.toml` per `(module, body)`. Returns its id.
+    fn write_sourced_pack(
+        packs_root: &Path,
+        lang: &str,
+        repo: Option<&str>,
+        installed_at: Option<u64>,
+        modules: &[(&str, &str)],
+    ) -> String {
+        let id = crate::langpack::store::pack_id_for(lang, repo);
+        let source = format!("https://github.com/{}", repo.unwrap_or(crate::update::release::REPO));
+        let dir = packs_root.join(&id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let names: Vec<String> = modules.iter().map(|(m, _)| format!("{m:?}")).collect();
+        std::fs::write(
+            dir.join("pack.toml"),
+            format!(
+                "language = \"{lang}\"\nversion = \"1.0.0\"\nsource = \"{source}\"\nmodules = [{}]\n",
+                names.join(", ")
+            ),
+        )
+        .unwrap();
+        for (module, body) in modules {
+            std::fs::write(dir.join(format!("{module}.toml")), body).unwrap();
+        }
+        if let Some(at) = installed_at {
+            std::fs::write(dir.join("installed-at"), at.to_string()).unwrap();
+        }
+        id
+    }
+
+    fn preference(language: &str, module: &str, pack: &str) -> crate::state::PackPreference {
+        crate::state::PackPreference { language: language.into(), module: module.into(), pack: pack.into() }
+    }
+
+    /// Ours answers an overlap with no preference — even installed **after**
+    /// the third party's: `installed_at` orders third parties among
+    /// themselves only (`ritornello-install` resets ours).
+    /// **[MUTATION]** drop the official rank: the older third party answers, red.
+    #[test]
+    fn the_official_pack_wins_an_overlap_with_no_preference() {
+        let packs = tempfile::tempdir().unwrap();
+        write_sourced_pack(packs.path(), "fr", None, Some(2000), &[("core", "k = \"ours\"\n")]);
+        write_sourced_pack(packs.path(), "fr", Some("z/zed"), Some(1000), &[("core", "k = \"theirs\"\n")]);
+        let registry = Registry::sweep(packs.path().to_path_buf());
+        assert_eq!(registry.installed_packs().len(), 2, "both packs must have been read");
+        assert_eq!(registry.chain_for("core", "fr", "en").get("k"), "ours");
+    }
+
+    /// Packs compose (spec §6.1): a key the speaking pack lacks is answered by
+    /// the next one, not by English.
+    #[test]
+    fn a_third_party_pack_fills_a_key_the_official_one_lacks() {
+        let packs = tempfile::tempdir().unwrap();
+        write_sourced_pack(packs.path(), "fr", None, None, &[("core", "a = \"ours-a\"\n")]);
+        write_sourced_pack(packs.path(), "fr", Some("z/zed"), None, &[("core", "a = \"theirs-a\"\nb = \"theirs-b\"\n")]);
+        let chain = Registry::sweep(packs.path().to_path_buf()).chain_for("core", "fr", "en");
+        assert_eq!(chain.get("a"), "ours-a");
+        assert_eq!(chain.get("b"), "theirs-b");
+    }
+
+    /// Between third parties, the one installed first speaks. The older one is
+    /// given the **greater** id, so an order by id alone would get it wrong.
+    /// **[MUTATION]** reverse the `installed_at` comparison: red.
+    #[test]
+    fn the_older_third_party_pack_wins_when_ours_does_not_carry_the_module() {
+        let packs = tempfile::tempdir().unwrap();
+        let mut ids =
+            [crate::langpack::store::third_party_pack_id("fr", "z/zed"), crate::langpack::store::third_party_pack_id("fr", "y/yon")];
+        ids.sort();
+        let repo_of = |id: &str| if *id == crate::langpack::store::third_party_pack_id("fr", "z/zed") { "z/zed" } else { "y/yon" };
+        // ids[1] (greater) is the older one.
+        write_sourced_pack(packs.path(), "fr", Some(repo_of(&ids[1])), Some(1000), &[("radio", "k = \"older\"\n")]);
+        write_sourced_pack(packs.path(), "fr", Some(repo_of(&ids[0])), Some(2000), &[("radio", "k = \"newer\"\n")]);
+        // Ours exists but does not carry `radio`: it takes no part.
+        write_sourced_pack(packs.path(), "fr", None, None, &[("core", "k = \"ours\"\n")]);
+        let registry = Registry::sweep(packs.path().to_path_buf());
+        assert_eq!(registry.chain_for("radio", "fr", "en").get("k"), "older");
+    }
+
+    /// A preference moves one module, and only in its language.
+    /// **[MUTATION]** drop the preferred rank: `radio` stays ours, red.
+    /// **[MUTATION]** match the preference without its module: `core` flips
+    /// too, red.
+    #[test]
+    fn a_preference_flips_its_module_and_leaves_the_others_on_ours() {
+        let packs = tempfile::tempdir().unwrap();
+        let both = [("core", "k = \"ours-core\"\n"), ("radio", "k = \"ours-radio\"\n")];
+        write_sourced_pack(packs.path(), "fr", None, None, &both);
+        let theirs = write_sourced_pack(
+            packs.path(),
+            "fr",
+            Some("z/zed"),
+            None,
+            &[("core", "k = \"theirs-core\"\n"), ("radio", "k = \"theirs-radio\"\n")],
+        );
+        let mut registry = Registry::sweep(packs.path().to_path_buf());
+        registry.set_preferences(vec![preference("fr", "radio", &theirs)]);
+        assert_eq!(registry.chain_for("radio", "fr", "en").get("k"), "theirs-radio");
+        assert_eq!(registry.chain_for("core", "fr", "en").get("k"), "ours-core");
+    }
+
+    #[test]
+    fn a_preference_naming_a_pack_that_is_not_installed_is_ignored() {
+        let packs = tempfile::tempdir().unwrap();
+        write_sourced_pack(packs.path(), "fr", None, None, &[("radio", "k = \"ours\"\n")]);
+        write_sourced_pack(packs.path(), "fr", Some("z/zed"), None, &[("radio", "k = \"theirs\"\n")]);
+        let mut registry = Registry::sweep(packs.path().to_path_buf());
+        let absent = crate::langpack::store::third_party_pack_id("fr", "nobody/here");
+        registry.set_preferences(vec![preference("fr", "radio", &absent)]);
+        assert_eq!(registry.chain_for("radio", "fr", "en").get("k"), "ours");
+    }
+
+    /// A preference recorded for German, naming the French third-party pack,
+    /// must not move French.
+    /// **[MUTATION]** match the preference without its language: red.
+    #[test]
+    fn a_preference_recorded_for_another_language_does_not_apply() {
+        let packs = tempfile::tempdir().unwrap();
+        write_sourced_pack(packs.path(), "fr", None, None, &[("radio", "k = \"ours\"\n")]);
+        let theirs = write_sourced_pack(packs.path(), "fr", Some("z/zed"), None, &[("radio", "k = \"theirs\"\n")]);
+        let mut registry = Registry::sweep(packs.path().to_path_buf());
+        registry.set_preferences(vec![preference("de", "radio", &theirs)]);
+        assert_eq!(registry.chain_for("radio", "fr", "en").get("k"), "ours");
+    }
+
+    /// One language whatever its case: a source's `pt-br` pack answers a
+    /// `pt-BR` request, and a preference recorded as `PT-br` applies to it.
+    /// **[MUTATION]** compare the pack's language with case: red on the first
+    /// assertion. **[MUTATION]** compare the preference's language with case:
+    /// red on the second.
+    #[test]
+    fn a_language_is_one_language_whatever_its_case() {
+        let packs = tempfile::tempdir().unwrap();
+        write_sourced_pack(packs.path(), "pt-BR", None, None, &[("radio", "a = \"ours\"\n")]);
+        let theirs = write_sourced_pack(packs.path(), "pt-br", Some("z/zed"), None, &[("radio", "a = \"theirs\"\nb = \"theirs-b\"\n")]);
+        let mut registry = Registry::sweep(packs.path().to_path_buf());
+        assert_eq!(registry.chain_for("radio", "pt-BR", "en").get("b"), "theirs-b");
+        registry.set_preferences(vec![preference("PT-br", "radio", &theirs)]);
+        assert_eq!(registry.chain_for("radio", "pt-BR", "en").get("a"), "theirs");
     }
 
     #[test]
