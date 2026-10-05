@@ -205,18 +205,17 @@ fn carries(published: &Published, name: &str) -> bool {
     match &published.offer {
         Offer::Core => name == CORE,
         Offer::Plugin(plugin) => plugin == name,
-        // A pack's row is real (task 7 gives it one, judged the same way
-        // every other component is), but placing one on disk takes no
-        // privileged step and no staging area -- `install` routes a name
-        // `langpack::store::language_of` recognises, and that an offered
-        // pack backs, into `install_language` *before* it ever reaches
-        // `resolve`/`carries` (fix round 2, F1). `false` stays the answer
-        // here regardless, and that is still deliberate: this function
-        // must never let a pack's row be placed through the plugin/core
-        // path, which is wrong for something with no binary, so a name
-        // that reaches `resolve` at all -- because `install_language`'s own
-        // routing did not claim it, offered pack absent -- correctly falls
-        // through to `Resolved::Nothing` rather than being matched here.
+        // A pack's row is real (judged the same way every other component
+        // is), but placing one on disk takes no privileged step and no
+        // staging area -- `install` routes a name that is the id of a pack
+        // this check offers (`Checked::packs`, ours or a source's) into
+        // `install_pack` *before* it ever reaches `resolve`/`carries` (fix
+        // round 2, F1). `false` stays the answer here regardless, and that
+        // is still deliberate: this function must never let a pack's row be
+        // placed through the plugin/core path, which is wrong for something
+        // with no binary, so a name that reaches `resolve` at all -- because
+        // no offered pack carries that id -- correctly falls through to
+        // `Resolved::Nothing` rather than being matched here.
         Offer::LanguagePack(_) => false,
         // Never installed component by component, and `download_name` already
         // answers `None` for it.
@@ -286,20 +285,19 @@ fn carries(published: &Published, name: &str) -> bool {
 ///
 ///   **A language pack never reaches this clause with anything to compare.**
 ///   `remember_placed`/`placed::record` has exactly one production caller,
-///   `install_one`, and `install_language` is not it (fix round 2, F1's own
+///   `install_one`, and `install_pack` is not it (fix round 2, F1's own
 ///   review of this function): a pack is never written into `placed.json`,
 ///   so `placed::version_of(placed, &c.name)` answers `None` for every pack
 ///   row, always. That makes this clause vacuously true for a pack whenever
 ///   `c.offered` is `Some` — which it is for every row this filter chain
 ///   reaches, `UpdateAvailable` meaning exactly that — so it never excludes
-///   a pack that would otherwise qualify. It also never protects one: a pack
-///   archive this policy fetches and the pack reader then refuses would be
-///   retried every night, exactly the cost this clause exists to bound for
-///   the core and a plugin. That gap is accepted rather than closed here,
-///   because closing it means teaching `install_language` to write the same
-///   memory `install_one` does, which is a change to what a pack install
-///   *does*, not to what this policy *reads* — out of scope for the finding
-///   that added packs to this list.
+///   a pack that would otherwise qualify. What bounds a refused pack instead
+///   is the third exclusion: `install_pack` marks a pack the reader refused
+///   (`Refusal::Pack`) `installable: Some(false)`, and `carry_installable`
+///   keeps that mark for as long as the same version is offered — so a
+///   lying archive is downloaded once per offered version, not every night.
+///   A pack refused for another reason (no room, a download that failed) is
+///   not marked, and is tried again, as a plugin would be.
 fn automatic_install_list(
     components: &[ComponentOffer],
     placed: &placed::Placed,
@@ -791,7 +789,8 @@ enum Refusal {
     Privileged(String),
     /// A language pack archive the pack reader turned down, or a pack whose
     /// manifest names a different language than the one it was installed
-    /// under. Only ever built by `install_language`'s own refusals: a
+    /// under, or a source other than the repository it was fetched from.
+    /// Only ever built by `place_pack`'s own refusals: a
     /// removal that fails does not go through this enum at all —
     /// `remove_language` builds its catalog message directly from
     /// `store::remove`'s own error, since it has no `name`/`why` pair to
@@ -1300,6 +1299,11 @@ struct Checked {
     fresh: Vec<sources::FreshOffer>,
     /// The names nobody owns that several sources offer: none is believed.
     conflicts: Vec<sources::Conflict>,
+    /// Every language pack on offer, ours and each source's, each under its
+    /// own id (`sources::pack_offers`). Unlike `fresh`, made whether or not
+    /// our release list was read: a pack's id carries its source, so no
+    /// ownership has to be judged for it.
+    packs: Vec<sources::PackOffer>,
 }
 
 impl Checked {
@@ -1317,27 +1321,25 @@ impl Checked {
     }
 }
 
-/// The release's own offer for one language pack, out of an already
-/// performed check.
+/// Every pack offered for one language — ours and each source's — out of an
+/// already performed check (spec §5.2: one gesture installs them all).
 ///
-/// **Not a second network round trip.** `checked.ours` is `check()`'s own
-/// fold of the release list, and a language pack sits in it as
-/// `Offer::LanguagePack` exactly like the core or a plugin sits in it as
+/// **Not a second network round trip.** `checked.packs` is built from
+/// `check()`'s own fold of our release list and from the answers of the same
+/// sweep (`sources::pack_offers`), where a language pack sits as
+/// `Offer::LanguagePack` exactly like the core or a plugin sits as
 /// `Offer::Core`/`Offer::Plugin` — see `release::fold`, `release::
 /// classify_asset`. `install_language` is handed the same `checked` the job
 /// loop already produced for this run (`run_worker`'s `Job::InstallLanguage`
 /// arm), the same way `install`/`install_one` are handed it for the core and
 /// for a plugin, rather than asking GitHub a second time for one component.
-/// `install` itself uses this same function to decide, before it ever
-/// reaches `resolve`/`carries`, whether a name it was asked to install is a
-/// pack this release actually offers (fix round 2, F1).
 ///
 /// `check()`'s own network call has a test seam since task 14
 /// (`release::TEST_RELEASES_URL_ENV`, compiled only under
 /// `#[cfg(debug_assertions)]`); see that constant's own doc for what it
 /// covers and does not.
-fn offered_pack<'a>(checked: &'a Checked, language: &str) -> Option<&'a Published> {
-    checked.ours.iter().find(|p| matches!(&p.offer, Offer::LanguagePack(l) if l == language))
+fn offered_packs<'a>(checked: &'a Checked, language: &str) -> Vec<&'a sources::PackOffer> {
+    checked.packs.iter().filter(|p| p.language == language).collect()
 }
 
 /// Everything the worker needs, and nothing it could read twice.
@@ -1589,25 +1591,66 @@ impl Worker {
             .collect()
     }
 
-    /// Installs a language pack. **The privileged installer is not involved,
+    /// Installs a language: **every** pack this check offers for it, ours and
+    /// each source's, in one gesture (spec §5.2).
+    ///
+    /// One pack refused does not cancel the others: each is attempted, and the
+    /// first refusal is what comes back, with the id of the pack it concerns —
+    /// the page has one message field, and naming the wrong pack would send
+    /// the operator after the wrong source.
+    ///
+    /// `checked` is `check()`'s own fold, read once by the caller (the job
+    /// loop, exactly as for the core and for a plugin) rather than fetched a
+    /// second time here — see `offered_packs`.
+    async fn install_language(&self, checked: &Checked, language: &str) -> Result<(), (String, Refusal)> {
+        let offers = offered_packs(checked, language);
+        if offers.is_empty() {
+            return Err((crate::langpack::store::pack_id(language), Refusal::NothingPublished));
+        }
+        let mut first: Option<(String, Refusal)> = None;
+        for offer in offers {
+            if let Err(why) = self.install_pack(offer).await {
+                tracing::warn!("update: installing {}: {why}", offer.id);
+                first.get_or_insert((offer.id.clone(), why));
+            }
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// One pack, and what a refusal by the pack reader leaves behind: the row
+    /// marked `installable: Some(false)`, the way `remember_manual_step` marks
+    /// a component, so the automatic policy does not fetch the same refused
+    /// archive every night (`carry_installable` keeps the mark while the same
+    /// version is offered, and drops it for a new one).
+    ///
+    /// Only `Refusal::Pack` — a fact about the archive itself — is remembered.
+    /// No room, a failed download or a digest that did not match say nothing
+    /// lasting about this version, and are tried again.
+    async fn install_pack(&self, offer: &sources::PackOffer) -> Result<(), Refusal> {
+        let result = self.place_pack(offer).await;
+        if matches!(result, Err(Refusal::Pack(_))) {
+            self.remember_manual_step(&offer.id).await;
+        }
+        result
+    }
+
+    /// Places one language pack. **The privileged installer is not involved,
     /// and that is the design rather than an optimisation.**
     ///
     /// A pack carries no binary, so there is nothing for root to place:
     /// `target.rs` keeps its two path shapes, no `Action` is formed, and
     /// nothing is written into the staging directory. What the core does
     /// here it does with its own, unprivileged hands, into a root it alone
-    /// chooses — the archive never names a destination.
+    /// chooses — the archive never names a destination: the directory is the
+    /// offer's id, formed from who answered (`sources::pack_offers`).
     ///
     /// The order is `install_one`'s, deliberately: room, then digest, then
-    /// read, then write. A refusal at any of the first three has written
-    /// nothing.
-    ///
-    /// `checked` is `check()`'s own fold, read once by the caller (the job
-    /// loop, exactly as for the core and for a plugin) rather than fetched a
-    /// second time here — see `offered_pack`.
-    async fn install_language(&self, checked: &Checked, language: &str) -> Result<(), Refusal> {
-        let id = crate::langpack::store::pack_id(language);
-        let offered = offered_pack(checked, language).ok_or(Refusal::NothingPublished)?;
+    /// read, then the manifest's two checks, then write. A refusal at any step
+    /// before the write has written nothing.
+    async fn place_pack(&self, offer: &sources::PackOffer) -> Result<(), Refusal> {
+        let id = offer.id.as_str();
+        let language = offer.language.as_str();
+        let offered = &offer.published;
         let root = self.root.to_string_lossy().to_string();
         if !enough_room(crate::system::disk_usage(&root), offered.size as usize) {
             return Err(Refusal::NoRoom);
@@ -1648,10 +1691,26 @@ impl Worker {
                 contents.manifest.language
             )));
         }
-        crate::langpack::store::install(&self.packs_root, &id, &contents)
+        // And the source it names must be the repository it was fetched from
+        // (spec §4.2) — ours included, since `scripts/package-release.sh`
+        // writes the official URL into every pack we publish. Without this, a
+        // stranger's pack claiming our repository would pass for ours the day
+        // it is moved, and `inventory` would list it under the wrong id or not
+        // at all. Compared lowercased: GitHub does. A `source` that does not
+        // read as a repository is refused, **never taken for ours**: `None`
+        // matches nothing here.
+        let expected = offer.repo.as_deref().unwrap_or(release::REPO).to_lowercase();
+        let declared = release::parse_repo_url(&contents.manifest.source).map(|r| r.to_lowercase());
+        if declared.as_deref() != Some(expected.as_str()) {
+            return Err(Refusal::Pack(format!(
+                "the archive of {id} names the source {:?}, and it was published by {expected}",
+                contents.manifest.source
+            )));
+        }
+        crate::langpack::store::install(&self.packs_root, id, &contents)
             .map_err(|e| Refusal::Prepare(format!("writing {id}: {e}")))?;
         crate::i18n::Registry::resweep_async(&self.registry).await;
-        self.mark_pack_row(&id, Some(contents.manifest.version.clone())).await;
+        self.mark_pack_row(id, Some(contents.manifest.version.clone())).await;
         Ok(())
     }
 
@@ -1684,7 +1743,7 @@ impl Worker {
                 (Some(_), Some(_)) => Availability::Aligned,
                 // Unreachable for a real pack row today: `component_offers`
                 // (`update::state`) only ever creates a language-pack row
-                // for a pack the release currently publishes, so `offered`
+                // for a pack on offer (`Checked::packs`), so `offered`
                 // is `Some` by construction wherever `mark_pack_row` finds
                 // one. Dead code, kept in step with that same function's
                 // own core row anyway (`None => Availability::Unknown`,
@@ -1696,8 +1755,16 @@ impl Worker {
         }
     }
 
-    /// Removes a language pack, and puts the device back on English if that
-    /// was the language in use.
+    /// Removes a language — **every** installed pack of it, ours and each
+    /// source's (spec §5.2) — and puts the device back on English if that was
+    /// the language in use.
+    ///
+    /// The packs are the ones whose own manifest names this language
+    /// (`Registry::installed_packs`, which `inventory` has checked against
+    /// each directory's id), plus our own id whatever the registry holds, as
+    /// before. One removal refused does not stop the others; the first refusal
+    /// is what the page hears, and the language stays chosen, since some of
+    /// it is still there.
     ///
     /// **The stored choice goes too, and only on a deliberate removal.** Any
     /// other disappearance — a pack that fails to reinstall, a component
@@ -1706,27 +1773,42 @@ impl Worker {
     /// back into it by itself the day a pack reappeared would be acting on
     /// an intention nobody still holds.
     async fn remove_language(&self, language: &str) {
-        let id = crate::langpack::store::pack_id(language);
-        match crate::langpack::store::remove(&self.packs_root, &id) {
-            Ok(true) => tracing::info!("update: {id} removed"),
-            Ok(false) => tracing::info!("update: {id} was not installed"),
-            Err(e) => {
-                // Not `message_for`: that helper fills only `{component}`,
-                // and this refusal's catalog text also names the cause, the
-                // same two parameters `refusal_message` gives the install
-                // path's own `Refusal::Pack`.
-                let detail = e.to_string();
-                let message = ritornello_i18n::interpolate(
-                    &self.message("update_pack_refused").await,
-                    [("component", id.as_str()), ("detail", detail.as_str())],
-                );
-                self.publish_failure(message).await;
-                tracing::warn!("update: removing {id}: {e}");
-                return;
+        let mut ids = vec![crate::langpack::store::pack_id(language)];
+        for pack in self.registry.read().await.installed_packs() {
+            if pack.manifest.language == language && !ids.contains(&pack.id) {
+                ids.push(pack.id.clone());
             }
         }
+        let mut refused: Option<(String, String)> = None;
+        let mut removed: Vec<&str> = Vec::new();
+        for id in &ids {
+            match crate::langpack::store::remove(&self.packs_root, id) {
+                Ok(true) => tracing::info!("update: {id} removed"),
+                Ok(false) => tracing::info!("update: {id} was not installed"),
+                Err(e) => {
+                    tracing::warn!("update: removing {id}: {e}");
+                    refused.get_or_insert((id.clone(), e.to_string()));
+                    continue;
+                }
+            }
+            removed.push(id);
+        }
         crate::i18n::Registry::resweep_async(&self.registry).await;
-        self.mark_pack_row(&id, None).await;
+        for id in removed {
+            self.mark_pack_row(id, None).await;
+        }
+        if let Some((id, detail)) = refused {
+            // Not `message_for`: that helper fills only `{component}`, and
+            // this refusal's catalog text also names the cause, the same two
+            // parameters `refusal_message` gives the install path's own
+            // `Refusal::Pack`.
+            let message = ritornello_i18n::interpolate(
+                &self.message("update_pack_refused").await,
+                [("component", id.as_str()), ("detail", detail.as_str())],
+            );
+            self.publish_failure(message).await;
+            return;
+        }
         if self.locale_current.read().await.as_deref() == Some(language) {
             // Through the channel the HTTP layer already uses, so the core
             // persists it exactly as a person picking English would.
@@ -1798,8 +1880,10 @@ impl Worker {
     /// twenty-second sweep would hold every route that touches it.
     async fn targets_now(&self, installed: &[Installed]) -> Vec<sources::SourceTarget> {
         let added = self.update_sources.read().await.clone();
-        // Language packs announce no repository yet.
-        sources::source_targets(installed, &[], &added)
+        // The sources installed third-party packs name, from the registry's
+        // last sweep: memory, not a directory walk.
+        let pack_sources = sources::pack_sources(self.registry.read().await.installed_packs());
+        sources::source_targets(installed, &pack_sources, &added)
     }
 
     /// The check. Two small requests — the release list and nothing else — and
@@ -1907,6 +1991,7 @@ impl Worker {
         let mut checked = Checked {
             theirs: theirs_from(installed, &answers),
             third_party: third_party_names(installed),
+            packs: sources::pack_offers(&published, &answers),
             ours: published,
             sources: answers,
             fresh: Vec::new(),
@@ -1925,6 +2010,7 @@ impl Worker {
             &checked.theirs,
             installed,
             &installed_packs,
+            &checked.packs,
             &checked.fresh,
             &checked.conflicts,
         );
@@ -1971,6 +2057,9 @@ impl Worker {
             ours: Vec::new(),
             theirs: theirs_from(installed, &answers),
             third_party: third_party_names(installed),
+            // A source's pack is still offered: its id carries its source, so
+            // nothing of ours has to be known to place it where it belongs.
+            packs: sources::pack_offers(&[], &answers),
             sources: answers,
             fresh: Vec::new(),
             conflicts: Vec::new(),
@@ -1987,6 +2076,7 @@ impl Worker {
             &checked.theirs,
             installed,
             &installed_packs,
+            &checked.packs,
             &checked.fresh,
             &checked.conflicts,
         );
@@ -2014,7 +2104,7 @@ impl Worker {
     /// operator asked for on five rows. Only the **first** cause reaches the
     /// page, which is the honest limit of a payload with one message field.
     ///
-    /// **A language pack is routed to `install_language` here, before
+    /// **A language pack is routed to `install_pack` here, before
     /// `resolve`/`carries` ever sees its name** (fix round 2, F1 of the
     /// whole-branch review). Before this, `carries` answered `false` for
     /// every `Offer::LanguagePack` by design, so a pack's row always resolved
@@ -2022,13 +2112,13 @@ impl Worker {
     /// this name" — even while the release genuinely offered it, and even
     /// while the config page's own Update button installed that same pack
     /// correctly through `POST /api/languages/{language}`. The two routes
-    /// now agree: a name `langpack::store::language_of` recognises as a pack
-    /// id, **and** that `offered_pack` finds in this same `checked`, is
-    /// installed exactly the way `Job::InstallLanguage` installs one — no
-    /// staging, no privileged unit. A name shaped like a pack id but not
-    /// backed by an offer falls through to `resolve` unchanged, which still
-    /// answers `Resolved::Nothing` for it — the same honest refusal as
-    /// before, now reached only when it is true.
+    /// now agree: a name that is the id of a pack this same `checked` offers
+    /// (`Checked::packs`, ours or a source's) is installed exactly the way
+    /// `Job::InstallLanguage` installs each of its packs — no staging, no
+    /// privileged unit. A name shaped like a pack id but not backed by an
+    /// offer falls through to `resolve` unchanged, which still answers
+    /// `Resolved::Nothing` for it — the same honest refusal as before, now
+    /// reached only when it is true.
     async fn install(&self, client: &reqwest::Client, checked: &Checked, names: &[String]) {
         let mut first_failure: Option<String> = None;
         // `(component, version)` per plugin actually placed. The core is never
@@ -2036,12 +2126,13 @@ impl Worker {
         // has already returned.
         let mut placed: Vec<Placement> = Vec::new();
         for name in install_order(names) {
-            if let Some(language) = crate::langpack::store::language_of(&name)
-                && let Some(published) = offered_pack(checked, language)
-            {
+            // By id, and only an id this check offers: ours (`ritornello-lang-
+            // fr`) or a source's (`ritornello-xlang-fr-<h12>`), each carrying
+            // the source it must come from.
+            if let Some(offer) = checked.packs.iter().find(|p| p.id == name) {
                 self.set_busy(Some(self.message_for("update_installing", &name).await))
                     .await;
-                // Read before `install_language` runs: it is what marks
+                // Read before `install_pack` runs: it is what marks
                 // this exact row `installed` on success
                 // (`mark_pack_row`), so reading it afterwards would
                 // always find one and report every install as an
@@ -2053,11 +2144,11 @@ impl Worker {
                     .components
                     .iter()
                     .any(|c| c.name == name && c.installed.is_some());
-                match self.install_language(checked, language).await {
+                match self.install_pack(offer).await {
                     Ok(()) => {
                         placed.push(Placement {
                             component: name.clone(),
-                            version: published.version.clone(),
+                            version: offer.published.version.clone(),
                             fresh: !was_installed,
                         });
                     }
@@ -2214,6 +2305,7 @@ impl Worker {
                 &checked.theirs,
                 &installed,
                 &installed_packs,
+                &checked.packs,
                 &checked.fresh,
                 &checked.conflicts,
             );
@@ -3039,7 +3131,7 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
                 // This arm has no test of its own that drives it through
                 // `run_worker`. `check()`'s list endpoint does have a test
                 // seam since task 14 (`release::TEST_RELEASES_URL_ENV`, see
-                // `offered_pack`'s own doc), so a real dispatch test is
+                // `offered_packs`'s own doc), so a real dispatch test is
                 // possible here now -- set the env var to a local server for
                 // the duration of one `#[serial]`-style test, drive
                 // `run_worker` with this exact job, and assert on
@@ -3050,9 +3142,8 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
                 // proving this arm routes to it, and that gap is what would
                 // remain open if this comment were the only thing fixed here.
                 if let Some(checked) = worker.check(&client).await
-                    && let Err(e) = worker.install_language(&checked, &language).await
+                    && let Err((id, e)) = worker.install_language(&checked, &language).await
                 {
-                    let id = crate::langpack::store::pack_id(&language);
                     let message = refusal_message(&*worker.catalog.read().await, &id, &e);
                     worker.publish_failure(message).await;
                 }
@@ -3833,6 +3924,7 @@ mod tests {
             sources: Vec::new(),
             fresh: Vec::new(),
             conflicts: Vec::new(),
+            packs: Vec::new(),
         };
         assert_eq!(
             resolve(&unconsulted, "radio"),
@@ -3851,6 +3943,7 @@ mod tests {
             sources: Vec::new(),
             fresh: Vec::new(),
             conflicts: Vec::new(),
+            packs: Vec::new(),
         };
         match resolve(&consulted, "radio") {
             Resolved::Theirs { published, repo } => {
@@ -3925,9 +4018,6 @@ mod tests {
     /// stranger out (so a filter that always lets it in fails), and
     /// `IncludingThirdParty` lets it in (so a filter that always keeps it out
     /// fails).
-    // Task 7: a third-party language pack row (`ComponentKind::LanguagePack`
-    // with `third_party_repo: Some`) is tested here too, once such a row can be
-    // built by the check.
     #[test]
     fn a_third_party_plugin_is_updated_only_when_the_scope_includes_third_parties() {
         let theirs = third_party_row("someones-plugin", "someone/theirs");
@@ -3943,9 +4033,40 @@ mod tests {
         );
     }
 
+    /// The same reach for a third-party **language pack**, with its row built
+    /// the way the check builds it (`component_offers` over `pack_offers`,
+    /// P6): an installed stranger's pack is updated only under the fourth
+    /// policy, and our own pack of the same language either way.
+    #[test]
+    fn a_third_party_pack_is_updated_only_when_the_scope_includes_third_parties() {
+        let pack = |version: &str| Published {
+            offer: Offer::LanguagePack("fr".into()),
+            version: version.into(),
+            url: "https://x/p.tar.gz".into(),
+            size: 0,
+            release_tag: "t".into(),
+            checksums_url: None,
+            catalogue_url: None,
+        };
+        let answers = [sources::SourceAnswer { repo: "z/zed".into(), published: vec![pack("2.0.0")] }];
+        let packs = sources::pack_offers(&[pack("0.3.0")], &answers);
+        let theirs = crate::langpack::store::third_party_pack_id("fr", "z/zed");
+        let ours = crate::langpack::store::pack_id("fr");
+        let installed = vec![(theirs.clone(), "1.0.0".to_string()), (ours.clone(), "0.2.0".to_string())];
+        let rows = component_offers("0.2.0", &[], &[], &[], &installed, &packs, &[], &[]);
+        assert_eq!(
+            automatic_install_list(&rows, &nothing_placed(), schedule::InstallScope::Official),
+            vec![ours.clone()]
+        );
+        assert_eq!(
+            automatic_install_list(&rows, &nothing_placed(), schedule::InstallScope::IncludingThirdParty),
+            vec![ours, theirs]
+        );
+    }
+
     /// A row that carries a repository is third-party whatever its kind says:
     /// the filter keys on the repository, which is what a third-party language
-    /// pack will carry.
+    /// pack carries.
     #[test]
     fn a_row_with_a_repository_is_third_party_whatever_its_kind() {
         let mut odd = row("odd", ComponentKind::Plugin, Availability::UpdateAvailable);
@@ -4583,7 +4704,7 @@ mod tests {
             ("plugins.toml.fragment", fragment.as_bytes()),
         ]);
         let published = served_with_wrong_digest("mpd", &archive).await;
-        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![] };
+        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![] };
         let client = client().unwrap();
 
         // The name **as the row itself reports it** — not hard-coded as
@@ -4699,7 +4820,8 @@ mod tests {
 
     /// A check that found only our own release, which is the ordinary shape.
     fn ours(published: Vec<Published>) -> Checked {
-        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new(), sources: Vec::new(), fresh: Vec::new(), conflicts: Vec::new() }
+        let packs = sources::pack_offers(&published, &[]);
+        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new(), sources: Vec::new(), fresh: Vec::new(), conflicts: Vec::new(), packs }
     }
 
     // ---- The refusals AT THEIR CALL SITE --------------------------------
@@ -4932,7 +5054,7 @@ mod tests {
     // by asserting against a directory nothing ever writes into.
     //
     // `install_language` takes the release's own fold (`Checked`) the same
-    // way `install_one` takes a `Published` -- see `offered_pack`'s own doc.
+    // way `install_one` takes a `Published` -- see `offered_packs`'s own doc.
     // `releases_url()` does have a test seam since task 14
     // (`release::TEST_RELEASES_URL_ENV`), but nothing below uses it: every
     // rig here builds the `Checked` its `install_language` call is handed
@@ -5253,7 +5375,7 @@ mod tests {
         let rig = pack_rig_with_wrong_digest().await;
         assert!(matches!(
             rig.worker.install_language(&rig.checked, "fr").await,
-            Err(Refusal::DigestMismatch)
+            Err((_, Refusal::DigestMismatch))
         ));
         assert!(!rig.packs_root.join("ritornello-lang-fr").exists());
     }
@@ -5271,8 +5393,282 @@ mod tests {
             .install_language(&rig.checked, "fr")
             .await
             .expect_err("a language mismatch must be refused");
-        assert!(matches!(err, Refusal::Pack(_)), "{err:?}");
+        assert!(matches!(err, (_, Refusal::Pack(_))), "{err:?}");
         assert!(!rig.packs_root.join("ritornello-lang-fr").exists());
+    }
+
+    // ---- Packs from any source (Task 7) -----------------------------------
+
+    /// A sound one-module pack archive whose `pack.toml` names `source`.
+    fn sourced_pack_archive(language: &str, version: &str, source: &str) -> Vec<u8> {
+        let manifest =
+            format!("language = {language:?}\nversion = {version:?}\nsource = {source:?}\nmodules = [\"core\"]\n");
+        targz(&[("pack.toml", manifest.as_bytes()), ("core.toml", b"k = \"v\"\n")])
+    }
+
+    /// The offer a source `repo` makes for `language`, its archive served
+    /// under the name a source publishes it (spec §3: the same
+    /// `ritornello-lang-<language>-<version>.tar.gz` as ours).
+    async fn third_party_offer(language: &str, version: &str, repo: &str, archive: &[u8]) -> sources::PackOffer {
+        let published = served_pack(language, version, archive).await;
+        let answers = [sources::SourceAnswer { repo: repo.to_string(), published: vec![published] }];
+        sources::pack_offers(&[], &answers).remove(0)
+    }
+
+    /// Our offer for `language`, its archive being exactly `archive`.
+    async fn official_offer(language: &str, version: &str, archive: &[u8]) -> sources::PackOffer {
+        sources::pack_offers(&[served_pack(language, version, archive).await], &[]).remove(0)
+    }
+
+    /// `bare_pack_rig` on a device whose plugin has already announced, so an
+    /// install pass that placed something does not wait `SETTLE_TIMEOUT`
+    /// for a line that will never speak before it rebuilds the rows.
+    fn settled_pack_rig() -> (Worker, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let line = PluginStatus { version: Some("0.2.0".to_string()), ..PluginStatus::kind("radio", "source", true, false) };
+        (worker_at(dir.path(), one_line(line)), dir)
+    }
+
+    fn checked_with_packs(packs: Vec<sources::PackOffer>) -> Checked {
+        Checked { packs, ..ours(Vec::new()) }
+    }
+
+    /// Nothing at all under the packs root: not a directory, not a file.
+    fn nothing_under(root: &Path) -> bool {
+        std::fs::read_dir(root).map(|mut d| d.next().is_none()).unwrap_or(true)
+    }
+
+    fn xlang(language: &str, repo: &str) -> String {
+        crate::langpack::store::third_party_pack_id(language, repo)
+    }
+
+    /// Spec §4.2, Review Focus 5: a stranger's pack whose `pack.toml` names
+    /// another source is refused before a byte is written.
+    #[tokio::test]
+    async fn a_third_party_pack_naming_another_source_is_refused_and_writes_nothing() {
+        let archive = sourced_pack_archive("fr", "1.0.0", "https://github.com/other/repo");
+        let offer = third_party_offer("fr", "1.0.0", "z/zed", &archive).await;
+        let (worker, _dir) = settled_pack_rig();
+        let err = worker.install_language(&checked_with_packs(vec![offer]), "fr").await.expect_err("refused");
+        assert_eq!(err.0, xlang("fr", "z/zed"), "the refusal names the pack it concerns");
+        assert!(matches!(err.1, Refusal::Pack(_)), "{err:?}");
+        assert!(nothing_under(&worker.packs_root), "nothing is written under the packs root");
+    }
+
+    /// The other direction: our offer whose manifest names a stranger's
+    /// repository is refused too — the check is not for strangers only.
+    /// **[MUTATION]** skip the source check when `offer.repo` is `None`: red.
+    #[tokio::test]
+    async fn an_official_pack_naming_a_third_party_source_is_refused() {
+        let archive = sourced_pack_archive("fr", "1.0.0", "https://github.com/z/zed");
+        let offer = official_offer("fr", "1.0.0", &archive).await;
+        let (worker, _dir) = settled_pack_rig();
+        let err = worker.install_language(&checked_with_packs(vec![offer]), "fr").await.expect_err("refused");
+        assert!(matches!(err.1, Refusal::Pack(_)), "{err:?}");
+        assert!(nothing_under(&worker.packs_root));
+    }
+
+    /// P14: a `source` that does not read as a repository is no source at
+    /// all, and never taken for ours. A bare `owner/repo` is exactly that
+    /// shape (`parse_repo_url` wants the URL). **[MUTATION]** treat an
+    /// unreadable source as ours: red.
+    #[tokio::test]
+    async fn a_pack_whose_source_does_not_read_is_refused_even_from_us() {
+        let archive = sourced_pack_archive("fr", "1.0.0", "skerdudou/ritornello");
+        let offer = official_offer("fr", "1.0.0", &archive).await;
+        let (worker, _dir) = settled_pack_rig();
+        let err = worker.install_language(&checked_with_packs(vec![offer]), "fr").await.expect_err("refused");
+        assert!(matches!(err.1, Refusal::Pack(_)), "{err:?}");
+        assert!(nothing_under(&worker.packs_root));
+    }
+
+    /// GitHub compares repositories without case, so a manifest naming
+    /// `Z/Zed` for a pack fetched from `z/zed` is that source.
+    /// **[MUTATION]** compare case-sensitively: red.
+    #[tokio::test]
+    async fn a_source_named_in_another_case_is_the_same_source() {
+        let archive = sourced_pack_archive("fr", "1.0.0", "https://github.com/Z/Zed");
+        let offer = third_party_offer("fr", "1.0.0", "z/zed", &archive).await;
+        let (worker, _dir) = settled_pack_rig();
+        worker.install_language(&checked_with_packs(vec![offer]), "fr").await.expect("installs");
+        assert!(worker.packs_root.join(xlang("fr", "z/zed")).join("core.toml").exists());
+    }
+
+    /// Spec §5.2: one gesture installs every pack of the language, each in
+    /// its own directory, and one gesture removes them all.
+    #[tokio::test]
+    async fn installing_a_language_installs_every_offered_pack_and_removing_it_removes_them_all() {
+        let ours = official_offer("fr", "0.2.1", &sourced_pack_archive("fr", "0.2.1", "https://github.com/skerdudou/ritornello")).await;
+        let theirs = third_party_offer("fr", "1.0.0", "z/zed", &sourced_pack_archive("fr", "1.0.0", "https://github.com/z/zed")).await;
+        let (worker, _dir) = settled_pack_rig();
+        worker.install_language(&checked_with_packs(vec![ours, theirs]), "fr").await.expect("both install");
+        let ours_dir = worker.packs_root.join(crate::langpack::store::pack_id("fr"));
+        let theirs_dir = worker.packs_root.join(xlang("fr", "z/zed"));
+        assert!(ours_dir.join("core.toml").exists() && theirs_dir.join("core.toml").exists());
+        assert_eq!(worker.registry.read().await.installed_packs().len(), 2, "both found again by the sweep");
+
+        worker.remove_language("fr").await;
+        assert!(!ours_dir.exists(), "ours removed");
+        assert!(!theirs_dir.exists(), "theirs removed with it");
+    }
+
+    /// A language's gesture is that language's only: installing one does not
+    /// install a source's pack of another, and removing one leaves another
+    /// language's pack alone.
+    #[tokio::test]
+    async fn a_language_gesture_never_touches_a_pack_of_another_language() {
+        let de = third_party_offer("de", "1.0.0", "z/zed", &sourced_pack_archive("de", "1.0.0", "https://github.com/z/zed")).await;
+        let fr = third_party_offer("fr", "1.0.0", "z/zed", &sourced_pack_archive("fr", "1.0.0", "https://github.com/z/zed")).await;
+        let (worker, _dir) = settled_pack_rig();
+        let checked = checked_with_packs(vec![de, fr]);
+        worker.install_language(&checked, "de").await.unwrap();
+        assert!(!worker.packs_root.join(xlang("fr", "z/zed")).exists(), "installing de installs no fr");
+        worker.install_language(&checked, "fr").await.unwrap();
+        worker.remove_language("fr").await;
+        assert!(!worker.packs_root.join(xlang("fr", "z/zed")).exists());
+        assert!(worker.packs_root.join(xlang("de", "z/zed")).exists());
+    }
+
+    /// One pack refused does not cancel its neighbours in the same gesture,
+    /// and the refusal that comes back names the pack that was refused.
+    #[tokio::test]
+    async fn one_refused_pack_does_not_stop_the_others_of_its_language() {
+        let liar = third_party_offer("fr", "1.0.0", "z/zed", &sourced_pack_archive("fr", "1.0.0", "https://github.com/x/y")).await;
+        let ours = official_offer("fr", "0.2.1", &sourced_pack_archive("fr", "0.2.1", "https://github.com/skerdudou/ritornello")).await;
+        let (worker, _dir) = settled_pack_rig();
+        let err = worker.install_language(&checked_with_packs(vec![liar, ours]), "fr").await.expect_err("one refused");
+        assert_eq!(err.0, xlang("fr", "z/zed"));
+        assert!(worker.packs_root.join(crate::langpack::store::pack_id("fr")).join("core.toml").exists(), "ours still installed");
+    }
+
+    /// P1: the generic install job, given a third-party pack's id, installs
+    /// that pack — routed by the checked offers, not by `language_of`, which
+    /// knows only our ids.
+    #[tokio::test]
+    async fn the_install_job_installs_a_third_party_pack_by_its_id() {
+        let offer = third_party_offer("pt-BR", "1.0.0", "z/zed", &sourced_pack_archive("pt-BR", "1.0.0", "https://github.com/z/zed")).await;
+        let id = offer.id.clone();
+        let (worker, _dir) = settled_pack_rig();
+        worker.install(&client().unwrap(), &checked_with_packs(vec![offer]), &names(&[id.as_str()])).await;
+        assert!(worker.packs_root.join(&id).join("core.toml").exists());
+        assert!(
+            matches!(&worker.state.read().await.outcome, CheckOutcome::Installed(_)),
+            "{:?}",
+            worker.state.read().await.outcome
+        );
+    }
+
+    /// Puts a third-party pack on disk at `version`, as an earlier install
+    /// would have, and lets the registry find it.
+    async fn preinstall_third_party(worker: &Worker, language: &str, version: &str, repo: &str) {
+        let archive = sourced_pack_archive(language, version, &format!("https://github.com/{repo}"));
+        let contents = crate::langpack::archive::read(&archive, ritornello_i18n::MAX_BYTES).unwrap();
+        crate::langpack::store::install(&worker.packs_root, &xlang(language, repo), &contents).unwrap();
+        crate::i18n::Registry::resweep_async(&worker.registry).await;
+    }
+
+    /// One scheduled run under the fourth policy, minus our own release list
+    /// (`check` asks GitHub): the sources' answers settle the rows, the
+    /// automatic list is drawn from them, and what it names is installed.
+    async fn scheduled_run(worker: &Worker, answers: Vec<sources::SourceAnswer>) -> Vec<String> {
+        let checked = worker.settle_with_release(Vec::new(), Some(&[][..]), &[], answers).await;
+        let list = automatic_install_list(
+            &worker.state.read().await.components,
+            &placed::read(&worker.staging),
+            schedule::InstallScope::IncludingThirdParty,
+        );
+        if !list.is_empty() {
+            worker.install(&client().unwrap(), &checked, &list).await;
+        }
+        list
+    }
+
+    /// P1: the automatic policy reaches an **installed** third-party pack and
+    /// updates it from its own source.
+    #[tokio::test]
+    async fn the_fourth_policy_updates_an_installed_third_party_pack() {
+        let (worker, _dir) = settled_pack_rig();
+        preinstall_third_party(&worker, "fr", "1.0.0", "z/zed").await;
+        let published = served_pack("fr", "2.0.0", &sourced_pack_archive("fr", "2.0.0", "https://github.com/z/zed")).await;
+        let answers = vec![sources::SourceAnswer { repo: "z/zed".into(), published: vec![published] }];
+
+        assert_eq!(scheduled_run(&worker, answers).await, vec![xlang("fr", "z/zed")]);
+
+        let registry = worker.registry.read().await;
+        let pack = registry.installed_packs().iter().find(|p| p.id == xlang("fr", "z/zed")).expect("still there");
+        assert_eq!(pack.manifest.version, "2.0.0");
+    }
+
+    /// A server that answers every connection with `body`, and counts them.
+    async fn serve_counting(body: Vec<u8>, file: &str) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut ignored = [0u8; 4096];
+                let _ = socket.read(&mut ignored).await;
+                let head = format!("HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://127.0.0.1:{port}/{file}"), hits)
+    }
+
+    /// P5: a third-party pack the reader refuses is downloaded **once** per
+    /// offered version, not every night — its row is marked like a
+    /// component's manual step, and the mark is carried by `(name, offered)`.
+    /// A new version is a new archive and is tried again.
+    /// **[MUTATION]** drop the mark in `install_pack`: two downloads, red.
+    #[tokio::test]
+    async fn a_refused_third_party_pack_is_downloaded_once_across_two_scheduled_runs() {
+        let (worker, _dir) = settled_pack_rig();
+        preinstall_third_party(&worker, "fr", "1.0.0", "z/zed").await;
+        let archive = sourced_pack_archive("fr", "2.0.0", "https://github.com/someone/else");
+        let file = "ritornello-lang-fr-2.0.0.tar.gz";
+        let (url, downloads) = serve_counting(archive.clone(), file).await;
+        let (checksums_url, _) = serve_counting(format!("{}  {file}\n", digest_hex(&archive)).into_bytes(), "SHA256SUMS").await;
+        let offer = |version: &str| Published {
+            offer: Offer::LanguagePack("fr".into()),
+            version: version.into(),
+            url: url.clone(),
+            size: 0,
+            release_tag: "v2.0.0".into(),
+            checksums_url: Some(checksums_url.clone()),
+            catalogue_url: None,
+        };
+        let answers = |version: &str| vec![sources::SourceAnswer { repo: "z/zed".into(), published: vec![offer(version)] }];
+        let id = xlang("fr", "z/zed");
+
+        assert_eq!(scheduled_run(&worker, answers("2.0.0")).await, vec![id.clone()], "first night: tried");
+        assert_eq!(scheduled_run(&worker, answers("2.0.0")).await, Vec::<String>::new(), "second night: not again");
+        assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1, "one download in two nights");
+        let row = worker.state.read().await.components.iter().find(|c| c.name == id).cloned().unwrap();
+        assert_eq!(row.installable, Some(false));
+
+        // A new version resets it: the mark belongs to the archive refused.
+        worker.settle_with_release(Vec::new(), Some(&[][..]), &[], answers("2.0.1")).await;
+        let list = automatic_install_list(
+            &worker.state.read().await.components,
+            &placed::read(&worker.staging),
+            schedule::InstallScope::IncludingThirdParty,
+        );
+        assert_eq!(list, vec![id]);
+    }
+
+    /// The check asks the source an installed third-party pack names, as it
+    /// asks a plugin's: `targets_now` reads the registry.
+    #[tokio::test]
+    async fn the_check_asks_the_source_of_an_installed_third_party_pack() {
+        let (worker, _dir) = settled_pack_rig();
+        preinstall_third_party(&worker, "fr", "1.0.0", "z/zed").await;
+        let targets = worker.targets_now(&[]).await;
+        assert_eq!(targets.iter().map(|t| t.repo.as_str()).collect::<Vec<_>>(), vec!["z/zed"]);
     }
 
     /// §7.3: removing the pack of the language in use sends the interface
@@ -5331,7 +5727,7 @@ mod tests {
     /// `Job::InstallLanguage` is not driven the same way here, and has no
     /// test of its own: its own arm always opens a real `check()` first
     /// (task 9's own brief: "the worker is the only thing that has read the
-    /// release"), which needs `releases_url()` — the same call `offered_pack`
+    /// release"), which needs `releases_url()` — the same call `offered_packs`
     /// takes an already-performed `Checked` to avoid repeating. A test that
     /// only constructed and cloned the value, without driving the loop, was
     /// tried and measured to prove nothing (gutting the arm to a no-op left
@@ -5395,6 +5791,7 @@ mod tests {
             sources: Vec::new(),
             fresh: Vec::new(),
             conflicts: Vec::new(),
+            packs: Vec::new(),
         };
 
         let memory = memory_at_the_exit(&mut worker, &checked)
@@ -5437,6 +5834,7 @@ mod tests {
             sources: Vec::new(),
             fresh: Vec::new(),
             conflicts: Vec::new(),
+            packs: Vec::new(),
         };
 
         assert!(
@@ -5838,6 +6236,7 @@ mod tests {
             ],
             fresh: Vec::new(),
             conflicts: Vec::new(),
+            packs: Vec::new(),
         };
         checked.judge_strangers(&[]);
         checked
@@ -5882,6 +6281,7 @@ mod tests {
                 published: stranger_plugin("zed", "6.6.6"),
             }],
             conflicts: Vec::new(),
+            packs: Vec::new(),
         };
         assert_eq!(resolve(&checked, "zed"), Resolved::UncheckedThirdParty);
     }
@@ -6143,6 +6543,7 @@ mod tests {
             sources: Vec::new(),
             fresh: vec![sources::FreshOffer { name: "zed".to_string(), repo: "z/zed".to_string(), published }],
             conflicts: Vec::new(),
+            packs: Vec::new(),
         }
     }
 
@@ -6974,7 +7375,7 @@ mod tests {
             checksums_url: None,
             catalogue_url: None,
         };
-        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![] };
+        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![] };
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
             worker.install(&client().unwrap(), &checked, &["files".to_string()]),
@@ -7199,6 +7600,7 @@ mod tests {
             sources: vec![],
             fresh: vec![],
             conflicts: vec![],
+            packs: vec![],
         };
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
@@ -7250,7 +7652,7 @@ mod tests {
     /// **[MUTATION]**: `Offer::Companion(c) => c == name` in `carries` — red.
     #[test]
     fn a_companion_s_name_resolves_to_nothing() {
-        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![] };
+        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![] };
         assert_eq!(resolve(&checked, "files-mount"), Resolved::Nothing);
     }
 

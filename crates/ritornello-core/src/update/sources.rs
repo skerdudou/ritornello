@@ -455,6 +455,74 @@ pub fn fresh_offers(answers: &[SourceAnswer], ours: &[Published], installed: &[I
     (fresh, conflicts)
 }
 
+/// One language pack on offer, from our release or from a source (spec §5).
+///
+/// **No ownership rule here, unlike plugins, and deliberately** (spec §4.1):
+/// several sources may publish the same language, each in its own directory,
+/// because a pack's id carries its source (`langpack::store::pack_id_for`). A
+/// stranger can therefore never offer a pack under our id, nor we under
+/// theirs: the id is formed here from who answered, never read from what
+/// they published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackOffer {
+    /// The pack's id, which is also its row's name and its directory's.
+    pub id: String,
+    pub language: String,
+    /// Lowercased `owner/repo` of the source that offers it; `None` for ours.
+    pub repo: Option<String>,
+    pub published: Published,
+}
+
+/// Every language pack on offer: ours first, then each source's, in the order
+/// the sources were asked.
+///
+/// Only `Offer::LanguagePack` is read, from either list: a source's plugin,
+/// core, bundle or companion is never a pack. A source answer that names our
+/// own repository is skipped (the sweep never asks it, and ours has its own
+/// list), as is a language `valid_locale` refuses — its id could not be a bare
+/// name. An id met twice (one repository answering under two spellings) is
+/// offered once, at its first position.
+pub fn pack_offers(ours: &[Published], answers: &[SourceAnswer]) -> Vec<PackOffer> {
+    let from_ours = ours.iter().map(|p| (None, p));
+    let from_sources = answers
+        .iter()
+        .filter(|a| !a.repo.eq_ignore_ascii_case(REPO))
+        .flat_map(|a| a.published.iter().map(move |p| (Some(a.repo.to_lowercase()), p)));
+    let mut out: Vec<PackOffer> = Vec::new();
+    for (repo, published) in from_ours.chain(from_sources) {
+        let Offer::LanguagePack(language) = &published.offer else { continue };
+        if !crate::status::valid_locale(language) {
+            continue;
+        }
+        let id = crate::langpack::store::pack_id_for(language, repo.as_deref());
+        if out.iter().any(|o| o.id == id) {
+            continue;
+        }
+        out.push(PackOffer { id, language: language.clone(), repo, published: published.clone() });
+    }
+    out
+}
+
+/// The sources installed third-party language packs announce, as
+/// `source_targets`/`source_rows` take them: a `https://github.com/owner/repo`
+/// URL (lowercased), one per repository, in pack id order.
+///
+/// Read off the pack's own `pack.toml` (`PackManifest.source`), which
+/// `langpack::store::inventory` has already checked against the directory's
+/// id. Ours is not a pack source; neither is a `source` that does not read as
+/// a GitHub repository — `inventory` lists such a pack as ours.
+pub fn pack_sources(packs: &[crate::langpack::store::InstalledPack]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for pack in packs {
+        let Some(repo) = release::parse_repo_url(&pack.manifest.source).map(|r| r.to_lowercase()) else { continue };
+        let url = format!("https://github.com/{repo}");
+        if repo != REPO && !out.contains(&url) {
+            out.push(url);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,5 +1044,87 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].announced_by, vec!["a".to_string(), "b".to_string()]);
         assert!(!rows[1].queryable);
+    }
+
+    fn pack(language: &str) -> Published {
+        offered(Offer::LanguagePack(language.into()))
+    }
+
+    fn pack_ids(offers: &[PackOffer]) -> Vec<(String, Option<String>)> {
+        offers.iter().map(|o| (o.id.clone(), o.repo.clone())).collect()
+    }
+
+    /// One language, two sources, two packs: ours under our id, theirs under
+    /// an id formed from who answered. No ownership rule, no conflict.
+    #[test]
+    fn every_source_offers_its_own_pack_of_a_language_under_its_own_id() {
+        use crate::langpack::store::{pack_id, third_party_pack_id};
+        let offers = pack_offers(&[pack("fr")], &[answer("z/zed", vec![pack("fr")]), answer("b/bee", vec![pack("fr")])]);
+        assert_eq!(
+            pack_ids(&offers),
+            vec![
+                (pack_id("fr"), None),
+                (third_party_pack_id("fr", "z/zed"), Some("z/zed".into())),
+                (third_party_pack_id("fr", "b/bee"), Some("b/bee".into())),
+            ]
+        );
+        assert!(offers.iter().all(|o| o.language == "fr"));
+    }
+
+    /// A stranger's plugin, core, bundle or companion is never a pack.
+    #[test]
+    fn pack_offers_never_yields_a_pack_from_a_plugin_or_core_answer() {
+        let mut companion = plugin("x", "1.0.0");
+        companion.offer = Offer::Companion("x-mount".into());
+        let answers = [answer(
+            "z/zed",
+            vec![plugin("ritornello-lang-fr", "1.0.0"), offered(Offer::Core), offered(Offer::Bundle), companion],
+        )];
+        assert!(pack_offers(&[plugin("fr", "1.0.0"), offered(Offer::Core)], &answers).is_empty());
+    }
+
+    /// One repository under two spellings offers one pack; an answer naming
+    /// our repository offers nothing of its own; a language no id can carry is
+    /// skipped. **[MUTATION]** drop the `REPO` filter: the second assertion
+    /// goes red (our id, carrying a repository). **[MUTATION]** drop the
+    /// language filter: the third goes red.
+    #[test]
+    fn pack_offers_skips_a_duplicate_ours_and_an_unusable_language() {
+        use crate::langpack::store::third_party_pack_id;
+        let offers = pack_offers(&[], &[answer("Z/Zed", vec![pack("fr")]), answer("z/zed", vec![pack("fr")])]);
+        assert_eq!(pack_ids(&offers), vec![(third_party_pack_id("fr", "z/zed"), Some("z/zed".into()))], "one repository, one pack");
+        // Our repository answering as a source: no third-party row for it.
+        assert!(pack_offers(&[], &[answer("Skerdudou/Ritornello", vec![pack("fr")])]).is_empty());
+        assert!(pack_offers(&[], &[answer("z/zed", vec![pack("a.b"), pack(&"a".repeat(17))])]).is_empty());
+    }
+
+    fn installed_pack(language: &str, source: &str) -> crate::langpack::store::InstalledPack {
+        crate::langpack::store::InstalledPack {
+            id: format!("whatever-{language}"),
+            manifest: ritornello_i18n::PackManifest {
+                language: language.into(),
+                version: "1.0.0".into(),
+                source: source.into(),
+                modules: vec![],
+            },
+            layers: vec![],
+            installed_at: 0,
+        }
+    }
+
+    /// What an installed pack announces, in the shape `source_targets` reads:
+    /// a third party's repository, once, never ours, never an unreadable one.
+    #[test]
+    fn installed_third_party_packs_announce_their_source() {
+        let packs = [
+            installed_pack("fr", "https://github.com/skerdudou/ritornello"),
+            installed_pack("fr", "https://github.com/Z/Zed"),
+            installed_pack("de", "https://github.com/z/zed"),
+            installed_pack("it", "not a repository"),
+            installed_pack("es", "https://github.com/SKERDUDOU/Ritornello"),
+        ];
+        let got = pack_sources(&packs);
+        assert_eq!(got, vec!["https://github.com/z/zed".to_string()]);
+        assert_eq!(repos(source_targets(&[], &got, &[])), vec!["z/zed"], "and the check asks it");
     }
 }

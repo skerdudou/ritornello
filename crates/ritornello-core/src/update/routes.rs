@@ -108,13 +108,21 @@ fn announcements(status: &crate::status::StatusState) -> Vec<(String, Option<Str
     out
 }
 
+/// The sources the installed third-party language packs name, from the
+/// registry's last sweep — memory, never a directory walk. Its guard is
+/// dropped before the caller takes any other lock.
+async fn pack_sources(state: &AppState) -> Vec<String> {
+    sources::pack_sources(state.registry.read().await.installed_packs())
+}
+
 /// `GET /api/update/sources` — the union view (`update::sources`), computed
 /// from in-memory handles only: no file, no network.
 pub async fn sources_json(State(state): State<AppState>) -> Response {
     let announced = announcements(&*state.status.read().await);
+    let packs = pack_sources(&state).await;
     let added = state.update_sources.read().await.clone();
     let reports = state.update.read().await.source_reports.clone();
-    Json(sources::source_rows(&announced, &[], &added, &reports)).into_response()
+    Json(sources::source_rows(&announced, &packs, &added, &reports)).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -151,9 +159,12 @@ fn send_sources(state: &AppState, list: Vec<String>) -> Result<(), StatusCode> {
 /// additions cannot both pass the limit; `try_send` does not wait, so holding
 /// it costs nothing.
 pub async fn sources_post(State(state): State<AppState>, Json(req): Json<SourceAddReq>) -> Response {
+    // Read before the write lock is taken, so no other lock is ever waited
+    // on while it is held but `status`'s, in the order already documented.
+    let packs = pack_sources(&state).await;
     let mut handle = state.update_sources.write().await;
     let announced = announcements(&*state.status.read().await);
-    let rows = sources::source_rows(&announced, &[], &handle, &[]);
+    let rows = sources::source_rows(&announced, &packs, &handle, &[]);
     let repo = match sources::check_add(&req.repo, &rows) {
         Ok(repo) => repo,
         Err(refusal) => {
@@ -614,6 +625,35 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["repo"], "skerdudou/ritornello");
         assert_eq!(rows[0]["kind"], "official");
+    }
+
+    /// An installed third-party language pack puts its source on the list,
+    /// read-only, as a plugin's announcement does — and adding that source
+    /// again is refused as already listed (both routes read the packs).
+    #[tokio::test]
+    async fn an_installed_third_party_pack_announces_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = ritornello_i18n::PackManifest {
+            language: "fr".into(),
+            version: "1.0.0".into(),
+            source: "https://github.com/Z/Zed".into(),
+            modules: vec!["core".into()],
+        };
+        let files = vec![("core.toml".to_string(), b"k = \"v\"\n".to_vec())];
+        let layers = ritornello_i18n::validate(&manifest, &files).unwrap();
+        let id = crate::langpack::store::third_party_pack_id("fr", "z/zed");
+        let contents = crate::langpack::archive::PackContents { manifest, layers, files };
+        crate::langpack::store::install(dir.path(), &id, &contents).unwrap();
+        let (state, _rx) = state_with_sources(4);
+        let registry = crate::i18n::seeded_registry(dir.path().to_path_buf());
+        let state = AppState { registry: std::sync::Arc::new(tokio::sync::RwLock::new(registry)), ..state };
+
+        let rows = rows_of(router(state.clone())).await;
+        let got: Vec<(&str, &str)> =
+            rows.iter().map(|r| (r["repo"].as_str().unwrap(), r["kind"].as_str().unwrap())).collect();
+        assert_eq!(got, vec![("skerdudou/ritornello", "official"), ("z/zed", "announced")]);
+        let resp = router(state).oneshot(post_source("Z/Zed")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "already listed, by the pack");
     }
 
     /// What the last check left in `UpdateState.source_reports` reaches the
