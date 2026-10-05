@@ -195,8 +195,11 @@ pub(crate) mod tests {
     ///
     /// `python3` first, then `python`: this crate is also tested on Windows
     /// (the `installer` job of `ci.yml`), where the interpreter is usually
-    /// installed under the second name only. Only a missing program falls
-    /// through; any other failure is reported as it is.
+    /// installed under the second name only. `python` is tried when
+    /// `python3` is missing, or when it ran, failed and printed nothing (the
+    /// Store stub below — and also a genuine failure of the script, which
+    /// writes its traceback to stderr, in which case `python`'s own answer
+    /// is the one reported).
     fn run_install_inventory() -> String {
         let run = |program: &str| {
             std::process::Command::new(program)

@@ -41,7 +41,8 @@ pub struct Args {
     /// Also erase the data of what is removed.
     #[arg(long)]
     pub purge_data: bool,
-    /// The release to install (a tag); the newest final release by default.
+    /// The release to install (a tag); by default the newest final release,
+    /// or the newest prerelease when none is final yet.
     #[arg(long)]
     pub version: Option<String>,
     /// Install from a directory of local archives instead of a release.

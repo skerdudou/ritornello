@@ -186,8 +186,9 @@ jobs:
     name: Installer (${{ matrix.target }})
     # On every event, not only on a tag: this is what proves, before a merge,
     # that the workstation installer still compiles and passes its own tests
-    # on each system a person may run it from. Only the packaging at the end
-    # is tag-only. Needs nothing: the crate embeds no web UI.
+    # on each system a person may run it from, down to its packaging and
+    # upload; only `publish`, on a tag, turns the archives into release
+    # assets. Needs nothing: the crate embeds no web UI.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -283,7 +284,11 @@ jobs:
       - name: Every installer leg passed
         env:
           RESULT: ${{ needs.installer.result }}
-        run: test "$RESULT" = success || { echo "installer legs: $RESULT" >&2; exit 1; }
+        # A block scalar: on a plain `run:` line, the `: ` inside the message
+        # is read by YAML as a new key, and the whole workflow fails to load
+        # (measured on this very job's first push).
+        run: |
+          test "$RESULT" = success || { echo "installer legs: $RESULT" >&2; exit 1; }
 
   release:
     name: Release archives (${{ matrix.arch }})

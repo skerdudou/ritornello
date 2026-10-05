@@ -121,8 +121,9 @@ not a per-architecture archive, so there is only one, whatever the
 architecture. Every release also carries `ritornello-install` itself, for
 five workstation systems, whether it changed or not (see
 [Installing on a device, without building anything](#installing-on-a-device-without-building-anything)).
-A single `SHA256SUMS` covers every archive of the release plus
-`catalogue.json`, whatever the architecture. A release is installed with
+A single `SHA256SUMS` covers every archive of the release, the installers
+included, plus `catalogue.json` and `inventory.json`, whatever the
+architecture. A release is installed with
 `ritornello-install`, the same program `deploy.sh` runs against a local
 directory built like a release (see [Deploying](#deploying) below); an
 archive is for putting a specific tagged version onto a device with no
