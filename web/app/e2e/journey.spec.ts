@@ -34,10 +34,16 @@ test('navigation between the home page, the config and the plugin pages', async 
   // merged-away card used to own too: Check, Install, the beta switch, the
   // policy trigger, the cadence trigger, and Save (the cadence-day trigger
   // stays hidden on the harness's default daily cadence, so it does not
-  // count here). Counted rather than merely found: a button removed by a
-  // refactor must turn this red.
+  // count here), and "Configure sources" (the seventh, which opens the
+  // sources dialog: the count moved from 6 to 7 when it was added). Counted
+  // rather than merely found: a button removed by a refactor must turn this
+  // red. The fourth policy option lives inside the closed select list, so it
+  // adds no button here.
   await expect(page.locator('[data-update-card]')).toBeVisible()
-  await expect(page.locator('[data-update-card] button')).toHaveCount(6)
+  await expect(page.locator('[data-update-card] button')).toHaveCount(7)
+  // Tied to the element that moved the count, so a seventh button of some
+  // other kind cannot stand in for it.
+  await expect(page.locator('[data-update-card] [data-update-sources]')).toBeVisible()
   // Against the real `/api/update` this harness serves, not only the page:
   // `not.toHaveText('')` and a `toHaveText` pinned to the client's own
   // pre-fetch default would both stay green against a broken or 404
