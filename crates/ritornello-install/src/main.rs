@@ -250,6 +250,11 @@ fn run(args: &Args) -> anyhow::Result<()> {
     // 11. Applied in one invocation, its output relayed as it arrives.
     eprintln!("Applying on {host}...");
     ssh::apply(&target, &control, dev.sudo, password.as_deref(), &bundle)?;
+    // Ends the shared ssh connection now rather than at the end of `main`.
+    // Off Unix there is no shared connection and `ControlDir` has no `Drop`,
+    // so the call is a no-op there — kept, so the order reads the same on
+    // every system.
+    #[cfg_attr(not(unix), allow(clippy::drop_non_drop))]
     drop(control);
 
     // 12. The report.

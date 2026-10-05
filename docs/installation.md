@@ -1093,7 +1093,9 @@ proven on hardware. In particular:
 - it has never been launched from Windows or macOS, only from a Linux
   workstation (WSL). Since the `installer` job of `ci.yml`, it is
   **compiled and unit-tested** on Windows and on Apple Silicon macOS on
-  every change (the Intel macOS build is compiled only), but never run
+  every change (the Intel macOS build is compiled only; the tests that
+  replay the device script for real run on Linux alone, since that script
+  needs the GNU tools of the device, not the workstation's), but never run
   against a device from either; in particular the Windows path, where ssh
   runs one connection per step and the terminal screens draw on the
   Windows console, has never been seen working end to end;

@@ -692,7 +692,12 @@ fn check(plan: &Plan) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+// Linux only, not every Unix: the script is written for the device, and it
+// relies on GNU coreutils and util-linux (`mv -T`, `rm --one-file-system`,
+// `timeout`), which macOS does not have — run there, these tests measure the
+// workstation's userland, not the script. Measured: 38 of them failed on the
+// macOS leg of the `installer` job, and none elsewhere.
+#[cfg(all(test, target_os = "linux"))]
 mod remote_script;
 
 #[cfg(test)]
