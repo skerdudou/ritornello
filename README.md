@@ -46,8 +46,8 @@ the details per system are in
 [docs/installation.md](docs/installation.md#installing-on-a-device-without-building-anything).
 These links always point at the newest **final** release. While only
 prereleases are published they lead nowhere: take the files from the
-[releases page](https://github.com/skerdudou/ritornello/releases) instead,
-and add `--version <tag>` to the command.
+[releases page](https://github.com/skerdudou/ritornello/releases) instead
+— the program itself then installs the newest prerelease.
 
 ## Highlights
 

@@ -934,11 +934,16 @@ mod tests {
 
     /// The device runs this text with `sh`, and a `\r` before each newline
     /// turns every command into one with a trailing carriage return --
-    /// `then\r` is not `then`. The script is a string inside a `.rs` file,
-    /// and a Windows checkout with `core.autocrlf=true` writes that file
-    /// with CRLF: rustc normalises line endings of the source it reads, but
-    /// this test is what says so on the platform where the risk is born
-    /// (the `installer` job of `ci.yml` runs it on Windows).
+    /// `then\r` is not `then`.
+    ///
+    /// What it guards, precisely: rustc normalises CRLF in the literals of
+    /// a source file, so a Windows checkout (`core.autocrlf=true`) of this
+    /// `.rs` file cannot make it fail — measured: green with CRLF sources,
+    /// and on the Windows leg of the `installer` job. It fails if the script
+    /// ever gains a `\r` another way: an `include_str!` of a template file
+    /// (not normalised), or one written explicitly. That is also why the
+    /// design's `*.rs text eol=lf` line was not added to `.gitattributes`:
+    /// it would have made the Windows leg check out LF and prove nothing.
     #[test]
     fn the_device_script_carries_no_carriage_return() {
         assert!(!PRELUDE.contains('\r'));

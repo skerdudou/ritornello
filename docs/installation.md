@@ -23,7 +23,8 @@ Take the file for yours from the newest release:
 | Linux or WSL, x86_64 | `ritornello-install-x86_64-unknown-linux-musl.tar.gz` |
 | Linux, 64-bit ARM | `ritornello-install-aarch64-unknown-linux-musl.tar.gz` |
 
-The Linux builds are static: they run on any distribution, old or new. The
+The Linux builds are linked statically against musl, so they do not
+depend on the distribution's C library — not yet measured on an old one. The
 release's `SHA256SUMS` lists each of these files, if you want to check the
 download.
 
@@ -37,9 +38,10 @@ it needs from GitHub itself, checking each against the release's
 `SHA256SUMS`. The [Deploying](#deploying) section below describes the same
 program in detail — its screens, its options, removal.
 
-**`--version`.** By default the newest **final** release is installed. As
-long as the project has published prereleases only, name one:
-`--version v0.2.0-beta.3`.
+**`--version`.** Without it, the newest final release is installed — or,
+while the project has published prereleases only, the newest prerelease.
+Name a tag (`--version v0.2.0-beta.2`) to install that release instead;
+in a terminal, a screen also offers the choice.
 
 **What the device needs**: an ssh server, an account allowed to use `sudo`,
 and a Debian-like system — GNU coreutils, util-linux and systemd; the exact
@@ -125,6 +127,10 @@ A single `SHA256SUMS` covers every archive of the release plus
 directory built like a release (see [Deploying](#deploying) below); an
 archive is for putting a specific tagged version onto a device with no
 build toolchain at all.
+
+If one leg of the `installer` job fails on a tag (a runner hiccup), the
+draft is not created: use "Re-run failed jobs" on that workflow run
+rather than pushing the tag again.
 
 **A draft is not yet a release, and pushing the tag is therefore not the
 last step.** The workflow deliberately stops at a draft — publishing is the

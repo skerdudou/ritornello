@@ -233,7 +233,7 @@ that is the only visibility the split introduced.
 ### Continuous integration
 
 `.github/workflows/ci.yml` runs those five commands on every push and pull
-request, on Ubuntu, in five jobs — the last two only on a tag:
+request — the last three jobs below only on a tag:
 
 - `web` — `npm ci`, build of the npm workspaces (the SPA, the kit, and one
   per plugin UI — a count deliberately not written here, it drifts every
@@ -247,20 +247,32 @@ request, on Ubuntu, in five jobs — the last two only on a tag:
 - `e2e` — same dist, debug build of the core, `mpv` installed (the
   journeys really play), Playwright on chromium; the report is uploaded on
   failure;
+- `installer` — on every event, once per workstation system (Linux musl
+  x86_64 and aarch64, Windows, macOS Apple Silicon, and macOS Intel built
+  only): clippy, the tests of `ritornello-install` alone, a release build,
+  and its archive uploaded as an artifact; `installer-ok` ("Installer (all
+  targets)") is the single check that stands for the five, meant to be
+  required by branch protection;
 - `release` — on a `v*` tag only, once per architecture (`armv7`,
   `arm64`, `x86_64`): it refuses a tag that is not `v` + the product
   number, then `cross build --release --workspace` and
   `scripts/package-release.sh`, which produces that architecture's
   archives;
+- `language-packs` — on a tag: the language pack archives, built once
+  outside the per-architecture matrix since a pack has no architecture;
 - `publish` — also on a tag: keeps only the components whose own version
   moved since the last **finished** release, checks the notes, generates
   `catalogue.json` (the kind and description of every installable
-  component, read by the "Add a plugin" dialog), writes
+  component, read by the "Add a plugin" dialog) and `inventory.json` (for
+  `ritornello-install`), adds the five installer archives — after its
+  filter, which would otherwise delete them — writes
   one `SHA256SUMS` for every asset including it, and creates the release as
   a **draft**. A tag carrying a prerelease suffix (`v0.2.1-beta.1`) makes it
   a prerelease.
 
-Ubuntu and not Windows because the SDK tests open Unix sockets.
+Everything runs on Ubuntu, since the SDK tests open Unix sockets, except
+the `installer` job, which builds and tests that one crate on the systems a
+person runs it from.
 `scripts/ci-local.sh [web|rust|installer|e2e]` runs the same commands in the same
 order from WSL — if one of the two changes, the other must follow. A known
 flaky class (a test that assumes fast execution) is fixed at the source

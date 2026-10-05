@@ -232,7 +232,10 @@ jobs:
         run: cargo test -p ritornello-install --target ${{ matrix.target }}
       - run: cargo build --release -p ritornello-install --target ${{ matrix.target }}
       - name: Package
-        if: startsWith(github.ref, 'refs/tags/v')
+        # On every event, like the build above: the packaging and the upload
+        # are proven by each pull request rather than first tried on the day
+        # of a release. Only `publish`, which is tag-only, turns them into
+        # release assets.
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -255,12 +258,32 @@ jobs:
             *) tar czf "../../../out/$name.tar.gz" ritornello-install ;;
           esac
           ls -l ../../../out
-      - if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ matrix.target }}
           if-no-files-found: error
           path: out
+
+  installer-ok:
+    name: Installer (all targets)
+    # One check that stands for the five legs above, so that branch
+    # protection can require it by a single stable name: `main` requires
+    # checks by name, and a check that is not required does not stop
+    # Dependabot's auto-merge (`gh pr merge --auto` waits for required checks
+    # only). Without it, a dependency bump that breaks the Windows or macOS
+    # build could land on `main` and first be seen when `publish`, which
+    # needs every leg, refuses the next release.
+    #
+    # `always()` so that a failed or cancelled leg makes THIS job fail rather
+    # than be skipped: a skipped required check counts as passing.
+    if: always()
+    needs: installer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every installer leg passed
+        env:
+          RESULT: ${{ needs.installer.result }}
+        run: test "$RESULT" = success || { echo "installer legs: $RESULT" >&2; exit 1; }
 
   release:
     name: Release archives (${{ matrix.arch }})

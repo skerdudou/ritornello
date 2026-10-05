@@ -11,7 +11,7 @@
 //! **R37 — the checksums that verify an archive are not always the chosen
 //! release's own.** The publish job writes one `SHA256SUMS` per release,
 //! listing only the assets *that* release carries (`.github/workflows/
-//! ci.yml`: `sha256sum *.tar.gz catalogue.json inventory.json`). Because an
+//! ci.yml`: `sha256sum *.tar.gz *.zip catalogue.json inventory.json`). Because an
 //! unchanged component is never re-uploaded, its archive keeps living in the
 //! release where it last changed — and so does the `SHA256SUMS` line that
 //! verifies it. `locate` is what finds that release; an archive is always

@@ -204,8 +204,13 @@ pub(crate) mod tests {
                 .current_dir(repo_root())
                 .output()
         };
+        // Also falls through when `python3` ran but produced nothing and
+        // failed: on a Windows workstation that name is often the Microsoft
+        // Store's App Execution Alias, a stub that exists (so no NotFound)
+        // and exits non-zero without running anything.
         let out = match run("python3") {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => run("python"),
+            Ok(o) if !o.status.success() && o.stdout.is_empty() => run("python").or(Ok(o)),
             other => other,
         }
         .expect("python3 or python is available: package-release.sh already needs it, here and in CI");
