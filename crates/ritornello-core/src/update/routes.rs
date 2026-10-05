@@ -266,6 +266,17 @@ pub async fn sources_post(State(state): State<AppState>, Json(req): Json<SourceA
         return status.into_response();
     }
     *handle = list;
+    drop(handle);
+    // A source just added is asked at once rather than at the next check:
+    // otherwise "Add a plugin" skips its own check for an hour after the
+    // last one and says there is nothing to add while the new source offers
+    // something. `try_send`, never waited on (no route may block), and a
+    // full queue is not a failure of the addition: the source is stored, and
+    // every queued job but a removal begins with a check that reads the list
+    // as it now is.
+    if state.update_tx.try_send(crate::update::Job::Check).is_err() {
+        tracing::info!("update: a source was added while the update queue is full; no check queued for it");
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -337,12 +348,20 @@ pub async fn update_install_post(
     if req.components.is_empty() {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    enqueue(&state, crate::update::Job::Install(req.components))
+    let consented = req.from.into_iter().collect();
+    enqueue(&state, crate::update::Job::Install { names: req.components, consented })
 }
 
 #[derive(serde::Deserialize)]
 pub struct InstallReq {
     pub components: Vec<String>,
+    /// `{ name: "owner/repo" }` for each plugin installed fresh from a
+    /// third-party source: the repository the page's second consent named.
+    /// Optional, so a request carrying `components` alone keeps its meaning
+    /// for everything but a fresh third-party plugin, which it no longer
+    /// installs (`Worker::install_consented`).
+    #[serde(default)]
+    pub from: std::collections::BTreeMap<String, String>,
 }
 
 /// `POST /api/languages/{language}` — installs every pack that language is
@@ -480,7 +499,26 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         assert!(matches!(
             rx.try_recv(),
-            Ok(crate::update::Job::Install(names)) if names == vec!["radio".to_string()]
+            Ok(crate::update::Job::Install { names, consented })
+                if names == vec!["radio".to_string()] && consented.is_empty()
+        ));
+    }
+
+    /// B3: the repository the page's second consent named travels with the
+    /// job, so the worker can hold the install to it.
+    #[tokio::test]
+    async fn the_confirmed_repository_travels_with_the_install() {
+        let (state, mut rx) = state_with_queue(4);
+        let request = Request::post("/api/update/install")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"components":["zed"],"from":{"zed":"Z/Zed"}}"#))
+            .unwrap();
+        let resp = router(state).oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(crate::update::Job::Install { names, consented })
+                if names == vec!["zed".to_string()] && consented == vec![("zed".to_string(), "Z/Zed".to_string())]
         ));
     }
 
@@ -983,6 +1021,48 @@ mod tests {
         assert_eq!(handle.read().await.len(), 1);
         assert_eq!(rx.try_recv().unwrap().len(), 1);
         assert!(rx.try_recv().is_err(), "a refusal tells the core nothing");
+    }
+
+    /// B1: a name longer than GitHub allows is not a repository, so it is
+    /// refused at the door rather than stored, sixteen times over, in
+    /// `state.json`. **[MUTATION]** drop the length bound in
+    /// `release::is_repo_segment`: red here.
+    #[tokio::test]
+    async fn a_repository_name_longer_than_github_allows_is_refused() {
+        let (state, mut rx) = state_with_sources(4);
+        let handle = state.update_sources.clone();
+        let app = router(state);
+        for oversized in [format!("{}/repo", "o".repeat(40)), format!("owner/{}", "r".repeat(101))] {
+            let r = app.clone().oneshot(post_source(&oversized)).await.unwrap();
+            assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY, "{oversized}");
+            assert!(!error_of(r).await.is_empty());
+        }
+        assert!(handle.read().await.is_empty());
+        assert!(rx.try_recv().is_err(), "nothing reached the core");
+    }
+
+    /// H4: a source just added is asked at once — a check is queued — so
+    /// "Add a plugin" can show what it offers without waiting for the next
+    /// check. A refusal queues nothing, and a full queue does not turn a
+    /// stored source into a failure (the check is a courtesy, never waited
+    /// on). **[MUTATION]** drop the `try_send(Job::Check)`: red on the first
+    /// `matches!`.
+    #[tokio::test]
+    async fn adding_a_source_queues_a_check_and_a_refusal_does_not() {
+        let (jobs_tx, mut jobs) = tokio::sync::mpsc::channel(4);
+        let (state, _sources) = state_with_sources(4);
+        let state = AppState { update_tx: jobs_tx, ..state };
+        let app = router(state.clone());
+        assert_eq!(app.clone().oneshot(post_source("z/zed")).await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert!(matches!(jobs.try_recv(), Ok(crate::update::Job::Check)));
+        assert_eq!(app.clone().oneshot(post_source("z/zed")).await.unwrap().status(), StatusCode::CONFLICT);
+        assert!(jobs.try_recv().is_err(), "a refused addition asks for nothing");
+        for _ in 0..4 {
+            state.update_tx.try_send(crate::update::Job::Check).unwrap();
+        }
+        let r = app.oneshot(post_source("b/bee")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NO_CONTENT, "a full queue does not refuse the addition");
+        assert_eq!(state.update_sources.read().await.len(), 2);
     }
 
     #[tokio::test]

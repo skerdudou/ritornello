@@ -84,6 +84,13 @@ pub(super) struct LanguagePackRow {
     /// Some pack of this language is installed and offered in another
     /// version. One only offered is an install, not an update.
     update_available: bool,
+    /// Some pack of this language is offered and not installed. For a
+    /// language that already has a pack, this is what lets a source's pack
+    /// for it be picked up: `update_available` counts only installed packs,
+    /// and "Add a language" lists only languages with none (`POST
+    /// /api/languages/{language}` installs every pack on offer, so the one
+    /// gesture covers it).
+    install_available: bool,
     /// Ours first, then third parties by id.
     packs: Vec<PackDetail>,
     /// One entry per module at least two installed packs of this language
@@ -178,6 +185,7 @@ fn language_pack_rows(
                     installed: None,
                     offered: None,
                     update_available: false,
+                    install_available: false,
                     packs: Vec::new(),
                     overlaps: Vec::new(),
                 });
@@ -200,6 +208,7 @@ fn language_pack_rows(
             (Some(i), Some(o)) => i != o,
             _ => false,
         });
+        row.install_available = row.packs.iter().any(|p| p.offered.is_some() && p.installed.is_none());
         row.overlaps = overlaps(registry, &row.language);
     }
     rows
@@ -1025,7 +1034,10 @@ mod tests {
         let ours = install_pack(&packs_root, "fr", None, "1.0.0", &["core", "radio"]);
         let theirs = install_pack(&packs_root, "fr", Some("z/zed"), "1.0.0", &["core", "mpd"]);
         let rows = pack_rows(packs_root, Vec::new(), Vec::new()).await;
-        assert_eq!(keys(&rows[0]), ["installed", "language", "offered", "overlaps", "packs", "update_available"]);
+        assert_eq!(
+            keys(&rows[0]),
+            ["install_available", "installed", "language", "offered", "overlaps", "packs", "update_available"]
+        );
         assert_eq!(keys(&rows[0]["packs"][0]), ["id", "installed", "offered", "source"]);
         assert_eq!(
             rows[0]["overlaps"],
@@ -1089,6 +1101,37 @@ mod tests {
             )
             .await;
             assert_eq!(rows[0]["update_available"], expected, "{why}");
+        }
+    }
+
+    /// H2: `install_available` — some pack of the language offered and not
+    /// installed, beside one that is. This is what lets an installed language
+    /// pick up a source's pack for it: `update_available` is false then, and
+    /// "Add a language" lists only languages with no pack at all.
+    /// **[MUTATION]** drop "offered": red on the second case.
+    /// **[MUTATION]** drop "not installed": red on the third.
+    #[tokio::test]
+    async fn an_install_is_available_when_a_pack_of_the_language_is_offered_and_not_installed() {
+        let ours = crate::langpack::store::pack_id("de");
+        let theirs = crate::langpack::store::third_party_pack_id("de", "z/zed");
+        let cases = [
+            (None, Some("1.0.0"), true, "theirs is offered, not installed"),
+            (None, None, false, "theirs is neither installed nor offered"),
+            (Some("1.0.0"), Some("1.0.0"), false, "theirs is installed already"),
+        ];
+        for (installed, offered, expected, why) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let rows = pack_rows(
+                dir.path().join("packs"),
+                vec![
+                    offered_pack(&ours, None, Some("1.0.0"), Some("1.0.0")),
+                    offered_pack(&theirs, Some("z/zed"), installed, offered),
+                ],
+                Vec::new(),
+            )
+            .await;
+            assert_eq!(rows[0]["install_available"], expected, "{why}");
+            assert_eq!(rows[0]["update_available"], false, "{why}: never an update");
         }
     }
 

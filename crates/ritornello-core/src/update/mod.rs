@@ -131,8 +131,14 @@ pub fn read_rollback_report(prefix: &Path) -> Option<ritornello_updater::rollbac
 pub enum Job {
     Check,
     /// Install the named components. `core` names the core; anything else is a
-    /// plugin.
-    Install(Vec<String>),
+    /// plugin or a language pack's id.
+    Install {
+        names: Vec<String>,
+        /// `(name, owner/repo)` for each plugin the operator confirmed
+        /// installing fresh from a third-party source: the repository the
+        /// second consent named (`Worker::install_consented`).
+        consented: Vec<(String, String)>,
+    },
     /// The scheduler's own job: a check, and — when the policy installs —
     /// the installs that check turns out to make due.
     ///
@@ -806,6 +812,16 @@ enum Refusal {
     /// reached the server, not as the honest "there is nothing to install"
     /// it actually means.
     NothingPublished,
+    /// `plugins.toml` could not be read by the check this install rests on
+    /// (`Checked::plugins_unknown`). Whose plugin a name is cannot be told
+    /// then — an installed fork named like ours would look like ours — so
+    /// nothing but a language pack is installed until the file reads again.
+    PluginsUnreadable,
+    /// A plugin offered fresh by a third-party source, installed without the
+    /// operator having confirmed **that** source for it: no repository named
+    /// in the request, or another one than the source offering it now
+    /// (spec §4.5, the second consent). Carries the source that offers it.
+    NotConsented(String),
 }
 
 impl std::fmt::Display for Refusal {
@@ -835,6 +851,10 @@ impl std::fmt::Display for Refusal {
                 write!(f, "{d}")
             }
             Self::NothingPublished => write!(f, "nothing published carries this name"),
+            Self::PluginsUnreadable => write!(f, "plugins.toml could not be read, so whose plugin this is is unknown"),
+            Self::NotConsented(repo) => {
+                write!(f, "offered by {repo}, which is not the repository confirmed for it")
+            }
         }
     }
 }
@@ -864,6 +884,8 @@ fn refusal_message(catalog: &Chain, component: &str, why: &Refusal) -> String {
         Refusal::Privileged(d) => ("update_privileged_failed", Some(("detail", d.as_str()))),
         Refusal::Pack(d) => ("update_pack_refused", Some(("detail", d.as_str()))),
         Refusal::NothingPublished => ("update_nothing_published", None),
+        Refusal::PluginsUnreadable => ("update_plugins_unreadable", None),
+        Refusal::NotConsented(repo) => ("update_not_consented", Some(("repo", repo.as_str()))),
     };
     let mut params: Vec<(&str, &str)> = vec![("component", component)];
     params.extend(param);
@@ -1304,6 +1326,13 @@ struct Checked {
     /// our release list was read: a pack's id carries its source, so no
     /// ownership has to be judged for it.
     packs: Vec<sources::PackOffer>,
+    /// `plugins.toml` could not be read by this check, so what the device
+    /// has — and so whose plugin a name is — is not known. `third_party`
+    /// and `theirs` are then built from an empty list, which says nothing
+    /// is a stranger's: a fork named like ours would resolve to `Ours` and
+    /// have its binary replaced. `install` therefore refuses every install
+    /// but a language pack's while this is set (`Refusal::PluginsUnreadable`).
+    plugins_unknown: bool,
 }
 
 impl Checked {
@@ -1935,17 +1964,21 @@ impl Worker {
                 // third-party rows — because in both cases *this* device has
                 // nothing of ours to install; they read differently because
                 // only one of them is undone by a switch its reader owns.
-                let installed = self.installed_when_settled().await;
+                // `_known`, as `settle_check` reads it: an unreadable
+                // `plugins.toml` must reach `Checked::plugins_unknown` on
+                // this branch too, or an install after it would take every
+                // installed stranger for one of ours.
+                let installed = self.installed_when_settled_known().await;
                 // Our repository publishing nothing says nothing about a
                 // stranger's, so the third-party rows are still answered.
-                let targets = self.targets_now(&installed).await;
+                let targets = self.targets_now(installed.as_deref().unwrap_or_default()).await;
                 let answers = self.sweep_sources(client, &targets, sources::SOURCES_DEADLINE).await;
                 // `Some` with an empty `ours`, and not `None`: this branch has
                 // just offered third-party updates on the page, and returning
                 // `None` would make Install do nothing and say nothing about
                 // them. Our own components resolve to `Nothing` from an empty
                 // list, which is the truth here.
-                return Some(self.settle_without_release(e, &installed, &targets, answers).await);
+                return Some(self.settle_without_release(e, installed.as_deref(), &targets, answers).await);
             }
             Err(ReleasesError::Unreadable) => {
                 let message = self
@@ -1999,6 +2032,7 @@ impl Worker {
             sources: answers,
             fresh: Vec::new(),
             conflicts: Vec::new(),
+            plugins_unknown: known.is_none(),
         };
         // Here and only here: `ours` is a fold that was actually read, so
         // which names are ours is known — and only when what the device has
@@ -2050,13 +2084,18 @@ impl Worker {
     /// The installed third-party plugins' own updates (`theirs`) are still
     /// answered: those are judged by the plugin's own announcement, which
     /// owes nothing to our release.
+    ///
+    /// `known` is `None` when `plugins.toml` could not be read, as for
+    /// `settle_with_release`: the rows are built from an empty list and the
+    /// check says so (`Checked::plugins_unknown`).
     async fn settle_without_release(
         &self,
         why: ReleasesError,
-        installed: &[Installed],
+        known: Option<&[Installed]>,
         targets: &[sources::SourceTarget],
         answers: Vec<sources::SourceAnswer>,
     ) -> Checked {
+        let installed = known.unwrap_or_default();
         let checked = Checked {
             ours: Vec::new(),
             theirs: theirs_from(installed, &answers),
@@ -2067,6 +2106,7 @@ impl Worker {
             sources: answers,
             fresh: Vec::new(),
             conflicts: Vec::new(),
+            plugins_unknown: known.is_none(),
         };
         let installed_packs = self.installed_packs().await;
         // The rows are rebuilt against an empty offer rather than left as
@@ -2135,6 +2175,29 @@ impl Worker {
     /// `Resolved::Nothing` for it — the same honest refusal as before, now
     /// reached only when it is true.
     async fn install(&self, client: &reqwest::Client, checked: &Checked, names: &[String]) {
+        self.install_consented(client, checked, names, &[]).await
+    }
+
+    /// `install`, with the repositories the operator confirmed for the
+    /// plugins asked for fresh: `(name, owner/repo)`, as the page's second
+    /// consent named them (spec §4.5).
+    ///
+    /// **A fresh offer installs only from the repository confirmed for it.**
+    /// The check this install rests on is run again at the gesture, and by
+    /// then another trusted source may be the one offering that name (the
+    /// first removed, a second added): the confirmation named a repository,
+    /// so that repository is the only one the archive may come from. None
+    /// confirmed — an automatic run, a request without one — installs
+    /// nothing fresh at all (`Refusal::NotConsented`). An update of an
+    /// installed plugin, ours or a stranger's, needs no such consent: its
+    /// source is the one its own announcement names.
+    async fn install_consented(
+        &self,
+        client: &reqwest::Client,
+        checked: &Checked,
+        names: &[String],
+        consented: &[(String, String)],
+    ) {
         let mut first_failure: Option<String> = None;
         // `(component, version)` per plugin actually placed. The core is never
         // in here: it exits at the end of its own install and this function
@@ -2177,6 +2240,18 @@ impl Worker {
                 }
                 continue;
             }
+            // Past the packs, every name is a plugin's or the core's, and
+            // whose it is was judged against `plugins.toml`. Unread, that
+            // judgement said "nobody's": refused rather than resolved, or a
+            // fork named like ours would be replaced by our archive.
+            if checked.plugins_unknown {
+                tracing::warn!("update: plugins.toml was unreadable at the check, not installing {name}");
+                let catalog = self.catalog.read().await;
+                let message = refusal_message(&catalog, &name, &Refusal::PluginsUnreadable);
+                drop(catalog);
+                first_failure.get_or_insert(message);
+                continue;
+            }
             // What the component **is** decides which list answers for it —
             // never which lookup happened to return something. See `resolve`.
             let (offered, repo, provenance) = match resolve(checked, &name) {
@@ -2196,6 +2271,19 @@ impl Worker {
                     continue;
                 }
                 Resolved::FreshTheirs { published, repo } => {
+                    // The second consent named a repository: only that one
+                    // may supply this name (see `install_consented`).
+                    let confirmed = consented
+                        .iter()
+                        .any(|(n, r)| *n == name && sources::normalize_repo(r).is_some_and(|r| r.eq_ignore_ascii_case(repo)));
+                    if !confirmed {
+                        tracing::warn!("update: {name} is offered by {repo}, which was not the repository confirmed for it");
+                        let catalog = self.catalog.read().await;
+                        let message = refusal_message(&catalog, &name, &Refusal::NotConsented(repo.to_string()));
+                        drop(catalog);
+                        first_failure.get_or_insert(message);
+                        continue;
+                    }
                     // The check judged this name free; the gesture asks
                     // again, because the device may have changed since and
                     // a fresh offer must never replace anyone's plugin.
@@ -3102,12 +3190,12 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
             Job::Check => {
                 worker.check(&client).await;
             }
-            Job::Install(names) => {
+            Job::Install { names, consented } => {
                 // A check first, always: it is what gives the download URLs
                 // and the digests of the release as it stands right now, and
                 // it costs two small requests next to an archive.
                 if let Some(checked) = worker.check(&client).await {
-                    worker.install(&client, &checked, &names).await;
+                    worker.install_consented(&client, &checked, &names, &consented).await;
                 }
             }
             Job::Scheduled { install } => {
@@ -3940,6 +4028,7 @@ mod tests {
             fresh: Vec::new(),
             conflicts: Vec::new(),
             packs: Vec::new(),
+            plugins_unknown: false,
         };
         assert_eq!(
             resolve(&unconsulted, "radio"),
@@ -3959,6 +4048,7 @@ mod tests {
             fresh: Vec::new(),
             conflicts: Vec::new(),
             packs: Vec::new(),
+            plugins_unknown: false,
         };
         match resolve(&consulted, "radio") {
             Resolved::Theirs { published, repo } => {
@@ -4447,6 +4537,8 @@ mod tests {
             Refusal::Privileged("Job for ritornello-update.service failed".to_string()),
             Refusal::Pack("the archive of ritornello-lang-fr declares the language \"de\"".to_string()),
             Refusal::NothingPublished,
+            Refusal::PluginsUnreadable,
+            Refusal::NotConsented("z/zed".to_string()),
         ];
         for catalog in [&english, &french()] {
             for why in &all {
@@ -4719,7 +4811,7 @@ mod tests {
             ("plugins.toml.fragment", fragment.as_bytes()),
         ]);
         let published = served_with_wrong_digest("mpd", &archive).await;
-        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![] };
+        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![], plugins_unknown: false };
         let client = client().unwrap();
 
         // The name **as the row itself reports it** — not hard-coded as
@@ -4836,7 +4928,7 @@ mod tests {
     /// A check that found only our own release, which is the ordinary shape.
     fn ours(published: Vec<Published>) -> Checked {
         let packs = sources::pack_offers(&published, &[]);
-        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new(), sources: Vec::new(), fresh: Vec::new(), conflicts: Vec::new(), packs }
+        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new(), sources: Vec::new(), fresh: Vec::new(), conflicts: Vec::new(), packs, plugins_unknown: false }
     }
 
     // ---- The refusals AT THEIR CALL SITE --------------------------------
@@ -5612,10 +5704,51 @@ mod tests {
     async fn settle(worker: &Worker, answers: Vec<sources::SourceAnswer>, branch: Branch) -> Checked {
         match branch {
             Branch::WithoutRelease => {
-                worker.settle_without_release(ReleasesError::OnlyPrereleases, &[], &[], answers).await
+                worker.settle_without_release(ReleasesError::OnlyPrereleases, Some(&[][..]), &[], answers).await
             }
             Branch::WithRelease => worker.settle_with_release(Vec::new(), Some(&[][..]), &[], answers).await,
         }
+    }
+
+    /// D2: **the sources dialog's reports after a check that found no release
+    /// of ours for this device** — the branch every stable-channel device
+    /// takes today. Each source asked has its report: what an answering one
+    /// published, and `answered: false` for a silent one.
+    /// **[MUTATION]** drop the `source_reports` write in
+    /// `settle_without_release`: red.
+    #[tokio::test]
+    async fn a_check_without_a_release_of_ours_still_reports_what_each_source_said() {
+        let (worker, _dir) = settled_pack_rig();
+        let targets = sources::source_targets(&[], &[], &["z/zed".to_string(), "b/bee".to_string()]);
+        let pack = Published { offer: Offer::LanguagePack("fr".into()), ..stranger_plugin("x", "1.0.0") };
+        let answers = vec![sources::SourceAnswer { repo: "z/zed".into(), published: vec![stranger_plugin("zed", "1.0.0"), pack] }];
+        worker.settle_without_release(ReleasesError::OnlyPrereleases, Some(&[][..]), &targets, answers).await;
+        let state = worker.state.read().await;
+        assert_eq!(state.outcome, CheckOutcome::OnlyPrereleases);
+        assert_eq!(
+            state.source_reports,
+            vec![
+                (
+                    "z/zed".to_string(),
+                    sources::SourceReport { answered: true, plugins: vec!["zed".into()], languages: vec!["fr".into()] },
+                ),
+                ("b/bee".to_string(), sources::SourceReport { answered: false, plugins: vec![], languages: vec![] }),
+            ]
+        );
+    }
+
+    /// B4, the other branch: a check that found no release of ours while
+    /// `plugins.toml` was unreadable says so too, or an install after it
+    /// would take every installed stranger for one of ours.
+    /// **[MUTATION]** `plugins_unknown: false` in `settle_without_release`:
+    /// red.
+    #[tokio::test]
+    async fn a_check_without_a_release_of_ours_still_knows_plugins_toml_was_unreadable() {
+        let (worker, _dir) = settled_pack_rig();
+        let unknown = worker.settle_without_release(ReleasesError::NoRelease, None, &[], Vec::new()).await;
+        assert!(unknown.plugins_unknown);
+        let known = worker.settle_without_release(ReleasesError::NoRelease, Some(&[][..]), &[], Vec::new()).await;
+        assert!(!known.plugins_unknown);
     }
 
     /// One scheduled run under the fourth policy, minus the request to our
@@ -5856,6 +5989,7 @@ mod tests {
             fresh: Vec::new(),
             conflicts: Vec::new(),
             packs: Vec::new(),
+            plugins_unknown: false,
         };
 
         let memory = memory_at_the_exit(&mut worker, &checked)
@@ -5899,6 +6033,7 @@ mod tests {
             fresh: Vec::new(),
             conflicts: Vec::new(),
             packs: Vec::new(),
+            plugins_unknown: false,
         };
 
         assert!(
@@ -6301,6 +6436,7 @@ mod tests {
             fresh: Vec::new(),
             conflicts: Vec::new(),
             packs: Vec::new(),
+            plugins_unknown: false,
         };
         checked.judge_strangers(&[]);
         checked
@@ -6346,6 +6482,7 @@ mod tests {
             }],
             conflicts: Vec::new(),
             packs: Vec::new(),
+            plugins_unknown: false,
         };
         assert_eq!(resolve(&checked, "zed"), Resolved::UncheckedThirdParty);
     }
@@ -6398,7 +6535,7 @@ mod tests {
             source_answer("evil/fork", vec![stranger_plugin("radio", "9.9.9")]),
             source_answer("z/zed", vec![stranger_plugin("zed", "1.0.0")]),
         ];
-        let checked = worker.settle_without_release(ReleasesError::OnlyPrereleases, &[], &[], answers).await;
+        let checked = worker.settle_without_release(ReleasesError::OnlyPrereleases, Some(&[][..]), &[], answers).await;
         assert!(checked.fresh.is_empty() && checked.conflicts.is_empty(), "{:?} {:?}", checked.fresh, checked.conflicts);
         assert_eq!(resolve(&checked, "radio"), Resolved::Nothing);
         let state = worker.state.read().await;
@@ -6614,6 +6751,7 @@ mod tests {
             fresh: vec![sources::FreshOffer { name: "zed".to_string(), repo: "z/zed".to_string(), published }],
             conflicts: Vec::new(),
             packs: Vec::new(),
+            plugins_unknown: false,
         }
     }
 
@@ -6627,7 +6765,9 @@ mod tests {
         let checked = checked_with_fresh(served("zed", &zed_archive()).await);
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            worker.install(&client().unwrap(), &checked, &names(&["zed"])),
+            // Confirmed under another spelling of the same repository: the
+            // comparison is GitHub's, case-insensitive.
+            worker.install_consented(&client().unwrap(), &checked, &names(&["zed"]), &zed_from("Z/Zed")),
         )
         .await
         .expect("install() hung");
@@ -6689,7 +6829,7 @@ mod tests {
             let checked = checked_with_fresh(stranger_plugin("zed", "1.0.0"));
             tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                worker.install(&client().unwrap(), &checked, &names(&["zed"])),
+                worker.install_consented(&client().unwrap(), &checked, &names(&["zed"]), &zed_from("z/zed")),
             )
             .await
             .expect("install() hung");
@@ -6705,6 +6845,75 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&worker.manifest).unwrap(), manifest);
             assert!(!worker.staging.join("request.json").exists());
         }
+    }
+
+    /// The consent the page sends for `zed`: `[("zed", repo)]`.
+    fn zed_from(repo: &str) -> Vec<(String, String)> {
+        vec![("zed".to_string(), repo.to_string())]
+    }
+
+    /// B3: **a fresh offer installs only from the repository the second
+    /// consent named.** The check at the gesture finds `zed` offered by
+    /// `z/zed`; an install confirmed for `b/bee` (the source that offered it
+    /// when the operator clicked, removed since), one confirmed for another
+    /// name, and one confirmed for nothing are each refused by name, before
+    /// any download (the offer's URL is never served) and with nothing
+    /// written. **[MUTATION]** drop the repository comparison: red on
+    /// `b/bee`. **[MUTATION]** drop the name comparison: red on `other`.
+    /// **[MUTATION]** drop the whole guard: red on all three.
+    #[tokio::test]
+    async fn a_fresh_offer_is_refused_unless_its_own_repository_was_confirmed() {
+        let catalog = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+        let expected = refusal_message(&catalog, "zed", &Refusal::NotConsented("z/zed".into()));
+        let confirmations: [(&str, Vec<(String, String)>); 3] = [
+            ("another repository", zed_from("b/bee")),
+            ("another name", vec![("other".to_string(), "z/zed".to_string())]),
+            ("nothing confirmed", Vec::new()),
+        ];
+        for (case, consented) in confirmations {
+            let (worker, _dir) = worker_rig(announced_radio());
+            let _privileged = Privileged::answers(Ok(()));
+            let before = std::fs::read_to_string(&worker.manifest).unwrap();
+            let checked = checked_with_fresh(stranger_plugin("zed", "1.0.0"));
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                worker.install_consented(&client().unwrap(), &checked, &names(&["zed"]), &consented),
+            )
+            .await
+            .expect("install() hung");
+            assert_eq!(worker.state.read().await.outcome, CheckOutcome::Failed(expected.clone()), "{case}");
+            assert_eq!(std::fs::read_to_string(&worker.manifest).unwrap(), before, "{case}");
+            assert!(!worker.staging.join("request.json").exists(), "{case}");
+        }
+    }
+
+    /// B4: **an unreadable `plugins.toml` installs nothing but a pack.** The
+    /// check could not tell whose plugin a name is, so `radio` — which might
+    /// be an installed fork's — is refused by name rather than resolved to
+    /// our archive, while a language pack, whose id carries its source,
+    /// still installs. Both asked in one gesture, through the check's own
+    /// settle (`known: None`), so the flag is the one a real check sets.
+    /// **[MUTATION]** drop the `plugins_unknown` guard in `install_consented`:
+    /// red on the outcome. **[MUTATION]** set `plugins_unknown: false` in
+    /// `settle_with_release`: red too.
+    #[tokio::test]
+    async fn an_unreadable_plugins_toml_installs_nothing_but_a_pack() {
+        let rig = pack_rig(&[("core", "k = \"v\"\n")], "fr", "0.2.0").await;
+        let mut published = rig.checked.ours.clone();
+        published.extend(radio_published("0.3.0"));
+        let checked = rig.worker.settle_with_release(published, None, &[], Vec::new()).await;
+        assert!(checked.plugins_unknown);
+        let id = crate::langpack::store::pack_id("fr");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            rig.worker.install(&client().unwrap(), &checked, &names(&[id.as_str(), "radio"])),
+        )
+        .await
+        .expect("install() hung");
+        let expected = refusal_message(&*rig.worker.catalog.read().await, "radio", &Refusal::PluginsUnreadable);
+        assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
+        assert!(!rig.staging.join("request.json").exists(), "nothing asked of root");
+        assert!(rig.packs_root.join(&id).join("core.toml").exists(), "the pack placed");
     }
 
     /// **Only a fresh offer is declared by the core.** A `Theirs` update
@@ -7445,7 +7654,7 @@ mod tests {
             checksums_url: None,
             catalogue_url: None,
         };
-        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![] };
+        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![], plugins_unknown: false };
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
             worker.install(&client().unwrap(), &checked, &["files".to_string()]),
@@ -7671,6 +7880,7 @@ mod tests {
             fresh: vec![],
             conflicts: vec![],
             packs: vec![],
+            plugins_unknown: false,
         };
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
@@ -7722,7 +7932,7 @@ mod tests {
     /// **[MUTATION]**: `Offer::Companion(c) => c == name` in `carries` — red.
     #[test]
     fn a_companion_s_name_resolves_to_nothing() {
-        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![] };
+        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![], plugins_unknown: false };
         assert_eq!(resolve(&checked, "files-mount"), Resolved::Nothing);
     }
 

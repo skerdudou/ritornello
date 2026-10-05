@@ -137,8 +137,9 @@ impl<P: Player> Core<P> {
     ///
     /// **Noted before the run rather than after it**, and that is the point:
     /// the ticker asks every minute, so a day noted only on success would fire
-    /// again sixty seconds after a failed check — and, under
-    /// `CheckAndInstall`, keep re-downloading all night. Once a day means once
+    /// again sixty seconds after a failed check — and, under a policy that
+    /// installs (`CheckAndInstall`, `CheckAndInstallAll`), keep
+    /// re-downloading all night. Once a day means once
     /// a day, whatever the outcome of the run.
     ///
     /// Which is why it takes an `Option` rather than a day: a run that never

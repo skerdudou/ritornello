@@ -228,9 +228,18 @@ pub fn component_offers(
         // it then meets is the check that the archive's bare name is the file
         // this plugin's `exec` declares: our archive carries
         // `ritornello-plugin-<name>`, so the install is refused with a named
-        // cause unless the author called their binary exactly that too. Three
-        // coincidences, all on their side, and the last one is the one they
-        // control.
+        // cause unless the binary is called exactly that too.
+        //
+        // **That last check is not always the author's to control.** A
+        // plugin installed fresh from a source is placed by this core as
+        // `ritornello-plugin-<name>` — the only binary name it accepts — so
+        // if it announces no repository and our release later publishes the
+        // same name (a name we had never shipped, or one dropped out of the
+        // release window this check reads), nothing on the device tells the
+        // two apart and the stranger's binary is replaced by ours. Announcing
+        // `repository` is what protects it, which `docs/plugins.md` says to
+        // the author in as many words; and such a plugin is never updated
+        // from its own source either, since nothing names that source.
         let is_third_party = !matches!(from, Origin::Unknown | Origin::Ours);
         // A third-party plugin's version is decided by **its own** repository,
         // and this release says nothing about it: never `plugin_offered`, even
