@@ -815,7 +815,7 @@ enum Refusal {
     /// `plugins.toml` could not be read by the check this install rests on
     /// (`Checked::plugins_unknown`). Whose plugin a name is cannot be told
     /// then — an installed fork named like ours would look like ours — so
-    /// nothing but a language pack is installed until the file reads again.
+    /// nothing but a language pack or the core itself is installed until the file reads again.
     PluginsUnreadable,
     /// A plugin offered fresh by a third-party source, installed without the
     /// operator having confirmed **that** source for it: no repository named
@@ -1331,7 +1331,7 @@ struct Checked {
     /// and `theirs` are then built from an empty list, which says nothing
     /// is a stranger's: a fork named like ours would resolve to `Ours` and
     /// have its binary replaced. `install` therefore refuses every install
-    /// but a language pack's while this is set (`Refusal::PluginsUnreadable`).
+    /// but a language pack's and the core's own while this is set (`Refusal::PluginsUnreadable`).
     plugins_unknown: bool,
 }
 
@@ -2241,10 +2241,14 @@ impl Worker {
                 continue;
             }
             // Past the packs, every name is a plugin's or the core's, and
-            // whose it is was judged against `plugins.toml`. Unread, that
-            // judgement said "nobody's": refused rather than resolved, or a
-            // fork named like ours would be replaced by our archive.
-            if checked.plugins_unknown {
+            // whose plugin it is was judged against `plugins.toml`. Unread,
+            // that judgement said "nobody's": a plugin is refused rather than
+            // resolved, or a fork named like ours would be replaced by our
+            // archive. **The core is exempt**: `core` is reserved, no fork
+            // takes its shape, its placement path is its own — and a
+            // self-update is exactly what may repair a device whose
+            // `plugins.toml` the running core cannot parse.
+            if checked.plugins_unknown && name != CORE {
                 tracing::warn!("update: plugins.toml was unreadable at the check, not installing {name}");
                 let catalog = self.catalog.read().await;
                 let message = refusal_message(&catalog, &name, &Refusal::PluginsUnreadable);
@@ -6039,6 +6043,42 @@ mod tests {
         assert!(
             memory_at_the_exit(&mut worker, &checked).await.is_some(),
             "a manual install of the version the automatic policy skips must still reach the restart"
+        );
+    }
+
+    /// B4 corrected: **the core's own update is not refused while
+    /// `plugins.toml` is unreadable** — it may be what repairs the device —
+    /// while a plugin still is, under the same check. Two gestures, because
+    /// a core placement ends the pass (the process leaves) before any
+    /// outcome is written: radio alone is refused by name; the core alone
+    /// goes all the way to its restart.
+    /// **[MUTATION]** drop `&& name != CORE`: red on the restart.
+    /// **[MUTATION]** drop the whole guard: red on radio's refusal.
+    #[tokio::test]
+    async fn an_unreadable_plugins_toml_still_lets_the_core_update_itself_and_refuses_a_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = worker_at(dir.path(), stalled_line());
+        let _privileged = Privileged::answers(Ok(()));
+        let mut published = vec![served_core(&core_archive()).await];
+        published.extend(radio_published("0.3.0"));
+        let checked = Checked { plugins_unknown: true, ..ours(published) };
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install(&client().unwrap(), &checked, &names(&["radio"])),
+        )
+        .await
+        .expect("the install pass hung");
+        let expected = refusal_message(&*worker.catalog.read().await, "radio", &Refusal::PluginsUnreadable);
+        assert_eq!(
+            worker.state.read().await.outcome,
+            CheckOutcome::Failed(expected),
+            "radio refused for the unreadable file, not resolved to our archive"
+        );
+
+        assert!(
+            memory_at_the_exit(&mut worker, &checked).await.is_some(),
+            "the core went past the gate, all the way to its restart"
         );
     }
 
