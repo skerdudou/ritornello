@@ -10,6 +10,7 @@ const CATALOG = {
   update_sources_unreadable: 'The list of sources could not be read.',
   update_source_official: 'This is the official repository, which is always read.',
   update_source_announced_by: 'Announced by {plugins}',
+  update_source_announced_by_pack: 'Named by an installed language pack',
   update_source_not_queryable: 'Cannot be checked: not a GitHub repository.',
   update_source_not_checked: 'Not checked yet.',
   update_source_unanswered: 'Did not answer at the last check.',
@@ -22,9 +23,11 @@ const CATALOG = {
   update_source_failed: 'The change could not be made. Try again.',
 }
 
+// The shape the core really serves for its own row: no report, ever
+// (`sources::reports_of` only covers the sources a check asks).
 const OFFICIAL: SourceRow = {
   repo: 'skerdudou/ritornello', kind: 'official', announced_by: [], queryable: true, stored: false,
-  report: { answered: true, plugins: ['console'], languages: ['fr'] },
+  report: null,
 }
 const ANNOUNCED_ONLY: SourceRow = {
   repo: 'ann/only', kind: 'announced', announced_by: ['zed'], queryable: true, stored: false, report: null,
@@ -149,10 +152,33 @@ describe('SourcesDialog', () => {
   })
 
   it('names the plugins and languages a source published', async () => {
+    served = [OFFICIAL, { ...ADDED, repo: 'pub/lisher', report: { answered: true, plugins: ['console'], languages: ['fr'] } }]
     await mountDialog()
     // Two separate lines, never one run-on sentence.
-    const lines = Array.from(row('skerdudou/ritornello').querySelectorAll('[data-source-report]')).map((e) => e.textContent)
+    const lines = Array.from(row('pub/lisher').querySelectorAll('[data-source-report]')).map((e) => e.textContent)
     expect(lines).toEqual(['Plugins published: console', 'Languages published: fr'])
+  })
+
+  // H1: the core never reports on its own repository (`reports_of` covers
+  // the sources a check asks, and ours has its own request), so the official
+  // row's `report` is always `null` — which used to read "Not checked yet."
+  // on the one repository read on every check. **[MUTATION]** drop the
+  // official guard on the report lines: red.
+  it('shows no report line on the official row, which is read on every check', async () => {
+    await mountDialog()
+    expect(OFFICIAL.report).toBeNull()
+    expect(row('skerdudou/ritornello').querySelector('[data-source-report]')).toBeNull()
+    expect(row('skerdudou/ritornello').textContent).not.toContain('Not checked yet.')
+  })
+
+  // H-M1: a repository only an installed language pack names has nobody in
+  // `announced_by`; it says what named it rather than "Announced by " and
+  // nothing. **[MUTATION]** drop the empty-list branch: red.
+  it('says a repository named only by an installed language pack was named by a pack', async () => {
+    served = [OFFICIAL, { ...ANNOUNCED_ONLY, repo: 'pack/only', announced_by: [] }]
+    await mountDialog()
+    expect(row('pack/only').textContent).toContain('Named by an installed language pack')
+    expect(row('pack/only').textContent).not.toContain('Announced by')
   })
 
   it('says a repository that cannot be queried is not queryable', async () => {

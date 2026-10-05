@@ -681,11 +681,17 @@ async function dropPlugin(targetName: string) {
  * being pressed twice in the same instant, though not to stop a second press
  * once the 202 has come back and the worker is still busy underneath it.
  */
-async function installPlugin(name: string) {
+async function installPlugin(name: string, confirmedRepo?: string) {
   if (inProgress.value.has(name)) return
   inProgress.value.add(name)
   try {
-    const err = await api.post('/api/update/install', { components: [name] })
+    // A plugin a third-party source offers fresh carries the repository its
+    // second consent named: the core installs it from that repository only,
+    // and refuses it if the check it runs now finds another one offering it.
+    const body = confirmedRepo === undefined
+      ? { components: [name] }
+      : { components: [name], from: { [name]: confirmedRepo } }
+    const err = await api.post('/api/update/install', body)
     if (err) {
       toast.error(err)
       return
@@ -718,12 +724,12 @@ function cancelThirdPartyInstall() {
 }
 
 /** Consent given: only now is the install asked for, through the same path
- *  as any other row's. */
+ *  as any other row's, with the repository the confirmation named. */
 async function confirmThirdPartyInstall() {
   const target = thirdPartyInstallTarget.value
   thirdPartyInstallTarget.value = null
   showInstallablesDialog.value = true
-  if (target) await installPlugin(target.name)
+  if (target) await installPlugin(target.name, target.repo)
 }
 
 /** Name of the plugin an uninstall confirmation is open for, or `null` when
@@ -875,15 +881,28 @@ function pollUpdateWhileBusy() {
 }
 
 /**
- * Ceiling for `pollLanguageWhileBusy`, in ticks of its own 2 s interval — 20 s
- * total. Not a measured worst case: a language pack is a small, text-only
- * archive, and an ordinary install or removal settles in well under this.
- * The ceiling exists so the poll cannot run forever if a job never reaches a
- * terminal state at all (the worker restarting mid-job, say) — the same
- * "no route may block, no page may wait on one" rule that gives the admin
- * protocol its own 5 s deadline, applied here on the polling side instead.
+ * Ceilings for `pollLanguageWhileBusy`, in ticks of its own 2 s interval.
+ *
+ * **While the update worker says it is idle**, 10 ticks — 20 s: enough for
+ * the worker to pick the job up and say it is busy, and for a removal, which
+ * never says so (`remove_language` sets no `busy`) and settles in well under
+ * that.
+ *
+ * **While it says it is busy**, the poll goes on, up to 150 ticks — 300 s. An
+ * install is a whole check before any pack is fetched: our release list (up
+ * to 60 s), the plugins settling (up to 15 s), every source asked under one
+ * 20-second deadline (`SOURCES_DEADLINE`) — a single silent source costs all
+ * of it — and then each pack's checksum file and archive. A 20 s ceiling
+ * used to stop the row before that check had even finished, so Install and
+ * Update looked like they did nothing whenever a source was slow.
+ *
+ * Both exist so the poll cannot run forever if a job never reaches a
+ * terminal state (the worker restarting mid-job, say) — the same "no route
+ * may block, no page may wait on one" rule that gives the admin protocol its
+ * own 5 s deadline, applied on the polling side.
  */
 const MAX_LANGUAGE_POLL_ATTEMPTS = 10
+const MAX_LANGUAGE_POLL_ATTEMPTS_WHILE_BUSY = 150
 
 let languagePoll: ReturnType<typeof setInterval> | null = null
 
@@ -953,15 +972,15 @@ function installedSignature(row: LanguagePackRow | undefined): string {
  * happen in.
  *
  * **Why not just extend `pollUpdateWhileBusy`.** That poll stops on
- * `!update.value.busy`, which does not track a language job the way it
- * tracks a component install: `Job::RemoveLanguage` never calls `set_busy`
- * at all (`remove_language`, `update/mod.rs`), and `Job::InstallLanguage`
- * sets it only for the brief `check()` call ahead of the download — neither
- * shape stays "busy" for as long as the pack actually takes to land or
- * leave. Polling the payload this row actually reads, against a completion
- * predicate this component can state precisely (`languageGestureSettled`),
- * is what proves the row is right, rather than hoping a signal built for a
- * different job shape happens to still be true.
+ * `!update.value.busy`, which does not track every language job:
+ * `Job::RemoveLanguage` never calls `set_busy` at all (`remove_language`,
+ * `update/mod.rs`). `Job::InstallLanguage` does — its `check()` sets it, and
+ * the worker clears it only once the whole job is over — so `busy` is what
+ * keeps this poll going past its idle ceiling while an install is still
+ * checking (see the two ceilings above). Completion itself is still read
+ * from the payload this row actually reads, against a predicate this
+ * component can state precisely (`languageGestureSettled`), rather than
+ * from a signal built for a different job shape.
  *
  * `installedAtStart` is read by the caller from `locale.value.packs` at the
  * moment the gesture is enqueued, before anything here can have changed it
@@ -975,10 +994,8 @@ function pollLanguageWhileBusy(busy: LanguageBusy, installedAtStart: string) {
     attempts += 1
     await refreshUpdate()
     locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
-    if (
-      languageGestureSettled(locale.value.packs, busy, installedAtStart)
-      || attempts >= MAX_LANGUAGE_POLL_ATTEMPTS
-    ) {
+    const ceiling = update.value.busy ? MAX_LANGUAGE_POLL_ATTEMPTS_WHILE_BUSY : MAX_LANGUAGE_POLL_ATTEMPTS
+    if (languageGestureSettled(locale.value.packs, busy, installedAtStart) || attempts >= ceiling) {
       stopLanguagePoll()
       packBusy.value = null
     }

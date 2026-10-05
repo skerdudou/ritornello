@@ -1,7 +1,9 @@
 <script setup lang="ts">
 /**
  * One line per language a pack is installed for, sitting right under
- * `LanguageCard`'s selector: what is on the device, with Update and Remove.
+ * `LanguageCard`'s selector: what is on the device, with Update and Remove,
+ * and Install when a source offers a pack of that language the device does
+ * not have yet (`install_available`).
  * Adding a language that is only offered is `AddLanguageDialog`'s job — one
  * gesture per language, everything published for it at once, never plugin by
  * plugin.
@@ -76,6 +78,13 @@ function updateAvailable(row: PackRow): boolean {
   return row.update_available
 }
 
+/** Whether the row lists where its packs come from: several packs, or one
+ * that is a third party's — the README promises a pack's source on its row,
+ * and a stranger's single pack must not pass for ours. */
+function showSources(row: PackRow): boolean {
+  return row.packs.length > 1 || row.packs.some((p) => p.source !== null)
+}
+
 function sourceLabel(pack: LanguagePackDetail): string {
   return packSourceLabel(t.value, pack.source)
 }
@@ -125,9 +134,10 @@ function busyLabel(row: PackRow): string {
       <span v-if="isBusy(row)" class="text-xs text-muted-foreground" data-pack-busy>
         {{ busyLabel(row) }}
       </span>
-      <!-- Under a language with several packs: where each one comes from.
-           A single-pack language renders exactly as it always did. -->
-      <ul v-if="row.packs.length > 1" class="w-full list-none space-y-1 text-xs text-muted-foreground" data-pack-sources>
+      <!-- Where each pack comes from, under a language with several packs or
+           whose one pack is a third party's. Only a language whose single
+           pack is ours renders exactly as it always did. -->
+      <ul v-if="showSources(row)" class="w-full list-none space-y-1 text-xs text-muted-foreground" data-pack-sources>
         <li v-for="pack in row.packs" :key="pack.id" :data-pack-source="pack.id">
           {{ sourceLabel(pack) }} —
           {{ pack.installed ?? t('language_pack_not_installed') }}
@@ -179,6 +189,17 @@ function busyLabel(row: PackRow): string {
         :disabled="isBusy(row)"
         @click="emit('install', row.language)"
       >{{ t('language_pack_update') }}</Button>
+      <!-- A pack of this language is on offer and not installed (a source's,
+           for a language the device already has): the same one gesture,
+           which installs every pack on offer. Behind Update when both apply,
+           since Update does exactly this too. -->
+      <Button
+        v-else-if="row.install_available"
+        variant="outline" size="xs"
+        :data-pack-install="row.language"
+        :disabled="isBusy(row)"
+        @click="emit('install', row.language)"
+      >{{ t('language_pack_install') }}</Button>
       <!-- Every row here has a pack on disk, so every row can be removed. -->
       <Button
         variant="outline" size="xs"

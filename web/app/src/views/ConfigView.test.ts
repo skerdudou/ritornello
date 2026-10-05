@@ -579,8 +579,11 @@ describe('ConfigView — plugin table', () => {
 
       ;(document.body.querySelector('[data-third-party-install-confirm]') as HTMLElement).click()
       await flushPromises()
+      // B3: the repository the confirmation named travels with the request,
+      // so the core installs from it and from nothing else.
+      // **[MUTATION]** drop `target.repo` from `confirmThirdPartyInstall`: red.
       expect(posts.filter((p) => p.url === '/api/update/install'))
-        .toEqual([{ url: '/api/update/install', body: { components: ['zed'] } }])
+        .toEqual([{ url: '/api/update/install', body: { components: ['zed'], from: { zed: 'z/zed' } } }])
       expect(document.body.querySelector('[data-third-party-install-dialog]')).toBeNull()
       expect(document.body.querySelector('[data-installables-dialog]')).not.toBeNull()
     })
@@ -2612,6 +2615,65 @@ describe('ConfigView — language pack polling', () => {
     }
   })
 
+  // H6: an install begins with a whole check, and one silent source holds
+  // that check for twenty seconds before any pack is fetched — so the poll
+  // used to give up at its 20 s ceiling with the job still running, and
+  // Install looked like it did nothing. While the worker says it is busy the
+  // poll goes on; once it lands, the row settles. And it is still bounded:
+  // a job that stays busy for ever releases the row at the busy ceiling.
+  // **[MUTATION]** drop the busy ceiling (always 10 ticks): red on "still
+  // busy at 30 s".
+  it('keeps polling while the worker is busy, past the idle ceiling, and settles when the pack lands', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, table } = await mountView({
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
+        '/api/update': freshUpdate(),
+      })
+      await openAddLanguage(w)
+      ;(table as Record<string, unknown>)['/api/update'] = {
+        ...(freshUpdate() as object), busy: 'Recherche de mises à jour…',
+      }
+      inDialog('[data-pack-install="de"]')!.click()
+      await flushPromises()
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(inDialog('[data-pack-busy]')!.textContent).toContain('Installation de')
+
+      ;(table as Record<string, unknown>)['/api/locale'] = localeWithPacks([packRow('de', '0.2.1', '0.2.1')])
+      ;(table as Record<string, unknown>)['/api/update'] = freshUpdate()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(inDialog('[data-pack-busy]')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('releases the row at the busy ceiling when the worker never stops being busy', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, table, spy } = await mountView({
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
+        '/api/update': freshUpdate(),
+      })
+      await openAddLanguage(w)
+      ;(table as Record<string, unknown>)['/api/update'] = {
+        ...(freshUpdate() as object), busy: 'Recherche de mises à jour…',
+      }
+      inDialog('[data-pack-install="de"]')!.click()
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(298_000)
+      expect(inDialog('[data-pack-busy]')).not.toBeNull()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(inDialog('[data-pack-busy]')).toBeNull()
+      const atCeiling = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(spy.mock.calls.filter((c) => c[0] === '/api/locale').length).toBe(atCeiling)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // Fix round 3 (F4 of the review): `LanguagePacksRow`'s "Update" button
   // calls the same `installLanguage` as "Install", producing the same
   // `busy.action === 'install'` — but a row only ever offers Update when
@@ -2763,6 +2825,24 @@ describe('ConfigView — a language from several packs', () => {
     })
     const { w, posts } = await mountView({ '/api/locale': localeWithPacks([row]) })
     await w.get('[data-pack-update="fr"]').trigger('click')
+    await flushPromises()
+    expect(posts.map((p) => p.url)).toContain('/api/languages/fr')
+  })
+
+  // H2, from the click: an installed language a source offers a new pack
+  // for shows Install, and Install is the language's one gesture.
+  it("Install, offered for a source's pack of an installed language, posts the language's one gesture", async () => {
+    const row = frTwoPacks({
+      overlaps: [],
+      install_available: true,
+      packs: [
+        { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: null, offered: '1.0.0' },
+      ],
+    })
+    const { w, posts } = await mountView({ '/api/locale': localeWithPacks([row]) })
+    expect(w.find('[data-pack-update="fr"]').exists()).toBe(false)
+    await w.get('[data-pack-install="fr"]').trigger('click')
     await flushPromises()
     expect(posts.map((p) => p.url)).toContain('/api/languages/fr')
   })

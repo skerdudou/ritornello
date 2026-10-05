@@ -158,14 +158,21 @@ function reportLines(report: SourceReport | null): string[] {
             <span v-if="row.kind === 'official'" data-source-official class="text-xs text-muted-foreground">
               {{ t('update_source_official') }}
             </span>
+            <!-- A repository only an installed language pack names has no
+                 plugin to credit: it says what named it. -->
             <span v-else-if="row.kind === 'announced'" data-source-announced class="text-xs text-muted-foreground">
-              {{ t('update_source_announced_by', { plugins: row.announced_by.join(', ') }) }}
+              {{ row.announced_by.length > 0
+                ? t('update_source_announced_by', { plugins: row.announced_by.join(', ') })
+                : t('update_source_announced_by_pack') }}
             </span>
             <span v-if="!row.queryable" data-source-not-queryable class="text-xs text-muted-foreground">
               {{ t('update_source_not_queryable') }}
             </span>
+            <!-- Never on the official row: the core reports only on the
+                 sources a check asks, ours has its own request, and what it
+                 said is the update card's own state. -->
             <span
-              v-for="line in reportLines(row.report)"
+              v-for="line in row.kind === 'official' ? [] : reportLines(row.report)"
               :key="line"
               data-source-report
               class="text-xs text-muted-foreground"

@@ -22,6 +22,10 @@ const CATALOG = {
   plugin_kind_source: 'source',
   installables_from_repo: 'Third-party plugin from {repo}, version {version}.',
   installables_conflict: 'Offered by several repositories ({repos}): none is trusted.',
+  installables_no_release:
+    'Third-party plugins are offered only once this appliance can read a release of Ritornello\'s own. “Offer beta versions” lets it read the betas.',
+  update_row_third_party_refused: 'Its last archive was refused: a third-party plugin\'s archive may carry nothing but its own binary.',
+  update_row_pack_refused: 'Its last archive was refused by the language pack checks.',
 }
 
 // The catalogue response the fake `fetch` answers `GET /api/update/catalogue`
@@ -188,10 +192,10 @@ describe('InstallablesDialog', () => {
     // appliance already has everything this version publishes", which is
     // what the appliance would otherwise claim (and precisely what the e2e
     // harness would see, since it never runs a check).
+    // (`no_release` and `only_prereleases` have a sentence of their own,
+    // tested below: they are a state the check did reach, H3.)
     const outcomes: UpdatePayload['outcome'][] = [
       { kind: 'never_checked' },
-      { kind: 'no_release' },
-      { kind: 'only_prereleases' },
       { kind: 'failed', detail: 'boom' },
     ]
     for (const outcome of outcomes) {
@@ -202,6 +206,28 @@ describe('InstallablesDialog', () => {
       await flushPromises()
       expect(document.body.querySelector('[data-installables-unknown]')).not.toBeNull()
       expect(document.body.querySelector('[data-installables-empty]')).toBeNull()
+      w.unmount()
+      document.body.innerHTML = ''
+    }
+  })
+
+  // H3: a check that found no release of ours for this appliance (nothing
+  // published, or only betas it declines) offers no stranger's plugin either
+  // — the core cannot judge ownership against a release it did not read —
+  // and every stable-channel device is in that state today. The dialog says
+  // why and points to the beta switch, instead of "no usable check has run"
+  // (false: one did) or "nothing to add". One outcome per operand.
+  // **[MUTATION]** drop `no_release` from `noRelease`: red on the first.
+  // **[MUTATION]** drop `only_prereleases`: red on the second.
+  it('says strangers wait for a release of ours, when the check found none for this appliance', async () => {
+    for (const outcome of [{ kind: 'no_release' }, { kind: 'only_prereleases' }] as UpdatePayload['outcome'][]) {
+      checkStatus = 500
+      const w = mountDialog([], outcome, NOW_S)
+      await flushPromises()
+      expect(document.body.querySelector('[data-installables-no-release]')?.textContent, outcome.kind)
+        .toContain('Offer beta versions')
+      expect(document.body.querySelector('[data-installables-unknown]'), outcome.kind).toBeNull()
+      expect(document.body.querySelector('[data-installables-empty]'), outcome.kind).toBeNull()
       w.unmount()
       document.body.innerHTML = ''
     }
@@ -394,6 +420,21 @@ describe('InstallablesDialog', () => {
       expect(dup.querySelector('[data-installable-privileged]')).toBeNull()
       expect(dup.querySelector('[data-installable-repo]')).toBeNull()
       expect(row('zed')?.querySelector('[data-installable-install]')).not.toBeNull()
+    })
+
+    // H5: a stranger's row the core marked `installable: false` was refused
+    // for what its archive carried (`archive_allowed`), not because it is
+    // privileged: its note says that, never "install it with
+    // ritornello-install", which has nothing to do with a stranger's plugin.
+    // **[MUTATION]** drop the `third_party_repo` branch of `refusedNote`:
+    // red.
+    it('says a refused stranger archive was refused, never the privileged-plugin sentence', async () => {
+      mountDialog([fresh({ installable: false })])
+      await flushPromises()
+      const note = row('zed')?.querySelector('[data-installable-privileged]')?.textContent ?? ''
+      expect(note).toContain('may carry nothing but its own binary')
+      expect(note).not.toContain('ritornello-install')
+      expect(row('zed')?.querySelector('[data-installable-install]')).toBeNull()
     })
 
     // Fails closed (fix round 1): a third-party row with neither a source

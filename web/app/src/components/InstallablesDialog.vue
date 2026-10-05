@@ -3,6 +3,7 @@ import {
   api, Button, Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
+import { refusedNote } from '../composables/refusedNote'
 import { useCatalog } from '../composables/useCatalog'
 import { checkFailure, hasUsableCheck, useUpdateCheck } from '../composables/useUpdateCheck'
 import type { ComponentOffer, UpdatePayload } from '../types'
@@ -184,6 +185,18 @@ const noCatalogue = computed(
 /** See `hasUsableCheck`: whether an empty `rows` means "nothing to add". */
 const usableCheck = computed(() => hasUsableCheck(props.outcome, props.lastCheckUnixS))
 
+/**
+ * The check ran and found no release of ours for this appliance — nothing
+ * published, or only betas it declines. A state, not a failure, and the one
+ * every stable-channel device is in today: the core then offers no stranger's
+ * plugin either (ownership cannot be judged against a release it did not
+ * read), so "no usable check has run" would be false and "nothing to add"
+ * would hide why.
+ */
+const noRelease = computed(
+  () => props.outcome.kind === 'no_release' || props.outcome.kind === 'only_prereleases',
+)
+
 
 // Generation counter, as `PluginRoute.vue` does for a plugin catalogue: the
 // request is asynchronous, and a dialog closed and reopened must not have a
@@ -239,6 +252,13 @@ watch(
       <!-- While the check runs the list is not shown at all, not even as
            "nothing to add": it would be an answer nobody has given yet. -->
       <template v-if="check.phase.value === 'checking'" />
+      <p
+        v-else-if="rows.length === 0 && noRelease"
+        data-installables-no-release
+        class="text-sm text-muted-foreground"
+      >
+        {{ t('installables_no_release') }}
+      </p>
       <p
         v-else-if="rows.length === 0 && !usableCheck"
         data-installables-unknown
@@ -301,11 +321,14 @@ watch(
               data-installable-conflict
               class="text-xs text-muted-foreground"
             >{{ t('installables_conflict', { repos: row.offer.conflict_repos.join(', ') }) }}</span>
+            <!-- The sentence follows what the row is (`refusedNote`): only
+                 one of ours is "privileged"; a stranger's plugin was refused
+                 for what its archive carried. -->
             <span
               v-else-if="row.offer.installable === false"
               data-installable-privileged
               class="text-xs text-muted-foreground"
-            >{{ t('plugin_privileged_note') }}</span>
+            >{{ refusedNote(t, row.offer) }}</span>
             <!-- Never disabled for a missing description: installing does not
                  depend on knowing how to describe the component. Disabled
                  while `busy` (m6): the update card's own Install button

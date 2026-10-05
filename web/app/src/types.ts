@@ -253,6 +253,12 @@ export interface LanguagePackRow {
    * official pack is current still shows Update for a third party's news.
    */
   update_available: boolean
+  /**
+   * Some pack of the language is offered and not installed — on a language
+   * that already has one, a source's pack for it. Decided by the core; the
+   * row's Install runs the language's whole install, which fetches it.
+   */
+  install_available: boolean
   /** Every pack of the language: the official one first, then third parties. */
   packs: LanguagePackDetail[]
   /** One entry per module two installed packs of the language both carry. */

@@ -179,6 +179,39 @@ describe('LanguagePacksRow: several packs of one language', () => {
   it('does not offer Update when no pack has news', async () => {
     const w = await mountRow(payloadOf(frWithThirdParty()))
     expect(w.find('[data-pack-update="fr"]').exists()).toBe(false)
+    expect(w.find('[data-pack-install="fr"]').exists()).toBe(false)
+  })
+
+  // H2: an installed language could not pick up a source's pack for it — no
+  // update (nothing installed moved), and "Add a language" lists only
+  // languages with no pack. The core says `install_available`; the row
+  // offers Install, the one language gesture, from the click.
+  // **[MUTATION]** drop the Install button: red.
+  it('offers Install when a source offers a pack of an installed language, and emits the language', async () => {
+    const row = packRow('fr', '0.2.1', '0.2.1', {
+      install_available: true,
+      packs: [
+        { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: null, offered: '1.0.0' },
+      ],
+    })
+    const w = await mountRow(payloadOf(row))
+    expect(w.find('[data-pack-update="fr"]').exists()).toBe(false)
+    await w.find('[data-pack-install="fr"]').trigger('click')
+    expect(w.emitted('install')).toEqual([['fr']])
+    expect(w.find(`[data-pack-source="${THIRD}"]`).text()).toBe('From someone/fr-extra — Not installed')
+  })
+
+  // H-M2: a language whose one installed pack is a stranger's names its
+  // source too — it must not read as ours. Ours alone still renders as
+  // before (the test above it). **[MUTATION]** list sources only for
+  // several packs again: red.
+  it("names the source of a language's single pack when it is a third party's", async () => {
+    const row = packRow('nl', null, null, {
+      packs: [{ id: 'ritornello-xlang-nl-0123456789ab', source: 'z/zed', installed: '3.0.0', offered: null }],
+    })
+    const w = await mountRow(payloadOf(row))
+    expect(w.find('[data-pack-sources]').text()).toBe('From z/zed — 3.0.0')
   })
 
   // P11: a filter on the official pack alone dropped this language from the
