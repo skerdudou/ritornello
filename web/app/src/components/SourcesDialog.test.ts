@@ -61,6 +61,7 @@ beforeEach(async () => {
         return new Response(JSON.stringify(served), { status: 200 })
       }
       if (url === '/api/update/sources' && method === 'POST') {
+        if (postAnswer.status === 0) throw new TypeError('Failed to fetch')
         return new Response(postAnswer.body || null, { status: postAnswer.status })
       }
       if (url.startsWith('/api/update/sources/') && method === 'DELETE') {
@@ -149,8 +150,9 @@ describe('SourcesDialog', () => {
 
   it('names the plugins and languages a source published', async () => {
     await mountDialog()
-    const text = row('skerdudou/ritornello').querySelector('[data-source-report]')!.textContent
-    expect(text).toBe('Plugins published: console Languages published: fr')
+    // Two separate lines, never one run-on sentence.
+    const lines = Array.from(row('skerdudou/ritornello').querySelectorAll('[data-source-report]')).map((e) => e.textContent)
+    expect(lines).toEqual(['Plugins published: console', 'Languages published: fr'])
   })
 
   it('says a repository that cannot be queried is not queryable', async () => {
@@ -194,6 +196,20 @@ describe('SourcesDialog', () => {
 
   it('shows a generic message when a full channel answers 429 without a body', async () => {
     postAnswer = { status: 429, body: '' }
+    await mountDialog()
+    const input = document.body.querySelector<HTMLInputElement>('[data-source-input]')!
+    input.value = 'a/b'
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-source-add]')!.click()
+    await flushPromises()
+    expect(document.body.querySelector('[data-source-error]')!.textContent).toBe(
+      'The change could not be made. Try again.',
+    )
+  })
+
+  it('shows a generic message, not the browser text, when the request never reached the core', async () => {
+    postAnswer = { status: 0, body: '' }
     await mountDialog()
     const input = document.body.querySelector<HTMLInputElement>('[data-source-input]')!
     input.value = 'a/b'

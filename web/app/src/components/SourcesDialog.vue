@@ -58,13 +58,33 @@ watch(
 )
 
 /**
- * A refusal the core explained carries its catalogue message as `error`. A
- * full write channel answers 429 or 500 **without a body**, which the kit
- * reads back as `HTTP <code>` — a string no operator can act on, so that
- * case gets a generic sentence instead of being shown raw.
+ * A write, answered with what the operator may read. A refusal the core
+ * explained carries its catalogue message as `error` and that is shown. Two
+ * cases carry nothing an operator can act on and get one generic sentence
+ * instead: a full write channel (429 or 500, **no body**) and a request that
+ * never reached the core (the browser's raw `fetch` text, in whatever
+ * language the browser speaks). The kit's `api.post` folds all three into one
+ * string, so this reads the response itself to tell them apart.
  */
-function explain(error: string): string {
-  return /^HTTP \d+$/.test(error) ? t.value('update_source_failed') : error
+async function write(method: 'POST' | 'DELETE', url: string, body?: unknown): Promise<string | null> {
+  let response: Response
+  try {
+    response = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  } catch {
+    return t.value('update_source_failed')
+  }
+  if (response.ok) return null
+  try {
+    const parsed = (await response.json()) as { error?: unknown }
+    if (typeof parsed.error === 'string' && parsed.error !== '') return parsed.error
+  } catch {
+    // no body, or not JSON: the generic sentence below
+  }
+  return t.value('update_source_failed')
 }
 
 /**
@@ -81,9 +101,9 @@ async function add() {
   working.value = true
   failure.value = null
   try {
-    const error = await api.post('/api/update/sources', { repo })
+    const error = await write('POST', '/api/update/sources', { repo })
     if (error !== null) {
-      failure.value = explain(error)
+      failure.value = error
       return
     }
     draft.value = ''
@@ -99,9 +119,9 @@ async function remove(row: SourceRow) {
   failure.value = null
   try {
     const path = row.repo.split('/').map(encodeURIComponent).join('/')
-    const error = await api.del(`/api/update/sources/${path}`)
+    const error = await write('DELETE', `/api/update/sources/${path}`)
     if (error !== null) {
-      failure.value = explain(error)
+      failure.value = error
       return
     }
     await load()
@@ -116,9 +136,9 @@ async function remove(row: SourceRow) {
  * ever "up to date": a source that was not asked, or did not answer, has said
  * nothing about being current.
  */
-function reportLine(report: SourceReport | null): string {
-  if (report === null) return t.value('update_source_not_checked')
-  if (!report.answered) return t.value('update_source_unanswered')
+function reportLines(report: SourceReport | null): string[] {
+  if (report === null) return [t.value('update_source_not_checked')]
+  if (!report.answered) return [t.value('update_source_unanswered')]
   const parts: string[] = []
   if (report.plugins.length > 0) {
     parts.push(t.value('update_source_published_plugins', { plugins: report.plugins.join(', ') }))
@@ -126,7 +146,7 @@ function reportLine(report: SourceReport | null): string {
   if (report.languages.length > 0) {
     parts.push(t.value('update_source_published_languages', { languages: report.languages.join(', ') }))
   }
-  return parts.length > 0 ? parts.join(' ') : t.value('update_source_publishes_nothing')
+  return parts.length > 0 ? parts : [t.value('update_source_publishes_nothing')]
 }
 </script>
 
@@ -162,7 +182,12 @@ function reportLine(report: SourceReport | null): string {
             <span v-if="!row.queryable" data-source-not-queryable class="text-xs text-muted-foreground">
               {{ t('update_source_not_queryable') }}
             </span>
-            <span data-source-report class="text-xs text-muted-foreground">{{ reportLine(row.report) }}</span>
+            <span
+              v-for="line in reportLines(row.report)"
+              :key="line"
+              data-source-report
+              class="text-xs text-muted-foreground"
+            >{{ line }}</span>
           </div>
           <Button
             v-if="removable(row)"

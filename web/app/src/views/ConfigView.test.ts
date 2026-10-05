@@ -2231,6 +2231,19 @@ describe('ConfigView — update', () => {
     }
   }
 
+  // Wiring, not behaviour (`SourcesDialog.test.ts` has the behaviour): the
+  // card's `sources` event must open the dialog, and the dialog must read the
+  // list when it opens. Deleting either the `@sources` handler or the `:open`
+  // binding in the view leaves the card and the dialog each green alone.
+  it('opens the sources dialog from the update card, and the dialog reads the list', async () => {
+    const { w, spy } = await mountView({ '/api/update/sources': [] } as Partial<Payloads>)
+    expect(document.body.querySelector('[data-sources-dialog]')).toBeNull()
+    await w.find('[data-update-sources]').trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('[data-sources-dialog]')).not.toBeNull()
+    expect(spy.mock.calls.map((c) => c[0])).toContain('/api/update/sources')
+  })
+
   it('sends a check with no body', async () => {
     const { w, posts } = await mountView()
     await w.find('[data-update-check]').trigger('click')
