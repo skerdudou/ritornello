@@ -129,9 +129,6 @@ pub fn pack_id_for(language: &str, source: Option<&str>) -> String {
 ///
 /// Every part is checked, not merely split: a name that only looks like a
 /// third-party id must not be read as naming some language.
-// Temporary, with `any_language_of`: first read in production by the
-// per-language rows of the Sources plan's Task 9, which removes these lines.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn third_party_language_of(id: &str) -> Option<&str> {
     let (language, hash) = id.strip_prefix(THIRD_PARTY_PACK_PREFIX)?.rsplit_once('-')?;
     let is_hash =
@@ -140,7 +137,6 @@ pub fn third_party_language_of(id: &str) -> Option<&str> {
 }
 
 /// The language any pack id names, ours or a third party's.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn any_language_of(id: &str) -> Option<&str> {
     language_of(id).or_else(|| third_party_language_of(id))
 }

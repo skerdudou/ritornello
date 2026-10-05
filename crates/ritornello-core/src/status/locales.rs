@@ -70,51 +70,164 @@ pub(super) struct LocaleResponse {
 
 /// What the page needs to offer a gesture for one language.
 ///
-/// Deliberately keyed by **language** rather than by pack id: the card shows
-/// languages, and livraison 2 -- where several packs may carry one language
-/// -- is the single place that will make this a list per language rather
-/// than one row.
+/// Keyed by **language** rather than by pack id: the card shows languages.
+/// Every pack of the language is in `packs`; `installed`/`offered` are still
+/// **ours** (the official pack's), so the page written before third-party
+/// packs keeps working unchanged.
 #[derive(Serialize)]
 pub(super) struct LanguagePackRow {
     language: String,
+    /// The official pack's installed version, `None` when ours is absent.
+    installed: Option<String>,
+    /// The official pack's offered version.
+    offered: Option<String>,
+    /// Some pack of this language is installed and offered in another
+    /// version. One only offered is an install, not an update.
+    update_available: bool,
+    /// Ours first, then third parties by id.
+    packs: Vec<PackDetail>,
+    /// One entry per module at least two installed packs of this language
+    /// carry; empty when none is shared (spec §6: nothing appears then).
+    overlaps: Vec<Overlap>,
+}
+
+/// One pack of a language. `installed` and `offered` **are** its versions —
+/// there is no separate `version`: installed on the device, and offered by
+/// the last check.
+#[derive(Serialize)]
+pub(super) struct PackDetail {
+    id: String,
+    /// The repository it comes from, lowercased `owner/repo`; `None` for ours.
+    source: Option<String>,
     installed: Option<String>,
     offered: Option<String>,
 }
 
-/// Builds `LocaleResponse::packs`: the release's own `LanguagePack` rows,
-/// plus an installed pack the release does not (or no longer) offer -- each
-/// language appearing **once**.
+/// One module several installed packs of one language carry.
+#[derive(Serialize)]
+pub(super) struct Overlap {
+    module: String,
+    /// Their ids, in the order they speak (`Registry::ordered_packs`).
+    packs: Vec<String>,
+    /// The one that speaks: the first of `packs`.
+    active: String,
+}
+
+/// Builds `LocaleResponse::packs`: one row per language (compared without
+/// case, as `update::offered_packs` gathers a language's packs), holding the
+/// last check's `LanguagePack` rows, ours and third parties', plus every
+/// installed pack the check does not (or no longer) offer — a pack stranded
+/// on the device must keep its row, or nothing is left to remove it.
 ///
-/// The two sources name a pack differently on purpose (`ComponentOffer::
-/// name` is a pack id, `InstalledPack.manifest.language` is the language
-/// itself), which is exactly why a naive concatenation could duplicate a
-/// language that is both offered and installed: `offered_ids` is collected
-/// first and is what the second loop is filtered against, so a pack id
-/// already turned into a row above is never turned into a second one below.
+/// The two sources name a pack by id, so a pack both offered and installed
+/// is listed once: `offered_ids` is collected first and the installed loop is
+/// filtered against it. The language comes from the id
+/// (`store::any_language_of`, ours or a third party's).
 fn language_pack_rows(
     registry: &crate::i18n::Registry,
     components: &[crate::update::state::ComponentOffer],
 ) -> Vec<LanguagePackRow> {
-    let offered = components.iter().filter(|c| c.kind == crate::update::state::ComponentKind::LanguagePack);
-    let mut packs: Vec<LanguagePackRow> = offered
-        .clone()
-        .map(|c| LanguagePackRow {
-            language: crate::langpack::store::language_of(&c.name).unwrap_or(&c.name).to_string(),
-            installed: c.installed.clone(),
-            offered: c.offered.clone(),
-        })
-        .collect();
-    let offered_ids: std::collections::HashSet<&str> = offered.map(|c| c.name.as_str()).collect();
-    for pack in registry.installed_packs() {
+    use crate::langpack::store;
+    let offered: Vec<&crate::update::state::ComponentOffer> =
+        components.iter().filter(|c| c.kind == crate::update::state::ComponentKind::LanguagePack).collect();
+    let installed = registry.installed_packs();
+    let repo_of = |pack: &store::InstalledPack| {
+        crate::update::release::parse_repo_url(&pack.manifest.source).map(|r| r.to_lowercase())
+    };
+    let mut details: Vec<(String, PackDetail)> = Vec::new();
+    for c in &offered {
+        let ours = store::language_of(&c.name).is_some();
+        let source = if ours {
+            None
+        } else {
+            c.third_party_repo
+                .as_ref()
+                .map(|r| r.to_lowercase())
+                .or_else(|| installed.iter().find(|p| p.id == c.name).and_then(repo_of))
+        };
+        let language = store::any_language_of(&c.name).unwrap_or(&c.name).to_string();
+        details.push((
+            language,
+            PackDetail { id: c.name.clone(), source, installed: c.installed.clone(), offered: c.offered.clone() },
+        ));
+    }
+    let offered_ids: std::collections::HashSet<&str> = offered.iter().map(|c| c.name.as_str()).collect();
+    for pack in installed {
         if !offered_ids.contains(pack.id.as_str()) {
-            packs.push(LanguagePackRow {
-                language: pack.manifest.language.clone(),
-                installed: Some(pack.manifest.version.clone()),
-                offered: None,
-            });
+            let ours = store::language_of(&pack.id).is_some();
+            let language = store::any_language_of(&pack.id).unwrap_or(&pack.manifest.language).to_string();
+            details.push((
+                language,
+                PackDetail {
+                    id: pack.id.clone(),
+                    source: if ours { None } else { repo_of(pack) },
+                    installed: Some(pack.manifest.version.clone()),
+                    offered: None,
+                },
+            ));
         }
     }
-    packs
+
+    let mut rows: Vec<LanguagePackRow> = Vec::new();
+    for (language, detail) in details {
+        let index = match rows.iter().position(|r| r.language.eq_ignore_ascii_case(&language)) {
+            Some(i) => i,
+            None => {
+                rows.push(LanguagePackRow {
+                    language: language.clone(),
+                    installed: None,
+                    offered: None,
+                    update_available: false,
+                    packs: Vec::new(),
+                    overlaps: Vec::new(),
+                });
+                rows.len() - 1
+            }
+        };
+        let row = &mut rows[index];
+        if store::language_of(&detail.id).is_some() {
+            // Ours names the row and fills its own two fields.
+            row.language = language;
+            row.installed = detail.installed.clone();
+            row.offered = detail.offered.clone();
+        }
+        row.packs.push(detail);
+    }
+    for row in &mut rows {
+        let theirs = |p: &PackDetail| store::language_of(&p.id).is_none();
+        row.packs.sort_by(|a, b| (theirs(a), &a.id).cmp(&(theirs(b), &b.id)));
+        row.update_available = row.packs.iter().any(|p| match (&p.installed, &p.offered) {
+            (Some(i), Some(o)) => i != o,
+            _ => false,
+        });
+        row.overlaps = overlaps(registry, &row.language);
+    }
+    rows
+}
+
+/// Every module at least two installed packs of `language` carry, with those
+/// packs in the order `Registry::ordered_packs` makes them speak — the very
+/// order `chain_for` resolves through, preferences included.
+fn overlaps(registry: &crate::i18n::Registry, language: &str) -> Vec<Overlap> {
+    let packs = registry.installed_packs();
+    let mut modules: Vec<&str> = packs
+        .iter()
+        .filter(|p| p.manifest.language.eq_ignore_ascii_case(language))
+        .flat_map(|p| p.layers.iter().map(|(m, _)| m.as_str()))
+        .collect();
+    modules.sort_unstable();
+    modules.dedup();
+    modules
+        .into_iter()
+        .filter_map(|module| {
+            let ordered = crate::i18n::Registry::ordered_packs(packs, registry.preferences(), module, language);
+            if ordered.len() < 2 {
+                return None;
+            }
+            let ids: Vec<String> = ordered.iter().map(|p| p.id.clone()).collect();
+            Some(Overlap { module: module.to_string(), active: ids[0].clone(), packs: ids })
+        })
+        .collect()
 }
 
 /// Builds every field of `LocaleResponse` from **one** registry read guard,
@@ -788,6 +901,195 @@ mod tests {
         let de = packs.iter().find(|p| p["language"] == "de").expect("an offered pack must be listed");
         assert_eq!(de["installed"], serde_json::Value::Null);
         assert_eq!(de["offered"], "1.0.0");
+    }
+
+    // --- Task 9: every pack of a language, and which one speaks ---
+
+    /// Installs a pack through `store::install`, as production writes one:
+    /// ours when `repo` is `None`, a third party's otherwise, carrying
+    /// `modules`. Returns its id.
+    fn install_pack(packs_root: &std::path::Path, language: &str, repo: Option<&str>, version: &str, modules: &[&str]) -> String {
+        let manifest = ritornello_i18n::PackManifest {
+            language: language.to_string(),
+            version: version.to_string(),
+            source: format!("https://github.com/{}", repo.unwrap_or(crate::update::release::REPO)),
+            modules: modules.iter().map(|m| m.to_string()).collect(),
+        };
+        let files: Vec<(String, Vec<u8>)> =
+            modules.iter().map(|m| (format!("{m}.toml"), format!("k = \"{m}\"\n").into_bytes())).collect();
+        let layers = ritornello_i18n::validate(&manifest, &files).unwrap();
+        let contents = crate::langpack::archive::PackContents { manifest, layers, files };
+        let id = crate::langpack::store::pack_id_for(language, repo);
+        crate::langpack::store::install(packs_root, &id, &contents).unwrap();
+        id
+    }
+
+    fn offered_pack(id: &str, repo: Option<&str>, installed: Option<&str>, offered: Option<&str>) -> crate::update::state::ComponentOffer {
+        crate::update::state::ComponentOffer {
+            name: id.to_string(),
+            third_party_repo: repo.map(str::to_string),
+            ..offered_language_pack("unused", installed, offered)
+        }
+    }
+
+    /// `GET /api/locale` on a registry swept from `packs_root`, with
+    /// `components` as the last check's rows; returns `packs`.
+    async fn pack_rows(
+        packs_root: std::path::PathBuf,
+        components: Vec<crate::update::state::ComponentOffer>,
+        prefs: Vec<crate::state::PackPreference>,
+    ) -> Vec<serde_json::Value> {
+        let mut registry = crate::i18n::seeded_registry(packs_root);
+        registry.set_preferences(prefs);
+        let state = AppState { registry: Arc::new(RwLock::new(registry)), ..tests_support::app_state() };
+        state.update.write().await.components = components;
+        let resp = router(state).oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        serde_json::from_value(v["packs"].clone()).unwrap()
+    }
+
+    fn keys(v: &serde_json::Value) -> Vec<String> {
+        let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    }
+
+    /// One language offered by us and by a source is one row holding both
+    /// packs, ours first; the row's own `installed`/`offered` stay ours.
+    /// **[MUTATION]** push a new row for every pack instead of finding the
+    /// language's row: two rows, red.
+    #[tokio::test]
+    async fn one_language_from_two_sources_is_one_row_with_two_packs() {
+        let dir = tempfile::tempdir().unwrap();
+        let theirs = crate::langpack::store::third_party_pack_id("de", "z/zed");
+        let rows = pack_rows(
+            dir.path().join("packs"),
+            vec![
+                offered_pack(&theirs, Some("z/zed"), None, Some("2.0.0")),
+                offered_pack(&crate::langpack::store::pack_id("de"), None, Some("1.0.0"), Some("1.0.0")),
+            ],
+            Vec::new(),
+        )
+        .await;
+        let de: Vec<&serde_json::Value> = rows.iter().filter(|r| r["language"] == "de").collect();
+        assert_eq!(de.len(), 1, "{rows:?}");
+        assert_eq!(rows.len(), 1, "no row named after a pack id: {rows:?}");
+        let packs = de[0]["packs"].as_array().unwrap();
+        assert_eq!(packs.len(), 2);
+        assert_eq!(packs[0]["id"], "ritornello-lang-de");
+        assert_eq!(packs[0]["source"], serde_json::Value::Null, "ours has no source");
+        assert_eq!(packs[1]["id"], theirs.as_str());
+        assert_eq!(packs[1]["source"], "z/zed");
+        assert_eq!((&de[0]["installed"], &de[0]["offered"]), (&serde_json::json!("1.0.0"), &serde_json::json!("1.0.0")));
+    }
+
+    /// A third-party pack the last check does not offer is still listed,
+    /// under its language (not under its id), with the source its manifest
+    /// names — the stranded-pack rationale, for theirs too.
+    #[tokio::test]
+    async fn an_installed_third_party_pack_nothing_offers_is_listed_under_its_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let packs_root = dir.path().join("packs");
+        let theirs = install_pack(&packs_root, "nl", Some("z/zed"), "3.0.0", &["core"]);
+        let rows = pack_rows(packs_root, Vec::new(), Vec::new()).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["language"], "nl");
+        assert_eq!(rows[0]["installed"], serde_json::Value::Null, "the row's own fields are ours, and ours is absent");
+        let pack = &rows[0]["packs"][0];
+        assert_eq!((pack["id"].as_str(), pack["source"].as_str()), (Some(theirs.as_str()), Some("z/zed")));
+        assert_eq!((pack["installed"].as_str(), pack["offered"].as_str()), (Some("3.0.0"), None));
+    }
+
+    /// Spec §6: nothing appears when no module is shared.
+    /// **[MUTATION]** list a module carried by a single pack: red.
+    #[tokio::test]
+    async fn no_overlap_is_reported_when_no_module_is_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let packs_root = dir.path().join("packs");
+        install_pack(&packs_root, "fr", None, "1.0.0", &["core"]);
+        install_pack(&packs_root, "fr", Some("z/zed"), "1.0.0", &["radio"]);
+        let rows = pack_rows(packs_root, Vec::new(), Vec::new()).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["packs"].as_array().unwrap().len(), 2);
+        assert_eq!(rows[0]["overlaps"], serde_json::json!([]));
+    }
+
+    /// A shared module lists its packs in the order they speak, ours first
+    /// with no preference, and only the shared module. The field names are
+    /// exactly the wire's.
+    #[tokio::test]
+    async fn a_shared_module_names_its_packs_in_order_and_ours_speaks() {
+        let dir = tempfile::tempdir().unwrap();
+        let packs_root = dir.path().join("packs");
+        let ours = install_pack(&packs_root, "fr", None, "1.0.0", &["core", "radio"]);
+        let theirs = install_pack(&packs_root, "fr", Some("z/zed"), "1.0.0", &["core", "mpd"]);
+        let rows = pack_rows(packs_root, Vec::new(), Vec::new()).await;
+        assert_eq!(keys(&rows[0]), ["installed", "language", "offered", "overlaps", "packs", "update_available"]);
+        assert_eq!(keys(&rows[0]["packs"][0]), ["id", "installed", "offered", "source"]);
+        assert_eq!(
+            rows[0]["overlaps"],
+            serde_json::json!([{ "module": "core", "packs": [ours, theirs], "active": ours }])
+        );
+    }
+
+    /// The preference recorded through the route is what `active` reports
+    /// on the very next read (Task 8's route, Task 9's field).
+    #[tokio::test]
+    async fn a_preference_put_through_the_route_is_the_active_pack_on_the_next_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let packs_root = dir.path().join("packs");
+        let ours = install_pack(&packs_root, "fr", None, "1.0.0", &["core"]);
+        let theirs = install_pack(&packs_root, "fr", Some("z/zed"), "1.0.0", &["core"]);
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let state = AppState {
+            registry: Arc::new(RwLock::new(crate::i18n::seeded_registry(packs_root))),
+            pack_preferences_tx: tx,
+            ..tests_support::app_state()
+        };
+        let app = router(state);
+        let put = Request::put("/api/languages/fr/preference")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "module": "core", "pack": theirs }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(put).await.unwrap().status(), StatusCode::NO_CONTENT);
+        let resp = app.oneshot(Request::get("/api/locale").body(Body::empty()).unwrap()).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v["packs"][0]["overlaps"],
+            serde_json::json!([{ "module": "core", "packs": [theirs, ours], "active": theirs }])
+        );
+    }
+
+    /// `update_available`: some pack of the language, installed and offered
+    /// in another version — any pack, not only ours; one that is offered but
+    /// not installed is an install, not an update.
+    /// **[MUTATION]** look at ours only: red on the first case.
+    /// **[MUTATION]** drop "installed present": red on the second.
+    /// **[MUTATION]** drop "the versions differ": red on the third.
+    #[tokio::test]
+    async fn an_update_is_available_when_any_installed_pack_is_offered_in_another_version() {
+        let ours = crate::langpack::store::pack_id("de");
+        let theirs = crate::langpack::store::third_party_pack_id("de", "z/zed");
+        let cases = [
+            (Some("1.0.0"), Some("1.1.0"), true, "theirs moved, ours did not"),
+            (None, Some("1.1.0"), false, "theirs is only offered"),
+            (Some("1.1.0"), Some("1.1.0"), false, "nothing moved"),
+        ];
+        for (installed, offered, expected, why) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let rows = pack_rows(
+                dir.path().join("packs"),
+                vec![
+                    offered_pack(&ours, None, Some("1.0.0"), Some("1.0.0")),
+                    offered_pack(&theirs, Some("z/zed"), installed, offered),
+                ],
+                Vec::new(),
+            )
+            .await;
+            assert_eq!(rows[0]["update_available"], expected, "{why}");
+        }
     }
 
     #[test]
