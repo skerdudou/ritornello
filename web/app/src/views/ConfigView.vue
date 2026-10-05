@@ -19,6 +19,7 @@ import UpdateCard from '../components/UpdateCard.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
 import { predictedThumbnailBytes } from '../composables/coverWeight'
 import { languageName } from '../composables/languages'
+import { packSourceLabel } from '../composables/packSource'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
 import type {
@@ -937,7 +938,9 @@ function languageGestureSettled(
  * pack's version alone cannot tell "settled" from "not yet".
  */
 function installedSignature(row: LanguagePackRow | undefined): string {
-  return row ? row.packs.map((p) => `${p.id}=${p.installed ?? ''}`).join('|') : ''
+  return row
+    ? row.packs.filter((p) => p.installed !== null).map((p) => `${p.id}=${p.installed}`).join('|')
+    : ''
 }
 
 /**
@@ -1164,6 +1167,25 @@ async function installLanguage(language: string) {
   pollLanguageWhileBusy(busy, installedAtStart)
   await loadAll()
 }
+
+/**
+ * The sentence in front of "Remove". `DELETE /api/languages/{language}`
+ * retires **every** pack of the language, so when a third party's pack is on
+ * disk, or there is more than one, the sentence names each pack that will go
+ * with its source: the owner learns it before confirming, not after.
+ */
+const removeConfirmText = computed(() => {
+  const language = removeLanguageTarget.value
+  if (!language) return ''
+  const name = languageName(language)
+  const installed = (locale.value.packs.find((p) => p.language === language)?.packs ?? [])
+    .filter((p) => p.installed !== null)
+  if (installed.length > 1 || installed.some((p) => p.source !== null)) {
+    const packs = installed.map((p) => packSourceLabel(t.value, p.source)).join(', ')
+    return t.value('language_pack_remove_confirm_several', { language: name, packs })
+  }
+  return t.value('language_pack_remove_confirm', { language: name })
+})
 
 /** The last refused preference write, for the select it was made on. */
 const preferenceError = ref<{ language: string; module: string; message: string } | null>(null)
@@ -1931,11 +1953,7 @@ function goTo(id: string) {
             <DialogHeader>
               <DialogTitle>{{ t('language_pack_remove') }}</DialogTitle>
               <DialogDescription>
-                {{
-                  removeLanguageTarget
-                    ? t('language_pack_remove_confirm', { language: languageName(removeLanguageTarget) })
-                    : ''
-                }}
+                {{ removeConfirmText }}
               </DialogDescription>
             </DialogHeader>
             <Button

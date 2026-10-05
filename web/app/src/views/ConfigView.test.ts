@@ -115,6 +115,7 @@ const CATALOGUE = {
   language_pack_overlap_intro: 'Plusieurs greffons couvrent le même module.',
   language_pack_overlap_module: 'Module {module}',
   language_pack_overlap_choose: 'Greffon qui parle pour {module}',
+  language_pack_remove_confirm_several: 'Retirer tous les greffons de la langue {language} : {packs} ?',
   languages_add_title: 'Ajouter une langue',
   languages_add_description: 'Langues que cette version publie.',
   languages_add_empty: 'Rien à ajouter.',
@@ -2775,6 +2776,47 @@ describe('ConfigView — a language from several packs', () => {
     })
     const { w } = await mountView({ '/api/locale': localeWithPacks([row]) })
     expect(w.find('[data-pack-remove="fr"]').exists()).toBe(true)
+  })
+
+  const confirmText = () =>
+    document.body.querySelector('[data-language-pack-remove-dialog]')?.textContent ?? ''
+
+  // Remove retires every pack of the language: the owner must read that
+  // before confirming.
+  it('names every pack and its source in the Remove confirmation when several are installed', async () => {
+    const { w, deletes } = await mountView({ '/api/locale': localeWithPacks([frTwoPacks({ overlaps: [] })]) })
+    await w.find('[data-pack-remove="fr"]').trigger('click')
+    await flushPromises()
+    expect(confirmText()).toContain('Retirer tous les greffons')
+    expect(confirmText()).toContain('Ritornello (greffon officiel), Depuis someone/fr-extra')
+    expect(deletes).toEqual([])
+  })
+
+  it('keeps the plain sentence for a language with its official pack alone', async () => {
+    const { w } = await mountView({ '/api/locale': localeWithPacks([packRow('fr', '0.2.1', '0.2.1')]) })
+    await w.find('[data-pack-remove="fr"]').trigger('click')
+    await flushPromises()
+    expect(confirmText()).toContain('Retirer le greffon')
+    expect(confirmText()).not.toContain('Retirer tous')
+  })
+
+  it('does not settle an Update because an offered-only pack appeared mid-poll', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const base = packRow('fr', '0.2.0', '0.2.1')
+      const { w, table } = await mountView({ '/api/locale': localeWithPacks([base]) })
+      await w.get('[data-pack-update="fr"]').trigger('click')
+      await flushPromises()
+      // Same installed versions, plus a pack that is only offered.
+      ;(table as Record<string, unknown>)['/api/locale'] = localeWithPacks([{
+        ...base,
+        packs: [...base.packs, { id: THIRD, source: 'someone/fr-extra', installed: null, offered: '1.0.0' }],
+      }])
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.find('[data-pack-busy]').exists()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("settles an Update on a third party's version moving, the official one staying put", async () => {
