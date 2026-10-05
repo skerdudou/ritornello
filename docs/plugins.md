@@ -154,9 +154,11 @@ line. Four things follow, and they are the whole contract:
 1. **Build the runtime with the macro**, `ritornello_plugin_sdk::declare_runtime!()?`,
    and give your crate a `repository = "https://github.com/<owner>/<repo>"` in
    its `Cargo.toml`. The core checks that repository's own releases for you:
-   at most sixteen third-party repositories per check, all asked at once
-   under one 20-second deadline — one slow host costs only its own rows,
-   never the whole check — and a repository that is not an
+   at most sixteen third-party repositories per check (those plugins
+   announce, those installed language packs name and those the operator
+   added), all asked at once under one 20-second deadline — one slow host
+   costs only its own rows, never the whole check — and a repository that is
+   not an
    `https://github.com/<owner>/<repo>` URL is left alone rather than guessed
    at: the updater speaks one API, and your row then reads "unknown" rather
    than claiming to be up to date.
@@ -185,11 +187,12 @@ line. Four things follow, and they are the whole contract:
    configuration and no `plugins.toml.fragment`. Official archives may carry
    some of those because the core writes them itself, unprivileged, into
    `/etc/ritornello` and into `plugins.toml`; a third-party archive is refused
-   if it carries any, and the refusal is shown on the page. A consequence
-   worth knowing in advance: a third-party plugin is therefore **updated**
-   from the UI, never freshly installed by it — its `[[plugin]]` block is
-   yours to add to `plugins.toml` once, by hand: the plugins page can switch
-   a plugin on, reorder it and remove it, but nothing in the UI declares one.
+   if it carries any, and the refusal is shown on the page. You do not need a
+   fragment to be installed fresh: when an operator installs your plugin from
+   the page, the core writes your `[[plugin]]` block itself, from the name
+   your repository offered and the device's plugins directory, never from
+   anything in the archive (see [Publishing from your own
+   repository](#publishing-from-your-own-repository)).
 4. **That binary must be named after your own plugin**, not after somebody
    else's: the core refuses an archive whose binary is not the file
    `plugins.toml` declares as this plugin's `exec`, and refuses one whose
@@ -197,9 +200,11 @@ line. Four things follow, and they are the whole contract:
    only directory the privileged installer writes to. Both refusals apply to
    official archives too; nothing here is a rule for strangers alone.
 
-A third-party plugin is also **never** installed by the automatic policy,
-whatever that policy is set to: an unattended device does not fetch bytes from
-a repository nobody vetted.
+The automatic policy reaches a third-party plugin only under its fourth
+setting, "Check and install, third-party plugins included", and then only to
+**update** one the device already has from the repository it announces. No
+setting ever adds a plugin or a pack by itself: a device does not fetch bytes
+from a repository nobody vetted that it was never told to want.
 
 The core compares that number to its own `PROTOCOL_VERSION` by **strict
 equality**, at both doors an announcement can come through — the startup
@@ -338,6 +343,79 @@ beyond that tie — a plugin that only fills in what is missing never
 competes with one that overwrites (see [Now-playing
 metadata](#now-playing-metadata-the-metadata-kind)).
 
+### Publishing from your own repository
+
+Nothing in this section has run against a real stranger's release: no
+third-party repository exists yet, and it was built and tested on a
+development machine only (see
+[installation.md](installation.md#what-has-not-been-verified)).
+
+**How a device learns your repository.** From the `repository` an installed,
+running plugin of yours announces; from the `source` of an installed language
+pack of yours; or because its operator typed `owner/repo` into the sources
+dialog (see [interface.md](interface.md#update-sources)). A device reads at
+most sixteen such repositories next to ours, which is always read first and
+cannot be removed. Only an `owner/repo` that GitHub's release list can answer
+is read at all.
+
+**What you attach to a release**, all in the same release, `SHA256SUMS`
+included:
+
+| What | Asset | Carries |
+|---|---|---|
+| A plugin | `ritornello-plugin-<name>-<version>-<arch>.tar.gz` | exactly one file, `usr/local/lib/ritornello/plugins/ritornello-plugin-<name>` |
+| A language pack | `ritornello-lang-<lang>-<version>.tar.gz` (no architecture) | `pack.toml` and the module catalogs, the shape of ours |
+| Digests | `SHA256SUMS` | a line for every archive above; **mandatory** |
+| Descriptions | `catalogue.json` | optional, the format of ours |
+
+- **The one file is named after the plugin, exactly.** `<name>` in the asset
+  name and in `ritornello-plugin-<name>` must agree; a bare `<name>` file, a
+  second file, a nested path, a unit, a polkit rule or anything else beside
+  the binary is refused, and the page says so. The core writes your
+  `[[plugin]]` block itself, from the name your repository offered and the
+  device's plugins directory.
+- **A pack's `pack.toml` must name its own publisher.** Its `source` must be
+  exactly `https://github.com/<owner>/<repo>` of the repository that published
+  the archive (compared without case). A missing, unreadable or foreign
+  `source` — ours included — is refused, and so is a `language` other than the
+  one the pack was offered under. The device derives the directory from who
+  answered and never from the archive: your pack lands in
+  `ritornello-xlang-<language>-<12 hex digits>` (a hash of your `owner/repo`),
+  so it cannot replace one of ours nor be replaced by another source's.
+  Where two installed packs carry the same module, ours speaks unless the
+  operator records a preference.
+- **`catalogue.json` is optional.** When present, the install dialog shows
+  its description of your plugin; only the entries for names your repository
+  legitimately offers are ever shown (entries for a name the device already
+  has, one of ours, or one a second source also offers are dropped), so a
+  catalogue cannot describe anyone else's plugin. Without one the row shows
+  the name, your repository and the version.
+- **Prerelease and draft flags behave as for ours** (see point 2 above).
+
+**Names that are refused.** A plugin is offered *fresh* — to a device that has
+none of that name — only when nobody owns the name and it is none of these:
+
+- a name our release publishes, or any plugin already on the device, declared
+  or not: a repository can never replace what exists by publishing its name,
+  and an installed third-party plugin is updated only from the repository it
+  announces;
+- `core`; a plugin that ships with a companion and the companion itself
+  (today `files` and `files-mount`); a privileged plugin — those are placed by
+  `ritornello-install` alone;
+- a name that is not a bare lowercase name (`a-z`, `0-9`, `-`, at most 64
+  characters), and any name beginning `ritornello-lang-` or
+  `ritornello-xlang-`, which name language packs;
+- **a name two or more sources offer**: the device believes neither, shows the
+  row as contested naming every repository, and offers no Install until the
+  operator removes one of them from the sources.
+
+**What happens next.** The operator clicks Install, and a second confirmation
+names your repository and says the plugin will run with the rights of the
+others. The core then checks ownership again, downloads, verifies the digest,
+places the binary, writes the block and starts the plugin. Later updates come
+from the repository your plugin announces; the automatic policy applies them
+only under its fourth setting.
+
 ### Text, translations, and what a plugin owes the catalogue
 
 Every user-facing string a plugin hands to the core — `SourceMessage::
@@ -398,12 +476,15 @@ confides both at once, unlike every bundled plugin today, which embeds
 English alone and leaves its other languages to the language packs this
 project itself builds and publishes from `deploy/locales/` — a choice
 specific to how *this project's own* plugins are packaged, not a limit
-the SDK imposes on yours. There is no third-party language-pack workflow
-today: the only packs a device ever installs come from this project's own
-release feed (`update::release::REPO`), so a language you did not embed
-yourself reaches your plugin's admin page only if this project's own pack
-for that language happens to cover your module's name — otherwise your
-page falls back to whatever you embedded (see the paragraph below).
+the SDK imposes on yours. A language pack is a separate archive, though,
+and a repository the operator reads can publish one (see [Publishing from
+your own repository](#publishing-from-your-own-repository)): a device
+installs one language in a single gesture from every pack on offer for it,
+each in its own directory. A language you did not embed yourself reaches
+your plugin's admin page only if an installed pack — ours, or a third
+party's — covers your module's name; where two installed packs cover it,
+ours speaks unless the operator recorded a preference. Otherwise your page
+falls back to whatever you embedded (see the paragraph below).
 
 **The common vocabulary — "Play", "Loading", the generic error
 sentences — travels with the core, not with you.** Your own keys resolve
@@ -2719,8 +2800,8 @@ shipped language to an installed language pack (see
 [interface.md](interface.md)) and layers what it finds over the confided
 English. **That is this project's own arrangement, not a limit
 `Runtime::texts` imposes**: the method takes any number of `(lang,
-source)` pairs, so a plugin — including a third-party one, which cannot
-ship a language pack of its own at all today — may confide several
+source)` pairs, so a plugin — including a third-party one, whose language
+packs travel as separate archives and never inside its own — may confide several
 languages at once, e.g. `Runtime::texts([("en", MY_EN), ("nl", MY_NL)])?`.
 The view then reads the resolved catalog from
 `GET /plugins/<name>/api/i18n[?lang=<l>]`, an ordinary core-served HTTP

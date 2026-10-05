@@ -77,8 +77,9 @@ and 5) and `x86_64`, so a plain Linux PC runs it just as well.
 - **Self-update and plugin management** — the core and each plugin check
   GitHub releases and install what changed from the browser, with an
   automatic rollback if the new binary fails to start; a plugin can also be
-  installed, removed or reordered live, and a third-party plugin is checked
-  against its own repository.
+  installed, removed or reordered live. Third-party repositories can be
+  added as sources, from which a plugin or a language pack can be installed
+  after a confirmation naming the repository.
 
 <p align="center">
   <img src="docs/captures/home-dark.png" width="49%" alt="The same home page in dark mode">

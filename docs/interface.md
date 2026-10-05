@@ -622,10 +622,11 @@ operator finally brings it back by hand. See
 for what it can and cannot write.
 
 **Check** asks GitHub for the list of releases — one small JSON document
-per repository it consults, this project's own and, for every declared
-third-party plugin, that plugin's own (capped at four repositories per
-check, so one slow stranger cannot stall the whole thing) — and downloads
-no archive. **Install** opens a confirmation dialog listing every
+per repository it consults, this project's own first and then up to sixteen
+others (see [Update sources](#update-sources)), all asked at once under one
+20-second deadline so that one slow stranger costs only its own rows — and
+downloads no archive. **Configure sources** on the same card opens the list
+of those repositories. **Install** opens a confirmation dialog listing every
 component, pre-ticking the ones out of step with what a release offers,
 except a third-party plugin (its own repository decided that, not this
 one) and a component already known to need a manual step. Leaving the
@@ -641,22 +642,37 @@ only that plugin.
 
 ### Automatic update policy
 
-Three settings, backed by `GET`/`PUT /api/settings`: **Off** (default —
+Four settings, backed by `GET`/`PUT /api/settings`: **Off** (default —
 a device that starts phoning home because it was updated is not a
 behaviour to inherit silently), **Check** (a silent daily or weekly
-check, updating the row above without installing anything), and **Check
+check, updating the row above without installing anything), **Check
 and install** (the same check, followed by installing whatever it found
-out of step). An hour (0-23, 3 by default) and a cadence — daily, or
+out of step in the official release), and **Check and install,
+third-party plugins included** (`check_and_install_all`, which also updates
+the third-party plugins and language packs already on the device from the
+repository each came from). An hour (0-23, 3 by default) and a cadence — daily, or
 weekly on a chosen day — decide when: once past that hour, on each day
 or each week that has not already run one, so a device that was off
 exactly at that hour still gets it once it comes back, rather than
 waiting for the next cycle.
 
 An automatic install only ever touches a component the device **already
-runs**: it never introduces a plugin the device does not have, and never
-a third-party one — those stay a hand-declared, hand-updated affair (see
-[Third-party plugins](#third-party-plugins) below). It can restart the
-core and any plugin it updates, the same as a manual install.
+runs**: under no setting does it introduce a plugin or a language pack the
+device does not have, and the first three never touch a third-party
+component at all (see [Third-party plugins](#third-party-plugins) below).
+It can restart the core and any plugin it updates, the same as a manual
+install.
+
+**The fourth setting has a price on rollback.** The value is written to
+`state.json` as `check_and_install_all`. A core older than the one that
+introduced it does not know that name, and its loader has no repair for an
+unknown policy: it discards the **whole** file and starts from the defaults,
+so the volume, the language and every other setting are lost along with the
+policy, which comes back `off`. A core of this version or later, rolled back
+from a still newer one, rewrites an unknown policy name to `off` and keeps
+everything else (`state::load`); damage anywhere else in the file still
+resets everything, as before. Either way the device stops updating by itself
+until its operator picks a policy again.
 
 **It also never installs the same version twice by itself.** The device
 writes down, per component, the version of the archive an automatic or
@@ -875,15 +891,53 @@ confirmed, and at that point it may carry nothing but its own binary —
 no systemd unit, no polkit rule, no locale catalog, nothing else — or the
 install is refused (the full contract, including how the core tells a
 third-party plugin from its own, is in
-[plugins.md](plugins.md#writing-a-plugin-of-your-own)). A third-party
-plugin is never installed by this page in the first place, and never
-touched by the automatic policy above, whatever it is set to: its first
-`[[plugin]]` block is always added by hand, and only its updates go
-through this page from then on.
+[plugins.md](plugins.md#writing-a-plugin-of-your-own)).
+
+A third-party plugin **can** be installed fresh from this page, when a
+source offers a name nobody on the device owns (not ours, not already
+installed, not reserved, and offered by exactly one source — see the author
+contract in [plugins.md](plugins.md#publishing-from-your-own-repository)). The
+"Add a plugin" dialog lists it with its repository and version, and a second
+confirmation names that repository and warns that the plugin will run on the
+appliance with the same rights as the others; nothing is sent before it is
+accepted. A name two sources offer is listed as contested, naming both, with
+no Install button. The core writes the plugin's `[[plugin]]` block itself.
+Updating one already installed is the same gesture as for an official
+component, against the repository it announces.
+
+The automatic policy touches a third-party component only under its fourth
+setting, and only to update one the device already has: it never adds one,
+whatever it is set to.
 
 None of installing, uninstalling or reordering — official or
 third-party — has run on the device this project actually ships on; see
 [installation.md](installation.md#what-has-not-been-verified).
+
+### Update sources
+
+The **Configure sources** button on the update card opens the list of
+repositories the device reads (`GET /api/update/sources`). Three kinds of row,
+in this order:
+
+- **the official repository**, always first and always read; it cannot be
+  removed;
+- **repositories announced** by an installed, running plugin or named by an
+  installed third-party language pack: accepted as facts, listed with the
+  plugins that announced them, and read-only. An announced address that is not
+  a GitHub repository is listed too, marked as not checkable, and never asked;
+- **repositories the operator added** (`POST /api/update/sources` with
+  `owner/repo` or a `https://github.com/owner/repo` URL, `DELETE
+  /api/update/sources/{owner}/{repo}`), the only rows with a Remove button. A
+  repository that is both announced and added keeps its row and its
+  announcement when the stored copy is removed.
+
+An addition is refused with a sentence of its own when it is not a GitHub
+repository, is the official one, is already listed, or when sixteen
+non-official, checkable sources are already listed; the limit is the same as
+the check's. Each row also says what the last check learned from it: not
+checked yet, did not answer, publishes nothing for this appliance, or the
+plugins and languages it published — never "up to date", which a source that
+did not answer cannot claim.
 
 ### Audio output picker
 
@@ -1527,8 +1581,10 @@ external TOML text, decentralized per component, read from **one root**:
         cd.toml
 
 - What an **install** writes: one whole directory per pack, named after the
-  pack's own id (`ritornello-lang-<language>`), replaced wholesale by every
-  install and never merged
+  pack's own id (`ritornello-lang-<language>` for ours,
+  `ritornello-xlang-<language>-<12 hex digits>` for a pack a third-party
+  source published, the digits hashing that source's `owner/repo`), replaced
+  wholesale by every install and never merged
   (`crates/ritornello-core/src/langpack/store.rs::install`), configurable
   through `RITORNELLO_LANGUAGE_PACKS` (default
   `/etc/ritornello/language-packs`). The sweep (`inventory`) enforces the
@@ -1604,16 +1660,38 @@ external TOML text, decentralized per component, read from **one root**:
   Right under the language picker, `LanguagePacksRow.vue` lists the
   languages a pack is installed for, with "Update" and "Remove", and the
   "Add a language" button opens `AddLanguageDialog.vue`, its mirror of the
-  "Add a plugin" dialog, listing the packs the release offers and the
-  device does not have. Both dialogs run the update check themselves when
+  "Add a plugin" dialog, listing the languages the release or a source
+  offers and the device has no pack of (each offered pack names its source
+  when one is a third party's). Both dialogs run the update check themselves when
   they open (`useUpdateCheck.ts`): nothing when the last check is under an
   hour old and succeeded, one `POST /api/update/check` otherwise, a wait
   and no second enqueue when a job is already running, and a Retry button
   on a failure or a full queue. "Install" / "Update" / "Remove" are
   `POST`/`DELETE /api/languages/{language}` — the
   update worker fetches, verifies and writes the pack itself (see
-  [Update card](#update-card)). There is no other route: a language nobody
-  has published a pack for cannot be added by hand any more. A missing key
+  [Update card](#update-card)). **One gesture covers a language, not one
+  pack:** Install fetches every pack on offer for it, ours and each source's,
+  each into its own directory; one refused does not cancel the others, and
+  the first refusal is what the page shows. Remove takes every installed pack
+  of that language, and puts the interface back in English if that language
+  was the one in use. A language with several packs lists one line per pack —
+  where it comes from and its installed version, or "Not installed" — and
+  offers Update when any of its installed packs has a different version on
+  offer. A third-party pack is held to its source: its `pack.toml` must name
+  the repository that published it, or it is refused (the author side is in
+  [plugins.md](plugins.md#publishing-from-your-own-repository)).
+  There is no other route: a language nobody
+  has published a pack for cannot be added by hand any more.
+- **Overlaps, and which pack speaks.** When two installed packs of one
+  language carry the same module, the official pack speaks unless the
+  operator records a preference. The language card then shows, under that
+  language, one selector per shared module (`PUT
+  /api/languages/{language}/preference`, `null` to clear it). A preference is
+  accepted only for an installed pack that carries that module in that
+  language, and at most 256 are stored (422 otherwise; a removal is always
+  accepted). A stored preference survives its pack's removal and is simply not
+  honoured while the pack is gone. Nothing is shown for a language whose packs
+  share no module. A missing key
   or module automatically falls back through the chain above (per-key
   degradation, never an error). A pack file that is present but unreadable
   (permissions, invalid TOML) is ignored **with a trace in the logs**.
