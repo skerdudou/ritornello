@@ -2033,6 +2033,7 @@ impl Worker {
         state.last_check_unix_s = Some(now_unix_s());
         state.components = components;
         state.source_reports = sources::reports_of(targets, &checked.sources);
+        state.source_catalogues = sources::source_catalogues(&checked.sources, &checked.fresh);
         drop(state);
         checked
     }
@@ -2104,6 +2105,9 @@ impl Worker {
         state.last_check_unix_s = Some(now_unix_s());
         state.components = components;
         state.source_reports = sources::reports_of(targets, &checked.sources);
+        // Nothing is offered fresh here (see above), so no source has a name
+        // its catalogue may describe.
+        state.source_catalogues = Vec::new();
         drop(state);
         checked
     }
@@ -6371,6 +6375,12 @@ mod tests {
         let dup = state.components.iter().find(|c| c.name == "dup").expect("a contested row");
         assert_eq!(dup.installable, Some(false));
         assert_eq!(dup.conflict_repos, Some(vec!["a/one".to_string(), "b/two".to_string()]));
+        // What `GET /api/update/catalogue?repo=` may select: the one source
+        // with a fresh offer, for that name alone.
+        // **[MUTATION]** drop the `source_catalogues` write: red.
+        let catalogues: Vec<(&str, &[String])> =
+            state.source_catalogues.iter().map(|c| (c.repo.as_str(), c.names.as_slice())).collect();
+        assert_eq!(catalogues, vec![("z/zed", &["zed".to_string()][..])]);
     }
 
     /// **Preflight ruling P4.** A device on the stable channel while only

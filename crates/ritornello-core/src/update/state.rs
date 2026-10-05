@@ -505,6 +505,15 @@ pub struct UpdateState {
     /// and is not part of `/api/update`'s contract.
     #[serde(skip)]
     pub source_reports: Vec<(String, crate::update::sources::SourceReport)>,
+    /// Per source with a fresh offer at the last check, where its own
+    /// catalogue lives and which names it may describe
+    /// (`sources::source_catalogues`). Read by `GET /api/update/catalogue?repo=`,
+    /// which only selects one of these: the address it fetches always comes
+    /// from here, never from the request.
+    ///
+    /// **`skip`**, like `source_reports`: not part of `/api/update`'s contract.
+    #[serde(skip)]
+    pub source_catalogues: Vec<crate::update::sources::SourceCatalogue>,
 }
 
 impl UpdateState {
@@ -528,6 +537,7 @@ impl UpdateState {
             pending_removals: Vec::new(),
             // No check has answered yet.
             source_reports: Vec::new(),
+            source_catalogues: Vec::new(),
         }
     }
 

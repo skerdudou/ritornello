@@ -455,6 +455,46 @@ pub fn fresh_offers(answers: &[SourceAnswer], ours: &[Published], installed: &[I
     (fresh, conflicts)
 }
 
+/// Where one source's own description of its plugins lives, and the only
+/// names that description may speak for (spec §6).
+///
+/// Built by the core from what the source itself answered, never from a
+/// request: `GET /api/update/catalogue?repo=` only **selects** one of these,
+/// so a query parameter can never make the core fetch an address of its
+/// choosing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCatalogue {
+    /// Lowercased `owner/repo`.
+    pub repo: String,
+    /// The newest `catalogue.json` that source's releases publish
+    /// (`release::newest_catalogue_url` over its own fold), `None` when none
+    /// does.
+    pub url: Option<String>,
+    /// The plugins this check offers **fresh from this source**
+    /// (`fresh_offers`), and nothing else: a stranger's catalogue may describe
+    /// what that stranger legitimately offers, never one of our names, an
+    /// installed plugin's, or a name another source contests.
+    pub names: Vec<String>,
+}
+
+/// One `SourceCatalogue` per source that has at least one fresh offer, in the
+/// order the sources were asked.
+pub fn source_catalogues(answers: &[SourceAnswer], fresh: &[FreshOffer]) -> Vec<SourceCatalogue> {
+    let mut out: Vec<SourceCatalogue> = Vec::new();
+    for answer in answers {
+        let repo = answer.repo.to_lowercase();
+        if out.iter().any(|c| c.repo == repo) {
+            continue;
+        }
+        let names: Vec<String> = fresh.iter().filter(|f| f.repo == repo).map(|f| f.name.clone()).collect();
+        if names.is_empty() {
+            continue;
+        }
+        out.push(SourceCatalogue { url: release::newest_catalogue_url(&answer.published), repo, names });
+    }
+    out
+}
+
 /// One language pack on offer, from our release or from a source (spec §5).
 ///
 /// **No ownership rule here, unlike plugins, and deliberately** (spec §4.1):
@@ -541,6 +581,43 @@ mod tests {
 
     fn answer(repo: &str, published: Vec<Published>) -> SourceAnswer {
         SourceAnswer { repo: repo.into(), published }
+    }
+
+    fn with_catalogue(mut p: Published, url: &str) -> Published {
+        p.catalogue_url = Some(url.into());
+        p
+    }
+
+    /// A source's catalogue may speak only for what it is offered fresh: not
+    /// our name it also publishes, not a name another source contests, and a
+    /// source with no fresh offer has no catalogue entry at all. The URL is
+    /// the newest its own answer names.
+    /// **[MUTATION]** take the names from the whole answer instead of
+    /// `fresh`: red on `radio` and `dup`. **[MUTATION]** drop the
+    /// `names.is_empty()` skip: red on `b/two`.
+    #[test]
+    fn a_source_catalogue_names_only_what_that_source_is_offered_fresh() {
+        let answers = [
+            answer(
+                "Z/Zed",
+                vec![
+                    with_catalogue(plugin("zed", "1.0.0"), "https://z/v2/catalogue.json"),
+                    with_catalogue(plugin("radio", "9.9.9"), "https://z/v1/catalogue.json"),
+                    plugin("dup", "1.0.0"),
+                ],
+            ),
+            answer("b/two", vec![plugin("dup", "1.0.0")]),
+        ];
+        let (fresh, conflicts) = fresh_offers(&answers, &[plugin("radio", "0.2.0")], &[]);
+        assert_eq!(conflicts.len(), 1, "dup is contested");
+        assert_eq!(
+            source_catalogues(&answers, &fresh),
+            vec![SourceCatalogue {
+                repo: "z/zed".into(),
+                url: Some("https://z/v2/catalogue.json".into()),
+                names: vec!["zed".into()],
+            }]
+        );
     }
 
     #[test]

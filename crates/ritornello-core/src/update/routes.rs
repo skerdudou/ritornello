@@ -35,7 +35,13 @@ pub async fn update_json(State(state): State<AppState>) -> Response {
 /// publishes no catalogue, which is every release published before this
 /// chantier. A fetch that **failed** is a different fact and answers
 /// **503**, not 200 — see below.
-pub async fn update_catalogue_json(State(state): State<AppState>) -> Response {
+pub async fn update_catalogue_json(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<CatalogueQuery>,
+) -> Response {
+    if let Some(repo) = query.repo {
+        return source_catalogue_json(&state, &repo).await;
+    }
     let Some(url) = state.update.read().await.catalogue_url.clone() else {
         return Json(Catalogue::default()).into_response();
     };
@@ -71,6 +77,78 @@ pub async fn update_catalogue_json(State(state): State<AppState>) -> Response {
         }
         None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct CatalogueQuery {
+    /// `owner/repo` of a source, for that source's own catalogue.
+    pub repo: Option<String>,
+}
+
+/// One source catalogue as fetched: `(repo, url)` is the key, the catalogue
+/// is kept whole and filtered on every read.
+#[derive(Debug, Clone)]
+pub struct SourceCatalogueCached {
+    pub repo: String,
+    pub url: String,
+    pub catalogue: Catalogue,
+}
+
+/// `GET /api/update/catalogue?repo=owner/repo` — what a **source** says about
+/// the plugins it is offered fresh for (spec §6).
+///
+/// **The query selects, it never addresses.** The URL fetched is the one the
+/// last check read off that source's own answer (`UpdateState::
+/// source_catalogues`); a repository that is not among them — never asked,
+/// offering nothing fresh, our own — answers 404 without a socket, so no
+/// request can make the core fetch an address of its choosing.
+///
+/// **Filtered to that source's fresh names**, on every read: a stranger's
+/// catalogue that also describes `radio`, an installed plugin or a name
+/// another source contests has those entries dropped here, so it can never
+/// describe what it does not legitimately offer.
+///
+/// Otherwise the official route's contract, for the same reasons: the same
+/// bounded fetch (`fetch_catalogue`), cached on success only, keyed by
+/// `(repo, url)`, and a failure answers 503 rather than an empty 200.
+async fn source_catalogue_json(state: &AppState, repo: &str) -> Response {
+    let Some(repo) = sources::normalize_repo(repo) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let current = state.update.read().await.source_catalogues.clone();
+    let Some(entry) = current.iter().find(|c| c.repo == repo) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let only_its_names = |catalogue: &Catalogue| Catalogue {
+        components: catalogue
+            .components
+            .iter()
+            .filter(|(name, _)| entry.names.contains(name))
+            .map(|(name, e)| (name.clone(), e.clone()))
+            .collect(),
+    };
+    let Some(url) = entry.url.clone() else {
+        return Json(Catalogue::default()).into_response();
+    };
+    if let Some(cached) =
+        state.update_source_catalogue_cache.read().await.iter().find(|c| c.repo == repo && c.url == url)
+    {
+        return Json(only_its_names(&cached.catalogue)).into_response();
+    }
+    let Some(fresh) = fetch_catalogue(&url).await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let answer = only_its_names(&fresh);
+    let mut cache = state.update_source_catalogue_cache.write().await;
+    // Only what the last check still names, so the cache is bounded by the
+    // sources list rather than growing with every release a source makes.
+    cache.retain(|c| {
+        (c.repo != repo || c.url != url)
+            && current.iter().any(|s| s.repo == c.repo && s.url.as_deref() == Some(c.url.as_str()))
+    });
+    cache.push(SourceCatalogueCached { repo, url, catalogue: fresh });
+    drop(cache);
+    Json(answer).into_response()
 }
 
 /// The network half, kept apart from the route so a failure of any kind —
@@ -576,6 +654,130 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // --- GET /api/update/catalogue?repo= ---
+
+    fn zed_source(url: Option<&str>) -> crate::update::sources::SourceCatalogue {
+        crate::update::sources::SourceCatalogue {
+            repo: "z/zed".into(),
+            url: url.map(str::to_string),
+            names: vec!["zed".into()],
+        }
+    }
+
+    fn two_entries() -> crate::update::catalogue::Catalogue {
+        use crate::update::catalogue::{Catalogue, Entry};
+        let mut components = std::collections::BTreeMap::new();
+        components.insert("zed".to_string(), Entry { kinds: vec!["display".into()], description: "Zed".into() });
+        components.insert("radio".to_string(), Entry { kinds: vec!["source".into()], description: "Not yours".into() });
+        Catalogue { components }
+    }
+
+    async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app.oneshot(Request::get(uri).body(Body::empty()).unwrap()).await.unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+    }
+
+    /// The query only selects among what the last check left: a repository
+    /// that is not a source with a fresh offer — a stranger, our own, one
+    /// not spelt as a repository — answers 404, and nothing is fetched (the
+    /// one URL the state holds is unreachable, so a fetch would answer 503).
+    /// **[MUTATION]** look the URL up without the repository match (first
+    /// entry): red.
+    #[tokio::test]
+    async fn a_repository_that_is_not_a_current_source_is_never_fetched() {
+        let (state, _rx) = state_with_queue(4);
+        state.update.write().await.source_catalogues = vec![zed_source(Some("http://127.0.0.1:1/catalogue.json"))];
+        let app = router(state);
+        for uri in [
+            "/api/update/catalogue?repo=evil%2Fother",
+            "/api/update/catalogue?repo=skerdudou%2Fritornello",
+            "/api/update/catalogue?repo=not%20a%20repo",
+        ] {
+            let (status, _) = get_json(app.clone(), uri).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        }
+    }
+
+    /// A source whose releases publish no catalogue answers the empty one,
+    /// as the official route does: the page then shows name, source, version.
+    #[tokio::test]
+    async fn a_source_without_a_catalogue_answers_an_empty_one() {
+        let (state, _rx) = state_with_queue(4);
+        state.update.write().await.source_catalogues = vec![zed_source(None)];
+        let (status, v) = get_json(router(state), "/api/update/catalogue?repo=z%2Fzed").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v, serde_json::json!({"components": {}}));
+    }
+
+    /// A stranger's catalogue describes only what that stranger is offered
+    /// fresh: its entry for `radio` is dropped. Served from the cache, under
+    /// a URL nothing serves, and the repository matched case-insensitively.
+    /// **[MUTATION]** drop the `names` filter: red on `radio`.
+    #[tokio::test]
+    async fn a_source_catalogue_never_describes_a_name_that_source_does_not_offer() {
+        let (state, _rx) = state_with_queue(4);
+        let url = "http://127.0.0.1:1/catalogue.json";
+        state.update.write().await.source_catalogues = vec![zed_source(Some(url))];
+        *state.update_source_catalogue_cache.write().await =
+            vec![super::SourceCatalogueCached { repo: "z/zed".into(), url: url.into(), catalogue: two_entries() }];
+        let (status, v) = get_json(router(state), "/api/update/catalogue?repo=Z%2FZed").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["components"]["zed"]["description"], "Zed");
+        assert!(v["components"].get("radio").is_none(), "{v}");
+    }
+
+    /// The cache key is `(repo, url)`: another repository's entry under the
+    /// same URL is not this one's answer. Nothing serves the URL, so the
+    /// request must go to the network and fail.
+    /// **[MUTATION]** drop `c.repo == repo` from the cache lookup: red (200).
+    /// **[MUTATION]** drop `c.url == url`: red with the second case (stale URL).
+    #[tokio::test]
+    async fn the_source_cache_is_keyed_by_repository_and_url() {
+        let url = "http://127.0.0.1:1/catalogue.json";
+        for (repo, cached_url) in [("other/one", url), ("z/zed", "http://127.0.0.1:1/older/catalogue.json")] {
+            let (state, _rx) = state_with_queue(4);
+            state.update.write().await.source_catalogues = vec![zed_source(Some(url))];
+            *state.update_source_catalogue_cache.write().await = vec![super::SourceCatalogueCached {
+                repo: repo.into(),
+                url: cached_url.into(),
+                catalogue: two_entries(),
+            }];
+            let (status, _) = get_json(router(state), "/api/update/catalogue?repo=z%2Fzed").await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{repo} {cached_url}");
+        }
+    }
+
+    /// Fetched from the URL the check read, filtered, cached on success only
+    /// and under `(repo, url)`, with entries the last check no longer names
+    /// pruned on that write.
+    #[tokio::test]
+    async fn a_source_catalogue_is_fetched_cached_on_success_and_the_cache_pruned() {
+        let body = br#"{"components":{"zed":{"kinds":["display"],"description":"Zed"},"radio":{"kinds":["source"],"description":"x"}}}"#;
+        let url = serve_fail_then_ok(http_ok_json(body)).await;
+        let (state, _rx) = state_with_queue(4);
+        state.update.write().await.source_catalogues = vec![zed_source(Some(&url))];
+        *state.update_source_catalogue_cache.write().await = vec![super::SourceCatalogueCached {
+            repo: "gone/away".into(),
+            url: "https://gone/catalogue.json".into(),
+            catalogue: two_entries(),
+        }];
+        let cache = state.update_source_catalogue_cache.clone();
+        let app = router(state);
+
+        let (status, _) = get_json(app.clone(), "/api/update/catalogue?repo=z%2Fzed").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(cache.read().await.len(), 1, "a failure is not cached");
+
+        let (status, v) = get_json(app, "/api/update/catalogue?repo=z%2Fzed").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["components"]["zed"]["description"], "Zed");
+        assert!(v["components"].get("radio").is_none(), "{v}");
+        let cached: Vec<(String, String)> = cache.read().await.iter().map(|c| (c.repo.clone(), c.url.clone())).collect();
+        assert_eq!(cached, vec![("z/zed".to_string(), url)]);
     }
 
     #[tokio::test]

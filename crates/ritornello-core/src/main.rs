@@ -2383,6 +2383,7 @@ async fn main() -> Result<()> {
             update: update_state.clone(),
             update_tx,
             update_catalogue_cache: Arc::new(RwLock::new(None)),
+            update_source_catalogue_cache: Arc::new(RwLock::new(Vec::new())),
             update_sources: update_sources.clone(),
             update_sources_tx: update_sources_tx.clone(),
             pack_preferences_tx: pack_preferences_tx.clone(),

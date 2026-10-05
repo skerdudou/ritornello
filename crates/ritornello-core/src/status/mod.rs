@@ -202,6 +202,11 @@ pub struct AppState {
     /// cache key, so a check that keeps offering the same release costs this
     /// route no socket at all.
     pub update_catalogue_cache: Arc<RwLock<Option<(String, crate::update::catalogue::Catalogue)>>>,
+    /// The same, for the sources' own catalogues
+    /// (`GET /api/update/catalogue?repo=`): one entry per `(repo, url)`,
+    /// unfiltered. Pruned on every write to the sources the last check left
+    /// a catalogue for, so it never holds more than `SOURCES_MAX` entries.
+    pub update_source_catalogue_cache: Arc<RwLock<Vec<crate::update::routes::SourceCatalogueCached>>>,
     /// The repositories the operator added as update sources, lowercased
     /// `owner/repo` — the same handle the update `Worker` reads, so a check
     /// started after a `POST` sees the addition. Written by the routes **only
@@ -636,6 +641,7 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_source_catalogue_cache: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources_tx: mpsc::channel(1).0,
             pack_preferences_tx: mpsc::channel(1).0,
@@ -689,6 +695,7 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_source_catalogue_cache: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources_tx: mpsc::channel(1).0,
             pack_preferences_tx: mpsc::channel(1).0,
@@ -744,6 +751,7 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_source_catalogue_cache: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources_tx: mpsc::channel(1).0,
             pack_preferences_tx: mpsc::channel(1).0,
@@ -831,6 +839,7 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_source_catalogue_cache: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             update_sources_tx: mpsc::channel(1).0,
             pack_preferences_tx: mpsc::channel(1).0,
