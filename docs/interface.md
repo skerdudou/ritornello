@@ -941,7 +941,20 @@ non-official, checkable sources are already listed; the limit is the same as
 the check's. Each row also says what the last check learned from it: not
 checked yet, did not answer, publishes nothing for this appliance, or the
 plugins and languages it published — never "up to date", which a source that
-did not answer cannot claim.
+did not answer cannot claim. The official row carries no such line: it is
+read on every check, and what it said is the update card's own state. A
+repository named only by an installed language pack says so instead of
+naming a plugin. Adding a source also queues a check, so what it offers
+appears in "Add a plugin" without waiting for the next one.
+
+**Third-party plugins are offered only once this appliance can read a
+release of Ritornello's own.** Whose name a plugin is cannot be judged
+against a release that was not read, so while the check finds none for this
+appliance — nothing published, or only betas and "Offer beta versions" off
+— "Add a plugin" lists no stranger's plugin, and says that turning on "Offer
+beta versions" lets it read the betas. Updates of third-party plugins and
+packs already installed, and new third-party language packs, are still
+offered meanwhile: neither needs that judgement.
 
 ### Audio output picker
 
@@ -1678,11 +1691,17 @@ external TOML text, decentralized per component, read from **one root**:
   each into its own directory; one refused does not cancel the others, and
   the first refusal is what the page shows. Remove takes every installed pack
   of that language, and puts the interface back in English if that language
-  was the one in use. A language with several packs lists one line per pack —
-  where it comes from and its installed version, or "Not installed" — and
-  offers Update when any of its installed packs has a different version on
-  offer. **Update runs the language's whole install**, so it also installs a
-  source's pack of that language the device does not have yet. A third-party pack is held to its source: its `pack.toml` must name
+  was the one in use. A language with several packs, or whose single pack is
+  a third party's, lists one line per pack — where it comes from and its
+  installed version, or "Not installed" — and offers Update when any of its
+  installed packs has a different version on offer, or Install when a pack
+  of it is on offer and not installed (`install_available`: a source's pack
+  for a language the device already has). **Both run the language's whole
+  install**, so Update also installs a source's pack of that language the
+  device does not have yet. The page keeps reading the row for as long as
+  the update worker says it is busy: an install begins with a full check,
+  which waits up to twenty seconds for silent sources before any pack is
+  fetched. A third-party pack is held to its source: its `pack.toml` must name
   the repository that published it, or it is refused (the author side is in
   [plugins.md](plugins.md#publishing-from-your-own-repository)).
   There is no other route: a language nobody

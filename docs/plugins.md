@@ -406,19 +406,47 @@ none of that name — only when nobody owns the name and it is none of these:
 - `core`; a plugin that ships with a companion and the companion itself
   (today `files` and `files-mount`); a privileged plugin — those are placed by
   `ritornello-install` alone;
-- a name that is not a bare lowercase name (`a-z`, `0-9`, `-`, at most 64
-  characters, not starting with `-`), and any name beginning `ritornello-lang-` or
+- a name that is not a bare lowercase name (`a-z`, `0-9`, `-`, not starting
+  with `-`) of **at most 46 characters** — its binary,
+  `ritornello-plugin-<name>`, must stay within the 64 the privileged
+  installer accepts — and any name beginning `ritornello-lang-` or
   `ritornello-xlang-`, which name language packs;
 - **a name two or more sources offer**: the device believes neither, shows the
   row as contested naming every repository, and offers no Install until the
   operator removes one of them from the sources.
 
+"Our release publishes it" means the releases this check reads — the newest
+hundred, folded per component. A plugin this project stops shipping drops out
+of that window and becomes, on a device that does not have it, a name a
+stranger may be offered fresh.
+
+No plugin is offered fresh, either, while a device cannot read a release of
+ours (none published for it, or only betas with "Offer beta versions" off):
+ownership cannot be judged against a release that was not read.
+
 **What happens next.** The operator clicks Install, and a second confirmation
 names your repository and says the plugin will run with the rights of the
-others. The core then checks ownership again, downloads, verifies the digest,
-places the binary, writes the block and starts the plugin. Later updates come
-from the repository your plugin announces; the automatic policy applies them
-only under its fourth setting.
+others. That repository travels with the request, and the install is refused
+if the check run at that moment finds the name offered by another one. The
+core then checks ownership again, downloads, verifies the digest, places the
+binary, writes the block and starts the plugin. Later updates come from the
+repository your plugin announces; the automatic policy applies them only under
+its fourth setting.
+
+**Announce your `repository`, or none of that follows.** A plugin of yours
+that announces none is, to the core, one of ours: it is never updated from
+your repository — nothing tells the device where that is — and if our release
+ever publishes its name, our archive replaces your binary, which the core
+itself placed as `ritornello-plugin-<name>` (see [Writing a plugin of your
+own](#writing-a-plugin-of-your-own)).
+
+**A refused update is not always remembered.** An archive refused for
+carrying more than its own binary marks its row, and is not fetched again
+until a new version is published. An archive whose binary is not the file the
+plugin's declaration runs, one that cannot be read, or one whose digest does
+not match is not marked: under the fourth policy it is downloaded and refused
+again every night, as a corrupted download would be, until you publish a
+corrected release.
 
 ### Text, translations, and what a plugin owes the catalogue
 
