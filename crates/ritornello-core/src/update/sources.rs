@@ -363,6 +363,11 @@ pub struct Conflict {
 /// - anything the privileged installer would not accept as a bare file name
 ///   (`request::valid_name`): no dot, no separator, no uppercase — so no
 ///   name of this list can ever spell a path;
+/// - a name whose **binary**, `ritornello-plugin-<name>`, the privileged
+///   installer would not accept: the binary must be a valid name too, and
+///   its 64-byte ceiling leaves a plugin 46. Offered past that, the row
+///   would carry an Install that could only ever be refused
+///   (`third_party_fragment`);
 /// - a language pack's id (`ritornello-lang-…`, and `ritornello-xlang-…`
 ///   for a third-party pack): those name packs, and a plugin named like one
 ///   would make a row and a pack answer to the same name.
@@ -387,6 +392,7 @@ fn reserved_in(name: &str, companions: &[(&str, &str)], is_privileged: impl Fn(&
         || companions.iter().any(|(plugin, companion)| *plugin == name || *companion == name)
         || is_privileged(name)
         || !ritornello_updater::request::valid_name(name)
+        || !ritornello_updater::request::valid_name(&format!("ritornello-plugin-{name}"))
         || PACK_ID_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
@@ -519,8 +525,9 @@ pub struct PackOffer {
 /// Only `Offer::LanguagePack` is read, from either list: a source's plugin,
 /// core, bundle or companion is never a pack. A source answer that names our
 /// own repository is skipped (the sweep never asks it, and ours has its own
-/// list), as is a language `valid_locale` refuses — its id could not be a bare
-/// name. An id met twice (one repository answering under two spellings) is
+/// list), as is a language `store::valid_pack_language` refuses — its id
+/// could not be a bare name, or would be one `ritornello-install` refuses to
+/// plan around (`fr-`). An id met twice (one repository answering under two spellings) is
 /// offered once, at its first position.
 pub fn pack_offers(ours: &[Published], answers: &[SourceAnswer]) -> Vec<PackOffer> {
     let from_ours = ours.iter().map(|p| (None, p));
@@ -531,7 +538,7 @@ pub fn pack_offers(ours: &[Published], answers: &[SourceAnswer]) -> Vec<PackOffe
     let mut out: Vec<PackOffer> = Vec::new();
     for (repo, published) in from_ours.chain(from_sources) {
         let Offer::LanguagePack(language) = &published.offer else { continue };
-        if !crate::status::valid_locale(language) {
+        if !crate::langpack::store::valid_pack_language(language) {
             continue;
         }
         let id = crate::langpack::store::pack_id_for(language, repo.as_deref());
@@ -732,6 +739,17 @@ mod tests {
     /// A plugin may not take a language pack's id, ours or a third party's.
     /// **[MUTATION]** drop either prefix: red. And the control: a name that
     /// merely contains `lang` is not reserved.
+    /// H-M3: a name whose binary, `ritornello-plugin-<name>`, is longer than
+    /// the privileged installer accepts (64 bytes): the name itself may be a
+    /// valid bare name of up to 64, but its binary could never be placed, so
+    /// it is never offered. 46 is the longest that works.
+    /// **[MUTATION]** drop the binary-name operand: red on the 47-byte name.
+    #[test]
+    fn a_name_whose_binary_name_is_too_long_is_reserved() {
+        assert!(!reserved(&"a".repeat(46)), "46 bytes: the binary is 64");
+        assert!(reserved(&"a".repeat(47)), "47 bytes: the binary would be 65");
+    }
+
     #[test]
     fn a_language_pack_id_is_reserved_in_both_namespaces() {
         assert!(reserved("ritornello-lang-fr"));
@@ -1173,6 +1191,10 @@ mod tests {
         // Our repository answering as a source: no third-party row for it.
         assert!(pack_offers(&[], &[answer("Skerdudou/Ritornello", vec![pack("fr")])]).is_empty());
         assert!(pack_offers(&[], &[answer("z/zed", vec![pack("a.b"), pack(&"a".repeat(17))])]).is_empty());
+        // B2: a language `valid_locale` takes but `ritornello-install` would
+        // refuse as a directory name — whatever classified it. **[MUTATION]**
+        // filter on `valid_locale` again: red here.
+        assert!(pack_offers(&[], &[answer("z/zed", vec![pack("fr-"), pack("-fr")])]).is_empty());
     }
 
     fn installed_pack(language: &str, source: &str) -> crate::langpack::store::InstalledPack {

@@ -125,7 +125,7 @@ pub fn pack_id_for(language: &str, source: Option<&str>) -> String {
 
 /// The language a **third-party** pack id names, or `None` for anything that
 /// is not exactly `ritornello-xlang-<language>-<twelve lowercase hex digits>`
-/// with a language `valid_locale` accepts.
+/// with a language `valid_pack_language` accepts.
 ///
 /// Every part is checked, not merely split: a name that only looks like a
 /// third-party id must not be read as naming some language.
@@ -133,7 +133,32 @@ pub fn third_party_language_of(id: &str) -> Option<&str> {
     let (language, hash) = id.strip_prefix(THIRD_PARTY_PACK_PREFIX)?.rsplit_once('-')?;
     let is_hash =
         hash.len() == SOURCE_HASH_LEN && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    (is_hash && crate::status::valid_locale(language)).then_some(language)
+    (is_hash && valid_pack_language(language)).then_some(language)
+}
+
+/// Whether `language` may name a pack directory on this device: a code
+/// `valid_locale` accepts **and** one `ritornello-install` accepts too.
+///
+/// The second half restates the installer's `names::valid_language` — no
+/// leading or trailing `-` — because the two binaries cannot share code
+/// without changing a shared crate. (The installer's third clause,
+/// `ritornello-lang-<language>` a valid pack id, is already implied here:
+/// `valid_locale` allows the same charset and at most 16 bytes, so the
+/// composed id never nears 64. Restating it would be an operand no test
+/// could make bite.) It matters: `classify_asset` used to read `fr-` out of
+/// `ritornello-lang-fr--1.0.0.tar.gz`, `valid_locale` accepted it, and the
+/// core placed `ritornello-xlang-fr--<h12>`, a directory every later
+/// `ritornello-install` run then refused to plan around. The agreement is
+/// pinned by a table both crates' tests read
+/// (`pack_language_agreement.txt`, beside this file).
+///
+/// Checked wherever a language enters: an asset name
+/// (`release::classify_asset`), an offer (`sources::pack_offers`) and a
+/// directory name read back (`third_party_language_of`).
+pub fn valid_pack_language(language: &str) -> bool {
+    crate::status::valid_locale(language)
+        && !language.starts_with('-')
+        && !language.ends_with('-')
 }
 
 /// The language any pack id names, ours or a third party's.
@@ -549,6 +574,34 @@ mod tests {
         assert_eq!(third_party_language_of("ritornello-xlang--0123456789ab"), None, "empty language");
         assert_eq!(third_party_language_of("ritornello-xlang-a.b-0123456789ab"), None, "not a language");
         assert_eq!(third_party_language_of("ritornello-xlang-0123456789ab"), None, "no language at all");
+    }
+
+    /// B2: the core and `ritornello-install` agree on which directory names
+    /// are a third-party pack's. The table is shared with the installer's
+    /// `names::tests::the_installer_agrees_with_the_core_on_third_party_pack_ids`,
+    /// which asserts the same verdicts with the installer's own function: a
+    /// directory the core may create and the installer refuses would stop
+    /// every ordinary installer run. **[MUTATION]** drop
+    /// `!language.ends_with('-')` from `valid_pack_language`: red on
+    /// `fr--`. **[MUTATION]** drop `!language.starts_with('-')`: red on `-fr`.
+    #[test]
+    fn the_core_agrees_with_the_installer_on_third_party_pack_ids() {
+        let table = include_str!("pack_language_agreement.txt");
+        let mut lines = 0;
+        for line in table.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            let (verdict, id) = line.split_once(' ').expect("`accept <id>` or `refuse <id>`");
+            let expected = match verdict {
+                "accept" => true,
+                "refuse" => false,
+                other => panic!("unknown verdict {other:?}"),
+            };
+            assert_eq!(third_party_language_of(id).is_some(), expected, "{id}");
+            lines += 1;
+        }
+        assert!(lines >= 10, "the table was read ({lines} lines)");
+        // Past sixteen bytes the installer still accepts a name; the core
+        // never forms one, which is the safe direction of the disagreement.
+        assert_eq!(third_party_language_of("ritornello-xlang-abcdefghijklmnopq-0123456789ab"), None);
     }
 
     #[test]
