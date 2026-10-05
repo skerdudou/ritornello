@@ -362,23 +362,32 @@ pub struct Conflict {
 ///   `ritornello-install`, never from this page;
 /// - anything the privileged installer would not accept as a bare file name
 ///   (`request::valid_name`): no dot, no separator, no uppercase — so no
-///   name of this list can ever spell a path.
+///   name of this list can ever spell a path;
+/// - a language pack's id (`ritornello-lang-…`, and `ritornello-xlang-…`
+///   for a third-party pack): those name packs, and a plugin named like one
+///   would make a row and a pack answer to the same name.
 ///
 /// Today the companion plugin and the privileged plugin are the same one
 /// (`files`), so those two operands overlap; both are kept because the two
 /// lists answer different questions and can part. That is why the rule is
-/// written over its two lists (`reserved_in`): with the real lists neither
+/// written over what it is given (`reserved_in`): with the real lists neither
 /// operand could be shown to bite on its own.
 pub fn reserved(name: &str) -> bool {
-    reserved_in(name, crate::plugins::COMPANIONS, crate::plugins::PRIVILEGED_PLUGINS)
+    reserved_in(name, crate::plugins::COMPANIONS, crate::plugins::is_privileged)
 }
 
-/// `reserved`, over the lists it is given rather than the shipped ones.
-fn reserved_in(name: &str, companions: &[(&str, &str)], privileged: &[&str]) -> bool {
+/// The prefixes of a language pack's id: ours (`langpack::store::PACK_ID_PREFIX`)
+/// and a third-party pack's.
+const PACK_ID_PREFIXES: [&str; 2] = [crate::langpack::store::PACK_ID_PREFIX, "ritornello-xlang-"];
+
+/// `reserved`, over the companions and the privilege rule it is given rather
+/// than the shipped ones.
+fn reserved_in(name: &str, companions: &[(&str, &str)], is_privileged: impl Fn(&str) -> bool) -> bool {
     name == "core"
         || companions.iter().any(|(plugin, companion)| *plugin == name || *companion == name)
-        || privileged.contains(&name)
+        || is_privileged(name)
         || !ritornello_updater::request::valid_name(name)
+        || PACK_ID_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
 /// Which plugins the sources may offer **fresh** — to a device that has no
@@ -496,6 +505,16 @@ mod tests {
         let missing = vec![Installed { name: "zed".into(), declared: true, binary_present: false, version: None, repository: None }];
         let (fresh, _) = fresh_offers(&[answer("z/zed", vec![plugin("zed", "1.0.0")])], &[], &missing);
         assert!(fresh.is_empty(), "a declaration owns its name even without a binary");
+        // Whatever its case: a declared `Zed`, from wherever, owns `zed`.
+        let capital = vec![Installed {
+            name: "Zed".into(),
+            declared: true,
+            binary_present: true,
+            version: None,
+            repository: Some("https://github.com/someone/else".into()),
+        }];
+        let (fresh, _) = fresh_offers(&[answer("z/zed", vec![plugin("zed", "1.0.0")])], &[], &capital);
+        assert!(fresh.is_empty(), "an installed `Zed` owns `zed`");
     }
 
     /// Two sources both offering an installed name: still nothing, and not a
@@ -515,7 +534,7 @@ mod tests {
     /// of `reserved` that the others do not cover — see the next test.
     #[test]
     fn a_reserved_name_is_never_offered() {
-        for name in ["core", "files", "files-mount", "Zed", "../zed", "a.b"] {
+        for name in ["core", "files", "files-mount", "Zed", "../zed", "a.b", "ritornello-lang-fr", "ritornello-xlang-fr-0123456789ab"] {
             let (fresh, conflicts) = fresh_offers(&[answer("z/zed", vec![plugin(name, "1.0.0")])], &[], &[]);
             assert!(fresh.is_empty() && conflicts.is_empty(), "{name}");
         }
@@ -549,16 +568,30 @@ mod tests {
     /// `files`), each shown alone over lists where they part: a companion's
     /// plugin that is not privileged, and a privileged plugin with no
     /// companion. **[MUTATION]** drop either operand: red.
+    ///
+    /// Over the shipped lists, both name `files`: there, the privileged
+    /// operand alone cannot be shown to matter (dropping it was measured
+    /// green), which is why `reserved_in` takes the lists as arguments.
     #[test]
     fn a_companion_plugin_and_a_privileged_plugin_are_each_reserved_on_their_own() {
         let companions: &[(&str, &str)] = &[("cam", "cam-helper")];
-        let privileged: &[&str] = &["root-thing"];
+        let privileged = |n: &str| n == "root-thing";
         assert!(reserved_in("cam", companions, privileged), "a companion's plugin");
         assert!(reserved_in("cam-helper", companions, privileged), "a companion");
         assert!(reserved_in("root-thing", companions, privileged), "a privileged plugin");
         assert!(!reserved_in("zed", companions, privileged), "and nothing else");
         // `reserved` reads the shipped lists, and no other.
-        assert!(!reserved_in("files", &[], &[]) && reserved("files"));
+        assert!(!reserved_in("files", &[], |_: &str| false) && reserved("files"));
+    }
+
+    /// A plugin may not take a language pack's id, ours or a third party's.
+    /// **[MUTATION]** drop either prefix: red. And the control: a name that
+    /// merely contains `lang` is not reserved.
+    #[test]
+    fn a_language_pack_id_is_reserved_in_both_namespaces() {
+        assert!(reserved("ritornello-lang-fr"));
+        assert!(reserved("ritornello-xlang-pt-0123456789ab"));
+        assert!(!reserved("lang-tools") && !reserved("ritornello-language"));
     }
 
     /// Clause (4). **[MUTATION]** keep the first offer instead of raising a

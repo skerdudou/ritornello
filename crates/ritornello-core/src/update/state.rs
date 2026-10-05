@@ -1093,8 +1093,6 @@ mod tests {
         assert!(state.pending_removals.is_empty(), "but nothing is waiting on it any more");
     }
 
-    /// Two presses queue two jobs, and the first answer clears by value: a
-    /// duplicated entry would survive it and strand the row on "erasing…".
     /// A plugin nobody owns, offered by one source: a row the operator can
     /// install, saying which repository it would come from.
     #[test]
@@ -1165,6 +1163,8 @@ mod tests {
         assert!(json[0].get("conflict_repos").is_none(), "{}", json[0]);
     }
 
+    /// Two presses queue two jobs, and the first answer clears by value: a
+    /// duplicated entry would survive it and strand the row on "erasing…".
     #[test]
     fn queueing_the_same_erasure_twice_lists_the_file_once() {
         let mut state = with_console_declared(&[]);

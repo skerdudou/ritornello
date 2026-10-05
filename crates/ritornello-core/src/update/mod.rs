@@ -1390,6 +1390,14 @@ impl Worker {
     /// `installed` directly, so a manual check clicked three seconds after
     /// boot gets the same answer as one clicked an hour later.
     async fn installed_when_settled(&self) -> Vec<Installed> {
+        self.installed_when_settled_known().await.unwrap_or_default()
+    }
+
+    /// `installed_when_settled`, saying `None` when the list cannot be known:
+    /// `plugins.toml` unreadable. Only the check reads this form, because it
+    /// is the one place where "nothing installed" and "not known" lead to
+    /// different answers (`settle_with_release`).
+    async fn installed_when_settled_known(&self) -> Option<Vec<Installed>> {
         if !await_settled(&self.status, None, SETTLE_TIMEOUT).await {
             tracing::warn!(
                 "update: some plugins were still silent after {} s; their rows will say what is known so far",
@@ -1413,16 +1421,18 @@ impl Worker {
     ///
     /// Read through `installed_when_settled`, never directly: a line that has
     /// not settled carries a `None` version that means "wait", not "unknown".
-    async fn installed(&self) -> Vec<Installed> {
+    ///
+    /// `None` when `plugins.toml` cannot be read. Most callers take that as an
+    /// empty list (`installed_when_settled`): it keeps the core's own row
+    /// honest and says nothing about plugins rather than something false. The
+    /// check must not: to the ownership rule, an empty list says every name is
+    /// free.
+    async fn installed(&self) -> Option<Vec<Installed>> {
         let manifest = match PluginManifest::load(&self.manifest) {
             Ok(m) => m,
             Err(e) => {
-                // An unreadable manifest is not a reason to report every
-                // plugin as absent: answering an empty list keeps the core's
-                // own row honest and says nothing about plugins rather than
-                // saying something false.
                 tracing::warn!("update: reading {}: {e:#}", self.manifest.display());
-                return Vec::new();
+                return None;
             }
         };
         let statuses = self.status.read().await;
@@ -1464,7 +1474,7 @@ impl Worker {
                 repository: None,
             });
         }
-        out
+        Some(out)
     }
 
     /// The language packs this device already has, as `component_offers`
@@ -1774,22 +1784,32 @@ impl Worker {
     /// release list of its own, since `check` itself fetches from GitHub.
     async fn settle_check(&self, client: &reqwest::Client, releases: &[Release]) -> Option<Checked> {
         let published = fold(releases, ARCH);
-        let installed = self.installed_when_settled().await;
-        let targets = self.targets_now(&installed).await;
+        let installed = self.installed_when_settled_known().await;
+        let targets = self.targets_now(installed.as_deref().unwrap_or_default()).await;
         let answers = self.sweep_sources(client, &targets, sources::SOURCES_DEADLINE).await;
-        Some(self.settle_with_release(published, &installed, &targets, answers).await)
+        Some(self.settle_with_release(published, installed.as_deref(), &targets, answers).await)
     }
 
     /// A check whose release list was read, once the sources have answered:
     /// no I/O but the registry and the companions file, so a test can hand
     /// it the answers a sweep would have collected.
+    ///
+    /// `known` is `None` when `plugins.toml` could not be read. The rows are
+    /// then built from an empty list, as before, but **no fresh offer and no
+    /// conflict is made**: the reasoning of `settle_without_release`, applied
+    /// to the other list ownership is judged against. With the device's own
+    /// plugins unknown, every installed name — a third-party `zed` included —
+    /// would look free, and a stranger publishing `zed` would be offered as
+    /// its owner
+    /// (`a_stranger_is_offered_nothing_fresh_while_plugins_toml_is_unreadable`).
     async fn settle_with_release(
         &self,
         published: Vec<Published>,
-        installed: &[Installed],
+        known: Option<&[Installed]>,
         targets: &[sources::SourceTarget],
         answers: Vec<sources::SourceAnswer>,
     ) -> Checked {
+        let installed = known.unwrap_or_default();
         let mut checked = Checked {
             theirs: theirs_from(installed, &answers),
             third_party: third_party_names(installed),
@@ -1799,8 +1819,11 @@ impl Worker {
             conflicts: Vec::new(),
         };
         // Here and only here: `ours` is a fold that was actually read, so
-        // which names are ours is known.
-        checked.judge_strangers(installed);
+        // which names are ours is known — and only when what the device has
+        // is known too.
+        if let Some(installed) = known {
+            checked.judge_strangers(installed);
+        }
         let installed_packs = self.installed_packs().await;
         let mut components = component_offers(
             self.core_version,
@@ -5731,7 +5754,7 @@ mod tests {
             source_answer("b/two", vec![stranger_plugin("dup", "1.0.0")]),
             source_answer("a/one", vec![stranger_plugin("dup", "2.0.0")]),
         ];
-        let checked = worker.settle_with_release(radio_published("0.3.0"), &installed, &[], answers).await;
+        let checked = worker.settle_with_release(radio_published("0.3.0"), Some(&installed), &[], answers).await;
         assert_eq!(checked.fresh.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["zed"]);
         let state = worker.state.read().await;
         let zed = state.components.iter().find(|c| c.name == "zed").expect("a fresh row");
@@ -5766,6 +5789,29 @@ mod tests {
             "{:#?}",
             state.components
         );
+    }
+
+    /// **The other list ownership is judged against.** `plugins.toml`
+    /// unreadable: the device's plugins are unknown, so an installed
+    /// third-party `zed` is unknown too, and a source publishing `zed` must
+    /// not be offered as its owner. Two halves: `installed` says "unknown"
+    /// rather than "nothing", and the check then judges no stranger.
+    ///
+    /// **[MUTATION]** `installed` answering `Some(Vec::new())` on a read
+    /// error: red. **[MUTATION]** judging against an empty list when
+    /// unknown: red.
+    #[tokio::test]
+    async fn a_stranger_is_offered_nothing_fresh_while_plugins_toml_is_unreadable() {
+        let (worker, _dir) = worker_rig(starting_line());
+        std::fs::write(&worker.manifest, "[[plugin\nthis is not toml").unwrap();
+        assert_eq!(worker.installed().await, None, "unreadable is not empty");
+        assert!(worker.installed_when_settled().await.is_empty(), "every other caller reads it as before");
+
+        let answers = vec![source_answer("evil/zed", vec![stranger_plugin("zed", "9.9.9")])];
+        let checked = worker.settle_with_release(radio_published("0.3.0"), None, &[], answers).await;
+        assert!(checked.fresh.is_empty() && checked.conflicts.is_empty(), "{:?} {:?}", checked.fresh, checked.conflicts);
+        assert_eq!(resolve(&checked, "zed"), Resolved::Nothing);
+        assert!(worker.state.read().await.components.iter().all(|c| c.name != "zed"));
     }
 
     /// Until Task 6 synthesises the `[[plugin]]` block, a fresh offer is
