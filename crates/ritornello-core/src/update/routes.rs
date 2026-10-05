@@ -113,7 +113,8 @@ fn announcements(status: &crate::status::StatusState) -> Vec<(String, Option<Str
 pub async fn sources_json(State(state): State<AppState>) -> Response {
     let announced = announcements(&*state.status.read().await);
     let added = state.update_sources.read().await.clone();
-    Json(sources::source_rows(&announced, &[], &added, &[])).into_response()
+    let reports = state.update.read().await.source_reports.clone();
+    Json(sources::source_rows(&announced, &[], &added, &reports)).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -613,6 +614,22 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["repo"], "skerdudou/ritornello");
         assert_eq!(rows[0]["kind"], "official");
+    }
+
+    /// What the last check left in `UpdateState.source_reports` reaches the
+    /// row it describes, and only that row.
+    #[tokio::test]
+    async fn the_last_check_s_report_is_attached_to_its_row() {
+        let (state, _rx) = state_with_sources(4);
+        *state.update_sources.write().await = vec!["b/bee".to_string()];
+        state.update.write().await.source_reports = vec![(
+            "b/bee".to_string(),
+            crate::update::sources::SourceReport { answered: true, plugins: vec!["zed".into()], languages: vec![] },
+        )];
+        let rows = rows_of(router(state)).await;
+        assert_eq!(rows[0]["report"], serde_json::Value::Null, "the official row was not in this report");
+        assert_eq!(rows[1]["report"]["answered"], true);
+        assert_eq!(rows[1]["report"]["plugins"], serde_json::json!(["zed"]));
     }
 
     #[tokio::test]

@@ -48,6 +48,10 @@ pub struct ThirdPartyOffer {
     /// its announcement echoed back.
     pub name: String,
     pub published: Published,
+    /// The repository that answered, as `release::origin` reads the
+    /// announcement — case kept, so it is the row's own `third_party_repo`
+    /// and the key the placement memory is read under (`placed_key`).
+    pub repo: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -420,6 +424,14 @@ pub struct UpdateState {
     /// doctrine refuses two paragraphs up.
     #[serde(skip)]
     pub pending_removals: Vec<String>,
+    /// What the last check learnt per source it asked
+    /// (`sources::reports_of`), keyed by lowercased `owner/repo`.
+    ///
+    /// **`skip`**, like `pending_removals` and for the same reason: it is read
+    /// by `GET /api/update/sources`, which attaches each report to its row,
+    /// and is not part of `/api/update`'s contract.
+    #[serde(skip)]
+    pub source_reports: Vec<(String, crate::update::sources::SourceReport)>,
 }
 
 impl UpdateState {
@@ -439,6 +451,8 @@ impl UpdateState {
             // a core that restarts mid-erasure has no queue left to wait on,
             // and the row then tells the truth from the scan alone.
             pending_removals: Vec::new(),
+            // No check has answered yet.
+            source_reports: Vec::new(),
         }
     }
 
@@ -803,6 +817,7 @@ mod tests {
         let theirs = ThirdPartyOffer {
             name: "someones-plugin".to_string(),
             published: published(Offer::Plugin("someones-plugin".to_string()), "2.0.0"),
+            repo: "someone/their-plugin".to_string(),
         };
         let rows = component_offers(
             "0.2.0",

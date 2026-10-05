@@ -153,9 +153,10 @@ line. Four things follow, and they are the whole contract:
 
 1. **Build the runtime with the macro**, `ritornello_plugin_sdk::declare_runtime!()?`,
    and give your crate a `repository = "https://github.com/<owner>/<repo>"` in
-   its `Cargo.toml`. The core checks that repository's own releases for you,
-   at most four third-party repositories per check — one slow host must not
-   block the whole check — and a repository that is not an
+   its `Cargo.toml`. The core checks that repository's own releases for you:
+   at most sixteen third-party repositories per check, all asked at once
+   under one 20-second deadline — one slow host costs only its own rows,
+   never the whole check — and a repository that is not an
    `https://github.com/<owner>/<repo>` URL is left alone rather than guessed
    at: the updater speaks one API, and your row then reads "unknown" rather
    than claiming to be up to date.

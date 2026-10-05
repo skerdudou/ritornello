@@ -25,13 +25,19 @@
 //! Nothing here does I/O: the routes call these functions on in-memory
 //! handles, and no HTTP route may block.
 
-use crate::update::release::{self, Origin, REPO};
+use crate::update::release::{self, Offer, Origin, Published, REPO};
 use crate::update::state::Installed;
 use serde::Serialize;
 
 /// How many addressable non-official repositories the device will read in one
 /// check (spec §2.3). The operator cannot add past it.
 pub const SOURCES_MAX: usize = 16;
+
+/// How long one check waits for the sources it asks, all together (spec
+/// §2.3). One deadline for the whole sweep, never one per source: sixteen
+/// sources each allowed their own timeout would make a check that can last
+/// sixteen times longer than any one of them.
+pub const SOURCES_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Reads `owner/repo` or `https://github.com/owner/repo[/][.git]` and returns
 /// the lowercased `owner/repo`, or `None` for anything else.
@@ -180,8 +186,6 @@ pub fn check_add(input: &str, current_rows: &[SourceRow]) -> Result<String, AddR
 
 /// One repository this check will ask, and where to ask it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-// Removed by Task 4, which moves the check onto these.
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct SourceTarget {
     /// Lowercased `owner/repo`, kept for the log.
     pub repo: String,
@@ -203,8 +207,6 @@ pub struct SourceTarget {
 /// own request), and an announcement with no GitHub endpoint to address
 /// consumes no slot. **Truncated to `SOURCES_MAX`, never sampled**: a stable
 /// prefix means the same repositories are checked every day.
-// Removed by Task 4, which moves the check onto these.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn source_targets(installed: &[Installed], pack_sources: &[String], added: &[String]) -> Vec<SourceTarget> {
     let announced = |raw: &str| match release::origin(Some(raw)) {
         Origin::ThirdParty(repo) => Some(repo.to_lowercase()),
@@ -228,9 +230,239 @@ pub fn source_targets(installed: &[Installed], pack_sources: &[String], added: &
         .collect()
 }
 
+/// What one source answered, **usably**: a source that did not answer in
+/// time, or answered something that is not a release list, has no
+/// `SourceAnswer` at all. `published` is the same fold as our own release
+/// list's, so every rule about drafts, prereleases and asset names is the
+/// one rule.
+#[derive(Debug, Clone)]
+pub struct SourceAnswer {
+    /// Lowercased `owner/repo`, as its `SourceTarget` named it.
+    pub repo: String,
+    pub published: Vec<Published>,
+}
+
+/// Asks every target at once and keeps what has come back by `deadline`.
+///
+/// **Concurrent, under one deadline.** A source that never answers costs the
+/// sweep the deadline and nothing more, and costs the check only its own
+/// rows: the others are already in. A source that answers badly (`fetch`
+/// gives `None`) is simply absent, never a failure of the sweep.
+///
+/// Answers are returned **in target order**, whatever order they arrived in,
+/// so what a check concludes does not depend on which server was quicker.
+///
+/// Returns at once when there is no target: a device with no third-party
+/// source must not wait for anything.
+pub async fn query_sources<F, Fut>(targets: &[SourceTarget], fetch: F, deadline: std::time::Duration) -> Vec<SourceAnswer>
+where
+    F: Fn(SourceTarget) -> Fut,
+    Fut: std::future::Future<Output = Option<Vec<Published>>>,
+{
+    use futures::StreamExt;
+    let mut pending: futures::stream::FuturesUnordered<_> = targets
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, t)| {
+            let repo = t.repo.clone();
+            let answer = fetch(t);
+            async move { (i, repo, answer.await) }
+        })
+        .collect();
+    let mut got: Vec<(usize, SourceAnswer)> = Vec::new();
+    let stop = tokio::time::sleep(deadline);
+    tokio::pin!(stop);
+    loop {
+        tokio::select! {
+            // The answers first: one that is ready at the very instant the
+            // deadline falls is kept rather than lost to a coin toss.
+            biased;
+            next = pending.next() => match next {
+                Some((i, repo, Some(published))) => got.push((i, SourceAnswer { repo, published })),
+                Some((_, repo, None)) => tracing::warn!("update: {repo} gave no usable answer"),
+                None => break,
+            },
+            _ = &mut stop => {
+                tracing::warn!(
+                    "update: {} source(s) still silent after {} s, not checked this time",
+                    pending.len(),
+                    deadline.as_secs()
+                );
+                break;
+            }
+        }
+    }
+    // Leaving drops `pending`, and with it every request still in flight:
+    // that cancellation is what bounds the sweep, since each request's own
+    // timeout (`download::fetch_text`, 60 s) is three times this deadline.
+    got.sort_by_key(|(i, _)| *i);
+    got.into_iter().map(|(_, a)| a).collect()
+}
+
+/// What the page says per source after a check: every target asked, in
+/// order, with what its answer offered — or `answered: false` for one that
+/// stayed silent or answered badly. A repository the check did not ask (over
+/// the limit, or not addressable) gets no report, which the page reads as
+/// "never checked" rather than as "answered nothing".
+pub fn reports_of(targets: &[SourceTarget], answers: &[SourceAnswer]) -> Vec<(String, SourceReport)> {
+    targets
+        .iter()
+        .map(|t| {
+            let report = match answers.iter().find(|a| a.repo == t.repo) {
+                None => SourceReport { answered: false, plugins: Vec::new(), languages: Vec::new() },
+                Some(answer) => {
+                    let mut plugins: Vec<String> = Vec::new();
+                    let mut languages: Vec<String> = Vec::new();
+                    for p in &answer.published {
+                        // A stranger's core, bundle or companion is not
+                        // something this device would take from it, so it is
+                        // not reported as on offer either.
+                        let (list, item) = match &p.offer {
+                            Offer::Plugin(name) => (&mut plugins, name),
+                            Offer::LanguagePack(language) => (&mut languages, language),
+                            Offer::Core | Offer::Bundle | Offer::Companion(_) => continue,
+                        };
+                        if !list.contains(item) {
+                            list.push(item.clone());
+                        }
+                    }
+                    SourceReport { answered: true, plugins, languages }
+                }
+            };
+            (t.repo.clone(), report)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn target(repo: &str) -> SourceTarget {
+        SourceTarget { repo: repo.into(), url: crate::update::release::releases_url_for(repo) }
+    }
+
+    /// The dead source's future is pending **forever**, so only the deadline
+    /// can end this sweep — and run under an outer timeout, so a sweep that
+    /// lost its deadline shows here as a red assertion rather than as a test
+    /// that never returns.
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_source_costs_its_own_rows_only() {
+        let targets = vec![target("dead/one"), target("fast/two")];
+        let started = tokio::time::Instant::now();
+        let sweep = query_sources(
+            &targets,
+            |t| async move {
+                if t.repo == "dead/one" {
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                Some(Vec::new())
+            },
+            SOURCES_DEADLINE,
+        );
+        let answers = tokio::time::timeout(std::time::Duration::from_secs(60), sweep)
+            .await
+            .expect("the sweep outlived its own deadline: nothing stops it but every source answering");
+        assert_eq!(answers.iter().map(|a| a.repo.as_str()).collect::<Vec<_>>(), vec!["fast/two"]);
+        assert_eq!(started.elapsed(), SOURCES_DEADLINE, "the deadline, not the dead source, ended the sweep");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sources_are_asked_together_not_one_after_the_other() {
+        // Sixteen sources each taking 15 s: in sequence that is four minutes, in
+        // parallel 15 s, under the 20 s deadline — so every one answers.
+        let targets: Vec<SourceTarget> = (0..16).map(|i| target(&format!("o/r{i}"))).collect();
+        let started = tokio::time::Instant::now();
+        let answers = query_sources(
+            &targets,
+            |_| async {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                Some(Vec::new())
+            },
+            SOURCES_DEADLINE,
+        )
+        .await;
+        assert_eq!(answers.len(), 16);
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(15));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn answers_come_back_in_target_order_whatever_order_they_arrive_in() {
+        let targets = vec![target("slow/a"), target("quick/b")];
+        let answers = query_sources(
+            &targets,
+            |t| async move {
+                let s = if t.repo == "slow/a" { 5 } else { 1 };
+                tokio::time::sleep(std::time::Duration::from_secs(s)).await;
+                Some(Vec::new())
+            },
+            SOURCES_DEADLINE,
+        )
+        .await;
+        assert_eq!(answers.iter().map(|a| a.repo.as_str()).collect::<Vec<_>>(), vec!["slow/a", "quick/b"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_source_that_answered_badly_is_absent_not_fatal() {
+        let targets = vec![target("bad/x"), target("good/y")];
+        let answers =
+            query_sources(&targets, |t| async move { (t.repo == "good/y").then(Vec::new) }, SOURCES_DEADLINE).await;
+        assert_eq!(answers.iter().map(|a| a.repo.as_str()).collect::<Vec<_>>(), vec!["good/y"]);
+    }
+
+    fn offered(offer: Offer) -> Published {
+        Published {
+            offer,
+            version: "1.0.0".into(),
+            url: "https://x/a".into(),
+            size: 1,
+            release_tag: "v1.0.0".into(),
+            checksums_url: None,
+            catalogue_url: None,
+        }
+    }
+
+    #[test]
+    fn a_report_names_what_each_asked_source_offered_and_which_stayed_silent() {
+        let targets = vec![target("quiet/one"), target("busy/two")];
+        let answers = vec![SourceAnswer {
+            repo: "busy/two".into(),
+            published: vec![
+                offered(Offer::Plugin("zed".into())),
+                offered(Offer::Core),
+                offered(Offer::LanguagePack("pt".into())),
+                offered(Offer::Plugin("zed".into())),
+                offered(Offer::Plugin("alpha".into())),
+            ],
+        }];
+        assert_eq!(
+            reports_of(&targets, &answers),
+            vec![
+                ("quiet/one".to_string(), SourceReport { answered: false, plugins: vec![], languages: vec![] }),
+                (
+                    "busy/two".to_string(),
+                    SourceReport {
+                        answered: true,
+                        plugins: vec!["zed".into(), "alpha".into()],
+                        languages: vec!["pt".into()],
+                    }
+                ),
+            ]
+        );
+    }
+
+    /// A device with no third-party source — the majority — must not pay the
+    /// deadline on every check.
+    #[tokio::test(start_paused = true)]
+    async fn no_source_means_no_wait() {
+        let started = tokio::time::Instant::now();
+        let answers = query_sources(&[], |_| async { Some(Vec::new()) }, SOURCES_DEADLINE).await;
+        assert!(answers.is_empty());
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+    }
 
     fn tp(name: &str, repo: &str) -> Installed {
         Installed {

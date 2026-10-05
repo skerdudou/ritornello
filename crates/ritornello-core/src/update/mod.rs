@@ -33,7 +33,7 @@ use crate::update::download::{
 };
 use crate::update::release::{
     differs, download_name, fold, newest_catalogue_url, origin, parse_checksums, parse_releases,
-    releases_url, releases_url_for, Channel, Offer, Origin, Published, Release, ReleasesError, ARCH,
+    releases_url, Channel, Offer, Origin, Published, Release, ReleasesError, ARCH,
     REPO,
 };
 use crate::update::state::{
@@ -334,70 +334,60 @@ pub(crate) fn third_party_placed_key(repo: &str, name: &str) -> String {
     format!("third-party:{repo}:{name}")
 }
 
-/// How many third-party repositories one check is allowed to query.
+/// What each installed third-party plugin's **own** repository offers for it,
+/// out of the answers one sweep collected (`sources::query_sources`).
 ///
-/// Without a ceiling, ten third-party plugins make ten requests a day to ten
-/// different servers, and a single slow host blocks the whole check behind its
-/// own timeout — a check that never answers leaves `busy` set and the buttons
-/// disabled. Four covers the real use and bounds the worst case; the plugins
-/// past it are simply not checked this time, which reads as `Unknown` and
-/// never as "up to date".
-const THIRD_PARTY_MAX: usize = 4;
-
-/// One repository this check will ask about one plugin.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Target {
-    /// The plugin's name, which is also the name the asset must carry: a
-    /// repository publishing an archive under another name has published
-    /// nothing for the binary sitting on this device.
-    name: String,
-    /// `owner/repo`, kept for the log — the address beside it is already
-    /// formed, so nothing downstream ever builds one.
-    repo: String,
-    /// Where to ask, formed **here** by `release::releases_url_for`. That
-    /// keeps the one place a host is chosen the one place a host is chosen:
-    /// `third_party_offers` receives an address and never composes one, so no
-    /// announced string can reach a URL template.
-    url: String,
-}
-
-/// The third-party repositories this check will query, and the addresses to
-/// query them at.
+/// The rule the per-plugin requests used to apply, now applied to answers
+/// that may serve several plugins at once:
 ///
-/// Pure, and separated from the requests it feeds, because the ceiling is the
-/// one thing about this list that can be wrong without any I/O being involved.
+/// - **only the repository the plugin itself announced answers for it.** A
+///   plugin named `zed` gets nothing from a repository the operator added,
+///   even one that publishes a `zed` archive: the announcement is the
+///   plugin's own claim about where it comes from, and an added source is
+///   not a claim about any installed binary;
+/// - **the asset must be named for this plugin.** A repository publishing an
+///   archive under another name has published nothing for the binary on this
+///   device — and this is also what stops a stranger's release from ever
+///   producing an `Offer::Core`, which downstream would be a component the
+///   plugin rule never judges.
 ///
-/// **In `plugins.toml` order and truncated, never sampled**: the order is
-/// already the priority order this product uses everywhere else, and a stable
-/// prefix means the same four plugins are checked every day rather than a
-/// different four each time.
+/// A plugin whose repository did not answer usably, or whose answer carries
+/// nothing named for it, yields no offer: its row stays `Unknown`, which
+/// says "nothing is known" and never "up to date".
 ///
-/// An `Origin::Foreign` is deliberately absent: there is no GitHub endpoint to
-/// address for it, so it must not consume one of the four either.
-fn third_party_targets(installed: &[Installed]) -> Vec<Target> {
+/// `repo` is the repository **as `origin` reads it**, case kept, because it
+/// is the same value the row carries as `third_party_repo` and so the same
+/// key `placed_key` reads the placement memory under. The answer is found by
+/// its lowercased form, which is how a `SourceTarget` names it.
+fn theirs_from(installed: &[Installed], answers: &[sources::SourceAnswer]) -> Vec<ThirdPartyOffer> {
     installed
         .iter()
-        .filter_map(|p| match origin(p.repository.as_deref()) {
-            Origin::ThirdParty(repo) => Some(Target {
-                name: p.name.clone(),
-                url: releases_url_for(&repo),
-                repo,
-            }),
-            Origin::Unknown | Origin::Ours | Origin::Foreign(_) => None,
+        .filter_map(|p| {
+            let Origin::ThirdParty(repo) = origin(p.repository.as_deref()) else { return None };
+            let key = repo.to_lowercase();
+            let answer = answers.iter().find(|a| a.repo == key)?;
+            let Some(published) = answer
+                .published
+                .iter()
+                .find(|o| matches!(&o.offer, Offer::Plugin(n) if *n == p.name))
+            else {
+                tracing::info!("update: {repo} publishes no {ARCH} archive named for {}", p.name);
+                return None;
+            };
+            Some(ThirdPartyOffer { name: p.name.clone(), published: published.clone(), repo })
         })
-        .take(THIRD_PARTY_MAX)
         .collect()
 }
 
 /// Every component the announcement says is third-party — **no cap, and
-/// `Foreign` included**, unlike `third_party_targets`.
+/// `Foreign` included**, unlike `sources::source_targets`.
 ///
 /// Two lists out of one reading, and the difference between them is the point:
-/// `third_party_targets` answers "whom do we go and ask", which is bounded and
+/// `source_targets` answers "whom do we go and ask", which is bounded and
 /// only covers repositories we can address; this one answers "what is a
-/// stranger", which admits no ceiling at all. A component left out of the four
-/// this check consulted, or announcing a repository we cannot address, is not
-/// thereby one of ours — and the fall-through that treated it as one is
+/// stranger", which admits no ceiling at all. A component left out of the
+/// sources this check consulted, or announcing a repository we cannot address,
+/// is not thereby one of ours — and the fall-through that treated it as one is
 /// exactly how our own release ends up installed under a colliding name.
 fn third_party_names(installed: &[Installed]) -> Vec<String> {
     installed
@@ -413,10 +403,11 @@ enum Resolved<'a> {
     /// Our own release publishes it.
     Ours(&'a Published),
     /// Its own repository published it, and that archive is what will be
-    /// fetched.
-    Theirs(&'a Published),
+    /// fetched. `repo` is the repository that answered, as the row names it:
+    /// the key its placement is remembered under.
+    Theirs { published: &'a Published, repo: &'a str },
     /// The announcement says it is a stranger's, and this check did not get an
-    /// answer from its repository — over the cap of four, unreachable,
+    /// answer from its repository — past the sources limit, unreachable,
     /// unaddressable, or publishing no archive for this architecture under
     /// this name.
     ///
@@ -438,7 +429,7 @@ enum Resolved<'a> {
 /// component is**, never by which lookup happened to return something.
 fn resolve<'a>(checked: &'a Checked, name: &str) -> Resolved<'a> {
     if let Some(offer) = checked.theirs.iter().find(|o| o.name == name) {
-        return Resolved::Theirs(&offer.published);
+        return Resolved::Theirs { published: &offer.published, repo: &offer.repo };
     }
     // Before `ours` and not after it: the membership test is what keeps a
     // stranger's row from ever being served from our release.
@@ -744,7 +735,7 @@ enum Refusal {
     /// directory. Carries which two names disagreed.
     NotItsOwnFile(String),
     /// A third-party component whose own repository could not be consulted by
-    /// this check — over the cap of four, unreachable, unaddressable, or
+    /// this check — past the sources limit, unreachable, unaddressable, or
     /// publishing no archive for this architecture under this name.
     ///
     /// A refusal and **not** a silent skip, because the alternative that used
@@ -1183,14 +1174,21 @@ struct Placement {
 struct Checked {
     /// The fold of **our** release list.
     ours: Vec<Published>,
-    /// What each third-party plugin's own repository publishes for it, at most
-    /// `THIRD_PARTY_MAX` of them.
+    /// What each third-party plugin's own repository publishes for it, derived
+    /// from `sources` by `theirs_from`.
     theirs: Vec<ThirdPartyOffer>,
     /// Every component the announcements call a stranger's, uncapped — see
     /// `third_party_names`. Carried beside `theirs` because a name absent from
-    /// `theirs` is not thereby one of ours: it may simply be the fifth
-    /// third-party plugin, or one whose server did not answer.
+    /// `theirs` is not thereby one of ours: it may simply be past the sources
+    /// limit, or one whose server did not answer.
     third_party: Vec<String>,
+    /// Every source that answered this check usably, in the order it was
+    /// asked (`sources::query_sources`).
+    // Not read outside tests yet: what an added source offers beyond the
+    // installed plugins' own updates is consumed by a later task of the
+    // sources plan, which removes this allow.
+    #[cfg_attr(not(test), allow(dead_code))]
+    sources: Vec<sources::SourceAnswer>,
 }
 
 /// The release's own offer for one language pack, out of an already
@@ -1296,8 +1294,6 @@ pub struct Worker {
     /// The repositories the operator added as update sources: the handle
     /// `AppState.update_sources` is. Read per check, like `settings`, so an
     /// addition is seen by the next one without a restart.
-    // Not read yet: the check that queries the added repositories is the reader.
-    #[allow(dead_code)]
     pub update_sources: Arc<RwLock<Vec<String>>>,
 }
 
@@ -1602,67 +1598,72 @@ impl Worker {
         }
     }
 
-    /// What each third-party plugin's own repository publishes for it.
+    /// One source's answer: one request, and the **same** `parse_releases`
+    /// and `fold` as our own release list — drafts and prereleases dropped by
+    /// one rule, the newest archive for this architecture picked by one rule,
+    /// and the version read off the asset name rather than off the tag, which
+    /// is what makes an offered version the version of the archive that would
+    /// actually be installed.
     ///
-    /// At most `THIRD_PARTY_MAX` requests, decided by `third_party_targets`
-    /// before a single socket is opened. Each answer goes through the **same**
-    /// `parse_releases` and `fold` as our own: drafts and prereleases dropped
-    /// by one rule, the newest archive for this architecture picked by one
-    /// rule, and the version read off the asset name rather than off the tag —
-    /// which is what makes an offered version the version of the archive that
-    /// would actually be installed, rather than a number nothing can deliver.
-    ///
-    /// A repository that answers badly, or that publishes nothing for this
-    /// architecture and this plugin name, simply yields no offer: its row
-    /// stays `Unknown`, which says "nothing is known" and never "up to date".
-    /// It is never a failure of the whole check — a stranger's server being
-    /// down must not blank out the core's own row.
-    async fn third_party_offers(
+    /// `None` for an answer that is not usable — no connection, a status that
+    /// is not 200 (whatever body came with it), a body that is not a release
+    /// list. A repository that answered a release list with nothing for this
+    /// channel did answer, and answered nothing: `Some` of an empty list, so
+    /// its report says "answered" rather than "silent".
+    async fn fetch_source(
         &self,
         client: &reqwest::Client,
-        targets: &[Target],
-    ) -> Vec<ThirdPartyOffer> {
-        // One read for the whole sweep: the setting cannot meaningfully change
-        // between two strangers' repositories inside one check, and re-reading
-        // per target would let it, which would make a check's answer depend on
-        // the order the targets happen to be in.
-        let channel = self.channel().await;
-        let mut out = Vec::with_capacity(targets.len());
-        for Target { name, repo, url } in targets {
-            let (status, body) = match fetch_text(client, url).await {
-                Ok(answer) => answer,
-                Err(e) => {
-                    tracing::warn!("update: {repo} (for the third-party plugin {name}): {e}");
-                    continue;
-                }
-            };
-            if status != 200 {
-                tracing::warn!("update: {repo} answered HTTP {status} for {name}");
-                continue;
+        channel: Channel,
+        target: sources::SourceTarget,
+    ) -> Option<Vec<Published>> {
+        let sources::SourceTarget { repo, url } = target;
+        let (status, body) = match fetch_text(client, &url).await {
+            Ok(answer) => answer,
+            Err(e) => {
+                tracing::warn!("update: {repo}: {e}");
+                return None;
             }
-            let releases = match parse_releases(&body, channel) {
-                Ok(releases) => releases,
-                Err(e) => {
-                    tracing::warn!("update: {repo} published nothing usable for {name}: {e:?}");
-                    continue;
-                }
-            };
-            // **The asset must be named for this plugin.** A repository that
-            // publishes an archive under another name has published nothing
-            // for the binary sitting on this device — and this is also what
-            // stops a stranger's release from producing an `Offer::Core`,
-            // which downstream would be a component the plugin rule never
-            // judges.
-            let Some(published) = fold(&releases, ARCH)
-                .into_iter()
-                .find(|p| matches!(&p.offer, Offer::Plugin(n) if n == name))
-            else {
-                tracing::info!("update: {repo} publishes no {ARCH} archive named for {name}");
-                continue;
-            };
-            out.push(ThirdPartyOffer { name: name.clone(), published });
+        };
+        if status != 200 {
+            tracing::warn!("update: {repo} answered HTTP {status}");
+            return None;
         }
-        out
+        match parse_releases(&body, channel) {
+            Ok(releases) => Some(fold(&releases, ARCH)),
+            Err(ReleasesError::NoRelease | ReleasesError::OnlyPrereleases) => Some(Vec::new()),
+            Err(ReleasesError::Unreadable) => {
+                tracing::warn!("update: {repo} did not answer a list of releases");
+                None
+            }
+        }
+    }
+
+    /// Asks every source at once (`sources::query_sources`), on the channel
+    /// the setting names **now**.
+    ///
+    /// One read for the whole sweep: the setting cannot meaningfully change
+    /// between two sources inside one check, and re-reading per source would
+    /// let it, which would make a check's answer depend on which server
+    /// answered first.
+    async fn sweep_sources(
+        &self,
+        client: &reqwest::Client,
+        targets: &[sources::SourceTarget],
+        deadline: std::time::Duration,
+    ) -> Vec<sources::SourceAnswer> {
+        let channel = self.channel().await;
+        sources::query_sources(targets, |t| self.fetch_source(client, channel, t), deadline).await
+    }
+
+    /// The sources one check asks, from the device as it is now.
+    ///
+    /// The operator's list is cloned and its guard dropped **before** any
+    /// request: the routes write through that lock, and one held across a
+    /// twenty-second sweep would hold every route that touches it.
+    async fn targets_now(&self, installed: &[Installed]) -> Vec<sources::SourceTarget> {
+        let added = self.update_sources.read().await.clone();
+        // Language packs announce no repository yet.
+        sources::source_targets(installed, &[], &added)
     }
 
     /// The check. Two small requests — the release list and nothing else — and
@@ -1717,7 +1718,9 @@ impl Worker {
                 let installed = self.installed_when_settled().await;
                 // Our repository publishing nothing says nothing about a
                 // stranger's, so the third-party rows are still answered.
-                let theirs = self.third_party_offers(client, &third_party_targets(&installed)).await;
+                let targets = self.targets_now(&installed).await;
+                let answers = self.sweep_sources(client, &targets, sources::SOURCES_DEADLINE).await;
+                let theirs = theirs_from(&installed, &answers);
                 let installed_packs = self.installed_packs().await;
                 let mut components =
                     component_offers(self.core_version, &[], &theirs, &installed, &installed_packs);
@@ -1733,6 +1736,7 @@ impl Worker {
                 state.catalogue_url = None;
                 state.last_check_unix_s = Some(now_unix_s());
                 state.components = components;
+                state.source_reports = sources::reports_of(&targets, &answers);
                 // `Some` with an empty `ours`, and not `None`: this branch has
                 // just offered third-party updates on the page, and returning
                 // `None` would make Install do nothing and say nothing about
@@ -1742,6 +1746,7 @@ impl Worker {
                     ours: Vec::new(),
                     theirs,
                     third_party: third_party_names(&installed),
+                    sources: answers,
                 });
             }
             Err(ReleasesError::Unreadable) => {
@@ -1763,7 +1768,9 @@ impl Worker {
     async fn settle_check(&self, client: &reqwest::Client, releases: &[Release]) -> Option<Checked> {
         let published = fold(releases, ARCH);
         let installed = self.installed_when_settled().await;
-        let theirs = self.third_party_offers(client, &third_party_targets(&installed)).await;
+        let targets = self.targets_now(&installed).await;
+        let answers = self.sweep_sources(client, &targets, sources::SOURCES_DEADLINE).await;
+        let theirs = theirs_from(&installed, &answers);
         let installed_packs = self.installed_packs().await;
         let mut components =
             component_offers(self.core_version, &published, &theirs, &installed, &installed_packs);
@@ -1782,7 +1789,13 @@ impl Worker {
         state.catalogue_url = newest_catalogue_url(&published);
         state.last_check_unix_s = Some(now_unix_s());
         state.components = components;
-        Some(Checked { ours: published, theirs, third_party: third_party_names(&installed) })
+        state.source_reports = sources::reports_of(&targets, &answers);
+        Some(Checked {
+            ours: published,
+            theirs,
+            third_party: third_party_names(&installed),
+            sources: answers,
+        })
     }
 
     /// Installs the named components, plugins first and the core last.
@@ -1851,9 +1864,9 @@ impl Worker {
             }
             // What the component **is** decides which list answers for it —
             // never which lookup happened to return something. See `resolve`.
-            let (offered, third_party) = match resolve(checked, &name) {
-                Resolved::Theirs(published) => (published, true),
-                Resolved::Ours(published) => (published, false),
+            let (offered, repo) = match resolve(checked, &name) {
+                Resolved::Theirs { published, repo } => (published, Some(repo)),
+                Resolved::Ours(published) => (published, None),
                 Resolved::UncheckedThirdParty => {
                     // A named refusal and not a silent skip: the operator
                     // ticked this row, and "nothing happened" would read as a
@@ -1886,22 +1899,13 @@ impl Worker {
             };
             self.set_busy(Some(self.message_for("update_installing", &name).await))
                 .await;
+            // The repository that answered travels with its offer: it is the
+            // placement memory's key, and the very repository the archive is
+            // about to come from.
+            let third_party = repo.is_some();
             let companion = if third_party { None } else { companion_offered(&checked.ours, &name) };
-            // The repository the row names, for the placement memory's key.
-            // Read from the row because `ThirdPartyOffer` carries none yet.
-            let repo = if third_party {
-                self.state
-                    .read()
-                    .await
-                    .components
-                    .iter()
-                    .find(|c| c.name == name && c.third_party_repo.is_some())
-                    .and_then(|c| c.third_party_repo.clone())
-            } else {
-                None
-            };
             match self
-                .install_one(client, &name, offered, third_party, repo.as_deref(), companion)
+                .install_one(client, &name, offered, third_party, repo, companion)
                 .await
             {
                 Ok(Placed::Plugin) => {
@@ -3041,26 +3045,23 @@ mod tests {
         }
     }
 
-    /// **Refusal 1 of 3: at most four third-party repositories per check.**
+    /// **Refusal 1 of 3: a check asks only the repositories it can address,
+    /// and a stranger is a stranger whether it was asked or not.**
     ///
-    /// Without the ceiling, ten third-party plugins make ten requests a day to
-    /// ten different servers, and a single slow host blocks the whole check
-    /// behind its own timeout — which leaves `busy` set and every button on
-    /// the page disabled.
-    ///
-    /// **Six** third-party plugins and not four, with an official one, an
-    /// unaddressable one and a silent one interleaved: a fixture of exactly
-    /// four could not tell a ceiling from its absence, and a fixture made only
-    /// of third-party rows could not tell "the first four third-party
-    /// repositories" from "the first four rows".
+    /// The ceiling itself (`sources::SOURCES_MAX`, sixteen, a stable prefix)
+    /// is `sources::tests::targets_are_a_stable_prefix_of_sixteen`'s; what is
+    /// pinned here is the reading of a real announcement list: **six**
+    /// third-party plugins with an official one, an unaddressable one and a
+    /// silent one interleaved, so a fixture made only of third-party rows
+    /// could not tell "the third-party repositories" from "the rows".
     #[test]
-    fn a_check_queries_at_most_four_third_party_repositories() {
+    fn a_check_asks_the_addressable_third_party_repositories_in_file_order() {
         let installed = vec![
-            // Ours — the majority path. It must not consume one of the four.
+            // Ours — the majority path. It must not be asked as a source.
             announcing("radio", Some("https://github.com/skerdudou/ritornello")),
             announcing("alpha", Some("https://github.com/a/alpha")),
             // Present and unaddressable: there is no GitHub endpoint to call
-            // for it, so it must not consume one of the four either.
+            // for it, so it must not consume a slot either.
             announcing("elsewhere", Some("https://gitlab.com/x/y")),
             announcing("bravo", Some("https://github.com/b/bravo")),
             // Announced nothing at all: switched off, dead, or predating the
@@ -3071,33 +3072,26 @@ mod tests {
             announcing("echo", Some("https://github.com/e/echo")),
             announcing("foxtrot", Some("https://github.com/f/foxtrot")),
         ];
-        let targets = third_party_targets(&installed);
-        let asked: Vec<(&str, &str)> =
-            targets.iter().map(|t| (t.name.as_str(), t.repo.as_str())).collect();
+        let targets = sources::source_targets(&installed, &[], &[]);
+        let asked: Vec<&str> = targets.iter().map(|t| t.repo.as_str()).collect();
         assert_eq!(
             asked,
-            vec![
-                ("alpha", "a/alpha"),
-                ("bravo", "b/bravo"),
-                ("charlie", "c/charlie"),
-                ("delta", "d/delta"),
-            ],
-            "at most four repositories are queried, and they are the first four in file order"
+            vec!["a/alpha", "b/bravo", "c/charlie", "d/delta", "e/echo", "f/foxtrot"],
+            "the addressable third-party repositories, in file order, and nothing else"
         );
-        assert_eq!(targets.len(), THIRD_PARTY_MAX);
-        // The address is formed here and nowhere downstream, so this is where
-        // the host a request goes to is decided.
+        // The address is formed there and nowhere downstream, so that is
+        // where the host a request goes to is decided.
         assert_eq!(
             targets[0].url,
             "https://api.github.com/repos/a/alpha/releases?per_page=100"
         );
 
-        // **The cap bounds who is asked, never who counts as a stranger.**
+        // **The limit bounds who is asked, never who counts as a stranger.**
         // The same fixture answered by `third_party_names`: all six, plus the
         // unaddressable one, and neither of the two that are ours or silent.
-        // Conflating the two lists is what let a fifth third-party plugin — or
-        // one on GitLab — fall through to our own release under a colliding
-        // name.
+        // Conflating the two lists is what let a third-party plugin past the
+        // limit — or one on GitLab — fall through to our own release under a
+        // colliding name.
         assert_eq!(
             third_party_names(&installed),
             names(&["alpha", "elsewhere", "bravo", "charlie", "delta", "echo", "foxtrot"]),
@@ -3541,7 +3535,7 @@ mod tests {
     /// served from our release.**
     ///
     /// The fall-through this replaces was reachable by an ordinary failure —
-    /// the fifth third-party plugin, a slow server, a GitLab fork — and not by
+    /// a third-party plugin past the sources limit, a slow server, a GitLab fork — and not by
     /// an attack: the row would fall to `ours`, where a colliding name (a fork
     /// of `radio` kept as `radio`) resolves to the **official** archive and is
     /// then installed under the plugin rule, `/etc/ritornello` files and all.
@@ -3554,6 +3548,7 @@ mod tests {
             ours: radio_published("9.9.9"),
             theirs: Vec::new(),
             third_party: names(&["radio"]),
+            sources: Vec::new(),
         };
         assert_eq!(
             resolve(&unconsulted, "radio"),
@@ -3566,14 +3561,19 @@ mod tests {
             theirs: vec![ThirdPartyOffer {
                 name: "radio".to_string(),
                 published: radio_published("2.0.0").remove(0),
+                repo: "Someone/Radio-Fork".to_string(),
             }],
             third_party: names(&["radio"]),
+            sources: Vec::new(),
         };
         match resolve(&consulted, "radio") {
-            Resolved::Theirs(published) => assert_eq!(
-                published.version, "2.0.0",
-                "its own repository answers, never the colliding official entry"
-            ),
+            Resolved::Theirs { published, repo } => {
+                assert_eq!(
+                    published.version, "2.0.0",
+                    "its own repository answers, never the colliding official entry"
+                );
+                assert_eq!(repo, "Someone/Radio-Fork", "and it names that repository, as the row does");
+            }
             other => panic!("{other:?}"),
         }
 
@@ -4295,7 +4295,7 @@ mod tests {
             ("plugins.toml.fragment", fragment.as_bytes()),
         ]);
         let published = served_with_wrong_digest("mpd", &archive).await;
-        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![] };
+        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![], sources: vec![] };
         let client = client().unwrap();
 
         // The name **as the row itself reports it** — not hard-coded as
@@ -4411,7 +4411,7 @@ mod tests {
 
     /// A check that found only our own release, which is the ordinary shape.
     fn ours(published: Vec<Published>) -> Checked {
-        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new() }
+        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new(), sources: Vec::new() }
     }
 
     // ---- The refusals AT THEIR CALL SITE --------------------------------
@@ -5103,6 +5103,7 @@ mod tests {
             ours: vec![served_core(&core_archive()).await],
             theirs: Vec::new(),
             third_party: Vec::new(),
+            sources: Vec::new(),
         };
 
         let memory = memory_at_the_exit(&mut worker, &checked)
@@ -5142,6 +5143,7 @@ mod tests {
             ours: vec![served_core(&core_archive()).await],
             theirs: Vec::new(),
             third_party: Vec::new(),
+            sources: Vec::new(),
         };
 
         assert!(
@@ -5200,16 +5202,31 @@ mod tests {
         format!("ritornello-plugin-{name}-{version}-{ARCH}.tar.gz")
     }
 
+    /// A source to ask at a local address, named as a `SourceTarget` names
+    /// it (lowercased `owner/repo`).
+    fn local_target(repo: &str, url: String) -> sources::SourceTarget {
+        sources::SourceTarget { repo: repo.to_string(), url }
+    }
+
+    /// One installed plugin per `(name, owner/repo)`, each announcing its
+    /// repository the way a real status line does.
+    fn announcing_each(list: &[(&str, &str)]) -> Vec<Installed> {
+        list.iter()
+            .map(|(name, repo)| announcing(name, Some(&format!("https://github.com/{repo}"))))
+            .collect()
+    }
+
     /// **The last decision on the path that lets bytes arrive from a
     /// repository we do not control, and the one that had no test.**
     ///
-    /// Five repositories answering five different ways, driven through the
-    /// real `fetch_text` against real sockets. Two properties in one run,
-    /// because they are one loop:
+    /// Six repositories answering six different ways, driven through the
+    /// real `fetch_text` against real sockets by the real sweep, and the
+    /// offers derived from those answers by the real `theirs_from`. Two
+    /// properties in one run, because they are one loop:
     ///
     /// - **an asset must be named for the plugin it is being fetched for.** A
-    ///   repository publishing `ritornello-plugin-radio-…` when asked about
-    ///   `bravo` has published nothing for the binary on this device, and a
+    ///   repository publishing `ritornello-plugin-radio-…` when it is
+    ///   `bravo`'s has published nothing for the binary on this device, and a
     ///   repository publishing `ritornello-core-…` must never produce an offer
     ///   at all — a core offer from a stranger is the one component the plugin
     ///   rule never judges;
@@ -5226,46 +5243,33 @@ mod tests {
 
         let targets = vec![
             // Publishes an archive named for somebody else's plugin.
-            Target {
-                name: "bravo".to_string(),
-                repo: "b/bravo".to_string(),
-                url: serve_once(releases_body(&[&asset_for("radio", "3.0.0")]), "releases").await,
-            },
+            local_target(
+                "b/bravo",
+                serve_once(releases_body(&[&asset_for("radio", "3.0.0")]), "releases").await,
+            ),
             // Answers properly.
-            Target {
-                name: "alpha".to_string(),
-                repo: "a/alpha".to_string(),
-                url: serve_once(releases_body(&[&asset_for("alpha", "2.0.0")]), "releases").await,
-            },
+            local_target(
+                "a/alpha",
+                serve_once(releases_body(&[&asset_for("alpha", "2.0.0")]), "releases").await,
+            ),
             // Nothing listening at all.
-            Target {
-                name: "charlie".to_string(),
-                repo: "c/charlie".to_string(),
-                url: refused_url().await,
-            },
+            local_target("c/charlie", refused_url().await),
             // Rate-limited — and its body is a **perfectly good** release
             // listing naming delta's own asset. Deliberately: an error body
             // that also failed to parse would be refused by the next clause
             // for a different reason, and the fixture could then not tell the
             // status check from its absence. What this pins is that the
             // **status** decides, not the bytes that came with it.
-            Target {
-                name: "delta".to_string(),
-                repo: "d/delta".to_string(),
-                url: serve_with(403, releases_body(&[&asset_for("delta", "6.0.0")]), "releases")
-                    .await,
-            },
+            local_target(
+                "d/delta",
+                serve_with(403, releases_body(&[&asset_for("delta", "6.0.0")]), "releases").await,
+            ),
             // 200, and a body that is not a release list.
-            Target {
-                name: "echo".to_string(),
-                repo: "e/echo".to_string(),
-                url: serve_once(b"<html>not json</html>".to_vec(), "releases").await,
-            },
+            local_target("e/echo", serve_once(b"<html>not json</html>".to_vec(), "releases").await),
             // Publishes a CORE archive: a stranger must never offer one.
-            Target {
-                name: "foxtrot".to_string(),
-                repo: "f/foxtrot".to_string(),
-                url: serve_once(
+            local_target(
+                "f/foxtrot",
+                serve_once(
                     releases_body(&[
                         &format!("ritornello-core-4.0.0-{ARCH}.tar.gz"),
                         &asset_for("foxtrot", "5.1.0"),
@@ -5273,15 +5277,24 @@ mod tests {
                     "releases",
                 )
                 .await,
-            },
+            ),
         ];
+        let installed = announcing_each(&[
+            ("bravo", "b/bravo"),
+            ("alpha", "a/alpha"),
+            ("charlie", "c/charlie"),
+            ("delta", "d/delta"),
+            ("echo", "e/echo"),
+            ("foxtrot", "f/foxtrot"),
+        ]);
 
-        let offers = tokio::time::timeout(
+        let answers = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.third_party_offers(&client, &targets),
+            worker.sweep_sources(&client, &targets, sources::SOURCES_DEADLINE),
         )
         .await
-        .expect("third_party_offers hung");
+        .expect("the sweep hung");
+        let offers = theirs_from(&installed, &answers);
 
         let got: Vec<(&str, &str)> =
             offers.iter().map(|o| (o.name.as_str(), o.published.version.as_str())).collect();
@@ -5296,6 +5309,12 @@ mod tests {
             offers.iter().all(|o| matches!(&o.published.offer, Offer::Plugin(n) if *n == o.name)),
             "a third-party offer is always a plugin offer, named for that plugin: {offers:#?}"
         );
+        // And the three failures are absent from the answers themselves, not
+        // merely filtered out later: the report says "did not answer".
+        assert_eq!(
+            answers.iter().map(|a| a.repo.as_str()).collect::<Vec<_>>(),
+            vec!["b/bravo", "a/alpha", "f/foxtrot"],
+        );
     }
 
     /// **The switch is what makes a prerelease visible, and it is read on the
@@ -5304,7 +5323,8 @@ mod tests {
     /// Two runs of the same worker over two repositories — one publishing a
     /// finished release, one publishing a prerelease — with nothing changed
     /// between them but `update_prereleases`. Real sockets, the real
-    /// `fetch_text`, the real `third_party_offers`.
+    /// `fetch_text`, the real `sweep_sources` — the very call the check makes,
+    /// which reads the setting itself.
     ///
     /// What this pins is not the filter itself, which `parse_releases` has its
     /// own tests for on both channels, but that the setting is **consulted by
@@ -5321,35 +5341,33 @@ mod tests {
         let client = client().unwrap();
 
         // Fresh listeners for each run: `serve_once` answers one request.
-        async fn two_repositories() -> Vec<Target> {
+        async fn two_repositories() -> Vec<sources::SourceTarget> {
             vec![
-                Target {
-                    name: "alpha".to_string(),
-                    repo: "a/alpha".to_string(),
-                    url: serve_once(releases_body(&[&asset_for("alpha", "2.0.0")]), "releases")
+                local_target(
+                    "a/alpha",
+                    serve_once(releases_body(&[&asset_for("alpha", "2.0.0")]), "releases").await,
+                ),
+                local_target(
+                    "b/bravo",
+                    serve_once(prerelease_body(&[&asset_for("bravo", "3.0.0-beta.1")]), "releases")
                         .await,
-                },
-                Target {
-                    name: "bravo".to_string(),
-                    repo: "b/bravo".to_string(),
-                    url: serve_once(
-                        prerelease_body(&[&asset_for("bravo", "3.0.0-beta.1")]),
-                        "releases",
-                    )
-                    .await,
-                },
+                ),
             ]
         }
 
         async fn sweep(worker: &Worker, client: &reqwest::Client) -> Vec<(String, String)> {
             let targets = two_repositories().await;
-            let offers = tokio::time::timeout(
+            let answers = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                worker.third_party_offers(client, &targets),
+                worker.sweep_sources(client, &targets, sources::SOURCES_DEADLINE),
             )
             .await
-            .expect("third_party_offers hung");
-            offers.into_iter().map(|o| (o.name, o.published.version)).collect()
+            .expect("the sweep hung");
+            let installed = announcing_each(&[("alpha", "a/alpha"), ("bravo", "b/bravo")]);
+            theirs_from(&installed, &answers)
+                .into_iter()
+                .map(|o| (o.name, o.published.version))
+                .collect()
         }
 
         // Off, which is the product default and is left untouched here.
@@ -5373,6 +5391,124 @@ mod tests {
             ],
             "the finished release still answers, and the prerelease now does too — \
              with its whole version, dash included"
+        );
+    }
+
+    /// **One deadline, on real sockets.** Two repositories answer, a third
+    /// accepts the connection into its backlog and never answers it — the
+    /// shape of a host that is up and stuck, which no status code produces.
+    /// The sweep must come back with the two answers once the (short,
+    /// injected) deadline falls, not after the request's own 60 s timeout.
+    ///
+    /// A real clock, deliberately: a paused one would jump to the deadline
+    /// while the two live sockets are still idle on I/O. The outer timeout is
+    /// what turns a sweep that lost its deadline into a red assertion.
+    #[tokio::test]
+    async fn a_stuck_host_on_a_real_socket_costs_the_deadline_and_no_more() {
+        let (worker, _dir) = worker_rig(starting_line());
+        let client = client().unwrap();
+        let stuck = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stuck_url = format!("http://127.0.0.1:{}/releases", stuck.local_addr().unwrap().port());
+        let targets = vec![
+            local_target(
+                "a/alpha",
+                serve_once(releases_body(&[&asset_for("alpha", "2.0.0")]), "releases").await,
+            ),
+            local_target("s/stuck", stuck_url),
+            // Answers a release list with nothing in it: answered, offering
+            // nothing — present, and not to be confused with silence.
+            local_target("e/empty", serve_once(b"[]".to_vec(), "releases").await),
+        ];
+        let deadline = std::time::Duration::from_secs(2);
+        let started = std::time::Instant::now();
+        let answers = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            worker.sweep_sources(&client, &targets, deadline),
+        )
+        .await
+        .expect("the sweep outlived its deadline: the stuck host held it");
+        assert!(started.elapsed() >= deadline, "the stuck host was waited for until the deadline");
+        assert_eq!(
+            answers.iter().map(|a| (a.repo.as_str(), a.published.len())).collect::<Vec<_>>(),
+            vec![("a/alpha", 1), ("e/empty", 0)],
+        );
+        assert_eq!(
+            sources::reports_of(&targets, &answers)
+                .into_iter()
+                .map(|(repo, r)| (repo, r.answered))
+                .collect::<Vec<_>>(),
+            vec![("a/alpha".to_string(), true), ("s/stuck".to_string(), false), ("e/empty".to_string(), true)],
+        );
+        drop(stuck);
+    }
+
+    /// **A check replaces the per-source report, it does not add to it.** The
+    /// sources a check asks are GitHub addresses this test cannot reach, so it
+    /// drives the other half: a report left by an earlier check, for a source
+    /// the device no longer reads, must be gone after the next one — or the
+    /// page would go on saying what a removed repository offered. With no
+    /// source to ask, the check also returns without waiting for anything.
+    #[tokio::test]
+    async fn a_check_records_what_each_source_answered() {
+        let status = one_line(PluginStatus {
+            version: Some("0.2.0".into()),
+            repository: Some("https://github.com/skerdudou/ritornello".into()),
+            ..PluginStatus::kind("radio", "source", true, false)
+        });
+        let (worker, _dir) = worker_rig(status);
+        worker.state.write().await.source_reports = vec![(
+            "gone/repo".to_string(),
+            sources::SourceReport { answered: true, plugins: vec!["zed".into()], languages: vec![] },
+        )];
+        let body = releases_body(&[&asset_for("radio", "0.3.0")]);
+        let releases = parse_releases(std::str::from_utf8(&body).unwrap(), Channel::Stable).unwrap();
+        let checked = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.settle_check(&client().unwrap(), &releases),
+        )
+        .await
+        .expect("settle_check hung")
+        .expect("a check over a readable release list");
+        assert!(checked.sources.is_empty());
+        assert_eq!(worker.state.read().await.source_reports, Vec::new(), "the earlier report must not survive");
+    }
+
+    /// **Only the repository a plugin announced answers for it.** An operator-
+    /// added source publishing an archive under an installed plugin's name is
+    /// not that plugin's repository, and must not become its update — that
+    /// would let any added repository replace any installed binary by naming
+    /// it. The announcement is matched whatever its case, and the offer
+    /// carries the repository spelled as the row spells it, which is the
+    /// placement memory's key.
+    #[test]
+    fn a_plugin_is_answered_by_its_own_repository_and_no_other() {
+        let installed = vec![
+            announcing("zed", Some("https://github.com/Z/Zed")),
+            announcing("radio", Some("https://github.com/skerdudou/ritornello")),
+        ];
+        let answer = |repo: &str, name: &str, version: &str| sources::SourceAnswer {
+            repo: repo.to_string(),
+            published: vec![Published {
+                offer: Offer::Plugin(name.to_string()),
+                version: version.to_string(),
+                url: "https://x/a".to_string(),
+                size: 1,
+                release_tag: "v1".to_string(),
+                checksums_url: None,
+                catalogue_url: None,
+            }],
+        };
+        // An added source offers zed (and radio), and comes first.
+        let answers = vec![answer("o/other", "zed", "9.9.9"), answer("o/other", "radio", "9.9.9")];
+        assert!(
+            theirs_from(&installed, &answers).is_empty(),
+            "a repository nobody announced answers for no installed plugin"
+        );
+        let answers = vec![answer("o/other", "zed", "9.9.9"), answer("z/zed", "zed", "1.2.0")];
+        let offers = theirs_from(&installed, &answers);
+        assert_eq!(
+            offers.iter().map(|o| (o.name.as_str(), o.published.version.as_str(), o.repo.as_str())).collect::<Vec<_>>(),
+            vec![("zed", "1.2.0", "Z/Zed")],
         );
     }
 
@@ -5503,10 +5639,10 @@ mod tests {
             Some("https://github.com/someone/their-plugin"),
             "relayed verbatim and unparsed, exactly as the announcement gave it"
         );
-        let targets = third_party_targets(&installed);
+        let targets = worker.targets_now(&installed).await;
         assert_eq!(
-            targets.iter().map(|t| (t.name.as_str(), t.repo.as_str())).collect::<Vec<_>>(),
-            vec![("radio", "someone/their-plugin")],
+            targets.iter().map(|t| t.repo.as_str()).collect::<Vec<_>>(),
+            vec!["someone/their-plugin"],
             "and it is what decides which repository the check goes and asks"
         );
     }
@@ -5524,7 +5660,7 @@ mod tests {
         let (worker, _dir) = worker_rig(status);
         let installed = worker.installed_when_settled().await;
         assert!(
-            third_party_targets(&installed).is_empty(),
+            worker.targets_now(&installed).await.is_empty(),
             "an official plugin must never send the core asking a stranger's repository about it"
         );
     }
@@ -5975,7 +6111,7 @@ mod tests {
             checksums_url: None,
             catalogue_url: None,
         };
-        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![] };
+        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![], sources: vec![] };
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
             worker.install(&client().unwrap(), &checked, &["files".to_string()]),
@@ -6197,6 +6333,7 @@ mod tests {
             ours: vec![radio, files_offer, companion_offer("0.3.0")],
             theirs: vec![],
             third_party: vec![],
+            sources: vec![],
         };
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
@@ -6248,7 +6385,7 @@ mod tests {
     /// **[MUTATION]**: `Offer::Companion(c) => c == name` in `carries` — red.
     #[test]
     fn a_companion_s_name_resolves_to_nothing() {
-        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![] };
+        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![], sources: vec![] };
         assert_eq!(resolve(&checked, "files-mount"), Resolved::Nothing);
     }
 
