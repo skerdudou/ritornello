@@ -28,6 +28,27 @@ The reference machine is a **Raspberry Pi 2** — 32-bit ARM, 1 GB of RAM,
 in daily use — and the same binaries build for `armv7`, `aarch64` (Pi 3, 4
 and 5) and `x86_64`, so a plain Linux PC runs it just as well.
 
+## Download
+
+Everything is installed onto the device from your own computer by one
+program, `ritornello-install`, over ssh — nothing to build:
+
+| Your computer | Installer |
+|---|---|
+| Windows (64-bit) | [ritornello-install-x86_64-pc-windows-msvc.zip](https://github.com/skerdudou/ritornello/releases/latest/download/ritornello-install-x86_64-pc-windows-msvc.zip) |
+| macOS, Apple Silicon | [ritornello-install-aarch64-apple-darwin.tar.gz](https://github.com/skerdudou/ritornello/releases/latest/download/ritornello-install-aarch64-apple-darwin.tar.gz) |
+| macOS, Intel | [ritornello-install-x86_64-apple-darwin.tar.gz](https://github.com/skerdudou/ritornello/releases/latest/download/ritornello-install-x86_64-apple-darwin.tar.gz) |
+| Linux or WSL, x86_64 | [ritornello-install-x86_64-unknown-linux-musl.tar.gz](https://github.com/skerdudou/ritornello/releases/latest/download/ritornello-install-x86_64-unknown-linux-musl.tar.gz) |
+| Linux, 64-bit ARM | [ritornello-install-aarch64-unknown-linux-musl.tar.gz](https://github.com/skerdudou/ritornello/releases/latest/download/ritornello-install-aarch64-unknown-linux-musl.tar.gz) |
+
+Then `./ritornello-install --host user@device` and follow the screens —
+the details per system are in
+[docs/installation.md](docs/installation.md#installing-on-a-device-without-building-anything).
+These links always point at the newest **final** release. While only
+prereleases are published they lead nowhere: take the files from the
+[releases page](https://github.com/skerdudou/ritornello/releases) instead,
+and add `--version <tag>` to the command.
+
 ## Highlights
 
 - **Internet radio** — presets on the remote's number pad, station
@@ -160,10 +181,9 @@ Runtime dependencies on the target are a handful of Debian packages:
 
 ## Quick start
 
-**To install on a device without building anything**, download
-`ritornello-install` for your computer (Windows, macOS or Linux) from the
-newest release and run it against the device over ssh:
-[docs/installation.md](docs/installation.md#installing-on-a-device-without-building-anything).
+**To install on a device without building anything**, take
+`ritornello-install` for your computer from [Download](#download) above
+and run it against the device over ssh.
 
 **To build it yourself**, on the development machine (Node 20+, Rust stable,
 [`cross`](https://github.com/cross-rs/cross) for ARM):

@@ -17,11 +17,11 @@ Take the file for yours from the newest release:
 
 | Your computer | File |
 |---|---|
-| Windows (64-bit) | `ritornello-install-<version>-x86_64-pc-windows-msvc.zip` |
-| macOS, Apple Silicon (M1 and later) | `ritornello-install-<version>-aarch64-apple-darwin.tar.gz` |
-| macOS, Intel | `ritornello-install-<version>-x86_64-apple-darwin.tar.gz` |
-| Linux or WSL, x86_64 | `ritornello-install-<version>-x86_64-unknown-linux-musl.tar.gz` |
-| Linux, 64-bit ARM | `ritornello-install-<version>-aarch64-unknown-linux-musl.tar.gz` |
+| Windows (64-bit) | `ritornello-install-x86_64-pc-windows-msvc.zip` |
+| macOS, Apple Silicon (M1 and later) | `ritornello-install-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `ritornello-install-x86_64-apple-darwin.tar.gz` |
+| Linux or WSL, x86_64 | `ritornello-install-x86_64-unknown-linux-musl.tar.gz` |
+| Linux, 64-bit ARM | `ritornello-install-aarch64-unknown-linux-musl.tar.gz` |
 
 The Linux builds are static: they run on any distribution, old or new. The
 release's `SHA256SUMS` lists each of these files, if you want to check the

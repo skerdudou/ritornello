@@ -1636,16 +1636,44 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
             assert!(!ARCHES.contains(target), "{target} is a device label, not a workstation triple");
         }
         assert!(
-            job.contains(r#"name="ritornello-install-$v-$TARGET""#),
-            "the installer archive is named after the product number and the full target"
+            job.contains(r#"name="ritornello-install-$TARGET""#),
+            "the installer archive is named after the full target, and nothing else"
         );
         for target in targets {
             for ext in ["tar.gz", "zip"] {
-                let name = format!("ritornello-install-0.2.0-beta.3-{target}.{ext}");
+                let name = format!("ritornello-install-{target}.{ext}");
                 for arch in ARCHES {
                     assert_eq!(classify_asset(&name, arch), None, "{name} on {arch}");
                 }
             }
         }
+    }
+
+    /// The README's download table points at
+    /// `releases/latest/download/<file>`, which GitHub resolves to that file
+    /// in the newest final release. That only works because ci.yml names the
+    /// installer archives the same way in every release, so the two must
+    /// agree: this reads both. A target added to the workflow without its
+    /// link, a link left behind after a rename, or the wrong extension for a
+    /// system would otherwise only be found by someone clicking on it.
+    #[test]
+    fn the_readme_links_every_installer_the_ci_publishes() {
+        let ci_yml = include_str!("../../../../.github/workflows/ci.yml").replace("\r\n", "\n");
+        let job = ci_yml
+            .split("\n  installer:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  release:\n").next())
+            .expect("ci.yml has an `installer` job followed by the `release` job");
+        let readme = include_str!("../../../../README.md");
+        let base = format!("https://github.com/{REPO}/releases/latest/download/");
+        let targets: Vec<&str> = job.lines().filter_map(|l| l.trim().strip_prefix("target: ")).collect();
+        assert_eq!(targets.len(), 5, "the installer job's matrix: {targets:?}");
+        for target in targets {
+            let ext = if target.contains("windows") { "zip" } else { "tar.gz" };
+            let link = format!("{base}ritornello-install-{target}.{ext}");
+            assert!(readme.contains(&link), "README.md has no download link {link}");
+        }
+        let linked = readme.matches(base.as_str()).count();
+        assert_eq!(linked, 5, "README.md links {linked} files under {base}, one per installer target expected");
     }
 }

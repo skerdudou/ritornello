@@ -236,15 +236,18 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-        # Named after the product number and the full target triple, never a
-        # device label (armv7, arm64, x86_64): a device reads every asset of a
-        # release, and `an_installer_archive_is_never_a_component` in
-        # update/release.rs pins that it ignores these names. `.zip` for
+        # Named after the full target triple, never a device label (armv7,
+        # arm64, x86_64): a device reads every asset of a release, and
+        # `an_installer_archive_is_never_a_component` in update/release.rs
+        # pins that it ignores these names. **No version in the name, on
+        # purpose**: the same name in every release is what lets the README
+        # link to `releases/latest/download/<name>` once and for all (pinned
+        # by `the_readme_links_every_installer_the_ci_publishes`). No device
+        # fetches these, so nothing compares their versions. `.zip` for
         # Windows, where it is the archive a person can open; `.tar.gz`
         # elsewhere, which keeps the executable bit.
         run: |
-          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          name="ritornello-install-$v-$TARGET"
+          name="ritornello-install-$TARGET"
           mkdir out
           cd "target/$TARGET/release"
           case "$TARGET" in

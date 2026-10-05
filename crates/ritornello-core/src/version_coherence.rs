@@ -57,8 +57,9 @@ mod tests {
         // it inherits the product number on purpose: no device ever fetches
         // it, so the equality rule that makes a component's own number
         // necessary never applies, and a person simply takes the one in the
-        // newest release. Its archives are named after the product number
-        // and a workstation target triple, never after a component.
+        // newest release. Its archives are named after a workstation target
+        // triple alone — no version, so that the README can link to
+        // `releases/latest/download/<file>` — and never after a component.
         "ritornello-install",
     ];
 
