@@ -696,6 +696,35 @@ async function installPlugin(name: string) {
   }
 }
 
+/**
+ * The plugin a third-party source offers fresh whose install is awaiting the
+ * second consent (spec §4.5), with the repository it comes from, or `null`
+ * when no such confirmation is open. Same shared-dialog idiom as
+ * `uninstallTarget`; the installables dialog is closed while it is open and
+ * reopened after, so only one dialog is ever on screen.
+ */
+const thirdPartyInstallTarget = ref<{ name: string; repo: string } | null>(null)
+
+function askThirdPartyInstall(name: string, repo: string) {
+  showInstallablesDialog.value = false
+  thirdPartyInstallTarget.value = { name, repo }
+}
+
+/** Closed without consent: nothing is sent, and the list comes back. */
+function cancelThirdPartyInstall() {
+  thirdPartyInstallTarget.value = null
+  showInstallablesDialog.value = true
+}
+
+/** Consent given: only now is the install asked for, through the same path
+ *  as any other row's. */
+async function confirmThirdPartyInstall() {
+  const target = thirdPartyInstallTarget.value
+  thirdPartyInstallTarget.value = null
+  showInstallablesDialog.value = true
+  if (target) await installPlugin(target.name)
+}
+
 /** Name of the plugin an uninstall confirmation is open for, or `null` when
  * the dialog is closed. One name, not a `Set` like `inProgress`: only one
  * confirmation can be on screen at a time. */
@@ -1642,8 +1671,40 @@ function goTo(id: string) {
           :busy="update.busy"
           @update:open="(v: boolean) => (showInstallablesDialog = v)"
           @install="installPlugin"
+          @install-third-party="askThirdPartyInstall"
           @refresh="onCheckSettled"
         />
+
+        <!-- The second consent for a stranger's plugin (spec §4.5): the
+             repository is named before anything is installed from it.
+             Closing it is the refusal, and sends nothing. -->
+        <Dialog
+          :open="thirdPartyInstallTarget !== null"
+          @update:open="(v: boolean) => { if (!v) cancelThirdPartyInstall() }"
+        >
+          <DialogContent data-third-party-install-dialog>
+            <DialogHeader>
+              <DialogTitle>{{ t('installables_confirm_third_party_title') }}</DialogTitle>
+              <DialogDescription>
+                {{
+                  thirdPartyInstallTarget
+                    ? t('installables_confirm_third_party', {
+                      component: thirdPartyInstallTarget.name,
+                      repo: thirdPartyInstallTarget.repo,
+                    })
+                    : ''
+                }}
+              </DialogDescription>
+            </DialogHeader>
+            <Button
+              data-third-party-install-confirm
+              :disabled="thirdPartyInstallTarget !== null && inProgress.has(thirdPartyInstallTarget.name)"
+              @click="confirmThirdPartyInstall"
+            >
+              {{ t('installables_install') }}
+            </Button>
+          </DialogContent>
+        </Dialog>
 
         <!-- One shared dialog for the whole table, keyed by `uninstallTarget`
              rather than one per row: only one confirmation is ever on screen,

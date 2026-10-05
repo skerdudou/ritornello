@@ -114,6 +114,9 @@ const CATALOGUE = {
   installables_title: 'Ajouter un greffon',
   installables_checking: 'Recherche des composants…',
   installables_retry: 'Réessayer',
+  installables_install: 'Installer',
+  installables_confirm_third_party_title: 'Installer un greffon tiers',
+  installables_confirm_third_party: "{component} vient de {repo}, un dépôt qui n'est pas celui de Ritornello.",
   language_pack_remove_confirm:
     "Retirer le greffon {language} ? L'interface repasse en anglais si c'est la langue utilisée.",
 }
@@ -529,6 +532,61 @@ describe('ConfigView — plugin table', () => {
     ;(document.body.querySelector('[data-installable-install]') as HTMLElement).click()
     await flushPromises()
     expect(posts).toContainEqual({ url: '/api/update/install', body: { components: ['console'] } })
+  })
+
+  // Spec §4.5, the second consent, driven from the event: the Install
+  // button inside the dialog, inside the mounted page. A stranger's plugin
+  // is installed only once the page has named its repository and the
+  // operator confirmed; closing the confirmation sends nothing.
+  // **[MUTATION]** emit `install` from the dialog for a third-party row (the
+  // first click installs): red on "nothing sent yet". **[MUTATION]** drop
+  // `repo` from the confirmation's parameters: red on the text.
+  describe('installing a third-party plugin', () => {
+    const strangerOffer = () => ({
+      ...(freshUpdate() as object),
+      components: [
+        {
+          name: 'zed', kind: 'third_party', declared: false, binary_present: false,
+          installed: null, offered: '1.2.0', availability: 'not_installed', third_party_repo: 'z/zed',
+        },
+      ],
+    })
+
+    async function pressInstall(w: VueWrapper) {
+      await w.find('[data-installables-open]').trigger('click')
+      await flushPromises()
+      ;(document.body.querySelector('[data-installable-row][data-name="zed"] [data-installable-install]') as HTMLElement)
+        .click()
+      await flushPromises()
+    }
+
+    it('asks for consent naming the repository, and installs only once given', async () => {
+      const { w, posts } = await mountView({ '/api/update': strangerOffer() })
+      await pressInstall(w)
+      expect(posts.filter((p) => p.url === '/api/update/install')).toEqual([])
+      const dialog = document.body.querySelector('[data-third-party-install-dialog]')
+      expect(dialog?.textContent).toContain("zed vient de z/zed, un dépôt qui n'est pas celui de Ritornello.")
+      // One dialog at a time: the list is closed behind the confirmation.
+      expect(document.body.querySelector('[data-installables-dialog]')).toBeNull()
+
+      ;(document.body.querySelector('[data-third-party-install-confirm]') as HTMLElement).click()
+      await flushPromises()
+      expect(posts.filter((p) => p.url === '/api/update/install'))
+        .toEqual([{ url: '/api/update/install', body: { components: ['zed'] } }])
+      expect(document.body.querySelector('[data-third-party-install-dialog]')).toBeNull()
+      expect(document.body.querySelector('[data-installables-dialog]')).not.toBeNull()
+    })
+
+    it('sends nothing when the confirmation is closed, and gives the list back', async () => {
+      const { w, posts } = await mountView({ '/api/update': strangerOffer() })
+      await pressInstall(w)
+      const close = document.body.querySelector('[data-third-party-install-dialog] [data-slot="dialog-close"]')
+      ;(close as HTMLElement).click()
+      await flushPromises()
+      expect(document.body.querySelector('[data-third-party-install-dialog]')).toBeNull()
+      expect(document.body.querySelector('[data-installables-dialog]')).not.toBeNull()
+      expect(posts.filter((p) => p.url === '/api/update/install')).toEqual([])
+    })
   })
 
   it('groups the kinds of a same plugin on a single row', async () => {
