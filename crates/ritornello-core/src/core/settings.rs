@@ -153,11 +153,6 @@ impl<P: Player> Core<P> {
         self.persist();
     }
 
-    /// The operator's own additions to the sources list (`update::sources`).
-    pub fn update_sources(&self) -> &[String] {
-        &self.update_sources
-    }
-
     /// Replaces the stored list and persists it, so a following unrelated
     /// settings write cannot lose it.
     pub fn set_update_sources(&mut self, list: Vec<String>) {
@@ -228,7 +223,7 @@ mod tests {
     async fn the_source_list_is_read_back_from_the_persisted_state_at_start() {
         let persisted = PersistedState { update_sources: vec!["z/zed".into()], ..Default::default() };
         let (core, _pc, _sc, _rx, _dir) = setup_persisted(persisted);
-        assert_eq!(core.update_sources(), ["z/zed".to_string()]);
+        assert_eq!(core.update_sources, ["z/zed".to_string()]);
     }
 
     #[tokio::test]
@@ -238,7 +233,7 @@ mod tests {
         core.set_theme(crate::theme::ThemeState { theme: "t".into(), mode: "dark".into() });
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.update_sources, vec!["z/zed".to_string()]);
-        assert_eq!(core.update_sources(), ["z/zed".to_string()]);
+        assert_eq!(core.update_sources, ["z/zed".to_string()]);
     }
 
     #[tokio::test]
