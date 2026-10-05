@@ -1698,7 +1698,7 @@ function goTo(id: string) {
             </DialogHeader>
             <Button
               data-third-party-install-confirm
-              :disabled="thirdPartyInstallTarget !== null && inProgress.has(thirdPartyInstallTarget.name)"
+              :disabled="(thirdPartyInstallTarget !== null && inProgress.has(thirdPartyInstallTarget.name)) || !!update.busy"
               @click="confirmThirdPartyInstall"
             >
               {{ t('installables_install') }}

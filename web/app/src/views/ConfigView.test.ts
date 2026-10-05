@@ -577,6 +577,22 @@ describe('ConfigView — plugin table', () => {
       expect(document.body.querySelector('[data-installables-dialog]')).not.toBeNull()
     })
 
+    // Fix round 1: a job that starts while the confirmation is open (the
+    // update card's Install, a scheduled run) disables its confirm, as it
+    // disables the list's own Install. The page learns `busy` from a reload
+    // of `/api/update`, driven here by the dialog's own `refresh` event.
+    // **[MUTATION]** drop `|| !!update.busy`: red.
+    it('disables the consent while a job is running', async () => {
+      const { w, table } = await mountView({ '/api/update': strangerOffer() })
+      await pressInstall(w)
+      const confirm = () => document.body.querySelector<HTMLButtonElement>('[data-third-party-install-confirm]')!
+      expect(confirm().disabled).toBe(false)
+      ;(table as Record<string, unknown>)['/api/update'] = { ...strangerOffer(), busy: 'Installing radio…' }
+      w.findComponent({ name: 'InstallablesDialog' }).vm.$emit('refresh')
+      await flushPromises()
+      expect(confirm().disabled).toBe(true)
+    })
+
     it('sends nothing when the confirmation is closed, and gives the list back', async () => {
       const { w, posts } = await mountView({ '/api/update': strangerOffer() })
       await pressInstall(w)

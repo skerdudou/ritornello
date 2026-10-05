@@ -139,14 +139,18 @@ async fn source_catalogue_json(state: &AppState, repo: &str) -> Response {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let answer = only_its_names(&fresh);
+    // Pruned against what the state names **now**, read after the fetch: a
+    // check may have landed during it. Every entry kept is then a distinct
+    // `(repo, url)` of the current list, which holds one entry per source,
+    // so the cache never exceeds `SOURCES_MAX`. The guard is dropped before
+    // the cache lock is taken.
+    let now = state.update.read().await.source_catalogues.clone();
+    let is_current = |r: &str, u: &str| now.iter().any(|s| s.repo == r && s.url.as_deref() == Some(u));
     let mut cache = state.update_source_catalogue_cache.write().await;
-    // Only what the last check still names, so the cache is bounded by the
-    // sources list rather than growing with every release a source makes.
-    cache.retain(|c| {
-        (c.repo != repo || c.url != url)
-            && current.iter().any(|s| s.repo == c.repo && s.url.as_deref() == Some(c.url.as_str()))
-    });
-    cache.push(SourceCatalogueCached { repo, url, catalogue: fresh });
+    cache.retain(|c| (c.repo != repo || c.url != url) && is_current(&c.repo, &c.url));
+    if is_current(&repo, &url) {
+        cache.push(SourceCatalogueCached { repo, url, catalogue: fresh });
+    }
     drop(cache);
     Json(answer).into_response()
 }

@@ -107,8 +107,17 @@ function isFreshThirdParty(c: ComponentOffer): c is ComponentOffer & { third_par
 /** Install on a row: ours at once, a stranger's through the page's
  *  confirmation naming its repository (spec §4.5). */
 function onInstall(c: ComponentOffer) {
-  if (isFreshThirdParty(c)) emit('install-third-party', c.name, c.third_party_repo)
-  else emit('install', c.name)
+  // Fails closed: a third-party row that is not a fresh offer from one named
+  // source never installs directly, whatever shape it arrives in.
+  if (c.kind !== 'third_party') emit('install', c.name)
+  else if (isFreshThirdParty(c)) emit('install-third-party', c.name, c.third_party_repo)
+}
+
+/** Whether a row has anything to install from here: ours, or a stranger's
+ *  fresh offer from one named source. A third-party row with no source to
+ *  name gets no button rather than a direct install. */
+function canInstall(c: ComponentOffer): boolean {
+  return c.kind !== 'third_party' || isFreshThirdParty(c)
 }
 
 /** The sources whose fresh offers are on screen. */
@@ -304,7 +313,7 @@ watch(
                  re-enqueues a second `Job::Install` of a component whose
                  first install has not finished yet. -->
             <Button
-              v-else
+              v-else-if="canInstall(row.offer)"
               variant="outline" size="xs" data-installable-install
               :disabled="!!busy"
               @click="onInstall(row.offer)"

@@ -396,6 +396,20 @@ describe('InstallablesDialog', () => {
       expect(row('zed')?.querySelector('[data-installable-install]')).not.toBeNull()
     })
 
+    // Fails closed (fix round 1): a third-party row with neither a source
+    // nor a conflict has no one to name in the second consent, so it gets no
+    // button at all rather than a direct install. Its fresh neighbour keeps
+    // its button, so a dialog that drops every Install cannot pass.
+    // **[MUTATION]** Install back to a plain `v-else`: red.
+    it('offers no Install for a third-party row that names no source', async () => {
+      const w = mountDialog([offer({ name: 'orphan', kind: 'third_party', offered: '1.0.0' }), fresh()])
+      await flushPromises()
+      expect(row('orphan')).not.toBeNull()
+      expect(row('orphan')?.querySelector('[data-installable-install]')).toBeNull()
+      expect(row('zed')?.querySelector('[data-installable-install]')).not.toBeNull()
+      expect(w.emitted('install')).toBeUndefined()
+    })
+
     // The source's own catalogue describes its own offer — asked from the
     // core by repository, once — and nothing else: its entry for `radio`
     // never describes our `radio`, nor does our catalogue's `zed` describe

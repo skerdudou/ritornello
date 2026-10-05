@@ -204,8 +204,9 @@ pub struct AppState {
     pub update_catalogue_cache: Arc<RwLock<Option<(String, crate::update::catalogue::Catalogue)>>>,
     /// The same, for the sources' own catalogues
     /// (`GET /api/update/catalogue?repo=`): one entry per `(repo, url)`,
-    /// unfiltered. Pruned on every write to the sources the last check left
-    /// a catalogue for, so it never holds more than `SOURCES_MAX` entries.
+    /// unfiltered. Pruned on every write against the sources the state names
+    /// at that moment (read after the fetch), and an answer no longer named
+    /// is not stored, so it never holds more than `SOURCES_MAX` entries.
     pub update_source_catalogue_cache: Arc<RwLock<Vec<crate::update::routes::SourceCatalogueCached>>>,
     /// The repositories the operator added as update sources, lowercased
     /// `owner/repo` — the same handle the update `Worker` reads, so a check
