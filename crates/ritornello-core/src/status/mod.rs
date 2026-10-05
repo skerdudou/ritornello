@@ -1484,6 +1484,49 @@ mod tests {
         assert!(settings_rx.try_recv().is_err(), "nothing must go out on the channel");
     }
 
+    #[tokio::test]
+    async fn put_settings_with_an_unknown_update_policy_is_refused_and_sends_nothing() {
+        // An unknown policy is refused at the door (axum's `Json` rejection):
+        // only `state::load` is lenient with a value from a newer core.
+        let (state, mut settings_rx) = app_state_with_settings();
+        let settings_current = state.settings_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"update_policy":"nonsense"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_client_error(), "got {}", resp.status());
+        assert_eq!(settings_current.read().await.update_policy, crate::update::schedule::UpdatePolicy::Off);
+        // The only sender lives in the state the router owned; once the router
+        // is gone the channel is closed, and an empty one answers `None`.
+        assert_eq!(settings_rx.recv().await, None, "nothing must go out on the channel");
+    }
+
+    #[tokio::test]
+    async fn put_settings_accepts_the_fourth_update_policy() {
+        let (state, mut settings_rx) = app_state_with_settings();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"update_policy":"check_and_install_all"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            settings_rx.recv().await.unwrap().update_policy,
+            crate::update::schedule::UpdatePolicy::CheckAndInstallAll
+        );
+    }
+
     #[test]
     fn validate_audio_device_returns_a_typed_error() {
         assert_eq!(validate_audio_device(""), Err(AudioOutputError::EmptyName));

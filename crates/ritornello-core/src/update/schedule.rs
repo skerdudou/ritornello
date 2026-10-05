@@ -16,7 +16,38 @@ pub enum UpdatePolicy {
     #[default]
     Off,
     Check,
+    /// Installs what the official release offers for what is already on the
+    /// device. Never adds a component, and never touches a third-party one.
     CheckAndInstall,
+    /// As `CheckAndInstall`, and the components that come from a third-party
+    /// repository are updated too (spec section 4.4). Still never adds one.
+    ///
+    /// **The accepted price of a rollback:** a core older than this one does
+    /// not know the wire name `check_and_install_all`. `state::load` reads it
+    /// as `off` rather than discarding the whole file, so the device stops
+    /// updating by itself until the operator picks a policy again — a safe
+    /// direction, and the only one that does not lose the other settings.
+    CheckAndInstallAll,
+}
+
+/// How far an automatic run may reach when it installs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallScope {
+    /// Components of the official release only.
+    Official,
+    /// The official release's, and every third-party component's.
+    IncludingThirdParty,
+}
+
+impl UpdatePolicy {
+    /// `None` when the policy never installs; otherwise how far it may reach.
+    pub fn install_scope(self) -> Option<InstallScope> {
+        match self {
+            Self::Off | Self::Check => None,
+            Self::CheckAndInstall => Some(InstallScope::Official),
+            Self::CheckAndInstallAll => Some(InstallScope::IncludingThirdParty),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +191,33 @@ mod tests {
 
     fn at(hour: u32, minute: u32, weekday: Weekday, day: i64) -> LocalNow {
         LocalNow { hour, minute, weekday, day_key: day }
+    }
+
+    #[test]
+    fn the_fourth_policy_reads_and_writes_its_own_wire_name() {
+        let p: UpdatePolicy = serde_json::from_str("\"check_and_install_all\"").unwrap();
+        assert_eq!(p, UpdatePolicy::CheckAndInstallAll);
+        assert_eq!(
+            serde_json::to_string(&UpdatePolicy::CheckAndInstallAll).unwrap(),
+            "\"check_and_install_all\""
+        );
+    }
+
+    #[test]
+    fn only_the_two_install_policies_install_and_only_the_fourth_includes_third_parties() {
+        assert_eq!(UpdatePolicy::Off.install_scope(), None);
+        assert_eq!(UpdatePolicy::Check.install_scope(), None);
+        assert_eq!(UpdatePolicy::CheckAndInstall.install_scope(), Some(InstallScope::Official));
+        assert_eq!(
+            UpdatePolicy::CheckAndInstallAll.install_scope(),
+            Some(InstallScope::IncludingThirdParty)
+        );
+    }
+
+    #[test]
+    fn the_fourth_policy_is_due_like_the_others() {
+        let now = at(3, 0, Weekday::Wednesday, 100);
+        assert!(due(&now, UpdatePolicy::CheckAndInstallAll, 3, UpdateCadence::Daily, None));
     }
 
     /// Seven stated pairs, not a loop over `0..7` mapped by the same rule

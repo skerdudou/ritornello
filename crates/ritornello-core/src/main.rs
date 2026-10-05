@@ -2997,9 +2997,8 @@ async fn main() -> Result<()> {
                         // night — installing included.
                         let previous_run_day = core.update_last_run_day();
                         core.set_update_last_run_day(Some(now.day_key));
-                        let install = settings.update_policy
-                            == update::schedule::UpdatePolicy::CheckAndInstall;
-                        tracing::info!("scheduled update run (install: {install})");
+                        let install = settings.update_policy.install_scope();
+                        tracing::info!("scheduled update run (install: {install:?})");
                         // A full channel means a run is still in flight, and
                         // queuing a second one behind it would be the same
                         // work twice. `try_send` rather than `send` for that,

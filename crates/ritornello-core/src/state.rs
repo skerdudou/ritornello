@@ -381,10 +381,31 @@ impl Default for PersistedState {
 }
 
 pub fn load(path: &Path) -> PersistedState {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Ok(text) = std::fs::read_to_string(path) else { return PersistedState::default() };
+    if let Ok(state) = serde_json::from_str(&text) {
+        return state;
+    }
+    // One known shape of "a newer core wrote this": an `update_policy` this
+    // core does not know. Rewritten to `off` and parsed again; anything else
+    // still takes the all-or-nothing path, deliberately (see the test
+    // `a_file_broken_elsewhere_still_resets_to_defaults`).
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return PersistedState::default();
+    };
+    replace_unknown_update_policy(&mut value);
+    serde_json::from_value(value).unwrap_or_default()
+}
+
+/// Rewrites a `settings.update_policy` that is a string this core cannot read
+/// to `off`. A value that is not a string is damage, not a newer core's name,
+/// and a known name is left exactly as it is.
+fn replace_unknown_update_policy(value: &mut serde_json::Value) {
+    if let Some(policy) = value.pointer_mut("/settings/update_policy")
+        && policy.is_string()
+        && serde_json::from_value::<crate::update::schedule::UpdatePolicy>(policy.clone()).is_err()
+    {
+        *policy = serde_json::Value::String("off".into());
+    }
 }
 
 pub fn save(path: &Path, state: &PersistedState) -> Result<()> {
@@ -400,6 +421,97 @@ pub fn save(path: &Path, state: &PersistedState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writes `st`, swaps the serialized `update_policy` for `wire` (a JSON
+    /// value as text) and reads the file back through `load`.
+    fn load_with_policy_on_disk(st: &PersistedState, wire: &str) -> PersistedState {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        save(&path, st).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let marker = "\"update_policy\": \"off\"";
+        assert!(text.contains(marker), "the fixture must serialize the policy as expected");
+        let text = text.replace(marker, &format!("\"update_policy\": {wire}"));
+        assert!(text.contains(wire), "the fixture must actually carry the replaced value");
+        std::fs::write(&path, text).unwrap();
+        load(&path)
+    }
+
+    fn customised() -> PersistedState {
+        let mut st = PersistedState { volume: 37, locale: Some("fr".into()), ..PersistedState::default() };
+        st.settings.update_hour = 5;
+        st
+    }
+
+    #[test]
+    fn a_policy_this_core_does_not_know_falls_back_to_off_and_keeps_every_other_setting() {
+        // What a core rolled back under a newer one reads: the newer core wrote
+        // a value this one has never heard of.
+        let back = load_with_policy_on_disk(&customised(), "\"check_and_install_everything\"");
+        assert_eq!(back.volume, 37);
+        assert_eq!(back.locale.as_deref(), Some("fr"));
+        assert_eq!(back.settings.update_hour, 5);
+        assert_eq!(back.settings.update_policy, crate::update::schedule::UpdatePolicy::Off);
+    }
+
+    #[test]
+    fn the_repair_rewrites_an_unknown_policy_name_and_nothing_else() {
+        // Called directly: through `load` a known policy never reaches the
+        // repair (the first parse succeeds), so the "is it really unknown"
+        // operand can only be seen here.
+        let repaired = |wire: serde_json::Value| {
+            let mut v = serde_json::json!({ "settings": { "update_policy": wire } });
+            replace_unknown_update_policy(&mut v);
+            v["settings"]["update_policy"].clone()
+        };
+        assert_eq!(repaired(serde_json::json!("check")), serde_json::json!("check"));
+        assert_eq!(
+            repaired(serde_json::json!("check_and_install_all")),
+            serde_json::json!("check_and_install_all")
+        );
+        assert_eq!(repaired(serde_json::json!("whatever_comes_next")), serde_json::json!("off"));
+        assert_eq!(repaired(serde_json::json!(3)), serde_json::json!(3));
+    }
+
+    #[test]
+    fn a_known_policy_beside_damage_elsewhere_is_not_repaired_into_amnesty() {
+        // Damage elsewhere takes the all-or-nothing path even when the policy
+        // is known; the repair rewrites nothing in that case.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"volume":"loud","settings":{"update_policy":"check"}}"#).unwrap();
+        assert_eq!(load(&path), PersistedState::default());
+    }
+
+    #[test]
+    fn a_policy_that_is_not_even_a_string_is_not_a_newer_cores_value() {
+        // The repair is for an unknown *name*. A number is damage, and damage
+        // takes the all-or-nothing path.
+        let back = load_with_policy_on_disk(&customised(), "3");
+        assert_eq!(back, PersistedState::default());
+    }
+
+    #[test]
+    fn a_file_broken_elsewhere_still_resets_to_defaults() {
+        // The repair is for one field's value, not a general amnesty.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"active_source":"cd","volume":"loud"}"#).unwrap();
+        assert_eq!(load(&path), PersistedState::default());
+    }
+
+    #[test]
+    fn an_unknown_policy_and_damage_elsewhere_together_still_reset_to_defaults() {
+        // The repair rewrites one field; it must not make the rest lenient.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"volume":"loud","settings":{"update_policy":"check_and_install_everything"}}"#,
+        )
+        .unwrap();
+        assert_eq!(load(&path), PersistedState::default());
+    }
 
     #[test]
     fn default_if_file_missing_or_corrupted() {

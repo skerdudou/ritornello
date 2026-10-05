@@ -132,8 +132,8 @@ pub enum Job {
     /// Install the named components. `core` names the core; anything else is a
     /// plugin.
     Install(Vec<String>),
-    /// The scheduler's own job: a check, and — when the policy is
-    /// `CheckAndInstall` — the installs that check turns out to make due.
+    /// The scheduler's own job: a check, and — when the policy installs —
+    /// the installs that check turns out to make due.
     ///
     /// **One job and not two**, and that is the whole reason it exists: what
     /// an automatic run must install is only known once the check has
@@ -141,9 +141,10 @@ pub enum Job {
     /// to build the list from the *previous* check, and would install a day
     /// late — or, on the first run of a fresh device, install nothing at all.
     Scheduled {
-        /// `UpdatePolicy::CheckAndInstall`, decided by the ticker that has the
-        /// settings in hand rather than read again here.
-        install: bool,
+        /// `UpdatePolicy::install_scope`, decided by the ticker that has the
+        /// settings in hand rather than read again here: `None` for a policy
+        /// that only checks, otherwise how far the installs may reach.
+        install: Option<schedule::InstallScope>,
     },
     /// The slow half of an uninstall (see `status::plugin_status::plugin_delete`):
     /// the declaration is already gone from `plugins.toml` and the core has
@@ -230,8 +231,10 @@ fn carries(published: &Published, name: &str) -> bool {
 /// Four exclusions, and each answers a decision of the specification rather
 /// than a convenience:
 ///
-/// - a **third-party** plugin is never touched by the automatic policy — its
-///   repository is not ours to judge;
+/// - a **third-party** component (any row carrying a `third_party_repo`,
+///   whatever its kind) is touched only when the policy says so
+///   (`InstallScope::IncludingThirdParty`, the fourth policy): its repository
+///   is not ours to judge unless the operator chose to trust it that far;
 /// - a plugin the device does not have is never *added* by itself — choosing
 ///   what is installed stays the operator's decision;
 /// - a component already known to need a manual step is not attempted again
@@ -296,16 +299,38 @@ fn carries(published: &Published, name: &str) -> bool {
 ///   memory `install_one` does, which is a change to what a pack install
 ///   *does*, not to what this policy *reads* — out of scope for the finding
 ///   that added packs to this list.
-fn automatic_install_list(components: &[ComponentOffer], placed: &placed::Placed) -> Vec<String> {
+fn automatic_install_list(
+    components: &[ComponentOffer],
+    placed: &placed::Placed,
+    scope: schedule::InstallScope,
+) -> Vec<String> {
     components
         .iter()
         .filter(|c| c.availability == Availability::UpdateAvailable)
-        .filter(|c| matches!(c.kind, ComponentKind::Core | ComponentKind::Plugin | ComponentKind::LanguagePack))
+        // Keyed on the repository and not on the kind, so a third-party
+        // language pack (Task 7) follows the same rule as a third-party
+        // plugin without a second arm to forget.
+        .filter(|c| c.third_party_repo.is_none() || scope == schedule::InstallScope::IncludingThirdParty)
         .filter(|c| c.installable != Some(false))
-        .filter(|c| c.installed.is_some() || placed.contains_key(&c.name))
-        .filter(|c| c.offered.as_deref() != placed::version_of(placed, &c.name))
+        .filter(|c| c.installed.is_some() || placed.contains_key(&placed_key(c)))
+        .filter(|c| c.offered.as_deref() != placed::version_of(placed, &placed_key(c)))
         .map(|c| c.name.clone())
         .collect()
+}
+
+/// The key a component's placement is remembered under: its name for ours, a
+/// namespaced key for any row that carries a repository. A stranger's name may
+/// collide with ours, and `:` never appears in one of ours.
+fn placed_key(c: &ComponentOffer) -> String {
+    match &c.third_party_repo {
+        Some(repo) => third_party_placed_key(repo, &c.name),
+        None => c.name.clone(),
+    }
+}
+
+/// The key under which a third-party component's placement is remembered.
+pub(crate) fn third_party_placed_key(repo: &str, name: &str) -> String {
+    format!("third-party:{repo}:{name}")
 }
 
 /// How many third-party repositories one check is allowed to query.
@@ -1855,7 +1880,23 @@ impl Worker {
             self.set_busy(Some(self.message_for("update_installing", &name).await))
                 .await;
             let companion = if third_party { None } else { companion_offered(&checked.ours, &name) };
-            match self.install_one(client, &name, offered, third_party, companion).await {
+            // The repository the row names, for the placement memory's key.
+            // Read from the row because `ThirdPartyOffer` carries none yet.
+            let repo = if third_party {
+                self.state
+                    .read()
+                    .await
+                    .components
+                    .iter()
+                    .find(|c| c.name == name && c.third_party_repo.is_some())
+                    .and_then(|c| c.third_party_repo.clone())
+            } else {
+                None
+            };
+            match self
+                .install_one(client, &name, offered, third_party, repo.as_deref(), companion)
+                .await
+            {
                 Ok(Placed::Plugin) => {
                     self.restart_plugin(&name).await;
                     placed.push(Placement {
@@ -1970,6 +2011,7 @@ impl Worker {
         name: &str,
         offered: &Published,
         third_party: bool,
+        repo: Option<&str>,
         companion_offered: Option<&str>,
     ) -> Result<Placed, Refusal> {
         let is_core = offered.offer == Offer::Core;
@@ -2167,8 +2209,17 @@ impl Worker {
         // the moment it sees `Placed::Core`, so this is the last instant at
         // which anything can be remembered about a core update. See
         // `remember_placed`, and `automatic_install_list` for what reads it.
-        if !third_party {
-            self.remember_placed(name, &offered.version, core_notes);
+        // A third party is remembered under a namespaced key, never its bare
+        // name: that name is a stranger's choice and may be one of ours.
+        match (third_party, repo) {
+            (false, _) => self.remember_placed(name, &offered.version, core_notes),
+            (true, Some(repo)) => {
+                self.remember_placed(&third_party_placed_key(repo, name), &offered.version, core_notes)
+            }
+            // No repository to namespace by: nothing is remembered, which
+            // fails open (the component is attempted again) as the module
+            // doc says it should.
+            (true, None) => {}
         }
         // The installer **copies** what it places (it renames a copy made
         // inside the target's own directory, since a rename across mounts is
@@ -2213,13 +2264,12 @@ impl Worker {
     /// arms of `install` is what makes that ordering a fact about the shape of
     /// the code instead of a rule three call sites have to remember.
     ///
-    /// **Nothing is remembered for a third-party component**, and that is not
-    /// an oversight: the automatic policy never installs one (see
-    /// `automatic_install_list`), so there is nothing for the memory to bound
-    /// — and a third-party plugin's name is chosen by its own author and may
-    /// collide with one of ours, which is the very reason `Checked` keeps two
-    /// lists. Not writing the entry is how that collision is made impossible
-    /// here rather than reasoned about.
+    /// **A third-party component is remembered under a namespaced key**
+    /// (`third_party_placed_key`), now that the fourth policy may install one
+    /// unattended and the memory has something to bound. Its name is chosen by
+    /// its own author and may collide with one of ours, which is the very
+    /// reason `Checked` keeps two lists: the `third-party:<repo>:` prefix makes
+    /// the collision impossible here rather than reasoned about.
     ///
     /// **A manual placement is written down too**, and the brief only asked
     /// for the automatic policy's own. It is the better reading: what the
@@ -2663,7 +2713,7 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
             }
             Job::Scheduled { install } => {
                 if let Some(checked) = worker.check(&client).await
-                    && install
+                    && let Some(scope) = install
                 {
                     // The memory is read from disk at the moment of the
                     // decision rather than held in the `Worker`: it is
@@ -2674,6 +2724,7 @@ pub async fn run_worker(worker: Worker, mut rx: mpsc::Receiver<Job>) {
                     let names = automatic_install_list(
                         &worker.state.read().await.components,
                         &placed::read(&worker.staging),
+                        scope,
                     );
                     if names.is_empty() {
                         tracing::debug!("update: scheduled run, nothing to install");
@@ -3244,7 +3295,7 @@ mod tests {
             silent,
         ];
         assert_eq!(
-            automatic_install_list(&components, &nothing_placed()),
+            automatic_install_list(&components, &nothing_placed(), schedule::InstallScope::Official),
             names(&["core", "radio", "ritornello-lang-fr"])
         );
     }
@@ -3297,7 +3348,7 @@ mod tests {
         // Night 1: nothing has ever been placed on this device.
         let night_one = worker_at(dir.path(), stalled_line());
         assert_eq!(
-            automatic_install_list(&rows, &placed::read(&night_one.staging)),
+            automatic_install_list(&rows, &placed::read(&night_one.staging), schedule::InstallScope::Official),
             names(&["core"]),
             "the first night installs it: this policy has never placed 0.4.1 here"
         );
@@ -3316,7 +3367,7 @@ mod tests {
         // device comes up on it, in a new process.
         let night_two = worker_at(dir.path(), stalled_line());
         assert_eq!(
-            automatic_install_list(&rows, &placed::read(&night_two.staging)),
+            automatic_install_list(&rows, &placed::read(&night_two.staging), schedule::InstallScope::Official),
             Vec::<String>::new(),
             "the second night installs nothing: 0.4.1 is the version this policy already placed and the device did not keep"
         );
@@ -3342,7 +3393,7 @@ mod tests {
         let memory = placed::read(&worker.staging);
 
         assert_eq!(
-            automatic_install_list(&rows, &memory),
+            automatic_install_list(&rows, &memory, schedule::InstallScope::Official),
             Vec::<String>::new(),
             "the automatic policy has given up on this version"
         );
@@ -3365,7 +3416,7 @@ mod tests {
         let worker = worker_at(dir.path(), stalled_line());
         placed::record(&worker.staging, "core", "0.4.1", None).unwrap();
         assert_eq!(
-            automatic_install_list(&core_offered("0.2.0", "0.5.0"), &placed::read(&worker.staging)),
+            automatic_install_list(&core_offered("0.2.0", "0.5.0"), &placed::read(&worker.staging), schedule::InstallScope::Official),
             names(&["core"]),
             "0.5.0 is not the version that failed, and nothing is known against it"
         );
@@ -3390,7 +3441,7 @@ mod tests {
         console.installed = None;
         console.offered = Some("0.4.1".to_string());
         assert_eq!(
-            automatic_install_list(&[console], &placed::read(&worker.staging)),
+            automatic_install_list(&[console], &placed::read(&worker.staging), schedule::InstallScope::Official),
             Vec::<String>::new(),
             "an unknown version this updater is not responsible for is still nobody's business to fix nightly"
         );
@@ -3415,7 +3466,7 @@ mod tests {
         console.installed = None;
         console.offered = Some("0.5.0".to_string());
         assert_eq!(
-            automatic_install_list(&[console.clone()], &placed::read(&worker.staging)),
+            automatic_install_list(&[console.clone()], &placed::read(&worker.staging), schedule::InstallScope::Official),
             names(&["console"]),
             "the release after the one that broke it is exactly where an automatic repair is worth most"
         );
@@ -3424,7 +3475,7 @@ mod tests {
         // one download per released version and never one per night.
         console.offered = Some("0.4.1".to_string());
         assert_eq!(
-            automatic_install_list(&[console], &placed::read(&worker.staging)),
+            automatic_install_list(&[console], &placed::read(&worker.staging), schedule::InstallScope::Official),
             Vec::<String>::new(),
             "the same broken archive is not fetched again tonight"
         );
@@ -3548,9 +3599,155 @@ mod tests {
         theirs.offered = Some("2.0.0".to_string());
         let mine = row("radio", ComponentKind::Plugin, Availability::UpdateAvailable);
         assert_eq!(
-            automatic_install_list(&[theirs, mine], &nothing_placed()),
+            automatic_install_list(&[theirs, mine], &nothing_placed(), schedule::InstallScope::Official),
             names(&["radio"]),
             "a third-party plugin is never installed while nobody is watching, even when its own repository offers a newer version"
+        );
+    }
+
+    fn memory(entries: &[(&str, &str)]) -> placed::Placed {
+        entries
+            .iter()
+            .map(|(key, version)| {
+                (
+                    key.to_string(),
+                    placed::PlacedComponent { version: version.to_string(), not_installed_files: None },
+                )
+            })
+            .collect()
+    }
+
+    fn third_party_row(name: &str, repo: &str) -> ComponentOffer {
+        let mut c = row(name, ComponentKind::ThirdParty, Availability::UpdateAvailable);
+        c.third_party_repo = Some(repo.to_string());
+        c.offered = Some("2.0.0".to_string());
+        c
+    }
+
+    /// The fourth policy's whole reach, and its edge: a third-party plugin is
+    /// updated only when the scope says so, and the official row beside it is
+    /// updated either way (without it an empty answer would pass).
+    ///
+    /// Each operand of the predicate has its own half: `Official` keeps the
+    /// stranger out (so a filter that always lets it in fails), and
+    /// `IncludingThirdParty` lets it in (so a filter that always keeps it out
+    /// fails).
+    // Task 7: a third-party language pack row (`ComponentKind::LanguagePack`
+    // with `third_party_repo: Some`) is tested here too, once such a row can be
+    // built by the check.
+    #[test]
+    fn a_third_party_plugin_is_updated_only_when_the_scope_includes_third_parties() {
+        let theirs = third_party_row("someones-plugin", "someone/theirs");
+        let mine = row("radio", ComponentKind::Plugin, Availability::UpdateAvailable);
+        let rows = [theirs, mine];
+        assert_eq!(
+            automatic_install_list(&rows, &nothing_placed(), schedule::InstallScope::Official),
+            names(&["radio"])
+        );
+        assert_eq!(
+            automatic_install_list(&rows, &nothing_placed(), schedule::InstallScope::IncludingThirdParty),
+            names(&["someones-plugin", "radio"])
+        );
+    }
+
+    /// A row that carries a repository is third-party whatever its kind says:
+    /// the filter keys on the repository, which is what a third-party language
+    /// pack will carry.
+    #[test]
+    fn a_row_with_a_repository_is_third_party_whatever_its_kind() {
+        let mut odd = row("odd", ComponentKind::Plugin, Availability::UpdateAvailable);
+        odd.third_party_repo = Some("someone/theirs".to_string());
+        assert_eq!(
+            automatic_install_list(&[odd.clone()], &nothing_placed(), schedule::InstallScope::Official),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            automatic_install_list(&[odd], &nothing_placed(), schedule::InstallScope::IncludingThirdParty),
+            names(&["odd"])
+        );
+    }
+
+    /// The placement memory of a third party is its own: offered == placed
+    /// under the **namespaced** key excludes it, and a plain-name entry (one of
+    /// ours, same name) does not.
+    #[test]
+    fn a_third_party_is_judged_by_its_namespaced_placement_only() {
+        let scope = schedule::InstallScope::IncludingThirdParty;
+        let theirs = third_party_row("radio", "someone/theirs");
+        let key = third_party_placed_key("someone/theirs", "radio");
+        assert_eq!(key, "third-party:someone/theirs:radio");
+        // Tried and kept nothing: its own entry says this archive was placed.
+        assert_eq!(
+            automatic_install_list(std::slice::from_ref(&theirs), &memory(&[(&key, "2.0.0")]), scope),
+            Vec::<String>::new()
+        );
+        // Our `radio` having been placed at that very version says nothing
+        // about the stranger's.
+        assert_eq!(
+            automatic_install_list(std::slice::from_ref(&theirs), &memory(&[("radio", "2.0.0")]), scope),
+            names(&["radio"])
+        );
+        // And an entry for another repository's `radio` does not shield it.
+        let other = third_party_placed_key("someone/else", "radio");
+        assert_eq!(
+            automatic_install_list(&[theirs], &memory(&[(&other, "2.0.0")]), scope),
+            names(&["radio"])
+        );
+    }
+
+    /// The other direction of the collision: a stranger's placement does not
+    /// shield one of ours that bears the same name.
+    #[test]
+    fn a_third_party_placement_does_not_shield_an_official_component_of_the_same_name() {
+        let mine = row("radio", ComponentKind::Plugin, Availability::UpdateAvailable);
+        let key = third_party_placed_key("someone/theirs", "radio");
+        assert_eq!(
+            automatic_install_list(
+                std::slice::from_ref(&mine),
+                &memory(&[(&key, "0.3.0")]),
+                schedule::InstallScope::IncludingThirdParty
+            ),
+            names(&["radio"])
+        );
+        // Control: our own entry at the offered version does shield it.
+        assert_eq!(
+            automatic_install_list(
+                &[mine],
+                &memory(&[("radio", "0.3.0")]),
+                schedule::InstallScope::IncludingThirdParty
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// The "never announced a version" guard reads the same namespaced key:
+    /// a third party this updater placed and that then died is repaired, one
+    /// it never touched is left alone, and a same-named official placement
+    /// does not count as its own.
+    #[test]
+    fn a_silent_third_party_is_admitted_by_its_own_placement_only() {
+        let scope = schedule::InstallScope::IncludingThirdParty;
+        let mut silent = third_party_row("radio", "someone/theirs");
+        silent.installed = None;
+        let key = third_party_placed_key("someone/theirs", "radio");
+        assert_eq!(
+            automatic_install_list(&[silent.clone()], &memory(&[(&key, "1.0.0")]), scope),
+            names(&["radio"])
+        );
+        assert_eq!(
+            automatic_install_list(&[silent.clone()], &nothing_placed(), scope),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            automatic_install_list(&[silent], &memory(&[("radio", "1.0.0")]), scope),
+            Vec::<String>::new()
+        );
+        // And an official silent row is not admitted by a stranger's entry.
+        let mut mine = row("radio", ComponentKind::Plugin, Availability::UpdateAvailable);
+        mine.installed = None;
+        assert_eq!(
+            automatic_install_list(&[mine], &memory(&[(&key, "1.0.0")]), scope),
+            Vec::<String>::new()
         );
     }
 
@@ -5200,7 +5397,7 @@ mod tests {
         let client = client().unwrap();
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client, "radio", &published, true, None),
+            worker.install_one(&client, "radio", &published, true, None, None),
         )
         .await
         .expect("install_one hung");
@@ -5255,7 +5452,7 @@ mod tests {
         let client = client().unwrap();
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client, "theirs", &published, true, None),
+            worker.install_one(&client, "theirs", &published, true, None, None),
         )
         .await
         .expect("install_one hung");
@@ -5605,7 +5802,7 @@ mod tests {
         let published = served("newsource", &archive).await;
         let client = client().unwrap();
 
-        worker.install_one(&client, "newsource", &published, false, None).await.unwrap();
+        worker.install_one(&client, "newsource", &published, false, None, None).await.unwrap();
 
         assert_eq!(
             std::fs::read(worker.plugin_data_root.join("newsource").join("stations.toml")).unwrap(),
@@ -5660,7 +5857,7 @@ mod tests {
         let client = client().unwrap();
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client, "files", &published, false, companion_offered),
+            worker.install_one(&client, "files", &published, false, None, companion_offered),
         )
         .await
         .expect("install_one hung")
@@ -6030,7 +6227,7 @@ mod tests {
         let published = served("files", &archive).await;
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            worker.install_one(&client().unwrap(), "files", &published, true, None),
+            worker.install_one(&client().unwrap(), "files", &published, true, None, None),
         )
         .await
         .expect("install_one hung");
@@ -6060,8 +6257,34 @@ mod tests {
         let archive = targz(&[("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF")]);
         let published = served("radio", &archive).await;
         let client = client().unwrap();
-        let outcome = worker.install_one(&client, "radio", &published, false, None).await;
+        let outcome = worker.install_one(&client, "radio", &published, false, None, None).await;
         assert!(matches!(outcome, Ok(Placed::Plugin)), "{:?}", outcome.as_ref().err());
+    }
+
+    /// What `install_one` remembers, and under which key. Driven through the
+    /// real `install_one` and read back from the file the next night's process
+    /// would read: a third party is written under its namespaced key and never
+    /// its bare name, one of ours under its name, and a third party with no
+    /// repository to namespace by under nothing.
+    #[tokio::test]
+    async fn install_one_remembers_a_placement_under_the_key_its_origin_dictates() {
+        for (third_party, repo, expected) in [
+            (true, Some("someone/theirs"), Some("third-party:someone/theirs:radio")),
+            (false, None, Some("radio")),
+            (true, None, None),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let worker = worker_at(dir.path(), one_line(PluginStatus::startup("radio")));
+            let _privileged = Privileged::answers(Ok(()));
+            let archive = targz(&[("usr/local/lib/ritornello/plugins/ritornello-plugin-radio", b"ELF")]);
+            let published = served("radio", &archive).await;
+            let outcome = worker
+                .install_one(&client().unwrap(), "radio", &published, third_party, repo, None)
+                .await;
+            assert!(matches!(outcome, Ok(Placed::Plugin)), "{:?}", outcome.as_ref().err());
+            let keys: Vec<String> = placed::read(&worker.staging).keys().cloned().collect();
+            assert_eq!(keys, expected.map(str::to_string).into_iter().collect::<Vec<_>>(), "third_party={third_party}");
+        }
     }
 
     /// The declaration is written **from the archive's own fragment**, and
