@@ -312,6 +312,7 @@ update_needs_manual_step = "{component} ne peut pas être installé depuis ici :
 update_needs_companion_step = "{component} ne peut pas être installé ni mis à jour depuis ici : il est livré avec {companion}, un composant exécuté par root que seul ritornello-install place, et cette version le modifie ou l'appareil ne peut pas dire quelle version il en a. Installez ou mettez à jour {component} avec ritornello-install."
 update_row_needs_companion = "Cette mise à jour modifie aussi l'assistant de montage ({companion}) : faites-la avec ritornello-install."
 update_wrong_file = "{component} ne peut pas être installé depuis ici : son archive ne porte pas le fichier que {component} est déclaré exécuter ({detail})"
+update_wrong_name = "{component} ne peut pas être installé sous ce nom ({detail})"
 update_third_party_unchecked = "{component} vient d'un dépôt tiers que cette vérification n'a pas pu consulter, et sa mise à jour ne peut venir que de là — rien n'a été installé"
 update_third_party_archive = "{component} ne peut pas être installé depuis ici : une archive tierce ne peut porter que son propre binaire de greffon — ni unité systemd, ni règle polkit, ni fichier de configuration, ni bloc de greffon."
 update_no_fragment = "{component} ne peut pas être déclaré : son archive ne porte aucun bloc de greffon"

@@ -330,8 +330,13 @@ fn placed_key(c: &ComponentOffer) -> String {
 }
 
 /// The key under which a third-party component's placement is remembered.
+///
+/// The repository is lowercased here, once, for every writer and reader: a
+/// fresh install remembers its source as `sources::fresh_offers` names it
+/// (lowercased), and that plugin's later updates read the memory under the
+/// repository as it announces it, whose case is its author's choice.
 pub(crate) fn third_party_placed_key(repo: &str, name: &str) -> String {
-    format!("third-party:{repo}:{name}")
+    format!("third-party:{}:{name}", repo.to_lowercase())
 }
 
 /// What each installed third-party plugin's **own** repository offers for it,
@@ -749,6 +754,13 @@ enum Refusal {
     /// it names a sibling, or the declaration points outside the plugins
     /// directory. Carries which two names disagreed.
     NotItsOwnFile(String),
+    /// A third-party plugin installed from scratch under a name it may not
+    /// take, or whose binary is not named for it: the core writes its
+    /// `[[plugin]]` block itself (`third_party_fragment`), and refuses to
+    /// write one that would declare a binary named for someone else, a name
+    /// reserved for ours, or a name taken on this device since the check.
+    /// Carries which rule refused.
+    NotItsOwnName(String),
     /// A third-party component whose own repository could not be consulted by
     /// this check — past the sources limit, unreachable, unaddressable, or
     /// publishing no archive for this architecture under this name.
@@ -808,7 +820,7 @@ impl std::fmt::Display for Refusal {
             Self::ThirdPartyArchive => {
                 write!(f, "a third-party archive may carry nothing but its own binary")
             }
-            Self::NotItsOwnFile(d) => write!(f, "{d}"),
+            Self::NotItsOwnFile(d) | Self::NotItsOwnName(d) => write!(f, "{d}"),
             Self::ThirdPartyUnchecked => {
                 write!(f, "its own repository was not consulted by this check")
             }
@@ -837,6 +849,7 @@ fn refusal_message(catalog: &Chain, component: &str, why: &Refusal) -> String {
         Refusal::NeedsCompanionStep(c) => ("update_needs_companion_step", Some(("companion", *c))),
         Refusal::ThirdPartyArchive => ("update_third_party_archive", None),
         Refusal::NotItsOwnFile(d) => ("update_wrong_file", Some(("detail", d.as_str()))),
+        Refusal::NotItsOwnName(d) => ("update_wrong_name", Some(("detail", d.as_str()))),
         Refusal::ThirdPartyUnchecked => ("update_third_party_unchecked", None),
         Refusal::NoFragment => ("update_no_fragment", None),
         Refusal::Download(d) => ("update_download_failed", Some(("detail", d.as_str()))),
@@ -944,6 +957,60 @@ fn declaration_needed(
         Some(fragment) => Ok(Some(fragment.to_string())),
         None => Err(Refusal::NoFragment),
     }
+}
+
+/// The `[[plugin]]` block the core writes for a third-party plugin it
+/// installs from scratch (spec §4.3).
+///
+/// **Built by the core, never read from the archive.** A stranger's archive
+/// may carry nothing but its own binary (`only_its_own_binary`), so it has no
+/// block to offer — and a block it did offer would choose its own `exec`,
+/// which is the one line of `plugins.toml` that says what the core runs. So
+/// the block says exactly two things, both the core's: the name the source
+/// offered, and the plugins directory root places the binary in, joined with
+/// that binary's file.
+///
+/// Refused (`NotItsOwnName`) unless:
+///
+/// - `file` is **exactly** `ritornello-plugin-<name>`. Not
+///   `plugins::component_name_from_file(file) == name`: that answers `zed`
+///   for a bare file `zed` too (preflight ruling P2). Exact equality is also
+///   what keeps the row and the undeclared-binary scan, which names a binary
+///   by that function, agreeing on whose binary it is;
+/// - `file` is a valid bare name — it is what root joins onto the plugins
+///   directory, and a name near the length limit makes a file past it;
+/// - `name` is a valid bare name and not `sources::reserved`. `reserved`
+///   holds `!valid_name` itself; the first check is stated here anyway, so
+///   this rule does not rest on what another function chooses to reserve.
+fn third_party_fragment(name: &str, file: &str, plugins_dir: &Path) -> Result<String, Refusal> {
+    use ritornello_updater::request::valid_name;
+    let own = format!("ritornello-plugin-{name}");
+    if file != own {
+        return Err(Refusal::NotItsOwnName(format!("the archive carries {file}, not {own}")));
+    }
+    if !valid_name(file) {
+        return Err(Refusal::NotItsOwnName(format!("{file} is not a valid file name")));
+    }
+    if !valid_name(name) {
+        return Err(Refusal::NotItsOwnName(format!("{name} is not a valid plugin name")));
+    }
+    if sources::reserved(name) {
+        return Err(Refusal::NotItsOwnName(format!("{name} is reserved")));
+    }
+    let exec = plugins_dir.join(file);
+    let exec = exec
+        .to_str()
+        .ok_or_else(|| Refusal::Prepare(format!("{} is not UTF-8", exec.display())))?;
+    // Through `toml_edit` rather than `format!`: the plugins directory is
+    // the device's, and quoting it is the TOML writer's job.
+    let mut block = toml_edit::Table::new();
+    block["name"] = toml_edit::value(name);
+    block["exec"] = toml_edit::value(exec);
+    let mut blocks = toml_edit::ArrayOfTables::new();
+    blocks.push(block);
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["plugin"] = toml_edit::Item::ArrayOfTables(blocks);
+    Ok(doc.to_string())
 }
 
 /// Is the file root will be asked to place **this component's own**?
@@ -1996,21 +2063,22 @@ impl Worker {
                     continue;
                 }
                 Resolved::FreshTheirs { published, repo } => {
-                    // Task 6: route this to `install_one` with the `[[plugin]]`
-                    // block the core synthesises. Until then it is refused by
-                    // name and never reaches `install_one`: a third-party
-                    // archive cannot carry a block of its own
-                    // (`only_its_own_binary`), so placing it would leave a
-                    // binary nothing launches.
-                    tracing::warn!(
-                        "update: {name} {} is offered fresh by {repo}, which this core cannot declare yet",
-                        published.version
-                    );
-                    let catalog = self.catalog.read().await;
-                    let message = refusal_message(&catalog, &name, &Refusal::NoFragment);
-                    drop(catalog);
-                    first_failure.get_or_insert(message);
-                    continue;
+                    // The check judged this name free; the gesture asks
+                    // again, because the device may have changed since and
+                    // a fresh offer must never replace anyone's plugin.
+                    if let Err(why) = self.still_unowned(&name) {
+                        tracing::warn!("update: installing {name}: {why}");
+                        let catalog = self.catalog.read().await;
+                        let message = refusal_message(&catalog, &name, &why);
+                        drop(catalog);
+                        first_failure.get_or_insert(message);
+                        continue;
+                    }
+                    // Its `[[plugin]]` block is the core's own, written by
+                    // `install_one` (`third_party_fragment`); `repo` is the
+                    // key the placement is remembered under, which is the
+                    // one this plugin's later updates (`Theirs`) read.
+                    (published, Some(repo))
                 }
                 Resolved::Nothing => {
                     // A named refusal, not a silent skip (task 18's review,
@@ -2287,7 +2355,20 @@ impl Worker {
         // it. `declaration_needed` makes the core's own decision from `is_core`
         // alone.
         let declared = !is_core && self.declared(name);
-        let fragment = declaration_needed(is_core, declared, contents.fragment.as_deref())?;
+        // A third-party plugin nothing declares yet gets **the core's** block,
+        // built from the offered name and the device's plugins directory —
+        // never from the archive, which may carry nothing but its binary
+        // anyway (`archive_allowed` above). See `third_party_fragment`.
+        let fragment = if third_party && !declared {
+            let Some((file, _)) = &contents.binary else {
+                return Err(Refusal::Prepare(format!(
+                    "the archive of {name} carries no plugin binary"
+                )));
+            };
+            Some(third_party_fragment(name, file, &plugins_dir(&self.root))?)
+        } else {
+            declaration_needed(is_core, declared, contents.fragment.as_deref())?
+        };
         // One decision, read once: a block to write is what makes this an
         // installation rather than a replacement.
         let fresh = fragment.is_some();
@@ -2543,6 +2624,32 @@ impl Worker {
         // launches nothing at all on the next boot.
         write_atomic(&self.manifest, updated.as_bytes())
             .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", self.manifest.display())))
+    }
+
+    /// Is `name` still nobody's on this device, as it was when the check
+    /// offered it fresh?
+    ///
+    /// Read from the disk at the gesture, since the check may be hours old:
+    /// `plugins.toml` readable (an unreadable file proves nothing, and
+    /// `declared` would answer `false` there), no block of that name, no
+    /// block running the file the plugin would be placed as, and no such file
+    /// already in the plugins directory. Any of the last three means
+    /// installing would replace a binary someone else owns.
+    fn still_unowned(&self, name: &str) -> Result<(), Refusal> {
+        let manifest = PluginManifest::load(&self.manifest).map_err(|e| {
+            Refusal::NotItsOwnName(format!("{} cannot be read: {e:#}", self.manifest.display()))
+        })?;
+        let target = plugins_dir(&self.root).join(format!("ritornello-plugin-{name}"));
+        if manifest.plugins.iter().any(|p| p.name == name) {
+            return Err(Refusal::NotItsOwnName(format!("{name} is declared on this device")));
+        }
+        if let Some(p) = manifest.plugins.iter().find(|p| Path::new(&p.exec) == target) {
+            return Err(Refusal::NotItsOwnName(format!("{} runs {}", p.name, target.display())));
+        }
+        if target.exists() {
+            return Err(Refusal::NotItsOwnName(format!("{} already exists", target.display())));
+        }
+        Ok(())
     }
 
     /// Is this plugin declared in `plugins.toml`?
@@ -4155,6 +4262,7 @@ mod tests {
             Refusal::NeedsCompanionStep("files-mount"),
             Refusal::ThirdPartyArchive,
             Refusal::NotItsOwnFile("it is declared to run /a/b, and the archive carries c".to_string()),
+            Refusal::NotItsOwnName("the archive carries zed, not ritornello-plugin-zed".to_string()),
             Refusal::ThirdPartyUnchecked,
             Refusal::NoFragment,
             Refusal::Download("connection reset by peer".to_string()),
@@ -5814,15 +5922,199 @@ mod tests {
         assert!(worker.state.read().await.components.iter().all(|c| c.name != "zed"));
     }
 
-    /// Until Task 6 synthesises the `[[plugin]]` block, a fresh offer is
-    /// refused by name and never reaches `install_one`: the URL is not
-    /// served, so reaching it would refuse with a download failure instead.
+    // ---- Task 6: a third-party plugin installed from scratch -------------
+
+    /// The plugins directory a device really has, for the pure tests.
+    const DEVICE_PLUGINS: &str = "/usr/local/lib/ritornello/plugins";
+
+    #[test]
+    fn a_fresh_third_party_block_names_the_plugin_and_its_placed_binary() {
+        let dir = Path::new(DEVICE_PLUGINS);
+        let block = third_party_fragment("zed", "ritornello-plugin-zed", dir).unwrap();
+        let edited = crate::plugins::edit::append_block("", &block, "zed")
+            .expect("append_block accepts what we synthesise");
+        assert!(edited.contains("name = \"zed\""), "{edited}");
+        assert!(
+            edited.contains("exec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-zed\""),
+            "{edited}"
+        );
+        // Nothing else: no `enabled`, no option a stranger could have chosen.
+        let manifest: PluginManifest = toml::from_str(&edited).unwrap();
+        assert_eq!(manifest.plugins.len(), 1);
+        assert!(manifest.plugins[0].enabled);
+    }
+
+    /// Each case isolates **one** operand of the predicate where it can, so
+    /// dropping that operand alone turns this test red (see the mutation
+    /// table in the task report):
+    ///
+    /// - exact file equality: `("zed", "zed")` — `zed` is a valid bare name
+    ///   and not reserved, and `component_name_from_file("zed")` answers
+    ///   `zed`, which is why that function cannot be the predicate
+    ///   (preflight ruling P2); also `radio`'s file, `zed2`, `../`;
+    /// - the file a valid bare name: a name of 60 characters is valid and
+    ///   free, but its file is 78 characters, past `valid_name`'s 64;
+    /// - the name a valid bare name: `-zed` starts with a dash, while
+    ///   `ritornello-plugin--zed` is a valid file (`reserved` also refuses
+    ///   it, since it holds `!valid_name` itself — two guards on purpose);
+    /// - not reserved: `files` (a companion's plugin), `files-mount`,
+    ///   `core`, and a pack id.
+    #[test]
+    fn a_fresh_third_party_block_refuses_a_binary_named_for_someone_else() {
+        let dir = Path::new(DEVICE_PLUGINS);
+        let long = "z".repeat(60);
+        let long_file = format!("ritornello-plugin-{long}");
+        let cases: Vec<(&str, &str)> = vec![
+            ("zed", "ritornello-plugin-radio"),
+            ("zed", "zed"),
+            ("zed", "ritornello-plugin-zed2"),
+            ("zed", "../ritornello-plugin-zed"),
+            ("Zed", "ritornello-plugin-Zed"),
+            (long.as_str(), long_file.as_str()),
+            ("-zed", "ritornello-plugin--zed"),
+            ("files", "ritornello-plugin-files"),
+            ("files-mount", "ritornello-plugin-files-mount"),
+            ("core", "ritornello-plugin-core"),
+            ("ritornello-lang-fr", "ritornello-plugin-ritornello-lang-fr"),
+            ("ritornello-xlang-fr-0123456789ab", "ritornello-plugin-ritornello-xlang-fr-0123456789ab"),
+        ];
+        for (name, file) in cases {
+            assert!(
+                matches!(third_party_fragment(name, file, dir), Err(Refusal::NotItsOwnName(_))),
+                "{name} / {file}"
+            );
+        }
+        // Control: the same predicate accepts the one honest shape, at the
+        // longest name whose file still fits.
+        let fits = "z".repeat(64 - "ritornello-plugin-".len());
+        assert!(third_party_fragment(&fits, &format!("ritornello-plugin-{fits}"), dir).is_ok());
+    }
+
+    /// A status line that has finished speaking, so an install pass's
+    /// `installed_when_settled` does not wait out its fifteen seconds.
+    fn announced_radio() -> Arc<RwLock<StatusState>> {
+        one_line(PluginStatus {
+            version: Some("0.2.0".into()),
+            ..PluginStatus::kind("radio", "source", true, false)
+        })
+    }
+
+    /// A stranger's archive as the strict rule wants it: its own binary,
+    /// nothing else.
+    fn zed_archive() -> Vec<u8> {
+        targz(&[("usr/local/lib/ritornello/plugins/ritornello-plugin-zed", b"ZED")])
+    }
+
+    /// **The block written is the core's, byte for byte**, built from the
+    /// offered name and the device's plugins directory. Driven through the
+    /// real `install_one`: the request root is asked to carry out names the
+    /// plugin's own file, and the placement is remembered under the
+    /// source's namespaced key, so the nightly bound holds from the first
+    /// update on.
     #[tokio::test]
-    async fn installing_a_fresh_offer_is_refused_by_name_before_any_download() {
-        let (worker, _dir) = worker_rig(starting_line());
-        let checked = checked_with_strangers();
-        tokio::time::timeout(
+    async fn install_one_declares_a_fresh_third_party_plugin_with_the_block_the_core_synthesises() {
+        let (worker, dir) = worker_rig(announced_radio());
+        let _privileged = Privileged::answers(Ok(()));
+        let before = std::fs::read_to_string(&worker.manifest).unwrap();
+        let published = served("zed", &zed_archive()).await;
+        let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(30),
+            worker.install_one(&client().unwrap(), "zed", &published, true, Some("z/zed"), None),
+        )
+        .await
+        .expect("install_one hung");
+        assert!(matches!(outcome, Ok(Placed::NewPlugin)), "{:?}", outcome.as_ref().err());
+
+        let block = third_party_fragment("zed", "ritornello-plugin-zed", &plugins_dir(dir.path())).unwrap();
+        let expected = crate::plugins::edit::append_block(&before, &block, "zed").unwrap();
+        assert_eq!(std::fs::read_to_string(&worker.manifest).unwrap(), expected);
+
+        let request: Request =
+            serde_json::from_str(&std::fs::read_to_string(worker.staging.join("request.json")).unwrap()).unwrap();
+        assert!(
+            matches!(&request.actions[..], [Action::PlacePlugin { file, .. }] if file == "ritornello-plugin-zed"),
+            "{request:?}"
+        );
+        let memory = placed::read(&worker.staging);
+        assert_eq!(memory.keys().cloned().collect::<Vec<_>>(), vec![third_party_placed_key("z/zed", "zed")]);
+    }
+
+    /// Spec §3: `SHA256SUMS` is mandatory. An offer with no checksums file is
+    /// refused before a byte is downloaded, and `plugins.toml` is untouched.
+    #[tokio::test]
+    async fn install_one_refuses_a_fresh_third_party_offer_without_a_checksums_file() {
+        let (worker, _dir) = worker_rig(announced_radio());
+        let _privileged = Privileged::answers(Ok(()));
+        let before = std::fs::read_to_string(&worker.manifest).unwrap();
+        let mut published = served("zed", &zed_archive()).await;
+        published.checksums_url = None;
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install_one(&client().unwrap(), "zed", &published, true, Some("z/zed"), None),
+        )
+        .await
+        .expect("install_one hung");
+        assert!(matches!(outcome, Err(Refusal::NoDigest)), "{:?}", outcome.as_ref().err());
+        assert_eq!(std::fs::read_to_string(&worker.manifest).unwrap(), before);
+        assert!(!worker.staging.join("request.json").exists());
+    }
+
+    /// An archive bringing its own `[[plugin]]` block — here one that would
+    /// run a file outside the plugins directory — is refused whole, and
+    /// nothing is written: neither the block, nor the core's own, nor a
+    /// request for root.
+    #[tokio::test]
+    async fn install_one_refuses_a_fresh_archive_that_brings_its_own_block() {
+        let (worker, _dir) = worker_rig(announced_radio());
+        let _privileged = Privileged::answers(Ok(()));
+        let before = std::fs::read_to_string(&worker.manifest).unwrap();
+        // At the archive's root, where `archive::read` takes a fragment from
+        // (`archive::FRAGMENT_NAME`) — proven below, so the fixture really
+        // carries a block and not merely an extra file.
+        let archive = targz(&[
+            ("usr/local/lib/ritornello/plugins/ritornello-plugin-zed", b"ZED"),
+            ("./plugins.toml.fragment", b"[[plugin]]\nname = \"zed\"\nexec = \"/tmp/evil\"\n"),
+        ]);
+        assert!(
+            archive::read(&archive, DECOMPRESSED_MAX).unwrap().fragment.is_some_and(|f| f.contains("/tmp/evil")),
+            "the fixture carries a block the reader sees"
+        );
+        let published = served("zed", &archive).await;
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install_one(&client().unwrap(), "zed", &published, true, Some("z/zed"), None),
+        )
+        .await
+        .expect("install_one hung");
+        // The file first: under a mutation that lets the archive through,
+        // what goes red must be the block it wrote.
+        assert_eq!(std::fs::read_to_string(&worker.manifest).unwrap(), before);
+        assert!(matches!(outcome, Err(Refusal::ThirdPartyArchive)), "{:?}", outcome.as_ref().err());
+        assert!(!worker.staging.join("request.json").exists());
+    }
+
+    /// A check offering one fresh plugin, `zed`, from `z/zed`, at `published`.
+    fn checked_with_fresh(published: Published) -> Checked {
+        Checked {
+            ours: radio_published("0.3.0"),
+            theirs: Vec::new(),
+            third_party: Vec::new(),
+            sources: Vec::new(),
+            fresh: vec![sources::FreshOffer { name: "zed".to_string(), repo: "z/zed".to_string(), published }],
+            conflicts: Vec::new(),
+        }
+    }
+
+    /// **From the gesture**, not from the method: `install` routes a fresh
+    /// offer to `install_one` with its source, and the page reads a first
+    /// installation.
+    #[tokio::test]
+    async fn installing_a_fresh_offer_declares_it_and_remembers_it_under_its_source() {
+        let (worker, _dir) = worker_rig(announced_radio());
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = checked_with_fresh(served("zed", &zed_archive()).await);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
             worker.install(&client().unwrap(), &checked, &names(&["zed"])),
         )
         .await
@@ -5830,8 +6122,96 @@ mod tests {
         let catalog = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
         assert_eq!(
             worker.state.read().await.outcome,
-            CheckOutcome::Failed(refusal_message(&catalog, "zed", &Refusal::NoFragment))
+            install_report(&catalog, &[Placement { component: "zed".into(), version: "2.0.0".into(), fresh: true }], None)
+                .unwrap()
         );
+        assert!(worker.declared("zed"));
+        assert!(placed::read(&worker.staging).contains_key(&third_party_placed_key("z/zed", "zed")));
+    }
+
+    /// **The check's verdict is re-asked at the gesture.** Between the check
+    /// that offered `zed` and the click, the name or its file may have been
+    /// taken; installing then would replace someone's plugin with a
+    /// stranger's binary — the one thing a fresh offer must never do. Four
+    /// ways it can be taken, each refused by name, before any download (the
+    /// offer's URL is never served) and with nothing written.
+    #[tokio::test]
+    async fn installing_a_fresh_offer_is_refused_once_its_name_or_file_is_taken() {
+        enum Taken {
+            Declared,
+            ExecOfAnother,
+            FileOnDisk,
+            ManifestUnreadable,
+        }
+        for taken in [Taken::Declared, Taken::ExecOfAnother, Taken::FileOnDisk, Taken::ManifestUnreadable] {
+            let (worker, dir) = worker_rig(announced_radio());
+            let _privileged = Privileged::answers(Ok(()));
+            let zed_file = plugins_dir(dir.path()).join("ritornello-plugin-zed");
+            let mut manifest = std::fs::read_to_string(&worker.manifest).unwrap();
+            match taken {
+                Taken::Declared => {
+                    manifest.push_str("\n[[plugin]]\nname = \"zed\"\nexec = \"/opt/zed\"\n");
+                }
+                Taken::ExecOfAnother => {
+                    manifest.push_str(&format!("\n[[plugin]]\nname = \"myzed\"\nexec = {:?}\n", zed_file.to_string_lossy()));
+                }
+                Taken::FileOnDisk => std::fs::write(&zed_file, b"SOMEONE ELSE'S").unwrap(),
+                Taken::ManifestUnreadable => manifest = "[[plugin\nnot toml".to_string(),
+            }
+            std::fs::write(&worker.manifest, &manifest).unwrap();
+            let checked = checked_with_fresh(stranger_plugin("zed", "1.0.0"));
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                worker.install(&client().unwrap(), &checked, &names(&["zed"])),
+            )
+            .await
+            .expect("install() hung");
+            let outcome = worker.state.read().await.outcome.clone();
+            let CheckOutcome::Failed(message) = &outcome else { panic!("{outcome:?}") };
+            let catalog = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+            let head = refusal_message(&catalog, "zed", &Refusal::NotItsOwnName(String::new()));
+            assert!(message.starts_with(head.trim_end_matches(|c: char| !c.is_alphanumeric())), "{message}");
+            assert_eq!(std::fs::read_to_string(&worker.manifest).unwrap(), manifest);
+            assert!(!worker.staging.join("request.json").exists());
+        }
+    }
+
+    /// **Second consent (spec §4.5).** The first installation of a fresh
+    /// third-party plugin is always a gesture: even under the policy that
+    /// installs third parties, and even with a placement remembered under
+    /// its key (a plugin installed once and since removed), the row is
+    /// `NotInstalled` and the robot leaves it alone.
+    ///
+    /// **[MUTATION]** drop the `UpdateAvailable` filter of
+    /// `automatic_install_list`: red.
+    #[tokio::test]
+    async fn the_automatic_policy_never_installs_a_fresh_offer() {
+        let (worker, _dir) = worker_rig(announced_radio());
+        let answers = vec![source_answer("z/zed", vec![stranger_plugin("zed", "1.0.0")])];
+        let nothing: Vec<Installed> = Vec::new();
+        let checked = worker.settle_with_release(radio_published("0.3.0"), Some(&nothing), &[], answers).await;
+        assert_eq!(checked.fresh.len(), 1, "the fixture offers zed fresh");
+        let state = worker.state.read().await;
+        let zed = state.components.iter().find(|c| c.name == "zed").expect("a fresh row");
+        assert_eq!(zed.availability, Availability::NotInstalled);
+        let key = third_party_placed_key("z/zed", "zed");
+        for memory in [nothing_placed(), memory(&[(&key, "0.9.0")])] {
+            let list = automatic_install_list(
+                &state.components,
+                &memory,
+                schedule::InstallScope::IncludingThirdParty,
+            );
+            assert!(!list.contains(&"zed".to_string()), "{list:?}");
+        }
+    }
+
+    /// The placement key is one spelling per repository: a fresh install
+    /// remembers its source lowercased (`sources::fresh_offers`), and the
+    /// plugin's later updates read it under the repository as it announces
+    /// it, whose case is its author's.
+    #[test]
+    fn a_third_party_placement_key_ignores_the_repository_s_case() {
+        assert_eq!(third_party_placed_key("Z/Zed", "zed"), third_party_placed_key("z/zed", "zed"));
     }
 
     /// **RULING 64 at the call site: the third-party path really does call the
