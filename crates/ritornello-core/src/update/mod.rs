@@ -1673,6 +1673,10 @@ impl Worker {
     ///
     /// Returns the fold so a scheduled run can install from it without asking
     /// GitHub the same question twice.
+    ///
+    /// A check that fails before the sources are asked leaves the previous
+    /// `source_reports` in place: acceptable, because the outcome names the
+    /// failure, so the page never presents those reports as fresh.
     async fn check(&self, client: &reqwest::Client) -> Option<Checked> {
         self.set_busy(Some(self.message("update_checking").await)).await;
         let (status, body) = match fetch_text(client, &releases_url()).await {
@@ -5663,6 +5667,43 @@ mod tests {
             worker.targets_now(&installed).await.is_empty(),
             "an official plugin must never send the core asking a stranger's repository about it"
         );
+    }
+
+    /// **The check reads the operator's list.** An added source is asked after
+    /// the announced one, in its stored form normalised, and the handle is
+    /// read as it is at check time — not as it was at construction.
+    #[tokio::test]
+    async fn the_check_asks_the_operator_s_added_sources_after_the_announced_ones() {
+        let status = one_line(PluginStatus {
+            version: Some("1.4.0".into()),
+            repository: Some("https://github.com/someone/their-plugin".into()),
+            ..PluginStatus::kind("radio", "source", true, false)
+        });
+        let (worker, _dir) = worker_rig(status);
+        let installed = worker.installed_when_settled().await;
+        *worker.update_sources.write().await = vec!["Z/Added".to_string()];
+        let targets = worker.targets_now(&installed).await;
+        assert_eq!(
+            targets.iter().map(|t| t.repo.as_str()).collect::<Vec<_>>(),
+            vec!["someone/their-plugin", "z/added"],
+            "the announced repository first, then the operator's own"
+        );
+    }
+
+    /// The sixteen-source ceiling, through the check's own path: seventeen
+    /// added sources ask sixteen, and they are the first sixteen.
+    #[tokio::test]
+    async fn the_check_asks_no_more_than_sixteen_sources() {
+        let (worker, _dir) = worker_rig(one_line(PluginStatus {
+            version: Some("0.2.0".into()),
+            repository: Some("https://github.com/skerdudou/ritornello".into()),
+            ..PluginStatus::kind("radio", "source", true, false)
+        }));
+        let installed = worker.installed_when_settled().await;
+        *worker.update_sources.write().await = (0..17).map(|i| format!("o/r{i:02}")).collect();
+        let targets = worker.targets_now(&installed).await;
+        assert_eq!(targets.len(), sources::SOURCES_MAX);
+        assert_eq!(targets.last().map(|t| t.repo.as_str()), Some("o/r15"));
     }
 
     fn radio_published(version: &str) -> Vec<Published> {
