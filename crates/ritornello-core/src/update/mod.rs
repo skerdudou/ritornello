@@ -1339,7 +1339,9 @@ impl Checked {
 /// `#[cfg(debug_assertions)]`); see that constant's own doc for what it
 /// covers and does not.
 fn offered_packs<'a>(checked: &'a Checked, language: &str) -> Vec<&'a sources::PackOffer> {
-    checked.packs.iter().filter(|p| p.language == language).collect()
+    // Without case: `pt-BR` from us and `pt-br` from a source are one
+    // language, so one gesture (BCP 47 tags compare case-insensitively).
+    checked.packs.iter().filter(|p| p.language.eq_ignore_ascii_case(language)).collect()
 }
 
 /// Everything the worker needs, and nothing it could read twice.
@@ -1775,7 +1777,8 @@ impl Worker {
     async fn remove_language(&self, language: &str) {
         let mut ids = vec![crate::langpack::store::pack_id(language)];
         for pack in self.registry.read().await.installed_packs() {
-            if pack.manifest.language == language && !ids.contains(&pack.id) {
+            // Without case, as `offered_packs` gathers them.
+            if pack.manifest.language.eq_ignore_ascii_case(language) && !ids.contains(&pack.id) {
                 ids.push(pack.id.clone());
             }
         }
@@ -2081,6 +2084,14 @@ impl Worker {
             &checked.conflicts,
         );
         let mut state = self.state.write().await;
+        // As after a check that read our release: a refusal remembered for
+        // an offered version must survive this branch too, or a third-party
+        // archive refused yesterday (`install_pack`'s mark, P5) is fetched
+        // again tonight. Keyed on `(name, offered)`, so our own rows, offered
+        // nothing here, only meet a previous row that was offered nothing
+        // too — and `deny_privileged_install` decides after it, as it does
+        // in `settle_with_release`.
+        carry_installable(&state.components, &mut components);
         carry_core_notes(&state.components, &mut components);
         deny_privileged_install(&mut components);
         state.outcome = match why {
@@ -5512,6 +5523,23 @@ mod tests {
         assert!(!theirs_dir.exists(), "theirs removed with it");
     }
 
+    /// A language is one language whatever case a source spells it in:
+    /// `pt-br` from a source and `pt-BR` from us install and go together.
+    /// **[MUTATION]** compare case-sensitively in `offered_packs`, then in
+    /// `remove_language`: red each time.
+    #[tokio::test]
+    async fn a_language_spelled_in_another_case_is_one_gesture() {
+        let ours = official_offer("pt-BR", "0.2.1", &sourced_pack_archive("pt-BR", "0.2.1", "https://github.com/skerdudou/ritornello")).await;
+        let theirs = third_party_offer("pt-br", "1.0.0", "z/zed", &sourced_pack_archive("pt-br", "1.0.0", "https://github.com/z/zed")).await;
+        let (worker, _dir) = settled_pack_rig();
+        worker.install_language(&checked_with_packs(vec![ours, theirs]), "pt-BR").await.expect("both install");
+        let theirs_dir = worker.packs_root.join(xlang("pt-br", "z/zed"));
+        assert!(theirs_dir.join("core.toml").exists(), "theirs installed in the same gesture");
+        worker.remove_language("pt-BR").await;
+        assert!(!theirs_dir.exists(), "and removed in the same gesture");
+        assert!(!worker.packs_root.join(crate::langpack::store::pack_id("pt-BR")).exists());
+    }
+
     /// A language's gesture is that language's only: installing one does not
     /// install a source's pack of another, and removing one leaves another
     /// language's pack alone.
@@ -5567,11 +5595,31 @@ mod tests {
         crate::i18n::Registry::resweep_async(&worker.registry).await;
     }
 
-    /// One scheduled run under the fourth policy, minus our own release list
-    /// (`check` asks GitHub): the sources' answers settle the rows, the
-    /// automatic list is drawn from them, and what it names is installed.
-    async fn scheduled_run(worker: &Worker, answers: Vec<sources::SourceAnswer>) -> Vec<String> {
-        let checked = worker.settle_with_release(Vec::new(), Some(&[][..]), &[], answers).await;
+    /// Which half of a check settles the rows in `scheduled_run`.
+    #[derive(Clone, Copy)]
+    enum Branch {
+        /// Our release list answered nothing for this channel — today's
+        /// branch for a device on the stable channel (`OnlyPrereleases`).
+        WithoutRelease,
+        /// Our release list was read (here, with nothing of ours in it).
+        WithRelease,
+    }
+
+    async fn settle(worker: &Worker, answers: Vec<sources::SourceAnswer>, branch: Branch) -> Checked {
+        match branch {
+            Branch::WithoutRelease => {
+                worker.settle_without_release(ReleasesError::OnlyPrereleases, &[], &[], answers).await
+            }
+            Branch::WithRelease => worker.settle_with_release(Vec::new(), Some(&[][..]), &[], answers).await,
+        }
+    }
+
+    /// One scheduled run under the fourth policy, minus the request to our
+    /// own release list (`check` asks GitHub): the sources' answers settle
+    /// the rows through `branch`, the automatic list is drawn from them, and
+    /// what it names is installed.
+    async fn scheduled_run(worker: &Worker, answers: Vec<sources::SourceAnswer>, branch: Branch) -> Vec<String> {
+        let checked = settle(worker, answers, branch).await;
         let list = automatic_install_list(
             &worker.state.read().await.components,
             &placed::read(&worker.staging),
@@ -5592,7 +5640,7 @@ mod tests {
         let published = served_pack("fr", "2.0.0", &sourced_pack_archive("fr", "2.0.0", "https://github.com/z/zed")).await;
         let answers = vec![sources::SourceAnswer { repo: "z/zed".into(), published: vec![published] }];
 
-        assert_eq!(scheduled_run(&worker, answers).await, vec![xlang("fr", "z/zed")]);
+        assert_eq!(scheduled_run(&worker, answers, Branch::WithoutRelease).await, vec![xlang("fr", "z/zed")]);
 
         let registry = worker.registry.read().await;
         let pack = registry.installed_packs().iter().find(|p| p.id == xlang("fr", "z/zed")).expect("still there");
@@ -5624,9 +5672,21 @@ mod tests {
     /// offered version, not every night — its row is marked like a
     /// component's manual step, and the mark is carried by `(name, offered)`.
     /// A new version is a new archive and is tried again.
-    /// **[MUTATION]** drop the mark in `install_pack`: two downloads, red.
+    /// **[MUTATION]** drop the mark in `install_pack`: two downloads, red on
+    /// both branches. **[MUTATION]** drop `carry_installable` from
+    /// `settle_without_release`: red on that branch — the one every stable
+    /// device takes today.
     #[tokio::test]
     async fn a_refused_third_party_pack_is_downloaded_once_across_two_scheduled_runs() {
+        refused_pack_is_fetched_once(Branch::WithoutRelease).await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_third_party_pack_is_downloaded_once_when_our_release_was_read() {
+        refused_pack_is_fetched_once(Branch::WithRelease).await;
+    }
+
+    async fn refused_pack_is_fetched_once(branch: Branch) {
         let (worker, _dir) = settled_pack_rig();
         preinstall_third_party(&worker, "fr", "1.0.0", "z/zed").await;
         let archive = sourced_pack_archive("fr", "2.0.0", "https://github.com/someone/else");
@@ -5645,14 +5705,14 @@ mod tests {
         let answers = |version: &str| vec![sources::SourceAnswer { repo: "z/zed".into(), published: vec![offer(version)] }];
         let id = xlang("fr", "z/zed");
 
-        assert_eq!(scheduled_run(&worker, answers("2.0.0")).await, vec![id.clone()], "first night: tried");
-        assert_eq!(scheduled_run(&worker, answers("2.0.0")).await, Vec::<String>::new(), "second night: not again");
+        assert_eq!(scheduled_run(&worker, answers("2.0.0"), branch).await, vec![id.clone()], "first night: tried");
+        assert_eq!(scheduled_run(&worker, answers("2.0.0"), branch).await, Vec::<String>::new(), "second night: not again");
         assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1, "one download in two nights");
         let row = worker.state.read().await.components.iter().find(|c| c.name == id).cloned().unwrap();
         assert_eq!(row.installable, Some(false));
 
         // A new version resets it: the mark belongs to the archive refused.
-        worker.settle_with_release(Vec::new(), Some(&[][..]), &[], answers("2.0.1")).await;
+        settle(&worker, answers("2.0.1"), branch).await;
         let list = automatic_install_list(
             &worker.state.read().await.components,
             &placed::read(&worker.staging),
