@@ -19,6 +19,7 @@ pub mod state;
 pub mod schedule;
 pub mod placed;
 pub mod install_registry;
+pub mod sources;
 
 pub mod routes;
 
@@ -1292,6 +1293,12 @@ pub struct Worker {
     /// independent copies of "the language in use" could disagree about
     /// which language a removal is judged against.
     pub locale_current: Arc<RwLock<Option<String>>>,
+    /// The repositories the operator added as update sources: the handle
+    /// `AppState.update_sources` is. Read per check, like `settings`, so an
+    /// addition is seen by the next one without a restart.
+    // Not read yet: the check that queries the added repositories is the reader.
+    #[allow(dead_code)]
+    pub update_sources: Arc<RwLock<Vec<String>>>,
 }
 
 impl Worker {
@@ -4114,6 +4121,7 @@ mod tests {
             // a channel it can `try_recv()` on — see `bare_pack_rig`.
             locale_tx: mpsc::channel(1).0,
             locale_current: Arc::new(RwLock::new(None)),
+            update_sources: Arc::new(RwLock::new(Vec::new())),
         }
     }
 

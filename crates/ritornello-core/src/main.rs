@@ -1767,6 +1767,7 @@ async fn main() -> Result<()> {
     let (sources_catalog_tx, catalog_rx) = watch::channel(SourcesCatalog::default());
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
+    let (update_sources_tx, mut update_sources_rx) = mpsc::channel::<Vec<String>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
     let (fallback_tx, mut fallback_rx) = mpsc::channel::<String>(4);
     let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
@@ -2261,6 +2262,7 @@ async fn main() -> Result<()> {
             core.not_installed_files = Some(entries);
         }
     }
+    let update_sources = Arc::new(RwLock::new(persisted.update_sources.clone()));
     let worker = update::Worker {
         state: update_state.clone(),
         catalog: catalog.clone(),
@@ -2281,6 +2283,7 @@ async fn main() -> Result<()> {
         packs_root: worker_packs_root,
         locale_tx: locale_tx.clone(),
         locale_current: locale_current.clone(),
+        update_sources: update_sources.clone(),
     };
     // Read off the `Worker` actually built, not a second `PathBuf::from("/")`
     // literal: `status::PluginsControl.root` (below) must be the exact same
@@ -2376,6 +2379,8 @@ async fn main() -> Result<()> {
             update: update_state.clone(),
             update_tx,
             update_catalogue_cache: Arc::new(RwLock::new(None)),
+            update_sources: update_sources.clone(),
+            update_sources_tx: update_sources_tx.clone(),
         };
         let (app_state, core_engine) = assemble_covers_and_core(
             mpv_player,
@@ -2735,6 +2740,9 @@ async fn main() -> Result<()> {
             // playing.
             Some((path, r)) = extraction_rx.recv() => {
                 core.extraction_arrived(path, r).await;
+            }
+            Some(list) = update_sources_rx.recv() => {
+                core.set_update_sources(list);
             }
             Some(device) = audio_rx.recv() => {
                 if let Err(e) = core.set_audio_device(device).await {

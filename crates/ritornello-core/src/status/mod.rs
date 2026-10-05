@@ -202,6 +202,13 @@ pub struct AppState {
     /// cache key, so a check that keeps offering the same release costs this
     /// route no socket at all.
     pub update_catalogue_cache: Arc<RwLock<Option<(String, crate::update::catalogue::Catalogue)>>>,
+    /// The repositories the operator added as update sources, lowercased
+    /// `owner/repo` — the same handle the update `Worker` reads, so a check
+    /// started after a `POST` sees the addition. Written by the routes **only
+    /// after** the core loop accepted the change (the `locale_put` order), and
+    /// persisted by the core through `update_sources_tx`.
+    pub update_sources: Arc<RwLock<Vec<String>>>,
+    pub update_sources_tx: mpsc::Sender<Vec<String>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -225,6 +232,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/update/catalogue", get(crate::update::routes::update_catalogue_json))
         .route("/api/update/check", axum::routing::post(crate::update::routes::update_check_post))
         .route("/api/update/install", axum::routing::post(crate::update::routes::update_install_post))
+        .route(
+            "/api/update/sources",
+            get(crate::update::routes::sources_json).post(crate::update::routes::sources_post),
+        )
+        .route(
+            "/api/update/sources/{owner}/{repo}",
+            axum::routing::delete(crate::update::routes::sources_delete),
+        )
         .route(
             "/api/languages/{language}",
             axum::routing::post(crate::update::routes::language_install_post)
@@ -613,6 +628,8 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources_tx: mpsc::channel(1).0,
         }
     }
 
@@ -663,6 +680,8 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources_tx: mpsc::channel(1).0,
         };
         (state, audio_rx)
     }
@@ -715,6 +734,8 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources_tx: mpsc::channel(1).0,
         };
         (state, cmd_rx)
     }
@@ -799,6 +820,8 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources_tx: mpsc::channel(1).0,
         };
         (state, locale_rx, fallback_rx, dir)
     }

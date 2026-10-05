@@ -300,6 +300,8 @@ pub struct Core<P: Player> {
     /// updates it is a later task; losing this quietly on the next
     /// unrelated settings change would be the wrong kind of "not yet".
     update_last_run_day: Option<i64>,
+    /// Repositories the operator added as update sources, lowercased.
+    update_sources: Vec<String>,
     /// The named presets **of each source**, indexed by source name, as each
     /// declared them (`SourceMessage::presets`).
     ///
@@ -528,6 +530,7 @@ impl<P: Player> Core<P> {
             random: persisted.random,
             repeat_all: persisted.repeat_all,
             update_last_run_day: persisted.update_last_run_day,
+            update_sources: persisted.update_sources.clone(),
             presets_par_source: HashMap::new(),
             pending_tens: 0,
             state_path,

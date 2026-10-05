@@ -359,6 +359,23 @@ pub struct PersistedState {
     /// `schedule::day_key`: an identity, never compared for order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_last_run_day: Option<i64>,
+    /// Repositories the operator added as extra places to look for plugins and
+    /// language packs, lowercased `owner/repo`. Only the operator's own entries
+    /// are stored; the union with what installed plugins announce is computed at
+    /// read time (`update::sources`). Lenient at load: see `lenient_sources`.
+    #[serde(default, deserialize_with = "lenient_sources", skip_serializing_if = "Vec::is_empty")]
+    pub update_sources: Vec<String>,
+}
+
+/// Anything at all, keeping only the strings: a hand-edited or future value
+/// must never take `load`'s all-or-nothing path (`PersistedState.fallback`'s
+/// doc measured why). Validated where it is used, at the route.
+fn lenient_sources<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(match v {
+        serde_json::Value::Array(items) => items.into_iter().filter_map(|i| i.as_str().map(str::to_string)).collect(),
+        _ => Vec::new(),
+    })
 }
 
 impl Default for PersistedState {
@@ -376,6 +393,7 @@ impl Default for PersistedState {
             random: false,
             repeat_all: false,
             update_last_run_day: None,
+            update_sources: Vec::new(),
         }
     }
 }
@@ -540,6 +558,7 @@ mod tests {
             random: false,
             repeat_all: false,
             update_last_run_day: None,
+            update_sources: Vec::new(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -571,6 +590,7 @@ mod tests {
             random: false,
             repeat_all: false,
             update_last_run_day: None,
+            update_sources: Vec::new(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -595,6 +615,7 @@ mod tests {
             random: false,
             repeat_all: false,
             update_last_run_day: None,
+            update_sources: Vec::new(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -773,5 +794,29 @@ mod tests {
         let st = PersistedState { standby: true, ..Default::default() };
         save(&path, &st).unwrap();
         assert!(load(&path).standby);
+    }
+
+    #[test]
+    fn a_malformed_source_list_never_resets_the_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        for bad in ["42", "\"z/zed\"", "[1, \"a/b\", null, \"c/d\"]", "{\"x\":1}"] {
+            std::fs::write(&path, format!(r#"{{"active_source":"cd","volume":41,"update_sources":{bad}}}"#)).unwrap();
+            let st = load(&path);
+            assert_eq!((st.active_source.as_str(), st.volume), ("cd", 41), "{bad}");
+        }
+        std::fs::write(&path, r#"{"active_source":"cd","volume":41,"update_sources":[1,"a/b",null,"c/d"]}"#).unwrap();
+        assert_eq!(load(&path).update_sources, vec!["a/b".to_string(), "c/d".to_string()]);
+    }
+
+    #[test]
+    fn the_source_list_survives_a_round_trip_and_is_absent_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let st = PersistedState { update_sources: vec!["a/b".into()], ..Default::default() };
+        save(&path, &st).unwrap();
+        assert_eq!(load(&path).update_sources, vec!["a/b".to_string()]);
+        save(&path, &PersistedState::default()).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("update_sources"));
     }
 }

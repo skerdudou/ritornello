@@ -153,6 +153,18 @@ impl<P: Player> Core<P> {
         self.persist();
     }
 
+    /// The operator's own additions to the sources list (`update::sources`).
+    pub fn update_sources(&self) -> &[String] {
+        &self.update_sources
+    }
+
+    /// Replaces the stored list and persists it, so a following unrelated
+    /// settings write cannot lose it.
+    pub fn set_update_sources(&mut self, list: Vec<String>) {
+        self.update_sources = list;
+        self.persist();
+    }
+
     pub(super) fn persist(&self) {
         let st = PersistedState {
             active_source: self.active_source.clone(),
@@ -167,6 +179,7 @@ impl<P: Player> Core<P> {
             random: self.random,
             repeat_all: self.repeat_all,
             update_last_run_day: self.update_last_run_day,
+            update_sources: self.update_sources.clone(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistence failed: {e}");
@@ -200,6 +213,7 @@ mod tests {
             random: false,
             repeat_all: false,
             update_last_run_day: None,
+            update_sources: Vec::new(),
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
@@ -208,6 +222,23 @@ mod tests {
         let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"audio_device bluealsa:DEV=XX".to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_source_list_is_read_back_from_the_persisted_state_at_start() {
+        let persisted = PersistedState { update_sources: vec!["z/zed".into()], ..Default::default() };
+        let (core, _pc, _sc, _rx, _dir) = setup_persisted(persisted);
+        assert_eq!(core.update_sources(), ["z/zed".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn the_source_list_is_persisted_and_survives_an_unrelated_write() {
+        let (mut core, _pc, _sc, _rx, dir) = setup();
+        core.set_update_sources(vec!["z/zed".into()]);
+        core.set_theme(crate::theme::ThemeState { theme: "t".into(), mode: "dark".into() });
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.update_sources, vec!["z/zed".to_string()]);
+        assert_eq!(core.update_sources(), ["z/zed".to_string()]);
     }
 
     #[tokio::test]

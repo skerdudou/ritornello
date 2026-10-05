@@ -510,6 +510,8 @@ mod tests {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources_tx: tokio::sync::mpsc::channel(1).0,
         }
     }
 
