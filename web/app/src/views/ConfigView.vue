@@ -923,11 +923,21 @@ function stopLanguagePoll() {
 function languageGestureSettled(
   packs: LanguagePackRow[],
   busy: LanguageBusy,
-  installedAtStart: string | null,
+  installedAtStart: string,
 ): boolean {
   const row = packs.find((p) => p.language === busy.language)
-  if (busy.action === 'remove') return !row || row.installed === null
-  return !!row && row.installed !== installedAtStart
+  if (busy.action === 'remove') return !row || row.packs.every((p) => p.installed === null)
+  return !!row && installedSignature(row) !== installedAtStart
+}
+
+/**
+ * What a language has on disk, as one comparable string: every pack's id and
+ * installed version. A language may carry several packs, and an Update can
+ * move a third party's while the official one stays put, so the official
+ * pack's version alone cannot tell "settled" from "not yet".
+ */
+function installedSignature(row: LanguagePackRow | undefined): string {
+  return row ? row.packs.map((p) => `${p.id}=${p.installed ?? ''}`).join('|') : ''
 }
 
 /**
@@ -955,7 +965,7 @@ function languageGestureSettled(
  * — see `languageGestureSettled`'s own doc for why an install needs it and
  * a remove does not.
  */
-function pollLanguageWhileBusy(busy: LanguageBusy, installedAtStart: string | null) {
+function pollLanguageWhileBusy(busy: LanguageBusy, installedAtStart: string) {
   stopLanguagePoll()
   let attempts = 0
   languagePoll = setInterval(async () => {
@@ -1142,7 +1152,7 @@ const packBusy = ref<LanguageBusy | null>(null)
 async function installLanguage(language: string) {
   if (packBusy.value) return
   const busy: LanguageBusy = { language, action: 'install' }
-  const installedAtStart = locale.value.packs.find((p) => p.language === language)?.installed ?? null
+  const installedAtStart = installedSignature(locale.value.packs.find((p) => p.language === language))
   packBusy.value = busy
   const err = await api.post(`/api/languages/${encodeURIComponent(language)}`, {})
   if (err) {
@@ -1153,6 +1163,25 @@ async function installLanguage(language: string) {
   toast.success(t.value('language_pack_installing', { language: languageName(language) }))
   pollLanguageWhileBusy(busy, installedAtStart)
   await loadAll()
+}
+
+/** The last refused preference write, for the select it was made on. */
+const preferenceError = ref<{ language: string; module: string; message: string } | null>(null)
+
+/**
+ * Prefers `pack` for `module` in `language`: `PUT /api/languages/{language}/
+ * preference`. A refusal (422: the pack is not installed or does not carry
+ * the module, the ceiling; 503: the core is busy) is shown next to that
+ * select, with the route's own message. Either way `/api/locale` is read
+ * again, so the select shows what the core now says speaks — after a refusal
+ * that is what it said before, and the select goes back to it. Only the
+ * locale payload is refreshed: `loadAll` would also reset the language the
+ * owner may have picked above and not saved yet.
+ */
+async function setPackPreference(language: string, module: string, pack: string) {
+  const err = await api.put(`/api/languages/${encodeURIComponent(language)}/preference`, { module, pack })
+  preferenceError.value = err ? { language, module, message: err } : null
+  locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
 }
 
 /** Language a remove confirmation is open for, or `null` when the dialog is
@@ -1199,7 +1228,7 @@ async function confirmRemoveLanguage() {
   toast.success(t.value('language_pack_removing', { language: languageName(language) }))
   // `null`: `languageGestureSettled`'s `remove` branch never reads this
   // parameter, it only exists for the `install` branch (see its own doc).
-  pollLanguageWhileBusy(busy, null)
+  pollLanguageWhileBusy(busy, '')
   await loadAll()
 }
 
@@ -1811,8 +1840,10 @@ function goTo(id: string) {
             <LanguagePacksRow
               :payload="locale"
               :busy="packBusy"
+              :preference-error="preferenceError"
               @install="installLanguage"
               @remove="askRemoveLanguage"
+              @prefer="setPackPreference"
             />
 
             <!-- Adding a language nobody installed yet: its own dialog, the

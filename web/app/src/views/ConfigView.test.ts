@@ -2,7 +2,8 @@ import { api, Select, SelectItem, toast } from '@ritornello/ui'
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import type { LocalePayload } from '../types'
+import type { LanguagePackRow, LocalePayload } from '../types'
+import { packRow } from '../testing/languagePacks'
 
 // Same approach as `useTheme.test.ts`: we keep the real module (components,
 // `api`, ...) and replace only the two `toast` entries this view uses, so we
@@ -108,6 +109,12 @@ const CATALOGUE = {
   language_pack_update_available: 'Un greffon plus récent est disponible',
   language_pack_installing: 'Installation de {language}…',
   language_pack_removing: 'Retrait de {language}…',
+  language_pack_official: 'Ritornello (greffon officiel)',
+  language_pack_from: 'Depuis {source}',
+  language_pack_not_installed: 'Non installé',
+  language_pack_overlap_intro: 'Plusieurs greffons couvrent le même module.',
+  language_pack_overlap_module: 'Module {module}',
+  language_pack_overlap_choose: 'Greffon qui parle pour {module}',
   languages_add_title: 'Ajouter une langue',
   languages_add_description: 'Langues que cette version publie.',
   languages_add_empty: 'Rien à ajouter.',
@@ -193,7 +200,7 @@ type Payloads = ReturnType<typeof payloads>
  * overridden per call. Module-scoped so both the gesture tests and the
  * polling tests below can build on it. */
 function localeWithPacks(
-  packs: Array<{ language: string; installed: string | null; offered: string | null }>,
+  packs: LanguagePackRow[],
 ): LocalePayload {
   return {
     locales: ['en', 'fr'],
@@ -1616,7 +1623,7 @@ describe('ConfigView — language and display', () => {
   // rejection elsewhere in this codebase.
   it('installs a language pack: posts to the right route, acknowledges, and reloads the locale', async () => {
     const { w, spy, posts } = await mountView({
-      '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+      '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
       '/api/update': freshUpdate(),
     })
     const before = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
@@ -1635,7 +1642,7 @@ describe('ConfigView — language and display', () => {
   it('toasts the refusal from a language install and releases the busy row', async () => {
     const { w } = await mountView(
       {
-        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
         '/api/update': freshUpdate(),
       },
       undefined,
@@ -1655,8 +1662,8 @@ describe('ConfigView — language and display', () => {
   it('lists installed packs in the card, and offers the others only through the Add a language dialog', async () => {
     const { w } = await mountView({
       '/api/locale': localeWithPacks([
-        { language: 'fr', installed: '0.2.1', offered: '0.2.1' },
-        { language: 'de', installed: null, offered: '0.2.1' },
+        packRow('fr', '0.2.1', '0.2.1'),
+        packRow('de', null, '0.2.1'),
       ]),
       '/api/update': freshUpdate(),
     })
@@ -1703,7 +1710,7 @@ describe('ConfigView — language and display', () => {
       // The check lands: a timestamp, and the release now offers German.
       ;(table as Record<string, unknown>)['/api/update'] = freshUpdate()
       ;(table as Record<string, unknown>)['/api/locale'] =
-        localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }])
+        localeWithPacks([packRow('de', null, '0.2.1')])
       const localeReads = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
       await vi.advanceTimersByTimeAsync(2000)
       await flushPromises()
@@ -1719,7 +1726,7 @@ describe('ConfigView — language and display', () => {
 
   it('removes a language pack through its confirmation: deletes the right route, acknowledges, and reloads', async () => {
     const { w, spy, deletes } = await mountView({
-      '/api/locale': localeWithPacks([{ language: 'fr', installed: '0.2.1', offered: '0.2.1' }]),
+      '/api/locale': localeWithPacks([packRow('fr', '0.2.1', '0.2.1')]),
     })
     await w.find('[data-pack-remove="fr"]').trigger('click')
     await flushPromises()
@@ -1739,7 +1746,7 @@ describe('ConfigView — language and display', () => {
 
   it('toasts the refusal from a language removal and releases the busy row', async () => {
     const { w } = await mountView(
-      { '/api/locale': localeWithPacks([{ language: 'fr', installed: '0.2.1', offered: '0.2.1' }]) },
+      { '/api/locale': localeWithPacks([packRow('fr', '0.2.1', '0.2.1')]) },
       undefined,
       undefined,
       'fr pack not found',
@@ -2513,7 +2520,7 @@ describe('ConfigView — language pack polling', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { w, table } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
         '/api/update': freshUpdate(),
       })
       await openAddLanguage(w)
@@ -2528,7 +2535,7 @@ describe('ConfigView — language pack polling', () => {
 
       // The worker catches up one tick later.
       ;(table as Record<string, unknown>)['/api/locale'] =
-        localeWithPacks([{ language: 'de', installed: '0.2.1', offered: '0.2.1' }])
+        localeWithPacks([packRow('de', '0.2.1', '0.2.1')])
       await vi.advanceTimersByTimeAsync(2000)
 
       expect(inDialog('[data-pack-busy]')).toBeNull()
@@ -2543,7 +2550,7 @@ describe('ConfigView — language pack polling', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { w, spy, table } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
         '/api/update': freshUpdate(),
       })
       await openAddLanguage(w)
@@ -2557,7 +2564,7 @@ describe('ConfigView — language pack polling', () => {
       const callsRightAfterClick = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
 
       ;(table as Record<string, unknown>)['/api/locale'] =
-        localeWithPacks([{ language: 'de', installed: '0.2.1', offered: '0.2.1' }])
+        localeWithPacks([packRow('de', '0.2.1', '0.2.1')])
       await vi.advanceTimersByTimeAsync(2000)
       expect(inDialog('[data-pack-busy]')).toBeNull()
       const callsAfterSettle = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
@@ -2582,7 +2589,7 @@ describe('ConfigView — language pack polling', () => {
       // `table['/api/locale']` never changes: the job never lands, from
       // this page's point of view.
       const { w, spy } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
         '/api/update': freshUpdate(),
       })
       await openAddLanguage(w)
@@ -2617,7 +2624,7 @@ describe('ConfigView — language pack polling', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { w, table } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'es', installed: '0.2.0', offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('es', '0.2.0', '0.2.1')]),
       })
       await w.find('[data-pack-update="es"]').trigger('click')
       await flushPromises()
@@ -2633,7 +2640,7 @@ describe('ConfigView — language pack polling', () => {
 
       // Now the version actually moves.
       ;(table as Record<string, unknown>)['/api/locale'] =
-        localeWithPacks([{ language: 'es', installed: '0.2.1', offered: '0.2.1' }])
+        localeWithPacks([packRow('es', '0.2.1', '0.2.1')])
       await vi.advanceTimersByTimeAsync(2000)
       expect(w.find('[data-pack-busy]').exists()).toBe(false)
       expect(w.find('[data-pack-update="es"]').exists()).toBe(false)
@@ -2646,7 +2653,7 @@ describe('ConfigView — language pack polling', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { w, table } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'fr', installed: '0.2.1', offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('fr', '0.2.1', '0.2.1')]),
       })
       await w.find('[data-pack-remove="fr"]').trigger('click')
       await flushPromises()
@@ -2671,7 +2678,7 @@ describe('ConfigView — language pack polling', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { w, spy } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
         '/api/update': freshUpdate(),
       })
       await openAddLanguage(w)
@@ -2681,6 +2688,114 @@ describe('ConfigView — language pack polling', () => {
       const before = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
       await vi.advanceTimersByTimeAsync(20_000)
       expect(spy.mock.calls.filter((c) => c[0] === '/api/locale').length).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('ConfigView — a language from several packs', () => {
+  const OFFICIAL = 'ritornello-lang-fr'
+  const THIRD = 'ritornello-xlang-fr-0123456789ab'
+
+  function frTwoPacks(extra: Partial<LanguagePackRow> = {}): LanguagePackRow {
+    return packRow('fr', '0.2.1', '0.2.1', {
+      packs: [
+        { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: '1.0.0', offered: '1.0.0' },
+      ],
+      overlaps: [{ module: 'core', packs: [THIRD, OFFICIAL], active: THIRD }],
+      ...extra,
+    })
+  }
+
+  const localeGets = (spy: ReturnType<typeof vi.fn>) =>
+    spy.mock.calls.filter(([url, init]) => url === '/api/locale' && !(init as RequestInit | undefined)?.method).length
+
+  function overlapSelect(w: VueWrapper) {
+    return w.findAllComponents(Select).find((s) => s.props('modelValue') === THIRD
+      || s.props('modelValue') === OFFICIAL)!
+  }
+
+  it('writes the preference from the select, then reads /api/locale again and shows who speaks', async () => {
+    const { w, spy, puts, table } = await mountView({ '/api/locale': localeWithPacks([frTwoPacks()]) })
+    expect(w.get('[data-pack-preference="core"]').text()).toBe('Depuis someone/fr-extra')
+    const before = localeGets(spy)
+
+    ;(table as Record<string, unknown>)['/api/locale'] = localeWithPacks([
+      frTwoPacks({ overlaps: [{ module: 'core', packs: [OFFICIAL, THIRD], active: OFFICIAL }] }),
+    ])
+    await overlapSelect(w).vm.$emit('update:modelValue', OFFICIAL)
+    await flushPromises()
+
+    expect(puts).toEqual([{ url: '/api/languages/fr/preference', body: { module: 'core', pack: OFFICIAL } }])
+    expect(localeGets(spy)).toBe(before + 1)
+    expect(w.get('[data-pack-preference="core"]').text()).toBe('Ritornello (greffon officiel)')
+    expect(w.find('[data-pack-preference-error]').exists()).toBe(false)
+  })
+
+  it("shows the route's own refusal next to the select, and the select goes back to what speaks", async () => {
+    const { w } = await mountView(
+      { '/api/locale': localeWithPacks([frTwoPacks()]) },
+      'This pack does not carry that module.',
+    )
+    await overlapSelect(w).vm.$emit('update:modelValue', OFFICIAL)
+    await flushPromises()
+    expect(w.get('[data-pack-overlap="core"] [data-pack-preference-error]').text())
+      .toBe('This pack does not carry that module.')
+    expect(w.get('[data-pack-preference="core"]').text()).toBe('Depuis someone/fr-extra')
+  })
+
+  it('shows no overlap block when the core reports none', async () => {
+    const { w } = await mountView({ '/api/locale': localeWithPacks([frTwoPacks({ overlaps: [] })]) })
+    expect(w.find('[data-pack-overlaps]').exists()).toBe(false)
+  })
+
+  it("Update, offered for a third party's news alone, posts the language's one gesture", async () => {
+    const row = frTwoPacks({
+      overlaps: [],
+      update_available: true,
+      packs: [
+        { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: '1.0.0', offered: '1.1.0' },
+      ],
+    })
+    const { w, posts } = await mountView({ '/api/locale': localeWithPacks([row]) })
+    await w.get('[data-pack-update="fr"]').trigger('click')
+    await flushPromises()
+    expect(posts.map((p) => p.url)).toContain('/api/languages/fr')
+  })
+
+  it("keeps a language whose only installed pack is a third party's on the card", async () => {
+    const row = packRow('fr', null, '0.2.1', {
+      packs: [
+        { id: OFFICIAL, source: null, installed: null, offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: '1.0.0', offered: '1.0.0' },
+      ],
+    })
+    const { w } = await mountView({ '/api/locale': localeWithPacks([row]) })
+    expect(w.find('[data-pack-remove="fr"]').exists()).toBe(true)
+  })
+
+  it("settles an Update on a third party's version moving, the official one staying put", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const news = (third: string) => frTwoPacks({
+        overlaps: [],
+        update_available: third !== '1.1.0',
+        packs: [
+          { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+          { id: THIRD, source: 'someone/fr-extra', installed: third, offered: '1.1.0' },
+        ],
+      })
+      const { w, table } = await mountView({ '/api/locale': localeWithPacks([news('1.0.0')]) })
+      await w.get('[data-pack-update="fr"]').trigger('click')
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.find('[data-pack-busy]').exists()).toBe(true)
+      ;(table as Record<string, unknown>)['/api/locale'] = localeWithPacks([news('1.1.0')])
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.find('[data-pack-busy]').exists()).toBe(false)
     } finally {
       vi.useRealTimers()
     }

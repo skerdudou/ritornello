@@ -243,8 +243,39 @@ export interface LocalePayload {
  */
 export interface LanguagePackRow {
   language: string
+  /** The **official** pack's installed version (third-party packs: `packs`). */
+  installed: string | null
+  /** The **official** pack's offered version. */
+  offered: string | null
+  /**
+   * Some pack of the language — ours or a third party's — is installed and
+   * offered in another version. Decided by the core, so a language whose
+   * official pack is current still shows Update for a third party's news.
+   */
+  update_available: boolean
+  /** Every pack of the language: the official one first, then third parties. */
+  packs: LanguagePackDetail[]
+  /** One entry per module two installed packs of the language both carry. */
+  overlaps: LanguagePackOverlap[]
+}
+
+/** One pack of a language, mirroring `status::locales::PackDetail`. */
+export interface LanguagePackDetail {
+  id: string
+  /** Lowercased `owner/repo`, or `null` for Ritornello's own pack. */
+  source: string | null
   installed: string | null
   offered: string | null
+}
+
+/**
+ * A module two installed packs carry, mirroring `status::locales::Overlap`:
+ * `packs` in the order they speak, `active` (the first) is the one that does.
+ */
+export interface LanguagePackOverlap {
+  module: string
+  packs: string[]
+  active: string
 }
 
 /**

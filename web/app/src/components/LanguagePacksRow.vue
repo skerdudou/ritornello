@@ -20,7 +20,11 @@ import { Button } from '@ritornello/ui'
 import { computed } from 'vue'
 import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
-import type { LanguageBusy, LanguagePackRow as PackRow, LocalePayload } from '../types'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@ritornello/ui'
+import { packSourceLabel } from '../composables/packSource'
+import type {
+  LanguageBusy, LanguagePackDetail, LanguagePackOverlap, LanguagePackRow as PackRow, LocalePayload,
+} from '../types'
 
 const props = defineProps<{
   payload: LocalePayload
@@ -38,22 +42,57 @@ const props = defineProps<{
    * invents nothing.
    */
   busy: LanguageBusy | null
+  /**
+   * What the core said when it refused the last preference write (422: the
+   * pack does not carry the module, the ceiling; 503: core busy), with the
+   * language and module it was for — shown next to that module's select.
+   */
+  preferenceError?: { language: string; module: string; message: string } | null
 }>()
-const emit = defineEmits<{ install: [string]; remove: [string] }>()
+const emit = defineEmits<{
+  install: [string]
+  remove: [string]
+  /** `ConfigView` writes the preference and reloads `/api/locale`. */
+  prefer: [language: string, module: string, pack: string]
+}>()
 
 const { t } = useCatalog()
 
 /**
- * The rows worth a line: the packs on disk. A pack that is only *offered* is
- * `AddLanguageDialog`'s row, not this one — listing it here as well would put
- * the same gesture in two places, and this list would grow with every
+ * The rows worth a line: the languages with a pack on disk — **any** pack,
+ * not only the official one: a language whose only installed pack is a third
+ * party's must keep its Update and Remove. A language that is only *offered*
+ * is `AddLanguageDialog`'s row, not this one — listing it here as well would
+ * put the same gesture in two places, and this list would grow with every
  * language a release publishes whether or not the owner wants it.
  */
-const rows = computed<PackRow[]>(() => props.payload.packs.filter((p) => p.installed !== null))
+const rows = computed<PackRow[]>(() =>
+  props.payload.packs.filter((p) => p.packs.some((x) => x.installed !== null)),
+)
 
-/** A pack is on disk, and the release currently offers a different version. */
+/** `row.update_available`: decided by the core over **every** pack of the
+ * language, never re-derived here from the official pack's two versions. */
 function updateAvailable(row: PackRow): boolean {
-  return row.installed !== null && row.offered !== null && row.offered !== row.installed
+  return row.update_available
+}
+
+function sourceLabel(pack: LanguagePackDetail): string {
+  return packSourceLabel(t.value, pack.source)
+}
+
+/** The label of the pack `id` within `row`. Two packs from one repository
+ * (it can publish several) would read the same, so the id is appended then. */
+function packLabel(row: PackRow, id: string): string {
+  const pack = row.packs.find((p) => p.id === id)
+  if (!pack) return id
+  const label = sourceLabel(pack)
+  return row.packs.filter((p) => sourceLabel(p) === label).length > 1 ? `${label} (${id})` : label
+}
+
+/** Whether a preference error belongs to this select. */
+function errorFor(row: PackRow, overlap: LanguagePackOverlap): string | null {
+  const e = props.preferenceError
+  return e && e.language === row.language && e.module === overlap.module ? e.message : null
 }
 
 /** Whether `row` is the one `busy` names. */
@@ -86,6 +125,50 @@ function busyLabel(row: PackRow): string {
       <span v-if="isBusy(row)" class="text-xs text-muted-foreground" data-pack-busy>
         {{ busyLabel(row) }}
       </span>
+      <!-- Under a language with several packs: where each one comes from.
+           A single-pack language renders exactly as it always did. -->
+      <ul v-if="row.packs.length > 1" class="w-full list-none space-y-1 text-xs text-muted-foreground" data-pack-sources>
+        <li v-for="pack in row.packs" :key="pack.id" :data-pack-source="pack.id">
+          {{ sourceLabel(pack) }} —
+          {{ pack.installed ?? t('language_pack_not_installed') }}
+        </li>
+      </ul>
+      <!-- Shown only where two installed packs carry the same module: which
+           one speaks, and a choice. Nothing appears when no module is shared. -->
+      <div v-if="row.overlaps.length > 0" class="w-full space-y-2" data-pack-overlaps>
+        <p class="text-xs text-muted-foreground">{{ t('language_pack_overlap_intro') }}</p>
+        <div
+          v-for="overlap in row.overlaps"
+          :key="overlap.module"
+          class="flex flex-wrap items-center gap-2"
+          :data-pack-overlap="overlap.module"
+        >
+          <span class="text-xs">{{ t('language_pack_overlap_module', { module: overlap.module }) }}</span>
+          <Select
+            :model-value="overlap.active"
+            @update:model-value="(v) => emit('prefer', row.language, overlap.module, String(v))"
+          >
+            <!-- The label is rendered here, not left to reka's text capture
+                 taken once at mount (the select-label pitfall). -->
+            <SelectTrigger
+              class="min-w-32"
+              :data-pack-preference="overlap.module"
+              :aria-label="t('language_pack_overlap_choose', { module: overlap.module })"
+            ><SelectValue>{{ packLabel(row, overlap.active) }}</SelectValue></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="id in overlap.packs" :key="id" :value="id">
+                {{ packLabel(row, id) }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <span
+            v-if="errorFor(row, overlap)"
+            class="text-xs text-destructive"
+            role="alert"
+            data-pack-preference-error
+          >{{ errorFor(row, overlap) }}</span>
+        </div>
+      </div>
       <!-- Same route as a first install (`ConfigView`'s `installLanguage`): the core
            does not distinguish a first install from a reinstall over a
            newer offer. -->
@@ -96,9 +179,8 @@ function busyLabel(row: PackRow): string {
         :disabled="isBusy(row)"
         @click="emit('install', row.language)"
       >{{ t('language_pack_update') }}</Button>
-      <!-- Only an installed pack can be removed. -->
+      <!-- Every row here has a pack on disk, so every row can be removed. -->
       <Button
-        v-if="row.installed !== null"
         variant="outline" size="xs"
         :data-pack-remove="row.language"
         :disabled="isBusy(row)"

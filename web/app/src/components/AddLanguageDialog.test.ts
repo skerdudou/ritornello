@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetCatalog, useCatalog } from '../composables/useCatalog'
 import type { LanguageBusy, LanguagePackRow, UpdatePayload } from '../types'
+import { packRow } from '../testing/languagePacks'
 import AddLanguageDialog from './AddLanguageDialog.vue'
 
 const CATALOG = {
@@ -16,15 +17,17 @@ const CATALOG = {
   update_last_attempt_failed: 'The last attempt failed',
   language_pack_install: 'Install',
   language_pack_installing: 'Installing {language}…',
+  language_pack_official: 'Ritornello (official pack)',
+  language_pack_from: 'From {source}',
 }
 
 const NOW_S = Math.floor(Date.now() / 1000)
 
 const PACKS: LanguagePackRow[] = [
-  { language: 'fr', installed: '0.2.1', offered: '0.2.1' },
-  { language: 'de', installed: null, offered: '0.2.1' },
-  { language: 'es', installed: '0.2.0', offered: '0.2.1' },
-  { language: 'it', installed: null, offered: '0.2.1' },
+  packRow('fr', '0.2.1', '0.2.1'),
+  packRow('de', null, '0.2.1'),
+  packRow('es', '0.2.0', '0.2.1'),
+  packRow('it', null, '0.2.1'),
 ]
 
 let checkStatus = 202
@@ -92,8 +95,49 @@ describe('AddLanguageDialog', () => {
     expect(q('[data-add-language-row][data-language="es"]')).toBeNull()
   })
 
+  // A language only a third-party source offers is as installable as one the
+  // release publishes: a filter on the official pack's `offered` hid it.
+  it('offers a language only a third-party source offers, and names that source', async () => {
+    const nl = packRow('nl', null, null, {
+      packs: [{ id: 'ritornello-xlang-nl-0123456789ab', source: 'someone/nl', installed: null, offered: '1.0.0' }],
+    })
+    mountDialog({ packs: [nl, ...PACKS] })
+    await flushPromises()
+    expect(qa('[data-add-language-row]').map((r) => r.dataset.language)).toEqual(['nl', 'de', 'it'])
+    expect(q('[data-add-language-row][data-language="nl"] [data-pack-offered-from]')!.textContent!.trim())
+      .toBe('From someone/nl')
+    // A language only the release offers reads as it always did.
+    expect(q('[data-add-language-row][data-language="de"] [data-pack-offered-from]')).toBeNull()
+  })
+
+  it('does not offer a language that has a pack on disk, even when another pack of it is only offered', async () => {
+    const fr = packRow('fr', '0.2.1', '0.2.1', {
+      packs: [
+        { id: 'ritornello-lang-fr', source: null, installed: '0.2.1', offered: '0.2.1' },
+        { id: 'ritornello-xlang-fr-0123456789ab', source: 'someone/fr', installed: null, offered: '1.0.0' },
+      ],
+    })
+    mountDialog({ packs: [fr] })
+    await flushPromises()
+    expect(qa('[data-add-language-row]')).toHaveLength(0)
+  })
+
+  // The second operand of the filter: the official pack is only offered, but a
+  // third party's pack of the language is on disk, so it is not an addition.
+  it("does not offer a language whose only installed pack is a third party's", async () => {
+    const fr = packRow('fr', null, '0.2.1', {
+      packs: [
+        { id: 'ritornello-lang-fr', source: null, installed: null, offered: '0.2.1' },
+        { id: 'ritornello-xlang-fr-0123456789ab', source: 'someone/fr', installed: '1.0.0', offered: '1.0.0' },
+      ],
+    })
+    mountDialog({ packs: [fr] })
+    await flushPromises()
+    expect(qa('[data-add-language-row]')).toHaveLength(0)
+  })
+
   it('never lists a language that is neither offered nor installed', async () => {
-    mountDialog({ packs: [{ language: 'nl', installed: null, offered: null }, ...PACKS] })
+    mountDialog({ packs: [packRow('nl', null, null), ...PACKS] })
     await flushPromises()
     expect(q('[data-add-language-row][data-language="nl"]')).toBeNull()
     expect(qa('[data-add-language-row]')).toHaveLength(2)
