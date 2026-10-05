@@ -312,6 +312,38 @@ pub fn inventory(root: &Path) -> Vec<InstalledPack> {
     out
 }
 
+/// Test helper, shared by every test that needs a pack on disk: writes one
+/// the way an install leaves it under `root` -- ours when `repo` is `None`, a
+/// third party's (`ritornello-xlang-<lang>-<h12>`) otherwise -- with its
+/// `installed-at` file when `installed_at` is given and one `<module>.toml`
+/// per `(module, body)`. Returns its id.
+#[cfg(test)]
+pub(crate) fn write_test_pack(
+    root: &Path,
+    lang: &str,
+    repo: Option<&str>,
+    installed_at: Option<u64>,
+    modules: &[(&str, &str)],
+) -> String {
+    let id = pack_id_for(lang, repo);
+    let source = format!("https://github.com/{}", repo.unwrap_or(crate::update::release::REPO));
+    let dir = root.join(&id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let names: Vec<String> = modules.iter().map(|(m, _)| format!("{m:?}")).collect();
+    let manifest = format!(
+        "language = \"{lang}\"\nversion = \"1.0.0\"\nsource = \"{source}\"\nmodules = [{}]\n",
+        names.join(", ")
+    );
+    std::fs::write(dir.join("pack.toml"), manifest).unwrap();
+    for (module, body) in modules {
+        std::fs::write(dir.join(format!("{module}.toml")), body).unwrap();
+    }
+    if let Some(at) = installed_at {
+        std::fs::write(dir.join(INSTALLED_AT), at.to_string()).unwrap();
+    }
+    id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

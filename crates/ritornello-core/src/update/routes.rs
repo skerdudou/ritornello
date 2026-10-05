@@ -299,12 +299,22 @@ pub struct PreferenceReq {
     pub pack: Option<String>,
 }
 
+/// The preference route's `{error}` body: the catalog message for `key`, its
+/// `{max}` being the ceiling on stored preferences.
+async fn preference_error(state: &AppState, status: StatusCode, key: &str) -> Response {
+    let message =
+        state.catalog.read().await.get(key).replace("{max}", &crate::state::PACK_PREFERENCES_MAX.to_string());
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
 /// `PUT /api/languages/{language}/preference` — which installed pack speaks
 /// for one module in this language (`Registry::ordered_packs`).
 ///
-/// Validates the shape only: a preference naming a pack that is not installed,
-/// or that does not carry the module, is stored and simply not honoured
-/// (`ordered_packs`), so a pack removed and put back finds it again.
+/// Validates the shape, then refuses a **new** choice that does not name an
+/// installed pack carrying the module in the language, and a list that would
+/// grow past `PACK_PREFERENCES_MAX` (both 422). A removal is always accepted.
+/// An entry already stored outlives its pack: it is simply not honoured while
+/// the pack is gone (`ordered_packs`), and a pack put back finds it again.
 ///
 /// **No I/O and no wait.** The new list is computed from the registry's copy
 /// and handed to the core loop first, which persists it and retranslates
@@ -321,15 +331,35 @@ pub async fn language_preference_put(
 ) -> Response {
     let pack_ok = req.pack.as_deref().is_none_or(ritornello_i18n::valid_pack_id);
     if !crate::status::valid_locale(&language) || !ritornello_i18n::valid_pack_name(&req.module) || !pack_ok {
-        return error_body(&state, StatusCode::UNPROCESSABLE_ENTITY, "language_preference_invalid").await;
+        return preference_error(&state, StatusCode::UNPROCESSABLE_ENTITY, "language_preference_invalid").await;
     }
     let mut registry = state.registry.write().await;
     let list = crate::state::with_pack_preference(registry.preferences(), &language, &req.module, req.pack.as_deref());
+    // Two refusals keep an unauthenticated client from growing the stored
+    // list without bound — every entry is rewritten into `state.json` on each
+    // change and read by every resolution. A removal (`null`) passes both.
+    // A **new** choice must name an installed pack that carries this module in
+    // this language — the predicate `ordered_packs` keeps a pack by. An entry
+    // already stored is never refused for its pack having gone since: a pack
+    // put back finds its preference again.
+    let refusal = if req.pack.as_deref().is_some_and(|p| !registry.pack_carries(p, &req.module, &language)) {
+        Some("language_preference_not_installed")
+    } else if list.len() > crate::state::PACK_PREFERENCES_MAX && list.len() > registry.preferences().len() {
+        // Only a list that grows past the ceiling: replacing a stored key, or
+        // a removal, is always accepted, even on a list longer than it.
+        Some("language_preference_full")
+    } else {
+        None
+    };
+    if let Some(key) = refusal {
+        drop(registry);
+        return preference_error(&state, StatusCode::UNPROCESSABLE_ENTITY, key).await;
+    }
     if state.pack_preferences_tx.try_send(list.clone()).is_err() {
         drop(registry);
         // Full: the core is busy, asking again succeeds. Closed: the core is
         // gone, which it does not recover from. Both leave nothing changed.
-        return error_body(&state, StatusCode::SERVICE_UNAVAILABLE, "language_preference_not_saved").await;
+        return preference_error(&state, StatusCode::SERVICE_UNAVAILABLE, "language_preference_not_saved").await;
     }
     registry.set_preferences(list);
     StatusCode::NO_CONTENT.into_response()
@@ -892,9 +922,29 @@ mod tests {
 
     type Prefs = Vec<crate::state::PackPreference>;
 
-    fn state_with_preferences(capacity: usize) -> (AppState, tokio::sync::mpsc::Receiver<Prefs>) {
+    /// A rig whose preference channel is real and whose registry holds one
+    /// installed third-party French pack carrying `radio` and `core`. Returns
+    /// that pack's id; the directory lives as long as the returned guard.
+    fn state_with_preferences(
+        capacity: usize,
+    ) -> (AppState, tokio::sync::mpsc::Receiver<Prefs>, String, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let packs_root = dir.path().join("packs");
+        let id = crate::langpack::store::write_test_pack(
+            &packs_root,
+            "fr",
+            Some("z/zed"),
+            None,
+            &[("core", "k = \"v\"\n"), ("radio", "k = \"v\"\n")],
+        );
+        let registry = crate::i18n::seeded_registry(packs_root);
         let (tx, rx) = tokio::sync::mpsc::channel(capacity);
-        (AppState { pack_preferences_tx: tx, ..app_state() }, rx)
+        let state = AppState {
+            registry: std::sync::Arc::new(tokio::sync::RwLock::new(registry)),
+            pack_preferences_tx: tx,
+            ..app_state()
+        };
+        (state, rx, id, dir)
     }
 
     fn put_preference(language: &str, body: serde_json::Value) -> Request<Body> {
@@ -908,15 +958,19 @@ mod tests {
         crate::state::PackPreference { language: language.into(), module: module.into(), pack: pack.into() }
     }
 
+    /// What the catalog says for `key`, `{max}` filled as the route fills it.
+    async fn catalog_message(state: &AppState, key: &str) -> String {
+        state.catalog.read().await.get(key).replace("{max}", &crate::state::PACK_PREFERENCES_MAX.to_string())
+    }
+
     /// The core is told the whole new list, and the registry holds the same
     /// list once the route has answered.
     /// **[MUTATION]** drop `registry.set_preferences` from the route: red on
     /// the registry assertion.
     #[tokio::test]
     async fn a_preference_is_told_to_the_core_and_kept_in_the_registry() {
-        let (state, mut rx) = state_with_preferences(4);
+        let (state, mut rx, id, _dir) = state_with_preferences(4);
         let registry = state.registry.clone();
-        let id = crate::langpack::store::third_party_pack_id("fr", "z/zed");
         let r = router(state)
             .oneshot(put_preference("fr", serde_json::json!({ "module": "radio", "pack": id })))
             .await
@@ -928,10 +982,11 @@ mod tests {
     }
 
     /// `null` forgets the preference of that module in that language, and
-    /// only that one.
+    /// only that one — whatever the packs it names (none of them installed
+    /// here): a removal is never refused.
     #[tokio::test]
     async fn a_null_pack_forgets_the_preference() {
-        let (state, mut rx) = state_with_preferences(4);
+        let (state, mut rx, _id, _dir) = state_with_preferences(4);
         state.registry.write().await.set_preferences(vec![pref("fr", "radio", "a"), pref("fr", "core", "b")]);
         let registry = state.registry.clone();
         let r = router(state)
@@ -943,10 +998,11 @@ mod tests {
         assert_eq!(registry.read().await.preferences(), [pref("fr", "core", "b")]);
     }
 
-    /// 422 with a catalog message, and nothing told or kept, for each part of
-    /// the request that is not a bare name.
+    /// 422 with **the shape message**, and nothing told or kept, for each part
+    /// of the request that is not a bare name. The exact message matters: the
+    /// installed-pack check would refuse these too, with another one.
     /// **[MUTATION]** drop each of the three operands of the shape check in
-    /// turn: the matching case below answers 204, red.
+    /// turn: the matching case below answers another message, red.
     #[tokio::test]
     async fn a_preference_that_is_not_bare_names_is_refused_and_changes_nothing() {
         let id = crate::langpack::store::third_party_pack_id("fr", "z/zed");
@@ -955,14 +1011,84 @@ mod tests {
             ("fr", serde_json::json!({ "module": "radio", "pack": "../etc" })),
             ("f%20r", serde_json::json!({ "module": "radio", "pack": id })),
         ] {
-            let (state, mut rx) = state_with_preferences(4);
+            let (state, mut rx, _id, _dir) = state_with_preferences(4);
+            let expected = catalog_message(&state, "language_preference_invalid").await;
             let registry = state.registry.clone();
             let r = router(state).oneshot(put_preference(language, body.clone())).await.unwrap();
             assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY, "{language} {body}");
-            let message = error_of(r).await;
-            assert!(!message.is_empty() && message != "language_preference_invalid", "a catalog message: {message:?}");
+            assert_eq!(error_of(r).await, expected, "{language} {body}");
+            assert_ne!(expected, "language_preference_invalid", "a catalog message, not its key");
             assert!(rx.recv().await.is_none(), "nothing told to the core: {body}");
             assert!(registry.read().await.preferences().is_empty());
+        }
+    }
+
+    /// A new choice must name an installed pack carrying that module in that
+    /// language (Important 1, part a): anything else would let a client grow
+    /// the stored list with names nothing on the device answers to.
+    /// **[MUTATION]** drop each of the three operands of `Registry::carries`
+    /// / `pack_carries` (installed id, language, module): the matching case
+    /// below answers 204, red.
+    #[tokio::test]
+    async fn a_new_preference_must_name_an_installed_pack_carrying_its_module_in_its_language() {
+        let ours = crate::langpack::store::pack_id("fr");
+        for (language, module, pack, why) in [
+            ("fr", "radio", ours.as_str(), "not installed"),
+            ("de", "radio", "", "installed, another language"),
+            ("fr", "mpd", "", "installed, another module"),
+        ] {
+            let (state, mut rx, theirs, _dir) = state_with_preferences(4);
+            let pack = if pack.is_empty() { theirs.as_str() } else { pack };
+            let expected = catalog_message(&state, "language_preference_not_installed").await;
+            let registry = state.registry.clone();
+            let r = router(state)
+                .oneshot(put_preference(language, serde_json::json!({ "module": module, "pack": pack })))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY, "{why}");
+            assert_eq!(error_of(r).await, expected, "{why}");
+            assert!(rx.recv().await.is_none(), "nothing told to the core: {why}");
+            assert!(registry.read().await.preferences().is_empty(), "{why}");
+        }
+    }
+
+    /// A stored list already past the ceiling (hand-edited, say): a new key
+    /// is refused with its own message; replacing a stored key, and a
+    /// removal, are still accepted (Important 1, part b).
+    /// **[MUTATION]** drop the ceiling check: the new key answers 204, red.
+    /// **[MUTATION]** drop "the list grows": the replacement answers 422, red.
+    #[tokio::test]
+    async fn past_the_ceiling_a_new_key_is_refused_but_a_replacement_and_a_removal_are_not() {
+        let max = crate::state::PACK_PREFERENCES_MAX;
+        let filled = |theirs: &str| -> Prefs {
+            let mut v: Prefs = (0..max).map(|i| pref("fr", &format!("m{i}"), "gone")).collect();
+            v.push(pref("fr", "core", theirs));
+            v
+        };
+
+        let (state, mut rx, theirs, _dir) = state_with_preferences(4);
+        state.registry.write().await.set_preferences(filled(&theirs));
+        let expected = catalog_message(&state, "language_preference_full").await;
+        assert!(expected.contains(&max.to_string()), "the message names the ceiling: {expected}");
+        let registry = state.registry.clone();
+        let r = router(state)
+            .oneshot(put_preference("fr", serde_json::json!({ "module": "radio", "pack": theirs })))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error_of(r).await, expected);
+        assert!(rx.recv().await.is_none());
+        assert_eq!(registry.read().await.preferences().len(), max + 1, "nothing added");
+
+        for body in [
+            serde_json::json!({ "module": "core", "pack": theirs }),
+            serde_json::json!({ "module": "m0", "pack": null }),
+        ] {
+            let (state, mut rx, theirs, _dir) = state_with_preferences(4);
+            state.registry.write().await.set_preferences(filled(&theirs));
+            let r = router(state).oneshot(put_preference("fr", body.clone())).await.unwrap();
+            assert_eq!(r.status(), StatusCode::NO_CONTENT, "{body}");
+            assert!(rx.recv().await.is_some(), "{body}");
         }
     }
 
@@ -971,11 +1097,11 @@ mod tests {
     /// **[MUTATION]** write the registry before the send: red.
     #[tokio::test]
     async fn a_core_that_cannot_be_told_leaves_the_preferences_untouched() {
-        let (state, rx) = state_with_preferences(4);
+        let (state, rx, theirs, _dir) = state_with_preferences(4);
         drop(rx);
         let registry = state.registry.clone();
         let r = router(state)
-            .oneshot(put_preference("fr", serde_json::json!({ "module": "radio", "pack": "p" })))
+            .oneshot(put_preference("fr", serde_json::json!({ "module": "radio", "pack": theirs })))
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);

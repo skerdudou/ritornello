@@ -386,6 +386,13 @@ pub struct PackPreference {
     pub pack: String,
 }
 
+/// How many pack preferences may be stored. Far above any real device (a
+/// handful of modules times the languages with two packs); it exists so an
+/// unauthenticated client cannot grow `state.json` without bound through
+/// `PUT /api/languages/{language}/preference`, which refuses a list that
+/// would grow past it.
+pub const PACK_PREFERENCES_MAX: usize = 256;
+
 /// `prefs` with the entry for `(language, module)` replaced by `pack`, or
 /// removed when `pack` is `None`. The language is compared without case, as
 /// everywhere a language is one language whatever a source spells it in.

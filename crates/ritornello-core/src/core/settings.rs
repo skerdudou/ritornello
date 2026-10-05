@@ -265,23 +265,10 @@ mod tests {
     /// install leaves them under the rig's packs root. Returns the third
     /// party's id.
     fn two_french_core_packs(root: &std::path::Path) -> String {
-        let mut theirs = String::new();
-        for (repo, word) in [(None, "Sortie ours"), (Some("z/zed"), "Sortie theirs")] {
-            let id = crate::langpack::store::pack_id_for("fr", repo);
-            let dir = root.join("packs").join(&id);
-            std::fs::create_dir_all(&dir).unwrap();
-            let source = format!("https://github.com/{}", repo.unwrap_or(crate::update::release::REPO));
-            std::fs::write(
-                dir.join("pack.toml"),
-                format!("language = \"fr\"\nversion = \"1.0.0\"\nsource = \"{source}\"\nmodules = [\"core\"]\n"),
-            )
-            .unwrap();
-            std::fs::write(dir.join("core.toml"), format!("audio_output = \"{word}\"\n")).unwrap();
-            if repo.is_some() {
-                theirs = id;
-            }
-        }
-        theirs
+        let packs = root.join("packs");
+        let write = crate::langpack::store::write_test_pack;
+        write(&packs, "fr", None, None, &[("core", "audio_output = \"Sortie ours\"\n")]);
+        write(&packs, "fr", Some("z/zed"), None, &[("core", "audio_output = \"Sortie theirs\"\n")])
     }
 
     /// The preference reaches what the core says at once, and is kept by a

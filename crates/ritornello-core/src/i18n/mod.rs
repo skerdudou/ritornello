@@ -205,27 +205,9 @@ mod tests {
     #[test]
     fn the_startup_registry_already_honours_the_persisted_preference() {
         let packs = tempfile::tempdir().unwrap();
-        let mut theirs = String::new();
-        for (repo, word) in [(None, "Sortie ours"), (Some("z/zed"), "Sortie theirs")] {
-            let id = crate::langpack::store::pack_id_for("fr", repo);
-            let dir = packs.path().join(&id);
-            std::fs::create_dir_all(&dir).unwrap();
-            let source = format!("https://github.com/{}", repo.unwrap_or(crate::update::release::REPO));
-            std::fs::write(
-                dir.join("pack.toml"),
-                format!("language = \"fr\"
-version = \"1.0.0\"
-source = \"{source}\"
-modules = [\"core\"]
-"),
-            )
-            .unwrap();
-            std::fs::write(dir.join("core.toml"), format!("audio_output = \"{word}\"
-")).unwrap();
-            if repo.is_some() {
-                theirs = id;
-            }
-        }
+        let write = crate::langpack::store::write_test_pack;
+        write(packs.path(), "fr", None, None, &[("core", "audio_output = \"Sortie ours\"\n")]);
+        let theirs = write(packs.path(), "fr", Some("z/zed"), None, &[("core", "audio_output = \"Sortie theirs\"\n")]);
         let none = startup_registry(packs.path().to_path_buf(), Vec::new());
         assert_eq!(core_catalog(&none, "fr", "en").get("audio_output"), "Sortie ours");
         let prefs = vec![crate::state::PackPreference { language: "fr".into(), module: "core".into(), pack: theirs }];
