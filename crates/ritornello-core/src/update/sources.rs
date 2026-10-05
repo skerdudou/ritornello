@@ -25,7 +25,8 @@
 //! Nothing here does I/O: the routes call these functions on in-memory
 //! handles, and no HTTP route may block.
 
-use crate::update::release::{self, REPO};
+use crate::update::release::{self, Origin, REPO};
+use crate::update::state::Installed;
 use serde::Serialize;
 
 /// How many addressable non-official repositories the device will read in one
@@ -177,9 +178,126 @@ pub fn check_add(input: &str, current_rows: &[SourceRow]) -> Result<String, AddR
     Ok(repo)
 }
 
+/// One repository this check will ask, and where to ask it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+// Removed by Task 4, which moves the check onto these.
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct SourceTarget {
+    /// Lowercased `owner/repo`, kept for the log.
+    pub repo: String,
+    /// Formed **here** by `release::releases_url_for`, so the one place a
+    /// host is chosen stays the one place: nothing downstream composes an
+    /// address, and no announced string can reach a URL template.
+    pub url: String,
+}
+
+/// The repositories one check asks: announced by an installed plugin (in
+/// `plugins.toml` order), then announced by an installed language pack, then
+/// added by the operator (in insertion order).
+///
+/// Pure, and separate from the requests it feeds, because the ceiling is the
+/// one thing about this list that can be wrong without any I/O being involved.
+///
+/// Repositories are compared case-insensitively and a repository named twice
+/// is asked once, at its first position. Ours is never asked here (it has its
+/// own request), and an announcement with no GitHub endpoint to address
+/// consumes no slot. **Truncated to `SOURCES_MAX`, never sampled**: a stable
+/// prefix means the same repositories are checked every day.
+// Removed by Task 4, which moves the check onto these.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn source_targets(installed: &[Installed], pack_sources: &[String], added: &[String]) -> Vec<SourceTarget> {
+    let announced = |raw: &str| match release::origin(Some(raw)) {
+        Origin::ThirdParty(repo) => Some(repo.to_lowercase()),
+        Origin::Ours | Origin::Unknown | Origin::Foreign(_) => None,
+    };
+    let from_plugins = installed.iter().filter_map(|p| p.repository.as_deref()).filter_map(announced);
+    let from_packs = pack_sources.iter().map(String::as_str).filter_map(announced);
+    let from_operator = added.iter().filter_map(|raw| normalize_repo(raw));
+    let mut seen: Vec<String> = Vec::new();
+    for repo in from_plugins.chain(from_packs).chain(from_operator) {
+        // The second guard for the official repository: `origin` compares
+        // case-sensitively, and a hand-edited `Skerdudou/Ritornello` must not
+        // become a source of its own.
+        if repo != REPO && !seen.contains(&repo) {
+            seen.push(repo);
+        }
+    }
+    seen.into_iter()
+        .take(SOURCES_MAX)
+        .map(|repo| SourceTarget { url: release::releases_url_for(&repo), repo })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tp(name: &str, repo: &str) -> Installed {
+        Installed {
+            name: name.into(),
+            declared: true,
+            binary_present: true,
+            version: Some("1.0.0".into()),
+            repository: Some(format!("https://github.com/{repo}")),
+        }
+    }
+
+    fn repos(targets: Vec<SourceTarget>) -> Vec<String> {
+        targets.into_iter().map(|t| t.repo).collect()
+    }
+
+    #[test]
+    fn targets_are_announced_then_pack_sources_then_added_without_duplicates_or_ours() {
+        let installed = vec![tp("radio", "skerdudou/ritornello"), tp("zed", "Z/Zed"), tp("zed2", "z/zed"), tp("alpha", "a/alpha")];
+        let got = repos(source_targets(&installed, &["https://github.com/P/Packs".into()], &["b/bee".into(), "A/ALPHA".into()]));
+        assert_eq!(got, vec!["z/zed", "a/alpha", "p/packs", "b/bee"]);
+    }
+
+    #[test]
+    fn a_repository_added_twice_in_different_cases_is_asked_once() {
+        let got = repos(source_targets(&[], &[], &["B/Bee".into(), "b/bee".into()]));
+        assert_eq!(got, vec!["b/bee"]);
+    }
+
+    #[test]
+    fn the_official_repository_is_never_asked_in_any_spelling() {
+        let installed = vec![tp("radio", "skerdudou/ritornello")];
+        let added = vec!["skerdudou/ritornello".to_string(), "Skerdudou/Ritornello".to_string()];
+        assert!(source_targets(&installed, &["https://github.com/SKERDUDOU/ritornello".into()], &added).is_empty());
+        // And the announcement path alone, with no operator entry to hide it.
+        assert!(source_targets(&installed, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn targets_are_a_stable_prefix_of_sixteen() {
+        let added: Vec<String> = (0..20).map(|i| format!("o/r{i:02}")).collect();
+        let got = repos(source_targets(&[], &[], &added));
+        assert_eq!(got.len(), SOURCES_MAX);
+        assert_eq!(got.first().map(String::as_str), Some("o/r00"));
+        assert_eq!(got.last().map(String::as_str), Some("o/r15"));
+    }
+
+    #[test]
+    fn a_foreign_or_unaddressable_announcement_consumes_no_slot() {
+        let mut installed = vec![Installed { repository: Some("https://gitlab.com/x/y".into()), ..tp("gl", "x/y") }];
+        installed.push(Installed { repository: None, ..tp("none", "x/y") });
+        installed.extend((0..16).map(|i| tp(&format!("p{i}"), &format!("o/r{i}"))));
+        // The slot count alone cannot tell: a foreign row in front would still
+        // leave sixteen. What must hold is that sixteen *addressable* ones fill it.
+        let got = repos(source_targets(&installed, &["https://gitlab.com/p/q".into()], &["not a repo".into()]));
+        let expected: Vec<String> = (0..16).map(|i| format!("o/r{i}")).collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn every_target_url_is_formed_on_the_api_host() {
+        let got = source_targets(&[tp("zed", "z/zed")], &[], &["b/bee".into()]);
+        assert_eq!(got.len(), 2);
+        for t in got {
+            assert_eq!(t.url, crate::update::release::releases_url_for(&t.repo));
+            assert!(t.url.starts_with("https://api.github.com/repos/"), "{}", t.url);
+        }
+    }
 
     #[test]
     fn a_repository_is_read_in_both_spellings_and_stored_lowercased() {
