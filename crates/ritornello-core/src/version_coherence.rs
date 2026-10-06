@@ -1124,8 +1124,7 @@ serde = \"1\" # path=x
         let code = |job: String| -> String {
             job.lines()
                 .filter(|l| !l.trim_start().starts_with('#'))
-                .map(|l| format!("{l}
-"))
+                .map(|l| format!("{l}\n"))
                 .collect()
         };
         let publish = code(ci_job("publish"));
@@ -1172,6 +1171,16 @@ serde = \"1\" # path=x
             "the numbered release, the fixed release's creation and its update must each stay out of \"latest\""
         );
         assert!(job.contains("gh release upload installer assets/* --clobber"));
+        // Re-runnable: the numbered release is created only when absent, and
+        // the fixed one is found by `view` before it is created or edited.
+        assert!(
+            job.contains(r#"gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG""#),
+            "the numbered release is created unconditionally: a re-run of a failed job would die on 'already exists'"
+        );
+        assert!(
+            job.contains("if gh release view installer >/dev/null 2>&1; then"),
+            "the fixed release is not found before being created or edited"
+        );
         let notes = read(&repo_root().join(".github").join("installer-release-notes.md"));
         assert!(notes.contains("@VERSION@"), "the release notes template has lost its placeholder");
         assert!(job.contains("installer-release-notes.md"));

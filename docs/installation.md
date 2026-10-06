@@ -501,7 +501,13 @@ release. Its releases are made apart:
    commit and replaces its assets by this version's. That fixed release is the
    address the README links, and the only published release this repository
    ever rewrites: no device fetches the installer, so nothing depends on what
-   it held before.
+   it held before. GitHub needs unique asset names, so the replacement deletes
+   and re-uploads each asset: for a few seconds per publish a README link can
+   answer 404. That window is inherent, not a defect to fix.
+
+A failed `publish-installer` is re-run with "Re-run failed jobs", never
+re-tagged: both release steps are safe to run again over what a previous
+attempt left.
 
 Nothing in the README changes when the installer's number does. The device's
 update logic and the product's baseline queries ignore every release tagged

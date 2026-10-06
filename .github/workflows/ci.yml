@@ -565,13 +565,19 @@ jobs:
         #
         # Never edited afterwards. The fixed release below is the only one that
         # is.
+        #
+        # **Re-runnable.** If the step after this one fails, "Re-run failed
+        # jobs" restarts this whole job: a release that already exists is left
+        # as it is (its assets were attached by the same run of the same tag),
+        # so a re-run never fails on "already exists" and no tag is ever
+        # pushed twice.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
           version=${TAG#installer-v}
           sed -e "s/@VERSION@/$version/g" .github/installer-release-notes.md > notes.md
-          gh release create "$TAG" \
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
             --latest=false \
             --verify-tag \
             --title "ritornello-install $version" \
@@ -584,6 +590,18 @@ jobs:
         # by this version's. It is the ONE published release this repository
         # ever rewrites -- see AGENTS.md. No device fetches the installer, so
         # nothing compares versions of what it carries.
+        #
+        # **Re-runnable over a half-updated release**: every command below
+        # converges (the tag move is forced, the edit sets absolute values,
+        # the upload clobbers, stale assets are deleted by name), and a release
+        # that a previous attempt created is found by `gh release view`.
+        #
+        # **An inherent window, not a bug to fix.** GitHub requires unique
+        # asset names, so `--clobber` deletes each asset and uploads it again:
+        # for a few seconds per publish a README link can answer 404. Nobody
+        # downloads an installer at that rate, and the alternative (a new
+        # release per publish) is exactly the version-bearing address the
+        # README must not hold.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}

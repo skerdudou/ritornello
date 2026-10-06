@@ -1775,7 +1775,7 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
     /// both. A target added to the workflow without its link, a link left
     /// behind after a rename, or the wrong extension for a system would
     /// otherwise only be found by someone clicking on it.
-        #[test]
+    #[test]
     fn the_readme_links_every_installer_the_ci_publishes() {
         let ci_yml = include_str!("../../../../.github/workflows/ci.yml").replace("\r\n", "\n");
         let job = ci_yml
