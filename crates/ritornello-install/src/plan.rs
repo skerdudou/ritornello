@@ -863,8 +863,7 @@ fn settle(mut plan: Plan, dev: &DeviceState) -> Plan {
         && !plan.remove_registry
         && !plan.remove_user
         && plan.plugins_toml == dev.plugins_toml
-        && dev.user_exists
-        && dev.core_present;
+        && dev.user_exists;
     if !quiet {
         return plan;
     }

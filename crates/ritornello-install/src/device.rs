@@ -859,8 +859,8 @@ radio
     /// the expected JSON, it is no evidence at all — never a refusal, which
     /// would let the unprivileged account stop every install.
     ///
-    /// **[MUTATION]**: make `updater_placed` fail the survey (`?`) on a
-    /// parse error — this test fails.
+    /// **[MUTATION]**: make `updater_placed` refuse what does not parse
+    /// (`.expect` in place of `.unwrap_or_default()`) — this test fails.
     #[test]
     fn an_absent_unreadable_or_garbage_updater_memory_is_no_evidence() {
         for placed in [("", "absent"), ("", "unreadable"), ("{\"core\": {\"vers", "present"), ("[1, 2]", "present"), ("", "present")] {
