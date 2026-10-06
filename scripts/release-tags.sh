@@ -64,9 +64,9 @@ base_for() {
   local want=$1 tag pre found= prerelease_tag=false
   case "$want" in *-*) prerelease_tag=true ;; esac
   # Reads to the end, for the reason given in newest_product.
-  while IFS=$'	' read -r tag pre || [ -n "$tag" ]; do
-    tag=${tag%$''}
-    pre=${pre%$''}
+  while IFS=$'\t' read -r tag pre || [ -n "$tag" ]; do
+    tag=${tag%$'\r'}
+    pre=${pre%$'\r'}
     [ -n "$tag" ] || continue
     is_installer_tag "$tag" && continue
     [ "$tag" != "$want" ] || continue
@@ -74,8 +74,7 @@ base_for() {
     if [ "$prerelease_tag" = false ] && [ "$pre" = true ]; then continue; fi
     [ -n "$found" ] || found=$tag
   done
-  [ -z "$found" ] || printf '%s
-' "$found"
+  [ -z "$found" ] || printf '%s\n' "$found"
 }
 
 check_installer_tag() {
@@ -126,41 +125,28 @@ self_test() {
     "v0.2.0" "$(printf 'installer\r\nv0.2.0\r\n' | newest_product)"
 
   # The release a tag is measured against. The list is newest first.
-  local list
-  list=$(printf 'v0.2.0-beta.4	true
-installer-v0.2.0	false
-v0.2.0-beta.3	true
-installer	false
-v0.1.0	false
-')
-  expect "a prerelease tag is measured against the newest prerelease"     "v0.2.0-beta.4" "$(printf '%s
-' "$list" | base_for v0.2.0-beta.5)"
-  expect "a finished tag skips prereleases"     "v0.1.0" "$(printf '%s
-' "$list" | base_for v0.2.0)"
-  expect "a prerelease tag may be measured against a finished release"     "v0.2.0" "$(printf 'v0.2.0	false
-v0.2.0-beta.4	true
-' | base_for v0.2.1-beta.1)"
-  expect "a prerelease tag skips installer releases at the head"     "v0.2.0-beta.4" "$(printf 'installer-v0.2.1	false
-installer	false
-v0.2.0-beta.4	true
-' | base_for v0.2.0-beta.5)"
-  expect "a finished tag skips installer releases at the head"     "v0.1.0" "$(printf 'installer-v0.2.1	false
-v0.2.0-beta.4	true
-v0.1.0	false
-' | base_for v0.2.0)"
-  expect "only prereleases exist, finished tag: empty (publishes everything)"     "" "$(printf 'v0.2.0-beta.4	true
-v0.2.0-beta.3	true
-' | base_for v0.2.0)"
-  expect "only installers exist, prerelease tag: empty"     "" "$(printf 'installer	false
-installer-v0.2.0	false
-' | base_for v0.2.0-beta.1)"
+  local list='v0.2.0-beta.4\ttrue\ninstaller-v0.2.0\tfalse\nv0.2.0-beta.3\ttrue\ninstaller\tfalse\nv0.1.0\tfalse\n'
+  expect "a prerelease tag is measured against the newest prerelease" \
+    "v0.2.0-beta.4" "$(printf "$list" | base_for v0.2.0-beta.5)"
+  expect "a finished tag skips prereleases" \
+    "v0.1.0" "$(printf "$list" | base_for v0.2.0)"
+  expect "a prerelease tag may be measured against a finished release" \
+    "v0.2.0" "$(printf 'v0.2.0\tfalse\nv0.2.0-beta.4\ttrue\n' | base_for v0.2.1-beta.1)"
+  expect "a prerelease tag skips installer releases at the head" \
+    "v0.2.0-beta.4" "$(printf 'installer-v0.2.1\tfalse\ninstaller\tfalse\nv0.2.0-beta.4\ttrue\n' | base_for v0.2.0-beta.5)"
+  expect "a finished tag skips installer releases at the head" \
+    "v0.1.0" "$(printf 'installer-v0.2.1\tfalse\nv0.2.0-beta.4\ttrue\nv0.1.0\tfalse\n' | base_for v0.2.0)"
+  expect "only prereleases exist, finished tag: empty (publishes everything)" \
+    "" "$(printf 'v0.2.0-beta.4\ttrue\nv0.2.0-beta.3\ttrue\n' | base_for v0.2.0)"
+  expect "only installers exist, prerelease tag: empty" \
+    "" "$(printf 'installer\tfalse\ninstaller-v0.2.0\tfalse\n' | base_for v0.2.0-beta.1)"
   expect "nothing published: empty" "" "$(printf '' | base_for v0.2.0-beta.1)"
-  expect "a rerun never measures a tag against itself"     "v0.2.0-beta.3" "$(printf 'v0.2.0-beta.4	true
-v0.2.0-beta.3	true
-' | base_for v0.2.0-beta.4)"
-  expect "a CRLF list is read like an LF one"     "v0.2.0-beta.4" "$(printf 'v0.2.0-beta.4	true
-v0.1.0	false
-' | base_for v0.2.0-beta.5)"
+  expect "a rerun never measures a tag against itself" \
+    "v0.2.0-beta.3" "$(printf 'v0.2.0-beta.4\ttrue\nv0.2.0-beta.3\ttrue\n' | base_for v0.2.0-beta.4)"
+  # The flag ends the line, so it is what a CR would stick to: a finished tag
+  # reading "true\r" would take the beta for a finished release.
+  expect "a CRLF list is read like an LF one" \
+    "v0.1.0" "$(printf 'v0.2.0-beta.4\ttrue\r\nv0.1.0\tfalse\r\n' | base_for v0.2.0)"
 
   # The tag check, against real manifests.
   dir=$(mktemp -d)

@@ -411,8 +411,9 @@ before opening it:
 
 - you bump versions **by hand**, once per component and per delivery, not
   once per commit: the release compares each component's declared version
-  against the one it had at the release the tag is measured against (the last finished release for a finished tag, the previous published one for a prerelease), so fifteen commits
-  to a plugin are one bump;
+  against the one it had at the release the tag is measured against (the
+  last finished release for a finished tag, the previous published one for
+  a prerelease), so fifteen commits to a plugin are one bump;
 - you bump the product number too, and the tag must equal it exactly;
 - a compatible change to a shared crate (`ritornello-proto`,
   `ritornello-i18n`, `ritornello-plugin-sdk`, `ritornello-updater`)
