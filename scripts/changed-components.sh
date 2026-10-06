@@ -11,7 +11,11 @@
 # The rule: a component is published when the version it declares differs from
 # the version it declared at <ref>. Bumping the number is therefore the only
 # gesture, and forgetting to bump publishes nothing — a loud failure rather
-# than a silent one.
+# than a silent one. Two things republish everything instead: a change of
+# `PROTOCOL_VERSION` (a wire break: old binaries can no longer talk to the
+# core, so every core and plugin must have moved, and the script refuses the
+# release otherwise), and a change of the product's MAJOR. A COMPATIBLE change
+# to a shared crate republishes nothing by itself: see the block below.
 #
 # Usage: changed-components.sh [--guard-baseline <tag>] [ref | --guard-only]
 #        changed-components.sh --self-test
@@ -66,46 +70,75 @@ else
   fi
 fi
 
-# Shared crates are linked into every component's binary and inherit the
-# product version, so changing one moves no declared number while rebuilding
-# all eleven. Publishing "what changed" would then leave ten plugins on the
-# device built against the old crate, with version equality claiming
-# everything is up to date. A change to any of them therefore counts as a
-# change to everything — decided by content, not by a number.
-#
-# **Republishing is not, by itself, delivering**, and that limit is real: the
-# archives go out under the components' UNCHANGED versions, and the device
-# decides what to install with `release::differs`, which is plain version
-# inequality. Equal versions read as "up to date", so not one of those
-# rebuilt archives is ever fetched. A shared-crate change reaches devices
-# only if **every** component's version is bumped by hand in the same commit.
-# This script cannot do that for you and does not refuse the release: it says
-# so on stderr, `docs/installation.md` says so, and the release-notes
-# template asks for it.
+# Shared crates (proto, i18n, the plugin SDK, the updater) are linked into
+# the binaries and inherit the product version, so changing one moves no
+# declared number. That used to republish every component, and a device
+# installs on version inequality alone, so those archives were fetched by
+# nobody. The rule now is the owner's: DO NOT republish needlessly. A
+# component whose current binary still works with the new core stays where it
+# is. A component is republished only when
+#   1. its own version moved (its code changed, as always);
+#   2. `PROTOCOL_VERSION` changed: a wire break, old binaries cannot talk to
+#      the core any more, so every shipped component that links
+#      `ritornello-proto` (the core and the plugins; NOT a companion, which
+#      depends on no shared crate, and NOT a language pack, which is data)
+#      MUST have moved its version, or the release is refused below;
+#   3. the product's major changed.
+# A compatible shared-crate change prints a NOTE and nothing else: if the fix
+# must reach plugins, the developer bumps those plugins by hand, which is a
+# delivery choice and not a compatibility matter. The fingerprint test of
+# `ritornello-proto` is what forces the break-or-compatible decision on
+# whoever touches the wire.
 #
 # Not detected, and assumed: an external dependency bump lives in Cargo.lock,
-# which moves whenever any version moves. Detecting it would republish
-# everything at every delivery and defeat the point. If a dependency bump
-# matters, bumping every component is the gesture.
+# which moves whenever any version moves.
 #
 # This list is the same four crates as INTERNAL_CRATES in
 # version_coherence.rs — not derived from it (there is no manifest either
 # side can read the other from without more machinery than four entries
 # deserve), so a crate added to one belongs in the other too.
-#
-# ritornello-updater is not linked into anything, but its binary ships inside
-# the core's archive (deploy/packaging.toml, extra_binaries), so changing it
-# changes what that archive carries while moving no declared version. Strictly
-# it affects only the core; it is listed here because over-publishing is the
-# safe direction and one mechanism is better than two for a crate that changes
-# rarely.
 SHARED=(crates/ritornello-proto crates/ritornello-i18n crates/ritornello-plugin-sdk crates/ritornello-updater)
-if [ -n "$PREV" ] && ! git diff --quiet "$PREV" -- "${SHARED[@]}"; then
-  echo "a shared crate changed since $PREV — every component is published" >&2
-  echo "  NOTE: republished archives keep their unchanged version numbers, and a device" >&2
-  echo "  installs on version inequality alone — so no device will fetch any of them." >&2
-  echo "  For a shared-crate change to reach devices, bump EVERY component's version." >&2
-  PREV=""
+
+# The PROTOCOL_VERSION a ritornello-proto lib.rs declares, from stdin, or
+# `absent`.
+proto_version() {
+  local v
+  v=$(tr -d '\r' | sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9][0-9]*\);.*/\1/p' | head -1)
+  [ -n "$v" ] || v=absent
+  printf '%s\n' "$v"
+}
+
+# The product's major, from a workspace Cargo.toml on stdin: the first
+# `version = "..."` line, the same one package-release.sh reads.
+product_major() {
+  local v
+  v=$(tr -d '\r' | sed -n 's/^version = "\([0-9][0-9]*\)\..*/\1/p' | head -1)
+  [ -n "$v" ] || v=absent
+  printf '%s\n' "$v"
+}
+
+# ALL is set when this release republishes every component regardless of
+# its version: the first release (no PREV, handled below) is the other way
+# to the same result. PROTO_BREAK is set when the wire changed.
+ALL=
+PROTO_BREAK=
+if [ -n "$PREV" ]; then
+  now_proto=$(proto_version < crates/ritornello-proto/src/lib.rs)
+  then_proto=$(git show "$PREV:crates/ritornello-proto/src/lib.rs" 2>/dev/null | proto_version || echo absent)
+  now_major=$(product_major < Cargo.toml)
+  then_major=$(git show "$PREV:Cargo.toml" 2>/dev/null | product_major || echo absent)
+  if [ "$now_proto" != "$then_proto" ]; then
+    PROTO_BREAK=1 ALL=1
+    echo "PROTOCOL_VERSION moved ($then_proto -> $now_proto) since $PREV — every component is republished" >&2
+  fi
+  if [ "$now_major" != "$then_major" ]; then
+    ALL=1
+    echo "the product's major moved ($then_major -> $now_major) since $PREV — every component is republished" >&2
+  fi
+  if [ -z "$ALL" ] && ! git diff --quiet "$PREV" -- "${SHARED[@]}"; then
+    echo "NOTE: a shared crate changed since $PREV; it changed compatibly, so components are not republished" >&2
+    echo "  unless their version moved — bump a plugin by hand if a fix must reach it." >&2
+  fi
 fi
 
 # The plugin list comes from plugins.example.toml, the same source
@@ -134,7 +167,13 @@ if tr -d '\r' < deploy/packaging.toml | grep -q '^\[companions\.' && [ "${#COMPA
   echo "deploy/packaging.toml declares [companions.*] but packaging.py companions listed none" >&2
   exit 1
 fi
-for line in "${COMPANIONS[@]}"; do CRATES+=("ritornello-${line%% *}"); done
+COMPANION_CRATES=()
+for line in "${COMPANIONS[@]}"; do CRATES+=("ritornello-${line%% *}"); COMPANION_CRATES+=("ritornello-${line%% *}"); done
+is_companion() { # <crate>
+  local c
+  for c in "${COMPANION_CRATES[@]}"; do [ "$c" = "$1" ] && return 0; done
+  return 1
+}
 
 # The version a manifest declares, or the literal `inherited` when it uses
 # `version.workspace = true`. Two distinct answers, because a component that
@@ -538,6 +577,82 @@ if [ -n "$SELF_TEST" ]; then
   rm -rf "$R/.git"
   expect_guard 1 "" "git cannot read this repository" "local fallback outside any repository refuses" --
 
+  # The republication rule, through the REAL script: a throwaway repository
+  # holding every crate the script lists, a proto crate carrying
+  # PROTOCOL_VERSION, one more shared crate and a root Cargo.toml. Each case
+  # commits a baseline tagged v0.1.0, changes things, commits, and runs the
+  # whole script against v0.1.0 with no published baseline for the coupled
+  # guard (--guard-baseline "").
+  rel_repo() { # sets R
+    R=$(mktemp -d)
+    mkdir -p "$R/scripts" "$R/deploy" "$R/crates/ritornello-proto/src" "$R/crates/ritornello-i18n/src"
+    cp scripts/changed-components.sh scripts/packaging.py "$R/scripts/"
+    cp deploy/plugins.example.toml deploy/language-packs.toml deploy/packaging.toml "$R/deploy/"
+    printf '[workspace.package]\nversion = "0.1.0"\n' > "$R/Cargo.toml"
+    printf 'pub const PROTOCOL_VERSION: u32 = 1;\n' > "$R/crates/ritornello-proto/src/lib.rs"
+    printf 'pub fn t() {}\n' > "$R/crates/ritornello-i18n/src/lib.rs"
+    for c in "${CRATES[@]}"; do
+      mkdir -p "$R/crates/$c"
+      printf '[package]\nname = "%s"\nversion = "0.1.0"\n' "$c" > "$R/crates/$c/Cargo.toml"
+    done
+    guard_git init -q; guard_git add -A; guard_git commit -q -m baseline; guard_git tag v0.1.0
+  }
+  rel_bump() { guard_bump "$1" "${2:-0.1.1}"; }
+  expect_rel() { # <exit> <stdout lines, space-separated, sorted> <stderr must contain, or ""> <why> [args]
+    local want_exit="$1" want="$2" say="$3" why="$4" got_exit=0 got
+    shift 4
+    if [ "$#" -eq 0 ]; then set -- --guard-baseline "" v0.1.0; fi
+    guard_git add -A; guard_git commit -q -m change --allow-empty
+    bash "$R/scripts/changed-components.sh" "$@" > "$R.out" 2> "$R.err" || got_exit=$?
+    got=$({ grep -v '^ritornello-lang-' "$R.out" || true; } | sort | tr '\n' ' '); got="${got% }"
+    if [ "$got_exit" != "$want_exit" ] || [ "$got" != "$want" ] || { [ -n "$say" ] && ! grep -qF -- "$say" "$R.err"; }; then
+      echo "self-test: republication [$*] -> exit $got_exit printing [$got], expected exit $want_exit printing [$want]${say:+ saying \"$say\"} ($why)" >&2
+      sed 's/^/    /' "$R.err" >&2
+      fails=$((fails + 1))
+    fi
+    rm -rf "$R" "$R.out" "$R.err"
+  }
+  non_companions=()
+  for c in "${CRATES[@]}"; do is_companion "$c" || non_companions+=("$c"); done
+  all_non_companions=$(printf '%s\n' "${non_companions[@]}" | sort | tr '\n' ' '); all_non_companions="${all_non_companions% }"
+  all_crates=$(printf '%s\n' "${CRATES[@]}" | sort | tr '\n' ' '); all_crates="${all_crates% }"
+
+  rel_repo
+  printf 'pub const PROTOCOL_VERSION: u32 = 1;\npub fn extra() {}\n' > "$R/crates/ritornello-proto/src/lib.rs"
+  expect_rel 2 "" "changed compatibly" "a compatible shared-crate change, nothing moved: nothing republished, a note"
+
+  rel_repo
+  printf 'pub fn t() { /* compatible */ }\n' > "$R/crates/ritornello-i18n/src/lib.rs"
+  rel_bump ritornello-plugin-radio
+  expect_rel 0 "ritornello-plugin-radio" "changed compatibly" "a compatible shared-crate change plus one moved plugin: only that plugin"
+
+  rel_repo
+  printf 'pub const PROTOCOL_VERSION: u32 = 2;\n' > "$R/crates/ritornello-proto/src/lib.rs"
+  for c in "${non_companions[@]}"; do rel_bump "$c"; done
+  expect_rel 0 "$all_non_companions" "PROTOCOL_VERSION moved" "a wire break with every core and plugin moved: all republished, the companion not"
+
+  rel_repo
+  printf 'pub const PROTOCOL_VERSION: u32 = 2;\n' > "$R/crates/ritornello-proto/src/lib.rs"
+  for c in "${non_companions[@]}"; do [ "$c" = ritornello-plugin-radio ] || rel_bump "$c"; done
+  expect_rel 1 "" "ritornello-plugin-radio" "a wire break with one plugin not moved is refused, and names it"
+
+  rel_repo
+  printf 'pub const PROTOCOL_VERSION: u32 = 2;\n' > "$R/crates/ritornello-proto/src/lib.rs"
+  for c in "${non_companions[@]}"; do rel_bump "$c"; done
+  rel_bump ritornello-files-mount
+  expect_rel 0 "$all_crates" "" "a wire break with the companion moved too: the companion is printed because it moved"
+
+  rel_repo
+  printf '[workspace.package]\nversion = "1.0.0"\n' > "$R/Cargo.toml"
+  expect_rel 0 "$all_non_companions" "major moved" "a new major republishes everything, whatever moved"
+
+  rel_repo
+  rel_bump ritornello-core
+  expect_rel 0 "ritornello-core" "" "an ordinary release: only what moved"
+
+  rel_repo
+  expect_rel 0 "$all_crates" "" "no baseline reference at all: every component, as for a first release" --guard-baseline ""
+
   # The pairs the real check walks, read from packaging.toml.
   found_pair=no
   for line in "${COMPANIONS[@]}"; do
@@ -549,7 +664,7 @@ if [ -n "$SELF_TEST" ]; then
   fi
 
   [ "$fails" -eq 0 ] || { echo "self-test: $fails case(s) wrong" >&2; exit 1; }
-  echo "self-test: language-pack change detection and the coupled-change guard ok"
+  echo "self-test: language-pack change detection, the coupled-change guard and the republication rule ok"
   exit 0
 fi
 
@@ -558,11 +673,39 @@ fi
 # list on stdout.
 run_guard || exit 1
 
+# A wire break republishes nothing unless every component that links
+# ritornello-proto moved: an archive rebuilt under its old number is fetched
+# by no device, and the release would look complete while delivering a core
+# that cannot talk to its plugins. A companion links no shared crate, and a
+# language pack is data; neither is asked to move.
+if [ -n "$PROTO_BREAK" ]; then
+  unmoved=()
+  for c in "${CRATES[@]}"; do
+    is_companion "$c" && continue
+    now=$(version_in < "crates/$c/Cargo.toml")
+    then_=$(git show "$PREV:crates/$c/Cargo.toml" 2>/dev/null | version_in || echo absent)
+    [ "$now" != "$then_" ] || unmoved+=("$c")
+  done
+  if [ "${#unmoved[@]}" -gt 0 ]; then
+    echo "PROTOCOL_VERSION moved since $PREV, but these components did not move their version:" >&2
+    printf '  %s\n' "${unmoved[@]}" >&2
+    echo "a wire break needs every core and plugin republished under a new number; bump them in crates/<name>/Cargo.toml" >&2
+    exit 1
+  fi
+fi
+
 changed=0
 for c in "${CRATES[@]}"; do
   now=$(version_in < "crates/$c/Cargo.toml")
   [ "$now" != absent ] || { echo "crates/$c declares no version" >&2; exit 1; }
   if [ -z "$PREV" ]; then
+    printf '%s\n' "$c"
+    changed=$((changed + 1))
+    continue
+  fi
+  # A wire break or a new major republishes every component, except a
+  # companion, which moves only when it changes itself.
+  if [ -n "$ALL" ] && ! is_companion "$c"; then
     printf '%s\n' "$c"
     changed=$((changed + 1))
     continue
@@ -584,7 +727,7 @@ MOVED_PACKS=()
 for l in "${LANGS[@]}"; do
   now=$(pack_version "$l" < deploy/language-packs.toml)
   [ "$now" != absent ] || { echo "deploy/language-packs.toml declares no version for [$l]" >&2; exit 1; }
-  if [ -z "$PREV" ]; then
+  if [ -z "$PREV" ] || [ -n "$ALL" ]; then
     then_=absent
   else
     # A language that did not exist at <ref> is new, so it counts as
