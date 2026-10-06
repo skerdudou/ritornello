@@ -1282,10 +1282,22 @@ binary re-reads and re-validates the whole file, and accepts only:
   `credentials=<path>`). There is no pass-through to `mount -o`.
 
 The binary **reconciles**: it mounts what is declared and absent,
-unmounts what is no longer declared, and is idempotent — hence rerunnable
-without precaution, including at boot (the unit is enabled by
-`deploy.sh`). A single share failing to mount does not fail the service:
-the others still go up.
+unmounts what is no longer declared, remounts a declared share whose
+mount is not in the mode the table asks for (`ro` while declared
+writable, or the reverse), and is idempotent — hence rerunnable without
+precaution, including at boot (the unit is enabled by `deploy.sh`). A
+single share failing to mount does not fail the service: the others
+still go up.
+
+The remount is what makes the "writable" toggle take effect. Up to
+`files-mount` 1.0.0 a share already mounted was skipped whatever its
+options, so ticking the box changed the table and nothing else until the
+next reboot — and the cover archive, which trusts the table, kept trying
+writes the kernel refused. The share is detached **lazily**
+(`umount --lazy`), unlike a removed one: the toggle is typically flipped
+while a track of that very share is playing, a plain `umount` then fails
+with "target is busy", and the old mount lives on only for the file mpv
+holds open.
 
 systemd offers no equivalent of logind's `CanPowerOff` for `manage-units`
 — there is no "CanStartUnit" — so the plugin cannot grey a button out

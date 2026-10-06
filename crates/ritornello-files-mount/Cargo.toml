@@ -10,7 +10,7 @@ name = "ritornello-files-mount"
 # can place the helper.
 # version_coherence.rs exempts it from every rule tying a component to the
 # product.
-version = "1.0.0"
+version = "1.0.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
