@@ -400,16 +400,12 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   await random.click()
   await expect(random).toHaveAttribute('aria-pressed', 'false')
 
-  // --- Repeat-one loops the playing file, and Next still moves on -------------
+  // --- Repeat-one wraps the playing file, and Next still moves on -------------
   //
   // The whole chain at once: the button's cycle, the core arming mpv's
-  // `loop-file` on the files plugin's loopable Play, and mpv really looping
-  // the 30 s fixture instead of moving to the next entry.
-  await repeat.click() // off -> all
-  await expect(repeat).toHaveAttribute('aria-pressed', 'true')
-  await repeat.click() // all -> one
-  await expect(repeat.locator('[data-repeat-one]')).toBeVisible()
-
+  // `loop-file` on the files plugin's loopable Play, and mpv really wrapping
+  // the 30 s fixture around instead of moving to the next entry. Run on a
+  // middle entry (1 of 3), so that "Next moves on" has a definite answer.
   const readFrame = () =>
     page.evaluate(
       () =>
@@ -424,23 +420,44 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
           }
         }),
     )
-  const looped = await readFrame()
-  // Two seconds from the end: at its natural end the file must start over.
-  const nearEnd = await page.request.post('/api/command', { data: { cmd: 'SeekTo', arg: 28 } })
-  expect(nearEnd.status()).toBe(204)
-  await expect
-    .poll(async () => {
-      const f = await readFrame()
-      return f.position != null && f.position < 10 && f.preset === looped.preset
-    }, { timeout: 15_000 })
-    .toBe(true)
+  await page.locator('[data-preset-button]').nth(0).click()
+  await expect(page.locator('[data-player-preset]')).toHaveText('1')
+  await expect.poll(async () => (await readFrame()).preset, { timeout: 10_000 }).toBe(1)
 
-  // Next is a manual skip: `loop-file` does not hold it back.
-  await page.locator('[data-remote-command="Next"]').click()
-  await expect.poll(async () => (await readFrame()).preset, { timeout: 10_000 }).not.toBe(looped.preset)
+  try {
+    await repeat.click() // off -> all
+    await expect(repeat).toHaveAttribute('aria-pressed', 'true')
+    await repeat.click() // all -> one
+    await expect(repeat.locator('[data-repeat-one]')).toBeVisible()
 
-  // Back to off, for the journeys that share this core and its state.json.
-  await repeat.click() // one -> off
+    // The 204 only proves the seek was enqueued. Two phases, so that a stale
+    // low frame cannot pass for a wrap: first a frame near the end proves the
+    // seek landed, then a low position on the same entry proves the file
+    // started over rather than moving on or never having left the start.
+    const nearEnd = await page.request.post('/api/command', { data: { cmd: 'SeekTo', arg: 28 } })
+    expect(nearEnd.status()).toBe(204)
+    await expect
+      .poll(async () => {
+        const f = await readFrame()
+        return f.preset === 1 && f.position != null && f.position >= 25
+      }, { timeout: 10_000 })
+      .toBe(true)
+    await expect
+      .poll(async () => {
+        const f = await readFrame()
+        return f.preset === 1 && f.position != null && f.position < 10
+      }, { timeout: 15_000 })
+      .toBe(true)
+
+    // Next is a manual skip: `loop-file` does not hold it back, and it goes
+    // to the following entry.
+    await page.locator('[data-remote-command="Next"]').click()
+    await expect.poll(async () => (await readFrame()).preset, { timeout: 10_000 }).toBe(2)
+  } finally {
+    // Back to off whatever happened: the journeys share this core and its
+    // state.json.
+    await page.request.post('/api/command', { data: { cmd: 'SetRepeat', arg: 'off' } })
+  }
   await expect(repeat).toHaveAttribute('aria-pressed', 'false')
   // Put the harness back in the state we found it: the journeys share a single
   // core and `files.spec.ts` runs **before** `journey.spec.ts`, which requires
