@@ -16,6 +16,13 @@
 //! ritornello-proto --test wire_fingerprint`, then read the diff of the
 //! fixture: it is the exact record of what moved.
 //!
+//! **What is covered, and what is not.** Both directions of every sample:
+//! the serialized form (compared with the fixture) and the read side (the
+//! recorded JSON must parse back, round-trip, and tolerate an unknown field).
+//! Not covered: a removed `alias`, a stricter validation of a value an old
+//! plugin used to send, and any field this sample leaves unpopulated; keep
+//! the samples fuller than the real traffic.
+//!
 //! The samples are deterministic: no `HashMap` with more than one entry, so
 //! no iteration order can leak into the output. Every enum variant of the wire
 //! appears at least once, and every optional field of the structs appears
@@ -24,6 +31,7 @@
 //! here, which is the moment to give it a sample.
 
 use ritornello_proto::*;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
@@ -189,8 +197,25 @@ fn repeat_label(r: &Repeat) -> &'static str {
 struct Lines(Vec<String>);
 
 impl Lines {
-    fn add<T: Serialize>(&mut self, name: &str, v: &T) {
+    /// Records one sample, and checks the read side of the wire as well:
+    /// the recorded JSON must parse back into `T` and serialize again to the
+    /// same text, and, when it is an object, must still parse with an
+    /// unknown extra field in it (an old plugin must ignore what a newer core
+    /// adds). That is what catches a `#[serde(default)]` removed from a field
+    /// that is skipped when empty, or a `deny_unknown_fields` added: neither
+    /// changes what is serialized, both break an old reader.
+    fn add<T: Serialize + DeserializeOwned>(&mut self, name: &str, v: &T) {
         let json = serde_json::to_string(v).expect("a wire message always serializes");
+        let back: T = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("{name}: its own JSON no longer parses back ({e}): {json}"));
+        let again = serde_json::to_string(&back).expect("a wire message always serializes");
+        assert_eq!(again, json, "{name}: the JSON does not survive a round trip");
+        if let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(&json) {
+            map.insert("an_unknown_future_field".into(), json!(1));
+            let widened = serde_json::Value::Object(map).to_string();
+            serde_json::from_str::<T>(&widened)
+                .unwrap_or_else(|e| panic!("{name}: an unknown field is no longer ignored ({e})"));
+        }
         self.0.push(format!("{name} = {json}"));
     }
 }
