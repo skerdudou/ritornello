@@ -88,3 +88,12 @@ updates:
       # the Vue language tools speak to the native compiler.
       - dependency-name: typescript
         versions: [">= 7"]
+      # `reka-ui` pins `@vueuse/core ^14.1.0` (still so in 2.11.0, the newest
+      # release on 2026-10-06), so a 15 in `web/kit` ships two copies of it,
+      # and `scripts/check-lockfile.mjs` refuses the 14 left behind for
+      # reka-ui -- correctly by its own rule, which only counts what our
+      # manifests declare. Nothing in 15 is wanted here: our code uses
+      # `reactiveOmit` and `useVModel`, which 15 does not touch. Lift this
+      # once a reka-ui release accepts `^15`, and bump the two together.
+      - dependency-name: "@vueuse/core"
+        versions: [">= 15"]

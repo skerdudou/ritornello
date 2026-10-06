@@ -58,7 +58,7 @@ jobs:
         # (the only case that fails on its own). Those are counts of what was
         # left, not the size of what went missing -- a rewrite of this comment
         # once read them the other way round and made it contradict itself.
-        # The list is eight files now, 157 tests of which 6 skip off Linux, and
+        # The list is nine files now, 174 tests of which 6 skip off Linux, and
         # the shape of the failure is the same: a one-file rename is the
         # realistic mistake, and it reproduces exactly the silent-green that naming the
         # files was supposed to prevent. So this step does not trust
@@ -83,6 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           tests=(
+            .github/scripts/analysis-memo.test.mjs
             .github/scripts/check-guards.test.mjs
             .github/scripts/check-workflow-permissions.test.mjs
             .github/scripts/classify-bump.test.mjs
