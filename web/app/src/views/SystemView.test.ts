@@ -83,6 +83,7 @@ function stub(
   log: unknown = { lines: [] },
   postRefusal?: string,
   processes: unknown = { processes: [] },
+  journal: unknown = { lines: [] },
 ) {
   const f = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
@@ -103,6 +104,11 @@ function stub(
     // round, and serving the metrics payload to the log would give it a
     // missing `lines` — the test would then fail for a reason that is not
     // its own.
+    // `/api/journal` too, for the same reason: left to the fallback it would
+    // be served the metrics payload, and consume a sample on the way.
+    if (u.includes('/api/journal')) {
+      return Promise.resolve({ ok: true, json: async () => journal } as Response)
+    }
     if (u.includes('/api/logs')) {
       if (log === null) {
         return Promise.resolve({ ok: false, status: 503, json: async () => ({}) } as Response)
@@ -1550,6 +1556,74 @@ describe('SystemView', () => {
       await w.get('[data-logs-all]').trigger('click')
       await flushPromises()
       expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(12)
+      w.unmount()
+    })
+  })
+
+  describe('journal dialog', () => {
+    const ERRORS = ['WARN [files] cover not archived']
+    const JOURNAL = [
+      '[files] INFO cover archived into /mnt/ritornello/music/Album',
+      '[musicbrainz] INFO cover found',
+      'INFO track changed',
+    ]
+    const journalCalls = (f: ReturnType<typeof stub>) =>
+      f.mock.calls.filter((c) => String(c[0]).includes('/api/journal')).length
+
+    it('is offered even when there is no error at all', async () => {
+      // An empty error list is exactly when one goes looking at what did
+      // happen: hiding the journal behind the errors would hide it then.
+      stub(payload(), CATALOGUE, { lines: [] }, undefined, undefined, { lines: JOURNAL })
+      const w = await mountView()
+      expect(w.find('[data-logs-all]').exists()).toBe(false)
+      expect(w.find('[data-journal-all]').exists()).toBe(true)
+      w.unmount()
+    })
+
+    it('is fetched on opening only, never on mount', async () => {
+      const f = stub(payload(), CATALOGUE, { lines: ERRORS }, undefined, undefined, { lines: JOURNAL })
+      const w = await mountView()
+      expect(journalCalls(f)).toBe(0)
+      await w.get('[data-journal-all]').trigger('click')
+      await flushPromises()
+      expect(journalCalls(f)).toBe(1)
+      w.unmount()
+    })
+
+    it('shows the journal, under its own title, and filters it', async () => {
+      stub(payload(), CATALOGUE, { lines: ERRORS }, undefined, undefined, { lines: JOURNAL })
+      const w = await mountView()
+      await w.get('[data-journal-all]').trigger('click')
+      await flushPromises()
+      expect(document.body.querySelector('[data-logs-title]')!.textContent).toContain('system_journal_title')
+      const lines = [...document.body.querySelectorAll('[data-logs-dialog-line]')].map((l) => l.textContent)
+      expect(lines).toEqual(JOURNAL)
+      expect(document.body.querySelector('[data-logs-count]')!.textContent).toContain('3 / 3')
+
+      const field = document.body.querySelector<HTMLInputElement>('[data-logs-filter]')!
+      field.value = 'files'
+      field.dispatchEvent(new Event('input'))
+      await flushPromises()
+      expect(document.body.querySelectorAll('[data-logs-dialog-line]')).toHaveLength(1)
+      expect(document.body.querySelector('[data-logs-count]')!.textContent).toContain('1 / 3')
+      w.unmount()
+    })
+
+    it('the errors button still opens the errors after the journal was shown', async () => {
+      // One popin, two sources: the mode must be set by every opening, or
+      // the errors button would reopen on the journal.
+      stub(payload(), CATALOGUE, { lines: ERRORS }, undefined, undefined, { lines: JOURNAL })
+      const w = await mountView()
+      await w.get('[data-journal-all]').trigger('click')
+      await flushPromises()
+      document.body.querySelector<HTMLElement>('[data-slot="dialog-close"]')!.click()
+      await flushPromises()
+      await w.get('[data-logs-all]').trigger('click')
+      await flushPromises()
+      expect(document.body.querySelector('[data-logs-title]')!.textContent).toContain('system_errors_title')
+      const lines = [...document.body.querySelectorAll('[data-logs-dialog-line]')].map((l) => l.textContent)
+      expect(lines).toEqual(ERRORS)
+      expect(document.body.querySelector('[data-logs-count]')!.textContent).toContain('1 / 1')
       w.unmount()
     })
   })

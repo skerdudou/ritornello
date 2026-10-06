@@ -66,7 +66,22 @@ const logDates = computed(() =>
   logs.value.map((l) => lineDate(l, clock.value.date_format, clock.value.clock_24h)),
 )
 const cardLogs = computed(() => logDates.value.slice(0, CARD_LOGS))
-const filteredLogs = computed(() => filterLines(logDates.value, errorsQuery.value))
+
+/**
+ * The full journal — INFO and up, the core's and every plugin's — fetched
+ * only when its popin opens, never on mount: it weighs up to a few hundred
+ * kilobytes, where the errors are a handful of lines.
+ */
+const journal = ref<string[]>([])
+/** Which list the popin shows: one popin, one filter, two sources. */
+const dialogMode = ref<'errors' | 'journal'>('errors')
+const dialogLines = computed(() => (dialogMode.value === 'journal' ? journal.value : logs.value))
+const dialogDates = computed(() =>
+  dialogMode.value === 'journal'
+    ? journal.value.map((l) => lineDate(l, clock.value.date_format, clock.value.clock_24h))
+    : logDates.value,
+)
+const filteredLogs = computed(() => filterLines(dialogDates.value, errorsQuery.value))
 
 /**
  * Fetches the log: on mount, and every time the popin opens.
@@ -92,8 +107,23 @@ function openErrors(): void {
   // it is at the top of the dialog, not under the eyes of whoever just
   // clicked the button.
   errorsQuery.value = ''
+  dialogMode.value = 'errors'
   errorsOpen.value = true
   void fetchLog()
+}
+
+/** Same conventions as `fetchLog`, against the journal's own route. */
+async function fetchJournal(): Promise<void> {
+  const j = await api.get<LogsPayload>('/api/journal').catch(() => null)
+  if (j) journal.value = j.lines ?? []
+}
+
+function openJournal(): void {
+  // Same reset as `openErrors`, for the same reason.
+  errorsQuery.value = ''
+  dialogMode.value = 'journal'
+  errorsOpen.value = true
+  void fetchJournal()
 }
 
 /**
@@ -1114,15 +1144,25 @@ async function pollUntilBack(before: number | null, maxMs: number, successKey: s
              filter was only discovered at the very moment there is too much
              to read to explore the screen. It only disappears on an empty
              log, where there would be nothing to open. -->
-        <Button
-          v-if="logs.length"
-          variant="outline"
-          size="sm"
-          data-logs-all
-          @click="openErrors"
-        >
-          {{ t('system_errors_all', { count: logs.length }) }}
-        </Button>
+        <!-- The journal button, by contrast, is always there: an empty
+             error list is exactly when one goes looking at what did happen
+             (a cover that was not archived, a plugin that restarted) — those
+             are INFO lines, and the plugins' lines used to reach only
+             journald. -->
+        <div class="flex flex-wrap gap-2">
+          <Button
+            v-if="logs.length"
+            variant="outline"
+            size="sm"
+            data-logs-all
+            @click="openErrors"
+          >
+            {{ t('system_errors_all', { count: logs.length }) }}
+          </Button>
+          <Button variant="outline" size="sm" data-journal-all @click="openJournal">
+            {{ t('system_journal_all') }}
+          </Button>
+        </div>
       </CardContent>
     </Card>
 
@@ -1145,9 +1185,11 @@ async function pollUntilBack(before: number | null, maxMs: number, successKey: s
            you scrutinize. -->
       <DialogContent class="sm:max-w-[min(95vw,120rem)]">
         <DialogHeader>
-          <DialogTitle>{{ t('system_errors_title') }}</DialogTitle>
+          <DialogTitle data-logs-title>
+            {{ t(dialogMode === 'journal' ? 'system_journal_title' : 'system_errors_title') }}
+          </DialogTitle>
           <DialogDescription data-logs-count>
-            {{ filteredLogs.length }} / {{ logs.length }}
+            {{ filteredLogs.length }} / {{ dialogLines.length }}
           </DialogDescription>
         </DialogHeader>
         <Input

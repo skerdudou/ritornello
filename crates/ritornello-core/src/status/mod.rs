@@ -32,8 +32,10 @@ pub use plugin_status::{
     PluginOrder, PluginStatus, PluginsControl,
 };
 mod settings_validation;
-use logs::{logs_json, player_sse};
-pub use logs::{LogBuffer, LogBufferWriter};
+use logs::{journal_json, logs_json, player_sse};
+pub use logs::{truncate_line, JournalWriter, LogBuffer, LogBufferWriter};
+#[cfg(test)]
+pub use logs::MAX_LINE_BYTES;
 pub use settings_validation::validate_settings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +230,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/locale", get(locale_json).put(locale_put))
         .route("/api/i18n", get(i18n_json))
         .route("/api/logs", get(logs_json))
+        .route("/api/journal", get(journal_json))
         .route("/api/player", get(player_sse))
         .route("/api/presets", get(presets_json))
         .route("/api/theme", get(crate::theme::theme_json).put(crate::theme::theme_put))

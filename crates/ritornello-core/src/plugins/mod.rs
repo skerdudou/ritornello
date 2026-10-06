@@ -333,24 +333,145 @@ pub fn data_dir_for(root: &Path, name: &str) -> Option<PathBuf> {
 /// read the variable once a plugin's own `Catalog` field was gone (tasks
 /// 8-10) — a plugin's admin catalog is served on demand, by locale, straight
 /// from the core's registry.
+///
+/// The plugin's stdout and stderr are **relayed**, no longer inherited: each
+/// line is tagged with the plugin's name, written to the core's own stdout
+/// (so journald still receives every line, now saying whose it is) and kept
+/// in `logs` for the System page — see `relay_output`.
 pub fn spawn(
     exec: &str,
     register: &Path,
     name: &str,
     prefix: &Path,
     data_dir: &Path,
+    logs: &std::sync::Arc<crate::status::LogBuffer>,
 ) -> Result<tokio::process::Child> {
     let mut cmd = tokio::process::Command::new(exec);
     cmd.arg("--register").arg(register);
     cmd.arg("--name").arg(name);
     cmd.arg("--socket-prefix").arg(prefix);
     cmd.env(ritornello_plugin_sdk::DATA_DIR_ENV, data_dir);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
     // The path is named in the error: "No such file or directory" alone leaves
     // one guessing **which** of the `plugins.toml` paths is at fault, and the
     // most common confusion is precisely there — a deployment `exec`
     // (`/usr/local/lib/...`) copied into a development configuration, where the
     // binaries live under `target/debug/`.
-    cmd.kill_on_drop(true).spawn().with_context(|| format!("executable {exec}"))
+    let mut child = cmd.kill_on_drop(true).spawn().with_context(|| format!("executable {exec}"))?;
+    if let Some(out) = child.stdout.take() {
+        relay_output(name.to_string(), out, Stream::Stdout, logs.clone());
+    }
+    if let Some(err) = child.stderr.take() {
+        relay_output(name.to_string(), err, Stream::Stderr, logs.clone());
+    }
+    Ok(child)
+}
+
+/// Which of a plugin's two outputs a line came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stream {
+    /// Where every plugin's `tracing` writes (the `fmt` default).
+    Stdout,
+    /// Where nothing is written on purpose: a panic, or a library printing on
+    /// its own. Every line of it counts as an error.
+    Stderr,
+}
+
+/// Reads one output of a plugin, line by line, until the plugin closes it.
+///
+/// A task of its own per output, and it must keep reading whatever happens:
+/// a pipe nobody drains fills up (64 KB on Linux), and the plugin then blocks
+/// on its next log line — in the middle of whatever it was doing. Hence bytes
+/// read with `read_until` and decoded lossily, rather than `lines()`, which
+/// stops at the first invalid UTF-8 and would leave the pipe undrained.
+///
+/// The copy written to the core's stdout ignores its own errors: a closed
+/// stdout must not stop the draining either.
+fn relay_output<R>(name: String, output: R, stream: Stream, logs: std::sync::Arc<crate::status::LogBuffer>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncBufReadExt;
+    tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(output);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            let Some((line, is_error)) = plugin_line(&name, &String::from_utf8_lossy(&buf), stream) else {
+                continue;
+            };
+            {
+                use std::io::Write;
+                let _ = writeln!(std::io::stdout().lock(), "{line}");
+            }
+            logs.record(line, is_error);
+        }
+    });
+}
+
+/// One raw line of a plugin's output, as the core keeps it, and whether it is
+/// an error. `None` for a line with nothing in it.
+///
+/// - Colour codes are removed: `tracing`'s `fmt` writes them whatever its
+///   output is, and they would be printed raw on the page.
+/// - The plugin's name goes **after** the timestamp when the line starts with
+///   one (`2026-10-06T20:25:04.123Z [files]  WARN …`), so the page can still
+///   rewrite that timestamp into the local time (`lineDate`, web side); a line
+///   without one (a panic) is simply prefixed.
+/// - An error is a line whose level is WARN or ERROR — the same threshold as
+///   the core's own errors ring — or any line from stderr.
+fn plugin_line(name: &str, raw: &str, stream: Stream) -> Option<(String, bool)> {
+    let clean = strip_ansi(raw);
+    let clean = clean.trim_end();
+    if clean.trim().is_empty() {
+        return None;
+    }
+    let (line, level) = match clean.split_once(char::is_whitespace) {
+        Some((first, rest)) if looks_like_timestamp(first) => {
+            (format!("{first} [{name}] {}", rest.trim_start()), rest.split_whitespace().next())
+        }
+        _ => (format!("[{name}] {clean}"), None),
+    };
+    let is_error = stream == Stream::Stderr || matches!(level, Some("WARN" | "ERROR"));
+    Some((crate::status::truncate_line(&line).to_string(), is_error))
+}
+
+/// `2026-10-06T20:25:04.123456Z`, the shape `tracing`'s `fmt` starts a line
+/// with: a date, a `T`, and a `Z` at the end. Checked loosely on purpose — it
+/// only decides where the name goes, and a wrong guess still keeps the line.
+fn looks_like_timestamp(token: &str) -> bool {
+    let b = token.as_bytes();
+    b.len() >= 20
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[10] == b'T'
+        && token.ends_with('Z')
+}
+
+/// `s` without its ANSI escape sequences (`ESC [ … letter`), the only kind a
+/// `tracing` formatter writes.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Time given to a plugin between `SIGTERM` and `SIGKILL`.
@@ -479,10 +600,194 @@ mod tests {
             "radio",
             &dir.path().join("prefix"),
             &data,
+            &std::sync::Arc::new(crate::status::LogBuffer::new(10)),
         )
         .unwrap();
         child.wait().await.unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), data.to_str().unwrap());
+    }
+
+    /// Waits until `logs` holds `n` journal lines, or fails after a generous
+    /// ceiling. A condition polled, not a duration assumed: the relay tasks
+    /// drain the pipes on their own schedule, after the process has exited.
+    async fn journal_reaches(logs: &crate::status::LogBuffer, n: usize) -> Vec<String> {
+        for _ in 0..1000 {
+            let lines = logs.journal_snapshot();
+            if lines.len() >= n {
+                return lines;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("journal never reached {n} lines: {:?}", logs.journal_snapshot());
+    }
+
+    /// A real process, both outputs, and what the page then has to read.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_plugins_output_reaches_the_journal_tagged_with_its_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let exec = dir.path().join("fake-plugin");
+        std::fs::write(
+            &exec,
+            "#!/bin/sh\n\
+             echo '2026-10-06T20:25:04.123456Z  INFO cover archived'\n\
+             echo '2026-10-06T20:25:05.000001Z  WARN cover not archived: the share is read-only'\n\
+             echo \"thread 'main' panicked at src/main.rs:1:1\" >&2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let logs = std::sync::Arc::new(crate::status::LogBuffer::new(10));
+        let mut child = spawn(
+            exec.to_str().unwrap(),
+            &dir.path().join("register.sock"),
+            "files",
+            &dir.path().join("prefix"),
+            &dir.path().join("data"),
+            &logs,
+        )
+        .unwrap();
+        child.wait().await.unwrap();
+        let mut journal = journal_reaches(&logs, 3).await;
+        // Two tasks, one per output: their relative order is not a contract.
+        journal.sort();
+        assert_eq!(
+            journal,
+            vec![
+                "2026-10-06T20:25:04.123456Z [files] INFO cover archived".to_string(),
+                "2026-10-06T20:25:05.000001Z [files] WARN cover not archived: the share is read-only"
+                    .to_string(),
+                "[files] thread 'main' panicked at src/main.rs:1:1".to_string(),
+            ]
+        );
+        let mut errors = logs.snapshot();
+        errors.sort();
+        assert_eq!(
+            errors,
+            vec![
+                "2026-10-06T20:25:05.000001Z [files] WARN cover not archived: the share is read-only"
+                    .to_string(),
+                "[files] thread 'main' panicked at src/main.rs:1:1".to_string(),
+            ],
+            "the INFO line is journal only; the WARN and the panic are errors too"
+        );
+    }
+
+    /// The pipe must be drained whatever it carries. A plugin printing more
+    /// than a pipe holds (64 KB) blocks on its next write if nobody reads,
+    /// and a reader that stops at the first invalid UTF-8 (`lines()`) stops
+    /// reading for good — the plugin then hangs, which is far worse than a
+    /// lost log line.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_relay_keeps_draining_past_invalid_utf8_and_a_full_pipe() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let exec = dir.path().join("fake-plugin");
+        // 2000 lines of 100 bytes (200 KB, three pipes' worth) after a line
+        // that is not UTF-8, then a last line: the process can only exit, and
+        // that last line can only be read, if every byte before was drained.
+        std::fs::write(
+            &exec,
+            "#!/bin/sh\n\
+             printf 'bad \\377\\376 bytes\\n'\n\
+             i=0; while [ $i -lt 2000 ]; do \
+               printf '%099d\\n' $i; i=$((i+1)); done\n\
+             echo last\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let logs = std::sync::Arc::new(crate::status::LogBuffer::new(10).with_journal(5000));
+        let mut child = spawn(
+            exec.to_str().unwrap(),
+            &dir.path().join("register.sock"),
+            "files",
+            &dir.path().join("prefix"),
+            &dir.path().join("data"),
+            &logs,
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), child.wait())
+            .await
+            .expect("the plugin hung: its output was not drained")
+            .unwrap();
+        let journal = journal_reaches(&logs, 2002).await;
+        assert_eq!(journal.first().unwrap(), "[files] bad \u{fffd}\u{fffd} bytes");
+        assert_eq!(journal.last().unwrap(), "[files] last");
+    }
+
+    /// The exact bytes `tracing`'s formatter writes, colours included — the
+    /// default of every plugin, whose output is not a terminal on the device —
+    /// produced by the formatter itself rather than retyped by hand.
+    fn formatted(level: tracing::Level, message: &str) -> String {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let sink = Sink(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_target(false)
+            .with_ansi(true)
+            .with_writer(move || sink.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || match level {
+            tracing::Level::ERROR => tracing::error!("{message}"),
+            tracing::Level::WARN => tracing::warn!("{message}"),
+            _ => tracing::info!("{message}"),
+        });
+        String::from_utf8(bytes.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn a_formatted_line_loses_its_colours_and_keeps_its_timestamp_first() {
+        let raw = formatted(tracing::Level::WARN, "cover not archived");
+        assert!(raw.contains('\u{1b}'), "the formatter no longer colours: {raw:?}");
+        let (line, is_error) = plugin_line("files", &raw, Stream::Stdout).unwrap();
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+        let (stamp, rest) = line.split_once(' ').unwrap();
+        assert!(looks_like_timestamp(stamp), "{line:?}");
+        assert_eq!(rest, "[files] WARN cover not archived");
+        assert!(is_error);
+    }
+
+    #[test]
+    fn the_level_decides_what_is_an_error_on_stdout() {
+        let is_error =
+            |level| plugin_line("files", &formatted(level, "m"), Stream::Stdout).unwrap().1;
+        assert!(is_error(tracing::Level::ERROR));
+        assert!(is_error(tracing::Level::WARN));
+        assert!(!is_error(tracing::Level::INFO));
+        // A message merely *saying* WARN is not a WARN line.
+        assert!(!plugin_line("files", &formatted(tracing::Level::INFO, "WARN"), Stream::Stdout).unwrap().1);
+    }
+
+    #[test]
+    fn every_stderr_line_is_an_error_and_an_empty_one_is_nothing() {
+        assert_eq!(
+            plugin_line("cd", "thread 'main' panicked\n", Stream::Stderr),
+            Some(("[cd] thread 'main' panicked".to_string(), true))
+        );
+        assert_eq!(plugin_line("cd", "  \r\n", Stream::Stdout), None);
+        assert_eq!(plugin_line("cd", "\u{1b}[2m\u{1b}[0m\n", Stream::Stdout), None);
+    }
+
+    #[test]
+    fn a_line_is_cut_to_its_byte_budget_on_a_character_boundary() {
+        // `é` is two bytes: a cut in its middle would panic, not merely
+        // truncate.
+        let long = "é".repeat(crate::status::MAX_LINE_BYTES);
+        let (line, _) = plugin_line("x", &long, Stream::Stdout).unwrap();
+        assert!(line.len() <= crate::status::MAX_LINE_BYTES);
+        assert!(line.starts_with("[x] é"));
     }
 
     /// `DEFAULT_PLUGIN_DATA_ROOT` (this crate's own default) must name the
@@ -607,6 +912,7 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio"
             "dummy",
             &dir.path().join("dummy"),
             &dir.path().join("data/dummy"),
+            &std::sync::Arc::new(crate::status::LogBuffer::new(10)),
         )
         .expect_err("a missing executable must fail");
         let message = format!("{e:#}");

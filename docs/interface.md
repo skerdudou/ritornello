@@ -1594,6 +1594,30 @@ lines from `GET /api/logs`; a button opens a dialog over the whole buffer
 buffer: unrolled in the page, they would push everything else off the
 screen.
 
+A second button, always offered, opens the same dialog over the **full
+journal**, `GET /api/journal`: every line from INFO up, the core's and the
+plugins', the last 5000 of them. The journal is fetched only when that
+dialog opens, never with the page.
+
+- **Two rings, not one filtered on read.** The journal is chatty (a line per
+  track, per cover, per announcement), and in a single ring it would push
+  out the error the card exists to show. Each ring evicts only its own kind.
+- **The plugins' lines are relayed by the core.** A plugin's stdout and
+  stderr are no longer inherited from the core: the core reads them line by
+  line, removes the colour codes `tracing` writes even when its output is
+  not a terminal, puts the plugin's name after the timestamp
+  (`2026-10-06T20:25:04Z [files] WARN …`, so the page still rewrites the
+  time into the local one), writes the line to its own stdout so journald
+  still has it, and keeps it. Before this, a plugin's lines reached
+  journald only: a cover the `files` plugin refused to archive, for
+  instance, was invisible from the page.
+- **What counts as an error.** For a plugin line: a level of WARN or ERROR,
+  or any line from stderr, where nothing is written on purpose (a panic).
+- **Memory.** Every line is cut at 1 KB, so 5000 lines weigh a few hundred
+  KB in practice and 5 MB at the very worst, whatever a plugin prints.
+- **What stays in journald only.** Lines older than the ring, and anything
+  logged before a restart: the rings live in memory.
+
 ## Internationalization (i18n)
 
 The interface is multilingual. The base language is **English**, embedded
