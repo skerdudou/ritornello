@@ -1424,7 +1424,11 @@ that never announces at all (disabled, crashed, not yet started) could
 not have said so either way.
 
 **Updating `files` from the page is allowed, while `files-mount` does
-not move.** The plugin's archive carries its binary alone, so an update is
+not move.** The companion has its own independent version number, like
+`PROTOCOL_VERSION`: it answers "did the root helper change?", is never tied
+to the product's number or prerelease suffix, and moves only when the
+companion itself changes — so an unchanged helper keeps its number across
+every release, and updating `files` from the page works across them. The plugin's archive carries its binary alone, so an update is
 an ordinary plugin placement. The core only checks that the release's
 `files-mount` version is **equal** to the one `ritornello-install` recorded
 in `/var/lib/ritornello-install/installed.toml`; a different version, an
@@ -1436,7 +1440,8 @@ alone installs, updates and removes the companion**, always together with
 `files`. Because the plugin and the helper share the library crate
 `ritornello-files-mount`, `scripts/changed-components.sh` refuses a release
 that changes that crate without moving the versions it must move, so a
-changed helper can never reach a device under an old number.
+changed helper can never reach a device under an old number. A release that
+does not change it moves neither.
 
 **Adding a privileged plugin to this repository means giving it a
 companion in `deploy/packaging.toml`** — a `[companions.<name>]` table with

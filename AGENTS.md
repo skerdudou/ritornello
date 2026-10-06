@@ -29,12 +29,16 @@ rather than quietly shrinking it.
 **Everything written into this repository is in English.** Code, comments,
 doc comments, test names, commit messages, documentation. No exceptions.
 
-**Three numbers, three questions.** The product number
+**Four numbers, four questions.** The product number
 (`[workspace.package] version`) names the release and the git tag. Each
 shipped component — the core and each plugin — declares **its own** version,
 and that is what its archive is named after. `PROTOCOL_VERSION` is the
-core/plugin wire contract and moves only on a break. Major and minor stay
-identical everywhere; only the patch digit is free, component by component.
+core/plugin wire contract and moves only on a break. For the core and the
+plugins, major and minor stay identical everywhere; only the patch digit is
+free, component by component. The fourth number is the root-privileged
+companion's (`files-mount`): it answers "did the root helper change?", is
+independent of the product's major.minor and suffix (like
+`PROTOCOL_VERSION`), and moves only when the companion does.
 
 **A device compares versions for equality, never for order.** This is what
 makes rollback and channel-switching work, and it is the reason every
@@ -85,8 +89,9 @@ Several tests exist only to refuse a mistake that has actually been made
 here. Do not "fix" one by relaxing it — if a guard fires, it has found
 something.
 
-- `version_coherence.rs` — the three numbers above, including what a
-  prerelease may and may not declare.
+- `version_coherence.rs` — the four numbers above, including what a
+  prerelease may and may not declare (a component may keep an older suffix
+  of the same generation; a companion is exempt from the product rules).
 - `packaging_manifest.rs` — `deploy/packaging.toml` against reality, and
   against the inventory `ritornello-install` reads. `deploy/deploy.sh` is only
   a wrapper around it, so there is no second installation path to agree with.
@@ -98,7 +103,8 @@ something.
   to a companion (`files-mount`) that did not move its version, and its
   plugin's too when their shared crate changed: the shared-crate trap above,
   closed for that pair.
-- `scripts/release-notes-guard.sh` — refuses a release that changed a unit,
+- `scripts/release-notes-guard.sh` (ignores a version-only bump of the
+  mount helper's manifest) — refuses a release that changed a unit,
   a polkit rule, the updater or the mount helper while the notes still say
   "Nothing to do".
 - `check-dist.mjs` / `check-plugin-dist.mjs` — the import map and a single

@@ -498,11 +498,13 @@ fn archive_allowed(is_core: bool, third_party: bool, entries: &[String]) -> bool
 /// its unit and its rule are the companion's — so its update is an ordinary
 /// `PlacePlugin`. What that placement must never do is put a new plugin
 /// beside a companion it no longer matches: the two are built from one
-/// shared crate (`ritornello-files-mount`), and a release that moves one
-/// moves the other (`scripts/changed-components.sh`'s coupled-change guard).
-/// So a companion version that moved means "this update also changes the
-/// companion", which only `ritornello-install` can place, and the plugin
-/// waits for it.
+/// shared crate (`ritornello-files-mount`), and the coupled-change guard of
+/// `scripts/changed-components.sh` moves both only on a change to that
+/// shared library. A companion has a version of its own, independent of the
+/// product's: an unchanged helper keeps its number and the plugin updates
+/// from the page. A companion version that moved means "this update also
+/// changes the companion", which only `ritornello-install` can place, and the
+/// plugin waits for it.
 ///
 /// **Equality, never order**, like every version comparison on a device.
 /// And every unknown refuses: a release that carries no companion (dropped

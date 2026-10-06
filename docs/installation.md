@@ -150,7 +150,7 @@ pushed, a green workflow and 37 attached archives are not evidence a device
 can reach any of it. If a device says nothing is published, look first at
 whether the release is still a draft.
 
-Three different numbers are at play here, and they answer three different
+Four different numbers are at play here, and they answer four different
 questions. The **product number** — `vX.Y.Z`, the git tag — names the
 release and carries the generation: `0.2.7` is the seventh delivery of the
 `0.2` generation. Each shipped component (the core, each plugin) declares
@@ -158,11 +158,20 @@ release and carries the generation: `0.2.7` is the seventh delivery of the
 renumber everything else and does not make the updater think ten unrelated
 components changed too. `PROTOCOL_VERSION`, the wire-compatibility contract
 between the core and a plugin (see [plugins.md](plugins.md)), is a third
-number again, and it moves only on a breaking change to that wire format —
-not on every release, and not with every component's own patch bumps. Major
-and minor are kept identical everywhere — the product number and every
-component's own version — so only the patch digit is ever free, component
-by component.
+number, and it moves only on a breaking change to that wire format — not on
+every release, and not with every component's own patch bumps. For the
+product number, the core and the plugins, major and minor are kept identical
+everywhere, so only the patch digit is ever free, component by component.
+
+The **fourth number** belongs to a root-privileged companion
+(`ritornello-files-mount`, see [plugins.md](plugins.md)). It is its own
+independent version number, like `PROTOCOL_VERSION`: it answers "did the root
+helper change?", is never shown in the UI, is tied to neither the product's
+major and minor nor its prerelease suffix, and moves only when the companion
+itself changes. That is what lets an unchanged companion keep its number
+across every release, so that updating `files` from the web UI never sends
+the operator to `ritornello-install` for nothing: only that program can place
+the companion.
 
 The release gesture, then: bump the version of whichever component you
 changed, and tag with the next product number. The workflow publishes
@@ -374,7 +383,8 @@ finished release. There is no checkbox to forget and no second place where
 the same intent is stated. Like any release it lands as a **draft** first,
 so the notes are read before it can be installed by anything.
 
-Two rules, and neither is a convention that can be bent:
+Two rules, and neither is a convention that can be bent (they apply to the
+core and the plugins; a companion has a number of its own, see above):
 
 1. **The tag equals the product number**, suffix included. So the beta is
    prepared by setting `[workspace.package] version` to `0.2.1-beta.1` and
@@ -387,6 +397,13 @@ Two rules, and neither is a convention that can be bent:
    silently. So a component the beta delivers carries the beta's own full
    number, suffix included.
 
+   An unchanged component keeps its number across prereleases, possibly
+   with an **older** suffix of the same generation (`0.2.0-beta.2` inside
+   `v0.2.0-beta.3`): never a newer one, never another target number. A
+   finished release refuses any suffix, so at the first finished release of
+   a generation every component still on a beta number moves once. A
+   companion is outside all of this: it moves only when it changes itself.
+
    A component the beta does **not** deliver simply stays where the last
    finished release left it — `0.2.0` while the product prepares
    `0.2.1-beta.1` — and that is the normal shape of a narrow beta: only what
@@ -395,12 +412,13 @@ Two rules, and neither is a convention that can be bent:
    cheapest way to try the machinery.
 
    Three guards, and they now agree. `version_coherence.rs` refuses a suffix
-   that is not the product's, refuses any suffix at all in a finished
-   product (what stops a leftover `-beta.2` from riding into a real
-   release), and refuses a component declaring the finished number inside a
-   prerelease. `scripts/package-release.sh` re-checks the last of those
-   without cargo, since it names the archives; run
-   `scripts/package-release.sh --self-test` to see its case table.
+   that is newer than the product's or on another target number, refuses any
+   suffix at all in a finished product (what stops a leftover `-beta.2` from
+   riding into a real release), and refuses a component declaring the
+   finished number inside a prerelease. `scripts/package-release.sh`
+   re-checks the same rules without cargo, since it names the archives; run
+   `scripts/package-release.sh --self-test` to see its case table. A
+   companion is exempt from all three.
 
 The finished release then needs no special handling: its components differ
 from the beta's, so every device installs them, testers included. That
@@ -974,10 +992,18 @@ been observed for real:
   `installed.toml` has only run against a test release and a test
   registry, and no device has yet read a registry an actual installer run
   wrote;
-- a real release carrying a companion. No published release has yet
-  shipped `ritornello-files-mount-<version>-<arch>.tar.gz`, so the core
-  has never recognised one in GitHub's own listing, nor `ritornello-install`
-  placed one fetched from a release;
+- a release carrying a companion, since the two prereleases that shipped
+  `ritornello-files-mount-<version>-<arch>.tar.gz` (beta.2 and beta.3): no
+  device has yet had the core recognise one in GitHub's own listing, nor
+  `ritornello-install` place one fetched from a release. The companion has
+  since moved to its own numbering (`1.0.0`), which no release has carried
+  yet;
+- files-mount still depends on `ritornello-proto` for `RootError::text()`,
+  which only the files plugin calls. A change to `ritornello_proto::Text`
+  would reach the companion crate without the coupled-change guard noticing
+  it (the guard watches the crate's own directory). Planned: move that
+  mapping into the plugin and drop the dependency at the companion's next
+  real change, since that is itself a change to the companion;
 - `ritornello-install` removing a plugin on the Pi (unchecking it) and then
   placing it again (checking it back). Each direction is covered by tests
   that run the generated script for real, but the round trip has not been
