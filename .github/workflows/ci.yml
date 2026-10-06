@@ -145,7 +145,9 @@ jobs:
         # Cached by the action, keyed on the package list and `version`: a warm
         # run restores the .debs and runs no `apt-get update`. Bump `version`
         # to throw the cache away by hand.
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        # Pinned by commit SHA, unlike the actions/* pinned by tag: this is a
+        # third-party action that restores .debs and runs their install scripts.
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
           packages: ffmpeg
           # Postinst scripts register libblas.so.3 (update-alternatives):
@@ -181,7 +183,7 @@ jobs:
         # docs/development.md: the e2e tests really play through the radio plugin.
         # Cached like the rust job's ffmpeg: the mirrors, not the tests, were
         # the jitter (29 s to 402 s for this one step).
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
           packages: mpv ffmpeg
           # Their dependencies (libblas3 and friends) register libblas.so.3
@@ -197,7 +199,7 @@ jobs:
         # Listed here so the apt cache serves them; if Playwright is bumped
         # and Chromium fails to launch on a missing library, compare with
         # `npx playwright install-deps --dry-run chromium` and bump `version`.
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
           packages: >-
             libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64
@@ -282,10 +284,9 @@ jobs:
       - name: musl toolchain
         # `ring`, under rustls, compiles C: it needs musl-gcc for these targets.
         if: runner.os == 'Linux'
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: musl-tools
-          version: 1
+        # No apt cache here, unlike the test jobs: this leg builds the
+        # installer people download.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
       - run: cargo clippy -p ritornello-install --target ${{ matrix.target }} --all-targets -- -D warnings
       - if: matrix.test
         run: cargo test -p ritornello-install --target ${{ matrix.target }}
