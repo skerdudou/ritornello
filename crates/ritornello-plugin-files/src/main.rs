@@ -616,7 +616,7 @@ impl SourcePlugin for FilesSource {
         // Play key replays the last track.
         //
         // **Except when the last pass genuinely ran out** (`pass_finished`,
-        // set by `end_of_content` without repeat-all): the entry the kept
+        // set by `end_of_content` with repeat off): the entry the kept
         // index designates then sits at the very tail of the exhausted
         // order, with nothing drawn after it. Replaying from there would
         // give exactly one track before mpv goes idle again — a fresh pass

@@ -454,6 +454,11 @@ impl<P: Player> Core<P> {
                 // read at the file's end, and setting it first leaves no
                 // window where a non-loopable load runs under a stale loop.
                 self.load_loopable = loopable;
+                // If this fails, the `?` drops the whole `Play`: nothing
+                // loads, while `load_loopable` already names it. That is the
+                // safe direction — the cache is then unknown, so the next
+                // `Play` resyncs — and a 5 s IPC timeout means mpv is in
+                // trouble anyway.
                 self.sync_loop_track().await?;
                 // `loadlist` for a playlist, `loadfile` for a medium: it is
                 // the Source that declares it, and the core does not guess. An

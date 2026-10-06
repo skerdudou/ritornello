@@ -1024,7 +1024,9 @@ What each source does under `Repeat::One`:
   may loop on its own. The core then sets mpv's `loop-file` exactly when
   the repeat setting is `one` and the last load was declared loopable
   (`sync_loop_track`, called when a `Play` is applied and when a repeat
-  command arrives, and sending to mpv only on a change), so the track
+  command arrives, and sending to mpv on a change, and again
+  unconditionally after a send that got no answer, since the state is then
+  unknown), so the track
   restarts at its natural end with no gap and no round trip through the
   source. `end_of_content` is only a safety net: if an end arrives anyway
   under `one`, the entry that was playing starts over.

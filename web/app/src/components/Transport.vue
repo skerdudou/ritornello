@@ -111,11 +111,12 @@ function modeCommand(c: RemoteCommand): Command {
       </Button>
     </div>
   </div>
-  <!-- The two play modes (the second with three states), below the transport and centred like it: siblings
-       of `[data-transport]` rather than a third group inside it, so as not
-       to disturb the two-column centring the test above locks down. Toggles,
-       hence `aria-pressed`/`data-on` — new to this component, every other
-       button here being a mere impulse (see `REMOTE_MODES`'s doc). -->
+  <!-- The two play modes (the second with three states), below the
+       transport and centred like it: siblings of `[data-transport]` rather
+       than a third group inside it, so as not to disturb the two-column
+       centring the test above locks down. Toggles, hence
+       `aria-pressed`/`data-on` — new to this component, every other button
+       here being a mere impulse (see `REMOTE_MODES`'s doc). -->
   <div class="mt-1 flex items-center justify-center gap-2" data-modes>
     <Button
       v-for="c in REMOTE_MODES"

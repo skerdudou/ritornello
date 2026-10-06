@@ -1017,7 +1017,7 @@ tag has been pushed since. Consequently:
   page of a hundred releases — has been exercised by an actual device
   fetching an actual release.
 
-**Repeat-one has been measured on a bench, not on the device.** Two things
+**Repeat-one: partly measured on a bench, never on the device.** Two things
 are unverified:
 
 - Repeat-one on a CD: the seek back to the playing track's start lets an

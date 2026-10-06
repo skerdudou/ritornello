@@ -1344,6 +1344,12 @@ mod tests {
         core.handle_command(Command::Select(9)).await.unwrap();
         core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
         assert_eq!(loop_calls(&player), vec!["loop_track true", "loop_track false"]);
+        // Armed before the load, as `apply` promises: the disarm must reach
+        // the player before the radio's load does.
+        let calls = player.lock().unwrap().clone();
+        let disarm = calls.iter().position(|c| c == "loop_track false").expect("disarm sent");
+        let load = calls.iter().position(|c| c == "play http://fip").expect("radio loaded");
+        assert!(disarm < load, "the loop must be disarmed before the load: {calls:?}");
     }
 
     #[tokio::test]

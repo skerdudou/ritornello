@@ -883,6 +883,17 @@ mod tests {
             assert_eq!(before[Subsystem::Player as usize], after[Subsystem::Player as usize], "{name} is not player's business");
             assert_eq!(before[Subsystem::Mixer as usize], after[Subsystem::Mixer as usize], "{name} does not touch the mixer");
         }
+
+        // All to One leaves `repeat` non-off on both sides, and only `single`
+        // moves: a client must still learn it.
+        let e = SharedState::default();
+        e.apply_state(PlayerState { repeat: Repeat::All, ..Default::default() }).await;
+        let before = e.versions().await;
+        e.apply_state(PlayerState { repeat: Repeat::One, ..Default::default() }).await;
+        let after = e.versions().await;
+        assert_ne!(before[Subsystem::Options as usize], after[Subsystem::Options as usize], "all to one should move options");
+        assert_eq!(before[Subsystem::Player as usize], after[Subsystem::Player as usize], "all to one is not player's business");
+        assert_eq!(before[Subsystem::Mixer as usize], after[Subsystem::Mixer as usize], "all to one does not touch the mixer");
     }
 
     #[tokio::test]
