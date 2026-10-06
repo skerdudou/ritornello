@@ -505,7 +505,11 @@ and hands over: `ritornello-install --from-dir release/install "$@"`. Every
 argument you give the script reaches the installer. `TARGET` names the
 compilation target (see [Building](#building)) and defaults to the Pi 2's.
 `DEPLOY_STOP_BEFORE_INSTALL=1` stops once `release/install/` is complete
-and the installer built, without contacting any device. Nothing in the
+and the installer built, without contacting any device. **A development
+build that did not move a component's version is left alone on the
+device**, like any re-run (the installer compares versions, not bytes):
+to deploy changed code under unchanged numbers, pass `--reinstall`
+(`./deploy/deploy.sh --keep --reinstall`). Nothing in the
 script places a file on the device: every path, unit and rule comes from
 the inventory, generated from `deploy/packaging.toml` like the archives.
 
