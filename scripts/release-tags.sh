@@ -53,7 +53,10 @@ check_installer_tag() {
   local tag=$1 manifest=$2 version
   # Inside [package] only: a later table such as `[dependencies.x]` may carry
   # a `version = "..."` line of its own, which is not the installer's.
-  version=$(awk '/^\[/ { in_package = ($0 == "[package]") } in_package && /^version = "/ { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }' "$manifest")
+  # A trailing CR is dropped first: a Windows checkout (core.autocrlf) hands
+  # WSL `[package]\r`, which never equals `[package]`, and the version then
+  # read as empty — the Rust suite failed locally while CI (LF) was green.
+  version=$(awk '{ sub(/\r$/, "") } /^\[/ { in_package = ($0 == "[package]") } in_package && /^version = "/ { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }' "$manifest")
   if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "the installer declares version '$version' in $manifest: it must be a finished X.Y.Z (its releases are never prereleases, and it cannot inherit the product's number)" >&2
     return 1
@@ -111,6 +114,10 @@ self_test() {
   check "a two-part number is refused" 1 installer-v0.2 'version = "0.2"'
   # A dependency's own `version` must never be taken for the installer's.
   check "only the package's own line counts" 1 installer-v9.9.9 'version.workspace = true'
+  # A Windows checkout writes the manifest with CRLF; it must read the same.
+  printf '[package]\r\nname = "ritornello-install"\r\nversion = "0.2.0"\r\n' > "$dir/Cargo.toml"
+  if check_installer_tag installer-v0.2.0 "$dir/Cargo.toml" 2>/dev/null; then got=0; else got=1; fi
+  expect "a CRLF manifest is read like an LF one" 0 "$got"
 
   if [ "$failures" -ne 0 ]; then
     echo "release-tags.sh --self-test: $failures failure(s)" >&2

@@ -1,29 +1,24 @@
-**Action required** — this is the first release, so it carries every
-privileged file at once: the updater's binary, two new systemd units, a new
-polkit rule, and a `ritornello.service` that gained the start limit and the
-`OnFailure=` line arming the rollback. An update can write none of those, by
-design, so they are placed by hand or by `ritornello-install`.
+**Action required** — the root mount helper for network shares,
+`files-mount`, changed (it now remounts a share whose "writable" setting
+changed). Only `ritornello-install` may place it, so the update page refuses
+to update the `files` plugin with "update with ritornello-install" until it
+is run. The core and the other plugins update from the page as usual.
 
-On a device installed with `ritornello-install`, nothing to do: it
-places all four and reloads systemd.
+`files-mount` now carries its own number, independent of the product's:
+it moves from `0.2.0-beta.3` to `1.0.1`, and from now on it only moves when
+the helper itself changes — so this installer run is not one you will be
+asked for at every release.
 
-On a device installed from these archives, after extracting the core's:
+Take the installer for your computer from its permanent link (the README's
+Download table, or `releases/download/installer/<file>`), then:
 
 ```sh
-sudo systemctl daemon-reload
-sudo systemctl restart ritornello
+./ritornello-install --host account@device --keep
 ```
 
-The four files are inside `ritornello-core-<version>-<arch>.tar.gz` at the
-paths they occupy on the device, so the ordinary `tar -C /` of the Install
-section below already put them there. What does not happen on its own is the
-`daemon-reload`: without it systemd keeps the old `ritornello.service`, the
-rollback stays unarmed, and every install attempt is refused by polkit with
-`Access denied` — a message that names no file.
-
-Until this release is installed, the update card checks and reports
-correctly and every install fails. That is expected: the feature installs
-its own privileged half exactly once, and this is that once.
+This installer leaves alone what is already up to date. Its first run on a
+device installed by an older installer places every plugin and pack once
+more — the older one did not record them — and later runs only what changed.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -52,28 +47,22 @@ its own privileged half exactly once, and this is that once.
 
 ## Behaviour changes
 
-Behaviour change: the source key's cycle now follows the order of
-`/etc/ritornello/plugins.toml` instead of being sorted alphabetically. On a
-device in service the cycle order therefore changes at the first start after
-this update. The configuration page reorders it, and the same order now also
-sets metadata priority.
+New: a "Full journal" on the System page. The core now relays every
+plugin's own output into its log, prefixed with the plugin's name, and keeps
+the latest lines (errors apart) for the page to show. A stream URL is never
+written there by the `musicbrainz` plugin.
 
-Behaviour change: updating a plugin now refuses when its `plugins.toml`
-entry declares an `exec` outside
-`/usr/local/lib/ritornello/plugins/`. Before this release that case was a
-silent half-success — the archive's binary landing where the entry is never
-read from, and the row then claiming a version that is not the one actually
-running. If an existing device meets this refusal on its next update, the
-fix is to move the binary under the plugins directory, or to point `exec`
-there.
+The `generic-input` plugin reopens a remote receiver that is unplugged and
+plugged back in, without a restart, and warns once per device node rather
+than on every retry.
 
-New setting, and no behaviour change unless it is ticked: "Offer
-prereleases", in the automatic-checks card. Off by default, so a device that
-is not told otherwise is offered finished releases only, exactly as before.
-Ticked, betas and release candidates are offered too — on every check, for
-the core, the plugins and any third-party plugin. A device on prereleases
-moves to a finished release as soon as one is published, since the two carry
-different version numbers.
+The `files-mount` helper remounts a network share whose "writable" setting
+changed, instead of keeping it in the old mode until the next reboot.
+
+Fewer downloads: a component whose own code did not change now keeps its
+number, so a device only fetches what really moved — here the core, `files`,
+`generic-input`, `musicbrainz` and the language packs. The installer is now
+published on its own channel (see Action required above).
 
 ## Install
 
