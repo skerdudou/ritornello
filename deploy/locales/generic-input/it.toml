@@ -67,7 +67,7 @@ act_prev = "Precedente"
 act_eject = "Espelli"
 act_source_cycle = "Cambia sorgente"
 act_toggle_random = "Casuale"
-act_toggle_repeat_all = "Ripeti tutto"
+act_cycle_repeat = "Ripeti"
 act_power = "Standby"
 
 # source shortcut rows, appended at the end of the table (one per source the

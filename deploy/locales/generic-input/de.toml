@@ -67,7 +67,7 @@ act_prev = "Zurück"
 act_eject = "Auswerfen"
 act_source_cycle = "Quelle wechseln"
 act_toggle_random = "Zufallswiedergabe"
-act_toggle_repeat_all = "Alle wiederholen"
+act_cycle_repeat = "Wiederholen"
 act_power = "Standby"
 
 # source shortcut rows, appended at the end of the table (one per source the

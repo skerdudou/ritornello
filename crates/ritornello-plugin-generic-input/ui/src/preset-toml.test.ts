@@ -12,7 +12,7 @@ describe('ACTIONS', () => {
     expect(ACTIONS.slice(9).map((a) => a.cmd.cmd)).toEqual([
       'Select', 'Plus10', 'VolumeUp', 'VolumeDown', 'Mute', 'PlayPause', 'Stop',
       'SeekBackward', 'SeekForward', 'Next', 'Prev', 'Eject', 'SourceCycle',
-      'ToggleRandom', 'ToggleRepeatAll', 'Power',
+      'ToggleRandom', 'CycleRepeat', 'Power',
     ])
     // The 0 key and +10 are inserted right after act_select_9.
     expect(ACTIONS[9]).toEqual({ key: 'act_select_0', cmd: { cmd: 'Select', arg: 0 } })
@@ -27,12 +27,12 @@ describe('ACTIONS', () => {
   })
 
   it('offers the two play mode toggles', () => {
-    // The toggle forms, not the absolute ones: a physical key does not know
-    // the current state, so it cannot send `SetRandom`/`SetRepeatAll` — the
-    // web remote does that instead (see `remoteCommands.ts` of the SPA).
+    // The toggle and cycle forms, not the absolute ones: a physical key does
+    // not know the current state, so it cannot send `SetRandom`/`SetRepeat` —
+    // the web remote does that instead (see `remoteCommands.ts` of the SPA).
     const cmds = ACTIONS.map((a) => a.cmd.cmd)
     expect(cmds).toContain('ToggleRandom')
-    expect(cmds).toContain('ToggleRepeatAll')
+    expect(cmds).toContain('CycleRepeat')
   })
 })
 
