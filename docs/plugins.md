@@ -226,30 +226,29 @@ simply wired again the moment a matching binary replaces the incompatible
 one — there is no manifest entry to undo, because there was never one to
 write.
 
-`PROTOCOL_VERSION` itself is expected to move rarely, and **only on a break
-of the wire format, never on an addition**: every field this protocol has
-gained so far — `admin`, `covers`, `ui_version`, the eject capability,
-`catalog`, and now `protocol` and `version` themselves — was absorbed by a
-serde default, so an old plugin and a new core (or the reverse) keep
-understanding each other, with tests pinning that an old announcement still
-parses. A number that moves this rarely is exactly what makes it
-trustworthy when it does: seeing it change is the signal that something
-must actually be recompiled, not routine noise. Because a protocol break
-changes what a plugin and the core can promise each other, it carries a
-minor version bump of the whole product — the major.minor declared in
-`[workspace.package]`, which every shipped component's own version must
-stay on (see
-[installation.md's versioning
-paragraph](installation.md#installing-from-a-release) and
-`version_coherence.rs`). It is not, any more, a single version inherited by
-every crate: the core and each plugin declare their own patch version, so a
-device legitimately runs its components at different patch levels from each
-other and from the core — that is not a misconfiguration to repair, it is
-the point of the per-component release scheme. `ritornello-proto`,
-`ritornello-plugin-sdk`, `ritornello-i18n` and `ritornello-updater` are the
-exception and keep inheriting the workspace version, since none of them
-ships as its own archive (see `ritornello_proto::PROTOCOL_VERSION`'s own doc
-comment, which this paragraph otherwise mirrors).
+`PROTOCOL_VERSION` moves at **every break** of the wire format, never on an
+addition: every field this protocol has gained so far — `admin`, `covers`,
+`ui_version`, the eject capability, `catalog`, and now `protocol` and
+`version` themselves — was absorbed by a serde default, so an old plugin and
+a new core (or the reverse) keep understanding each other, with tests pinning
+that an old announcement still parses. The decision is forced: the wire
+fingerprint test of `ritornello-proto` serializes a sample of every message
+and compares it with a committed fixture, so a rename, a removal or a changed
+type cannot ship without either a bump of this number or an explicit
+statement that the change is compatible. A bump republishes every component
+that links the crate under a new version (`scripts/changed-components.sh`
+refuses the release otherwise), and a plugin announcing another number is
+refused as above and shown "incompatible". There is no backward
+compatibility to maintain: breaks stay free, they are only signalled. It is
+not, any more, a single version inherited by every crate: the core and each
+plugin declare their own version, so a device legitimately runs its components
+at different patch levels from each other and from the core — that is not a
+misconfiguration to repair, it is the point of the per-component release
+scheme. `ritornello-proto`, `ritornello-plugin-sdk`, `ritornello-i18n` and
+`ritornello-updater` are the exception and keep inheriting the workspace
+version, since none of them ships as its own archive (see
+`ritornello_proto::PROTOCOL_VERSION`'s own doc comment, which this paragraph
+otherwise mirrors).
 
 This "bind first, announce second" order is not merely a convention:
 the SDK's `Runtime` enforces it structurally (see [Writing a `metadata`
@@ -1424,8 +1423,13 @@ that never announces at all (disabled, crashed, not yet started) could
 not have said so either way.
 
 **Updating `files` from the page is allowed, while `files-mount` does
-not move.** The plugin's archive carries its binary alone, so an update is
-an ordinary plugin placement. The core only checks that the release's
+not move.** The companion has its own independent version number, like
+`PROTOCOL_VERSION`: it answers "did the root helper change?", is never tied
+to the product's number or prerelease suffix, and moves only when the
+companion itself changes — so an unchanged helper keeps its number across
+every release, and updating `files` from the page works across them.
+The plugin's archive carries its binary alone, so an update is an ordinary
+plugin placement. The core only checks that the release's
 `files-mount` version is **equal** to the one `ritornello-install` recorded
 in `/var/lib/ritornello-install/installed.toml`; a different version, an
 unknown one (no registry, or none recorded for the companion), or a
@@ -1436,7 +1440,11 @@ alone installs, updates and removes the companion**, always together with
 `files`. Because the plugin and the helper share the library crate
 `ritornello-files-mount`, `scripts/changed-components.sh` refuses a release
 that changes that crate without moving the versions it must move, so a
-changed helper can never reach a device under an old number.
+changed helper can never reach a device under an old number. A release that
+does not change it moves neither.
+The helper depends on no shared workspace crate (`version_coherence.rs`
+refuses one): the text of a root refusal is mapped to its catalog keys in the
+files plugin (`root_error.rs`), not in the helper.
 
 **Adding a privileged plugin to this repository means giving it a
 companion in `deploy/packaging.toml`** — a `[companions.<name>]` table with

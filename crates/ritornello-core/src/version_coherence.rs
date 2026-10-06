@@ -1,17 +1,23 @@
 //! Guard over the versioning scheme: every shipped component declares its own
-//! patch version, and none of them drifts off the product's generation.
+//! version, and none of them drifts off the product's major.
 //!
-//! Three numbers exist in this repository and only one of them is here. The
-//! product number lives in `[workspace.package] version` and names the
-//! release; each shipped component declares its own version so a fix in one
-//! plugin does not renumber the whole product — which would make every
+//! Four numbers exist in this repository and only the first two are mostly
+//! here. The product number lives in `[workspace.package] version` and names
+//! the release; each shipped component declares its own version so a fix in
+//! one plugin does not renumber the whole product — which would make every
 //! component look stale on the device and have the updater replace all of
-//! them. `ritornello_proto::PROTOCOL_VERSION` is the compatibility contract
-//! and is none of this file's business.
+//! them. Only the MAJOR ties a core, plugin or language-pack number to the
+//! product's (before 1.0 the major stays 0, so nothing forces republishing
+//! everything); an unchanged component may keep an earlier minor, and what a
+//! prerelease may declare is `suffix_fits` below. The third number,
+//! `ritornello_proto::PROTOCOL_VERSION`, is the compatibility contract and is
+//! none of this file's business. The fourth is a root-privileged companion's
+//! own number, which none of the product rules touch (`tied_to_product`).
 //!
 //! What a red test here means: either a component started inheriting the
 //! product number again (so it can no longer be fixed on its own), or one
-//! drifted off the shared generation (so `0.2.x` no longer means one thing).
+//! drifted off the product's major or claimed a number from a release that
+//! does not exist yet.
 
 #[cfg(test)]
 mod tests {
@@ -37,8 +43,9 @@ mod tests {
     /// Components that ship beside a plugin and are versioned on their own,
     /// but are not plugins: no `ritornello-plugin-` prefix, no entry in
     /// `plugins.example.toml`. Each is a crate that declares its own literal
-    /// version, and every rule below that walks the shipped components walks
-    /// these too.
+    /// version. The rules that tie a number to the product walk the core and
+    /// the plugins only (`tied_to_product`); the rule that a manifest declares
+    /// a version of its own walks these too.
     const SHIPPED_COMPANIONS: &[&str] = &["ritornello-files-mount"];
 
     /// Crates that legitimately keep inheriting the product number: no
@@ -74,6 +81,66 @@ mod tests {
         );
         names.extend(SHIPPED_COMPANIONS.iter().map(|c| c.to_string()));
         names
+    }
+
+    /// Whether a shipped crate's number is tied to the product's.
+    ///
+    /// The core and the plugins are; a companion is NOT. A root-privileged
+    /// companion (`files-mount`) has a number of its own, independent of the
+    /// product's generation and of its prerelease suffix, and it moves only
+    /// when the companion itself changes. The reason is the device's own
+    /// rule: it compares a companion's version for equality to decide whether
+    /// the in-app update of its plugin is allowed, and only
+    /// `ritornello-install` can place the companion. Any move not caused by
+    /// a real change of the companion therefore forces an installer run for
+    /// nothing -- across a beta, and across a minor or major product change
+    /// (0.2 -> 0.3 -> 1.0) just as much.
+    fn tied_to_product(name: &str) -> bool {
+        !SHIPPED_COMPANIONS.contains(&name)
+    }
+
+    /// The shipped crates whose number must follow the product rules
+    /// (generation, finished number, prerelease suffix): everything but the
+    /// companions.
+    fn product_tied_crate_names() -> Vec<String> {
+        shipped_crate_names()
+            .into_iter()
+            .filter(|n| tied_to_product(n))
+            .collect()
+    }
+
+    /// Why `version` is off the product's major, or `None`. Companions are
+    /// never off it: see `tied_to_product`.
+    fn major_problem(product: &str, name: &str, version: &str) -> Option<String> {
+        let major = |v: &str| v.split('.').next().unwrap_or_default().to_string();
+        if !tied_to_product(name) || major(version) == major(product) {
+            return None;
+        }
+        Some(format!(
+            "{name} is {version}, off the product's major ({product}); only the \
+             major ties a component to the product"
+        ))
+    }
+
+    /// `major.minor.patch` with an optional non-empty dot-separated
+    /// prerelease: all a companion's own number has to be, since it is
+    /// compared and named in an archive like any other.
+    fn is_valid_semver(version: &str) -> bool {
+        let (core, pre) = match version.split_once('-') {
+            Some((c, p)) => (c, Some(p)),
+            None => (version, None),
+        };
+        let parts: Vec<&str> = core.split('.').collect();
+        let numbers = parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()));
+        let pre_ok = pre.is_none_or(|p| {
+            p.split('.').all(|i| {
+                !i.is_empty() && i.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            })
+        });
+        numbers && pre_ok
     }
 
     fn repo_root() -> PathBuf {
@@ -224,40 +291,217 @@ mod tests {
     }
 
     #[test]
-    fn every_shipped_component_stays_on_the_product_generation() {
-        let product = generation(&product_version());
-        let names = shipped_crate_names();
-        for name in names {
+    fn every_shipped_component_keeps_the_products_major() {
+        let product = product_version();
+        for name in product_tied_crate_names() {
             let version = declared_version(&crate_manifest(&name))
                 .unwrap_or_else(|| panic!("{name} declares no version of its own"));
+            if let Some(why) = major_problem(&product, &name, &version) {
+                panic!("{why}");
+            }
+        }
+    }
+
+    /// The same rule for language packs: they have no Cargo.toml, so
+    /// `deploy/language-packs.toml` is the one place their number is written,
+    /// and this is what keeps it on the same rails as every crate-shaped
+    /// component -- the product's major, nothing from a future release, and
+    /// the prerelease rules of `suffix_fits`.
+    #[test]
+    fn every_language_pack_stays_on_the_product_major() {
+        let product = product_version();
+        for (lang, version) in declared_packs() {
+            if let Err(why) = suffix_fits(&product, &version) {
+                panic!("language pack [{lang}]: {why}");
+            }
             assert_eq!(
-                generation(&version),
-                product,
-                "{name} is {version}, off the product generation {}.{}; \
-                 only the third number is free",
-                product.0,
-                product.1
+                major_problem(&product, "a-language-pack", &version),
+                None,
+                "language pack [{lang}]"
             );
         }
     }
 
-    /// The same generation rule, for language packs: they have no
-    /// Cargo.toml, so `deploy/language-packs.toml` is the one place their
-    /// number is written, and this is what keeps it on the same rails as
-    /// every crate-shaped component.
+    /// A companion is exempt from every rule tying a component to the
+    /// product (major, prerelease suffix, finished number inside a
+    /// prerelease, finished product refusing a suffix). Its number is its
+    /// own and moves only when the companion itself changes, never with the
+    /// product: the device compares it for equality to allow the in-app
+    /// update of its plugin, and only `ritornello-install` can place it, so
+    /// any move not caused by a real change forces an installer run for
+    /// nothing.
     #[test]
-    fn every_language_pack_stays_on_the_product_generation() {
-        let product = generation(&product_version());
-        for (lang, version) in declared_packs() {
+    fn a_companion_need_not_share_the_products_major() {
+        let companion = SHIPPED_COMPANIONS[0];
+        for product in ["0.2.0-beta.4", "1.3.0", "0.3.0-rc.1"] {
             assert_eq!(
-                generation(&version),
-                product,
-                "language pack [{lang}] is {version}, off the product \
-                 generation {}.{}; only the third number is free",
-                product.0,
-                product.1
+                major_problem(product, companion, "1.0.0"),
+                None,
+                "a companion at 1.0.0 inside {product}"
+            );
+            assert!(!tied_to_product(companion), "{product}");
+        }
+        assert!(
+            major_problem("1.0.0", "ritornello-core", "0.2.0").is_some(),
+            "the core is still tied to the product's major"
+        );
+        assert!(
+            major_problem("0.3.0", "ritornello-plugin-radio", "1.0.0").is_some(),
+            "a plugin is still tied to the product's major"
+        );
+        assert!(tied_to_product("ritornello-core"));
+    }
+
+    /// Every companion declares its own version, and it is valid semver.
+    #[test]
+    fn every_companion_declares_a_valid_semver_of_its_own() {
+        for name in SHIPPED_COMPANIONS {
+            let version = declared_version(&crate_manifest(name))
+                .unwrap_or_else(|| panic!("{name} inherits the product version"));
+            assert!(
+                is_valid_semver(&version),
+                "{name} declares {version}, which is not major.minor.patch[-prerelease]"
             );
         }
+        for good in ["0.2.0", "1.0.0", "3.1.4", "0.2.0-beta.2"] {
+            assert!(is_valid_semver(good), "{good}");
+        }
+        for bad in ["0.2", "0.2.0.1", "a.b.c", "0.2.0-", "0.2.0-beta..1", ""] {
+            assert!(!is_valid_semver(bad), "{bad}");
+        }
+    }
+
+    /// The names of the runtime dependencies of a manifest that point at a
+    /// path or at the workspace: `[dependencies]`, `[dependencies.<x>]`,
+    /// `[target.<t>.dependencies]` and `[target.<t>.dependencies.<x>]`.
+    /// `workspace = true` is flagged too, since the workspace could someday
+    /// declare a path dependency. `[dev-dependencies]` and
+    /// `[build-dependencies]` are out: tests and build scripts are not part
+    /// of the shipped binary. Textual, like `declared_version`.
+    fn path_dependencies(manifest: &str) -> Vec<String> {
+        // What a section header says about runtime dependencies:
+        // `None` out of scope, `Some(None)` a table of entries,
+        // `Some(Some(x))` one entry written as its own table.
+        fn scope(header: &str) -> Option<Option<String>> {
+            let h = header.strip_prefix("target.").map_or(header, |rest| {
+                // Past the cfg or triple, which may itself contain dots.
+                match rest.rfind(".dependencies") {
+                    Some(i) => &rest[i + 1..],
+                    None => "",
+                }
+            });
+            if h == "dependencies" {
+                Some(None)
+            } else {
+                h.strip_prefix("dependencies.").map(|x| Some(x.trim_matches('"').to_string()))
+            }
+        }
+        let mut current: Option<Option<String>> = None;
+        let mut found = Vec::new();
+        for line in manifest.lines() {
+            // Comments and every blank are dropped first, so `path="../x"`,
+            // `path = "../x"` and a header followed by `# comment` read alike.
+            let line: String = line
+                .split('#')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            if let Some(header) = line.strip_prefix('[') {
+                let header = header.split(']').next().unwrap_or_default().trim_start_matches('[');
+                current = scope(header);
+                continue;
+            }
+            if !(line.contains("path=") || line.contains("workspace=true")) {
+                continue;
+            }
+            match &current {
+                Some(Some(table)) => found.push(table.clone()),
+                Some(None) => {
+                    if let Some((key, _)) = line.split_once('=') {
+                        let key = key.split('.').next().unwrap_or_default();
+                        found.push(key.trim_matches('"').to_string());
+                    }
+                }
+                None => {}
+            }
+        }
+        found
+    }
+
+    /// A companion's crate has NO path dependency: the root helper's code
+    /// must change only when its own directory changes, which is exactly
+    /// what `changed-components.sh`'s coupled-change guard watches. A shared
+    /// workspace crate behind it would let a change reach the root binary
+    /// unseen, and the helper would then ship under an unchanged number that
+    /// a device, comparing for equality, never replaces -- while only
+    /// `ritornello-install` could place it anyway.
+    #[test]
+    fn a_companion_depends_on_no_workspace_crate() {
+        for name in SHIPPED_COMPANIONS {
+            let found = path_dependencies(&crate_manifest(name));
+            assert!(
+                found.is_empty(),
+                "{name} depends on {found:?} by path: a change to that crate would reach \
+                 the root helper without the coupled-change guard noticing"
+            );
+        }
+    }
+
+    #[test]
+    fn path_dependencies_reads_every_runtime_dependency_form() {
+        let found = |m: &str| path_dependencies(m);
+        // The plain table, and a dev-dependency that must stay ignored.
+        let manifest = "[package]\nname = \"x\"\n\n[dependencies]\n\
+                        a = { path = \"../a\" }\nserde = \"1\"\n\
+                        [dev-dependencies]\nb = { path = \"../b\" }\n";
+        assert_eq!(found(manifest), vec!["a".to_string()]);
+        assert!(found("[dependencies]\nserde = \"1\"\n").is_empty());
+        // One entry written as its own table.
+        assert_eq!(
+            found("[dependencies.c]\npath = \"../c\"\n"),
+            vec!["c".to_string()]
+        );
+        assert!(found("[dependencies.c]\nversion = \"1\"\n").is_empty());
+        // Target-specific tables, plain and per entry, with a dotted cfg.
+        assert_eq!(
+            found("[target.'cfg(unix)'.dependencies]\nd = { path = \"../d\" }\n"),
+            vec!["d".to_string()]
+        );
+        assert_eq!(
+            found("[target.x86_64-unknown-linux-gnu.dependencies.e]\npath = \"../e\"\n"),
+            vec!["e".to_string()]
+        );
+        // No blanks around the `=`, and a comment after a header.
+        assert_eq!(
+            found("[dependencies]\nk={path=\"../k\"}\n"),
+            vec!["k".to_string()]
+        );
+        assert_eq!(
+            found("[dependencies] # runtime\nm = { path = \"../m\" }\n"),
+            vec!["m".to_string()]
+        );
+        assert_eq!(
+            found("[dependencies]\nn = { workspace=true } # shared\n"),
+            vec!["n".to_string()]
+        );
+        // A commented-out entry is not a dependency.
+        assert!(found("[dependencies]
+# a = { path = \"../a\" }
+serde = \"1\" # path=x
+").is_empty());
+        // The workspace could one day declare a path.
+        assert_eq!(
+            found("[dependencies]\nf = { workspace = true }\ng.workspace = true\n"),
+            vec!["f".to_string(), "g".to_string()]
+        );
+        // Out of scope: build and dev tables, target or not, and the
+        // workspace's own table.
+        assert!(found("[build-dependencies]\nh = { path = \"../h\" }\n").is_empty());
+        assert!(found("[target.'cfg(unix)'.dev-dependencies]\ni = { path = \"../i\" }\n").is_empty());
+        assert!(found("[workspace.dependencies]\nj = { path = \"../j\" }\n").is_empty());
+        assert!(found("[package]\nversion.workspace = true\n").is_empty());
     }
 
     #[test]
@@ -310,7 +554,10 @@ mod tests {
             return; // a finished product: the rule above already covers it
         };
         let finished = product.split('-').next().unwrap_or(&product);
-        let names = shipped_crate_names();
+        // Companions are exempt, see `tied_to_product`: a companion that
+        // happens to sit at the finished number is its own number, and it
+        // moves only when the companion changes.
+        let names = product_tied_crate_names();
         for name in names {
             let version = declared_version(&crate_manifest(&name))
                 .unwrap_or_else(|| panic!("{name} declares no version of its own"));
@@ -336,7 +583,7 @@ mod tests {
     fn a_prerelease_ships_no_language_pack_under_the_finished_number() {
         let product = product_version();
         let Some(_) = prerelease(&product) else {
-            return; // a finished product: the generation rule above covers it
+            return; // a finished product: the suffix rule covers it
         };
         let finished = product.split('-').next().unwrap_or(&product);
         for (lang, version) in declared_packs() {
@@ -430,21 +677,19 @@ mod tests {
         }
     }
 
-    /// The same generation rule, in the other language that enforces it.
+    /// The same version rules, in the other language that enforces them.
     ///
     /// `scripts/package-release.sh` names every archive of a release and
-    /// re-checks the generation without cargo, because it runs in a job that
-    /// has no toolchain of ours. Its check was written as `${v%.*}`, which
-    /// answers `0.2` for `0.2.0` and `0.2.1-beta` for `0.2.1-beta.1` — so a
-    /// prerelease shipping only the component it fixes was refused, and the
-    /// same suffix written without a dot was not. The script now strips the
-    /// suffix first and carries the case table; this runs it.
+    /// re-checks major, target number and prerelease suffix without cargo,
+    /// because it runs in a job that has no toolchain of ours. Its case table
+    /// mirrors `the_suffix_rule_over_a_case_table` row for row, and the
+    /// script carries its own `--self-test`; this runs it.
     ///
     /// The release job is the script's only other exercise, and it fires on
     /// a tag: without this test the table would first be read on the day a
     /// release is being cut.
     #[test]
-    fn the_packaging_script_agrees_about_generations_and_prereleases() {
+    fn the_packaging_script_agrees_about_majors_targets_and_prereleases() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let out = std::process::Command::new("bash")
             .arg("scripts/package-release.sh")
@@ -492,29 +737,183 @@ mod tests {
         );
     }
 
+    /// Semver precedence of two prerelease strings (`beta.2`, `rc.1`):
+    /// identifiers are dot-separated, numeric ones compare numerically,
+    /// alphanumeric ones lexically, a numeric identifier sorts below an
+    /// alphanumeric one, and when every shared identifier is equal the
+    /// shorter list is the lower. Written by hand: `semver` is not a
+    /// dependency of this crate, and one comparison does not justify one.
+    fn compare_prerelease(a: &str, b: &str) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        let numeric = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
+        let (mut xs, mut ys) = (a.split('.'), b.split('.'));
+        loop {
+            match (xs.next(), ys.next()) {
+                (None, None) => return Ordering::Equal,
+                (None, Some(_)) => return Ordering::Less,
+                (Some(_), None) => return Ordering::Greater,
+                (Some(x), Some(y)) => {
+                    let ord = match (numeric(x), numeric(y)) {
+                        (true, true) => {
+                            // By length once leading zeros are gone, so a
+                            // huge identifier cannot overflow an integer.
+                            let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
+                            x.len().cmp(&y.len()).then_with(|| x.cmp(y))
+                        }
+                        (true, false) => Ordering::Less,
+                        (false, true) => Ordering::Greater,
+                        (false, false) => x.cmp(y),
+                    };
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                }
+            }
+        }
+    }
+
+    /// `(major, minor, patch)` and the prerelease suffix of a version.
+    fn parse_version(v: &str) -> Option<((u64, u64, u64), Option<String>)> {
+        let (core, pre) = match v.split_once('-') {
+            Some((c, p)) => (c, Some(p.to_string())),
+            None => (v, None),
+        };
+        let mut it = core.split('.').map(|n| n.parse::<u64>().ok());
+        let t = (it.next()??, it.next()??, it.next()??);
+        it.next().is_none().then_some((t, pre))
+    }
+
+    /// Whether a core, plugin or language pack declaring `component` may
+    /// ship inside the product `product`. Companions never come here
+    /// (`tied_to_product`).
+    ///
+    /// Only the MAJOR ties a component to the product: an unchanged
+    /// component keeps a number from an earlier minor (`0.2.4` inside
+    /// `0.3.0`), because a device compares versions for equality and a number
+    /// that moves without a change forces a pointless update. Then, with
+    /// P the product and C the component, same major:
+    ///
+    /// * a target number (`major.minor.patch`) HIGHER than P's is refused,
+    ///   with or without a suffix: it would claim a release that does not
+    ///   exist yet;
+    /// * P finished: C carries no suffix (the first finished release of a
+    ///   target moves every component still on a beta number, once);
+    /// * P prerelease, C bare: C must not be P's finished target number
+    ///   (that number is the finished release's, and a device would never
+    ///   replace the beta's bytes);
+    /// * P prerelease, C prerelease: a lower target is fine whatever the
+    ///   suffix; the same target needs a suffix not newer than P's.
+    fn suffix_fits(product: &str, component: &str) -> Result<(), String> {
+        let (Some((pt, ppre)), Some((ct, cpre))) = (parse_version(product), parse_version(component))
+        else {
+            return Err(format!("{component} or {product} is not major.minor.patch[-suffix]"));
+        };
+        if ct.0 != pt.0 {
+            return Err(format!(
+                "{component} is off the product's major ({product}); only the major \
+                 ties a component to the product"
+            ));
+        }
+        if ct > pt {
+            return Err(format!(
+                "{component} targets a number higher than the product's {product}: it \
+                 would claim a release that does not exist yet"
+            ));
+        }
+        match (cpre, ppre) {
+            (None, None) => Ok(()),
+            (None, Some(_)) if ct == pt => Err(format!(
+                "{component} is the number the finished release of {product} will carry: \
+                 a device compares versions for equality, so whoever installs it here \
+                 keeps the beta's bytes for ever"
+            )),
+            (None, Some(_)) => Ok(()),
+            (Some(_), None) => Err(format!(
+                "{component} is a prerelease number inside the stable product {product}; \
+                 the final delivery must not ship a component that still says beta"
+            )),
+            (Some(c), Some(p)) => {
+                if ct == pt && compare_prerelease(&c, &p) == std::cmp::Ordering::Greater {
+                    Err(format!(
+                        "{component} carries a suffix newer than the product's {product}: \
+                         it would claim a release that does not exist yet"
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// A component's number fits the product: same major, no target from a
+    /// future release, and a prerelease suffix that is the product's own or an
+    /// EARLIER one of the same target number (see `suffix_fits`).
+    ///
+    /// A device compares versions for equality, so an unchanged component
+    /// must be able to keep its number across prereleases: forcing every
+    /// component onto the product's suffix renumbered the root mount helper
+    /// (`files-mount`) on every beta with no code change, and the web UI then
+    /// refused to update `files` until `ritornello-install` had been run for
+    /// nothing. A suffix NEWER than the product's would be a component
+    /// claiming a release that does not exist yet, and a different target
+    /// number above the product's (`0.2.1-beta.1` inside `0.2.0-beta.3`) names a
+    /// later delivery altogether. A finished product still refuses any suffix.
     #[test]
-    fn a_prerelease_suffix_is_the_products_own_or_absent() {
+    fn a_prerelease_component_suffix_is_the_products_or_an_earlier_one() {
         let product = product_version();
-        let expected = prerelease(&product);
-        let names = shipped_crate_names();
+        // Companions are exempt, see `tied_to_product`.
+        let names = product_tied_crate_names();
         for name in names {
             let version = declared_version(&crate_manifest(&name))
                 .unwrap_or_else(|| panic!("{name} declares no version of its own"));
-            match (prerelease(&version), expected) {
-                (None, _) => {}
-                (Some(theirs), Some(ours)) => assert_eq!(
-                    theirs, ours,
-                    "{name} is {version}, carrying a prerelease suffix that is \
-                     not the product's {product}; a device compares versions \
-                     for equality, so a stale beta number is a binary that is \
-                     never replaced"
-                ),
-                (Some(_), None) => panic!(
-                    "{name} is {version}, a prerelease number inside the \
-                     stable product {product}; the final delivery must not \
-                     ship a component that still says beta"
-                ),
+            if let Err(why) = suffix_fits(&product, &version) {
+                panic!("{name}: {why}");
             }
+        }
+    }
+
+    /// The predicate itself, over a table: the test above only ever sees the
+    /// numbers the repository happens to carry today.
+    #[test]
+    fn the_suffix_rule_over_a_case_table() {
+        let cases: &[(&str, &str, bool, &str)] = &[
+            ("0.2.0-beta.3", "0.2.0-beta.3", true, "equal suffix"),
+            ("0.2.0-beta.3", "0.2.0-beta.2", true, "older suffix, same target"),
+            ("0.2.0-beta.3", "0.2.0-beta.4", false, "newer suffix"),
+            ("0.2.0-beta.3", "0.2.1-beta.1", false, "higher target number"),
+            ("0.2.1-beta.1", "0.2.0-beta.3", true, "a lower target keeps its beta number"),
+            ("0.2.0", "0.2.0-beta.2", false, "a suffix in a finished product"),
+            ("0.2.0", "0.2.0", true, "finished in finished"),
+            ("0.2.0-beta.3", "0.2.0", false, "the number the finished release will carry"),
+            ("0.2.1-beta.1", "0.2.0", true, "a component that did not move"),
+            ("0.2.0-rc.1", "0.2.0-beta.3", true, "beta precedes rc"),
+            ("0.2.0-beta.3", "0.2.0-rc.1", false, "rc is newer than beta"),
+            ("0.2.0-beta.10", "0.2.0-beta.9", true, "numeric, not lexical: 9 < 10"),
+            ("0.2.0-beta.9", "0.2.0-beta.10", false, "numeric, not lexical: 10 > 9"),
+            ("0.2.0-beta.3", "0.2.0-beta", true, "fewer identifiers is lower"),
+            ("0.2.0-beta", "0.2.0-beta.1", false, "more identifiers is higher"),
+            ("0.2.0-beta.3", "0.2.0-RC.1", true, "ASCII order: uppercase sorts before lowercase"),
+            ("0.2.0-beta.3", "0.2.0-1", true, "numeric identifier below alphanumeric"),
+            // Only the major ties a component to the product.
+            ("0.3.0", "0.2.4", true, "an unchanged component keeps an earlier minor"),
+            ("0.3.0-beta.1", "0.2.0-beta.3", true, "an earlier minor keeps its beta number"),
+            ("0.3.0-beta.1", "0.2.0", true, "an earlier minor, finished"),
+            ("0.3.0-beta.1", "0.3.0-beta.2", false, "a newer suffix of the same target"),
+            ("0.3.0", "0.4.0", false, "a target from a future release"),
+            ("0.3.0", "0.3.1", false, "a patch from a future release"),
+            ("0.3.0-beta.1", "0.3.0", false, "the finished number inside its prerelease"),
+            ("0.3.0-beta.1", "0.3.1", false, "a bare number above the product's"),
+            ("0.3.0", "1.0.0", false, "another major"),
+            ("1.0.0", "0.9.0", false, "another major, lower"),
+            ("0.3.0", "0.2.7-beta.1", false, "any suffix in a finished product"),
+            ("0.3.0-beta.1", "0.2.7-rc.1", true, "a lower target, whatever its suffix"),
+        ];
+        for (product, component, ok, why) in cases {
+            assert_eq!(
+                suffix_fits(product, component).is_ok(),
+                *ok,
+                "product {product}, component {component}: {why}"
+            );
         }
     }
 

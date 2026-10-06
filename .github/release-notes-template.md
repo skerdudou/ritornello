@@ -133,15 +133,17 @@ sudo chown -R ritornello: /etc/ritornello/language-packs/ritornello-lang-<langua
 ## What this release carries
 
 This release carries the components whose own version moved since the
-previous one — plus, when a shared crate changed, every component, since all
-eleven binaries were rebuilt. A component missing from the assets below is
+previous one. When `PROTOCOL_VERSION` or the product's major changed, every
+component moved (the release script refuses a wire break that left a core or
+plugin on its old number). A component missing from the assets below is
 unchanged, not removed — do not read its absence as a regression.
 
 **If a shared crate changed** (`ritornello-proto`, `ritornello-i18n`,
-`ritornello-plugin-sdk`, `ritornello-updater`), check that **every**
-component's version was bumped in the same commit. Devices install on version
-inequality alone: an archive republished under its old number is never
-fetched, so the release ships everything and delivers nothing.
+`ritornello-plugin-sdk`, `ritornello-updater`) compatibly, nothing was
+republished for it: devices install on version inequality alone, so a
+component only reaches them under a new number. If the fix must reach a
+plugin, that plugin's version must have been bumped by hand in the same
+commit.
 
 The version in an attached file's name is that **component's** own version,
 not this release's tag: `ritornello-plugin-radio-0.2.1-<arch>.tar.gz` says

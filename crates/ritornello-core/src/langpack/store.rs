@@ -91,7 +91,8 @@ const SOURCE_HASH_LEN: usize = 12;
 /// `ritornello-lang-<lang>+<owner>+<repo>`): `ritornello_i18n::valid_pack_id`
 /// admits neither `+` nor `.` and stops at 64 bytes, while a GitHub repository
 /// name may hold dots and run to a hundred bytes. Widening it would change a
-/// shared crate, which republishes every component under unchanged numbers.
+/// shared crate, and a compatible change there republishes nothing by itself:
+/// every plugin that must accept the wider id would have to be bumped by hand.
 /// Sixteen bytes of language at most (`valid_locale`) make this id 46 bytes
 /// at most.
 ///

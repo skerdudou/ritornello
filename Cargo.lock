@@ -1352,11 +1352,10 @@ dependencies = [
 
 [[package]]
 name = "ritornello-files-mount"
-version = "0.2.0-beta.3"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "ritornello-plugin-sdk",
- "ritornello-proto",
  "serde",
  "tempfile",
  "toml",

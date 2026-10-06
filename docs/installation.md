@@ -150,19 +150,33 @@ pushed, a green workflow and 37 attached archives are not evidence a device
 can reach any of it. If a device says nothing is published, look first at
 whether the release is still a draft.
 
-Three different numbers are at play here, and they answer three different
+Four different numbers are at play here, and they answer four different
 questions. The **product number** — `vX.Y.Z`, the git tag — names the
 release and carries the generation: `0.2.7` is the seventh delivery of the
 `0.2` generation. Each shipped component (the core, each plugin) declares
-**its own** patch version, so a fix confined to one plugin does not
+**its own** version, so a fix confined to one plugin does not
 renumber everything else and does not make the updater think ten unrelated
 components changed too. `PROTOCOL_VERSION`, the wire-compatibility contract
 between the core and a plugin (see [plugins.md](plugins.md)), is a third
-number again, and it moves only on a breaking change to that wire format —
-not on every release, and not with every component's own patch bumps. Major
-and minor are kept identical everywhere — the product number and every
-component's own version — so only the patch digit is ever free, component
-by component.
+number, and it moves only on a breaking change to that wire format — not on
+every release, and not with every component's own patch bumps. Only the **major** ties
+the core, the plugins and the language packs to the product number: an
+unchanged component may keep a number from an earlier minor (`0.2.4` inside
+product `0.3.0`), and it may never carry a number from a release that does
+not exist yet (`0.4.0` inside `0.3.0` is refused). Before 1.0 the major stays
+`0`, so nothing forces republishing everything; what keeps the core and the
+plugins in step is the shared-crate rule: a change to a crate they all link
+must move every component that links it.
+
+The **fourth number** belongs to a root-privileged companion
+(`ritornello-files-mount`, see [plugins.md](plugins.md)). It is its own
+independent version number, like `PROTOCOL_VERSION`: it answers "did the root
+helper change?", is never shown in the UI, is tied to neither the product's
+major nor its prerelease suffix, and moves only when the companion
+itself changes. That is what lets an unchanged companion keep its number
+across every release, so that updating `files` from the web UI never sends
+the operator to `ritornello-install` for nothing: only that program can place
+the companion.
 
 The release gesture, then: bump the version of whichever component you
 changed, and tag with the next product number. The workflow publishes
@@ -175,28 +189,36 @@ silent no-op: that component ships nothing this release, and if *no*
 component moved the script exits 2 and fails the job loudly rather than
 publishing an empty release that looks like success.
 
-**One case is a silent no-op, and it is the one to know about.** A change to
-a shared crate (`ritornello-proto`, `ritornello-i18n`,
-`ritornello-plugin-sdk`, `ritornello-updater`) makes the script republish
-*every* component — correctly, because all eleven binaries were rebuilt — but
-under their **unchanged** version numbers. A device decides what to install
-by comparing versions and nothing else, so it sees every row as up to date
-and fetches none of the new archives. The release looks complete and delivers
-nothing.
+**What republishes, and what does not.** A device decides what to install
+by comparing versions and nothing else, so an archive rebuilt under its old
+number is fetched by nobody. The script therefore does not republish a
+component whose current binary still works with the new core. A component
+is published when
 
-**For a shared-crate change to reach devices, bump the version of every
-component it actually reaches, in the same commit.** For `ritornello-proto`,
-`ritornello-i18n` and `ritornello-plugin-sdk` that is all eleven: they are
-linked into every binary. For `ritornello-updater` it is **the core alone** —
-its binary is not linked into anything and ships only inside the core's
-archive, so bumping the ten plugins for it would deliver ten identical
-archives. The script republishes everything in either case, because
-over-publishing is the safe direction and one mechanism beats two for a crate
-that changes this rarely; what you choose is which versions to move.
+1. its own version moved (its code changed, as always);
+2. `PROTOCOL_VERSION` changed: a wire break, old binaries can no longer talk
+   to the core. Every component that links `ritornello-proto` (the core and
+   the plugins; not a companion, which depends on no shared crate, nor a
+   language pack, which is data) **must** have moved its version, and the
+   script refuses the release, naming those that did not;
+3. the product's **major** changed: everything is republished.
 
-The script prints all of this on stderr when it detects such a change. It does
-not refuse the release, because republishing is still the right thing to
-build — it is only not, on its own, delivering.
+A *compatible* change to a shared crate (`ritornello-proto`,
+`ritornello-i18n`, `ritornello-plugin-sdk`, `ritornello-updater`) republishes
+nothing by itself: the script prints a note on stderr. If the fix must reach
+plugins, bump those plugins by hand: that is a delivery choice, not a
+compatibility matter. The decision between "break" and "compatible" for the
+wire is forced by a test, `crates/ritornello-proto/tests/wire_fingerprint.rs`,
+which compares a sample of every wire message with a committed fixture (see
+[development.md](development.md#tests)); `PROTOCOL_VERSION` moves at every
+break, before and after the first stable release, and a plugin announcing
+another number is shown "incompatible" on the System page.
+
+The **first finished release** republishes everything: a finished product
+refuses any prerelease component (see below), so every component still on a
+beta number moves once. While only prereleases exist there is no finished
+release to measure against, so the script behaves as for a first release and
+publishes everything.
 
 Detection reads a single page of the GitHub releases API — one hundred
 releases (`per_page=100`). A component that has not shipped a new archive of
@@ -374,7 +396,8 @@ finished release. There is no checkbox to forget and no second place where
 the same intent is stated. Like any release it lands as a **draft** first,
 so the notes are read before it can be installed by anything.
 
-Two rules, and neither is a convention that can be bent:
+Two rules, and neither is a convention that can be bent (they apply to the
+core and the plugins; a companion has a number of its own, see above):
 
 1. **The tag equals the product number**, suffix included. So the beta is
    prepared by setting `[workspace.package] version` to `0.2.1-beta.1` and
@@ -387,6 +410,15 @@ Two rules, and neither is a convention that can be bent:
    silently. So a component the beta delivers carries the beta's own full
    number, suffix included.
 
+   An unchanged component keeps its number across prereleases, with an
+   **older** suffix of the same target (`0.2.0-beta.2` inside
+   `v0.2.0-beta.3`) or a lower target altogether (`0.2.0-beta.3` inside
+   `v0.3.0-beta.1`): never a newer suffix on the same target, never a target
+   above the product's, never another major. A finished release refuses any
+   suffix, so at the first finished release of a target every component still
+   on a beta number moves once. A companion is outside all of this: it moves
+   only when it changes itself.
+
    A component the beta does **not** deliver simply stays where the last
    finished release left it — `0.2.0` while the product prepares
    `0.2.1-beta.1` — and that is the normal shape of a narrow beta: only what
@@ -395,12 +427,13 @@ Two rules, and neither is a convention that can be bent:
    cheapest way to try the machinery.
 
    Three guards, and they now agree. `version_coherence.rs` refuses a suffix
-   that is not the product's, refuses any suffix at all in a finished
-   product (what stops a leftover `-beta.2` from riding into a real
-   release), and refuses a component declaring the finished number inside a
-   prerelease. `scripts/package-release.sh` re-checks the last of those
-   without cargo, since it names the archives; run
-   `scripts/package-release.sh --self-test` to see its case table.
+   that is newer than the product's or on another target number, refuses any
+   suffix at all in a finished product (what stops a leftover `-beta.2` from
+   riding into a real release), and refuses a component declaring the
+   finished number inside a prerelease. `scripts/package-release.sh`
+   re-checks the same rules without cargo, since it names the archives; run
+   `scripts/package-release.sh --self-test` to see its case table. A
+   companion is exempt from all three.
 
 The finished release then needs no special handling: its components differ
 from the beta's, so every device installs them, testers included. That
@@ -974,10 +1007,12 @@ been observed for real:
   `installed.toml` has only run against a test release and a test
   registry, and no device has yet read a registry an actual installer run
   wrote;
-- a real release carrying a companion. No published release has yet
-  shipped `ritornello-files-mount-<version>-<arch>.tar.gz`, so the core
-  has never recognised one in GitHub's own listing, nor `ritornello-install`
-  placed one fetched from a release;
+- a release carrying a companion, since the two prereleases that shipped
+  `ritornello-files-mount-<version>-<arch>.tar.gz` (beta.2 and beta.3): no
+  device has yet had the core recognise one in GitHub's own listing, nor
+  `ritornello-install` place one fetched from a release. The companion has
+  since moved to its own numbering (`1.0.0`), which no release has carried
+  yet;
 - `ritornello-install` removing a plugin on the Pi (unchecking it) and then
   placing it again (checking it back). Each direction is covered by tests
   that run the generated script for real, but the round trip has not been
@@ -1013,7 +1048,7 @@ tag has been pushed since. Consequently:
   by hand against commits of this repository, never inside the actual
   GitHub Actions job;
 - nothing about the per-component versioning scheme itself — three
-  archives named after three different numbers, a catalogue read from one
+  archives named after different numbers, a catalogue read from one
   page of a hundred releases — has been exercised by an actual device
   fetching an actual release.
 

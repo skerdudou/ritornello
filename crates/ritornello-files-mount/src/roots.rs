@@ -7,17 +7,8 @@
 //! This module's validation is **read by a root binary**. It is therefore
 //! strict, and refuses on principle anything it cannot prove harmless.
 
-use ritornello_proto::Text;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-/// One named parameter, the shape every `RootError` variant needs: a single
-/// interpolated value, never a concatenation (see `AGENTS.md`'s rule against
-/// a number glued to a label — the same trap for a path or a name).
-fn keyed(key: &str, param: &str, value: &str) -> Text {
-    Text::Keyed { key: key.to_string(), params: HashMap::from([(param.to_string(), value.to_string())]) }
-}
 
 /// Root of the mount points. Constant, **never read from the configuration**:
 /// a free mount point would be a path to validate, and root is who would use
@@ -237,22 +228,6 @@ impl Root {
     /// Credentials file consumed by `mount.cifs`.
     pub fn credentials_path(&self, dir: &Path) -> PathBuf {
         dir.join(format!("{}.cred", self.name))
-    }
-}
-
-impl RootError {
-    /// Unresolved refusal surfaced to the user (body of the admin-side
-    /// refusal), resolved by the core against this plugin's announced
-    /// catalog — not here any more (language-packs chantier, task 9).
-    pub fn text(&self) -> Text {
-        match self {
-            RootError::BadName { name } => keyed("bad_root_name", "name", name),
-            RootError::BadHost { host } => keyed("bad_host", "host", host),
-            RootError::BadShare { share } => keyed("bad_share", "share", share),
-            RootError::BadSubpath { subpath } => keyed("bad_subpath", "path", subpath),
-            RootError::DuplicateName { name } => keyed("duplicate_root", "name", name),
-            RootError::RelativeLocalPath { path } => keyed("relative_local_path", "path", path),
-        }
     }
 }
 
