@@ -172,6 +172,9 @@ pub enum PlanError {
     /// `plugins.toml` declares a plugin under the name of a component that
     /// ships beside a plugin (`files-mount`), which is never a plugin.
     DeclaredUnderCompanionName(String),
+    /// `plugins.toml` declares a plugin under a language pack's id
+    /// (`ritornello-lang-fr`), which keys that pack's registry record.
+    DeclaredUnderPackId(String),
 }
 
 /// One sentence per refusal, naming what is refused and what to do about
@@ -243,6 +246,13 @@ impl std::fmt::Display for PlanError {
                 names::PLUGINS_TOML,
                 names::PLUGINS_TOML
             ),
+            Self::DeclaredUnderPackId(n) => write!(
+                f,
+                "{} declares a plugin named {n:?}, which is the name of a language pack, never a plugin: \
+                 remove that [[plugin]] block from {} by hand, then run again",
+                names::PLUGINS_TOML,
+                names::PLUGINS_TOML
+            ),
         }
     }
 }
@@ -262,6 +272,12 @@ pub fn compute(inv: &Inventory, dev: &DeviceState, intent: &Intent) -> Result<Pl
     // would carry the companion's record over after its files are gone.
     if let Some(d) = dev.declared.iter().find(|d| inv.companions.iter().any(|c| c.name == d.name)) {
         return Err(PlanError::DeclaredUnderCompanionName(d.name.clone()));
+    }
+    // The same for a language pack's id, which keys the pack's record: a
+    // third-party plugin of that name, kept, would carry the pack's record
+    // over as its own, or lose it.
+    if let Some(d) = dev.declared.iter().find(|d| language_of(&d.name).is_some()) {
+        return Err(PlanError::DeclaredUnderPackId(d.name.clone()));
     }
     match intent {
         Intent::RemoveAll { erase_data } => remove_all(inv, dev, *erase_data),
@@ -1108,6 +1124,7 @@ pub(crate) mod tests {
                 .map(|(n, e)| Declared { name: n.to_string(), exec: e.to_string() })
                 .collect(),
             registry,
+            registry_ignored: false,
             updater_placed: BTreeMap::new(),
             packs: packs.iter().map(|p| p.to_string()).collect(),
             data_nonempty: data.iter().map(|d| d.to_string()).collect(),
@@ -1752,6 +1769,29 @@ pub(crate) mod tests {
             compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false }),
             refused
         );
+    }
+
+    /// A `plugins.toml` entry under a language pack's id is refused like
+    /// one under a companion's name, whatever the choice: kept as a third
+    /// party, it would take over the pack's registry record.
+    ///
+    /// **[MUTATION]**: drop the declared-under-a-pack-id check from
+    /// `compute` — this test fails.
+    #[test]
+    fn a_plugin_declared_under_a_pack_id_is_refused() {
+        let exec = "/usr/local/lib/ritornello/plugins/ritornello-lang-fr";
+        let device = dev(&[("radio", RADIO_EXEC), ("ritornello-lang-fr", exec)], None, &["ritornello-lang-fr"], &[]);
+        let refused = Err(PlanError::DeclaredUnderPackId("ritornello-lang-fr".to_string()));
+        assert_eq!(compute(&inv(), &device, &install(&["radio", "ritornello-lang-fr"], &["fr"], &[])), refused);
+        assert_eq!(compute(&inv(), &device, &install(&["radio"], &["fr"], &[])), refused);
+        assert_eq!(compute(&inv(), &device, &Intent::RemoveAll { erase_data: false }), refused);
+        says(
+            PlanError::DeclaredUnderPackId("ritornello-lang-fr".into()),
+            &["\"ritornello-lang-fr\"", "language pack", "remove that [[plugin]] block"],
+        );
+        // A name that merely starts like one but is no pack id is a plugin.
+        let device = dev(&[("radio", RADIO_EXEC), ("ritornello-lang-", THEIRS_EXEC)], None, &[], &[]);
+        assert!(compute(&inv(), &device, &install(&["radio", "ritornello-lang-"], &[], &[])).is_ok());
     }
 
     #[test]
@@ -2399,7 +2439,7 @@ privileged = [
 
     /// What this installer records after placing `inv()`'s core, radio,
     /// files (and so its companion) and French.
-    fn current_registry() -> Registry {
+    pub(crate) fn current_registry() -> Registry {
         let rec = |privileged: &[&str]| Recorded {
             version: OFFERED.to_string(),
             privileged: privileged.iter().map(|p| p.to_string()).collect(),
@@ -2420,7 +2460,7 @@ privileged = [
     }
 
     /// A device on which that run has just finished.
-    fn current_device() -> DeviceState {
+    pub(crate) fn current_device() -> DeviceState {
         dev(
             &[("radio", RADIO_EXEC), ("files", FILES_EXEC), ("theirs", THEIRS_EXEC)],
             Some(current_registry()),
@@ -2430,7 +2470,7 @@ privileged = [
     }
 
     /// The ordinary re-run, as `--keep` asks for it.
-    fn keep(device: &DeviceState) -> Plan {
+    pub(crate) fn keep(device: &DeviceState) -> Plan {
         let (plugins, packs) = preselection(&inv(), device);
         compute(&inv(), device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
             .expect("the re-run plans")

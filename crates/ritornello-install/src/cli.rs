@@ -43,8 +43,11 @@ pub struct Args {
     pub purge_data: bool,
     /// Place every component and language pack again, even those already
     /// at the offered version: the repair of a unit or a rule changed by
-    /// hand, and the way to go back to an older release.
-    #[arg(long)]
+    /// hand. A downgrade needs it only when the registry already records
+    /// the older version while the device runs another (the in-app updater
+    /// moved past it) and the updater's memory does not say so; otherwise
+    /// the versions differ and the component is placed anyway.
+    #[arg(long, overrides_with = "reinstall")]
     pub reinstall: bool,
     /// The release to install (a tag); by default the newest final release,
     /// or the newest prerelease when none is final yet.
@@ -387,6 +390,33 @@ mod tests {
         assert!(ArgError::ReinstallWithRemoveAll.to_string().contains("give one or the other"));
         // Alone, it does not say what is wanted: the screens ask.
         assert_eq!(intent(&["--reinstall"], &installed()), Ok(None));
+    }
+
+    /// A repeated `--reinstall` (the operator's, beside the one `deploy.sh`
+    /// adds) is the same request, not an error.
+    #[test]
+    fn a_repeated_reinstall_is_harmless() {
+        assert!(args(&["--keep", "--reinstall", "--reinstall"]).reinstall);
+    }
+
+    /// `deploy/deploy.sh` adds `--reinstall` unless its arguments already
+    /// say `--reinstall` or `--remove-all`: its own `--self-test` runs that
+    /// rule on its cases, with nothing built.
+    ///
+    /// **[MUTATION]**: drop `--remove-all` from `needs_reinstall`'s `case`
+    /// — this test fails.
+    #[test]
+    #[cfg(unix)]
+    fn deploy_sh_adds_reinstall_unless_told_otherwise() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/deploy.sh");
+        let out = std::process::Command::new("bash").arg(&script).arg("--self-test").output().expect("bash runs");
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("self-test passed"));
     }
 
     #[test]

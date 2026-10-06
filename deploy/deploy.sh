@@ -17,6 +17,44 @@
 # generated from deploy/packaging.toml like the archives are.
 set -euo pipefail
 
+# A development deploy ships a local build under the version numbers the
+# checkout already declares, and ritornello-install leaves alone whatever the
+# device has at those numbers: without --reinstall, changed code under an
+# unchanged number would never reach the device. So --reinstall is added,
+# unless the arguments already say it, or say --remove-all (which places
+# nothing, and which the installer refuses beside --reinstall).
+needs_reinstall() {
+  local a
+  for a in "$@"; do
+    case "$a" in --reinstall|--remove-all) return 1 ;; esac
+  done
+  return 0
+}
+
+# `deploy.sh --self-test`: the argument rule above, on its own cases, with
+# nothing built and no device. Run by the Rust suite (ritornello-install's
+# `deploy_sh_adds_reinstall_unless_told_otherwise`).
+if [ "${1:-}" = --self-test ]; then
+  fail=0
+  check() { # <expected: add|keep> <args...>
+    local want=$1; shift
+    if needs_reinstall "$@"; then got=add; else got=keep; fi
+    if [ "$got" != "$want" ]; then echo "FAIL: [$*] -> $got, want $want" >&2; fail=1; fi
+  }
+  check add
+  check add --keep
+  check add --plugins radio,cd --version v0.2.0
+  check add --keep --yes --purge-data
+  check keep --reinstall
+  check keep --keep --reinstall
+  check keep --remove-all
+  check keep --remove-all --purge-data --yes
+  check add --plugins reinstall
+  check add --packs --remove-allx
+  [ "$fail" = 0 ] && echo "deploy.sh: self-test passed"
+  exit "$fail"
+fi
+
 # Always from the repository root: every path below depends on it, and the
 # script must be launchable from anywhere.
 cd "$(dirname "$0")/.."
@@ -77,5 +115,8 @@ cargo build --release -p ritornello-install
 if [ -n "${DEPLOY_STOP_BEFORE_INSTALL:-}" ]; then
   echo "deploy.sh: $OUT is ready; not installing (DEPLOY_STOP_BEFORE_INSTALL)"
   exit 0
+fi
+if needs_reinstall "$@"; then
+  set -- "$@" --reinstall
 fi
 exec target/release/ritornello-install --from-dir "$OUT" "$@"

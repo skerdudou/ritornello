@@ -41,11 +41,11 @@ program in detail — its screens, its options, removal.
 Running it again is safe and cheap: what the device already has at the
 release's version is neither downloaded nor placed again, and on a device
 that is entirely up to date the program says so and stops — no sudo
-password, no download, and the radio keeps playing. When only some of it
+password, no archive downloaded (only the release list, its inventory and
+its `SHA256SUMS`), and the radio keeps playing. When only some of it
 changed, only that is fetched and placed (the service is still stopped and
 restarted around it). To place everything again anyway — a unit or a rule
-changed by hand, or going back to an older release — use `--reinstall`, or
-"Repair" on the first screen.
+changed by hand — use `--reinstall`, or "Repair" on the first screen.
 
 **`--version`.** Without it, the newest final release is installed — or,
 while the project has published prereleases only, the newest prerelease.
@@ -505,11 +505,14 @@ and hands over: `ritornello-install --from-dir release/install "$@"`. Every
 argument you give the script reaches the installer. `TARGET` names the
 compilation target (see [Building](#building)) and defaults to the Pi 2's.
 `DEPLOY_STOP_BEFORE_INSTALL=1` stops once `release/install/` is complete
-and the installer built, without contacting any device. **A development
-build that did not move a component's version is left alone on the
-device**, like any re-run (the installer compares versions, not bytes):
-to deploy changed code under unchanged numbers, pass `--reinstall`
-(`./deploy/deploy.sh --keep --reinstall`). Nothing in the
+and the installer built, without contacting any device. **The wrapper
+reinstalls everything by default**: it adds `--reinstall` to the
+installer's arguments, because a development build ships changed code
+under the version numbers the checkout already declares, which an ordinary
+run would leave alone (the installer compares versions, not bytes). It
+does not add it when the arguments already say `--reinstall` or
+`--remove-all`. `./deploy/deploy.sh --self-test` checks that rule without
+building anything; the Rust suite runs it. Nothing in the
 script places a file on the device: every path, unit and rule comes from
 the inventory, generated from `deploy/packaging.toml` like the archives.
 
@@ -544,7 +547,11 @@ supported.
   those the device already has at the offered version, which an ordinary
   run leaves alone. It is the answer to a unit, a polkit rule or a binary
   damaged or edited by hand (the version has not moved, so nothing else
-  would replace it), and to a downgrade. It combines with `--keep`,
+  would replace it). A downgrade does not need it as a rule — the versions
+  differ, so the older one is placed — except when the registry already
+  records the target version while the device runs another (the web UI's
+  updater moved past it) and the updater's own memory does not say so. It
+  combines with `--keep`,
   `--plugins`, `--packs` and `--version`, and is refused with
   `--remove-all`. On its own, in a terminal, the screens ask the rest.
 - `--version`: the release (a tag) to install; the newest final release by
@@ -575,7 +582,11 @@ The summary names what is installed, updated and removed, and what is
 component or pack to place, nothing to remove, `plugins.toml` and the
 registry unchanged — the run says that the device is already up to date
 and stops there, before the confirmation, the sudo password and any
-download: nothing is sent to the device and the service is not stopped.
+archive download (the release list, its inventory and its `SHA256SUMS`
+are still fetched, to know what is offered): nothing is sent to the device
+and the service is not stopped. That holds without a terminal too, even
+on a device whose `sudo` asks for a password: the missing password is
+only an error once the plan has something to do.
 A plugin the registry still records but `plugins.toml` no longer declares
 (uninstalled from the web interface) is listed as "no longer on the device,
 record cleared": what may be left of its binary is removed and its record
@@ -625,7 +636,16 @@ Only this file, which root owns, can make a run skip a component: what the
 `/var/lib/ritornello/staging/placed.json`, `plugins.toml`, a pack's
 `pack.toml` — can only ever make it place more. In particular, when the web
 UI's updater has placed a version of a component other than the one
-recorded here, the next run places that component again.
+recorded here, the next run places that component again. A registry that
+is not owned by root, or that its group or anyone else may write, is not
+trusted at all: the run treats the device as unrecorded and places
+everything.
+
+The installer never rewrites the updater's memory. So after going back to
+an older release (`--version <older>`, with `--reinstall` or not), that
+memory still names the newer version the web UI had placed, and every
+later run places that component again — expected, and safe — until the web
+UI's updater writes the memory again.
 
 It is also the one file the core reads from `ritornello-install`, for one
 field: the version of `files-mount`, the companion that carries the root

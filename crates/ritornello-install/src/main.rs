@@ -105,7 +105,7 @@ fn target(host: &str) -> ssh::Target {
 }
 
 /// What the survey alone refuses, before the inventory is even read.
-fn check_device(dev: &DeviceState, terminal: bool) -> anyhow::Result<()> {
+fn check_device(dev: &DeviceState) -> anyhow::Result<()> {
     anyhow::ensure!(dev.kernel == "Linux", "this device runs {:?}, not Linux: Ritornello runs on Linux", dev.kernel);
     if !dev.systemd {
         bail!(PlanError::NoSystemd);
@@ -113,9 +113,18 @@ fn check_device(dev: &DeviceState, terminal: bool) -> anyhow::Result<()> {
     if dev.arch_label().is_none() {
         bail!(PlanError::UnknownArch(dev.machine.clone()));
     }
+    Ok(())
+}
+
+/// What applying a plan needs of the device's `sudo`: refused only once
+/// there is a plan to apply, so that a device already up to date is told
+/// so even with no passwordless `sudo` and no terminal to ask a password
+/// on — nothing will be run as root there. Still before the summary, the
+/// confirmation and any archive download.
+fn check_sudo(sudo: Sudo, terminal: bool) -> anyhow::Result<()> {
     // `Sudo::Absent` is refused here, with ssh's own sentence for it.
-    ssh::remote_apply_command(dev.sudo)?;
-    if dev.sudo == Sudo::Password && !terminal {
+    ssh::remote_apply_command(sudo)?;
+    if sudo == Sudo::Password && !terminal {
         bail!(Missing::SudoPassword);
     }
     Ok(())
@@ -200,7 +209,13 @@ fn run(args: &Args) -> anyhow::Result<()> {
     let nonce = nonce()?;
     let output = ssh::probe(&target, &control, &device::probe_script(&nonce))?;
     let dev = device::parse(&output, &nonce).context("reading the device survey")?;
-    check_device(&dev, terminal)?;
+    check_device(&dev)?;
+    if dev.registry_ignored {
+        eprintln!(
+            "{} on {host} is not root's own (owner or mode): it is ignored, and everything is placed again",
+            names::REGISTRY
+        );
+    }
 
     // 3. What to do, on a device that has Ritornello, when the arguments
     // do not say.
@@ -239,6 +254,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
             control: &control,
             host: &host,
             sudo: dev.sudo,
+            terminal,
             source: source.as_mut(),
             product: &inv.product,
             source_label: &source_label,
@@ -286,6 +302,8 @@ enum Outcome {
 trait Steps {
     fn show_summary(&mut self, plan: &plan::Plan);
     fn say_up_to_date(&mut self, plan: &plan::Plan);
+    /// Whether the device can be asked to apply anything (`check_sudo`).
+    fn check_can_apply(&mut self) -> anyhow::Result<()>;
     fn confirm(&mut self) -> anyhow::Result<bool>;
     fn sudo_password(&mut self) -> anyhow::Result<Option<String>>;
     fn archive(&mut self, name: &str) -> anyhow::Result<Vec<u8>>;
@@ -304,6 +322,7 @@ fn carry_out(plan: &plan::Plan, yes: bool, steps: &mut impl Steps) -> anyhow::Re
         steps.say_up_to_date(plan);
         return Ok(Outcome::UpToDate);
     }
+    steps.check_can_apply()?;
 
     // 8. The summary, and its confirmation.
     steps.show_summary(plan);
@@ -336,6 +355,7 @@ struct Live<'a> {
     control: &'a ssh::ControlDir,
     host: &'a str,
     sudo: Sudo,
+    terminal: bool,
     source: &'a mut dyn Source,
     product: &'a str,
     source_label: &'a str,
@@ -351,6 +371,10 @@ impl Steps for Live<'_> {
         for line in ui::summary_lines(plan) {
             eprintln!("{line}");
         }
+    }
+
+    fn check_can_apply(&mut self) -> anyhow::Result<()> {
+        check_sudo(self.sudo, self.terminal)
     }
 
     fn confirm(&mut self) -> anyhow::Result<bool> {
@@ -433,6 +457,8 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         calls: Vec<String>,
+        /// What `check_can_apply` answers: `check_sudo` for this device.
+        sudo: Option<(Sudo, bool)>,
     }
 
     impl Steps for Recorder {
@@ -441,6 +467,13 @@ mod tests {
         }
         fn say_up_to_date(&mut self, _: &plan::Plan) {
             self.calls.push("up to date".into());
+        }
+        fn check_can_apply(&mut self) -> anyhow::Result<()> {
+            self.calls.push("check".into());
+            match self.sudo {
+                Some((sudo, terminal)) => check_sudo(sudo, terminal),
+                None => Ok(()),
+            }
         }
         fn confirm(&mut self) -> anyhow::Result<bool> {
             self.calls.push("confirm".into());
@@ -499,8 +532,41 @@ mod tests {
         assert_eq!(carry_out(&plan, false, &mut steps).unwrap(), Outcome::Applied);
         assert_eq!(
             steps.calls,
-            ["summary", "confirm", "sudo", "fetch ritornello-plugin-radio-0.2.0-beta.2-arm64.tar.gz", "apply"]
+            ["check", "summary", "confirm", "sudo", "fetch ritornello-plugin-radio-0.2.0-beta.2-arm64.tar.gz", "apply"]
         );
+    }
+
+    /// A device whose `sudo` asks for a password, with no terminal to ask
+    /// it on (`--keep --yes` from a script): already up to date, it is told
+    /// so — nothing would run as root. With something to do, the missing
+    /// password stops the run before the summary, any download and the
+    /// apply; so does a device with no `sudo` at all.
+    ///
+    /// **[MUTATION]**: call `check_can_apply` before the `nothing_to_do`
+    /// return in `carry_out` (the old order) — this test fails.
+    #[test]
+    fn a_missing_sudo_password_only_matters_when_there_is_something_to_apply() {
+        use crate::plan::tests as p;
+        let up_to_date = p::keep(&p::current_device());
+        assert!(up_to_date.nothing_to_do);
+        let mut steps = Recorder { sudo: Some((Sudo::Password, false)), ..Recorder::default() };
+        assert_eq!(carry_out(&up_to_date, true, &mut steps).unwrap(), Outcome::UpToDate);
+        assert_eq!(steps.calls, ["up to date"]);
+
+        let mut behind = p::current_device();
+        behind.registry.as_mut().unwrap().components.get_mut("radio").unwrap().version = "0.2.0-beta.1".into();
+        let plan = p::keep(&behind);
+        for sudo in [Sudo::Password, Sudo::Absent] {
+            let mut steps = Recorder { sudo: Some((sudo, false)), ..Recorder::default() };
+            let err = carry_out(&plan, true, &mut steps).unwrap_err();
+            assert_eq!(steps.calls, ["check"], "{sudo:?}: {err}");
+        }
+        let err = check_sudo(Sudo::Password, false).unwrap_err();
+        assert_eq!(err.to_string(), Missing::SudoPassword.to_string());
+        // A terminal asks the password later; root or a passwordless sudo
+        // needs none.
+        assert!(check_sudo(Sudo::Password, true).is_ok());
+        assert!(check_sudo(Sudo::NoPassword, false).is_ok() && check_sudo(Sudo::NotNeeded, false).is_ok());
     }
 
     /// The up-to-date line names the device, the release and its source,
