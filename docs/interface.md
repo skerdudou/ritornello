@@ -13,7 +13,7 @@ desktop arrangement is Tailwind breakpoints, not two separate views (see
 
 The page embeds buttons for 10 of the protocol's 21 commands: standby,
 source switch, mute, previous/next, play/pause, stop, eject, and the two
-play modes, random and repeat-all (see "Transport" below). Three more
+play modes, random and repeat (see "Transport" below). Three more
 commands are sent by controls that are not buttons — the preset tiles send
 `Select`, the progress bar sends `SeekTo`, the volume slider sends
 `SetVolume`. The remaining eight belong elsewhere: `VolumeUp`/`VolumeDown`
@@ -26,10 +26,10 @@ which has a single key and no other way past preset 10 (the web tiles reach
 the same numbers through their own page arrows, described under
 "Presets"); `SelectSource` (a source named rather than cycled to) exists
 for the MPD server plugin, whose clients send `load` — see
-[plugins.md](plugins.md); and `ToggleRandom`/`ToggleRepeatAll` are the
+[plugins.md](plugins.md); and `ToggleRandom`/`CycleRepeat` are the
 physical remote's own form of the two play-mode keys, sent instead of the
-web page's absolute `SetRandom`/`SetRepeatAll` because a physical key does
-not know the current value of the mode it flips — see "Physical remote".
+web page's absolute `SetRandom`/`SetRepeat` because a physical key does
+not know the current value of the mode it moves — see "Physical remote".
 
 `Next`/`Prev` are interpreted by the active source: preset for the radio,
 track for the CD player — these are not two distinct command pairs, only a
@@ -291,35 +291,44 @@ slider (below) do that work now. `SeekForward`/`SeekBackward` and
 remote (see "Physical remote") — the web page just no longer offers a
 button for any of the four. Ten commands remain on the page (standby,
 source switch, mute, previous, play/pause, next, stop, eject, random,
-repeat-all); a binding that still expects the web UI to grey
+repeat); a binding that still expects the web UI to grey
 `SeekForward`/`SeekBackward` or expose a ±volume control is stale.
 
 **Below the transport, a second row carries the two play modes**, shuffle
-and repeat-all — new controls, not a repurposing of anything that was
-there. Both are toggles rather than impulses (`aria-pressed`, filled in
-`primary` when on, muted when off, the same idiom as the active preset
-tile's dot), and both send the **absolute** form of their command,
-`SetRandom`/`SetRepeatAll` with the opposite of the value the page already
-holds — never `ToggleRandom`/`ToggleRepeatAll`, which is the physical
-remote's own form for a client with no state of its own to read (see
-"Physical remote"). Sending the toggle here too would let two clients that
-cross a change undo each other's intent instead of converging on whichever
-was pressed last. "Random" means drawing the whole list once, without a
-repeat, then stopping — not a dice roll at every track — and "repeat-all"
-means starting the same list over once it ends; see
-[plugins.md](plugins.md) for where each source actually implements them.
-Both keys are greyed, never hidden, on a source with no finite list to
-apply them to (the radio): the user asked to still see that the function
-exists, even where this particular source cannot honour it — read from
-`has_finite_list`, the capability a source declares for itself (see
+and repeat — new controls, not a repurposing of anything that was
+there. Shuffle is a toggle (`aria-pressed`, filled in `primary` when on,
+muted when off, the same idiom as the active preset tile's dot). Repeat is
+**one button with three states**, off, all and one, in that order and
+back to off; it is filled in `primary` as soon as it is not off, and in
+the "one" state it carries a small "1" badge, the convention of every
+mainstream player, since the icon set has no repeat-one glyph of its own.
+Both send the **absolute** form of their command: `SetRandom` with the
+opposite of the value the page already holds, and `SetRepeat` with the
+*next state of the cycle* after the one the page already holds — never
+`ToggleRandom`/`CycleRepeat`, which are the physical remote's own form for
+a client with no state of its own to read (see "Physical remote"). Sending
+the toggle here too would let two clients that cross a change undo each
+other's intent instead of converging on whichever was pressed last.
+"Random" means drawing the whole list once, without a repeat, then
+stopping — not a dice roll at every track; "repeat all" means starting the
+same list over once it ends; and "repeat one" means the playing track
+starts over at its natural end, while a manual next or previous still
+changes track and the new one repeats in turn. With shuffle on, "one"
+wins at a track's natural end, and shuffle only steers the manual skips.
+See [plugins.md](plugins.md) for where each source actually implements
+them. Both keys are greyed, never hidden, on a source with no finite list
+to apply them to (the radio): the user asked to still see that the
+function exists, even where this particular source cannot honour it — read
+from `has_finite_list`, the capability a source declares for itself (see
 [plugins.md](plugins.md)). **And a greyed key never claims to be on**: the
-core refuses both mode commands while the active source has no finite
+core refuses all four mode commands while the active source has no finite
 list, and publishes the two modes masked by that same capability, so
-`random` and `repeat_all` are never `true` in a frame where
-`has_finite_list` is `false`. The rule lives in the core rather than on
-this page because the core is the only party that knows the capability,
-and this page is only one of four ways in — the physical remote's toggle
-keys and the MPD server's `random`/`repeat` commands meet the same
+`random` is never `true` and `repeat` is never anything but `off` (and is
+then omitted from the frame, like `random` when it is `false`) in a frame
+where `has_finite_list` is `false`. The rule lives in the core rather than
+on this page because the core is the only party that knows the capability,
+and this page is only one of four ways in — the physical remote's keys and
+the MPD server's `random`/`repeat`/`single` commands meet the same
 refusal, where they used to walk straight past it. Refusing is not
 forgetting, though: the two modes are persisted settings of the
 **device**, not of what is loaded, so the value comes back untouched on a
@@ -542,10 +551,12 @@ such a table anyway; the page merely says so before the round trip rather
 than after it.
 
 Two of the table's rows are the **toggle** form of the two play modes,
-"Shuffle" and "Repeat all" — bound like any other action, and sending
-`ToggleRandom`/`ToggleRepeatAll` rather than the web remote's absolute
-`SetRandom`/`SetRepeatAll` (see "Transport" above): a physical key has no
-way to know the current value of the mode it flips, only to invert it.
+"Shuffle" and "Repeat" — bound like any other action, and sending
+`ToggleRandom`/`CycleRepeat` rather than the web remote's absolute
+`SetRandom`/`SetRepeat` (see "Transport" above): a physical key has no
+way to know the current value of the mode it moves, only to step it, and
+the one "Repeat" key steps through the same cycle as the web button, off,
+all, one, then off again.
 
 **A row per installed source, appended at the end of the table.** Below
 the fixed actions, the page lists every source the core currently

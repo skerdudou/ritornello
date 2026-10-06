@@ -874,8 +874,8 @@ not — the whole point of this section's closing caveat is that "meant to"
 has not yet been confirmed against a real drive.
 
 The two play modes apply to a disc exactly as to a file list — see
-[the two play modes](#the-two-play-modes-random-and-repeat-all), in the
-`files` section below, for what `random` and `repeat-all` mean and how
+[the two play modes](#the-two-play-modes-random-and-repeat), in the
+`files` section below, for what `random` and `repeat` mean and how
 `has_finite_list` greys the keys that drive them. `has_finite_list` answers
 **true unconditionally**, the same reasoning as `can_eject` above: an empty
 tray still "has" a finite list in the sense that matters, since the modes
@@ -891,7 +891,7 @@ plugin's, even though the underlying idea is the same: walk the drawn pass
 by `next`/`prev` and by the player's own automatic advance (corrected
 toward the pass's real next entry, since mpv chains chapters on its own
 with no notion of a drawn order), stopping the disc outright once every
-entry has played once — under `repeat_all`, opening a fresh pass instead,
+entry has played once — under repeat-all, opening a fresh pass instead,
 drawn again rather than replayed. Reopening a pass — whether at its own
 natural end or because mpv's physical end of disc arrived before the pass
 itself was actually finished — always goes through a full reload
@@ -912,8 +912,26 @@ before it is sent, so its echo names that track, while a natural advance
 by definition lands on another one) and ignores its own echoes — without
 that, under shuffle each correction's
 echo was read as another advance and corrected again, walking the whole
-pass in a few round trips and, under `repeat_all`, drawing the next one
+pass in a few round trips and, under repeat-all, drawing the next one
 without end.
+
+**Repeat-one** does not use mpv's `loop-file` on a disc, and that is why
+the cd plugin does not declare its `Play` `loopable` (see
+[the two play modes](#the-two-play-modes-random-and-repeat)): the disc is a
+single entry whose tracks are chapters, so `loop-file` would loop the
+whole disc. Instead, when mpv reports a chapter other than the one the
+plugin stands on — the playing track ended and the next one began — the
+plugin seeks back to the start of the track that was playing, once the
+disc's track count is known (after a presence flicker the track is zeroed
+until the table of contents lands, and any notification would look like an
+advance from track 0; until then mpv's report is trusted). That seek wins
+over the shuffle correction, so with shuffle on "one" still wins at a
+natural end and shuffle only steers manual skips. If mpv goes idle at the
+disc's physical end instead, `end_of_content` reloads the disc on the track
+that was playing, as an arrival does. The cost of the seek is an instant of
+the next track let through before it lands; its length has **not been
+measured**, since no drive was available (see "What has not been verified"
+in [installation.md](installation.md#what-has-not-been-verified)).
 
 **None of this has been measured on real hardware.** No CD drive and no
 reachable Raspberry Pi were available during this chantier, so the
@@ -981,15 +999,46 @@ start on the resumed track. `Player::load_list` takes it as a parameter and
 the player exposes no way to reposition separately, which is what keeps the
 old sequence from coming back.
 
-### The two play modes: random and repeat-all
+### The two play modes: random and repeat
 
 A list of files is exactly the kind of finite thing the two play modes make
 sense of: **random** (draw the whole list once, without a repeat, then
-stop) and **repeat-all** (start the same list over once it ends). Both are
-settings the **core** holds and persists, not commands acting on the
+stop) and **repeat**, which has three values, `Repeat::Off`, `Repeat::All`
+(start the same list over once it ends) and `Repeat::One` (the playing
+track starts over at its natural end; a manual next or previous still
+changes track, and the new one repeats in turn). It is one value rather
+than two booleans because "all" and "one" exclude each other. Both modes
+are settings the **core** holds and persists, not commands acting on the
 current track — a source only ever learns their current value, through
-`SourceReq::SetPlayMode { random, repeat_all }`, sent as one request rather
+`SourceReq::SetPlayMode { random, repeat }`, sent as one request rather
 than two so that a delivery race can never set one half without the other.
+The commands that move them are `SetRandom`/`SetRepeat` (absolute, from the
+web page and MPD) and `ToggleRandom`/`CycleRepeat` (relative, from a
+physical key; the cycle is off, all, one, off). With shuffle on, "one"
+wins at a track's natural end, and shuffle only steers manual skips.
+
+What each source does under `Repeat::One`:
+
+- **`files`** declares every `Play` of its list `loopable`
+  (`SourceAction::Play::loopable`): each entry is a whole track the player
+  may loop on its own. The core then sets mpv's `loop-file` exactly when
+  the repeat setting is `one` and the last load was declared loopable
+  (`sync_loop_track`, called when a `Play` is applied and when a repeat
+  command arrives, and sending to mpv only on a change), so the track
+  restarts at its natural end with no gap and no round trip through the
+  source. `end_of_content` is only a safety net: if an end arrives anyway
+  under `one`, the entry that was playing starts over.
+- **The cd player** does **not** declare `loopable`: a disc is one entry
+  whose tracks are chapters, and `loop-file` would loop the whole disc. It
+  seeks back to the start of the playing track instead — see its own
+  section above.
+- **The radio** has no finite list and never applies either mode.
+
+`loopable` is absent (false) for a live stream, which must never loop.
+`loop-file` was measured on the development bench (mpv 0.37.0 under WSL),
+**not on the device**: a file in a playlist loops without being reloaded,
+and an unreadable entry is tried once, after which mpv moves on to the
+next entry.
 
 Whether either mode has anything to apply to is a capability of its own,
 `SourcePlugin::has_finite_list` — same shape and same default as
@@ -999,20 +1048,20 @@ compiling unchanged, correctly declaring it has nothing for either mode to
 apply to. The web remote reads it to grey its two mode buttons (see
 [interface.md](interface.md)), and the **core** reads it twice over: it
 refuses a mode command outright while the active source declares no finite
-list, and it publishes both modes masked by the capability, so no client —
-web remote, MPD client or display — is ever shown a mode as on where
-nothing can apply it. Note where the mask is *not*: a source is still
-handed the raw setting through `SetPlayMode`, whether or not it can act on
-it, which is what lets the value be waiting, untouched, on the source that
-can. `files` and the cd player (above) are the two sources that override
-`has_finite_list` to true.
+list, and it publishes both modes masked by the capability (`random`
+false, `repeat` off), so no client — web remote, MPD client or display —
+is ever shown a mode as on where nothing can apply it. Note where the mask
+is *not*: a source is still handed the raw setting through `SetPlayMode`,
+whether or not it can act on it, which is what lets the value be waiting,
+untouched, on the source that can. `files` and the cd player (above) are
+the two sources that override `has_finite_list` to true.
 
 `random` here is **not a dice roll at every track**: `set_play_mode` draws
 a permutation of the list's entries only on the actual transition that
 turns shuffle **on**, and `next`/`prev`/the player's own automatic advance
 then step through that permutation instead of the list's natural order,
 stopping once every entry has played once rather than looping back to
-redraw on their own. Toggling `repeat_all` alone, or any redelivery of
+redraw on their own. Changing `repeat` alone, or any redelivery of
 values that have not actually changed (a hot-plug, `push_play_mode`'s own
 broadcast), leaves an already-drawn order and the position within it
 untouched — redrawing on every call, an earlier version caught in review,
@@ -1045,7 +1094,7 @@ exist before this chantier. The core used to notify a source of a
 user-requested stop and of mpv reaching the natural end of its list
 through the very same signal; a source had no way to tell "the list ran
 out, open the next pass" from "the user asked for silence", so
-`repeat-all` had nothing to be built on. `SourceReq::EndOfContent` is the
+repeat-all had nothing to be built on. `SourceReq::EndOfContent` is the
 missing half: the core sends it only when it still believed playback was
 under way at the instant mpv went idle — every commanded stop it issues
 itself (the Stop key, entering standby) already finishes setting its own
@@ -1062,9 +1111,9 @@ new source's own ending. Not something the test suite can reproduce
 without hardware that keeps playing after being told to stop, so this
 remains a documented, unverified risk rather than a fixed case. `files`
 overrides `end_of_content` to open a new pass — a fresh draw under
-`random`, the identity order otherwise — when `repeat_all` is set, and to
-behave like the ordinary `stop()` every other source already had
-otherwise.
+`random`, the identity order otherwise — under repeat-all, to start the
+playing entry over under repeat-one (the safety net above), and to behave
+like the ordinary `stop()` every other source already had otherwise.
 
 The cd player answers the same two requests over its own tracks, by
 chapter rather than by list entry — see its own section above.
@@ -1691,16 +1740,30 @@ gesture that works.
 *rearranging* (`delete`, `move`, `swap` — the queue is not ours to reorder, it is
 what the active source offers), no writing playlists (`save`, `rm`,
 `playlistadd` — a source's presets are edited on that source's own admin page),
-and no `update` (there is no database to index). `single` and `consume` are
-reported as `0` and cannot be set: reported rather than omitted, because
-clients read them unconditionally and misbehave without them, but writing
-them is refused — there is no writing arm for either. `repeat` and `random`
-are the two that **can**: `random 0|1` and `repeat 0|1` reach
-`Command::SetRandom`/`SetRepeatAll`, the same absolute commands the web
-remote's two mode buttons send (see [interface.md](interface.md)), and
-`status` reports the real, persisted value rather than a constant zero — see
-[the play modes](#the-two-play-modes-random-and-repeat-all) for what the
-value means and which sources honour it. Neither command guards against
+and no `update` (there is no database to index). `consume` is reported as
+`0` and cannot be set: reported rather than omitted, because clients read it
+unconditionally and misbehave without it, but writing it is refused — there
+is no writing arm for it. `repeat`, `single` and `random` are the three that
+**can**: `random 0|1`, `repeat 0|1` and
+`single 0|1` reach `Command::SetRandom`/`SetRepeat`, the same absolute
+commands the web remote's two mode buttons send (see
+[interface.md](interface.md)), and `status` reports the real, persisted
+value rather than a constant zero — see
+[the play modes](#the-two-play-modes-random-and-repeat) for what the
+value means and which sources honour it.
+
+MPD splits the repeat setting into two flags where Ritornello holds one
+value, so `status` and the two commands translate against the known
+setting. `status` reports off as `repeat: 0` and `single: 0`, all as
+`repeat: 1` and `single: 0`, one as `repeat: 1` and `single: 1`. `repeat 0`
+sets off; `repeat 1` sets all from off and leaves all and one unchanged;
+`single 1` sets one; `single 0` sets all from one and leaves off and all
+unchanged. `single 1` from off is the one translation that is not a
+literal reading: in MPD it means "stop after this song", a mode Ritornello
+does not have, so it turns repeat-one on and the next `status` shows
+`repeat: 1` — an honest report of what the device does, rather than an
+acknowledgement the following frame would undo. `single oneshot` and
+`consume` are refused. Neither command guards against
 standby specially: like every command here, it is accepted and has no
 effect while the device is off, the core swallowing it before this plugin
 ever sees the difference. There is one audio output, always
