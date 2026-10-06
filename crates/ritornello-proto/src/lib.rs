@@ -6,12 +6,21 @@
 /// because a typo fixed in the core must not read as an incompatibility with
 /// nine plugins.
 ///
-/// **It moves only on a break, never on an addition.** Every field added to
+/// **It moves on every break, never on an addition.** Every field added to
 /// this protocol so far (`admin`, `covers`, `ui_version`, the eject
 /// capability) was absorbed by serde's defaults, and the tests that pin that
-/// behaviour are the proof. So this number may well never move; that rarity is
-/// exactly what gives it its meaning — when it does move, everything must be
-/// replaced, and a bump of the product's minor goes with it.
+/// behaviour are the proof. A rename, a removal or a changed type is a break:
+/// the number moves, every component that links this crate is republished
+/// under a new version (`scripts/changed-components.sh` refuses the release
+/// otherwise), and the core shows a plugin announcing another number as
+/// "incompatible". There is no backward compatibility to maintain: breaks stay
+/// free, they are only signalled.
+///
+/// **What forces the decision** is `tests/wire_fingerprint.rs`: it serializes
+/// a sample of every wire message and compares it with a committed fixture,
+/// so the wire cannot change without someone choosing, in that test's own
+/// words, between "break: bump this number" and "compatible: update the
+/// fingerprint and say why".
 pub const PROTOCOL_VERSION: u32 = 1;
 
 pub mod admin;
