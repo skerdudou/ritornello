@@ -180,6 +180,11 @@ jobs:
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
           packages: mpv ffmpeg
+          # Their dependencies (libblas3 and friends) register libblas.so.3
+          # through update-alternatives in a postinst script: without
+          # running those scripts a restored cache leaves ffmpeg and mpv
+          # unable to start ("cannot open shared object file", measured).
+          execute_install_scripts: true
           version: 1
       - name: Chromium system libraries
         # What `npx playwright install-deps chromium` would apt-install on
