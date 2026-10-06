@@ -939,7 +939,17 @@ serde = \"1\" # path=x
     ///
     /// Prereleases stay out of it on purpose — the endpoint excludes them
     /// unless asked — so the beta channel never shows up as the version of
-    /// the product.
+    /// the product **once a finished release exists**. Before the first one,
+    /// shields falls back to the newest prerelease, and the owner accepts a
+    /// beta number there (measured: `v0.2.0-beta.3` with no finished `v*`
+    /// release); after it, a beta must never be shown, which is what leaving
+    /// `include_prereleases` out guarantees.
+    ///
+    /// `filter=v*` keeps the installer's own releases (`installer`,
+    /// `installer-vX.Y.Z`, finished releases of their own) out of the badge:
+    /// GitHub picked `installer-v0.2.0` as "latest" while the product had
+    /// only prereleases, and the unfiltered badge read it as the product's
+    /// version.
     #[test]
     fn the_readme_badge_reads_the_release_list_rather_than_a_number() {
         let readme = read(&repo_root().join("README.md"));
@@ -958,7 +968,14 @@ serde = \"1\" # path=x
             !readme.contains("include_prereleases"),
             "the version badge must exclude prereleases: the beta channel is \
              opt-in on the device and must not be advertised as the product's \
-             version"
+             version once a finished release exists"
+        );
+        assert!(
+            readme.contains("img.shields.io/github/v/release/skerdudou/ritornello?")
+                && readme.contains("filter=v*"),
+            "the version badge must read the product's own tags (`filter=v*`): \
+             unfiltered, it shows the installer's releases, which are finished \
+             releases of their own"
         );
     }
 
