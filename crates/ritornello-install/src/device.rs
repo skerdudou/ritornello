@@ -1027,7 +1027,8 @@ radio
     /// a registry the test's own account owns is not trusted (skipped when
     /// the tests run as root, whose files these would be).
     #[test]
-    #[cfg(unix)]
+    // GNU `stat -c` only: the probe runs on the device, which is GNU/Linux.
+    #[cfg(target_os = "linux")]
     fn probe_script_reports_the_registry_s_owner_and_mode() {
         if running_as_root() {
             println!("SKIPPED: running as root, whose registry is trusted");
