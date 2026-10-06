@@ -123,7 +123,10 @@ jobs:
   rust:
     name: Rust (build, clippy, tests)
     needs: web
-    runs-on: ubuntu-latest
+    # 24.04, not -latest: the apt cache key ignores the OS release and its
+    # hits are extracted straight into /, so the pin and the apt caches (and
+    # the Chromium list in e2e) move together: change both, bump `version:`.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -153,7 +156,13 @@ jobs:
           # Postinst scripts register libblas.so.3 (update-alternatives):
           # without them a restored ffmpeg cannot start, and the tests that
           # need it skip themselves silently.
+          # Maintainer scripts restored from the cache run as root on the
+          # runner: acceptable only in these test-only jobs (read-only token,
+          # no secrets). Never copy this into a job that builds something
+          # people download.
           execute_install_scripts: true
+          # Cached .debs get no Ubuntu security or point updates until this
+          # is bumped: fine for test tooling.
           version: 1
       - run: cargo build --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -166,7 +175,10 @@ jobs:
   e2e:
     name: End-to-end journeys (Playwright)
     needs: web
-    runs-on: ubuntu-latest
+    # 24.04, not -latest: the apt cache key ignores the OS release and its
+    # hits are extracted straight into /, so the pin and the apt caches (and
+    # the Chromium list in e2e) move together: change both, bump `version:`.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -190,7 +202,13 @@ jobs:
           # through update-alternatives in a postinst script: without
           # running those scripts a restored cache leaves ffmpeg and mpv
           # unable to start ("cannot open shared object file", measured).
+          # Maintainer scripts restored from the cache run as root on the
+          # runner: acceptable only in these test-only jobs (read-only token,
+          # no secrets). Never copy this into a job that builds something
+          # people download.
           execute_install_scripts: true
+          # Cached .debs get no Ubuntu security or point updates until this
+          # is bumped: fine for test tooling.
           version: 1
       - name: Chromium system libraries
         # What `npx playwright install-deps chromium` would apt-install on
@@ -210,6 +228,8 @@ jobs:
             libfreetype6 xfonts-cyrillic xfonts-scalable fonts-liberation
             fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
             fonts-freefont-ttf
+          # Cached .debs get no Ubuntu security or point updates until this
+          # is bumped: fine for test tooling.
           version: 1
       - run: cargo build --workspace
       - name: Playwright version
