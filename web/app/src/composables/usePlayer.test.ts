@@ -26,7 +26,6 @@ function state(partial: Partial<PlayerPayload> = {}): PlayerPayload {
     can_eject: false,
     has_finite_list: false,
     random: false,
-    repeat_all: false,
     ...partial,
   }
 }

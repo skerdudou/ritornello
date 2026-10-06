@@ -99,7 +99,9 @@ remote_eject = "Auswerfen"
 remote_source = "Quelle"
 remote_power = "Standby"
 remote_random = "Zufall"
+remote_repeat_off = "Wiederholen aus"
 remote_repeat_all = "Alle wiederholen"
+remote_repeat_one = "Titel wiederholen"
 seek_step_label = "Sprungweite (s)"
 # Album covers. One card: the memory the cache may occupy (a budget, not a
 # count), then the ceilings on what the core agrees to read, then the

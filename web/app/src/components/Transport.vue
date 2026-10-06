@@ -5,7 +5,7 @@ import {
 } from '@radix-icons/vue'
 import type { Component } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
-import type { Command, PlayerPayload } from '../types'
+import type { Command, PlayerPayload, Repeat } from '../types'
 import {
   unavailable, hidden, REMOTE_MODES, REMOTE_TRANSPORT, REMOTE_TRANSPORT_SECONDARY,
 } from '../views/remoteCommands'
@@ -32,27 +32,34 @@ function icon(c: RemoteCommand): Component {
 
 const visible = (list: RemoteCommand[]) => list.filter((c) => !hidden(c.cmd.cmd, props.state))
 
-/** Which `PlayerPayload` field a mode command reads and flips. */
-const MODE_FIELD: Record<string, 'random' | 'repeat_all'> = {
-  SetRandom: 'random',
-  SetRepeatAll: 'repeat_all',
-}
 const MODE_ICONS: Record<string, Component> = {
   SetRandom: ShuffleIcon,
-  SetRepeatAll: LoopIcon,
+  SetRepeat: LoopIcon,
 }
-/** Current value of a mode command, `false` before the first frame. */
+const NEXT_REPEAT: Record<Repeat, Repeat> = { off: 'all', all: 'one', one: 'off' }
+const REPEAT_LABEL: Record<Repeat, string> = {
+  off: 'remote_repeat_off',
+  all: 'remote_repeat_all',
+  one: 'remote_repeat_one',
+}
+/** Current repeat value, `off` before the first frame and when absent. */
+const repeat = (): Repeat => props.state?.repeat ?? 'off'
+/** Whether a mode button shows as pressed. */
 function modeOn(c: RemoteCommand): boolean {
-  const field = MODE_FIELD[c.cmd.cmd]
-  return field ? (props.state?.[field] ?? false) : false
+  if (c.cmd.cmd === 'SetRandom') return props.state?.random ?? false
+  return repeat() !== 'off'
+}
+function modeLabel(c: RemoteCommand): string {
+  return c.cmd.cmd === 'SetRepeat' ? t.value(REPEAT_LABEL[repeat()]) : t.value(c.key)
 }
 /**
- * The command actually sent for a mode toggle: the absolute value, set to
- * the opposite of what the SPA currently knows (see `REMOTE_MODES`'s doc on
- * why it is `SetRandom`/`SetRepeatAll` and not `ToggleRandom`/`ToggleRepeatAll`).
+ * The command actually sent: an absolute value computed from what the SPA
+ * knows — the inverse for random, the next state of the cycle for repeat
+ * (see `REMOTE_MODES`'s doc on why never `ToggleRandom`/`CycleRepeat`).
  */
 function modeCommand(c: RemoteCommand): Command {
-  return { cmd: c.cmd.cmd, arg: !modeOn(c) }
+  if (c.cmd.cmd === 'SetRandom') return { cmd: 'SetRandom', arg: !modeOn(c) }
+  return { cmd: 'SetRepeat', arg: NEXT_REPEAT[repeat()] }
 }
 </script>
 
@@ -104,7 +111,7 @@ function modeCommand(c: RemoteCommand): Command {
       </Button>
     </div>
   </div>
-  <!-- The two play modes, below the transport and centred like it: siblings
+  <!-- The two play modes (the second with three states), below the transport and centred like it: siblings
        of `[data-transport]` rather than a third group inside it, so as not
        to disturb the two-column centring the test above locks down. Toggles,
        hence `aria-pressed`/`data-on` — new to this component, every other
@@ -119,12 +126,22 @@ function modeCommand(c: RemoteCommand): Command {
       variant="ghost"
       size="icon-sm"
       :class="['rounded-full', modeOn(c) ? 'text-primary' : 'text-muted-foreground']"
-      :aria-label="t(c.key)"
-      :title="t(c.key)"
+      :aria-label="modeLabel(c)"
+      :title="modeLabel(c)"
       :disabled="unavailable(c.cmd.cmd, state)"
       @click="emit('command', modeCommand(c))"
     >
-      <component :is="MODE_ICONS[c.cmd.cmd]" class="size-4" />
+      <span class="relative inline-flex">
+        <component :is="MODE_ICONS[c.cmd.cmd]" class="size-4" />
+        <!-- Repeat-one: the "1" badge, the convention of every mainstream
+             player — the icon set has no repeat-one glyph of its own. -->
+        <span
+          v-if="c.cmd.cmd === 'SetRepeat' && repeat() === 'one'"
+          data-repeat-one
+          aria-hidden="true"
+          class="absolute -right-1.5 -top-1.5 text-[0.55rem] font-bold leading-none"
+        >1</span>
+      </span>
     </Button>
   </div>
 </template>

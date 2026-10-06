@@ -99,7 +99,9 @@ remote_eject = "Éjecter"
 remote_source = "Source"
 remote_power = "Veille"
 remote_random = "Aléatoire"
+remote_repeat_off = "Répétition désactivée"
 remote_repeat_all = "Tout répéter"
+remote_repeat_one = "Répéter le titre"
 seek_step_label = "Pas de déplacement (s)"
 # Album covers. One card: the memory the cache may occupy (a budget, not a
 # count), then the ceilings on what the core agrees to read, then the
