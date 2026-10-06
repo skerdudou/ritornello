@@ -1427,8 +1427,9 @@ not move.** The companion has its own independent version number, like
 `PROTOCOL_VERSION`: it answers "did the root helper change?", is never tied
 to the product's number or prerelease suffix, and moves only when the
 companion itself changes — so an unchanged helper keeps its number across
-every release, and updating `files` from the page works across them. The plugin's archive carries its binary alone, so an update is
-an ordinary plugin placement. The core only checks that the release's
+every release, and updating `files` from the page works across them.
+The plugin's archive carries its binary alone, so an update is an ordinary
+plugin placement. The core only checks that the release's
 `files-mount` version is **equal** to the one `ritornello-install` recorded
 in `/var/lib/ritornello-install/installed.toml`; a different version, an
 unknown one (no registry, or none recorded for the companion), or a

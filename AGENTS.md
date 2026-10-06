@@ -36,10 +36,10 @@ and that is what its archive is named after. `PROTOCOL_VERSION` is the
 core/plugin wire contract and moves only on a break. For the core, the
 plugins and the language packs only the major must match the product's (before
 1.0 it stays 0, so nothing forces republishing everything); the rest is each
-component's own, and never a number from a release that does not exist yet. The fourth number is the root-privileged
-companion's (`files-mount`): it answers "did the root helper change?", is
-independent of the product's major.minor and suffix (like
-`PROTOCOL_VERSION`), and moves only when the companion does.
+component's own, and never a number from a release that does not exist yet.
+The fourth number is the root-privileged companion's (`files-mount`): it
+answers "did the root helper change?", is independent of the product's major
+and suffix (like `PROTOCOL_VERSION`), and moves only when the companion does.
 
 **A device compares versions for equality, never for order.** This is what
 makes rollback and channel-switching work, and it is the reason every
@@ -102,7 +102,7 @@ something.
 - `packaging_manifest.rs` — `deploy/packaging.toml` against reality, and
   against the inventory `ritornello-install` reads. `deploy/deploy.sh` is only
   a wrapper around it, so there is no second installation path to agree with.
-- `scripts/package-release.sh --self-test` — the same generation rules
+- `scripts/package-release.sh --self-test` — the same version rules
   without cargo, since the release job runs without our toolchain.
 - `scripts/changed-components.sh` — exits 2 when no component moved, rather
   than publishing an empty release that looks like success, and refuses a
