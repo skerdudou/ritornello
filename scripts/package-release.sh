@@ -166,6 +166,11 @@ version_fits() { # <label> <component version>   (reads $VERSION)
 crate_version_of() { # <version> [companion]   (reads $VERSION)
   if [ "${2:-}" != companion ]; then
     version_fits "component" "$1" || return 1
+  elif ! [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    # Exempt from the product rules, not from being a version: a local run
+    # without cargo must not name an archive after garbage.
+    echo "companion version $1 is not major.minor.patch[-prerelease]" >&2
+    return 1
   fi
   echo "$1"
 }
@@ -259,8 +264,8 @@ if [ -n "$SELF_TEST" ]; then
   expect 0.2.1-beta.1 0.2.1 refused "a language pack at the number the finished release will carry, inside a prerelease"
   # A companion is exempt from version_fits: crate_version() skips it for a
   # companion. The self-test runs the very function, with a companion label.
-  expect_companion() { # <product> <companion> <why>
-    local want=ok got=ok
+  expect_companion() { # <product> <companion> <why> [ok|refused]
+    local want=${4:-ok} got=ok
     VERSION="$1"
     crate_version_of "$2" companion >/dev/null 2>&1 || got=refused
     if [ "$got" != "$want" ]; then
@@ -271,6 +276,10 @@ if [ -n "$SELF_TEST" ]; then
   expect_companion 0.2.0-beta.4 1.0.0 "a companion's own number inside a prerelease product"
   expect_companion 1.3.0 3.1.4 "a companion's own number inside an unrelated generation"
   expect_companion 0.3.0-rc.1 1.0.0 "a companion's own number inside a release candidate"
+  expect_companion 0.3.0 1.0.0+build.5 "a companion with build metadata" ok
+  expect_companion 0.3.0 garbage "a companion that is not a version" refused
+  expect_companion 0.3.0 1.0 "a companion with two numbers" refused
+  expect_companion 0.3.0 1.0.0- "a companion with an empty suffix" refused
   [ "$fails" -eq 0 ] || { echo "self-test: $fails case(s) wrong" >&2; exit 1; }
   echo "self-test: version guards ok"
   exit 0

@@ -117,13 +117,23 @@ product_major() {
   printf '%s\n' "$v"
 }
 
-# ALL is set when this release republishes every component regardless of
+# ALL is set when this release republishes every core and plugin regardless of
 # its version: the first release (no PREV, handled below) is the other way
 # to the same result. PROTO_BREAK is set when the wire changed.
 ALL=
 PROTO_BREAK=
+# MAJOR_MOVED is the only trigger, besides the lack of a PREV, that also
+# republishes the language packs: a wire break does not touch them, they are
+# data and embed no proto.
+MAJOR_MOVED=
 if [ -n "$PREV" ]; then
   now_proto=$(proto_version < crates/ritornello-proto/src/lib.rs)
+  # Fail loudly: a PROTOCOL_VERSION this script cannot read would make every
+  # wire break invisible, and the release would look complete.
+  if [ "$now_proto" = absent ]; then
+    echo "cannot read PROTOCOL_VERSION from crates/ritornello-proto/src/lib.rs" >&2
+    exit 1
+  fi
   then_proto=$(git show "$PREV:crates/ritornello-proto/src/lib.rs" 2>/dev/null | proto_version || echo absent)
   now_major=$(product_major < Cargo.toml)
   then_major=$(git show "$PREV:Cargo.toml" 2>/dev/null | product_major || echo absent)
@@ -132,7 +142,7 @@ if [ -n "$PREV" ]; then
     echo "PROTOCOL_VERSION moved ($then_proto -> $now_proto) since $PREV — every component is republished" >&2
   fi
   if [ "$now_major" != "$then_major" ]; then
-    ALL=1
+    ALL=1 MAJOR_MOVED=1
     echo "the product's major moved ($then_major -> $now_major) since $PREV — every component is republished" >&2
   fi
   if [ -z "$ALL" ] && ! git diff --quiet "$PREV" -- "${SHARED[@]}"; then
@@ -598,13 +608,24 @@ if [ -n "$SELF_TEST" ]; then
     guard_git init -q; guard_git add -A; guard_git commit -q -m baseline; guard_git tag v0.1.0
   }
   rel_bump() { guard_bump "$1" "${2:-0.1.1}"; }
+  # Moves one language pack's version in the repository's own copy.
+  pack_bump() { # <language>
+    tr -d '\r' < "$R/deploy/language-packs.toml" \
+      | awk -v sec="[$1]" '$0 == sec { f = 1 } f && /^version = / { $0 = "version = \"9.9.9\""; f = 0 } { print }' \
+      > "$R/m" && mv "$R/m" "$R/deploy/language-packs.toml"
+  }
   expect_rel() { # <exit> <stdout lines, space-separated, sorted> <stderr must contain, or ""> <why> [args]
     local want_exit="$1" want="$2" say="$3" why="$4" got_exit=0 got
     shift 4
     if [ "$#" -eq 0 ]; then set -- --guard-baseline "" v0.1.0; fi
     guard_git add -A; guard_git commit -q -m change --allow-empty
     bash "$R/scripts/changed-components.sh" "$@" > "$R.out" 2> "$R.err" || got_exit=$?
-    got=$({ grep -v '^ritornello-lang-' "$R.out" || true; } | sort | tr '\n' ' '); got="${got% }"
+    if [ -n "${KEEP_PACKS:-}" ]; then
+      got=$(sort "$R.out" | tr '\n' ' ')
+    else
+      got=$({ grep -v '^ritornello-lang-' "$R.out" || true; } | sort | tr '\n' ' ')
+    fi
+    got="${got% }"
     if [ "$got_exit" != "$want_exit" ] || [ "$got" != "$want" ] || { [ -n "$say" ] && ! grep -qF -- "$say" "$R.err"; }; then
       echo "self-test: republication [$*] -> exit $got_exit printing [$got], expected exit $want_exit printing [$want]${say:+ saying \"$say\"} ($why)" >&2
       sed 's/^/    /' "$R.err" >&2
@@ -615,6 +636,9 @@ if [ -n "$SELF_TEST" ]; then
   non_companions=()
   for c in "${CRATES[@]}"; do is_companion "$c" || non_companions+=("$c"); done
   all_non_companions=$(printf '%s\n' "${non_companions[@]}" | sort | tr '\n' ' '); all_non_companions="${all_non_companions% }"
+  pack_names=()
+  for l in "${LANGS[@]}"; do pack_names+=("$(pack_archive_name "$l")"); done
+  all_with_packs=$(printf '%s\n' "${non_companions[@]}" "${pack_names[@]}" | sort | tr '\n' ' '); all_with_packs="${all_with_packs% }"
   all_crates=$(printf '%s\n' "${CRATES[@]}" | sort | tr '\n' ' '); all_crates="${all_crates% }"
 
   rel_repo
@@ -645,6 +669,30 @@ if [ -n "$SELF_TEST" ]; then
   rel_repo
   printf '[workspace.package]\nversion = "1.0.0"\n' > "$R/Cargo.toml"
   expect_rel 0 "$all_non_companions" "major moved" "a new major republishes everything, whatever moved"
+
+  # The language packs, kept in the output this time: they are data, and a
+  # wire break must not republish them under their unchanged numbers.
+  rel_repo
+  printf 'pub const PROTOCOL_VERSION: u32 = 2;\n' > "$R/crates/ritornello-proto/src/lib.rs"
+  for c in "${non_companions[@]}"; do rel_bump "$c"; done
+  KEEP_PACKS=1 expect_rel 0 "$all_non_companions" "" "a wire break with the packs untouched: no language pack is printed"
+
+  rel_repo
+  printf '[workspace.package]\nversion = "1.0.0"\n' > "$R/Cargo.toml"
+  KEEP_PACKS=1 expect_rel 0 "$all_with_packs" "" "a new major republishes every language pack too"
+
+  rel_repo
+  printf '[workspace.package]\nversion = "1.0.0"\n' > "$R/Cargo.toml"
+  pack_bump "${LANGS[0]}"
+  KEEP_PACKS=1 expect_rel 0 "$all_with_packs" "" "a new major with one pack bumped: every pack is printed, that one included"
+
+  rel_repo
+  pack_bump "${LANGS[0]}"
+  KEEP_PACKS=1 expect_rel 0 "$(pack_archive_name "${LANGS[0]}")" "" "an ordinary release with one pack bumped: only that pack"
+
+  rel_repo
+  printf 'pub fn nothing() {}\n' > "$R/crates/ritornello-proto/src/lib.rs"
+  expect_rel 1 "" "cannot read PROTOCOL_VERSION" "a lib.rs this script cannot read the protocol number from is refused, not skipped"
 
   rel_repo
   rel_bump ritornello-core
@@ -727,7 +775,7 @@ MOVED_PACKS=()
 for l in "${LANGS[@]}"; do
   now=$(pack_version "$l" < deploy/language-packs.toml)
   [ "$now" != absent ] || { echo "deploy/language-packs.toml declares no version for [$l]" >&2; exit 1; }
-  if [ -z "$PREV" ] || [ -n "$ALL" ]; then
+  if [ -z "$PREV" ] || [ -n "$MAJOR_MOVED" ]; then
     then_=absent
   else
     # A language that did not exist at <ref> is new, so it counts as
