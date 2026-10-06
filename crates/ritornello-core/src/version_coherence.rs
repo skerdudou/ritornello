@@ -396,24 +396,31 @@ mod tests {
                 h.strip_prefix("dependencies.").map(|x| Some(x.trim_matches('"').to_string()))
             }
         }
-        let flagged = |line: &str| line.contains("path =") || line.contains("workspace = true");
         let mut current: Option<Option<String>> = None;
         let mut found = Vec::new();
         for line in manifest.lines() {
-            let line = line.trim_end_matches('\r').trim();
+            // Comments and every blank are dropped first, so `path="../x"`,
+            // `path = "../x"` and a header followed by `# comment` read alike.
+            let line: String = line
+                .split('#')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
             if let Some(header) = line.strip_prefix('[') {
-                let header = header.trim_end_matches(']').trim_start_matches('[');
+                let header = header.split(']').next().unwrap_or_default().trim_start_matches('[');
                 current = scope(header);
                 continue;
             }
-            if !flagged(line) {
+            if !(line.contains("path=") || line.contains("workspace=true")) {
                 continue;
             }
             match &current {
                 Some(Some(table)) => found.push(table.clone()),
                 Some(None) => {
                     if let Some((key, _)) = line.split_once('=') {
-                        let key = key.trim().split('.').next().unwrap_or_default();
+                        let key = key.split('.').next().unwrap_or_default();
                         found.push(key.trim_matches('"').to_string());
                     }
                 }
@@ -466,6 +473,24 @@ mod tests {
             found("[target.x86_64-unknown-linux-gnu.dependencies.e]\npath = \"../e\"\n"),
             vec!["e".to_string()]
         );
+        // No blanks around the `=`, and a comment after a header.
+        assert_eq!(
+            found("[dependencies]\nk={path=\"../k\"}\n"),
+            vec!["k".to_string()]
+        );
+        assert_eq!(
+            found("[dependencies] # runtime\nm = { path = \"../m\" }\n"),
+            vec!["m".to_string()]
+        );
+        assert_eq!(
+            found("[dependencies]\nn = { workspace=true } # shared\n"),
+            vec!["n".to_string()]
+        );
+        // A commented-out entry is not a dependency.
+        assert!(found("[dependencies]
+# a = { path = \"../a\" }
+serde = \"1\" # path=x
+").is_empty());
         // The workspace could one day declare a path.
         assert_eq!(
             found("[dependencies]\nf = { workspace = true }\ng.workspace = true\n"),
@@ -558,7 +583,7 @@ mod tests {
     fn a_prerelease_ships_no_language_pack_under_the_finished_number() {
         let product = product_version();
         let Some(_) = prerelease(&product) else {
-            return; // a finished product: the generation rule above covers it
+            return; // a finished product: the suffix rule covers it
         };
         let finished = product.split('-').next().unwrap_or(&product);
         for (lang, version) in declared_packs() {
@@ -652,21 +677,19 @@ mod tests {
         }
     }
 
-    /// The same generation rule, in the other language that enforces it.
+    /// The same version rules, in the other language that enforces them.
     ///
     /// `scripts/package-release.sh` names every archive of a release and
-    /// re-checks the generation without cargo, because it runs in a job that
-    /// has no toolchain of ours. Its check was written as `${v%.*}`, which
-    /// answers `0.2` for `0.2.0` and `0.2.1-beta` for `0.2.1-beta.1` — so a
-    /// prerelease shipping only the component it fixes was refused, and the
-    /// same suffix written without a dot was not. The script now strips the
-    /// suffix first and carries the case table; this runs it.
+    /// re-checks major, target number and prerelease suffix without cargo,
+    /// because it runs in a job that has no toolchain of ours. Its case table
+    /// mirrors `the_suffix_rule_over_a_case_table` row for row, and the
+    /// script carries its own `--self-test`; this runs it.
     ///
     /// The release job is the script's only other exercise, and it fires on
     /// a tag: without this test the table would first be read on the day a
     /// release is being cut.
     #[test]
-    fn the_packaging_script_agrees_about_generations_and_prereleases() {
+    fn the_packaging_script_agrees_about_majors_targets_and_prereleases() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let out = std::process::Command::new("bash")
             .arg("scripts/package-release.sh")
