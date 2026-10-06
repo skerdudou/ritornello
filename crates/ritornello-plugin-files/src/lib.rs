@@ -12,6 +12,7 @@ pub mod explore;
 pub mod m3u;
 pub mod mount;
 pub mod playlist;
+pub mod root_error;
 pub mod health;
 pub mod scan;
 pub mod smb;
@@ -35,6 +36,7 @@ pub const FILES_EN: &str = include_str!("locales/en.toml");
 
 #[cfg(test)]
 mod tests {
+    use crate::root_error::RootErrorText;
     use crate::roots::RootError;
     use ritornello_proto::Text;
 

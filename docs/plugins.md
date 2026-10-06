@@ -1442,6 +1442,9 @@ alone installs, updates and removes the companion**, always together with
 that changes that crate without moving the versions it must move, so a
 changed helper can never reach a device under an old number. A release that
 does not change it moves neither.
+The helper depends on no shared workspace crate (`version_coherence.rs`
+refuses one): the text of a root refusal is mapped to its catalog keys in the
+files plugin (`root_error.rs`), not in the helper.
 
 **Adding a privileged plugin to this repository means giving it a
 companion in `deploy/packaging.toml`** — a `[companions.<name>]` table with

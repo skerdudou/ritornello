@@ -1356,7 +1356,6 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "ritornello-plugin-sdk",
- "ritornello-proto",
  "serde",
  "tempfile",
  "toml",

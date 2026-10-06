@@ -998,12 +998,6 @@ been observed for real:
   `ritornello-install` place one fetched from a release. The companion has
   since moved to its own numbering (`1.0.0`), which no release has carried
   yet;
-- files-mount still depends on `ritornello-proto` for `RootError::text()`,
-  which only the files plugin calls. A change to `ritornello_proto::Text`
-  would reach the companion crate without the coupled-change guard noticing
-  it (the guard watches the crate's own directory). Planned: move that
-  mapping into the plugin and drop the dependency at the companion's next
-  real change, since that is itself a change to the companion;
 - `ritornello-install` removing a plugin on the Pi (unchecking it) and then
   placing it again (checking it back). Each direction is covered by tests
   that run the generated script for real, but the round trip has not been

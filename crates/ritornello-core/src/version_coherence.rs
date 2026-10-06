@@ -343,6 +343,58 @@ mod tests {
         }
     }
 
+    /// The names of the `[dependencies]` entries of a manifest that point at
+    /// a path (a crate of this workspace), `[dev-dependencies]` excluded:
+    /// tests are not part of the shipped binary. Textual, like
+    /// `declared_version`: the shape that matters is a `path = ` inside the
+    /// entry, on one line.
+    fn path_dependencies(manifest: &str) -> Vec<String> {
+        let mut in_dependencies = false;
+        let mut found = Vec::new();
+        for line in manifest.lines() {
+            let line = line.trim_end_matches('\r').trim();
+            if line.starts_with('[') {
+                in_dependencies = line == "[dependencies]";
+                continue;
+            }
+            if in_dependencies
+                && line.contains("path =")
+                && let Some((name, _)) = line.split_once('=')
+            {
+                found.push(name.trim().to_string());
+            }
+        }
+        found
+    }
+
+    /// A companion's crate has NO path dependency: the root helper's code
+    /// must change only when its own directory changes, which is exactly
+    /// what `changed-components.sh`'s coupled-change guard watches. A shared
+    /// workspace crate behind it would let a change reach the root binary
+    /// unseen, and the helper would then ship under an unchanged number that
+    /// a device, comparing for equality, never replaces -- while only
+    /// `ritornello-install` could place it anyway.
+    #[test]
+    fn a_companion_depends_on_no_workspace_crate() {
+        for name in SHIPPED_COMPANIONS {
+            let found = path_dependencies(&crate_manifest(name));
+            assert!(
+                found.is_empty(),
+                "{name} depends on {found:?} by path: a change to that crate would reach \
+                 the root helper without the coupled-change guard noticing"
+            );
+        }
+    }
+
+    #[test]
+    fn path_dependencies_reads_only_the_dependencies_section() {
+        let manifest = "[package]\nname = \"x\"\n\n[dependencies]\n\
+                        a = { path = \"../a\" }\nserde = \"1\"\n\
+                        [dev-dependencies]\nb = { path = \"../b\" }\n";
+        assert_eq!(path_dependencies(manifest), vec!["a".to_string()]);
+        assert!(path_dependencies("[dependencies]\nserde = \"1\"\n").is_empty());
+    }
+
     #[test]
     fn internal_crates_still_inherit() {
         for name in INTERNAL_CRATES {

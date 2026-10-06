@@ -28,7 +28,6 @@ name = "ritornello-media-mount"
 path = "src/bin/media-mount.rs"
 
 [dependencies]
-ritornello-proto = { path = "../ritornello-proto" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"

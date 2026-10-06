@@ -12,6 +12,7 @@ use crate::state;
 use anyhow::Result;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
+use ritornello_plugin_files::root_error::RootErrorText;
 use ritornello_plugin_files::roots::{Root, RootKind, Roots};
 use ritornello_plugin_files::health::Health;
 use ritornello_plugin_files::store::{self, Location};
