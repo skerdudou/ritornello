@@ -132,7 +132,10 @@ jobs:
   rust:
     name: Rust (build, clippy, tests)
     needs: web
-    runs-on: ubuntu-latest
+    # 24.04, not -latest: the apt cache key ignores the OS release and its
+    # hits are extracted straight into /, so the pin and the apt caches (and
+    # the Chromium list in e2e) move together: change both, bump `version:`.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -151,7 +154,25 @@ jobs:
         # ffmpeg: otherwise nine tests silently skip themselves (grep -rc
         # "ffmpeg missing" across the repo, excluding the e2e comment that
         # merely names the same failure mode).
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+        # Cached by the action, keyed on the package list and `version`: a warm
+        # run restores the .debs and runs no `apt-get update`. Bump `version`
+        # to throw the cache away by hand.
+        # Pinned by commit SHA, unlike the actions/* pinned by tag: this is a
+        # third-party action that restores .debs and runs their install scripts.
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: ffmpeg
+          # Postinst scripts register libblas.so.3 (update-alternatives):
+          # without them a restored ffmpeg cannot start, and the tests that
+          # need it skip themselves silently.
+          # Maintainer scripts restored from the cache run as root on the
+          # runner: acceptable only in these test-only jobs (read-only token,
+          # no secrets). Never copy this into a job that builds something
+          # people download.
+          execute_install_scripts: true
+          # Cached .debs get no Ubuntu security or point updates until this
+          # is bumped: fine for test tooling.
+          version: 1
       - run: cargo build --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -163,7 +184,10 @@ jobs:
   e2e:
     name: End-to-end journeys (Playwright)
     needs: web
-    runs-on: ubuntu-latest
+    # 24.04, not -latest: the apt cache key ignores the OS release and its
+    # hits are extracted straight into /, so the pin and the apt caches (and
+    # the Chromium list in e2e) move together: change both, bump `version:`.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -178,9 +202,61 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Audio player for the journeys
         # docs/development.md: the e2e tests really play through the radio plugin.
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mpv ffmpeg
+        # Cached like the rust job's ffmpeg: the mirrors, not the tests, were
+        # the jitter (29 s to 402 s for this one step).
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: mpv ffmpeg
+          # Their dependencies (libblas3 and friends) register libblas.so.3
+          # through update-alternatives in a postinst script: without
+          # running those scripts a restored cache leaves ffmpeg and mpv
+          # unable to start ("cannot open shared object file", measured).
+          # Maintainer scripts restored from the cache run as root on the
+          # runner: acceptable only in these test-only jobs (read-only token,
+          # no secrets). Never copy this into a job that builds something
+          # people download.
+          execute_install_scripts: true
+          # Cached .debs get no Ubuntu security or point updates until this
+          # is bumped: fine for test tooling.
+          version: 1
+      - name: Chromium system libraries
+        # What `npx playwright install-deps chromium` would apt-install on
+        # ubuntu-latest (24.04), read from nativeDeps.ts of @playwright/test
+        # 1.63: its `chromium` libraries, then its `tools` (fonts and xvfb).
+        # Listed here so the apt cache serves them; if Playwright is bumped
+        # and Chromium fails to launch on a missing library, compare with
+        # `npx playwright install-deps --dry-run chromium` and bump `version`.
+        uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
+        with:
+          packages: >-
+            libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64
+            libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64
+            libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1
+            libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2
+            xvfb fonts-noto-color-emoji fonts-unifont libfontconfig1
+            libfreetype6 xfonts-cyrillic xfonts-scalable fonts-liberation
+            fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf
+            fonts-freefont-ttf
+          # Cached .debs get no Ubuntu security or point updates until this
+          # is bumped: fine for test tooling.
+          version: 1
       - run: cargo build --workspace
-      - run: npx playwright install --with-deps chromium
+      - name: Playwright version
+        id: playwright
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        working-directory: web/app
+      - name: Chromium browser
+        # Keyed on the OS and the exact @playwright/test version, which alone
+        # decides which Chromium build it wants. On a hit nothing is
+        # downloaded, and `playwright install` (which prunes old browsers
+        # before fetching) is not run at all.
+        id: browser
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - if: steps.browser.outputs.cache-hit != 'true'
+        run: npx playwright install chromium
         working-directory: web/app
       - run: npm run e2e
         working-directory: web/app
@@ -237,6 +313,8 @@ jobs:
       - name: musl toolchain
         # `ring`, under rustls, compiles C: it needs musl-gcc for these targets.
         if: runner.os == 'Linux'
+        # No apt cache here, unlike the test jobs: this leg builds the
+        # installer people download.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
       - run: cargo clippy -p ritornello-install --target ${{ matrix.target }} --all-targets -- -D warnings
       - if: matrix.test
