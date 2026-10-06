@@ -92,6 +92,10 @@ impl crate::player::Player for FakePlayer {
         self.calls.lock().unwrap().push(format!("chapter {n}"));
         Ok(())
     }
+    async fn set_loop_track(&self, on: bool) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("loop_track {on}"));
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -146,6 +150,11 @@ impl Source for FakeSource {
             // would fall through to `Noop` and the Play key would look
             // inert in the tests too.
             ("radio", SourceReq::Play) => SourceAction::play("http://fip"),
+            // The shape `plugin-files` sends: a list of files, each entry a
+            // whole track mpv may loop on its own. Carried by the cd fake on
+            // a digit no other test uses, so the loop tests need no third
+            // source in the rig.
+            ("cd", SourceReq::Select(9)) => SourceAction::play("/tmp/files.m3u").playlist().finite().loopable(),
             ("cd", SourceReq::Play) => SourceAction::play("cdda://").finite(),
             // Models the cd plugin's own `pending_chapter`: mpv's first
             // track notification after a resume can carry an action of its

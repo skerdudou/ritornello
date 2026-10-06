@@ -468,6 +468,7 @@ impl<P: Player> Core<P> {
                 self.repeat = self.repeat.next();
                 self.persist();
                 self.push_play_mode().await;
+                self.sync_loop_track().await?;
             }
             Command::SetRandom(v) => {
                 self.random = v;
@@ -478,6 +479,7 @@ impl<P: Player> Core<P> {
                 self.repeat = r;
                 self.persist();
                 self.push_play_mode().await;
+                self.sync_loop_track().await?;
             }
         }
         Ok(())
@@ -489,6 +491,7 @@ mod tests {
     use crate::core::*;
     use crate::core::test_support::*;
     use ritornello_proto::Repeat;
+    use std::sync::Mutex;
 
     #[tokio::test]
     async fn standby_blocks_everything_but_power() {
@@ -1283,5 +1286,85 @@ mod tests {
         core.resume().await.unwrap();
         core.handle_command(Command::Stop).await.unwrap();
         assert!(source_calls.lock().unwrap().iter().any(|c| c == "radio:Stop"));
+    }
+
+    /// The `loop_track` calls the fake player received, in order.
+    fn loop_calls(player: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        player.lock().unwrap().iter().filter(|c| c.starts_with("loop_track")).cloned().collect()
+    }
+
+    /// Lands on the cd fake with its finite list declared, as a real cd
+    /// plugin would on arrival, so the repeat commands are not refused.
+    async fn on_the_cd(core: &mut Core<FakePlayer>) {
+        core.handle_command(Command::SelectSource("cd".into())).await.unwrap();
+        declare_finite_list(core, "cd");
+    }
+
+    #[tokio::test]
+    async fn repeat_one_arms_the_loop_on_a_loopable_play() {
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::SetRepeat(Repeat::One)).await.unwrap();
+        assert!(loop_calls(&player).is_empty(), "the disc's own Play is not loopable");
+        core.handle_command(Command::Select(9)).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true"]);
+    }
+
+    #[tokio::test]
+    async fn leaving_repeat_one_disarms_the_loop_mid_track() {
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::SetRepeat(Repeat::One)).await.unwrap();
+        core.handle_command(Command::Select(9)).await.unwrap();
+        core.handle_command(Command::SetRepeat(Repeat::All)).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true", "loop_track false"]);
+    }
+
+    #[tokio::test]
+    async fn entering_repeat_one_arms_the_loop_mid_track() {
+        // From the command, not from a Play: the track already playing must
+        // loop, without waiting for the next load.
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::Select(9)).await.unwrap();
+        assert!(loop_calls(&player).is_empty());
+        core.handle_command(Command::CycleRepeat).await.unwrap(); // off -> all
+        assert!(loop_calls(&player).is_empty(), "repeat-all never loops a track");
+        core.handle_command(Command::CycleRepeat).await.unwrap(); // all -> one
+        assert_eq!(loop_calls(&player), vec!["loop_track true"]);
+    }
+
+    #[tokio::test]
+    async fn switching_to_a_source_whose_play_is_not_loopable_disarms_the_loop() {
+        // A live stream left under `loop-file` would replay its buffer at a
+        // cut instead of being restarted.
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::SetRepeat(Repeat::One)).await.unwrap();
+        core.handle_command(Command::Select(9)).await.unwrap();
+        core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true", "loop_track false"]);
+    }
+
+    #[tokio::test]
+    async fn a_remembered_repeat_one_arms_the_loop_on_the_first_loopable_play() {
+        // No command after a reboot, only the persisted value.
+        let (mut core, player, _src, _state, _dir) =
+            setup_persisted(PersistedState { repeat: Repeat::One, ..PersistedState::default() });
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::Select(9)).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true"]);
+    }
+
+    #[tokio::test]
+    async fn the_loop_is_only_sent_when_it_changes() {
+        // Dozens of tests pin the exact sequence of player calls: a loop
+        // command on every Play would break them all, and say nothing.
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::SetRepeat(Repeat::One)).await.unwrap();
+        core.handle_command(Command::Select(9)).await.unwrap();
+        core.handle_command(Command::Select(9)).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true"]);
     }
 }

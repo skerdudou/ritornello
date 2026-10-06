@@ -292,6 +292,16 @@ pub struct Core<P: Player> {
     random: bool,
     /// The repeat setting, same persistence and same push as `random`.
     repeat: ritornello_proto::Repeat,
+    /// The last `Play` applied declared each of its entries loopable by the
+    /// player on its own (`SourceAction::Play::loopable`). Replaced by every
+    /// `Play`, so a source switch — whose arrival is a `Play` of the new
+    /// source — carries the new source's answer, and a stream says `false`.
+    load_loopable: bool,
+    /// What mpv's `loop-file` was last set to. `false` at construction, which
+    /// is a fresh mpv's own default: the core does not outlive mpv (`main`
+    /// exits when it dies, and systemd restarts both), so the two never
+    /// drift. Only a change is sent — see `sync_loop_track`.
+    loop_track_armed: bool,
     /// Identity of the last local day an automatic update run happened on.
     /// Round-tripped exactly like `random` and `repeat` — read from
     /// `PersistedState` at construction, written back unchanged by every
@@ -533,6 +543,8 @@ impl<P: Player> Core<P> {
             has_finite_list: false,
             random: persisted.random,
             repeat: persisted.repeat,
+            load_loopable: false,
+            loop_track_armed: false,
             update_last_run_day: persisted.update_last_run_day,
             update_sources: persisted.update_sources.clone(),
             pack_preferences: persisted.pack_preferences.clone(),

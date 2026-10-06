@@ -401,10 +401,28 @@ impl<P: Player> Core<P> {
         self.publish_catalog();
     }
 
+    /// Sets mpv's `loop-file` to what the device should be doing now:
+    /// looping the playing file exactly when the repeat setting is `One` and
+    /// the last load was declared loopable by its source.
+    ///
+    /// Called from the only two places either term moves — a `Play` applied
+    /// (`apply`) and a repeat command — rather than from every command:
+    /// standby and a source switch both end in a new `Play` or in nothing
+    /// playing at all. Sent only on a change, so the exact player call
+    /// sequences pinned elsewhere stay untouched.
+    pub(super) async fn sync_loop_track(&mut self) -> Result<()> {
+        let wanted = self.repeat == ritornello_proto::Repeat::One && self.load_loopable;
+        if wanted != self.loop_track_armed {
+            self.player.set_loop_track(wanted).await?;
+            self.loop_track_armed = wanted;
+        }
+        Ok(())
+    }
+
     pub(super) async fn apply(&mut self, action: SourceAction) -> Result<()> {
         match action {
             SourceAction::Noop => {}
-            SourceAction::Play { uri, start, finite, playlist } => {
+            SourceAction::Play { uri, start, finite, playlist, loopable } => {
                 // The restart machinery (`expecting_stream` then
                 // `PlaybackIdle` → retry) only exists for network streams:
                 // content that ends is a normal end, not a failure. Confusing
@@ -428,6 +446,11 @@ impl<P: Player> Core<P> {
                 // confirms it (a sleeping share, a file gone) must not be
                 // read as "the list ran out".
                 self.played_since_play = false;
+                // Armed **before** the load: `loop-file` is a player setting
+                // read at the file's end, and setting it first leaves no
+                // window where a non-loopable load runs under a stale loop.
+                self.load_loopable = loopable;
+                self.sync_loop_track().await?;
                 // `loadlist` for a playlist, `loadfile` for a medium: it is
                 // the Source that declares it, and the core does not guess. An
                 // `.m3u8` is a playlist for a file player and an HLS stream
