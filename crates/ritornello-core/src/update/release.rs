@@ -378,6 +378,19 @@ impl Channel {
         }
     }
 }
+/// Whether a tag belongs to the installer's own publication channel: the
+/// fixed release `installer`, or a numbered `installer-vX.Y.Z`.
+///
+/// Those releases hold the workstation installer, which no device ever
+/// fetches. They are dropped by `parse_releases` before anything is counted:
+/// published and never a prerelease, they would otherwise stand for "a final
+/// release exists" and hide the honest `OnlyPrereleases` answer. Not a bare
+/// `starts_with("installer")`: the rule is the two shapes this repository
+/// publishes, so no unrelated tag is swallowed by a prefix.
+fn is_installer_tag(tag: &str) -> bool {
+    tag == "installer" || tag.starts_with("installer-v")
+}
+
 
 /// Which of a repository's releases this device will consider: **drafts
 /// always dropped, prereleases dropped unless the owner asked for them**.
@@ -407,7 +420,7 @@ pub fn parse_releases(body: &str, channel: Channel) -> Result<Vec<Release>, Rele
     let out: Vec<Release> = wire
         .into_iter()
         .filter(|r| {
-            if r.draft {
+            if r.draft || is_installer_tag(&r.tag_name) {
                 return false;
             }
             if r.prerelease && channel != Channel::WithPrereleases {
@@ -1406,6 +1419,64 @@ mod tests {
         assert!(fold(&parse_releases(&text, Channel::Stable).unwrap(), "armv7").is_empty());
     }
 
+    /// The installer has its own publication channel: a release tagged
+    /// `installer-vX.Y.Z`, and the fixed release tagged `installer`. Both sit
+    /// in the very list a device reads, published and not prereleases, with
+    /// archives that are no component. They must be invisible to it -- and
+    /// not merely harmless to the fold: left in the list, one of them turns
+    /// "only prereleases are published" (a switch the owner can flip) into an
+    /// empty offer, because it counts as a published final release.
+    #[test]
+    fn an_installer_release_does_not_exist_for_a_device() {
+        let installer = |tag: &str| {
+            rel(tag, "2026-09-20T10:00:00Z", false, false, &[
+                "ritornello-install-x86_64-unknown-linux-musl.tar.gz",
+                "ritornello-install-x86_64-pc-windows-msvc.zip",
+                "SHA256SUMS",
+            ])
+        };
+        // Beside a prerelease the channel declines: the honest answer stays
+        // "only prereleases", not an empty list of final releases.
+        let text = body(
+            &[
+                installer("installer-v0.2.0"),
+                installer("installer"),
+                rel("v0.2.0-beta.1", "2026-09-10T08:07:25Z", false, true, &[
+                    "ritornello-plugin-radio-0.2.0-beta.1-armv7.tar.gz",
+                ]),
+            ]
+            .join(","),
+        );
+        assert_eq!(parse_releases(&text, Channel::Stable), Err(ReleasesError::OnlyPrereleases));
+        // Alone, they are nothing published.
+        let text = body(&[installer("installer-v0.2.0"), installer("installer")].join(","));
+        assert_eq!(parse_releases(&text, Channel::Stable), Err(ReleasesError::NoRelease));
+        assert_eq!(parse_releases(&text, Channel::WithPrereleases), Err(ReleasesError::NoRelease));
+        // Beside a product release, they change nothing about what is offered,
+        // whichever is newer, and none of them is ever a carrying release.
+        let text = body(
+            &[
+                installer("installer-v0.2.0"),
+                installer("installer"),
+                rel("v0.2.7", "2026-09-08T10:00:00Z", false, false, &[
+                    "ritornello-plugin-radio-0.2.4-armv7.tar.gz",
+                    "SHA256SUMS",
+                ]),
+            ]
+            .join(","),
+        );
+        let releases = parse_releases(&text, Channel::Stable).unwrap();
+        assert_eq!(releases.len(), 1, "only the product release is read");
+        let published = fold(&releases, "armv7");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].release_tag, "v0.2.7");
+        // A tag that merely starts with the letters is not the installer's.
+        assert!(!is_installer_tag("installers-and-more"));
+        assert!(!is_installer_tag("v0.2.0"));
+        assert!(is_installer_tag("installer"));
+        assert!(is_installer_tag("installer-v1.0.0"));
+    }
+
     #[test]
     fn an_empty_list_is_no_release_and_not_a_failure() {
         assert_eq!(parse_releases("[]", Channel::Stable), Err(ReleasesError::NoRelease));
@@ -1637,9 +1708,11 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
         );
     }
 
-    /// Every release now also carries the workstation installer, built for
-    /// five workstation targets, and a device reads the whole asset list.
-    /// What keeps a device from taking one of those for a component is that
+    /// The installer's releases carry the workstation installer, built for
+    /// five workstation targets (they are dropped from the list before a
+    /// device reads it: see `an_installer_release_does_not_exist_for_a_device`),
+    /// and the names must stay harmless should one ever reach the asset list
+    /// anyway. What keeps a device from taking one of those for a component is that
     /// their names end in a **full target triple** -- never one of the
     /// device labels in `ARCHES`, which is the only suffix this function
     /// strips -- and that `ritornello-install-` is no component prefix.
@@ -1689,13 +1762,20 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
     }
 
     /// The README's download table points at
-    /// `releases/latest/download/<file>`, which GitHub resolves to that file
-    /// in the newest final release. That only works because ci.yml names the
-    /// installer archives the same way in every release, so the two must
-    /// agree: this reads both. A target added to the workflow without its
-    /// link, a link left behind after a rename, or the wrong extension for a
-    /// system would otherwise only be found by someone clicking on it.
-    #[test]
+    /// `releases/download/installer/<file>`: the fixed release tagged
+    /// `installer`, whose assets the installer job of ci.yml replaces with the
+    /// newest installer's archives. The link holds no version and never
+    /// changes. It is NOT `releases/latest/download/...`: GitHub's "latest"
+    /// is the newest final **product** release, which does not exist while
+    /// only prereleases are published (the link then led nowhere), and which
+    /// no longer carries the installer at all.
+    ///
+    /// That only works because ci.yml names the installer archives the same
+    /// way in every installer release, so the two must agree: this reads
+    /// both. A target added to the workflow without its link, a link left
+    /// behind after a rename, or the wrong extension for a system would
+    /// otherwise only be found by someone clicking on it.
+        #[test]
     fn the_readme_links_every_installer_the_ci_publishes() {
         let ci_yml = include_str!("../../../../.github/workflows/ci.yml").replace("\r\n", "\n");
         let job = ci_yml
@@ -1704,7 +1784,7 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
             .and_then(|rest| rest.split("\n  release:\n").next())
             .expect("ci.yml has an `installer` job followed by the `release` job");
         let readme = include_str!("../../../../README.md");
-        let base = format!("https://github.com/{REPO}/releases/latest/download/");
+        let base = format!("https://github.com/{REPO}/releases/download/installer/");
         let targets: Vec<&str> = job.lines().filter_map(|l| l.trim().strip_prefix("target: ")).collect();
         assert_eq!(targets.len(), 5, "the installer job's matrix: {targets:?}");
         for target in targets {
@@ -1714,5 +1794,11 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
         }
         let linked = readme.matches(base.as_str()).count();
         assert_eq!(linked, 5, "README.md links {linked} files under {base}, one per installer target expected");
+        // The old form must be gone: it 404s while only prereleases exist and
+        // would lead to a release that no longer carries an installer.
+        assert!(
+            !readme.contains("releases/latest/download/ritornello-install"),
+            "README.md still links an installer through releases/latest"
+        );
     }
 }

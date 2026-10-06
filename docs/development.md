@@ -268,6 +268,11 @@ request — the last three jobs below only on a tag:
   and its archive uploaded as an artifact; `installer-ok` ("Installer (all
   targets)") is the single check that stands for the five, meant to be
   required by branch protection;
+- `publish-installer` — on an `installer-vX.Y.Z` tag only (the installer's own
+  number, not the product's): refuses a tag that disagrees with
+  `crates/ritornello-install/Cargo.toml`, then publishes the numbered release
+  and moves the fixed release `installer` (see
+  [Publishing the installer](installation.md#publishing-the-installer));
 - `release` — on a `v*` tag only, once per architecture (`armv7`,
   `arm64`, `x86_64`): it refuses a tag that is not `v` + the product
   number, then `cross build --release --workspace` and
@@ -279,9 +284,9 @@ request — the last three jobs below only on a tag:
   moved since the last **finished** release, checks the notes, generates
   `catalogue.json` (the kind and description of every installable
   component, read by the "Add a plugin" dialog) and `inventory.json` (for
-  `ritornello-install`), adds the five installer archives — after its
-  filter, which would otherwise delete them — writes
-  one `SHA256SUMS` for every asset including it, and creates the release as
+  `ritornello-install`), writes one `SHA256SUMS` for every asset including
+  it — the installer archives are no longer part of a product release — and
+  creates the release as
   a **draft**. A tag carrying a prerelease suffix (`v0.2.1-beta.1`) makes it
   a prerelease.
 

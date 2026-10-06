@@ -11,9 +11,12 @@ not a technical constraint — the examples below merely illustrate it.
 ## Installing on a device, without building anything
 
 Everything is installed, updated and removed from your own computer by one
-program, `ritornello-install`, which talks to the device over ssh. Every
-release on the project's GitHub page carries it, built for five systems.
-Take the file for yours from the newest release:
+program, `ritornello-install`, which talks to the device over ssh. It is
+built for five systems and has releases of its own, apart from the product's:
+the newest installer is always at
+`https://github.com/skerdudou/ritornello/releases/download/installer/<file>`,
+whatever the product's own releases are doing (the README links exactly
+these). Take the file for yours:
 
 | Your computer | File |
 |---|---|
@@ -25,8 +28,17 @@ Take the file for yours from the newest release:
 
 The Linux builds are linked statically against musl, so they do not
 depend on the distribution's C library — not yet measured on an old one. The
-release's `SHA256SUMS` lists each of these files, if you want to check the
+`SHA256SUMS` beside them lists each of these files, if you want to check the
 download.
+
+The installer prints its own number on its first line (and at the top of
+`--help`; `--version` is not for that, it selects the product release to
+install). When the release list it reads anyway shows a newer installer, it
+says so in one line on stderr — with the link for your system — and carries
+on. It never updates itself: it is an unsigned program that runs commands as
+root on your device, so replacing it stays a step you take. An older installer
+is found among the numbered releases, `installer-vX.Y.Z`, on the project's
+releases page.
 
 Then, in a terminal, in the directory where you extracted it:
 
@@ -127,18 +139,19 @@ the file attached to the release page. The release also carries
 `catalogue.json`, a description (kind and one-line summary) of every
 installable component, read by the "Add a plugin" dialog —
 not a per-architecture archive, so there is only one, whatever the
-architecture. Every release also carries `ritornello-install` itself, for
-five workstation systems, whether it changed or not (see
-[Installing on a device, without building anything](#installing-on-a-device-without-building-anything)).
-A single `SHA256SUMS` covers every archive of the release, the installers
-included, plus `catalogue.json` and `inventory.json`, whatever the
-architecture. A release is installed with
+architecture. The workstation installer is not attached to these releases:
+it has its own (see
+[Installing on a device, without building anything](#installing-on-a-device-without-building-anything)
+and [Publishing the installer](#publishing-the-installer)).
+A single `SHA256SUMS` covers every archive of the release, plus
+`catalogue.json` and `inventory.json`, whatever the architecture. A release is
+installed with
 `ritornello-install`, the same program `deploy.sh` runs against a local
 directory built like a release (see [Deploying](#deploying) below); an
 archive is for putting a specific tagged version onto a device with no
 build toolchain at all.
 
-If one leg of the `installer` job fails on a tag (a runner hiccup), the
+If one architecture leg of the `release` job fails on a tag (a runner hiccup), the
 draft is not created: use "Re-run failed jobs" on that workflow run
 rather than pushing the tag again.
 
@@ -159,7 +172,7 @@ pushed, a green workflow and 37 attached archives are not evidence a device
 can reach any of it. If a device says nothing is published, look first at
 whether the release is still a draft.
 
-Four different numbers are at play here, and they answer four different
+Five different numbers are at play here, and they answer five different
 questions. The **product number** — `vX.Y.Z`, the git tag — names the
 release and carries the generation: `0.2.7` is the seventh delivery of the
 `0.2` generation. Each shipped component (the core, each plugin) declares
@@ -186,6 +199,13 @@ itself changes. That is what lets an unchanged companion keep its number
 across every release, so that updating `files` from the web UI never sends
 the operator to `ritornello-install` for nothing: only that program can place
 the companion.
+
+The **fifth number** is the workstation installer's own, in
+`crates/ritornello-install/Cargo.toml`. It names the tag `installer-vX.Y.Z` of
+a publication channel of its own, is always a finished `X.Y.Z`, is tied to
+neither the product's major nor its suffix, and moves only when the installer
+itself changes. No device ever fetches the installer, so nothing compares it
+for equality, and a person simply takes the newest.
 
 The release gesture, then: bump the version of whichever component you
 changed, and tag with the next product number. The workflow publishes
@@ -455,6 +475,39 @@ On the device, prereleases are only ever *offered* to an owner who ticked
 [interface.md](interface.md#prereleases-and-how-a-device-asks-for-them)).
 The switch is off by default, and a device that has never been told
 otherwise cannot be offered one.
+
+### Publishing the installer
+
+The installer rarely changes, so it is not re-attached to every product
+release. Its releases are made apart:
+
+1. Bump `version` in `crates/ritornello-install/Cargo.toml` (a finished
+   `X.Y.Z`; the installer's own number, not the product's) and merge. Nothing
+   moves it for you: a change to a crate the installer links
+   (`ritornello-i18n`, `ritornello-manifest`, `ritornello-updater`) reaches
+   people only if you bump it, exactly as for a plugin.
+2. Push the tag `installer-vX.Y.Z` on the commit that carries it. A workflow
+   step refuses a tag that disagrees with the manifest
+   (`scripts/release-tags.sh check-installer-tag`, which has a self-test) or
+   that is not a finished number: its releases are never prereleases.
+3. The `publish-installer` job, after the five `installer` legs pass, creates
+   the release `installer-vX.Y.Z` — published at once, not a draft, titled
+   "ritornello-install X.Y.Z", with the five archives and their own
+   `SHA256SUMS` — and marks it **not** "latest", so that GitHub's "latest"
+   keeps meaning the newest final product release. Its notes come from
+   `.github/installer-release-notes.md`; say what changed on the release page
+   afterwards.
+4. The same job then moves the fixed release tagged `installer` onto this
+   commit and replaces its assets by this version's. That fixed release is the
+   address the README links, and the only published release this repository
+   ever rewrites: no device fetches the installer, so nothing depends on what
+   it held before.
+
+Nothing in the README changes when the installer's number does. The device's
+update logic and the product's baseline queries ignore every release tagged
+`installer` or `installer-v…` (`scripts/release-tags.sh newest-product`,
+and `parse_releases` in the core), so these releases never count as a
+product release. The installer itself reads the same list and does the same.
 
 ## Example: Raspberry Pi 2
 
@@ -1272,13 +1325,20 @@ proven on hardware. In particular:
   against a device from either; in particular the Windows path, where ssh
   runs one connection per step and the terminal screens draw on the
   Windows console, has never been seen working end to end;
-- no release has yet carried the five installer archives: the publish
-  job's step that adds them after its component filter, and the
-  `SHA256SUMS` lines that cover them, run only on a tag, and no tag has
-  been pushed since they were written — the next one is their first trial.
-  The instructions in
+- the installer's own publication channel has never run: the
+  `publish-installer` job (the numbered release, the fixed release `installer`,
+  the moved tag, the replaced assets) runs only on an `installer-v*` tag, and
+  none has been pushed since it was written — the first one is its first
+  trial, and the README's five links do not resolve until then. Whether the
+  repository's release settings allow the fixed release to be edited, and a
+  release created with `--latest=false` to stay out of "latest", has not
+  been observed either. The instructions in
   [Installing on a device, without building anything](#installing-on-a-device-without-building-anything)
   describe files that do not exist until then;
+- the newer-installer notice has only been tested against canned release
+  lists. It reads the one page (100 releases) the installer fetches for the
+  product release; an installer tag older than the hundredth newest release
+  would not be seen, and nothing is said then;
 - `sudo -S` (reading the password from its standard input) and `sudo -k`
   (dropping the cached credential) have never been measured on a device,
   whatever their documented behaviour;
