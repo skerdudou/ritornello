@@ -1613,6 +1613,14 @@ dialog opens, never with the page.
   instance, was invisible from the page.
 - **What counts as an error.** For a plugin line: a level of WARN or ERROR,
   or any line from stderr, where nothing is written on purpose (a panic).
+  A plugin's DEBUG and TRACE lines go to journald only: the level filter is
+  the core's, not left to each plugin (`files` sets none of its own).
+- **No secret in a line.** The route is readable by anything on the
+  network, like every route of the device. The code was audited for log
+  lines that could carry one (SMB passwords travel through a 0600
+  credentials file, never on a command line or in a message), and the one
+  that printed a user-typed stream URL now strips its credentials and its
+  query (`shown_url`, `musicbrainz`). A new log line must keep it that way.
 - **Memory.** Every line is cut at 1 KB, so 5000 lines weigh a few hundred
   KB in practice and 5 MB at the very worst, whatever a plugin prints.
 - **What stays in journald only.** Lines older than the ring, and anything

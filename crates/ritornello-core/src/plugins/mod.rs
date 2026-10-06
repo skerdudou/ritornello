@@ -402,20 +402,36 @@ where
                 Ok(0) | Err(_) => return,
                 Ok(_) => {}
             }
-            let Some((line, is_error)) = plugin_line(&name, &String::from_utf8_lossy(&buf), stream) else {
+            let Some(line) = plugin_line(&name, &String::from_utf8_lossy(&buf), stream) else {
                 continue;
             };
             {
                 use std::io::Write;
-                let _ = writeln!(std::io::stdout().lock(), "{line}");
+                let _ = writeln!(std::io::stdout().lock(), "{}", line.text);
             }
-            logs.record(line, is_error);
+            if !line.verbose {
+                logs.record(line.text, line.is_error);
+            }
         }
     });
 }
 
-/// One raw line of a plugin's output, as the core keeps it, and whether it is
-/// an error. `None` for a line with nothing in it.
+/// One line of a plugin's output, as the core relays it.
+#[derive(Debug, PartialEq, Eq)]
+struct PluginLine {
+    /// What journald receives and the rings keep.
+    text: String,
+    /// Also kept in the errors ring.
+    is_error: bool,
+    /// DEBUG or TRACE: passed on to journald, kept out of the rings. A plugin
+    /// chooses its own level filter — `files` sets none — and the journal the
+    /// page shows is documented as INFO and up; it must not depend on each
+    /// plugin remembering to filter.
+    verbose: bool,
+}
+
+/// One raw line of a plugin's output, as the core keeps it. `None` for a line
+/// with nothing in it.
 ///
 /// - Colour codes are removed: `tracing`'s `fmt` writes them whatever its
 ///   output is, and they would be printed raw on the page.
@@ -425,7 +441,7 @@ where
 ///   without one (a panic) is simply prefixed.
 /// - An error is a line whose level is WARN or ERROR — the same threshold as
 ///   the core's own errors ring — or any line from stderr.
-fn plugin_line(name: &str, raw: &str, stream: Stream) -> Option<(String, bool)> {
+fn plugin_line(name: &str, raw: &str, stream: Stream) -> Option<PluginLine> {
     let clean = strip_ansi(raw);
     let clean = clean.trim_end();
     if clean.trim().is_empty() {
@@ -437,8 +453,11 @@ fn plugin_line(name: &str, raw: &str, stream: Stream) -> Option<(String, bool)> 
         }
         _ => (format!("[{name}] {clean}"), None),
     };
-    let is_error = stream == Stream::Stderr || matches!(level, Some("WARN" | "ERROR"));
-    Some((crate::status::truncate_line(&line).to_string(), is_error))
+    Some(PluginLine {
+        text: crate::status::truncate_line(&line).to_string(),
+        is_error: stream == Stream::Stderr || matches!(level, Some("WARN" | "ERROR")),
+        verbose: matches!(level, Some("DEBUG" | "TRACE")),
+    })
 }
 
 /// `2026-10-06T20:25:04.123456Z`, the shape `tracing`'s `fmt` starts a line
@@ -631,6 +650,7 @@ mod tests {
         std::fs::write(
             &exec,
             "#!/bin/sh\n\
+             echo '2026-10-06T20:25:03.000000Z DEBUG probing /mnt/ritornello/music'\n\
              echo '2026-10-06T20:25:04.123456Z  INFO cover archived'\n\
              echo '2026-10-06T20:25:05.000001Z  WARN cover not archived: the share is read-only'\n\
              echo \"thread 'main' panicked at src/main.rs:1:1\" >&2\n",
@@ -649,6 +669,9 @@ mod tests {
         .unwrap();
         child.wait().await.unwrap();
         let mut journal = journal_reaches(&logs, 3).await;
+        // The DEBUG line, written first on the same output, has been read by
+        // the time the INFO after it is in: its absence below is a decision,
+        // not a race.
         // Two tasks, one per output: their relative order is not a contract.
         journal.sort();
         assert_eq!(
@@ -737,11 +760,14 @@ mod tests {
         let subscriber = tracing_subscriber::fmt()
             .with_target(false)
             .with_ansi(true)
+            .with_max_level(tracing::Level::TRACE)
             .with_writer(move || sink.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, || match level {
             tracing::Level::ERROR => tracing::error!("{message}"),
             tracing::Level::WARN => tracing::warn!("{message}"),
+            tracing::Level::DEBUG => tracing::debug!("{message}"),
+            tracing::Level::TRACE => tracing::trace!("{message}"),
             _ => tracing::info!("{message}"),
         });
         String::from_utf8(bytes.lock().unwrap().clone()).unwrap()
@@ -751,7 +777,8 @@ mod tests {
     fn a_formatted_line_loses_its_colours_and_keeps_its_timestamp_first() {
         let raw = formatted(tracing::Level::WARN, "cover not archived");
         assert!(raw.contains('\u{1b}'), "the formatter no longer colours: {raw:?}");
-        let (line, is_error) = plugin_line("files", &raw, Stream::Stdout).unwrap();
+        let PluginLine { text: line, is_error, verbose } = plugin_line("files", &raw, Stream::Stdout).unwrap();
+        assert!(!verbose);
         assert!(!line.contains('\u{1b}'), "{line:?}");
         let (stamp, rest) = line.split_once(' ').unwrap();
         assert!(looks_like_timestamp(stamp), "{line:?}");
@@ -762,19 +789,33 @@ mod tests {
     #[test]
     fn the_level_decides_what_is_an_error_on_stdout() {
         let is_error =
-            |level| plugin_line("files", &formatted(level, "m"), Stream::Stdout).unwrap().1;
+            |level| plugin_line("files", &formatted(level, "m"), Stream::Stdout).unwrap().is_error;
         assert!(is_error(tracing::Level::ERROR));
         assert!(is_error(tracing::Level::WARN));
         assert!(!is_error(tracing::Level::INFO));
         // A message merely *saying* WARN is not a WARN line.
-        assert!(!plugin_line("files", &formatted(tracing::Level::INFO, "WARN"), Stream::Stdout).unwrap().1);
+        assert!(!plugin_line("files", &formatted(tracing::Level::INFO, "WARN"), Stream::Stdout).unwrap().is_error);
+    }
+
+    #[test]
+    fn debug_and_trace_are_relayed_to_journald_but_kept_out_of_the_journal() {
+        // `files` sets no level filter of its own: without this, its DEBUG
+        // lines would reach a journal documented as INFO and up.
+        let verbose =
+            |level| plugin_line("files", &formatted(level, "m"), Stream::Stdout).unwrap().verbose;
+        assert!(verbose(tracing::Level::DEBUG));
+        assert!(verbose(tracing::Level::TRACE));
+        assert!(!verbose(tracing::Level::INFO));
+        assert!(!verbose(tracing::Level::WARN));
+        // A message merely *saying* DEBUG is not a DEBUG line.
+        assert!(!plugin_line("files", &formatted(tracing::Level::INFO, "DEBUG"), Stream::Stdout).unwrap().verbose);
     }
 
     #[test]
     fn every_stderr_line_is_an_error_and_an_empty_one_is_nothing() {
         assert_eq!(
             plugin_line("cd", "thread 'main' panicked\n", Stream::Stderr),
-            Some(("[cd] thread 'main' panicked".to_string(), true))
+            Some(PluginLine { text: "[cd] thread 'main' panicked".to_string(), is_error: true, verbose: false })
         );
         assert_eq!(plugin_line("cd", "  \r\n", Stream::Stdout), None);
         assert_eq!(plugin_line("cd", "\u{1b}[2m\u{1b}[0m\n", Stream::Stdout), None);
@@ -785,7 +826,7 @@ mod tests {
         // `é` is two bytes: a cut in its middle would panic, not merely
         // truncate.
         let long = "é".repeat(crate::status::MAX_LINE_BYTES);
-        let (line, _) = plugin_line("x", &long, Stream::Stdout).unwrap();
+        let line = plugin_line("x", &long, Stream::Stdout).unwrap().text;
         assert!(line.len() <= crate::status::MAX_LINE_BYTES);
         assert!(line.starts_with("[x] é"));
     }
