@@ -148,6 +148,10 @@ jobs:
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
           packages: ffmpeg
+          # Postinst scripts register libblas.so.3 (update-alternatives):
+          # without them a restored ffmpeg cannot start, and the tests that
+          # need it skip themselves silently.
+          execute_install_scripts: true
           version: 1
       - run: cargo build --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
