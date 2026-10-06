@@ -12,6 +12,8 @@ stage="${1:-all}"
 
 if [ "$stage" = all ] || [ "$stage" = web ]; then
   echo "== web =="
+  # CI runs the build in `web-build` and the last two commands in `web-test`,
+  # in parallel with the Rust jobs; here they stay in one sequence.
   npm ci
   # Before anything consumes the tree: npm ci proves the lock installs, not
   # that what it describes can be loaded or still covers every platform.

@@ -1202,9 +1202,72 @@ serde = \"1\" # path=x
         assert!(notes.contains("@VERSION@"), "the release notes template has lost its placeholder");
         assert!(job.contains("installer-release-notes.md"));
         // The product's own jobs never run for an installer tag.
+        // Both halves of the web job: skipping only one would leave the other
+        // building or testing the web UI for a tag that embeds none.
+        for job in ["web-build", "web-test"] {
+            assert!(
+                ci_job(job).contains("!startsWith(github.ref, 'refs/tags/installer-v')"),
+                "an installer tag would run `{job}`, the web UI the installer does not embed"
+            );
+        }
+    }
+
+    /// **The web job was split in two so that Rust and e2e stop waiting for
+    /// the web tests, and nothing that publishes may stop waiting for them.**
+    /// Each assertion is one way the split could silently undo itself:
+    /// - `rust` or `e2e` waiting on `web-test` again (the four minutes this
+    ///   split removed from every run);
+    /// - `rust` or `e2e` no longer waiting on `web-build` (no dist to embed);
+    /// - `publish` not needing `rust`, `e2e` and `web-test`: the archives are
+    ///   built without waiting for the tests, so the gate is there, and a tag
+    ///   would otherwise draft a release over a red suite;
+    /// - `release` waiting for anything beyond the built web again;
+    /// - the old `web` job coming back beside the two halves.
+    #[test]
+    fn the_web_tests_gate_every_publication_without_gating_the_rust_jobs() {
+        let needs = |job: &str| -> Vec<String> {
+            let body = ci_job(job);
+            let line = body
+                .lines()
+                .map(str::trim)
+                .find(|l| l.starts_with("needs:"))
+                .unwrap_or_else(|| panic!("`{job}` declares no `needs:`"));
+            line["needs:".len()..]
+                .trim()
+                .trim_matches(|c| c == '[' || c == ']')
+                .split(',')
+                .map(|n| n.trim().to_string())
+                .collect()
+        };
+        for job in ["rust", "e2e"] {
+            let n = needs(job);
+            assert!(n.contains(&"web-build".to_string()), "`{job}` has no dist to embed: {n:?}");
+            assert!(
+                !n.contains(&"web-test".to_string()),
+                "`{job}` waits for the web tests again: {n:?}"
+            );
+        }
+        // The tests gate the publication, not the archives: `release` starts
+        // with the web build, and `publish` is where every test must have
+        // passed. `language-packs` needs nothing.
+        let n = needs("release");
+        assert_eq!(n, ["web-build"], "`release` waits for more than the built web: {n:?}");
         assert!(
-            ci_job("web").contains("!startsWith(github.ref, 'refs/tags/installer-v')"),
-            "an installer tag would build the whole web UI"
+            !ci_job("language-packs").lines().any(|l| l.trim().starts_with("needs:")),
+            "`language-packs` packages text and needs no other job"
+        );
+        let n = needs("publish");
+        for gate in ["release", "language-packs", "rust", "e2e", "web-test"] {
+            assert!(
+                n.contains(&gate.to_string()),
+                "`publish` could draft a release without `{gate}`: {n:?}"
+            );
+        }
+        assert!(
+            !workflow().contains("
+  web:
+"),
+            "the unsplit `web` job is back beside `web-build` and `web-test`"
         );
     }
 

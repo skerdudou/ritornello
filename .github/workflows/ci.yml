@@ -34,8 +34,14 @@ permissions:
   contents: read
 
 jobs:
-  web:
-    name: Web UI (build, typecheck, vitest)
+  web-build:
+    name: Web UI (build)
+    # Everything the Rust jobs wait for, and nothing else: the build, what
+    # guards it, and the dist artifact. The typecheck and the vitest suites
+    # (~3.5 of the 4 minutes the whole web job took, measured) run in
+    # `web-test`, beside `rust` and `e2e` rather than before them. Neither of
+    # those reads a test result; both read the built dist.
+    #
     # Not on an installer tag: the installer embeds no web UI and `rust` and
     # `e2e` wait for this job, so skipping it skips all three. The installer
     # job below tests and builds the one crate that tag publishes.
@@ -115,8 +121,6 @@ jobs:
         # Node walks up into its node_modules and the build passes locally.
         run: node scripts/check-lockfile.mjs
       - run: npm run build --workspaces --if-present
-      - run: npm run typecheck
-      - run: npm test --workspaces --if-present
       - name: Publish the dist bundles for the Rust jobs
         # dist/ is git-ignored: this job is the only producer, the others
         # download. Without dist, build.rs embeds a stub and settles for a
@@ -129,9 +133,31 @@ jobs:
             web/app/dist
             crates/*/ui/dist
 
+  web-test:
+    name: Web UI (typecheck, vitest)
+    # The other half of the former `web` job, run in parallel with `rust` and
+    # `e2e` instead of ahead of them. It is still a gate: `release` and
+    # `language-packs` need it, so no tag publishes with a red web suite, and
+    # `main` requires it by name.
+    #
+    # It repeats `npm ci` (cached) instead of passing a node_modules
+    # artifact, and does not build: vue-tsc and vitest read sources, not dist.
+    # Same installer-tag skip as `web-build`.
+    if: ${{ !startsWith(github.ref, 'refs/tags/installer-v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test --workspaces --if-present
+
   rust:
     name: Rust (build, clippy, tests)
-    needs: web
+    needs: web-build
     # 24.04, not -latest: the apt cache key ignores the OS release and its
     # hits are extracted straight into /, so the pin and the apt caches (and
     # the Chromium list in e2e) move together: change both, bump `version:`.
@@ -183,7 +209,7 @@ jobs:
 
   e2e:
     name: End-to-end journeys (Playwright)
-    needs: web
+    needs: web-build
     # 24.04, not -latest: the apt cache key ignores the OS release and its
     # hits are extracted straight into /, so the pin and the apt caches (and
     # the Chromium list in e2e) move together: change both, bump `version:`.
@@ -381,7 +407,11 @@ jobs:
   release:
     name: Release archives (${{ matrix.arch }})
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [rust, e2e]
+    # Starts as soon as the web is built: it reads `dist-web` and nothing
+    # rust or e2e produce (its cargo cache is its own). The test gate sits on
+    # `publish`, which needs rust, e2e and web-test: archives built from a
+    # red tree are never drafted, let alone published.
+    needs: web-build
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -430,7 +460,8 @@ jobs:
   language-packs:
     name: Language pack archives
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [rust]
+    # No `needs:` at all: it packages text and reads no build output. The
+    # test gate sits on `publish`.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -448,7 +479,9 @@ jobs:
   publish:
     name: Draft the GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release, language-packs]
+    # Every test gate lives here: nothing is drafted unless the Rust suite, the
+    # end-to-end journeys and the web tests all passed.
+    needs: [release, language-packs, rust, e2e, web-test]
     runs-on: ubuntu-latest
     permissions:
       # The only privilege this workflow asks for, and only here.
