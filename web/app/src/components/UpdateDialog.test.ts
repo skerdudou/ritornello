@@ -6,7 +6,7 @@ import UpdateDialog from './UpdateDialog.vue'
 
 const CATALOG = {
   update_dialog_title: 'Confirm the update',
-  update_dialog_description: 'Choose what to install. What is already up to date is left unchecked.',
+  update_dialog_description: 'Only what needs updating is listed. Choose what to install.',
   update_row_third_party: 'Third-party plugin from {repo}. Never selected automatically.',
   update_row_core_not_selected:
     '{component} will move while the core stays behind — this may make them incompatible.',
