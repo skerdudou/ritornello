@@ -114,7 +114,9 @@ impl AdminPlugin for GenericInputAdmin {
                 Ok(())
             }
             Op::Rescan => {
-                let n = self.hub.open_new_devices(&self.input_root);
+                // The same scan the periodic rescan runs; the two may race,
+                // which `open_new_devices`'s reservation makes harmless.
+                let n = self.hub.rescan(&self.input_root).await;
                 tracing::info!("rescan: {n} new device(s) opened");
                 Ok(())
             }

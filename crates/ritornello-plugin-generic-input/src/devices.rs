@@ -2,13 +2,23 @@ use crate::bindings::Bindings;
 use crate::learn::LearnState;
 use evdev::{Device, EventType};
 use ritornello_proto::{Command, InputMessage};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 /// Root of evdev nodes on a standard Linux.
 pub const INPUT_DIR: &str = "/dev/input";
+
+/// How often the plugin does on its own what the page's "Refresh" does.
+/// Without it, a receiver unplugged and plugged back stayed dead until the
+/// plugin restarted or someone clicked "Refresh" (seen on the device,
+/// 2026-10-06): its reader ends with the old node, and nothing ever opened
+/// the new one. A scan that finds nothing new costs one listing of the input
+/// directory, so five seconds is cheap and still feels immediate.
+pub const RESCAN_PERIOD: Duration = Duration::from_secs(5);
 
 /// Pure filter over a directory listing: keeps only `eventN` nodes, sorted.
 /// Separated from disk access to stay testable without hardware (like the
@@ -26,18 +36,69 @@ pub fn event_nodes(root: &Path, entries: &[String]) -> Vec<PathBuf> {
     v
 }
 
-/// Disk listing of evdev nodes. Missing or unreadable directory → empty list
-/// and a `warn`: never fatal.
-pub fn scan_event_nodes(root: &Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(root) else {
-        tracing::warn!("directory {} unreadable: no input device", root.display());
-        return Vec::new();
-    };
-    let entries: Vec<String> = rd
+/// Disk listing of evdev nodes. A missing or unreadable directory is an
+/// error for the caller to report — once, see `Reported` — never fatal.
+pub fn scan_event_nodes(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries: Vec<String> = std::fs::read_dir(root)?
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    event_nodes(root, &entries)
+    Ok(event_nodes(root, &entries))
+}
+
+/// The failures already reported as a `warn`, so that a rescan every
+/// `RESCAN_PERIOD` does not repeat the same line every five seconds for a
+/// node that simply stays unreadable (the plugin's output ends up in a log
+/// the owner reads). Repeats go to `debug`.
+///
+/// What makes a failure worth reporting again:
+/// * the node **reached listening** (`node_listening`): it worked, so a
+///   later failure is news;
+/// * the node **left the input directory** (`keep_only`): a node that comes
+///   back is a new device behind a possibly reused `eventN` name — the
+///   receiver plugged back in — and deserves its own line;
+/// * for the directory itself, one listing that **succeeded**.
+///
+/// Opening a node is not enough to forget its failure: a node that opens
+/// but then refuses its event stream would otherwise be reopened, fail and
+/// warn again at every tick. Only listening counts as having recovered.
+#[derive(Debug, Default)]
+pub struct Reported {
+    nodes: BTreeSet<PathBuf>,
+    root: bool,
+}
+
+impl Reported {
+    /// Records a failure of `path`; `true` when it is the first since the
+    /// last reset, i.e. when it must be reported as a `warn`.
+    pub fn node_failed(&mut self, path: &Path) -> bool {
+        self.nodes.insert(path.to_path_buf())
+    }
+
+    /// `path` is being listened to: a later failure is new again.
+    pub fn node_listening(&mut self, path: &Path) {
+        self.nodes.remove(path);
+    }
+
+    /// Forgets the failures of every node no longer in the directory.
+    pub fn keep_only(&mut self, present: &[PathBuf]) {
+        self.nodes.retain(|p| present.contains(p));
+    }
+
+    /// Same as `node_failed`, for the input directory itself.
+    pub fn root_failed(&mut self) -> bool {
+        !std::mem::replace(&mut self.root, true)
+    }
+
+    /// The input directory could be listed: a later failure is new again.
+    pub fn root_readable(&mut self) {
+        self.root = false;
+    }
+
+    #[cfg(test)]
+    fn has_node(&self, path: &Path) -> bool {
+        self.nodes.contains(path)
+    }
 }
 
 /// What a key press produces: the bound command, or nothing. The device
@@ -83,6 +144,9 @@ pub struct Hub {
     pub learn: Arc<RwLock<LearnState>>,
     /// Currently open nodes: path → device name.
     pub open: Arc<RwLock<BTreeMap<PathBuf, String>>>,
+    /// Failures already reported, see `Reported`. `std::sync::Mutex`, never
+    /// held across an `.await`.
+    pub reported: Arc<Mutex<Reported>>,
     pub tx: mpsc::Sender<InputMessage>,
 }
 
@@ -92,6 +156,7 @@ impl Hub {
             bindings: Arc::new(RwLock::new(bindings)),
             learn: Arc::new(RwLock::new(LearnState::default())),
             open: Arc::new(RwLock::new(BTreeMap::new())),
+            reported: Arc::new(Mutex::new(Reported::default())),
             tx,
         }
     }
@@ -119,10 +184,28 @@ impl Hub {
     /// Opens every readable evdev node not already open and spawns one
     /// playback task per node. Returns the number of new nodes. An
     /// unreadable device (permissions, gone between enumeration and open)
-    /// is logged as `warn` and skipped — never fatal.
+    /// is skipped — never fatal — and reported as a `warn` only the first
+    /// time (see `Reported`), since this runs every `RESCAN_PERIOD`.
+    ///
+    /// Synchronous file I/O: from async code, go through `rescan`.
     pub fn open_new_devices(&self, root: &Path) -> usize {
+        let nodes = match scan_event_nodes(root) {
+            Ok(nodes) => {
+                self.reported.lock().unwrap().root_readable();
+                nodes
+            }
+            Err(e) => {
+                if self.reported.lock().unwrap().root_failed() {
+                    tracing::warn!("directory {} unreadable: no input device: {e}", root.display());
+                } else {
+                    tracing::debug!("directory {} still unreadable: {e}", root.display());
+                }
+                Vec::new()
+            }
+        };
+        self.reported.lock().unwrap().keep_only(&nodes);
         let mut new_count = 0;
-        for path in scan_event_nodes(root) {
+        for path in nodes {
             // Atomic reservation: the membership check and the insert happen
             // under the same write lock, so a concurrent second rescan
             // (double-click on "Refresh") cannot open the same node twice
@@ -137,7 +220,7 @@ impl Hub {
             let dev = match Device::open(&path) {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!("device {} unreadable, skipped: {e}", path.display());
+                    self.report_unreadable(&path, &e);
                     self.open.write().unwrap().remove(&path);
                     continue;
                 }
@@ -150,6 +233,31 @@ impl Hub {
         new_count
     }
 
+    /// `open_new_devices` off the async runtime: a directory listing and an
+    /// open plus a few ioctls per new node are quick on `/dev/input`, but
+    /// they are blocking I/O all the same, and this now runs every
+    /// `RESCAN_PERIOD` beside the remote's own tasks.
+    pub async fn rescan(&self, root: &Path) -> usize {
+        let hub = self.clone();
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || hub.open_new_devices(&root))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("input rescan failed: {e}");
+                0
+            })
+    }
+
+    /// A node that could not be used: `warn` the first time, `debug` while
+    /// it stays that way (see `Reported`).
+    fn report_unreadable(&self, path: &Path, e: &dyn std::fmt::Display) {
+        if self.reported.lock().unwrap().node_failed(path) {
+            tracing::warn!("device {} unreadable, skipped: {e}", path.display());
+        } else {
+            tracing::debug!("device {} still unreadable: {e}", path.display());
+        }
+    }
+
     /// One playback task per node, all feeding the same mpsc.
     fn spawn_reader(&self, path: PathBuf, dev: Device, name: String) {
         let hub = self.clone();
@@ -157,11 +265,16 @@ impl Hub {
             let mut stream = match dev.into_event_stream() {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!("evdev stream {} unavailable: {e}", path.display());
+                    // Same memory as an open that fails: the node is
+                    // forgotten, so the next rescan opens it again, and
+                    // without it this would warn every five seconds.
+                    let e = format!("evdev stream unavailable: {e}");
+                    hub.report_unreadable(&path, &e);
                     hub.forget(&path);
                     return;
                 }
             };
+            hub.reported.lock().unwrap().node_listening(&path);
             tracing::info!("listening on device: {name} ({})", path.display());
             loop {
                 let ev = match stream.next_event().await {
@@ -214,6 +327,27 @@ impl Hub {
     }
 }
 
+/// Runs `rescan` every `period`, for as long as the plugin lives. The first
+/// tick is one period away: `main` has just scanned. A tick that finds
+/// nothing new logs nothing above `debug`.
+pub fn spawn_periodic_rescan(hub: Hub, root: PathBuf, period: Duration) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        // A missed tick (a slow scan, a suspended clock) is not caught up in
+        // a burst: one scan sees everything that changed meanwhile.
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            let n = hub.rescan(&root).await;
+            if n > 0 {
+                tracing::info!("periodic rescan: {n} new device(s) opened");
+            } else {
+                tracing::debug!("periodic rescan: nothing new");
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,8 +384,8 @@ mod tests {
     }
 
     #[test]
-    fn scan_event_nodes_missing_directory_gives_empty() {
-        assert!(scan_event_nodes(Path::new("/nonexistent-input-xyz")).is_empty());
+    fn scan_event_nodes_missing_directory_is_an_error() {
+        assert!(scan_event_nodes(Path::new("/nonexistent-input-xyz")).is_err());
     }
 
     #[test]
@@ -373,5 +507,150 @@ mod tests {
     fn key_outcome_held_respects_learning() {
         let t = table();
         assert_eq!(key_outcome_held(&t, Some("eHome"), "eHome", 115, true), None);
+    }
+
+    /// The `warn` lines `f` emits on this thread, as text.
+    fn warnings_of(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(sink.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// A regular file named like a node: listed by the scan, refused by
+    /// `Device::open` (its ioctls fail on a file) — an unreadable node.
+    fn fake_node(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, "").unwrap();
+        p
+    }
+
+    #[test]
+    fn an_unreadable_node_is_warned_about_once_not_at_every_scan() {
+        // With a rescan every five seconds, warning at each scan would write
+        // the same line twelve times a minute for as long as the node stays.
+        let dir = tempfile::tempdir().unwrap();
+        fake_node(dir.path(), "event0");
+        let (hub, _rx) = test_hub();
+        let log = warnings_of(|| {
+            for _ in 0..3 {
+                assert_eq!(hub.open_new_devices(dir.path()), 0);
+            }
+        });
+        assert_eq!(log.matches("event0 unreadable").count(), 1, "{log}");
+    }
+
+    #[test]
+    fn a_node_that_leaves_and_comes_back_unreadable_is_warned_about_again() {
+        // A node that disappears and reappears is a device plugged back in:
+        // its failure is news again.
+        let dir = tempfile::tempdir().unwrap();
+        let node = fake_node(dir.path(), "event0");
+        let (hub, _rx) = test_hub();
+        let log = warnings_of(|| {
+            hub.open_new_devices(dir.path());
+            std::fs::remove_file(&node).unwrap();
+            hub.open_new_devices(dir.path());
+            fake_node(dir.path(), "event0");
+            hub.open_new_devices(dir.path());
+            hub.open_new_devices(dir.path());
+        });
+        assert_eq!(log.matches("event0 unreadable").count(), 2, "{log}");
+    }
+
+    #[test]
+    fn an_unreadable_input_directory_is_warned_about_once_per_outage() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("input");
+        let (hub, _rx) = test_hub();
+        let log = warnings_of(|| {
+            hub.open_new_devices(&root);
+            hub.open_new_devices(&root);
+            // it comes back, then goes away again: a second outage
+            std::fs::create_dir(&root).unwrap();
+            hub.open_new_devices(&root);
+            std::fs::remove_dir(&root).unwrap();
+            hub.open_new_devices(&root);
+            hub.open_new_devices(&root);
+        });
+        assert_eq!(log.matches("input unreadable").count(), 2, "{log}");
+    }
+
+    #[test]
+    fn a_failure_is_news_again_only_once_the_node_has_been_listened_to() {
+        let p = PathBuf::from("/dev/input/event4");
+        let mut r = Reported::default();
+        assert!(r.node_failed(&p));
+        assert!(!r.node_failed(&p));
+        // Opening is not recovering: only `node_listening` resets, so a node
+        // whose stream keeps failing after a successful open is not
+        // reported anew at every tick.
+        r.node_listening(&p);
+        assert!(r.node_failed(&p));
+        // A node still present keeps its memory; one gone loses it.
+        r.keep_only(std::slice::from_ref(&p));
+        assert!(!r.node_failed(&p));
+        r.keep_only(&[]);
+        assert!(r.node_failed(&p));
+    }
+
+    #[test]
+    fn the_input_directory_failure_is_news_again_after_one_good_listing() {
+        let mut r = Reported::default();
+        assert!(r.root_failed());
+        assert!(!r.root_failed());
+        r.root_readable();
+        assert!(r.root_failed());
+    }
+
+    /// Waits, on the paused clock, until a scan has met `node`.
+    async fn until_scanned(hub: &Hub, node: &Path) {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while !hub.reported.lock().unwrap().has_node(node) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no scan met {} within a minute", node.display()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_periodic_rescan_meets_nodes_that_appear_after_startup() {
+        // The regression (2026-10-06): a receiver plugged back in was never
+        // opened again, because only startup and "Refresh" scanned. Here no
+        // one calls `rescan`: only the timer can meet the nodes. Simulated
+        // clock, so no real duration is assumed.
+        let dir = tempfile::tempdir().unwrap();
+        let (hub, _rx) = test_hub();
+        let start = tokio::time::Instant::now();
+        let task = spawn_periodic_rescan(hub.clone(), dir.path().to_path_buf(), RESCAN_PERIOD);
+
+        let first = fake_node(dir.path(), "event0");
+        until_scanned(&hub, &first).await;
+        let met = start.elapsed();
+        assert!(met >= RESCAN_PERIOD, "scanned before the first period: {met:?}");
+        assert!(met < 2 * RESCAN_PERIOD, "the first tick came late: {met:?}");
+
+        // And again later: a timer, not a single deferred scan.
+        let second = fake_node(dir.path(), "event1");
+        until_scanned(&hub, &second).await;
+        assert!(start.elapsed() >= 2 * RESCAN_PERIOD);
+        task.abort();
     }
 }

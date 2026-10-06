@@ -1433,6 +1433,15 @@ dressed up as design:**
   problem on this project's own hardware, not fixed — flagged rather than
   silently carried.
 
+`generic-input`'s rescan every five seconds (see
+[plugins.md](plugins.md#ritornello-plugin-generic-input--inputs)) has only
+run against fake nodes — regular files that `Device::open` refuses — on a
+simulated clock. Nothing has yet observed, on the Pi, the infrared receiver
+unplugged and plugged back in and the remote answering again within a tick
+without a click on "Refresh", nor the single `warn` of a node that opens but
+whose event stream cannot be started: no test reaches that path, since it
+needs a real evdev device.
+
 Not something left unverified, but worth recording here for whoever meets
 its traces in the history: `plugin_action_refusal`, the scaffold that made
 every not-yet-wired plugin gesture refuse honestly instead of silently

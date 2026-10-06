@@ -1636,6 +1636,24 @@ this plugin but never written by it, hence installed system-wide rather
 than kept in its own data directory; see [Where a plugin keeps its
 data](#where-a-plugin-keeps-its-data) above).
 
+Devices are found at startup and then **every five seconds** by the plugin
+itself: each tick lists `/dev/input` and opens any `eventN` node not already
+open, exactly what the page's "Refresh" button does (the button still
+works, and racing it is harmless — a node is reserved before it is opened,
+so it is never opened twice). This is what brings a remote back after its
+USB receiver is unplugged and plugged in again: the reader of the old node
+ends with it, and the next tick opens the new one. Before this rescan
+nothing did, and the remote stayed dead until a restart or a click on
+"Refresh". A tick that finds nothing new costs one directory listing, runs
+off the async runtime, and logs nothing above `debug`.
+
+A node that cannot be used — unreadable, or whose event stream cannot be
+started — is reported as a `warn` **once**, not at every tick; while it
+stays that way the repeats go to `debug`. The failure is reported again
+only once the node has actually been listened to, or after it has left
+`/dev/input` (a node that comes back is a device plugged in again). An
+unreadable `/dev/input` itself is likewise reported once per outage.
+
 Learning listens for thirty seconds, in a dialog naming the action and the
 device; the four ways out of that dialog — its "Cancel", the cross, Escape,
 a click on the veil — all cancel the listening session on the device, not

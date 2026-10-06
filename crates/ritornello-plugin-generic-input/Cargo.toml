@@ -37,3 +37,6 @@ ritornello-proto = { path = "../ritornello-proto" }
 
 [dev-dependencies]
 tempfile = "3"
+# Simulated clock: the periodic rescan is proven without waiting five real
+# seconds, nor guessing how long a scan takes.
+tokio = { version = "1", features = ["test-util"] }
