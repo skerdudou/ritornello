@@ -98,7 +98,8 @@ struct CdSource {
     /// — a disc's tracks are their own numbering, with no separate list of
     /// entries behind them).
     draw: CdOrder,
-    /// The two play modes, learned from `set_play_mode` and consulted by
+    /// The two play modes (`repeat` is off, all or one; one wins over
+    /// shuffle), learned from `set_play_mode` and consulted by
     /// `player_track`/`end_of_content`/`next`/`prev` to know whether a track
     /// number should come from the disc's own order or from `order` below.
     random: bool,
@@ -569,6 +570,9 @@ impl CdSource {
     /// restarting under repeat-all is a plain chapter seek — no reload
     /// needed, unlike `end_of_content`'s own restart (see its doc on
     /// regression #1).
+    ///
+    /// Only reached under shuffle: repeat-one never gets here, `player_track`
+    /// answers it before the shuffle correction.
     async fn finish_pass(&mut self) -> SourceOutcome {
         if self.repeat == Repeat::Off {
             self.playback = false;
@@ -813,7 +817,9 @@ impl SourcePlugin for CdSource {
     /// shuffling or not, at the disc's true end — the same convention
     /// `ritornello-plugin-files`'s `end_of_content` documents.
     ///
-    /// Without repeat-all, behaves like the default `stop()`. With it, the
+    /// Under repeat-one, the disc is reloaded on the track that was playing
+    /// (the first branch below). Without repeat, behaves like the default
+    /// `stop()`. Under repeat-all, the
     /// disc must be reloaded from scratch: unlike files (which reissues
     /// `Play` to rebuild its m3u while mpv itself stays loaded), this
     /// notification only ever arrives once mpv has gone properly idle —
@@ -825,6 +831,16 @@ impl SourcePlugin for CdSource {
     /// with a bare `PlayerChapter`, which only ever logged its own
     /// failure).
     async fn end_of_content(&mut self) -> SourceOutcome {
+        // Repeat-one on the disc's last track: mpv went idle with nothing
+        // loaded, so the disc is reopened like an arrival, armed to land back
+        // on the track that was playing (see repeat-all's reload below for
+        // why a bare seek would fail here).
+        if self.repeat == Repeat::One {
+            self.pending_chapter = Some(self.track);
+            self.playback = true;
+            self.remember();
+            return self.issue(SourceAction::play("cdda://").finite());
+        }
         // Under shuffle, mpv's true idle can arrive **mid-pass**: the
         // physically last chapter of the disc may sit anywhere in the
         // drawn order, not necessarily at its own last entry (see
@@ -972,6 +988,21 @@ impl SourcePlugin for CdSource {
         // there is simply nothing to ignore.
         if n == self.track {
             return self.issue(SourceAction::Noop);
+        }
+        // Repeat-one: mpv has moved on to the physically next chapter on its
+        // own — a natural advance, since the echo guard above already let
+        // every requested seek through as `Noop`, a manual next/previous
+        // included. Send it back to the start of the track that was playing.
+        // Before the shuffle correction on purpose: "one" wins over shuffle,
+        // which then only steers manual skips. `track` is left as it is, so
+        // this seek's own echo lands on the guard above.
+        //
+        // `loop-file` cannot do this here (see `SourceAction::Play::loopable`):
+        // the disc is one entry, and it would loop the whole disc. The cost
+        // is an instant of the next track before the seek lands — unmeasured,
+        // no drive available.
+        if self.repeat == Repeat::One {
+            return self.issue(SourceAction::PlayerChapter(self.track));
         }
         // Corrected (review 1, C1): a disc's chapters cannot be reordered
         // for mpv the way a playlist can, so under shuffle it is *this*
@@ -1476,6 +1507,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeat_one_seeks_back_on_a_natural_advance_and_ignores_its_echo() {
+        let mut s = source_with_disc(4).await;
+        s.set_play_mode(false, Repeat::One).await;
+        s.activate().await;
+        s.player_track(0).await; // the disc opens on track 0
+        let before = s.track;
+        let next = before + 1;
+        assert_eq!(s.player_track(next).await.action, SourceAction::PlayerChapter(before), "sent back");
+        assert_eq!(s.track, before, "the track did not change");
+        assert_eq!(s.player_track(before).await.action, SourceAction::Noop, "the echo of that seek");
+        assert_eq!(s.track, before);
+    }
+
+    #[tokio::test]
+    async fn repeat_one_wins_over_shuffle() {
+        let mut s = source_with_disc_and_draw_queue(4, vec![vec![2, 0, 3, 1]]);
+        s.set_play_mode(true, Repeat::One).await;
+        s.activate().await;
+        assert_eq!(s.player_track(0).await.action, SourceAction::PlayerChapter(2), "opened at 0, sent to 2");
+        assert_eq!(s.player_track(2).await.action, SourceAction::Noop, "echo");
+        assert_eq!(s.player_track(3).await.action, SourceAction::PlayerChapter(2), "back to 2, not on to 0");
+        assert_eq!(s.cursor, 0, "the pass did not move");
+    }
+
+    #[tokio::test]
+    async fn a_manual_next_under_repeat_one_moves_to_the_next_track() {
+        // The seek `next` emits must not be taken for a natural advance and
+        // undone.
+        let mut s = source_with_disc(4).await;
+        s.set_play_mode(false, Repeat::One).await;
+        s.activate().await;
+        s.player_track(0).await;
+        let from = s.track;
+        let out = s.next().await;
+        assert_eq!(out.action, SourceAction::PlayerChapter(from + 1));
+        assert_eq!(s.player_track(from + 1).await.action, SourceAction::Noop, "the echo of the skip");
+        assert_eq!(s.track, from + 1);
+    }
+
+    #[tokio::test]
+    async fn repeat_one_on_the_last_track_reloads_the_disc_on_that_track() {
+        let mut s = source_with_disc(3).await;
+        s.set_play_mode(false, Repeat::One).await;
+        s.activate().await;
+        s.player_track(0).await;
+        s.select(3).await; // the last track (`select` is 1-based, `track` 0-based)
+        s.player_track(2).await; // echo
+        assert_eq!(s.end_of_content().await.action, SourceAction::play("cdda://").finite());
+        assert_eq!(s.pending_chapter, Some(2));
+        assert_eq!(s.player_track(0).await.action, SourceAction::PlayerChapter(2), "reopened at 0, sent back to 2");
+    }
+
+    #[tokio::test]
     async fn the_disc_declares_a_finite_list() {
         assert!(source_with_disc(3).await.has_finite_list());
     }
@@ -1718,7 +1802,7 @@ mod tests {
         // and the owner's "every track once" applies with repeat-all off
         // too.
         let mut s = source_with_disc_and_order(4, vec![2, 0, 3, 1]);
-        s.set_play_mode(true, Repeat::Off).await; // repeat-all OFF
+        s.set_play_mode(true, Repeat::Off).await; // repeat OFF
         s.activate().await; // order = [2, 0, 3, 1], cursor 0, pending on 2
         s.player_track(0).await; // confirms the disc open at entry 2
 
