@@ -230,6 +230,21 @@ that is the only visibility the split introduced.
     npm run typecheck                                   # vue-tsc
     npm run e2e -w app                                  # Playwright journeys
 
+### The wire fingerprint
+
+`crates/ritornello-proto/tests/wire_fingerprint.rs` serializes a sample of
+every message that crosses the core/plugin wire and compares it with
+`tests/wire-fingerprint.txt`, which records the `PROTOCOL_VERSION` it was
+taken under. When it fails, the wire changed or the number moved without the
+fixture: decide whether an old plugin can still understand the new shape. If
+not, it is a break, so bump `PROTOCOL_VERSION` and regenerate; if it is
+compatible (an added optional field, an added variant nobody old receives),
+regenerate only, and say why in the commit. Regenerate with:
+
+    UPDATE_WIRE_FINGERPRINT=1 cargo test -p ritornello-proto --test wire_fingerprint
+
+and read the diff of the fixture: it is the exact record of what moved.
+
 ### Continuous integration
 
 `.github/workflows/ci.yml` runs those five commands on every push and pull
@@ -388,11 +403,12 @@ before opening it:
   against the one it had at the last finished release, so fifteen commits
   to a plugin are one bump;
 - you bump the product number too, and the tag must equal it exactly;
-- a change to a shared crate (`ritornello-proto`, `ritornello-i18n`,
-  `ritornello-plugin-sdk`, `ritornello-updater`) republishes every
-  component under **unchanged** numbers unless you bump them: the release
-  then looks complete and delivers nothing. This is the one failure here
-  that is entirely silent;
+- a compatible change to a shared crate (`ritornello-proto`,
+  `ritornello-i18n`, `ritornello-plugin-sdk`, `ritornello-updater`)
+  republishes nothing: bump the plugins it must reach by hand. A change to
+  `PROTOCOL_VERSION` or to the product's major republishes everything, and
+  the script refuses a wire break that left a core or plugin on its old
+  number;
 - the release lands as a draft, and a tag with a prerelease suffix lands
   as a prerelease. **A draft is invisible to every device** — GitHub lists
   drafts to a reader with push access alone, and the core polls with no

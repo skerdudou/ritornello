@@ -44,10 +44,16 @@ independent of the product's major.minor and suffix (like
 **A device compares versions for equality, never for order.** This is what
 makes rollback and channel-switching work, and it is the reason every
 delivery must move a number: an archive republished under its old number is
-never fetched. The one silent failure to know about is a change to a shared
-crate (`ritornello-proto`, `ritornello-i18n`, `ritornello-plugin-sdk`,
-`ritornello-updater`): every binary is rebuilt and republished, under
-unchanged numbers, so the release looks complete and delivers nothing.
+never fetched. A component is republished only when its own version moved,
+when `PROTOCOL_VERSION` changed (a wire break: every core and plugin must move,
+and `changed-components.sh` refuses the release otherwise), or when the
+product's major changed. A compatible change to a shared crate
+(`ritornello-proto`, `ritornello-i18n`, `ritornello-plugin-sdk`,
+`ritornello-updater`) republishes nothing by itself; if a fix must reach
+plugins, bump them by hand. `PROTOCOL_VERSION` moves at every wire break, and
+the wire fingerprint test of `ritornello-proto` forces the decision. The first
+finished release republishes everything, since a finished product refuses any
+prerelease component.
 
 **Never delete a published release, or any file attached to one.** The
 archive of a component that has not changed in a long time lives in the
@@ -99,7 +105,11 @@ something.
 - `scripts/package-release.sh --self-test` — the same generation rules
   without cargo, since the release job runs without our toolchain.
 - `scripts/changed-components.sh` — exits 2 when no component moved, rather
-  than publishing an empty release that looks like success.
+  than publishing an empty release that looks like success, and refuses a
+  `PROTOCOL_VERSION` change that left a core or plugin on its old number.
+- `crates/ritornello-proto/tests/wire_fingerprint.rs` — the wire against a
+  committed fixture: a change is either a break (bump `PROTOCOL_VERSION`) or
+  compatible (regenerate the fixture, say why).
 - `scripts/changed-components.sh`'s coupled-change guard — refuses a change
   to a companion (`files-mount`) that did not move its version, and its
   plugin's too when their shared crate changed: the shared-crate trap above,

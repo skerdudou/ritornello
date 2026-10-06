@@ -189,28 +189,36 @@ silent no-op: that component ships nothing this release, and if *no*
 component moved the script exits 2 and fails the job loudly rather than
 publishing an empty release that looks like success.
 
-**One case is a silent no-op, and it is the one to know about.** A change to
-a shared crate (`ritornello-proto`, `ritornello-i18n`,
-`ritornello-plugin-sdk`, `ritornello-updater`) makes the script republish
-*every* component — correctly, because all eleven binaries were rebuilt — but
-under their **unchanged** version numbers. A device decides what to install
-by comparing versions and nothing else, so it sees every row as up to date
-and fetches none of the new archives. The release looks complete and delivers
-nothing.
+**What republishes, and what does not.** A device decides what to install
+by comparing versions and nothing else, so an archive rebuilt under its old
+number is fetched by nobody. The script therefore does not republish a
+component whose current binary still works with the new core. A component
+is published when
 
-**For a shared-crate change to reach devices, bump the version of every
-component it actually reaches, in the same commit.** For `ritornello-proto`,
-`ritornello-i18n` and `ritornello-plugin-sdk` that is all eleven: they are
-linked into every binary. For `ritornello-updater` it is **the core alone** —
-its binary is not linked into anything and ships only inside the core's
-archive, so bumping the ten plugins for it would deliver ten identical
-archives. The script republishes everything in either case, because
-over-publishing is the safe direction and one mechanism beats two for a crate
-that changes this rarely; what you choose is which versions to move.
+1. its own version moved (its code changed, as always);
+2. `PROTOCOL_VERSION` changed: a wire break, old binaries can no longer talk
+   to the core. Every component that links `ritornello-proto` (the core and
+   the plugins; not a companion, which depends on no shared crate, nor a
+   language pack, which is data) **must** have moved its version, and the
+   script refuses the release, naming those that did not;
+3. the product's **major** changed: everything is republished.
 
-The script prints all of this on stderr when it detects such a change. It does
-not refuse the release, because republishing is still the right thing to
-build — it is only not, on its own, delivering.
+A *compatible* change to a shared crate (`ritornello-proto`,
+`ritornello-i18n`, `ritornello-plugin-sdk`, `ritornello-updater`) republishes
+nothing by itself: the script prints a note on stderr. If the fix must reach
+plugins, bump those plugins by hand: that is a delivery choice, not a
+compatibility matter. The decision between "break" and "compatible" for the
+wire is forced by a test, `crates/ritornello-proto/tests/wire_fingerprint.rs`,
+which compares a sample of every wire message with a committed fixture (see
+[development.md](development.md#tests)); `PROTOCOL_VERSION` moves at every
+break, before and after the first stable release, and a plugin announcing
+another number is shown "incompatible" on the System page.
+
+The **first finished release** republishes everything: a finished product
+refuses any prerelease component (see below), so every component still on a
+beta number moves once. While only prereleases exist there is no finished
+release to measure against, so the script behaves as for a first release and
+publishes everything.
 
 Detection reads a single page of the GitHub releases API — one hundred
 releases (`per_page=100`). A component that has not shipped a new archive of
