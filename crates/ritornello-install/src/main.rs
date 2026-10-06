@@ -151,7 +151,7 @@ fn ask_intent(inv: &Inventory, dev: &DeviceState, action: Action) -> anyhow::Res
     let packs = ui::ask_packs(&ui::pack_choices(inv, &installed_packs), &installed_packs)?;
     let candidates = ui::data_choices(&cli::removed_by(inv, dev, &plugins), dev);
     let erase_data = if candidates.is_empty() { BTreeSet::new() } else { ui::ask_erase(&candidates)? };
-    Ok(Intent::InstallOrUpdate { plugins, packs, erase_data })
+    Ok(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: action == Action::Repair })
 }
 
 /// Asks for the sudo password and proves it, three tries at most. Every
@@ -204,13 +204,20 @@ fn run(args: &Args) -> anyhow::Result<()> {
 
     // 3. What to do, on a device that has Ritornello, when the arguments
     // do not say.
+    // `--reinstall` has already said which: the repair.
     let interactive = terminal && !args.names_an_intent();
-    let action = if interactive && ui::offers_remove_all(&dev) { ui::ask_action()? } else { Action::InstallOrUpdate };
+    let action = if args.reinstall {
+        Action::Repair
+    } else if interactive && ui::offers_remove_all(&dev) {
+        ui::ask_action()?
+    } else {
+        Action::InstallOrUpdate
+    };
 
     // 4 and 5. The source, its version, its inventory. A total removal
     // does not ask for a version: it removes what the registry and the
     // newest inventory know.
-    let mut source = open_source(args, interactive && action == Action::InstallOrUpdate)?;
+    let mut source = open_source(args, interactive && action != Action::RemoveAll)?;
     eprintln!("Reading the inventory of {}...", source.label());
     let inv = Inventory::parse(&source.inventory()?)?;
 
@@ -224,32 +231,20 @@ fn run(args: &Args) -> anyhow::Result<()> {
     // 7. The plan: a refusal is said in one sentence, and nothing is sent.
     let plan = plan::compute(&inv, &dev, &intent).map_err(|e| anyhow!("{e} (nothing was sent to the device)"))?;
 
-    // 8. The summary, and its confirmation.
-    ui::show_summary(&plan, &inv.product, &source.label(), &host);
-    if !args.yes && !ui::confirm()? {
-        eprintln!("Nothing was changed.");
-        return Ok(());
-    }
-
-    // 9. The sudo password, the last question.
-    let password = match dev.sudo {
-        Sudo::Password => Some(sudo_password(&target, &control, &host)?),
-        Sudo::NotNeeded | Sudo::NoPassword | Sudo::Absent => None,
+    // 8 to 11.
+    let source_label = source.label();
+    let outcome = {
+        let mut live = Live {
+            target: &target,
+            control: &control,
+            host: &host,
+            sudo: dev.sudo,
+            source: source.as_mut(),
+            product: &inv.product,
+            source_label: &source_label,
+        };
+        carry_out(&plan, args.yes, &mut live)?
     };
-
-    // 10. Every archive, verified before it is read as one; then the script
-    // and the bundle.
-    let mut archives = BTreeMap::new();
-    for name in &plan.archives {
-        eprintln!("Fetching {name}...");
-        archives.insert(name.clone(), source.archive(name)?);
-    }
-    let script = script::render(&plan)?;
-    let bundle = script::bundle(&plan, &script, &archives)?;
-
-    // 11. Applied in one invocation, its output relayed as it arrives.
-    eprintln!("Applying on {host}...");
-    ssh::apply(&target, &control, dev.sudo, password.as_deref(), &bundle)?;
     // Ends the shared ssh connection now rather than at the end of `main`.
     // Off Unix there is no shared connection and `ControlDir` has no `Drop`,
     // so the call is a no-op there — kept, so the order reads the same on
@@ -258,14 +253,125 @@ fn run(args: &Args) -> anyhow::Result<()> {
     drop(control);
 
     // 12. The report.
-    eprintln!("Done on {host}:");
-    for line in ui::summary_lines(&plan) {
-        eprintln!("{line}");
-    }
-    if plan.start_service {
-        println!("The web interface: {}", web_address(&host));
+    match outcome {
+        Outcome::Declined => {}
+        Outcome::UpToDate => println!("The web interface: {}", web_address(&host)),
+        Outcome::Applied => {
+            eprintln!("Done on {host}:");
+            for line in ui::summary_lines(&plan) {
+                eprintln!("{line}");
+            }
+            if plan.start_service {
+                println!("The web interface: {}", web_address(&host));
+            }
+        }
     }
     Ok(())
+}
+
+/// How steps 8 to 11 ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The device already is what was asked: nothing was asked, fetched or
+    /// sent.
+    UpToDate,
+    /// The operator said no at the confirmation.
+    Declined,
+    Applied,
+}
+
+/// What steps 8 to 11 do to the world, one method each, so that
+/// `carry_out`'s order — and above all what it never reaches — can be
+/// tested without a terminal, a network or a device.
+trait Steps {
+    fn show_summary(&mut self, plan: &plan::Plan);
+    fn say_up_to_date(&mut self, plan: &plan::Plan);
+    fn confirm(&mut self) -> anyhow::Result<bool>;
+    fn sudo_password(&mut self) -> anyhow::Result<Option<String>>;
+    fn archive(&mut self, name: &str) -> anyhow::Result<Vec<u8>>;
+    fn apply(&mut self, bundle: &[u8], password: Option<&str>) -> anyhow::Result<()>;
+}
+
+/// Steps 8 to 11: the summary and its confirmation, the sudo password,
+/// every archive, the bundle and the one invocation that applies it.
+///
+/// A plan with nothing to do stops first, before any of them: a device
+/// already up to date is not asked for a password, sends no download
+/// request, and its radio is not stopped for a run that would change
+/// nothing.
+fn carry_out(plan: &plan::Plan, yes: bool, steps: &mut impl Steps) -> anyhow::Result<Outcome> {
+    if plan.nothing_to_do {
+        steps.say_up_to_date(plan);
+        return Ok(Outcome::UpToDate);
+    }
+
+    // 8. The summary, and its confirmation.
+    steps.show_summary(plan);
+    if !yes && !steps.confirm()? {
+        eprintln!("Nothing was changed.");
+        return Ok(Outcome::Declined);
+    }
+
+    // 9. The sudo password, the last question.
+    let password = steps.sudo_password()?;
+
+    // 10. Every archive, verified before it is read as one; then the script
+    // and the bundle.
+    let mut archives = BTreeMap::new();
+    for name in &plan.archives {
+        eprintln!("Fetching {name}...");
+        archives.insert(name.clone(), steps.archive(name)?);
+    }
+    let script = script::render(plan)?;
+    let bundle = script::bundle(plan, &script, &archives)?;
+
+    // 11. Applied in one invocation, its output relayed as it arrives.
+    steps.apply(&bundle, password.as_deref())?;
+    Ok(Outcome::Applied)
+}
+
+/// The real steps: the terminal, the release, the device.
+struct Live<'a> {
+    target: &'a ssh::Target,
+    control: &'a ssh::ControlDir,
+    host: &'a str,
+    sudo: Sudo,
+    source: &'a mut dyn Source,
+    product: &'a str,
+    source_label: &'a str,
+}
+
+impl Steps for Live<'_> {
+    fn show_summary(&mut self, plan: &plan::Plan) {
+        ui::show_summary(plan, self.product, self.source_label, self.host);
+    }
+
+    fn say_up_to_date(&mut self, plan: &plan::Plan) {
+        eprintln!("{}", ui::up_to_date_line(self.host, self.product, self.source_label));
+        for line in ui::summary_lines(plan) {
+            eprintln!("{line}");
+        }
+    }
+
+    fn confirm(&mut self) -> anyhow::Result<bool> {
+        ui::confirm()
+    }
+
+    fn sudo_password(&mut self) -> anyhow::Result<Option<String>> {
+        match self.sudo {
+            Sudo::Password => Ok(Some(sudo_password(self.target, self.control, self.host)?)),
+            Sudo::NotNeeded | Sudo::NoPassword | Sudo::Absent => Ok(None),
+        }
+    }
+
+    fn archive(&mut self, name: &str) -> anyhow::Result<Vec<u8>> {
+        self.source.archive(name)
+    }
+
+    fn apply(&mut self, bundle: &[u8], password: Option<&str>) -> anyhow::Result<()> {
+        eprintln!("Applying on {}...", self.host);
+        ssh::apply(self.target, self.control, self.sudo, password, bundle)
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +427,88 @@ mod tests {
         assert!(!is_terminal(true, false), "stderr redirected: dialoguer cannot draw");
         assert!(!is_terminal(false, true), "stdin redirected: nothing to read an answer from");
         assert!(!is_terminal(false, false));
+    }
+
+    /// Records every step `carry_out` reaches, and answers each one.
+    #[derive(Default)]
+    struct Recorder {
+        calls: Vec<String>,
+    }
+
+    impl Steps for Recorder {
+        fn show_summary(&mut self, _: &plan::Plan) {
+            self.calls.push("summary".into());
+        }
+        fn say_up_to_date(&mut self, _: &plan::Plan) {
+            self.calls.push("up to date".into());
+        }
+        fn confirm(&mut self) -> anyhow::Result<bool> {
+            self.calls.push("confirm".into());
+            Ok(true)
+        }
+        fn sudo_password(&mut self) -> anyhow::Result<Option<String>> {
+            self.calls.push("sudo".into());
+            Ok(None)
+        }
+        fn archive(&mut self, name: &str) -> anyhow::Result<Vec<u8>> {
+            self.calls.push(format!("fetch {name}"));
+            Ok(Vec::new())
+        }
+        fn apply(&mut self, _: &[u8], _: Option<&str>) -> anyhow::Result<()> {
+            self.calls.push("apply".into());
+            Ok(())
+        }
+    }
+
+    /// The owner's case, end to end from the plan: a device already up to
+    /// date is told so, and nothing else happens — no confirmation, no sudo
+    /// password, no download, no apply (so no stop of the service either).
+    /// The same device with one plugin moved goes the whole way, fetching
+    /// that one archive only.
+    ///
+    /// **[MUTATION]**: drop the `nothing_to_do` return from `carry_out` —
+    /// this test fails (the summary, the confirmation, the sudo password and
+    /// the apply are reached).
+    #[test]
+    fn an_up_to_date_device_is_told_so_before_any_question_download_or_apply() {
+        use crate::plan::tests::{RADIO_EXEC, THEIRS_EXEC, dev, inv};
+        use crate::registry::{Recorded, Registry};
+        let rec = |v: &str, p: &[&str]| Recorded { version: v.into(), privileged: p.iter().map(|s| s.to_string()).collect() };
+        let registry = Registry {
+            format: 1,
+            components: [
+                ("core".to_string(), rec("0.2.0-beta.2", &["/etc/systemd/system/ritornello.service"])),
+                ("radio".to_string(), rec("0.2.0-beta.2", &[])),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let device = dev(&[("radio", RADIO_EXEC), ("theirs", THEIRS_EXEC)], Some(registry), &[], &[]);
+        let (plugins, packs) = plan::preselection(&inv(), &device);
+        let keep = Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false };
+
+        let plan = plan::compute(&inv(), &device, &keep).unwrap();
+        let mut steps = Recorder::default();
+        assert_eq!(carry_out(&plan, false, &mut steps).unwrap(), Outcome::UpToDate);
+        assert_eq!(steps.calls, ["up to date"]);
+
+        let mut moved = device.clone();
+        moved.registry.as_mut().unwrap().components.get_mut("radio").unwrap().version = "0.2.0-beta.1".into();
+        let plan = plan::compute(&inv(), &moved, &keep).unwrap();
+        let mut steps = Recorder::default();
+        assert_eq!(carry_out(&plan, false, &mut steps).unwrap(), Outcome::Applied);
+        assert_eq!(
+            steps.calls,
+            ["summary", "confirm", "sudo", "fetch ritornello-plugin-radio-0.2.0-beta.2-arm64.tar.gz", "apply"]
+        );
+    }
+
+    /// The up-to-date line names the device, the release and its source,
+    /// and says that nothing was changed.
+    #[test]
+    fn the_up_to_date_line_says_nothing_was_changed() {
+        let line = ui::up_to_date_line("dietpi@radio", "0.3.0", "GitHub release v0.3.0");
+        assert_eq!(line, "dietpi@radio is already up to date with Ritornello 0.3.0 from GitHub release v0.3.0: nothing was changed.");
     }
 
     #[test]

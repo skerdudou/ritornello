@@ -87,6 +87,8 @@ m PLUGINS_TOML; rd "$R/etc/ritornello/plugins.toml"
 m PLUGINS_TOML_STATE; echo "$s"
 m REGISTRY; rd "$R/var/lib/ritornello-install/installed.toml"
 m REGISTRY_STATE; echo "$s"
+m PLACED; rd "$R/var/lib/ritornello/staging/placed.json"
+m PLACED_STATE; echo "$s"
 m PACKS; ls -1 "$R/etc/ritornello/language-packs" 2>/dev/null || true
 m DATA
 for d in "$R"/var/lib/ritornello/plugins/*/; do
@@ -141,9 +143,44 @@ pub struct DeviceState {
     pub plugins_toml: Option<String>,
     pub declared: Vec<Declared>,
     pub registry: Option<Registry>,
+    /// What the core's in-app updater says it last placed, component name
+    /// to version, from `/var/lib/ritornello/staging/placed.json`.
+    ///
+    /// **Untrusted**: that file belongs to the unprivileged `ritornello`
+    /// account, which can write anything into it. It is read only because
+    /// the updater moves binaries without touching the root-owned registry,
+    /// so it is the one place a registry that has fallen behind shows. It
+    /// may therefore only ever make the plan reinstall a component, never
+    /// skip one (see `plan::is_current`). Empty when the file is absent,
+    /// unreadable or does not parse: that only ever means "no evidence".
+    pub updater_placed: BTreeMap<String, String>,
     pub packs: BTreeSet<String>,
     pub data_nonempty: BTreeSet<String>,
     pub user_exists: bool,
+}
+
+/// One entry of the updater's `placed.json`: only its version is read.
+/// Every other key (`not_installed_files`, and whatever a later core adds)
+/// is ignored rather than refused — the file is evidence for doing more,
+/// and a reader that refused it would throw that evidence away.
+#[derive(Debug, Deserialize)]
+struct PlacedEntry {
+    version: String,
+}
+
+/// The updater's memory, or nothing. Whatever is wrong with the file — a
+/// state other than `present`, bytes that are not the expected JSON — the
+/// answer is an empty memory: the core itself reads a corrupt `placed.json`
+/// the same way (`update::placed::read`), and an empty memory here only
+/// means the registry alone decides, which is the trusted half anyway.
+fn updater_placed(body: &str, state: &str) -> BTreeMap<String, String> {
+    if state.trim() != "present" {
+        return BTreeMap::new();
+    }
+    let text = body.strip_suffix('\n').unwrap_or(body);
+    serde_json::from_str::<BTreeMap<String, PlacedEntry>>(text)
+        .map(|m| m.into_iter().map(|(name, entry)| (name, entry.version)).collect())
+        .unwrap_or_default()
 }
 
 impl DeviceState {
@@ -189,6 +226,8 @@ const SECTIONS: &[&str] = &[
     "PLUGINS_TOML_STATE",
     "REGISTRY",
     "REGISTRY_STATE",
+    "PLACED",
+    "PLACED_STATE",
     "PACKS",
     "DATA",
     "END",
@@ -301,6 +340,7 @@ pub fn parse(output: &str, nonce: &str) -> anyhow::Result<DeviceState> {
             )
         })
         .transpose()?;
+    let updater_placed = updater_placed(get("PLACED"), get("PLACED_STATE"));
 
     let packs: BTreeSet<String> =
         get("PACKS").lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
@@ -317,6 +357,7 @@ pub fn parse(output: &str, nonce: &str) -> anyhow::Result<DeviceState> {
         plugins_toml,
         declared,
         registry,
+        updater_placed,
         packs,
         data_nonempty,
         user_exists,
@@ -340,6 +381,7 @@ mod tests {
             plugins_toml: None,
             declared: Vec::new(),
             registry: None,
+            updater_placed: BTreeMap::new(),
             packs: BTreeSet::new(),
             data_nonempty: BTreeSet::new(),
             user_exists: false,
@@ -405,6 +447,9 @@ version = \"0.2.0\"
 privileged = []
 @@n1@@ REGISTRY_STATE
 present
+@@n1@@ PLACED
+@@n1@@ PLACED_STATE
+absent
 @@n1@@ PACKS
 ritornello-lang-fr
 ritornello-lang-es
@@ -477,6 +522,9 @@ present
 @@real@@ REGISTRY
 @@real@@ REGISTRY_STATE
 absent
+@@real@@ PLACED
+@@real@@ PLACED_STATE
+absent
 @@real@@ PACKS
 @@real@@ DATA
 @@real@@ END
@@ -522,6 +570,9 @@ present
 @@n@@ REGISTRY
 @@n@@ REGISTRY_STATE
 absent
+@@n@@ PLACED
+@@n@@ PLACED_STATE
+absent
 @@n@@ PACKS
 @@n@@ DATA
 @@n@@ END
@@ -556,6 +607,9 @@ no
 absent
 @@n@@ REGISTRY
 @@n@@ REGISTRY_STATE
+absent
+@@n@@ PLACED
+@@n@@ PLACED_STATE
 absent
 @@n@@ PACKS
 ritornello-lang-fr
@@ -667,6 +721,9 @@ version = \"0.2.0\"
 privileged = []
 @@n@@ REGISTRY_STATE
 present
+@@n@@ PLACED
+@@n@@ PLACED_STATE
+absent
 @@n@@ PACKS
 ritornello-lang-fr
 
@@ -768,14 +825,63 @@ radio
     /// body exactly as `probe_script` frames it, i.e. the file's bytes plus
     /// the one `\n` the next marker opens with.
     fn survey_with(plugins_toml: (&str, &str), registry: (&str, &str)) -> String {
+        survey_with_placed(plugins_toml, registry, ("", "absent"))
+    }
+
+    /// The same, with the updater's `placed.json` too.
+    fn survey_with_placed(plugins_toml: (&str, &str), registry: (&str, &str), placed: (&str, &str)) -> String {
         format!(
             "\n@@n@@ KERNEL\nLinux\n\n@@n@@ MACHINE\nx86_64\n\n@@n@@ SYSTEMD\nyes\n\n@@n@@ UID\n0\n\
              \n@@n@@ SUDO\nnot-needed\n\n@@n@@ CORE\nyes\n\n@@n@@ USER\nyes\n\
              \n@@n@@ PLUGINS_TOML\n{}\n@@n@@ PLUGINS_TOML_STATE\n{}\n\
              \n@@n@@ REGISTRY\n{}\n@@n@@ REGISTRY_STATE\n{}\n\
+             \n@@n@@ PLACED\n{}\n@@n@@ PLACED_STATE\n{}\n\
              \n@@n@@ PACKS\n\n@@n@@ DATA\n\n@@n@@ END\n",
-            plugins_toml.0, plugins_toml.1, registry.0, registry.1
+            plugins_toml.0, plugins_toml.1, registry.0, registry.1, placed.0, placed.1
         )
+    }
+
+    /// The core's own `placed.json`, as `update::placed::record` writes it
+    /// (`serde_json::to_string` of the map), the core's archive note
+    /// included: only each version is read, the note is ignored.
+    const PLACED_JSON: &str = r#"{"core":{"version":"0.3.0","not_installed_files":["etc/systemd/system/ritornello.service"]},"radio":{"version":"1.7.3"}}"#;
+
+    #[test]
+    fn the_updater_s_memory_is_read_version_by_version() {
+        let state = parse(&survey_with_placed((RADIO_BLOCK, "present"), ("", "absent"), (PLACED_JSON, "present")), "n")
+            .unwrap();
+        let want: BTreeMap<String, String> =
+            [("core", "0.3.0"), ("radio", "1.7.3")].iter().map(|(n, v)| (n.to_string(), v.to_string())).collect();
+        assert_eq!(state.updater_placed, want);
+    }
+
+    /// An untrusted file the run can do without: absent, unreadable, or not
+    /// the expected JSON, it is no evidence at all — never a refusal, which
+    /// would let the unprivileged account stop every install.
+    ///
+    /// **[MUTATION]**: make `updater_placed` fail the survey (`?`) on a
+    /// parse error — this test fails.
+    #[test]
+    fn an_absent_unreadable_or_garbage_updater_memory_is_no_evidence() {
+        for placed in [("", "absent"), ("", "unreadable"), ("{\"core\": {\"vers", "present"), ("[1, 2]", "present"), ("", "present")] {
+            let state = parse(&survey_with_placed((RADIO_BLOCK, "present"), ("", "absent"), placed), "n")
+                .unwrap_or_else(|e| panic!("{placed:?}: {e}"));
+            assert!(state.updater_placed.is_empty(), "{placed:?}: {:?}", state.updater_placed);
+        }
+    }
+
+    /// For real: the survey reads the file where the core writes it.
+    #[test]
+    #[cfg(unix)]
+    fn probe_script_reads_the_updater_s_memory_where_the_core_keeps_it() {
+        let stdout = run_probe(|root| {
+            std::fs::create_dir_all(root.join("var/lib/ritornello/staging")).expect("staging dir");
+            std::fs::write(root.join("var/lib/ritornello/staging/placed.json"), PLACED_JSON).expect("placed.json");
+        });
+        let state = parse(&stdout, "real").expect("parses");
+        assert_eq!(state.updater_placed.get("radio").map(String::as_str), Some("1.7.3"), "{stdout}");
+        let stdout = run_probe(|_| {});
+        assert!(parse(&stdout, "real").unwrap().updater_placed.is_empty(), "{stdout}");
     }
 
     const RADIO_BLOCK: &str = "[[plugin]]\nname = \"radio\"\nexec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-radio\"\n";

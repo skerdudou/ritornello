@@ -1,0 +1,124 @@
+(
+    (
+        {
+            "ritornello-core-0.2.0-beta.2-arm64.tar.gz",
+            "ritornello-files-mount-0.2.0-beta.2-arm64.tar.gz",
+            "ritornello-lang-fr-0.2.0-beta.2.tar.gz",
+            "ritornello-plugin-cd-0.2.0-beta.2-arm64.tar.gz",
+            "ritornello-plugin-files-0.2.0-beta.2-arm64.tar.gz",
+            "ritornello-plugin-radio-0.2.0-beta.2-arm64.tar.gz",
+        },
+        true,
+        true,
+        [],
+        [],
+    ),
+    (
+        [],
+        [],
+        [],
+        [
+            Put {
+                archive: "ritornello-core-0.2.0-beta.2-arm64.tar.gz",
+                archive_path: "usr/local/bin/ritornello-core",
+                dest: "/usr/local/bin/ritornello-core",
+                mode: "0755",
+                owner: "root:root",
+            },
+            Put {
+                archive: "ritornello-core-0.2.0-beta.2-arm64.tar.gz",
+                archive_path: "etc/systemd/system/ritornello.service",
+                dest: "/etc/systemd/system/ritornello.service",
+                mode: "0644",
+                owner: "root:root",
+            },
+            Put {
+                archive: "ritornello-plugin-radio-0.2.0-beta.2-arm64.tar.gz",
+                archive_path: "usr/local/lib/ritornello/plugins/ritornello-plugin-radio",
+                dest: "/usr/local/lib/ritornello/plugins/ritornello-plugin-radio",
+                mode: "0755",
+                owner: "root:root",
+            },
+            Put {
+                archive: "ritornello-plugin-cd-0.2.0-beta.2-arm64.tar.gz",
+                archive_path: "usr/local/lib/ritornello/plugins/ritornello-plugin-cd",
+                dest: "/usr/local/lib/ritornello/plugins/ritornello-plugin-cd",
+                mode: "0755",
+                owner: "root:root",
+            },
+            Put {
+                archive: "ritornello-plugin-files-0.2.0-beta.2-arm64.tar.gz",
+                archive_path: "usr/local/lib/ritornello/plugins/ritornello-plugin-files",
+                dest: "/usr/local/lib/ritornello/plugins/ritornello-plugin-files",
+                mode: "0755",
+                owner: "root:root",
+            },
+            Put {
+                archive: "ritornello-files-mount-0.2.0-beta.2-arm64.tar.gz",
+                archive_path: "etc/systemd/system/ritornello-media-mount.service",
+                dest: "/etc/systemd/system/ritornello-media-mount.service",
+                mode: "0644",
+                owner: "root:root",
+            },
+            Put {
+                archive: "ritornello-files-mount-0.2.0-beta.2-arm64.tar.gz",
+                archive_path: "etc/polkit-1/rules.d/51-ritornello-media.rules",
+                dest: "/etc/polkit-1/rules.d/51-ritornello-media.rules",
+                mode: "0644",
+                owner: "root:root",
+            },
+            Put {
+                archive: "ritornello-files-mount-0.2.0-beta.2-arm64.tar.gz",
+                archive_path: "usr/local/lib/ritornello/ritornello-media-mount",
+                dest: "/usr/local/lib/ritornello/ritornello-media-mount",
+                mode: "0755",
+                owner: "root:root",
+            },
+        ],
+        [
+            Initial {
+                archive: "ritornello-plugin-radio-0.2.0-beta.2-arm64.tar.gz",
+                archive_path: "initial-config/stations.example.toml",
+                plugin: "radio",
+                target: "stations.toml",
+            },
+        ],
+    ),
+    (
+        [
+            (
+                "ritornello-lang-fr-0.2.0-beta.2.tar.gz",
+                "ritornello-lang-fr",
+            ),
+        ],
+        Some(
+            "# The plugins the core starts, in priority order.\n[[plugin]]\nname = \"radio\"\nexec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-radio\"\n\n[[plugin]]\nname = \"cd\"\nexec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-cd\"\n\n[[plugin]]\nname = \"files\"\nexec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-files\"\n\n[[plugin]]\nname = \"theirs\"\nexec = \"/usr/local/lib/ritornello/plugins/theirs-bin\"\n",
+        ),
+        false,
+        false,
+    ),
+    (
+        [
+            "ritornello.service",
+            "ritornello-media-mount.service",
+        ],
+        true,
+        false,
+    ),
+    (
+        [
+            "cd",
+        ],
+        [
+            "core",
+            "radio",
+            "files",
+            "files-mount",
+        ],
+        [],
+        [],
+        [
+            "theirs",
+        ],
+    ),
+)

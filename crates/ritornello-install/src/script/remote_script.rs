@@ -932,7 +932,7 @@ fn a_companion_moves_the_files_an_older_registry_recorded_under_its_plugin() {
     ];
     let old = p::registry(&[("core", &["/etc/systemd/system/ritornello.service"]), ("files", &moved)]);
     let device = p::dev(&[("files", files_exec)], Some(old), &[], &[]);
-    let intent = Intent::InstallOrUpdate { plugins: p::set(&["files"]), packs: p::set(&[]), erase_data: p::set(&[]) };
+    let intent = Intent::InstallOrUpdate { plugins: p::set(&["files"]), packs: p::set(&[]), erase_data: p::set(&[]), reinstall: false };
     let plan = compute(&p::inv(), &device, &intent).expect("the plan computes");
     let mount_archive = "ritornello-files-mount-0.2.0-beta.2-arm64.tar.gz";
     assert!(plan.archives.contains(mount_archive), "{:?}", plan.archives);
@@ -968,7 +968,7 @@ fn a_companion_moves_the_files_an_older_registry_recorded_under_its_plugin() {
     assert!(!run.log.lines().any(|l| l.starts_with("systemctl disable")), "{}", run.log);
     let written = crate::registry::Registry::parse(&rig.read("/var/lib/ritornello-install/installed.toml")).unwrap();
     assert_eq!(written.components["files-mount"].privileged, moved);
-    assert!(!written.components.contains_key("files"), "{written:?}");
+    assert_eq!(written.components["files"].privileged, Vec::<String>::new(), "files keeps no root file: {written:?}");
 }
 
 // --- R23: archive members and sources ------------------------------------
