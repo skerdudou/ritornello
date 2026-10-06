@@ -154,20 +154,25 @@ Four different numbers are at play here, and they answer four different
 questions. The **product number** — `vX.Y.Z`, the git tag — names the
 release and carries the generation: `0.2.7` is the seventh delivery of the
 `0.2` generation. Each shipped component (the core, each plugin) declares
-**its own** patch version, so a fix confined to one plugin does not
+**its own** version, so a fix confined to one plugin does not
 renumber everything else and does not make the updater think ten unrelated
 components changed too. `PROTOCOL_VERSION`, the wire-compatibility contract
 between the core and a plugin (see [plugins.md](plugins.md)), is a third
 number, and it moves only on a breaking change to that wire format — not on
-every release, and not with every component's own patch bumps. For the
-product number, the core and the plugins, major and minor are kept identical
-everywhere, so only the patch digit is ever free, component by component.
+every release, and not with every component's own patch bumps. Only the **major** ties
+the core, the plugins and the language packs to the product number: an
+unchanged component may keep a number from an earlier minor (`0.2.4` inside
+product `0.3.0`), and it may never carry a number from a release that does
+not exist yet (`0.4.0` inside `0.3.0` is refused). Before 1.0 the major stays
+`0`, so nothing forces republishing everything; what keeps the core and the
+plugins in step is the shared-crate rule: a change to a crate they all link
+must move every component that links it.
 
 The **fourth number** belongs to a root-privileged companion
 (`ritornello-files-mount`, see [plugins.md](plugins.md)). It is its own
 independent version number, like `PROTOCOL_VERSION`: it answers "did the root
 helper change?", is never shown in the UI, is tied to neither the product's
-major and minor nor its prerelease suffix, and moves only when the companion
+major nor its prerelease suffix, and moves only when the companion
 itself changes. That is what lets an unchanged companion keep its number
 across every release, so that updating `files` from the web UI never sends
 the operator to `ritornello-install` for nothing: only that program can place
@@ -397,12 +402,14 @@ core and the plugins; a companion has a number of its own, see above):
    silently. So a component the beta delivers carries the beta's own full
    number, suffix included.
 
-   An unchanged component keeps its number across prereleases, possibly
-   with an **older** suffix of the same generation (`0.2.0-beta.2` inside
-   `v0.2.0-beta.3`): never a newer one, never another target number. A
-   finished release refuses any suffix, so at the first finished release of
-   a generation every component still on a beta number moves once. A
-   companion is outside all of this: it moves only when it changes itself.
+   An unchanged component keeps its number across prereleases, with an
+   **older** suffix of the same target (`0.2.0-beta.2` inside
+   `v0.2.0-beta.3`) or a lower target altogether (`0.2.0-beta.3` inside
+   `v0.3.0-beta.1`): never a newer suffix on the same target, never a target
+   above the product's, never another major. A finished release refuses any
+   suffix, so at the first finished release of a target every component still
+   on a beta number moves once. A companion is outside all of this: it moves
+   only when it changes itself.
 
    A component the beta does **not** deliver simply stays where the last
    finished release left it — `0.2.0` while the product prepares
@@ -1033,7 +1040,7 @@ tag has been pushed since. Consequently:
   by hand against commits of this repository, never inside the actual
   GitHub Actions job;
 - nothing about the per-component versioning scheme itself — three
-  archives named after three different numbers, a catalogue read from one
+  archives named after different numbers, a catalogue read from one
   page of a hundred releases — has been exercised by an actual device
   fetching an actual release.
 

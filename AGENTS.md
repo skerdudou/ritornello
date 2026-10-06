@@ -33,9 +33,10 @@ doc comments, test names, commit messages, documentation. No exceptions.
 (`[workspace.package] version`) names the release and the git tag. Each
 shipped component — the core and each plugin — declares **its own** version,
 and that is what its archive is named after. `PROTOCOL_VERSION` is the
-core/plugin wire contract and moves only on a break. For the core and the
-plugins, major and minor stay identical everywhere; only the patch digit is
-free, component by component. The fourth number is the root-privileged
+core/plugin wire contract and moves only on a break. For the core, the
+plugins and the language packs only the major must match the product's (before
+1.0 it stays 0, so nothing forces republishing everything); the rest is each
+component's own, and never a number from a release that does not exist yet. The fourth number is the root-privileged
 companion's (`files-mount`): it answers "did the root helper change?", is
 independent of the product's major.minor and suffix (like
 `PROTOCOL_VERSION`), and moves only when the companion does.

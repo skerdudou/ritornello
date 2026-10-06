@@ -4,8 +4,8 @@ name = "ritornello-files-mount"
 # root helper that ships beside the `files` plugin (a "companion"), and it is
 # published and compared for equality on its own. The name deliberately does
 # NOT start with `ritornello-plugin-`: it is not a plugin, and a tool that
-# scans plugins by prefix must not mistake it for one. It moves only when the helper itself changes,
-# never with the product, and is never shown to the user: the device compares
+# scans plugins by prefix must not mistake it for one. It moves only when
+# the helper itself changes, never with the product, and is never shown to the user: the device compares
 # it for equality and only `ritornello-install` can place the helper.
 # version_coherence.rs exempts it from every rule tying a component to the
 # product.

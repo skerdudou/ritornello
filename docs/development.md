@@ -379,7 +379,7 @@ re-embedding the SPA.
 The gesture itself lives in
 [installation.md](installation.md#installing-from-a-release), with the
 prerelease variant just below it — it is written there because that is
-where the three numbers and the archive layout are explained, and splitting
+where the four numbers and the archive layout are explained, and splitting
 them would give the same rule two homes. What a developer needs to know
 before opening it:
 

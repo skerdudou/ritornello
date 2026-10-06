@@ -132,7 +132,7 @@ manifest_minus_version() { # <manifest text on stdin>
 # the helper; the change itself is judged by every other line of the diff, so
 # a version line alone says nothing about what the installer must place.
 watched_changed() { # <ref>
-  local ref="$1" f
+  local ref="$1" f base
   git diff --quiet "$ref" -- "${WATCHED[@]}" && return 1
   while IFS= read -r f; do
     if [ "$f" = crates/ritornello-files-mount/Cargo.toml ] && [ -f "$f" ] \
