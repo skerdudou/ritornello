@@ -1017,6 +1017,18 @@ tag has been pushed since. Consequently:
   page of a hundred releases — has been exercised by an actual device
   fetching an actual release.
 
+**Repeat-one: partly measured on a bench, never on the device.** Two things
+are unverified:
+
+- Repeat-one on a CD: the seek back to the playing track's start lets an
+  instant of the next track through; its length has never been measured (no
+  CD drive was available);
+- mpv's `loop-file`, which the core arms for the files source under
+  repeat-one, was measured on the development bench (mpv 0.37.0 under WSL),
+  never on the Pi: a file in a playlist loops without being reloaded, and an
+  unreadable entry is tried once, after which mpv moves on to the next
+  entry. The mpv version the device runs may differ.
+
 **The rollback only recognises "does not start."** It watches the service
 failing to come up — systemd's start-limit plus `OnFailure=` on the unit —
 which is what a marker-and-restart scheme can cheaply detect. A core that

@@ -21,7 +21,7 @@ use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::roots::{RootKind, Roots};
 use ritornello_plugin_files::FILES_EN;
 use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
-use ritornello_proto::{Preset, SourceAction, Text};
+use ritornello_proto::{Preset, Repeat, SourceAction, Text};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -155,10 +155,11 @@ struct FilesSource {
     draw: Order,
     /// The two play modes, learned from `set_play_mode` and consulted by
     /// `end_of_content`/`activate` to know whether a finished pass should
-    /// open another one.
+    /// open another one (`All`), replay the same entry (`One`) or stay over
+    /// (`Off`).
     random: bool,
-    repeat_all: bool,
-    /// Set by `end_of_content` when it was called without repeat-all — which
+    repeat: Repeat,
+    /// Set by `end_of_content` when it was called with repeat off — which
     /// only happens once mpv's list has run to its end. The next `Play` then
     /// opens a fresh pass instead of replaying the single entry left at the
     /// tail of the exhausted order — see `activate`'s doc for the defect this
@@ -499,7 +500,11 @@ impl FilesSource {
             // A list of files has a normal end: without this declaration,
             // mpv's inactivity at the end of the list would pass for a stream
             // cut and the restart would replay the list in a loop.
-            .finite();
+            .finite()
+            // Each entry is a whole file: under repeat-one the core loops it
+            // in mpv itself (`loop-file`), seamlessly, with no round trip
+            // through this plugin.
+            .loopable();
         let mut outcome = SourceOutcome::new(action)
             .plays(Self::identity(&entry.path))
             .preset_name(entry.display_name())
@@ -611,7 +616,7 @@ impl SourcePlugin for FilesSource {
         // Play key replays the last track.
         //
         // **Except when the last pass genuinely ran out** (`pass_finished`,
-        // set by `end_of_content` without repeat-all): the entry the kept
+        // set by `end_of_content` with repeat off): the entry the kept
         // index designates then sits at the very tail of the exhausted
         // order, with nothing drawn after it. Replaying from there would
         // give exactly one track before mpv goes idle again — a fresh pass
@@ -748,7 +753,7 @@ impl SourcePlugin for FilesSource {
         outcome
     }
 
-    /// A list of files is exactly the kind of finite list random/repeat-all
+    /// A list of files is exactly the kind of finite list random/repeat
     /// are for — unlike the radio, which has none. A constant, not derived
     /// from whether the playlist currently holds anything: an empty playlist
     /// still has a shape to shuffle or repeat once tracks are added, the same
@@ -772,10 +777,10 @@ impl SourcePlugin for FilesSource {
     /// (`player_track`, `next`, `prev`) reasoned about a list mpv did not
     /// have — the screen naming the wrong track, next/prev landing at the
     /// wrong position, with nothing to see in any single frame.
-    async fn set_play_mode(&mut self, random: bool, repeat_all: bool) {
+    async fn set_play_mode(&mut self, random: bool, repeat: Repeat) {
         let random_changed = random != self.random;
         self.random = random;
-        self.repeat_all = repeat_all;
+        self.repeat = repeat;
         if !random_changed {
             return;
         }
@@ -926,23 +931,33 @@ impl SourcePlugin for FilesSource {
     /// declares — as opposed to a live stream cutting out, which has no
     /// equivalent here.
     ///
-    /// Without repeat-all, behaves like the default `stop()` fallback always
+    /// With repeat off, behaves like the default `stop()` fallback always
     /// did — but remembers that the pass is over, for `activate` to read (see
     /// its doc). With repeat-all, opens a new pass: drawn again under
     /// shuffle, replayed identically otherwise, starting at that pass's
-    /// first entry either way.
+    /// first entry either way. With repeat-one, `loop-file` should keep the
+    /// list from ending at all; if an end arrives anyway, the entry that was
+    /// playing starts over.
     async fn end_of_content(&mut self) -> SourceOutcome {
-        if !self.repeat_all {
-            self.pass_finished = true;
-            return self.stop().await;
+        match self.repeat {
+            Repeat::Off => {
+                self.pass_finished = true;
+                self.stop().await
+            }
+            // `loop-file` should keep this from ever arriving under
+            // repeat-one; if it does, the playing entry starts over rather
+            // than the first one — `index` still names it.
+            Repeat::One => self.play().await,
+            Repeat::All => {
+                if self.random {
+                    self.draw_order().await;
+                }
+                if let Some(entry) = self.entry_at(0) {
+                    self.playlist.write().await.index = entry;
+                }
+                self.play().await
+            }
         }
-        if self.random {
-            self.draw_order().await;
-        }
-        if let Some(entry) = self.entry_at(0) {
-            self.playlist.write().await.index = entry;
-        }
-        self.play().await
     }
 
     /// The named presets, for the home page grid and for the sources_catalog
@@ -1223,7 +1238,7 @@ async fn main() -> Result<()> {
         order: (0..entries_len).collect(),
         draw: Order::Random,
         random: false,
-        repeat_all: false,
+        repeat: Repeat::Off,
         pass_finished: false,
         mode_changed: false,
         state_path: state_path.clone(),
@@ -1446,7 +1461,7 @@ mod tests {
             order,
             draw,
             random: false,
-            repeat_all: false,
+            repeat: Repeat::Off,
             pass_finished: false,
             mode_changed: false,
             state_path: root.join("plugin-files.json"),
@@ -1502,7 +1517,7 @@ mod tests {
         // covers everything without repeating. The draw is injected, so this is
         // exact and not statistical.
         let mut s = source_with(playlist_of(5), Order::Fixed(vec![3, 0, 4, 1, 2]));
-        s.set_play_mode(true, false).await;
+        s.set_play_mode(true, Repeat::Off).await;
         let mut seen = vec![];
         let out = s.activate().await;
         seen.push(started_entry(&out));
@@ -1519,7 +1534,7 @@ mod tests {
         // entry index. With a drawn order they are two different spaces, and
         // the screen would name the wrong track.
         let mut s = source_with(playlist_of(3), Order::Fixed(vec![2, 0, 1]));
-        s.set_play_mode(true, false).await;
+        s.set_play_mode(true, Repeat::Off).await;
         s.activate().await;
         s.player_track(1).await; // second position of the drawn order
         assert_eq!(s.current_entry(), 0, "position 1 holds entry 0");
@@ -1532,7 +1547,7 @@ mod tests {
         // engaged. Reading the step through the drawn order instead lands on
         // entry 1 (preset 2).
         let mut s = source_with(playlist_of(3), Order::Fixed(vec![2, 1, 0]));
-        s.set_play_mode(true, false).await;
+        s.set_play_mode(true, Repeat::Off).await;
         s.activate().await;
         // Simulate a playlist edit from the admin page: the one channel that
         // makes `next()` reload instead of delegating to mpv.
@@ -1899,11 +1914,11 @@ mod tests {
         // different permutations can tell "redrawn again" from "left alone"
         // apart.
         let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![1, 0, 2]]));
-        s.set_play_mode(true, false).await; // engages shuffle: draws [2, 0, 1]
+        s.set_play_mode(true, Repeat::Off).await; // engages shuffle: draws [2, 0, 1]
         assert_eq!(s.drawn_order(), &[2, 0, 1]);
         assert_eq!(s.current_entry(), 2, "the pass starts on the first drawn entry");
-        // `random` stays `true`; only `repeat_all` moves.
-        s.set_play_mode(true, true).await;
+        // `random` stays `true`; only `repeat` moves.
+        s.set_play_mode(true, Repeat::All).await;
         assert_eq!(s.drawn_order(), &[2, 0, 1], "no random transition: no redraw");
         assert_eq!(s.current_entry(), 2, "no random transition: the index must not move");
     }
@@ -1923,7 +1938,7 @@ mod tests {
         s.activate().await; // sequential playback, entry 0
         assert_eq!(s.current_entry(), 0);
 
-        s.set_play_mode(true, false).await; // shuffle engaged mid-playback
+        s.set_play_mode(true, Repeat::Off).await; // shuffle engaged mid-playback
 
         let out = s.player_track(1).await;
         assert!(
@@ -1944,15 +1959,15 @@ mod tests {
         let mut p = playlist_of(3);
         p.index = 2;
         let mut s = source_with(p, Order::Sequential);
-        s.set_play_mode(false, false).await;
-        s.set_play_mode(false, true).await;
+        s.set_play_mode(false, Repeat::Off).await;
+        s.set_play_mode(false, Repeat::All).await;
         assert_eq!(s.current_entry(), 2, "repeat-all alone never moves the index");
     }
 
     #[tokio::test]
     async fn a_pass_without_repeat_stops_at_the_end() {
         let mut s = source_with(playlist_of(3), Order::Fixed(vec![2, 0, 1]));
-        s.set_play_mode(true, false).await;
+        s.set_play_mode(true, Repeat::Off).await;
         let out = s.end_of_content().await;
         assert!(matches!(out.action, SourceAction::Noop), "nothing more to play");
         assert_eq!(out.identity, Some(IdentityUpdate::Nothing));
@@ -1961,7 +1976,7 @@ mod tests {
     #[tokio::test]
     async fn repeat_all_opens_a_new_pass_with_a_new_draw() {
         let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![1, 2, 0]]));
-        s.set_play_mode(true, true).await;
+        s.set_play_mode(true, Repeat::All).await;
         let out = s.end_of_content().await;
         assert!(matches!(out.action, SourceAction::Play { .. }), "{:?}", out.action);
         assert_eq!(s.drawn_order(), &[1, 2, 0], "the next pass is drawn again, not replayed");
@@ -1970,10 +1985,35 @@ mod tests {
     #[tokio::test]
     async fn repeat_all_without_shuffle_restarts_at_the_first_entry() {
         let mut s = source_with(playlist_of(3), Order::Sequential);
-        s.set_play_mode(false, true).await;
+        s.set_play_mode(false, Repeat::All).await;
         let out = s.end_of_content().await;
         match out.action {
             SourceAction::Play { start, .. } => assert_eq!(start, Some(0)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_play_of_the_list_is_declared_loopable() {
+        // Whatever the mode: the core alone decides whether to loop, from
+        // the repeat setting; the source only says a file is a whole track.
+        let mut s = source_with(playlist_of(3), Order::Sequential);
+        match s.activate().await.action {
+            SourceAction::Play { loopable, .. } => assert!(loopable),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn end_of_content_under_repeat_one_replays_the_same_entry() {
+        // A safety net: under repeat-one mpv's `loop-file` keeps the list
+        // from ending at all. Should an end arrive anyway, the track that
+        // was playing starts over — not the first one.
+        let mut s = source_with(playlist_of(3), Order::Sequential);
+        s.set_play_mode(false, Repeat::One).await;
+        s.playlist.write().await.index = 2;
+        match s.end_of_content().await.action {
+            SourceAction::Play { start, .. } => assert_eq!(start, Some(2)),
             other => panic!("{other:?}"),
         }
     }
@@ -1985,7 +2025,7 @@ mod tests {
         // of an exhausted order holds only the entry that was already the
         // last one played.
         let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![1, 2, 0]]));
-        s.set_play_mode(true, false).await; // no repeat: a pass really ends
+        s.set_play_mode(true, Repeat::Off).await; // no repeat: a pass really ends
         s.activate().await; // opens the first pass, order = [2, 0, 1]
         s.end_of_content().await; // the pass ends without opening another one
         let out = s.activate().await; // Play key pressed again

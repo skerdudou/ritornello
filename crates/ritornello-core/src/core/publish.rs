@@ -165,7 +165,7 @@ impl<P: Player> Core<P> {
             has_finite_list,
             // Unlike `can_eject`/`has_finite_list`, these two are a setting
             // persisted like the volume, not a capability described by the
-            // active source: `self.random` and `self.repeat_all` survive a
+            // active source: `self.random` and `self.repeat` survive a
             // source change, a standby and a restart untouched.
             //
             // **What travels here is not that setting, it is what the device
@@ -177,8 +177,9 @@ impl<P: Player> Core<P> {
             // and through an MPD client alike.
             //
             // The invariant it buys is worth stating plainly, because every
-            // client now leans on it: **`random` and `repeat_all` are never
-            // `true` while `has_finite_list` is `false`.** It holds in
+            // client now leans on it: **`random` is never `true` and `repeat`
+            // never anything but `Off` while `has_finite_list` is `false`.**
+            // It holds in
             // standby too. The rule used to let the modes through there, so
             // that a sleeping device still showed what it would do on wake;
             // that is the same lie in a quieter place, since standby refuses
@@ -188,7 +189,7 @@ impl<P: Player> Core<P> {
             // and returning to a source with a finite list publishes the
             // remembered value again, unchanged.
             random: self.random && has_finite_list,
-            repeat_all: self.repeat_all && has_finite_list,
+            repeat: if has_finite_list { self.repeat } else { ritornello_proto::Repeat::Off },
             // A rendering preference, pushed with the rest: a display never
             // fetches anything on the side, and the clock it draws in
             // standby is something it shows. It only moves on a user

@@ -65,15 +65,15 @@ pub enum SourceReq {
     /// believed playback was under way when idle arrived. `EndOfContent` is
     /// that answer: the source finished its list on its own. SDK-side
     /// default: behaves like `Stop`; a plugin may override `end_of_content()`
-    /// to advance to the next pass under random/repeat-all.
+    /// to advance to the next pass under random/repeat.
     EndOfContent,
     /// The two play modes together: `random` (draw the whole list without a
-    /// repeat, then stop) and `repeat_all` (start over). A single request for
-    /// both because they are read by the same source at the same instant, and
-    /// splitting them would let a delivery race set one without the other.
-    /// SDK-side default: `set_play_mode` does nothing, for a source with no
-    /// finite list to shuffle or repeat.
-    SetPlayMode { random: bool, repeat_all: bool },
+    /// repeat) and `repeat` (off, the whole list, or the playing track — see
+    /// `Repeat`). A single request for both because they are read by the
+    /// same source at the same instant, and splitting them would let a
+    /// delivery race set one without the other. SDK-side default:
+    /// `set_play_mode` does nothing, for a source with no finite list.
+    SetPlayMode { random: bool, repeat: crate::command::Repeat },
     /// The core obtained the full-size original of the cover retained for
     /// `identity`, and left it at `file`. The Source may keep it.
     ///
@@ -165,6 +165,18 @@ pub enum SourceAction {
         /// Source knows.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         finite: bool,
+        /// Each entry of what `uri` designates is a whole track the player may
+        /// loop on its own: under `Repeat::One`, the core then sets mpv's
+        /// `loop-file`, and the track restarts at its natural end with no gap
+        /// and no round trip through the source.
+        ///
+        /// Declared by the source because only it knows: a list of files is
+        /// loopable entry by entry, a disc is **not** — it is one entry whose
+        /// tracks are chapters, and `loop-file` would loop the whole disc (the
+        /// cd plugin seeks back to the chapter instead). Absent (= `false`) for
+        /// a live stream, which must never loop.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        loopable: bool,
     },
     Stop,
     PlayerNext,
@@ -191,7 +203,7 @@ impl SourceAction {
     /// Going through this constructor rather than the literal variant avoids a
     /// field added later forcing every caller to be touched.
     pub fn play(uri: impl Into<String>) -> Self {
-        SourceAction::Play { uri: uri.into(), start: None, finite: false, playlist: false }
+        SourceAction::Play { uri: uri.into(), start: None, finite: false, playlist: false, loopable: false }
     }
 
     /// Positions playback on the element at index `n` of the list. No effect
@@ -200,36 +212,40 @@ impl SourceAction {
     /// To be used with `playlist()`: without it, the URI is loaded as a single
     /// media item and the index arrives before the list exists.
     #[must_use]
-    pub fn starting_at(self, n: i64) -> Self {
-        match self {
-            SourceAction::Play { uri, finite, playlist, .. } => {
-                SourceAction::Play { uri, start: Some(n), finite, playlist }
-            }
-            other => other,
+    pub fn starting_at(mut self, n: i64) -> Self {
+        if let SourceAction::Play { start, .. } = &mut self {
+            *start = Some(n);
         }
+        self
     }
 
     /// Declares that the URI is a **playlist**, to be unfolded as such.
     #[must_use]
-    pub fn playlist(self) -> Self {
-        match self {
-            SourceAction::Play { uri, start, finite, .. } => {
-                SourceAction::Play { uri, start, finite, playlist: true }
-            }
-            other => other,
+    pub fn playlist(mut self) -> Self {
+        if let SourceAction::Play { playlist, .. } = &mut self {
+            *playlist = true;
         }
+        self
     }
 
     /// Declares finite content, whose mpv idleness signals the end and not a
     /// cut. No effect on an action that is not a `Play`.
     #[must_use]
-    pub fn finite(self) -> Self {
-        match self {
-            SourceAction::Play { uri, start, playlist, .. } => {
-                SourceAction::Play { uri, start, finite: true, playlist }
-            }
-            other => other,
+    pub fn finite(mut self) -> Self {
+        if let SourceAction::Play { finite, .. } = &mut self {
+            *finite = true;
         }
+        self
+    }
+
+    /// Declares each entry loopable by the player on its own (see the
+    /// field's doc). No effect on an action that is not a `Play`.
+    #[must_use]
+    pub fn loopable(mut self) -> Self {
+        if let SourceAction::Play { loopable, .. } = &mut self {
+            *loopable = true;
+        }
+        self
     }
 }
 
@@ -400,7 +416,7 @@ pub struct SourceMessage {
     /// **capability of the source**, not of what is loaded: an empty CD tray
     /// still "has" a finite list in the sense that matters here (the modes
     /// below apply to it, once it holds a disc). It is what lets the web
-    /// remote grey out its random/repeat-all buttons on a source, the radio,
+    /// remote grey out its random/repeat buttons on a source, the radio,
     /// for which "draw without repeat, then stop" and "start the list over"
     /// have no meaning.
     ///
@@ -607,6 +623,16 @@ mod tests {
     }
 
     #[test]
+    fn loopable_travels_only_when_set() {
+        let plain = serde_json::to_string(&SourceAction::play("/l.m3u").playlist().finite()).unwrap();
+        assert!(!plain.contains("loopable"), "{plain}");
+        let looping = SourceAction::play("/l.m3u").playlist().finite().loopable();
+        let json = serde_json::to_string(&looping).unwrap();
+        assert!(json.contains(r#""loopable":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<SourceAction>(&json).unwrap(), looping);
+    }
+
+    #[test]
     fn start_and_finite_round_trip() {
         let a = SourceAction::play("/var/lib/ritornello/plugin-files.m3u").starting_at(4).finite();
         let json = serde_json::to_string(&a).unwrap();
@@ -630,7 +656,8 @@ mod tests {
                 uri: "http://x".into(),
                 start: None,
                 finite: false,
-                playlist: false
+                playlist: false,
+                loopable: false
             }
         );
     }
@@ -754,8 +781,9 @@ mod tests {
 
     #[test]
     fn set_play_mode_carries_both_flags() {
-        let r = SourceReq::SetPlayMode { random: true, repeat_all: false };
+        let r = SourceReq::SetPlayMode { random: true, repeat: crate::command::Repeat::One };
         let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""random":true"#) && json.contains(r#""repeat":"one""#), "{json}");
         assert_eq!(serde_json::from_str::<SourceReq>(&json).unwrap(), r);
     }
 

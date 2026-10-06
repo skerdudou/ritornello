@@ -66,7 +66,7 @@ act_prev = "Anterior"
 act_eject = "Expulsar"
 act_source_cycle = "Cambiar de fuente"
 act_toggle_random = "Aleatorio"
-act_toggle_repeat_all = "Repetir todo"
+act_cycle_repeat = "Repetir"
 act_power = "En espera"
 
 # source shortcut rows, appended at the end of the table (one per source the

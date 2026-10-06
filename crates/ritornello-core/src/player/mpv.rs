@@ -585,6 +585,12 @@ impl super::Player for MpvPlayer {
         self.ipc.command(&[json!("set_property"), json!("chapter"), json!(n)]).await?;
         Ok(())
     }
+
+    async fn set_loop_track(&self, on: bool) -> Result<()> {
+        let value = if on { "inf" } else { "no" };
+        self.ipc.command(&[json!("set_property"), json!("loop-file"), json!(value)]).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

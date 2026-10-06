@@ -55,4 +55,8 @@ pub trait Player: Send + Sync + 'static {
     /// whose tracks are expected to be chapters; a seek, never a reload —
     /// not measured on real hardware, see `SourceAction::PlayerChapter`.
     async fn set_chapter(&self, n: i64) -> Result<()>;
+    /// Loop the playing file at its natural end (mpv's `loop-file`), or stop
+    /// doing so. A setting of the player, not of the file: it survives the
+    /// loads that follow until it is set again.
+    async fn set_loop_track(&self, on: bool) -> Result<()>;
 }

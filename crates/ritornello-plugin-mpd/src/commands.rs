@@ -12,7 +12,7 @@
 
 use crate::state::{Snapshot, Subsystem};
 use crate::protocol::{ack, line, Ack};
-use ritornello_proto::{Command, Playback, Preset, SourceCatalog};
+use ritornello_proto::{Command, Playback, Preset, Repeat, SourceCatalog};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -163,6 +163,7 @@ pub const COMMANDS: &[&str] = &[
     "seekcur",
     "seekid",
     "setvol",
+    "single",
     "stats",
     "status",
     "stop",
@@ -328,9 +329,9 @@ pub fn handle(
         // the current volume, and clamped here (see `volume`) rather than
         // letting `Command::SetVolume`, which is absolute, overflow.
         "volume" => volume(inst, index, remainder),
-        // `random 0|1` / `repeat 0|1`: absolute values, unlike the physical
+        // `random 0|1` / `repeat 0|1` / `single 0|1`: absolute values, unlike the physical
         // remote's toggle keys. Always emitted, never guarded by the current
-        // state: unlike `pause`'s toggle, `SetRandom`/`SetRepeatAll` carry no
+        // state: unlike `pause`'s toggle, `SetRandom`/`SetRepeat` carry no
         // ambiguity a resend could double, so there is no race to close here
         // — see `SharedState::acknowledge_optimistic` for where the
         // comparison actually lives (it decides whether to wake `options`,
@@ -345,7 +346,8 @@ pub fn handle(
         // command that did nothing, the same as every other key on this
         // device.
         "random" => play_mode(index, "random", remainder, Command::SetRandom),
-        "repeat" => play_mode(index, "repeat", remainder, Command::SetRepeatAll),
+        "repeat" => repeat_mode(inst, index, "repeat", remainder),
+        "single" => repeat_mode(inst, index, "single", remainder),
         // `seek`/`seekid` ignore their first argument (position or id):
         // `SeekTo` cannot change track at the same time, and MPD only sends
         // this kind of command about what is already playing.
@@ -712,18 +714,14 @@ fn published_volume(inst: &Snapshot) -> u8 {
 fn status(inst: &Snapshot) -> Vec<String> {
     let queue = queue(inst);
     let mut lines = vec![line("volume", published_volume(inst))];
-    lines.push(line("repeat", u8::from(inst.state.repeat_all)));
+    lines.push(line("repeat", u8::from(!inst.state.repeat.is_off())));
     lines.push(line("random", u8::from(inst.state.random)));
-    // `single` and `consume` stay reported as zero and **not omitted**:
-    // clients always read them, and their absence makes them misbehave.
-    // Unlike `repeat`/`random`, they have no writing arm — `single` and
-    // `consume` are not in `COMMANDS` and fall into the default refusal — so
-    // this is the only place where the plugin publishes a value it cannot
-    // change, and it can only ever be zero. See the spec, § What the plugin
-    // does not do.
-    for key in ["single", "consume"] {
-        lines.push(line(key, 0));
-    }
+    lines.push(line("single", u8::from(inst.state.repeat == Repeat::One)));
+    // `consume` stays reported as zero and **not omitted**: clients always
+    // read it, and its absence makes them misbehave. It has no writing arm
+    // and falls into the default refusal, so this is the only place where
+    // the plugin publishes a value it cannot change.
+    lines.push(line("consume", 0));
     lines.push(line("playlist", inst.queue_version));
     // The **queue length**, not the maximum of the indices: it is the number
     // of entries a client will ask for. The two coincide on a synthesized
@@ -1309,10 +1307,10 @@ fn playid(inst: &Snapshot, index: usize, args: &[String]) -> Outcome {
     }
 }
 
-/// `random 0|1` / `repeat 0|1`: translates the boolean argument into the
+/// `random 0|1`: translates the boolean argument into the
 /// absolute-value command the core expects.
 ///
-/// **No argument-less form**, unlike `pause`: MPD's `random`/`repeat` always
+/// **No argument-less form**, unlike `pause`: MPD's `random` always
 /// carry the `0`/`1` a client toggled on its own side, where `pause` alone is
 /// the Play/Pause key itself. A missing or non-boolean argument is therefore
 /// always an `Ack::Arg`, never a toggle guessed from the current mode.
@@ -1322,6 +1320,32 @@ fn play_mode(index: usize, name: &str, args: &[String], to_command: fn(bool) -> 
         Some("1") => Outcome::acting(to_command(true)),
         _ => Outcome::Reject(ack(Ack::Arg, index, name, "boolean expected")),
     }
+}
+
+/// `repeat 0|1` and `single 0|1`: MPD splits the repeat setting into two
+/// flags, Ritornello holds one value (`Repeat`), so each command is read
+/// against the known setting.
+///
+/// `single 1` without `repeat` means "stop after this song" in MPD, a mode
+/// Ritornello does not have: it turns repeat-one on instead, and the next
+/// `status` shows `repeat: 1` — an honest report of what the device does,
+/// not an acknowledgement the following frame would undo. `single oneshot`
+/// (MPD >= 0.21) is refused as a non-boolean.
+fn repeat_mode(inst: &Snapshot, index: usize, name: &str, args: &[String]) -> Outcome {
+    let on = match args.first().map(String::as_str) {
+        Some("0") => false,
+        Some("1") => true,
+        _ => return Outcome::Reject(ack(Ack::Arg, index, name, "boolean expected")),
+    };
+    let target = match (name, on, inst.state.repeat) {
+        ("repeat", false, _) => Repeat::Off,
+        ("repeat", true, Repeat::Off) => Repeat::All,
+        ("repeat", true, kept) => kept,
+        ("single", true, _) => Repeat::One,
+        ("single", false, Repeat::One) => Repeat::All,
+        (_, _, kept) => kept,
+    };
+    Outcome::acting(Command::SetRepeat(target))
 }
 
 /// `pause [0|1]`. Without an argument, toggles; with one, only emits if the
@@ -1942,22 +1966,26 @@ mod tests {
 
     #[test]
     fn status_reports_the_real_play_modes() {
-        // `repeat`/`random` must publish the device's real modes, not a
-        // constant zero: a client reads them to draw its shuffle/repeat
-        // buttons. `single`/`consume` stay at zero — they are refused (see
-        // the "not supported" test) and each would add a case to every
-        // surface already delivered for this task.
-        let inst = snapshot_from(PlayerState { random: true, repeat_all: false, ..radio_stopped() });
+        // `repeat`/`random`/`single` must publish the device's real modes,
+        // not a constant zero: a client reads them to draw its
+        // shuffle/repeat buttons. Repeat-one is MPD's `repeat 1` + `single 1`.
+        // `consume` stays at zero: it is refused (see the "not supported"
+        // test).
+        let inst = snapshot_from(PlayerState { random: true, repeat: Repeat::Off, ..radio_stopped() });
         let lines = handle_ok(&inst, &["status"]);
         assert!(lines.contains(&"random: 1".to_string()), "{lines:?}");
-        assert!(lines.contains(&"repeat: 0".to_string()), "{lines:?}");
-        assert!(lines.contains(&"single: 0".to_string()), "{lines:?}");
-        assert!(lines.contains(&"consume: 0".to_string()), "{lines:?}");
-
-        let inst = snapshot_from(PlayerState { random: false, repeat_all: true, ..radio_stopped() });
-        let lines = handle_ok(&inst, &["status"]);
-        assert!(lines.contains(&"random: 0".to_string()), "{lines:?}");
-        assert!(lines.contains(&"repeat: 1".to_string()), "{lines:?}");
+        for (repeat, want_repeat, want_single) in [
+            (Repeat::Off, "repeat: 0", "single: 0"),
+            (Repeat::All, "repeat: 1", "single: 0"),
+            (Repeat::One, "repeat: 1", "single: 1"),
+        ] {
+            let inst = snapshot_from(PlayerState { random: false, repeat, ..radio_stopped() });
+            let lines = handle_ok(&inst, &["status"]);
+            assert!(lines.contains(&want_repeat.to_string()), "{repeat:?}: {lines:?}");
+            assert!(lines.contains(&want_single.to_string()), "{repeat:?}: {lines:?}");
+            assert!(lines.contains(&"consume: 0".to_string()), "{repeat:?}: {lines:?}");
+            assert!(lines.contains(&"random: 0".to_string()), "{repeat:?}: {lines:?}");
+        }
     }
 
     #[test]
@@ -2784,22 +2812,60 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // `random` / `repeat`
+    // `random` / `repeat` / `single`
     // ------------------------------------------------------------------
 
+    fn with_repeat(r: Repeat) -> Snapshot {
+        snapshot_from(PlayerState { repeat: r, has_finite_list: true, ..radio_stopped() })
+    }
+
     #[test]
-    fn random_and_repeat_translate_zero_and_one() {
+    fn repeat_and_single_translate_like_mpd() {
+        // MPD's own model: `repeat` + `single` together mean "repeat the
+        // playing song". Each command is read against the known setting.
+        use Repeat::*;
+        for (from, words, to) in [
+            (Off, ["repeat", "1"], All),
+            (Off, ["repeat", "0"], Off),
+            (All, ["repeat", "1"], All),
+            (All, ["repeat", "0"], Off),
+            (One, ["repeat", "1"], One),
+            (One, ["repeat", "0"], Off),
+            (Off, ["single", "1"], One),
+            (All, ["single", "1"], One),
+            (One, ["single", "1"], One),
+            (One, ["single", "0"], All),
+            (All, ["single", "0"], All),
+            (Off, ["single", "0"], Off),
+        ] {
+            assert_eq!(
+                cmds(&with_repeat(from), &words),
+                vec![Command::SetRepeat(to)],
+                "{from:?} + {words:?}"
+            );
+        }
         let inst = snapshot_stopped();
         assert_eq!(cmds(&inst, &["random", "1"]), vec![Command::SetRandom(true)]);
         assert_eq!(cmds(&inst, &["random", "0"]), vec![Command::SetRandom(false)]);
-        assert_eq!(cmds(&inst, &["repeat", "1"]), vec![Command::SetRepeatAll(true)]);
-        assert_eq!(cmds(&inst, &["repeat", "0"]), vec![Command::SetRepeatAll(false)]);
+    }
+
+    #[test]
+    fn single_oneshot_and_consume_are_refused() {
+        let inst = with_repeat(Repeat::All);
+        assert_eq!(
+            handle_words(&inst, 0, &["single", "oneshot"]),
+            Outcome::Reject("ACK [2@0] {single} boolean expected".to_string())
+        );
+        assert_eq!(
+            handle_words(&inst, 0, &["consume", "1"]),
+            Outcome::Reject("ACK [5@0] {consume} unsupported".to_string())
+        );
     }
 
     #[test]
     fn random_and_repeat_refuse_a_missing_or_non_boolean_argument() {
         // Unlike `pause`, there is no argument-less toggle: MPD's own
-        // `random`/`repeat` always carry the `0`/`1` and are refused
+        // `random`/`repeat`/`single` always carry the `0`/`1` and are refused
         // otherwise — never guessed from the current mode.
         //
         // **The exact `ACK`, not merely `Reject(_)`**: the default arm of
@@ -2812,7 +2878,7 @@ mod tests {
         // by these two arms — the same code/message pair `setvol` uses for
         // its own "invalid volume" (see `protocol.rs`'s `ack` test).
         let inst = snapshot_stopped();
-        for cmd in ["random", "repeat"] {
+        for cmd in ["random", "repeat", "single"] {
             let expected = format!("ACK [2@0] {{{cmd}}} boolean expected");
             assert_eq!(
                 handle_words(&inst, 0, &[cmd]),
@@ -2825,19 +2891,11 @@ mod tests {
     }
 
     #[test]
-    fn random_and_repeat_are_accepted_and_single_is_still_refused() {
-        // The pair this task actually asked for, and the boundary it must
-        // not cross: `single` (and `consume`, its twin) is not offered, so it
-        // is refused rather than silently ignored — see the "not supported"
-        // test for the exhaustive list.
+    fn random_repeat_and_single_are_accepted() {
         let inst = snapshot_stopped();
-        assert!(matches!(handle_words(&inst, 0, &["random", "1"]), Outcome::Reply { .. }));
-        assert!(matches!(handle_words(&inst, 0, &["repeat", "1"]), Outcome::Reply { .. }));
-        assert_eq!(
-            handle_words(&inst, 0, &["single", "1"]),
-            Outcome::Reject("ACK [5@0] {single} unsupported".to_string()),
-            "not offered, so refused rather than silently ignored"
-        );
+        for cmd in ["random", "repeat", "single"] {
+            assert!(matches!(handle_words(&inst, 0, &[cmd, "1"]), Outcome::Reply { .. }), "{cmd}");
+        }
     }
 
     // ------------------------------------------------------------------
@@ -3165,11 +3223,8 @@ mod tests {
             "rename",
             "playlistadd",
             "playlistdelete",
-            // `repeat` and `random` came out of it: this task's whole point.
-            // `single` and `consume` stay, deliberately — not asked for, and
-            // each would add a case to every surface `repeat`/`random` just
-            // touched.
-            "single",
+            // `repeat`, `random` and `single` came out of it. `consume`
+            // stays, deliberately: Ritornello has no such mode.
             "consume",
             "crossfade",
             "replay_gain_mode",

@@ -18,13 +18,13 @@ test('on a phone: bottom bar, top nav absent, named tile', async ({ page }) => {
   // two different questions ("this source has no tray" versus "this source
   // has nothing to shuffle"), and only the second one was asked for here.
   await expect(page.locator('[data-remote-command="SetRandom"]')).toBeDisabled()
-  await expect(page.locator('[data-remote-command="SetRepeatAll"]')).toBeDisabled()
+  await expect(page.locator('[data-remote-command="SetRepeat"]')).toBeDisabled()
   // And greyed keys that do not claim to be on: the core masks both modes on
   // a source with no finite list, so the pressed state cannot contradict the
   // greying. `files.spec.ts` proves the same thing the hard way, with the
   // setting actually armed beforehand.
   await expect(page.locator('[data-remote-command="SetRandom"]')).toHaveAttribute('aria-pressed', 'false')
-  await expect(page.locator('[data-remote-command="SetRepeatAll"]')).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.locator('[data-remote-command="SetRepeat"]')).toHaveAttribute('aria-pressed', 'false')
 })
 
 /**

@@ -80,6 +80,10 @@ describe('i18n keys used by the shell', () => {
       // views/remoteCommands.ts: indexed by `.key`, never hard-coded in a
       // `t(...)` call (HomeView.vue does `t(c.key)`).
       ...REMOTE_COMMANDS.map((c) => c.key),
+      // Transport.vue: the repeat button swaps its label for the current
+      // state's, `t(REPEAT_LABEL[...])`: an index, not a literal.
+      'remote_repeat_all',
+      'remote_repeat_one',
       // PluginView.ts: `error` is a ref typed `'plugin_unavailable' |
       // 'plugin_contract_mismatch' | null`, never a literal passed to
       // `t(...)` (it is `t(error.value)`).

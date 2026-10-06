@@ -40,7 +40,6 @@ class FakeEventSource {
       can_eject: false,
       has_finite_list: false,
       random: false,
-      repeat_all: false,
       ...state,
     }
     this.onmessage?.({ data: JSON.stringify(full) } as MessageEvent)
@@ -66,12 +65,12 @@ describe('REMOTE_COMMANDS', () => {
     // Decided during the redesign: seeking goes through the bar, the volume
     // through the slider. The four removed commands remain in the protocol
     // and on the physical remote. Random/repeat-all joined later, as
-    // `SetRandom`/`SetRepeatAll`: the SPA knows the current value, so it
+    // `SetRandom`/`SetRepeat`: the SPA knows the current value, so it
     // sends the absolute form, not the toggle reserved for a key that
     // doesn't (see `unavailable`'s doc).
     expect(REMOTE_COMMANDS).toHaveLength(10)
     expect(REMOTE_COMMANDS.map((c) => c.cmd.cmd).sort()).toEqual(
-      ['Eject', 'Mute', 'Next', 'PlayPause', 'Power', 'Prev', 'SetRandom', 'SetRepeatAll', 'SourceCycle', 'Stop'].sort(),
+      ['Eject', 'Mute', 'Next', 'PlayPause', 'Power', 'Prev', 'SetRandom', 'SetRepeat', 'SourceCycle', 'Stop'].sort(),
     )
   })
 
@@ -555,7 +554,7 @@ describe('unavailable / hidden', () => {
     source: 'radio', volume: 60, muted: false, standby: false, preset: null, preset_count: null,
     preset_name: null, status: null, overlay: null, artist: null, title: null, album: null,
     duration_s: null, origin: null, cover_href: null, cover_origin: null, position_s: null,
-    seekable: false, can_eject: false, has_finite_list: false, random: false, repeat_all: false, ...e,
+    seekable: false, can_eject: false, has_finite_list: false, random: false, ...e,
   })
 
   it('standby only lets Power through', () => {
@@ -571,18 +570,18 @@ describe('unavailable / hidden', () => {
 
   it('the two mode buttons grey on the source\'s capability, not on the mode\'s own value', () => {
     // `has_finite_list` is what decides it — a capability of the active
-    // source, like `can_eject` — never `random`/`repeat_all` themselves:
+    // source, like `can_eject` — never `random`/`repeat` themselves:
     // those are persisted settings (see their doc in the proto crate) that
     // must not be read as a proxy for the capability.
     expect(unavailable('SetRandom', state({ has_finite_list: false }))).toBe(true)
-    expect(unavailable('SetRepeatAll', state({ has_finite_list: false }))).toBe(true)
+    expect(unavailable('SetRepeat', state({ has_finite_list: false }))).toBe(true)
     expect(unavailable('SetRandom', state({ has_finite_list: true }))).toBe(false)
-    expect(unavailable('SetRepeatAll', state({ has_finite_list: true }))).toBe(false)
-    // The mutation this guards against: a rule reading `random`/`repeat_all`
+    expect(unavailable('SetRepeat', state({ has_finite_list: true }))).toBe(false)
+    // The mutation this guards against: a rule reading `random`/`repeat`
     // themselves instead of `has_finite_list` would still pass the two lines
     // above (both default to `false`) but would fail here.
     expect(unavailable('SetRandom', state({ has_finite_list: true, random: true }))).toBe(false)
-    expect(unavailable('SetRepeatAll', state({ has_finite_list: true, repeat_all: true }))).toBe(false)
+    expect(unavailable('SetRepeat', state({ has_finite_list: true, repeat: 'all' }))).toBe(false)
   })
 
   it('Eject is hidden as long as the source declares no tray, including before the first frame', () => {

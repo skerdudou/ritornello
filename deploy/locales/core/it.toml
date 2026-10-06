@@ -99,7 +99,9 @@ remote_eject = "Espelli"
 remote_source = "Sorgente"
 remote_power = "Standby"
 remote_random = "Casuale"
+remote_repeat_off = "Ripeti disattivato"
 remote_repeat_all = "Ripeti tutto"
+remote_repeat_one = "Ripeti uno"
 seek_step_label = "Passo di spostamento (s)"
 # Album covers. One card: the memory the cache may occupy (a budget, not a
 # count), then the ceilings on what the core agrees to read, then the

@@ -3363,6 +3363,9 @@ mod toggle_tests {
         async fn set_chapter(&self, _n: i64) -> Result<()> {
             Ok(())
         }
+        async fn set_loop_track(&self, _on: bool) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// A source client that answers nothing useful. No test here sends it a

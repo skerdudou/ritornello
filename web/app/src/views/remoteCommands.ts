@@ -73,14 +73,14 @@ export const REMOTE_TRANSPORT_SECONDARY: RemoteCommand[] = [
 ]
 
 /**
- * The two play modes, random and repeat-all: persisted settings of the
- * device (see `PlayerPayload.random`/`repeat_all`), not commands that act on
+ * The two play modes, random and repeat: persisted settings of the
+ * device (see `PlayerPayload.random`/`repeat`), not commands that act on
  * the current playback the way `Stop` or `Next` do — but toggles all the
  * same, hence set apart from the plain impulses of `REMOTE_TRANSPORT` and
  * `REMOTE_TRANSPORT_SECONDARY`. `Transport.vue` is what gives them their
  * visible pressed state, new to that component.
  *
- * `SetRandom`/`SetRepeatAll` and not `ToggleRandom`/`ToggleRepeatAll`: the
+ * `SetRandom`/`SetRepeat` and not `ToggleRandom`/`CycleRepeat`: the
  * SPA already knows the current value (it is in the pushed state), so it
  * sends the absolute form with the opposite of what it knows. The `Toggle…`
  * commands exist for a client that does not know the state, the physical
@@ -89,8 +89,13 @@ export const REMOTE_TRANSPORT_SECONDARY: RemoteCommand[] = [
  * other's intent instead of converging on the last one pressed.
  */
 export const REMOTE_RANDOM: RemoteCommand = { key: 'remote_random', cmd: { cmd: 'SetRandom' } }
-export const REMOTE_REPEAT_ALL: RemoteCommand = { key: 'remote_repeat_all', cmd: { cmd: 'SetRepeatAll' } }
-export const REMOTE_MODES: RemoteCommand[] = [REMOTE_RANDOM, REMOTE_REPEAT_ALL]
+/**
+ * One button for the three repeat states. Its `key` names the state the
+ * button announces at rest; `Transport.vue` swaps it for the current state's
+ * label (`remote_repeat_off|all|one`).
+ */
+export const REMOTE_REPEAT: RemoteCommand = { key: 'remote_repeat_off', cmd: { cmd: 'SetRepeat' } }
+export const REMOTE_MODES: RemoteCommand[] = [REMOTE_RANDOM, REMOTE_REPEAT]
 
 /**
  * All the commands of the page: used by the i18n safeguard
@@ -117,7 +122,7 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [
  * The two mode keys have a second rule: they need a list with an end, a
  * capability the active source declares for itself (`has_finite_list`,
  * exactly like `can_eject`) — never the modes' own value, `random`/
- * `repeat_all`, which say whether a mode is on rather than whether it can be
+ * `repeat`, which say whether a mode is on rather than whether it can be
  * (see their doc in `types.ts`). Greyed and not hidden, unlike eject: the
  * user asked to still see that the function exists on a source that cannot
  * honour it. The core refuses both commands on such a source and publishes
@@ -130,7 +135,7 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [
 export function unavailable(name: string, state: PlayerPayload | null): boolean {
   if (!state) return false
   if (state.standby && name !== 'Power') return true
-  if (name === 'SetRandom' || name === 'SetRepeatAll') return !state.has_finite_list
+  if (name === 'SetRandom' || name === 'SetRepeat') return !state.has_finite_list
   return false
 }
 

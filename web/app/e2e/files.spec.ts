@@ -374,7 +374,7 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   // from it — and it covers precisely what the owner reported: shuffle stayed
   // lit on the radio, on a key that refused to be pressed.
   const random = page.locator('[data-remote-command="SetRandom"]')
-  const repeatAll = page.locator('[data-remote-command="SetRepeatAll"]')
+  const repeat = page.locator('[data-remote-command="SetRepeat"]')
   await expect(random).toBeEnabled()
   await expect(random).toHaveAttribute('aria-pressed', 'false')
   await random.click()
@@ -387,8 +387,8 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   await expect(page.locator('[data-source]')).toHaveText('radio')
   await expect(random).toBeDisabled()
   await expect(random).toHaveAttribute('aria-pressed', 'false')
-  await expect(repeatAll).toBeDisabled()
-  await expect(repeatAll).toHaveAttribute('aria-pressed', 'false')
+  await expect(repeat).toBeDisabled()
+  await expect(repeat).toHaveAttribute('aria-pressed', 'false')
 
   // Masking is not erasing, and the difference is worth a round trip: the
   // setting comes back untouched on the source that can honour it. Turned off
@@ -400,6 +400,65 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   await random.click()
   await expect(random).toHaveAttribute('aria-pressed', 'false')
 
+  // --- Repeat-one wraps the playing file, and Next still moves on -------------
+  //
+  // The whole chain at once: the button's cycle, the core arming mpv's
+  // `loop-file` on the files plugin's loopable Play, and mpv really wrapping
+  // the 30 s fixture around instead of moving to the next entry. Run on a
+  // middle entry (1 of 3), so that "Next moves on" has a definite answer.
+  const readFrame = () =>
+    page.evaluate(
+      () =>
+        new Promise<{ position: number | null; preset: number | null }>((resolve, reject) => {
+          const stream = new EventSource('/api/player')
+          const timer = setTimeout(() => { stream.close(); reject(new Error('no frame within 2 s')) }, 2000)
+          stream.onmessage = (e) => {
+            clearTimeout(timer)
+            stream.close()
+            const frame = JSON.parse(e.data as string) as { position_s: number | null; preset: number | null }
+            resolve({ position: frame.position_s, preset: frame.preset })
+          }
+        }),
+    )
+  await page.locator('[data-preset-button]').nth(0).click()
+  await expect(page.locator('[data-player-preset]')).toHaveText('1')
+  await expect.poll(async () => (await readFrame()).preset, { timeout: 10_000 }).toBe(1)
+
+  try {
+    await repeat.click() // off -> all
+    await expect(repeat).toHaveAttribute('aria-pressed', 'true')
+    await repeat.click() // all -> one
+    await expect(repeat.locator('[data-repeat-one]')).toBeVisible()
+
+    // The 204 only proves the seek was enqueued. Two phases, so that a stale
+    // low frame cannot pass for a wrap: first a frame near the end proves the
+    // seek landed, then a low position on the same entry proves the file
+    // started over rather than moving on or never having left the start.
+    const nearEnd = await page.request.post('/api/command', { data: { cmd: 'SeekTo', arg: 28 } })
+    expect(nearEnd.status()).toBe(204)
+    await expect
+      .poll(async () => {
+        const f = await readFrame()
+        return f.preset === 1 && f.position != null && f.position >= 25
+      }, { timeout: 10_000 })
+      .toBe(true)
+    await expect
+      .poll(async () => {
+        const f = await readFrame()
+        return f.preset === 1 && f.position != null && f.position < 10
+      }, { timeout: 15_000 })
+      .toBe(true)
+
+    // Next is a manual skip: `loop-file` does not hold it back, and it goes
+    // to the following entry.
+    await page.locator('[data-remote-command="Next"]').click()
+    await expect.poll(async () => (await readFrame()).preset, { timeout: 10_000 }).toBe(2)
+  } finally {
+    // Back to off whatever happened: the journeys share this core and its
+    // state.json.
+    await page.request.post('/api/command', { data: { cmd: 'SetRepeat', arg: 'off' } })
+  }
+  await expect(repeat).toHaveAttribute('aria-pressed', 'false')
   // Put the harness back in the state we found it: the journeys share a single
   // core and `files.spec.ts` runs **before** `journey.spec.ts`, which requires
   // the radio to be active. The restoration is verified, not hoped for.

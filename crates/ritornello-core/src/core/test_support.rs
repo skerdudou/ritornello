@@ -27,6 +27,9 @@ pub(super) struct FakePlayer {
     /// Shared and set after construction, for the same reason as
     /// `progress`.
     pub(super) pause_fails: Arc<std::sync::atomic::AtomicBool>,
+    /// When true, `set_loop_track` fails — the IPC timeout, which says
+    /// nothing about whether mpv applied the command.
+    pub(super) loop_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -92,6 +95,13 @@ impl crate::player::Player for FakePlayer {
         self.calls.lock().unwrap().push(format!("chapter {n}"));
         Ok(())
     }
+    async fn set_loop_track(&self, on: bool) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("loop_track {on}"));
+        if self.loop_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -146,6 +156,11 @@ impl Source for FakeSource {
             // would fall through to `Noop` and the Play key would look
             // inert in the tests too.
             ("radio", SourceReq::Play) => SourceAction::play("http://fip"),
+            // The shape `plugin-files` sends: a list of files, each entry a
+            // whole track mpv may loop on its own. Carried by the cd fake on
+            // a digit no other test uses, so the loop tests need no third
+            // source in the rig.
+            ("cd", SourceReq::Select(9)) => SourceAction::play("/tmp/files.m3u").playlist().finite().loopable(),
             ("cd", SourceReq::Play) => SourceAction::play("cdda://").finite(),
             // Models the cd plugin's own `pending_chapter`: mpv's first
             // track notification after a resume can carry an action of its
@@ -496,7 +511,7 @@ pub(super) fn update_with_capabilities(can_eject: Option<bool>, has_finite_list:
 ///
 /// `setup()` starts with the capability unknown, hence false by the
 /// convention of `SourceMessage::has_finite_list`, so **a test that arms
-/// `random` or `repeat_all` for a reason of its own must say this first** or
+/// `random` or `repeat` for a reason of its own must say this first** or
 /// the command is refused and the test proves nothing about what it meant to
 /// prove. `can_eject` deliberately left alone: the two capabilities share a
 /// wire idiom, not a value.

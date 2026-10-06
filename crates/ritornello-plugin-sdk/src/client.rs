@@ -1194,7 +1194,7 @@ mod tests {
 
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
         let client = SourceClient::connect(&socket, "radio".into(), update_tx).await.unwrap();
-        client.request(SourceReq::SetPlayMode { random: true, repeat_all: false }).await.unwrap();
+        client.request(SourceReq::SetPlayMode { random: true, repeat: ritornello_proto::Repeat::Off }).await.unwrap();
         assert!(update_rx.try_recv().is_err(), "no update must be relayed");
     }
 

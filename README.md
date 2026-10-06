@@ -64,11 +64,11 @@ prereleases are published they lead nowhere: take the files from the
   A root can also be armed to **keep the covers it finds**: the picture
   fetched for an album is written as a `cover.jpg` beside the tracks —
   never over an image already there — so any other player finds it too.
-- **Shuffle and repeat-all** — on any source that has a finite list (a
-  folder, a disc), driven from the web page, from a key on the remote or
-  from an MPD client. Shuffle draws the list once and then stops rather
-  than rolling dice at every track, and both modes belong to the device:
-  they survive a source change, a stop and a restart.
+- **Shuffle, repeat all and repeat one** — on any source that has a
+  finite list (a folder, a disc), driven from the web page, from a key on
+  the remote or from an MPD client. Shuffle draws the list once and then
+  stops rather than rolling dice at every track, and both modes belong to
+  the device: they survive a source change, a stop and a restart.
 - **Now-playing metadata, with provenance** — the stream's ICY header,
   enriched by dedicated plugins (MusicBrainz for discs and for cutting up
   an ICY string, OUI FM's metadata feed, Radio France's live endpoint for

@@ -261,7 +261,7 @@ pub trait SourcePlugin: Send + 'static {
     /// A **capability of the Source**, not of what it has loaded — the same
     /// convention as `can_eject`. The sdk stamps it on every frame, the core
     /// relays it in `PlayerState`, and the web remote greys out its
-    /// random/repeat-all keys wherever neither mode has a meaning (the
+    /// random/repeat keys wherever neither mode has a meaning (the
     /// radio), instead of emitting a command the Source silently drops.
     ///
     /// Default **false**: not knowing means offering nothing. That is what
@@ -319,7 +319,7 @@ pub trait SourcePlugin: Send + 'static {
     /// implementor with nothing to react to here, files and cd both
     /// overriding it — compiling **and behaving** unchanged; a Source
     /// overrides this only when it must react to its own list running out
-    /// (starting over under repeat-all, drawing the next unplayed entry
+    /// (starting over under repeat, drawing the next unplayed entry
     /// under random).
     async fn end_of_content(&mut self) -> SourceOutcome {
         self.stop().await
@@ -332,7 +332,7 @@ pub trait SourcePlugin: Send + 'static {
     /// finite list, and for one that has not been taught the modes yet. Not a
     /// `SourceOutcome`: nothing about what is playing changes just because a
     /// mode was armed or disarmed, unlike every other request above.
-    async fn set_play_mode(&mut self, _random: bool, _repeat_all: bool) {}
+    async fn set_play_mode(&mut self, _random: bool, _repeat: ritornello_proto::Repeat) {}
 
     /// The core obtained the full-size original of the retained cover and left
     /// it at `file`. See `SourceReq::ArchiveCover` for why `identity`
@@ -450,8 +450,8 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             .presets(plugin.list_presets().await)
                     }
                     SourceReq::EndOfContent => plugin.end_of_content().await,
-                    SourceReq::SetPlayMode { random, repeat_all } => {
-                        plugin.set_play_mode(random, repeat_all).await;
+                    SourceReq::SetPlayMode { random, repeat } => {
+                        plugin.set_play_mode(random, repeat).await;
                         SourceOutcome::new(SourceAction::Noop)
                     }
                     SourceReq::ArchiveCover { identity, file } => {
@@ -1567,7 +1567,7 @@ mod tests {
         // `SourceOutcome` still unties the `SourceClient`'s oneshot, exactly
         // like `ArchiveCover` and `ListPresets` below.
         struct RecordingSource {
-            seen: std::sync::Arc<std::sync::Mutex<Option<(bool, bool)>>>,
+            seen: std::sync::Arc<std::sync::Mutex<Option<(bool, ritornello_proto::Repeat)>>>,
         }
         #[async_trait::async_trait]
         impl SourcePlugin for RecordingSource {
@@ -1577,8 +1577,8 @@ mod tests {
             async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
             async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
             async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
-            async fn set_play_mode(&mut self, random: bool, repeat_all: bool) {
-                *self.seen.lock().unwrap() = Some((random, repeat_all));
+            async fn set_play_mode(&mut self, random: bool, repeat: ritornello_proto::Repeat) {
+                *self.seen.lock().unwrap() = Some((random, repeat));
             }
         }
         let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -1597,14 +1597,14 @@ mod tests {
         let (read, mut write) = client.expect("plugin connection").into_split();
         let mut lines = BufReader::new(read).lines();
         write
-            .write_all(b"{\"id\":1,\"req\":\"SetPlayMode\",\"arg\":{\"random\":true,\"repeat_all\":false}}\n")
+            .write_all(b"{\"id\":1,\"req\":\"SetPlayMode\",\"arg\":{\"random\":true,\"repeat\":\"all\"}}\n")
             .await
             .unwrap();
         let line = lines.next_line().await.unwrap().unwrap();
         let msg: SourceMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(msg.id, Some(1), "the oneshot must be released even on a Noop");
         assert_eq!(msg.action, Some(SourceAction::Noop));
-        assert_eq!(*seen.lock().unwrap(), Some((true, false)));
+        assert_eq!(*seen.lock().unwrap(), Some((true, ritornello_proto::Repeat::All)));
     }
 
     #[tokio::test]

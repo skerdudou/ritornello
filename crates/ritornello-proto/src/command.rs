@@ -1,5 +1,40 @@
 use serde::{Deserialize, Serialize};
 
+/// The repeat setting: one value with three states rather than two
+/// booleans, because "repeat one" and "repeat all" exclude each other — a
+/// pair of flags would have a fourth state with no meaning.
+///
+/// Lowercase on the wire (`"off"`, `"all"`, `"one"`), like `Playback`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Repeat {
+    /// The list plays once, then playback stops.
+    #[default]
+    Off,
+    /// The list starts over once exhausted.
+    All,
+    /// The playing track starts over at its natural end. A manual
+    /// next/previous still changes track, and the new one repeats in turn.
+    One,
+}
+
+impl Repeat {
+    /// The value after this one in the physical key's cycle:
+    /// off → all → one → off.
+    pub fn next(self) -> Self {
+        match self {
+            Repeat::Off => Repeat::All,
+            Repeat::All => Repeat::One,
+            Repeat::One => Repeat::Off,
+        }
+    }
+
+    /// Serves `skip_serializing_if`: the default value does not travel.
+    pub fn is_off(&self) -> bool {
+        matches!(self, Repeat::Off)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", content = "arg")]
 pub enum Command {
@@ -48,16 +83,18 @@ pub enum Command {
     /// for both an on and an off key, so it toggles, exactly like `Plus10`
     /// toggling its own pending state.
     ToggleRandom,
-    /// Flip repeat-all on/off. Same reasoning and the same physical-key
-    /// constraint as `ToggleRandom`.
-    ToggleRepeatAll,
+    /// Move the repeat setting one notch along its cycle (see
+    /// `Repeat::next`). For a physical key, which neither knows the current
+    /// value nor has room for three keys — same reasoning as `ToggleRandom`.
+    CycleRepeat,
     /// Absolute value of random play. Serves the SPA and MPD's `random`
     /// command; no physical key emits it — same reason for being as
     /// `SetVolume` beside `VolumeUp`: two clients that cross a toggle must
     /// not undo each other's intent.
     SetRandom(bool),
-    /// Absolute value of repeat-all. Same reason for being as `SetRandom`.
-    SetRepeatAll(bool),
+    /// Absolute value of the repeat setting. Same reason for being as
+    /// `SetRandom`.
+    SetRepeat(Repeat),
 }
 
 /// One line of the input protocol: the command, plus whether it comes from a
@@ -165,18 +202,38 @@ mod tests {
 
     #[test]
     fn play_mode_commands_round_trip() {
-        // Toggles for a physical key (a remote has no room for an on and an
-        // off key), absolute values for the SPA and for MPD — the same pair
-        // as `VolumeUp` beside `SetVolume`, and for the same reason: two
-        // clients that cross must not undo each other.
+        // A cycling key for a physical remote (it has no room for three
+        // keys, and does not know the current value), absolute values for
+        // the SPA and for MPD — the same pair as `VolumeUp` beside
+        // `SetVolume`, and for the same reason: two clients that cross must
+        // not undo each other.
         for (cmd, expected) in [
             (Command::ToggleRandom, r#"{"cmd":"ToggleRandom"}"#),
-            (Command::ToggleRepeatAll, r#"{"cmd":"ToggleRepeatAll"}"#),
+            (Command::CycleRepeat, r#"{"cmd":"CycleRepeat"}"#),
             (Command::SetRandom(true), r#"{"cmd":"SetRandom","arg":true}"#),
-            (Command::SetRepeatAll(false), r#"{"cmd":"SetRepeatAll","arg":false}"#),
+            (Command::SetRepeat(Repeat::Off), r#"{"cmd":"SetRepeat","arg":"off"}"#),
+            (Command::SetRepeat(Repeat::All), r#"{"cmd":"SetRepeat","arg":"all"}"#),
+            (Command::SetRepeat(Repeat::One), r#"{"cmd":"SetRepeat","arg":"one"}"#),
         ] {
             assert_eq!(serde_json::to_string(&cmd).unwrap(), expected);
             assert_eq!(serde_json::from_str::<Command>(expected).unwrap(), cmd);
         }
+    }
+
+    #[test]
+    fn repeat_cycles_off_all_one_and_back() {
+        assert_eq!(Repeat::Off.next(), Repeat::All);
+        assert_eq!(Repeat::All.next(), Repeat::One);
+        assert_eq!(Repeat::One.next(), Repeat::Off);
+        assert_eq!(Repeat::default(), Repeat::Off);
+    }
+
+    #[test]
+    fn the_old_repeat_all_commands_no_longer_parse() {
+        // No compatibility kept on purpose (no final release yet): a
+        // bindings file still naming the old command must fail loudly at
+        // parse time, not be silently mapped to something.
+        assert!(serde_json::from_str::<Command>(r#"{"cmd":"ToggleRepeatAll"}"#).is_err());
+        assert!(serde_json::from_str::<Command>(r#"{"cmd":"SetRepeatAll","arg":true}"#).is_err());
     }
 }

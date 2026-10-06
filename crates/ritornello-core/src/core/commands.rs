@@ -457,27 +457,29 @@ impl<P: Player> Core<P> {
             // would leave the web remote — which cannot send here at all —
             // disagreeing with the physical remote about what the device
             // remembers.
-            Command::ToggleRandom | Command::ToggleRepeatAll | Command::SetRandom(_) | Command::SetRepeatAll(_)
+            Command::ToggleRandom | Command::SetRandom(_) | Command::CycleRepeat | Command::SetRepeat(_)
                 if !self.has_finite_list => {}
             Command::ToggleRandom => {
                 self.random = !self.random;
                 self.persist();
                 self.push_play_mode().await;
             }
-            Command::ToggleRepeatAll => {
-                self.repeat_all = !self.repeat_all;
+            Command::CycleRepeat => {
+                self.repeat = self.repeat.next();
                 self.persist();
                 self.push_play_mode().await;
+                self.sync_loop_track().await?;
             }
             Command::SetRandom(v) => {
                 self.random = v;
                 self.persist();
                 self.push_play_mode().await;
             }
-            Command::SetRepeatAll(v) => {
-                self.repeat_all = v;
+            Command::SetRepeat(r) => {
+                self.repeat = r;
                 self.persist();
                 self.push_play_mode().await;
+                self.sync_loop_track().await?;
             }
         }
         Ok(())
@@ -488,6 +490,8 @@ impl<P: Player> Core<P> {
 mod tests {
     use crate::core::*;
     use crate::core::test_support::*;
+    use ritornello_proto::Repeat;
+    use std::sync::Mutex;
 
     #[tokio::test]
     async fn standby_blocks_everything_but_power() {
@@ -1119,12 +1123,22 @@ mod tests {
         assert!(state_rx.borrow().random);
         core.handle_command(Command::ToggleRandom).await.unwrap();
         assert!(!state_rx.borrow().random, "the toggle serves the physical key");
-        core.handle_command(Command::SetRepeatAll(true)).await.unwrap();
-        assert!(state_rx.borrow().repeat_all);
-        core.handle_command(Command::ToggleRepeatAll).await.unwrap();
-        assert!(!state_rx.borrow().repeat_all, "the toggle serves the physical key here too");
-        core.handle_command(Command::ToggleRepeatAll).await.unwrap();
-        assert!(state_rx.borrow().repeat_all, "applied twice, the toggle returns to its starting value");
+        core.handle_command(Command::SetRepeat(Repeat::All)).await.unwrap();
+        assert_eq!(state_rx.borrow().repeat, Repeat::All);
+        core.handle_command(Command::CycleRepeat).await.unwrap();
+        assert_eq!(state_rx.borrow().repeat, Repeat::One, "the cycle serves the physical key here too");
+        core.handle_command(Command::CycleRepeat).await.unwrap();
+        assert_eq!(state_rx.borrow().repeat, Repeat::Off, "the cycle comes back to off after one");
+    }
+
+    #[tokio::test]
+    async fn the_repeat_key_cycles_off_all_one_and_back() {
+        let (mut core, _pc, _sc, state_rx, _d) = setup();
+        declare_finite_list(&mut core, "radio");
+        for expected in [Repeat::All, Repeat::One, Repeat::Off] {
+            core.handle_command(Command::CycleRepeat).await.unwrap();
+            assert_eq!(state_rx.borrow().repeat, expected);
+        }
     }
 
     #[tokio::test]
@@ -1133,7 +1147,7 @@ mod tests {
         let (mut core, _pc, _sc, _rx, dir) = setup();
         declare_finite_list(&mut core, "radio");
         core.handle_command(Command::SetRandom(true)).await.unwrap();
-        core.handle_command(Command::SetRepeatAll(true)).await.unwrap();
+        core.handle_command(Command::SetRepeat(Repeat::All)).await.unwrap();
 
         let persisted = crate::state::load(&dir.path().join("state.json"));
         let (mut reloaded, _pc2, _sc2, _rx2, _d2) = setup_persisted(persisted);
@@ -1144,7 +1158,7 @@ mod tests {
         // survived.
         declare_finite_list(&mut reloaded, "radio");
         assert!(reloaded.player_state().random, "random must survive a restart");
-        assert!(reloaded.player_state().repeat_all, "repeat_all must survive a restart");
+        assert_eq!(reloaded.player_state().repeat, Repeat::All, "repeat must survive a restart");
     }
 
     #[tokio::test]
@@ -1180,17 +1194,17 @@ mod tests {
         for cmd in [
             Command::SetRandom(true),
             Command::ToggleRandom,
-            Command::SetRepeatAll(true),
-            Command::ToggleRepeatAll,
+            Command::SetRepeat(Repeat::One),
+            Command::CycleRepeat,
         ] {
             let label = format!("{cmd:?}");
             core.handle_command(cmd).await.unwrap();
             assert!(!state_rx.borrow().random, "{label}: nothing may show through on a mute source");
-            assert!(!state_rx.borrow().repeat_all, "{label}: same for repeat-all");
+            assert_eq!(state_rx.borrow().repeat, Repeat::Off, "{label}: same for repeat");
 
             declare_finite_list(&mut core, "radio");
             assert!(!state_rx.borrow().random, "{label} armed random on a source with no list");
-            assert!(!state_rx.borrow().repeat_all, "{label} armed repeat-all on a source with no list");
+            assert_eq!(state_rx.borrow().repeat, Repeat::Off, "{label} armed repeat on a source with no list");
             core.handle_source_update("radio", update_with_capabilities(None, Some(false)));
         }
     }
@@ -1221,7 +1235,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_published_modes_never_outlive_the_finite_list() {
-        // The invariant every client leans on: `random`/`repeat_all` are
+        // The invariant every client leans on: `random`/`repeat` are
         // never true while `has_finite_list` is false. The owner reported
         // the shuffle icon lit on the radio, next to a key that refused to
         // be pressed, because this mask did not exist.
@@ -1233,16 +1247,16 @@ mod tests {
         let (mut core, _pc, _sc, state_rx, _d) = setup();
         declare_finite_list(&mut core, "radio");
         core.handle_command(Command::SetRandom(true)).await.unwrap();
-        core.handle_command(Command::SetRepeatAll(true)).await.unwrap();
+        core.handle_command(Command::SetRepeat(Repeat::All)).await.unwrap();
         assert!(state_rx.borrow().random);
-        assert!(state_rx.borrow().repeat_all);
+        assert_eq!(state_rx.borrow().repeat, Repeat::All);
 
         core.handle_source_update("radio", update_with_capabilities(None, Some(false)));
         {
             let s = state_rx.borrow();
             assert!(!s.has_finite_list);
             assert!(!s.random, "a mode the source cannot honour is not a mode the device is in");
-            assert!(!s.repeat_all, "and the same for repeat-all");
+            assert_eq!(s.repeat, Repeat::Off, "and the same for repeat");
         }
 
         declare_finite_list(&mut core, "radio");
@@ -1250,7 +1264,7 @@ mod tests {
         {
             let s = state_rx.borrow();
             assert!(!s.random, "standby masks the modes as it already masked has_finite_list");
-            assert!(!s.repeat_all, "and the same for repeat-all");
+            assert_eq!(s.repeat, Repeat::Off, "and the same for repeat");
         }
         core.handle_command(Command::Power).await.unwrap(); // wake
         // Still masked right after the wake, and that is not this rule's
@@ -1272,5 +1286,106 @@ mod tests {
         core.resume().await.unwrap();
         core.handle_command(Command::Stop).await.unwrap();
         assert!(source_calls.lock().unwrap().iter().any(|c| c == "radio:Stop"));
+    }
+
+    /// The `loop_track` calls the fake player received, in order.
+    fn loop_calls(player: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        player.lock().unwrap().iter().filter(|c| c.starts_with("loop_track")).cloned().collect()
+    }
+
+    /// Lands on the cd fake with its finite list declared, as a real cd
+    /// plugin would on arrival, so the repeat commands are not refused.
+    async fn on_the_cd(core: &mut Core<FakePlayer>) {
+        core.handle_command(Command::SelectSource("cd".into())).await.unwrap();
+        declare_finite_list(core, "cd");
+    }
+
+    #[tokio::test]
+    async fn repeat_one_arms_the_loop_on_a_loopable_play() {
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::SetRepeat(Repeat::One)).await.unwrap();
+        assert!(loop_calls(&player).is_empty(), "the disc's own Play is not loopable");
+        core.handle_command(Command::Select(9)).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true"]);
+    }
+
+    #[tokio::test]
+    async fn leaving_repeat_one_disarms_the_loop_mid_track() {
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::SetRepeat(Repeat::One)).await.unwrap();
+        core.handle_command(Command::Select(9)).await.unwrap();
+        core.handle_command(Command::SetRepeat(Repeat::All)).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true", "loop_track false"]);
+    }
+
+    #[tokio::test]
+    async fn entering_repeat_one_arms_the_loop_mid_track() {
+        // From the command, not from a Play: the track already playing must
+        // loop, without waiting for the next load.
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::Select(9)).await.unwrap();
+        assert!(loop_calls(&player).is_empty());
+        core.handle_command(Command::CycleRepeat).await.unwrap(); // off -> all
+        assert!(loop_calls(&player).is_empty(), "repeat-all never loops a track");
+        core.handle_command(Command::CycleRepeat).await.unwrap(); // all -> one
+        assert_eq!(loop_calls(&player), vec!["loop_track true"]);
+    }
+
+    #[tokio::test]
+    async fn switching_to_a_source_whose_play_is_not_loopable_disarms_the_loop() {
+        // A live stream left under `loop-file` would replay its buffer at a
+        // cut instead of being restarted.
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::SetRepeat(Repeat::One)).await.unwrap();
+        core.handle_command(Command::Select(9)).await.unwrap();
+        core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true", "loop_track false"]);
+        // Armed before the load, as `apply` promises: the disarm must reach
+        // the player before the radio's load does.
+        let calls = player.lock().unwrap().clone();
+        let disarm = calls.iter().position(|c| c == "loop_track false").expect("disarm sent");
+        let load = calls.iter().position(|c| c == "play http://fip").expect("radio loaded");
+        assert!(disarm < load, "the loop must be disarmed before the load: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn a_remembered_repeat_one_arms_the_loop_on_the_first_loopable_play() {
+        // No command after a reboot, only the persisted value.
+        let (mut core, player, _src, _state, _dir) =
+            setup_persisted(PersistedState { repeat: Repeat::One, ..PersistedState::default() });
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::Select(9)).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true"]);
+    }
+
+    #[tokio::test]
+    async fn the_loop_is_only_sent_when_it_changes() {
+        // Dozens of tests pin the exact sequence of player calls: a loop
+        // command on every Play would break them all, and say nothing.
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::SetRepeat(Repeat::One)).await.unwrap();
+        core.handle_command(Command::Select(9)).await.unwrap();
+        core.handle_command(Command::Select(9)).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true"]);
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_loop_command_leaves_the_state_unknown() {
+        // The IPC times out after 5 s although the command was written, and
+        // mpv may apply it anyway. Caching the old value would then let the
+        // next live stream play under `loop-file=inf`.
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::SetRepeat(Repeat::One)).await.unwrap();
+        core.player.loop_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(core.handle_command(Command::Select(9)).await.is_err());
+        core.player.loop_fails.store(false, std::sync::atomic::Ordering::SeqCst);
+        core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true", "loop_track false"]);
     }
 }

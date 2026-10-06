@@ -310,7 +310,7 @@ impl<P: Player> Core<P> {
     /// just hot-wired, or any other single-source caller of
     /// `SourceReq::SetPlayMode`.
     ///
-    /// `random` and `repeat_all` always have a value (`false` by default,
+    /// `random` and `repeat` always have a value (`false` by default,
     /// read from `PersistedState` at construction), so there is never a
     /// reason to skip this send.
     ///
@@ -319,7 +319,7 @@ impl<P: Player> Core<P> {
     pub async fn send_play_mode_to(&self, name: &str) {
         if let Some(src) = self.sources.get(name)
             && let Err(e) = src
-                .request(SourceReq::SetPlayMode { random: self.random, repeat_all: self.repeat_all })
+                .request(SourceReq::SetPlayMode { random: self.random, repeat: self.repeat })
                 .await
         {
             tracing::warn!("SetPlayMode to {name}: {e}");
@@ -328,7 +328,7 @@ impl<P: Player> Core<P> {
 
     /// Broadcasts the current play mode to **every** wired source, active or
     /// not: unlike `can_eject`/`has_finite_list`, which describe the active
-    /// source's own capabilities, `random`/`repeat_all` are a setting of the
+    /// source's own capabilities, `random`/`repeat` are a setting of the
     /// device, and every source is entitled to know it — the SDK's default
     /// `set_play_mode` already no-ops for one that has no finite list to
     /// shuffle or repeat (see `SourcePlugin::set_play_mode`).
@@ -401,10 +401,32 @@ impl<P: Player> Core<P> {
         self.publish_catalog();
     }
 
+    /// Sets mpv's `loop-file` to what the device should be doing now:
+    /// looping the playing file exactly when the repeat setting is `One` and
+    /// the last load was declared loopable by its source.
+    ///
+    /// Called from the only two places either term moves — a `Play` applied
+    /// (`apply`) and a repeat command — rather than from every command:
+    /// standby and a source switch both end in a new `Play` or in nothing
+    /// playing at all. Sent only on a change, so the exact player call
+    /// sequences pinned elsewhere stay untouched.
+    pub(super) async fn sync_loop_track(&mut self) -> Result<()> {
+        let wanted = self.repeat == ritornello_proto::Repeat::One && self.load_loopable;
+        if self.loop_track_armed != Some(wanted) {
+            // Unknown until answered: a timed-out command may still have
+            // been applied by mpv, so a failure must not leave the old value
+            // cached.
+            self.loop_track_armed = None;
+            self.player.set_loop_track(wanted).await?;
+            self.loop_track_armed = Some(wanted);
+        }
+        Ok(())
+    }
+
     pub(super) async fn apply(&mut self, action: SourceAction) -> Result<()> {
         match action {
             SourceAction::Noop => {}
-            SourceAction::Play { uri, start, finite, playlist } => {
+            SourceAction::Play { uri, start, finite, playlist, loopable } => {
                 // The restart machinery (`expecting_stream` then
                 // `PlaybackIdle` → retry) only exists for network streams:
                 // content that ends is a normal end, not a failure. Confusing
@@ -428,6 +450,16 @@ impl<P: Player> Core<P> {
                 // confirms it (a sleeping share, a file gone) must not be
                 // read as "the list ran out".
                 self.played_since_play = false;
+                // Armed **before** the load: `loop-file` is a player setting
+                // read at the file's end, and setting it first leaves no
+                // window where a non-loopable load runs under a stale loop.
+                self.load_loopable = loopable;
+                // If this fails, the `?` drops the whole `Play`: nothing
+                // loads, while `load_loopable` already names it. That is the
+                // safe direction — the cache is then unknown, so the next
+                // `Play` resyncs — and a 5 s IPC timeout means mpv is in
+                // trouble anyway.
+                self.sync_loop_track().await?;
                 // `loadlist` for a playlist, `loadfile` for a medium: it is
                 // the Source that declares it, and the core does not guess. An
                 // `.m3u8` is a playlist for a file player and an HLS stream
@@ -1021,7 +1053,7 @@ mod tests {
         assert!(
             calls.iter().any(|c| c.starts_with("files:SetPlayMode")
                 && c.contains("random: true")
-                && c.contains("repeat_all: false")),
+                && c.contains("repeat: Off")),
             "the late source must learn the mode already in force: {calls:?}"
         );
     }
@@ -1042,7 +1074,7 @@ mod tests {
         assert!(
             calls.iter().any(|c| c.starts_with("cd:SetPlayMode")
                 && c.contains("random: true")
-                && c.contains("repeat_all: false")),
+                && c.contains("repeat: Off")),
             "the newly active source must be handed the mode at its activation: {calls:?}"
         );
     }
@@ -1062,13 +1094,13 @@ mod tests {
         assert!(
             calls.iter().any(|c| c.starts_with("radio:SetPlayMode")
                 && c.contains("random: true")
-                && c.contains("repeat_all: false")),
+                && c.contains("repeat: Off")),
             "radio must relearn the mode on wake: {calls:?}"
         );
         assert!(
             calls.iter().any(|c| c.starts_with("cd:SetPlayMode")
                 && c.contains("random: true")
-                && c.contains("repeat_all: false")),
+                && c.contains("repeat: Off")),
             "cd, though inactive, must relearn it too: {calls:?}"
         );
     }
@@ -1076,8 +1108,8 @@ mod tests {
     #[tokio::test]
     async fn only_the_play_mode_is_pushed_to_a_hot_wired_source() {
         // The play mode is the only setting a hot-wired, non-first source is
-        // owed: `random` and `repeat_all` always have a value (`false` or
-        // `true`, never "unset"), so it is always pushed, at its default
+        // owed: `random` and `repeat` always have a value (`false`/`Off` or
+        // another one, never "unset"), so it is always pushed, at its default
         // value here.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let late_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1089,7 +1121,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             late_calls.lock().unwrap().as_slice(),
-            ["files:SetPlayMode { random: false, repeat_all: false }".to_string()]
+            ["files:SetPlayMode { random: false, repeat: Off }".to_string()]
         );
     }
 
@@ -1115,7 +1147,7 @@ mod tests {
         assert_eq!(
             seen.lock().unwrap().as_slice(),
             [
-                "radio:SetPlayMode { random: false, repeat_all: false }".to_string(),
+                "radio:SetPlayMode { random: false, repeat: Off }".to_string(),
                 "radio:Wake".into()
             ],
             "the play mode BEFORE the wake, exactly as at startup"
@@ -1143,7 +1175,7 @@ mod tests {
 
         assert_eq!(
             seen.lock().unwrap().as_slice(),
-            ["radio:SetPlayMode { random: false, repeat_all: false }".to_string()]
+            ["radio:SetPlayMode { random: false, repeat: Off }".to_string()]
         );
         assert!(
             !core.player.calls.lock().unwrap().iter().any(|c| c.starts_with("play")),

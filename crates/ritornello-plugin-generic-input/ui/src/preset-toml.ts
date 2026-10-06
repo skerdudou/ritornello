@@ -41,12 +41,12 @@ export const ACTIONS: Row[] = [
   { key: 'act_prev', cmd: { cmd: 'Prev' } },
   { key: 'act_eject', cmd: { cmd: 'Eject' } },
   { key: 'act_source_cycle', cmd: { cmd: 'SourceCycle' } },
-  // The toggle forms, not the absolute ones (`SetRandom`/`SetRepeatAll`): a
-  // physical key does not know the current value of the mode it flips,
-  // unlike the web remote — see `remoteCommands.ts` of the SPA, which binds
-  // the absolute forms instead for exactly that reason.
+  // The toggle and cycle forms, not the absolute ones (`SetRandom`/
+  // `SetRepeat`): a physical key does not know the current value of the
+  // mode it moves, unlike the web remote — see `remoteCommands.ts` of the
+  // SPA, which binds the absolute forms instead for exactly that reason.
   { key: 'act_toggle_random', cmd: { cmd: 'ToggleRandom' } },
-  { key: 'act_toggle_repeat_all', cmd: { cmd: 'ToggleRepeatAll' } },
+  { key: 'act_cycle_repeat', cmd: { cmd: 'CycleRepeat' } },
   { key: 'act_power', cmd: { cmd: 'Power' } },
 ]
 
