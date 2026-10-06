@@ -209,8 +209,11 @@ for equality, and a person simply takes the newest.
 
 The release gesture, then: bump the version of whichever component you
 changed, and tag with the next product number. The workflow publishes
-exactly the components whose declared version moved since the previous
-published release (`scripts/changed-components.sh`, run from a development
+exactly the components whose declared version moved since the release the
+tag is measured against (a finished tag against the previous finished
+release, a prerelease tag against the previous published release,
+prereleases included: see [Publishing a prerelease](#publishing-a-prerelease);
+`scripts/changed-components.sh`, run from a development
 machine against an arbitrary ref — see [What has not been
 verified](#what-has-not-been-verified) below for how much of this has
 actually been exercised). Forgetting to bump a component's version is not a
@@ -246,8 +249,9 @@ another number is shown "incompatible" on the System page.
 The **first finished release** republishes everything: a finished product
 refuses any prerelease component (see below), so every component still on a
 beta number moves once. While only prereleases exist there is no finished
-release to measure against, so the script behaves as for a first release and
-publishes everything.
+release to measure against, so a finished tag behaves as for a first release
+and publishes everything; a prerelease tag is measured against the previous
+prerelease, and only the first prerelease ever published carries everything.
 
 Detection reads a single page of the GitHub releases API — one hundred
 releases (`per_page=100`). A component that has not shipped a new archive of
@@ -464,11 +468,25 @@ core and the plugins; a companion has a number of its own, see above):
    `scripts/package-release.sh --self-test` to see its case table. A
    companion is exempt from all three.
 
+**What a prerelease carries.** Only what moved since the previous published
+release, prereleases included (`release-tags.sh base-for <tag>` decides, and
+`--self-test` holds its cases): a beta no longer republishes components
+that the previous beta already delivered. Nothing is lost by that. A device
+that ticked "Offer prereleases" resolves each component to the newest
+release carrying its archive, prereleases included, so a component unchanged
+since beta.3 is found in beta.3. `ritornello-install` does the same, per
+archive, from the release that carries it, and `catalogue.json` and
+`inventory.json` describe every component whatever the release carries. The
+bundle of all plugins is attached to every release regardless. The one
+visible consequence is for someone assembling an install by hand from a
+beta's assets: it may need an archive from an older beta; the installer
+finds it by itself.
+
 The finished release then needs no special handling: its components differ
 from the beta's, so every device installs them, testers included. That
-holds because the "what changed" step measures against the last *finished*
-release, so anything a beta shipped is shipped again by the delivery it
-prepared.
+holds because the finished tag is measured against the last *finished*
+release and not against the last beta, so anything a beta shipped is shipped
+again by the delivery it prepared.
 
 On the device, prereleases are only ever *offered* to an owner who ticked
 "Offer prereleases" (see

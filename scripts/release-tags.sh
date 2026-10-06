@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The two decisions of the release workflow that depend on a tag's NAME, kept
+# The decisions of the release workflow that depend on a tag's NAME, kept
 # here so they can be run and broken on a development machine rather than
 # discovered by pushing a tag (a workflow change is never testable from its
 # own branch).
@@ -16,6 +16,17 @@
 #       them), and prints the first that is not the installer's. Prints
 #       nothing when there is none (nothing was ever published): a first
 #       release publishes everything.
+#   release-tags.sh base-for <tag>
+#       Reads `tag<TAB>isPrerelease` lines on stdin, newest first, and prints
+#       the release a release of <tag> is measured against by
+#       changed-components.sh. A prerelease tag (a semver suffix, the same
+#       shape ci.yml uses to create it with --prerelease) is measured
+#       against the newest published product release, prereleases included:
+#       a beta carries only what moved since the previous beta. A finished
+#       tag is measured against the newest FINISHED one, so it carries
+#       everything that changed since, betas' work included. Installer
+#       releases and <tag> itself are never the answer. Prints nothing when
+#       there is no candidate: that release publishes everything.
 #   release-tags.sh check-installer-tag <tag> <Cargo.toml>
 #       Exits 0 when <tag> is exactly `installer-v` + the version the
 #       manifest declares, and that version is a finished X.Y.Z. A release
@@ -47,6 +58,24 @@ newest_product() {
     fi
   done
   [ -z "$found" ] || printf '%s\n' "$found"
+}
+
+base_for() {
+  local want=$1 tag pre found= prerelease_tag=false
+  case "$want" in *-*) prerelease_tag=true ;; esac
+  # Reads to the end, for the reason given in newest_product.
+  while IFS=$'	' read -r tag pre || [ -n "$tag" ]; do
+    tag=${tag%$''}
+    pre=${pre%$''}
+    [ -n "$tag" ] || continue
+    is_installer_tag "$tag" && continue
+    [ "$tag" != "$want" ] || continue
+    # A finished tag skips prereleases; a prerelease tag skips nothing.
+    if [ "$prerelease_tag" = false ] && [ "$pre" = true ]; then continue; fi
+    [ -n "$found" ] || found=$tag
+  done
+  [ -z "$found" ] || printf '%s
+' "$found"
 }
 
 check_installer_tag() {
@@ -96,6 +125,43 @@ self_test() {
   expect "a CRLF line is read like any other" \
     "v0.2.0" "$(printf 'installer\r\nv0.2.0\r\n' | newest_product)"
 
+  # The release a tag is measured against. The list is newest first.
+  local list
+  list=$(printf 'v0.2.0-beta.4	true
+installer-v0.2.0	false
+v0.2.0-beta.3	true
+installer	false
+v0.1.0	false
+')
+  expect "a prerelease tag is measured against the newest prerelease"     "v0.2.0-beta.4" "$(printf '%s
+' "$list" | base_for v0.2.0-beta.5)"
+  expect "a finished tag skips prereleases"     "v0.1.0" "$(printf '%s
+' "$list" | base_for v0.2.0)"
+  expect "a prerelease tag may be measured against a finished release"     "v0.2.0" "$(printf 'v0.2.0	false
+v0.2.0-beta.4	true
+' | base_for v0.2.1-beta.1)"
+  expect "a prerelease tag skips installer releases at the head"     "v0.2.0-beta.4" "$(printf 'installer-v0.2.1	false
+installer	false
+v0.2.0-beta.4	true
+' | base_for v0.2.0-beta.5)"
+  expect "a finished tag skips installer releases at the head"     "v0.1.0" "$(printf 'installer-v0.2.1	false
+v0.2.0-beta.4	true
+v0.1.0	false
+' | base_for v0.2.0)"
+  expect "only prereleases exist, finished tag: empty (publishes everything)"     "" "$(printf 'v0.2.0-beta.4	true
+v0.2.0-beta.3	true
+' | base_for v0.2.0)"
+  expect "only installers exist, prerelease tag: empty"     "" "$(printf 'installer	false
+installer-v0.2.0	false
+' | base_for v0.2.0-beta.1)"
+  expect "nothing published: empty" "" "$(printf '' | base_for v0.2.0-beta.1)"
+  expect "a rerun never measures a tag against itself"     "v0.2.0-beta.3" "$(printf 'v0.2.0-beta.4	true
+v0.2.0-beta.3	true
+' | base_for v0.2.0-beta.4)"
+  expect "a CRLF list is read like an LF one"     "v0.2.0-beta.4" "$(printf 'v0.2.0-beta.4	true
+v0.1.0	false
+' | base_for v0.2.0-beta.5)"
+
   # The tag check, against real manifests.
   dir=$(mktemp -d)
   trap 'rm -rf "$dir"' RETURN
@@ -128,13 +194,17 @@ self_test() {
 
 case "${1:-}" in
   newest-product) newest_product ;;
+  base-for)
+    [ "$#" -eq 2 ] || { echo "usage: release-tags.sh base-for <tag>" >&2; exit 2; }
+    base_for "$2"
+    ;;
   check-installer-tag)
     [ "$#" -eq 3 ] || { echo "usage: release-tags.sh check-installer-tag <tag> <Cargo.toml>" >&2; exit 2; }
     check_installer_tag "$2" "$3"
     ;;
   --self-test) self_test ;;
   *)
-    echo "usage: release-tags.sh newest-product | check-installer-tag <tag> <Cargo.toml> | --self-test" >&2
+    echo "usage: release-tags.sh newest-product | base-for <tag> | check-installer-tag <tag> <Cargo.toml> | --self-test" >&2
     exit 2
     ;;
 esac
