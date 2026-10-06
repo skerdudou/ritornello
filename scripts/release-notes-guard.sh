@@ -54,8 +54,8 @@ if [ "${1:-}" = "--self-test" ]; then
   # mistyped reddens the case that needs it.
   self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
   failures=0
-  check() { # <name> <changed path> <notes first line> <expected exit>
-    local name=$1 path=$2 notes=$3 want=$4 dir got
+  check() { # <name> <changed path> <notes first line> <expected exit> [version-line|dependency-line]
+    local name=$1 path=$2 notes=$3 want=$4 how=${5:-rewrite} dir got
     dir=$(mktemp -d)
     (
       cd "$dir"
@@ -72,8 +72,14 @@ if [ "${1:-}" = "--self-test" ]; then
         crates/ritornello-files-mount/src/x.rs crates/other/x.rs; do
         echo base > "$f"
       done
+      printf '[package]\nname = "ritornello-files-mount"\nversion = "1.0.0"\n\n[dependencies]\nfoo = "1"\n' \
+        > crates/ritornello-files-mount/Cargo.toml
       git add -A && git commit -qm base && git tag base
-      echo changed > "$path"
+      case "$how" in
+        version-line) sed -i 's/^version = "1.0.0"/version = "2.0.0"/' "$path" ;;
+        dependency-line) sed -i 's/^foo = "1"/foo = "2"/' "$path" ;;
+        *) echo changed > "$path" ;;
+      esac
       echo "$notes" > .github/release-notes-template.md
       git add -A && git commit -qm change
     )
@@ -94,6 +100,11 @@ if [ "${1:-}" = "--self-test" ]; then
   check "the updater changed, notes say nothing" crates/ritornello-updater/x.rs 'Nothing to do' 1
   check "the mount helper changed, notes say nothing" crates/ritornello-files-mount/src/x.rs 'Nothing to do' 1
   check "the mount helper changed, notes say what to do" crates/ritornello-files-mount/src/x.rs '**Action required** — run ritornello-install' 0
+  # The companion's number is a counter that moves only when the companion
+  # changes; a diff that is ONLY that line is the bookkeeping of a change
+  # already judged elsewhere, not a change to what the installer places.
+  check "files-mount version line only: not a mount helper change" crates/ritornello-files-mount/Cargo.toml 'Nothing to do' 0 version-line
+  check "files-mount manifest dependency changed" crates/ritornello-files-mount/Cargo.toml 'Nothing to do' 1 dependency-line
   check "nothing watched changed" crates/other/x.rs 'Nothing to do' 0
   [ "$failures" = 0 ] || exit 1
   echo "release-notes-guard.sh --self-test: all cases pass"
@@ -110,7 +121,31 @@ if [ -n "$PREV" ] && ! git rev-parse --verify -q "$PREV^{commit}" >/dev/null; th
   exit 1
 fi
 
-if [ -n "$PREV" ] && git diff --quiet "$PREV" -- "${WATCHED[@]}"; then
+# A manifest with its `[package]` `version =` line set aside: the same idea
+# as changed-components.sh's manifest_minus_version.
+manifest_minus_version() { # <manifest text on stdin>
+  tr -d '\r' | awk '/^\[/ { section = $0 } !(section == "[package]" && /^version = /)'
+}
+
+# Whether anything watched changed, not counting a bump of the mount helper's
+# own version. That number is a counter moved by one at each real change of
+# the helper; the change itself is judged by every other line of the diff, so
+# a version line alone says nothing about what the installer must place.
+watched_changed() { # <ref>
+  local ref="$1" f
+  git diff --quiet "$ref" -- "${WATCHED[@]}" && return 1
+  while IFS= read -r f; do
+    if [ "$f" = crates/ritornello-files-mount/Cargo.toml ] && [ -f "$f" ] \
+      && base=$(git show "$ref:$f" 2>/dev/null) \
+      && [ "$(printf '%s\n' "$base" | manifest_minus_version)" = "$(manifest_minus_version < "$f")" ]; then
+      continue
+    fi
+    return 0
+  done < <(git diff --name-only "$ref" -- "${WATCHED[@]}")
+  return 1
+}
+
+if [ -n "$PREV" ] && ! watched_changed "$PREV"; then
   echo "no unit, rule, updater or mount helper change since $PREV — no guard to enforce"
   exit 0
 fi
