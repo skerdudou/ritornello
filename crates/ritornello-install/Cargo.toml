@@ -11,7 +11,7 @@ clap = { version = "4", features = ["derive", "env"] }
 dialoguer = "0.11"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # The survey's nonce (R28). Already in the tree through ring, under reqwest.
-getrandom = "0.2"
+getrandom = "0.4"
 # `json`: the installer parses inventory.json straight off the wire. No
 # OpenSSL: `rustls-tls` only, same as the core and the plugins that talk TLS.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
