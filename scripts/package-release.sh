@@ -67,6 +67,38 @@ generation() { # <version>
   echo "${core%.*}"
 }
 
+# Semver precedence of two prerelease strings, as -1, 0 or 1. `sort -V` is
+# not semver-correct for prereleases, so it is spelled out: identifiers are
+# dot-separated, numeric ones compare numerically, alphanumeric ones
+# lexically, numeric sorts below alphanumeric, and when every shared
+# identifier is equal the shorter list is the lower.
+prerelease_cmp() { # <a> <b>
+  local a b x y
+  IFS=. read -r -a a <<< "$1"
+  IFS=. read -r -a b <<< "$2"
+  local i n=${#a[@]}
+  [ "${#b[@]}" -gt "$n" ] && n=${#b[@]}
+  for ((i = 0; i < n; i++)); do
+    if [ "$i" -ge "${#a[@]}" ]; then echo -1; return; fi
+    if [ "$i" -ge "${#b[@]}" ]; then echo 1; return; fi
+    x=${a[i]} y=${b[i]}
+    [ "$x" = "$y" ] && continue
+    local xn=0 yn=0
+    case "$x" in ''|*[!0-9]*) ;; *) xn=1 ;; esac
+    case "$y" in ''|*[!0-9]*) ;; *) yn=1 ;; esac
+    if [ $xn = 1 ] && [ $yn = 1 ]; then
+      x=$((10#$x)) y=$((10#$y))
+      if [ "$x" -lt "$y" ]; then echo -1; else echo 1; fi
+    elif [ $xn = 1 ]; then echo -1
+    elif [ $yn = 1 ]; then echo 1
+    elif [[ "$x" < "$y" ]]; then echo -1
+    else echo 1
+    fi
+    return
+  done
+  echo 0
+}
+
 # Whether a component may ship under $VERSION. Split out of crate_version so
 # --self-test exercises these expressions rather than a copy of them: a
 # self-test that restates the rule proves only that it can restate it.
@@ -92,15 +124,52 @@ version_fits() { # <label> <component version>   (reads $VERSION)
     echo "$label is $v inside prerelease $VERSION: the finished ${VERSION%%-*} will carry that same number, so a device installing it here would never replace it" >&2
     return 1
   fi
+  # A prerelease suffix on the component. A device compares versions for
+  # equality, so an unchanged component must be able to KEEP its number
+  # across prereleases: its suffix may be the product's own or an EARLIER
+  # one of the same target number (`0.2.0-beta.2` inside `0.2.0-beta.3`).
+  # Never a newer one (a release that does not exist yet), never another
+  # target number, and never any suffix inside a finished product.
+  if [ "$v" != "${v%%-*}" ]; then
+    if [ "$VERSION" = "${VERSION%%-*}" ]; then
+      echo "$label is $v, a prerelease number inside the stable product $VERSION" >&2
+      return 1
+    fi
+    if [ "${v%%-*}" != "${VERSION%%-*}" ]; then
+      echo "$label is $v: its target number is not the product's ${VERSION%%-*} ($VERSION)" >&2
+      return 1
+    fi
+    if [ "$(prerelease_cmp "${v#*-}" "${VERSION#*-}")" -gt 0 ]; then
+      echo "$label is $v, carrying a suffix newer than the product's $VERSION" >&2
+      return 1
+    fi
+  fi
   return 0
 }
 
+# A root-privileged companion is EXEMPT from version_fits: its version is its
+# own, independent of the product's generation and suffix, and it moves only
+# when the companion itself changes. The device compares it for equality to
+# allow the in-app update of its plugin, and only ritornello-install can
+# place it, so any move not caused by a real change of the companion forces an
+# installer run for nothing. Same exemption as version_coherence.rs.
+# Its archive is still named after its own version.
+
 # The version a shipped component declares for itself.
-crate_version() { # <crate directory name>
+# The rule applied to a declared version, split from the file read so that
+# --self-test exercises it rather than a copy.
+crate_version_of() { # <version> [companion]   (reads $VERSION)
+  if [ "${2:-}" != companion ]; then
+    version_fits "component" "$1" || return 1
+  fi
+  echo "$1"
+}
+
+crate_version() { # <crate directory name> [companion]
   local v
   v=$(sed -n 's/^version = "\(.*\)"/\1/p' "crates/$1/Cargo.toml" | tr -d '\r' | head -1)
   [ -n "$v" ] || { echo "crates/$1 declares no version of its own" >&2; exit 1; }
-  version_fits "crates/$1" "$v" || exit 1
+  crate_version_of "$v" "${2:-}" >/dev/null || { echo "crates/$1 is $v" >&2; exit 1; }
   echo "$v"
 }
 
@@ -152,11 +221,36 @@ if [ -n "$SELF_TEST" ]; then
   expect 0.2.1-beta1 0.2.0 ok "the same, with a suffix carrying no dot"
   expect 0.2.1-beta.1 0.2.1 refused "the number the finished release will carry"
   expect 0.2.1-beta.1 0.3.0 refused "off the generation, suffix or not"
+  # A component may keep an earlier suffix of the product's own target number.
+  expect 0.2.0-beta.3 0.2.0-beta.2 ok "an unchanged component keeps its older beta number"
+  expect 0.2.0-beta.3 0.2.0-beta.3 ok "the product's own suffix"
+  expect 0.2.0-beta.3 0.2.0-beta.4 refused "a suffix newer than the product's"
+  expect 0.2.0-beta.3 0.2.1-beta.1 refused "another target number"
+  expect 0.2.0-beta.3 0.2.0-rc.1 refused "rc is newer than beta"
+  expect 0.2.0-rc.1 0.2.0-beta.3 ok "beta precedes rc"
+  expect 0.2.0-beta.10 0.2.0-beta.9 ok "numeric, not lexical: 9 < 10"
+  expect 0.2.0-beta.9 0.2.0-beta.10 refused "numeric, not lexical: 10 > 9"
+  expect 0.2.0-beta.3 0.2.0-beta ok "fewer identifiers is lower"
+  expect 0.2.0 0.2.0-beta.2 refused "a finished product refuses any suffix"
   # A language pack is a shipped component like any other: pack_version()
   # calls this same version_fits, so these two cases are the pack-specific
   # readings of the two rules above rather than a second code path.
   expect 0.3.0 0.2.9 refused "a language pack off the product generation"
   expect 0.2.1-beta.1 0.2.1 refused "a language pack at the number the finished release will carry, inside a prerelease"
+  # A companion is exempt from version_fits: crate_version() skips it for a
+  # companion. The self-test runs the very function, with a companion label.
+  expect_companion() { # <product> <companion> <why>
+    local want=ok got=ok
+    VERSION="$1"
+    crate_version_of "$2" companion >/dev/null 2>&1 || got=refused
+    if [ "$got" != "$want" ]; then
+      echo "self-test: product=$1 companion=$2 -> $got, expected $want ($3)" >&2
+      fails=$((fails + 1))
+    fi
+  }
+  expect_companion 0.2.0-beta.4 1.0.0 "a companion's own number inside a prerelease product"
+  expect_companion 1.3.0 3.1.4 "a companion's own number inside an unrelated generation"
+  expect_companion 0.3.0-rc.1 1.0.0 "a companion's own number inside a release candidate"
   [ "$fails" -eq 0 ] || { echo "self-test: $fails case(s) wrong" >&2; exit 1; }
   echo "self-test: version guards ok"
   exit 0
@@ -380,7 +474,7 @@ stage_companion() { # <name> <staging dir>
 for c in "${COMPANIONS[@]}"; do
   D=$(mktemp -d)
   stage_companion "$c" "$D"
-  pack "$D" "ritornello-$c" "$(crate_version "ritornello-$c")"
+  pack "$D" "ritornello-$c" "$(crate_version "ritornello-$c" companion)"
 done
 
 # --- the bundle of all plugins -------------------------------------------
