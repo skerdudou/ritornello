@@ -1001,7 +1001,12 @@ impl SourcePlugin for CdSource {
         // the disc is one entry, and it would loop the whole disc. The cost
         // is an instant of the next track before the seek lands — unmeasured,
         // no drive available.
-        if self.repeat == Repeat::One {
+        //
+        // Only once the track count is known, like the shuffle correction:
+        // after a presence flicker `track` is zeroed until the TOC lands, and
+        // any notification would then look like an advance from track 0. Until
+        // then mpv's report is trusted below.
+        if self.repeat == Repeat::One && self.total_tracks > 0 {
             return self.issue(SourceAction::PlayerChapter(self.track));
         }
         // Corrected (review 1, C1): a disc's chapters cannot be reordered
@@ -2690,6 +2695,41 @@ mod tests {
         );
 
         // mpv finally reports the disc open: the resume is still owed, and applied.
+        assert_eq!(source.player_track(0).await.action, SourceAction::PlayerChapter(2));
+    }
+
+    #[tokio::test]
+    async fn repeat_one_does_not_seek_to_track_one_while_the_track_count_is_unknown() {
+        // A flicker zeroes `track` and `total_tracks` (`forget_disc`) and
+        // keeps `pending_chapter`. Until the TOC lands, a notification with
+        // `n >= 1` is not a natural advance from the zeroed `track`: taking
+        // it for one would seek to chapter 0, neither the track that was
+        // playing nor the owed one.
+        let mut source = source_arriving_with(OnArrival::LastTrack);
+        remember_track(&mut source, 2);
+        source.set_play_mode(false, Repeat::One).await;
+        source.activate().await;
+        assert_eq!(source.pending_chapter, Some(2));
+
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        presence_tx.send(false).await.unwrap();
+        source.poll_notification().await;
+        presence_tx.send(true).await.unwrap();
+        source.poll_notification().await;
+        assert_eq!(source.total_tracks, 0, "the track count is unknown again");
+
+        assert_ne!(
+            source.player_track(1).await.action,
+            SourceAction::PlayerChapter(0),
+            "not a seek back to the first track"
+        );
+        assert_eq!(source.pending_chapter, Some(2), "the owed seek survives");
+
+        let epoch = source.epoch;
+        let toc = "3 150 22767 41887 63000".to_string();
+        source.toc_tx.clone().send((epoch, Some(toc), 3)).await.unwrap();
+        source.poll_notification().await;
         assert_eq!(source.player_track(0).await.action, SourceAction::PlayerChapter(2));
     }
 
