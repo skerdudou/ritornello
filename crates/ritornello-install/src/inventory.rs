@@ -192,12 +192,31 @@ pub(crate) mod tests {
     /// the same script (`run_install_inventory` there): the inventory this
     /// installer will actually receive is produced by python, not
     /// hand-written here.
+    ///
+    /// `python3` first, then `python`: this crate is also tested on Windows
+    /// (the `installer` job of `ci.yml`), where the interpreter is usually
+    /// installed under the second name only. `python` is tried when
+    /// `python3` is missing, or when it ran, failed and printed nothing (the
+    /// Store stub below — and also a genuine failure of the script, which
+    /// writes its traceback to stderr, in which case `python`'s own answer
+    /// is the one reported).
     fn run_install_inventory() -> String {
-        let out = std::process::Command::new("python3")
-            .arg("scripts/install-inventory.py")
-            .current_dir(repo_root())
-            .output()
-            .expect("python3 is available: package-release.sh already needs it, here and in CI");
+        let run = |program: &str| {
+            std::process::Command::new(program)
+                .arg("scripts/install-inventory.py")
+                .current_dir(repo_root())
+                .output()
+        };
+        // Also falls through when `python3` ran but produced nothing and
+        // failed: on a Windows workstation that name is often the Microsoft
+        // Store's App Execution Alias, a stub that exists (so no NotFound)
+        // and exits non-zero without running anything.
+        let out = match run("python3") {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => run("python"),
+            Ok(o) if !o.status.success() && o.stdout.is_empty() => run("python").or(Ok(o)),
+            other => other,
+        }
+        .expect("python3 or python is available: package-release.sh already needs it, here and in CI");
         assert!(
             out.status.success(),
             "install-inventory.py failed:\n{}",

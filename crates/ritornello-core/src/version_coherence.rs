@@ -52,11 +52,14 @@ mod tests {
         // Shared plugins.toml editing: it inherits the product number and no
         // archive is named after it.
         "ritornello-manifest",
-        // The workstation-side installer: no archive is named after it
-        // either, and it inherits the product number for delivery 1. It is
-        // shipped its own way (built for a workstation, not published to a
-        // device), so whether delivery 2 gives it its own patch version is
-        // that delivery's own decision, not this one's.
+        // The workstation-side installer. Every release carries it, built
+        // for five workstation targets by the `installer` job of ci.yml, and
+        // it inherits the product number on purpose: no device ever fetches
+        // it, so the equality rule that makes a component's own number
+        // necessary never applies, and a person simply takes the one in the
+        // newest release. Its archives are named after a workstation target
+        // triple alone — no version, so that the README can link to
+        // `releases/latest/download/<file>` — and never after a component.
         "ritornello-install",
     ];
 

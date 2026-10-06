@@ -76,7 +76,7 @@ plugin's `ui.js` are embedded at compile time (`rust-embed`,
     npm run typecheck
     npm run e2e -w app          # Playwright; it really plays audio
 
-`scripts/ci-local.sh [web|rust|e2e]` runs what CI runs, in CI's order. If
+`scripts/ci-local.sh [web|rust|installer|e2e]` runs what CI runs, in CI's order. If
 one changes, the other must follow.
 
 ## Guards, and what they are for

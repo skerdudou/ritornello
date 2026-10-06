@@ -692,7 +692,12 @@ fn check(plan: &Plan) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+// Linux only, not every Unix: the script is written for the device, and it
+// relies on GNU coreutils and util-linux (`mv -T`, `rm --one-file-system`,
+// `timeout`), which macOS does not have — run there, these tests measure the
+// workstation's userland, not the script. Measured: 38 of them failed on the
+// macOS leg of the `installer` job, and none elsewhere.
+#[cfg(all(test, target_os = "linux"))]
 mod remote_script;
 
 #[cfg(test)]
@@ -925,5 +930,23 @@ mod tests {
         none.plugins_toml = None;
         let bytes = bundle(&none, "", &archives).unwrap();
         assert_eq!(tar::Archive::new(bytes.as_slice()).entries().unwrap().count(), 2);
+    }
+
+    /// The device runs this text with `sh`, and a `\r` before each newline
+    /// turns every command into one with a trailing carriage return --
+    /// `then\r` is not `then`.
+    ///
+    /// What it guards, precisely: rustc normalises CRLF in the literals of
+    /// a source file, so a Windows checkout (`core.autocrlf=true`) of this
+    /// `.rs` file cannot make it fail — measured: green with CRLF sources,
+    /// and on the Windows leg of the `installer` job. It fails if the script
+    /// ever gains a `\r` another way: an `include_str!` of a template file
+    /// (not normalised), or one written explicitly. That is also why the
+    /// design's `*.rs text eol=lf` line was not added to `.gitattributes`:
+    /// it would have made the Windows leg check out LF and prove nothing.
+    #[test]
+    fn the_device_script_carries_no_carriage_return() {
+        assert!(!PRELUDE.contains('\r'));
+        assert!(!render(&base()).unwrap().contains('\r'));
     }
 }
