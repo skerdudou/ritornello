@@ -64,7 +64,7 @@ fn main() -> ExitCode {
 /// the parser takes for the survey's own.
 fn nonce() -> anyhow::Result<String> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|e| anyhow!("reading the system's random source: {e}"))?;
+    getrandom::fill(&mut bytes).map_err(|e| anyhow!("reading the system's random source: {e}"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
