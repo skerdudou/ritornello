@@ -155,10 +155,11 @@ struct FilesSource {
     draw: Order,
     /// The two play modes, learned from `set_play_mode` and consulted by
     /// `end_of_content`/`activate` to know whether a finished pass should
-    /// open another one.
+    /// open another one (`All`), replay the same entry (`One`) or stay over
+    /// (`Off`).
     random: bool,
     repeat: Repeat,
-    /// Set by `end_of_content` when it was called without repeat-all — which
+    /// Set by `end_of_content` when it was called with repeat off — which
     /// only happens once mpv's list has run to its end. The next `Play` then
     /// opens a fresh pass instead of replaying the single entry left at the
     /// tail of the exhausted order — see `activate`'s doc for the defect this
@@ -499,7 +500,11 @@ impl FilesSource {
             // A list of files has a normal end: without this declaration,
             // mpv's inactivity at the end of the list would pass for a stream
             // cut and the restart would replay the list in a loop.
-            .finite();
+            .finite()
+            // Each entry is a whole file: under repeat-one the core loops it
+            // in mpv itself (`loop-file`), seamlessly, with no round trip
+            // through this plugin.
+            .loopable();
         let mut outcome = SourceOutcome::new(action)
             .plays(Self::identity(&entry.path))
             .preset_name(entry.display_name())
@@ -748,7 +753,7 @@ impl SourcePlugin for FilesSource {
         outcome
     }
 
-    /// A list of files is exactly the kind of finite list random/repeat-all
+    /// A list of files is exactly the kind of finite list random/repeat
     /// are for — unlike the radio, which has none. A constant, not derived
     /// from whether the playlist currently holds anything: an empty playlist
     /// still has a shape to shuffle or repeat once tracks are added, the same
@@ -926,23 +931,33 @@ impl SourcePlugin for FilesSource {
     /// declares — as opposed to a live stream cutting out, which has no
     /// equivalent here.
     ///
-    /// Without repeat-all, behaves like the default `stop()` fallback always
+    /// With repeat off, behaves like the default `stop()` fallback always
     /// did — but remembers that the pass is over, for `activate` to read (see
     /// its doc). With repeat-all, opens a new pass: drawn again under
     /// shuffle, replayed identically otherwise, starting at that pass's
-    /// first entry either way.
+    /// first entry either way. With repeat-one, `loop-file` should keep the
+    /// list from ending at all; if an end arrives anyway, the entry that was
+    /// playing starts over.
     async fn end_of_content(&mut self) -> SourceOutcome {
-        if self.repeat == Repeat::Off {
-            self.pass_finished = true;
-            return self.stop().await;
+        match self.repeat {
+            Repeat::Off => {
+                self.pass_finished = true;
+                self.stop().await
+            }
+            // `loop-file` should keep this from ever arriving under
+            // repeat-one; if it does, the playing entry starts over rather
+            // than the first one — `index` still names it.
+            Repeat::One => self.play().await,
+            Repeat::All => {
+                if self.random {
+                    self.draw_order().await;
+                }
+                if let Some(entry) = self.entry_at(0) {
+                    self.playlist.write().await.index = entry;
+                }
+                self.play().await
+            }
         }
-        if self.random {
-            self.draw_order().await;
-        }
-        if let Some(entry) = self.entry_at(0) {
-            self.playlist.write().await.index = entry;
-        }
-        self.play().await
     }
 
     /// The named presets, for the home page grid and for the sources_catalog
@@ -1974,6 +1989,31 @@ mod tests {
         let out = s.end_of_content().await;
         match out.action {
             SourceAction::Play { start, .. } => assert_eq!(start, Some(0)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_play_of_the_list_is_declared_loopable() {
+        // Whatever the mode: the core alone decides whether to loop, from
+        // the repeat setting; the source only says a file is a whole track.
+        let mut s = source_with(playlist_of(3), Order::Sequential);
+        match s.activate().await.action {
+            SourceAction::Play { loopable, .. } => assert!(loopable),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn end_of_content_under_repeat_one_replays_the_same_entry() {
+        // A safety net: under repeat-one mpv's `loop-file` keeps the list
+        // from ending at all. Should an end arrive anyway, the track that
+        // was playing starts over — not the first one.
+        let mut s = source_with(playlist_of(3), Order::Sequential);
+        s.set_play_mode(false, Repeat::One).await;
+        s.playlist.write().await.index = 2;
+        match s.end_of_content().await.action {
+            SourceAction::Play { start, .. } => assert_eq!(start, Some(2)),
             other => panic!("{other:?}"),
         }
     }
