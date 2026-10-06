@@ -932,7 +932,7 @@ fn a_companion_moves_the_files_an_older_registry_recorded_under_its_plugin() {
     ];
     let old = p::registry(&[("core", &["/etc/systemd/system/ritornello.service"]), ("files", &moved)]);
     let device = p::dev(&[("files", files_exec)], Some(old), &[], &[]);
-    let intent = Intent::InstallOrUpdate { plugins: p::set(&["files"]), packs: p::set(&[]), erase_data: p::set(&[]) };
+    let intent = Intent::InstallOrUpdate { plugins: p::set(&["files"]), packs: p::set(&[]), erase_data: p::set(&[]), reinstall: false };
     let plan = compute(&p::inv(), &device, &intent).expect("the plan computes");
     let mount_archive = "ritornello-files-mount-0.2.0-beta.2-arm64.tar.gz";
     assert!(plan.archives.contains(mount_archive), "{:?}", plan.archives);
@@ -968,7 +968,43 @@ fn a_companion_moves_the_files_an_older_registry_recorded_under_its_plugin() {
     assert!(!run.log.lines().any(|l| l.starts_with("systemctl disable")), "{}", run.log);
     let written = crate::registry::Registry::parse(&rig.read("/var/lib/ritornello-install/installed.toml")).unwrap();
     assert_eq!(written.components["files-mount"].privileged, moved);
-    assert!(!written.components.contains_key("files"), "{written:?}");
+    assert_eq!(written.components["files"].privileged, Vec::<String>::new(), "files keeps no root file: {written:?}");
+}
+
+/// The registry-only apply, run for real: a language pack removed from the
+/// web interface is still recorded, so the plan `compute` makes places,
+/// extracts and removes nothing, does not stop or restart the service, and
+/// only forgets the pack's record. Run, it leaves `plugins.toml` byte for
+/// byte as it was, writes a registry without that record, and never asks
+/// systemd to stop or restart anything.
+///
+/// **[MUTATION]**: let `settle` keep `stop_service`/`start_service` on a
+/// quiet run (drop the two resets) — this test fails on the log.
+#[test]
+fn a_registry_only_apply_forgets_the_record_and_leaves_the_service_running() {
+    use crate::plan::tests as p;
+    let mut device = p::current_device();
+    device.packs.clear();
+    let plan = p::keep(&device);
+    assert!(plan.archives.is_empty() && plan.puts.is_empty() && plan.packs.is_empty(), "{plan:?}");
+    assert!(!plan.ensure_user && !plan.nothing_to_do, "{plan:?}");
+
+    let rig = Rig::new();
+    let toml = device.plugins_toml.clone().unwrap();
+    rig.write("/etc/ritornello/plugins.toml", &toml);
+    rig.write("/var/lib/ritornello-install/installed.toml", &p::current_registry().render());
+    let run = rig.run(&plan, &BTreeMap::new(), &[("SHIM_USER_EXISTS", "1".into())]);
+    assert!(run.ok, "{}", run.stderr);
+
+    assert_eq!(rig.read("/etc/ritornello/plugins.toml"), toml, "plugins.toml written back byte for byte");
+    let written = Registry::parse(&rig.read("/var/lib/ritornello-install/installed.toml")).unwrap();
+    assert!(!written.components.contains_key("ritornello-lang-fr"), "{written:?}");
+    let mut kept = p::current_registry();
+    kept.components.remove("ritornello-lang-fr");
+    assert_eq!(written, kept, "every other record as it was");
+    for verb in ["systemctl stop", "systemctl restart", "systemctl start", "useradd"] {
+        assert!(!run.log.lines().any(|l| l.starts_with(verb)), "{verb}: {}", run.log);
+    }
 }
 
 // --- R23: archive members and sources ------------------------------------

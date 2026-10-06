@@ -2,6 +2,14 @@
 //! placed on the device, kept beside the inventory so an update or an
 //! uninstall knows what to remove without re-deriving it from a release
 //! archive it may no longer have on hand.
+//!
+//! Every component it places is recorded — the core, each plugin of ours,
+//! each companion, each language pack under its pack id — with the version
+//! placed, even when it places nothing privileged. That version is what
+//! lets a later run leave alone what is already up to date, and it may be
+//! trusted for that because the file is root's (root:root 0644): nothing
+//! the unprivileged account writes can ever make a run skip a component
+//! (see `plan::is_current`).
 
 use std::collections::BTreeMap;
 
@@ -79,6 +87,67 @@ mod tests {
         let rendered = original.render();
         let parsed = Registry::parse(&rendered).expect("a freshly rendered registry parses");
         assert_eq!(parsed, original);
+    }
+
+    /// The exact text this installer writes for a device with the core,
+    /// radio, files (and its companion) and French: every component
+    /// recorded, plugins and packs with no privileged file. The core's
+    /// reader is tested on this very text
+    /// (`install_registry::tests::RENDERED_EVERY_COMPONENT`); if this
+    /// rendering changes, that copy must follow.
+    #[test]
+    fn the_rendering_of_every_component_is_the_text_the_core_is_tested_on() {
+        let rec = |v: &str, p: &[&str]| Recorded { version: v.into(), privileged: p.iter().map(|s| s.to_string()).collect() };
+        let registry = Registry {
+            format: 1,
+            components: [
+                ("core", rec("0.3.0", &["/etc/systemd/system/ritornello.service"])),
+                ("files", rec("0.3.1", &[])),
+                (
+                    "files-mount",
+                    rec(
+                        "0.3.0",
+                        &[
+                            "/etc/systemd/system/ritornello-media-mount.service",
+                            "/etc/polkit-1/rules.d/51-ritornello-media.rules",
+                            "/usr/local/lib/ritornello/ritornello-media-mount",
+                        ],
+                    ),
+                ),
+                ("radio", rec("0.3.2", &[])),
+                ("ritornello-lang-fr", rec("0.3.0", &[])),
+            ]
+            .into_iter()
+            .map(|(n, r)| (n.to_string(), r))
+            .collect(),
+        };
+        let want = "format = 1
+
+[components.core]
+version = \"0.3.0\"
+privileged = [\"/etc/systemd/system/ritornello.service\"]
+
+[components.files]
+version = \"0.3.1\"
+privileged = []
+
+[components.files-mount]
+version = \"0.3.0\"
+privileged = [
+    \"/etc/systemd/system/ritornello-media-mount.service\",
+    \"/etc/polkit-1/rules.d/51-ritornello-media.rules\",
+    \"/usr/local/lib/ritornello/ritornello-media-mount\",
+]
+
+[components.radio]
+version = \"0.3.2\"
+privileged = []
+
+[components.ritornello-lang-fr]
+version = \"0.3.0\"
+privileged = []
+";
+        assert_eq!(registry.render(), want.replace("\r\n", "\n"));
     }
 
     /// **[MUTATION]**: drop the `format == 1` check from `Registry::parse`

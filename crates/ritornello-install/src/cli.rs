@@ -41,6 +41,14 @@ pub struct Args {
     /// Also erase the data of what is removed.
     #[arg(long)]
     pub purge_data: bool,
+    /// Place every component and language pack again, even those already
+    /// at the offered version: the repair of a unit or a rule changed by
+    /// hand. A downgrade needs it only when the registry already records
+    /// the older version while the device runs another (the in-app updater
+    /// moved past it) and the updater's memory does not say so; otherwise
+    /// the versions differ and the component is placed anyway.
+    #[arg(long, overrides_with = "reinstall")]
+    pub reinstall: bool,
     /// The release to install (a tag); by default the newest final release,
     /// or the newest prerelease when none is final yet.
     #[arg(long)]
@@ -75,6 +83,8 @@ pub enum ArgError {
     KeepOrChoose,
     /// `--remove-all` with `--keep`, `--plugins` or `--packs`.
     RemoveAllAlone,
+    /// `--reinstall` with `--remove-all`.
+    ReinstallWithRemoveAll,
     /// `--purge-data` with `--keep`, which chooses nothing to remove.
     PurgeWithKeep,
     /// `--purge-data` with nothing that says what is removed.
@@ -105,6 +115,10 @@ impl std::fmt::Display for ArgError {
             Self::RemoveAllAlone => {
                 write!(f, "--remove-all removes everything: it cannot be given with --keep, --plugins or --packs")
             }
+            Self::ReinstallWithRemoveAll => write!(
+                f,
+                "--reinstall places everything again and --remove-all removes everything: give one or the other"
+            ),
             Self::PurgeWithKeep => {
                 write!(f, "--keep keeps what is declared: to erase a plugin's data, name what stays with --plugins")
             }
@@ -185,6 +199,9 @@ pub fn check_combination(a: &Args) -> Result<(), ArgError> {
     if a.remove_all && (a.keep || chooses) {
         return Err(ArgError::RemoveAllAlone);
     }
+    if a.remove_all && a.reinstall {
+        return Err(ArgError::ReinstallWithRemoveAll);
+    }
     if a.keep && chooses {
         return Err(ArgError::KeepOrChoose);
     }
@@ -215,7 +232,7 @@ pub fn intent_from_args(a: &Args, dev: &DeviceState, inv: &Inventory) -> Result<
             return Err(ArgError::NothingToKeep);
         }
         let (plugins, packs) = plan::preselection(inv, dev);
-        return Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() }));
+        return Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: a.reinstall }));
     }
     if a.plugins.is_none() && a.packs.is_none() {
         return Ok(None);
@@ -242,7 +259,7 @@ pub fn intent_from_args(a: &Args, dev: &DeviceState, inv: &Inventory) -> Result<
     } else {
         BTreeSet::new()
     };
-    Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data }))
+    Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: a.reinstall }))
 }
 
 #[cfg(test)]
@@ -276,7 +293,7 @@ mod tests {
     }
 
     fn install(plugins: &[&str], packs: &[&str], erase: &[&str]) -> Option<Intent> {
-        Some(Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: set(erase) })
+        Some(Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: set(erase), reinstall: false })
     }
 
     #[test]
@@ -294,7 +311,7 @@ mod tests {
         let (plugins, packs) = plan::preselection(&inv(), &device);
         assert_eq!(
             intent(&["--keep"], &device),
-            Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() }))
+            Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false }))
         );
         assert_eq!(intent(&["--keep"], &device), Ok(install(&["cd", "radio", "theirs"], &["fr"], &[])));
     }
@@ -351,6 +368,55 @@ mod tests {
         );
         let intent = intent(&["--plugins", "radio", "--purge-data"], &device).unwrap().unwrap();
         assert!(plan::compute(&inv(), &device, &intent).is_ok(), "the plan agrees that files goes");
+    }
+
+    /// `--reinstall` rides on whatever says what is wanted, and is refused
+    /// beside a total removal, which places nothing.
+    ///
+    /// **[MUTATION]**: build either install intent with `reinstall: false`
+    /// — this test fails.
+    #[test]
+    fn reinstall_combines_with_keep_and_plugins_but_not_with_remove_all() {
+        let reinstalls = |argv: &[&str]| match intent(argv, &installed()) {
+            Ok(Some(Intent::InstallOrUpdate { reinstall, .. })) => reinstall,
+            other => panic!("{argv:?}: {other:?}"),
+        };
+        assert!(reinstalls(&["--keep", "--reinstall"]));
+        assert!(reinstalls(&["--plugins", "radio", "--reinstall", "--version", "v0.2.0"]));
+        assert!(reinstalls(&["--packs", "fr", "--reinstall"]));
+        assert!(!reinstalls(&["--keep"]));
+        assert!(!reinstalls(&["--plugins", "radio"]));
+        assert_eq!(intent(&["--remove-all", "--reinstall"], &installed()), Err(ArgError::ReinstallWithRemoveAll));
+        assert!(ArgError::ReinstallWithRemoveAll.to_string().contains("give one or the other"));
+        // Alone, it does not say what is wanted: the screens ask.
+        assert_eq!(intent(&["--reinstall"], &installed()), Ok(None));
+    }
+
+    /// A repeated `--reinstall` (the operator's, beside the one `deploy.sh`
+    /// adds) is the same request, not an error.
+    #[test]
+    fn a_repeated_reinstall_is_harmless() {
+        assert!(args(&["--keep", "--reinstall", "--reinstall"]).reinstall);
+    }
+
+    /// `deploy/deploy.sh` adds `--reinstall` unless its arguments already
+    /// say `--reinstall` or `--remove-all`: its own `--self-test` runs that
+    /// rule on its cases, with nothing built.
+    ///
+    /// **[MUTATION]**: drop `--remove-all` from `needs_reinstall`'s `case`
+    /// — this test fails.
+    #[test]
+    #[cfg(unix)]
+    fn deploy_sh_adds_reinstall_unless_told_otherwise() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/deploy.sh");
+        let out = std::process::Command::new("bash").arg(&script).arg("--self-test").output().expect("bash runs");
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("self-test passed"));
     }
 
     #[test]

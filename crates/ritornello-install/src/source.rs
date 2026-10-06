@@ -487,6 +487,8 @@ pub struct GitHub<F: Fetch = ReqwestFetch> {
     /// this process outlives someone else publishing one — mid-command, that
     /// is a source disagreeing with itself.
     chosen: usize,
+    /// Each release's parsed `SHA256SUMS`, by tag, once fetched.
+    sums: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl GitHub<ReqwestFetch> {
@@ -514,7 +516,7 @@ impl<F: Fetch> GitHub<F> {
             .iter()
             .position(|r| r.tag == chosen_tag)
             .expect("choose only ever returns a release drawn from this same list");
-        Ok(Self { fetch, releases, chosen })
+        Ok(Self { fetch, releases, chosen, sums: BTreeMap::new() })
     }
 
     fn chosen(&self) -> &Release {
@@ -550,13 +552,23 @@ impl<F: Fetch> GitHub<F> {
         String::from_utf8(bytes).context("response is not valid UTF-8")
     }
 
+    /// A release's `SHA256SUMS`, fetched once per release and kept: every
+    /// archive one release carries is checked against the same file, and a
+    /// run that fetched it again per archive only multiplied the requests
+    /// (and the chances of one failing). Kept for the life of this source,
+    /// which is one run: a release's assets are never replaced in place.
     fn sums_of(&mut self, release: &Release) -> anyhow::Result<BTreeMap<String, String>> {
+        if let Some(sums) = self.sums.get(&release.tag) {
+            return Ok(sums.clone());
+        }
         let url = release
             .assets
             .get("SHA256SUMS")
             .ok_or_else(|| anyhow::anyhow!("release {} carries no SHA256SUMS", release.tag))?
             .clone();
-        parse_sums(&self.get_text(&url)?)
+        let sums = parse_sums(&self.get_text(&url)?)?;
+        self.sums.insert(release.tag.clone(), sums.clone());
+        Ok(sums)
     }
 }
 
@@ -967,11 +979,13 @@ mod tests {
 
     struct FakeFetch {
         responses: BTreeMap<String, Vec<u8>>,
+        /// Every URL asked for, in order.
+        calls: Vec<String>,
     }
 
     impl FakeFetch {
         fn new() -> Self {
-            Self { responses: BTreeMap::new() }
+            Self { responses: BTreeMap::new(), calls: Vec::new() }
         }
 
         fn with(mut self, url: &str, bytes: &[u8]) -> Self {
@@ -982,6 +996,7 @@ mod tests {
 
     impl Fetch for FakeFetch {
         fn get(&mut self, url: &str, cap: u64) -> anyhow::Result<Vec<u8>> {
+            self.calls.push(url.to_string());
             let bytes = self
                 .responses
                 .get(url)
@@ -1103,6 +1118,40 @@ mod tests {
 
         let err = src.archive(RADIO).unwrap_err();
         assert!(err.to_string().contains("digest mismatch"), "{err}");
+    }
+
+    /// Three archives from two carriers, and the inventory of the first:
+    /// each carrier's `SHA256SUMS` is fetched once, however many files it
+    /// vouches for — and each one still against its own carrier's sums.
+    ///
+    /// **[MUTATION]**: drop the lookup at the top of `sums_of` — this test
+    /// fails (v0.2.9's sums fetched three times).
+    #[test]
+    fn each_carrier_s_sha256sums_is_fetched_once() {
+        const CORE: &str = "ritornello-core-0.2.9-armv7.tar.gz";
+        const CD: &str = "ritornello-plugin-cd-0.2.9-armv7.tar.gz";
+        let releases = body(&[
+            rel("v0.2.9", "2026-09-10T10:00:00Z", false, false, &[CORE, CD, "inventory.json", "SHA256SUMS"]),
+            rel("v0.2.8", "2026-09-01T10:00:00Z", false, false, &[RADIO, "SHA256SUMS"]),
+        ]);
+        let inventory = br#"{"format":1}"#;
+        let v29 = sha256sums(&[(CORE, &b"core"[..]), (CD, &b"cd"[..]), ("inventory.json", &inventory[..])]);
+        let v28 = sha256sums(&[(RADIO, &b"radio"[..])]);
+        let fetch = FakeFetch::new()
+            .with(&asset_url("v0.2.9", "SHA256SUMS"), v29.as_bytes())
+            .with(&asset_url("v0.2.8", "SHA256SUMS"), v28.as_bytes())
+            .with(&asset_url("v0.2.9", "inventory.json"), inventory)
+            .with(&asset_url("v0.2.9", CORE), b"core")
+            .with(&asset_url("v0.2.9", CD), b"cd")
+            .with(&asset_url("v0.2.8", RADIO), b"radio");
+        let mut src = github(&releases, Some("v0.2.9"), fetch);
+        src.inventory().unwrap();
+        assert_eq!(src.archive(CORE).unwrap(), b"core");
+        assert_eq!(src.archive(RADIO).unwrap(), b"radio");
+        assert_eq!(src.archive(CD).unwrap(), b"cd");
+        let sums_calls = |tag: &str| src.fetch.calls.iter().filter(|u| **u == asset_url(tag, "SHA256SUMS")).count();
+        assert_eq!(sums_calls("v0.2.9"), 1, "{:?}", src.fetch.calls);
+        assert_eq!(sums_calls("v0.2.8"), 1, "{:?}", src.fetch.calls);
     }
 
     /// The version screen's answer moves what every later read acts on —

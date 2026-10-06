@@ -21,6 +21,9 @@ use crate::source::Release;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     InstallOrUpdate,
+    /// Install or update, placing everything again even where the device
+    /// is already at the offered version (`--reinstall`).
+    Repair,
     RemoveAll,
 }
 
@@ -93,8 +96,12 @@ pub fn summary_lines(plan: &Plan) -> Vec<String> {
     section("installed", &summary.installed);
     section("updated", &summary.updated);
     section("removed", &summary.removed);
+    section("no longer on the device, record cleared", &summary.cleared);
     section("data erased", &summary.erased);
+    section("languages placed", &summary.languages_placed);
+    section("languages removed", &summary.languages_removed);
     section("left as they are (third-party)", &summary.kept_third_party);
+    section("already up to date", &summary.up_to_date);
     if plan.remove_trees.iter().any(|t| t == DATA_TREE) {
         lines.push(format!("  ALL DATA ERASED: the whole of {DATA_TREE}, every setting and every plugin's data"));
     }
@@ -139,12 +146,21 @@ pub fn offers_remove_all(dev: &DeviceState) -> bool {
 pub fn ask_action() -> anyhow::Result<Action> {
     let i = Select::new()
         .with_prompt("Ritornello is, or was, on this device")
-        .items(["Install or update", "Remove everything"])
+        .items(ACTIONS.map(|(label, _)| label))
         .default(0)
         .interact()
         .context("asking what to do")?;
-    Ok(if i == 0 { Action::InstallOrUpdate } else { Action::RemoveAll })
+    Ok(ACTIONS[i].1)
 }
+
+/// Step 3's choices, in the order shown. "Repair" places everything again:
+/// what an ordinary update leaves alone because its version has not moved
+/// may still have been damaged by hand.
+const ACTIONS: [(&str, Action); 3] = [
+    ("Install or update", Action::InstallOrUpdate),
+    ("Repair (reinstall everything)", Action::Repair),
+    ("Remove everything", Action::RemoveAll),
+];
 
 /// Step 4: the recent releases, newest first, `default` preselected.
 pub fn ask_version(releases: &[Release], default: &str) -> anyhow::Result<String> {
@@ -228,6 +244,11 @@ pub fn show_summary(plan: &Plan, product: &str, source: &str, host: &str) {
     }
 }
 
+/// What a run that has nothing to do says instead of a summary to confirm.
+pub fn up_to_date_line(host: &str, product: &str, source: &str) -> String {
+    format!("{host} is already up to date with Ritornello {product} from {source}: nothing was changed.")
+}
+
 /// Step 8's confirmation.
 pub fn confirm() -> anyhow::Result<bool> {
     Confirm::new().with_prompt("Go ahead?").default(false).interact().context("asking for confirmation")
@@ -283,9 +304,8 @@ mod tests {
         let summary = Summary {
             installed: vec!["cd".into()],
             updated: vec!["core".into(), "radio".into()],
-            removed: vec![],
-            erased: vec![],
             kept_third_party: vec!["theirs".into()],
+            ..Summary::default()
         };
         let plan = Plan { summary, ..Plan::default() };
         assert_eq!(
@@ -293,6 +313,40 @@ mod tests {
             ["  installed: cd", "  updated: core, radio", "  left as they are (third-party): theirs"]
         );
         assert_eq!(summary_lines(&Plan::default()), ["  nothing to change"]);
+    }
+
+    /// What is left alone, what was already gone and the languages are
+    /// said too: a run that only touches those would otherwise be
+    /// summarised as "nothing to change" right before it changes something.
+    #[test]
+    fn the_summary_names_what_is_up_to_date_cleared_and_the_languages() {
+        let summary = Summary {
+            updated: vec!["radio".into()],
+            cleared: vec!["cd".into()],
+            languages_placed: vec!["ritornello-lang-de".into()],
+            languages_removed: vec!["ritornello-lang-es".into()],
+            up_to_date: vec!["core".into(), "ritornello-lang-fr".into()],
+            ..Summary::default()
+        };
+        let plan = Plan { summary, ..Plan::default() };
+        assert_eq!(
+            summary_lines(&plan),
+            [
+                "  updated: radio",
+                "  no longer on the device, record cleared: cd",
+                "  languages placed: ritornello-lang-de",
+                "  languages removed: ritornello-lang-es",
+                "  already up to date: core, ritornello-lang-fr",
+            ]
+        );
+    }
+
+    /// The repair sits between the two others, and each label answers its
+    /// own action.
+    #[test]
+    fn the_action_screen_offers_the_repair() {
+        assert_eq!(ACTIONS.map(|(_, a)| a), [Action::InstallOrUpdate, Action::Repair, Action::RemoveAll]);
+        assert!(ACTIONS[1].0.contains("reinstall everything"));
     }
 
     /// A total removal with its data, on a device whose survey saw no data

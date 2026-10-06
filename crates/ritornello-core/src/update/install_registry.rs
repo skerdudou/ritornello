@@ -129,6 +129,47 @@ privileged = [
         assert_eq!(version_in(RENDERED, "files").as_deref(), Some("0.2.0-beta.3"));
     }
 
+    /// The shape `ritornello-install` writes since it records every
+    /// component it places, so that a re-run can leave alone what is up to
+    /// date: every plugin, most with no privileged file, and each language
+    /// pack under its pack id. Rendered by the installer's own
+    /// `Registry::render` for core, radio, files (with its companion) and
+    /// French. The extra records change nothing for the one question asked
+    /// here.
+    const RENDERED_EVERY_COMPONENT: &str = r#"format = 1
+
+[components.core]
+version = "0.3.0"
+privileged = ["/etc/systemd/system/ritornello.service"]
+
+[components.files]
+version = "0.3.1"
+privileged = []
+
+[components.files-mount]
+version = "0.3.0"
+privileged = [
+    "/etc/systemd/system/ritornello-media-mount.service",
+    "/etc/polkit-1/rules.d/51-ritornello-media.rules",
+    "/usr/local/lib/ritornello/ritornello-media-mount",
+]
+
+[components.radio]
+version = "0.3.2"
+privileged = []
+
+[components.ritornello-lang-fr]
+version = "0.3.0"
+privileged = []
+"#;
+
+    #[test]
+    fn a_registry_recording_every_component_and_pack_is_still_read() {
+        assert_eq!(version_in(RENDERED_EVERY_COMPONENT, "files-mount").as_deref(), Some("0.3.0"));
+        assert_eq!(version_in(RENDERED_EVERY_COMPONENT, "radio").as_deref(), Some("0.3.2"));
+        assert_eq!(version_in(RENDERED_EVERY_COMPONENT, "ritornello-lang-fr").as_deref(), Some("0.3.0"));
+    }
+
     /// A registry that does not record the companion — one written before
     /// the companion existed — reads as unknown, never as a match.
     #[test]

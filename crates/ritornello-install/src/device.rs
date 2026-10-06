@@ -54,6 +54,17 @@ use crate::registry::Registry;
 /// exactly its bytes plus that one `\n` — whether or not the file ended in a
 /// newline — which is what lets `parse` hand the plan the file byte for
 /// byte (see `file_content`).
+///
+/// Every file is read through `head -c`, at most one byte past
+/// `READ_CAP`: a file the account points one of these paths at, however
+/// large, costs the installer that much memory and no more, and the one
+/// byte too many is what lets `file_content` tell a file over the cap from
+/// one exactly at it — and refuse it rather than parse a truncated prefix.
+///
+/// The registry's owner and mode follow its state (`REGISTRY_OWNER`, from
+/// `stat -L`, so a symbolic link is judged by the file it reaches): the
+/// registry is trusted only when root owns it and neither its group nor
+/// anyone else may write it (see `registry_trusted`).
 pub fn probe_script(nonce: &str) -> String {
     format!(
         r#"R="${{RITORNELLO_INSTALL_ROOT:-}}"
@@ -80,13 +91,16 @@ gone() {{
 rd() {{
   if [ ! -e "$1" ] && [ ! -L "$1" ]; then
     if gone "$1"; then s=absent; else s=unreadable; fi
-  elif [ -f "$1" ] && cat "$1" 2>/dev/null; then s=present
+  elif [ -f "$1" ] && head -c {over} "$1" 2>/dev/null; then s=present
   else s=unreadable; fi
 }}
 m PLUGINS_TOML; rd "$R/etc/ritornello/plugins.toml"
 m PLUGINS_TOML_STATE; echo "$s"
 m REGISTRY; rd "$R/var/lib/ritornello-install/installed.toml"
 m REGISTRY_STATE; echo "$s"
+m REGISTRY_OWNER; stat -L -c '%u %a' "$R/var/lib/ritornello-install/installed.toml" 2>/dev/null || true
+m PLACED; rd "$R/var/lib/ritornello/staging/placed.json"
+m PLACED_STATE; echo "$s"
 m PACKS; ls -1 "$R/etc/ritornello/language-packs" 2>/dev/null || true
 m DATA
 for d in "$R"/var/lib/ritornello/plugins/*/; do
@@ -95,8 +109,25 @@ for d in "$R"/var/lib/ritornello/plugins/*/; do
 done
 m END
 "#,
-        n = nonce
+        n = nonce,
+        over = READ_CAP + 1
     )
+}
+
+/// The most the survey reads of any one file: far above any real
+/// `plugins.toml`, `installed.toml` or `placed.json` (a few kilobytes).
+pub const READ_CAP: usize = 1024 * 1024;
+
+/// Whether `stat -L -c '%u %a'`'s answer for the registry says root owns
+/// it and neither its group nor others may write it. Anything else — the
+/// account's own file, a mode with `g+w` or `o+w`, no answer at all — is a
+/// registry the account may have written, which may never justify leaving
+/// a component alone (`plan::is_current`): it is then read as absent, and
+/// everything is placed again.
+fn registry_trusted(owner: &str) -> bool {
+    let mut parts = owner.split_whitespace();
+    let (Some(uid), Some(mode), None) = (parts.next(), parts.next(), parts.next()) else { return false };
+    uid == "0" && u32::from_str_radix(mode, 8).is_ok_and(|m| m & 0o022 == 0)
 }
 
 /// One `[[plugin]]` block from the device's `plugins.toml` — `name` and
@@ -141,9 +172,50 @@ pub struct DeviceState {
     pub plugins_toml: Option<String>,
     pub declared: Vec<Declared>,
     pub registry: Option<Registry>,
+    /// The device has an `installed.toml`, but not one root alone could
+    /// have written (`registry_trusted`): `registry` is `None` for it.
+    pub registry_ignored: bool,
+    /// What the core's in-app updater says it last placed, component name
+    /// to version, from `/var/lib/ritornello/staging/placed.json`.
+    ///
+    /// **Untrusted**: that file belongs to the unprivileged `ritornello`
+    /// account, which can write anything into it. It is read only because
+    /// the updater moves binaries without touching the root-owned registry,
+    /// so it is the one place a registry that has fallen behind shows. It
+    /// may therefore only ever make the plan reinstall a component, never
+    /// skip one (see `plan::is_current`). Empty when the file is absent,
+    /// unreadable or does not parse: that only ever means "no evidence".
+    pub updater_placed: BTreeMap<String, String>,
     pub packs: BTreeSet<String>,
     pub data_nonempty: BTreeSet<String>,
     pub user_exists: bool,
+}
+
+/// One entry of the updater's `placed.json`: only its version is read.
+/// Every other key (`not_installed_files`, and whatever a later core adds)
+/// is ignored rather than refused — the file is evidence for doing more,
+/// and a reader that refused it would throw that evidence away.
+#[derive(Debug, Deserialize)]
+struct PlacedEntry {
+    version: String,
+}
+
+/// The updater's memory, or nothing. Whatever is wrong with the file — a
+/// state other than `present`, bytes that are not the expected JSON — the
+/// answer is an empty memory: the core itself reads a corrupt `placed.json`
+/// the same way (`update::placed::read`), and an empty memory here only
+/// means the registry alone decides, which is the trusted half anyway.
+fn updater_placed(body: &str, state: &str) -> BTreeMap<String, String> {
+    if state.trim() != "present" {
+        return BTreeMap::new();
+    }
+    let text = body.strip_suffix('\n').unwrap_or(body);
+    if text.len() > READ_CAP {
+        return BTreeMap::new();
+    }
+    serde_json::from_str::<BTreeMap<String, PlacedEntry>>(text)
+        .map(|m| m.into_iter().map(|(name, entry)| (name, entry.version)).collect())
+        .unwrap_or_default()
 }
 
 impl DeviceState {
@@ -189,6 +261,9 @@ const SECTIONS: &[&str] = &[
     "PLUGINS_TOML_STATE",
     "REGISTRY",
     "REGISTRY_STATE",
+    "REGISTRY_OWNER",
+    "PLACED",
+    "PLACED_STATE",
     "PACKS",
     "DATA",
     "END",
@@ -238,6 +313,14 @@ fn sections<'a>(output: &'a str, nonce: &str) -> anyhow::Result<BTreeMap<&'a str
 /// no trailing newline and one with it come back as they are.
 fn file_content(file: &str, body: &str, state: &str) -> anyhow::Result<Option<String>> {
     let content = body.strip_suffix('\n').unwrap_or(body);
+    // Over the cap, only a prefix was read: refused by name rather than
+    // parsed, since a `plugins.toml` cut at a block boundary would still
+    // parse — as a device declaring fewer plugins than it does.
+    anyhow::ensure!(
+        content.len() <= READ_CAP,
+        "{file} on the device is larger than {READ_CAP} bytes, which no file of Ritornello's ever is: \
+         refusing to read part of it; inspect it by hand"
+    );
     match state.trim() {
         "absent" => {
             anyhow::ensure!(
@@ -292,7 +375,13 @@ pub fn parse(output: &str, nonce: &str) -> anyhow::Result<DeviceState> {
     // A registry present but empty is refused like any other that does not
     // parse: the installer always writes `format`, and a registry read as
     // empty would forget every privileged file it records.
+    // A registry root does not own, or others may write, is read as absent:
+    // never parsed, never trusted, so nothing is skipped on its word and
+    // everything is placed again (which also rewrites it as root's own).
+    let registry_present = get("REGISTRY_STATE").trim() == "present";
+    let registry_ignored = registry_present && !registry_trusted(get("REGISTRY_OWNER"));
     let registry = file_content("installed.toml", get("REGISTRY"), get("REGISTRY_STATE"))?
+        .filter(|_| !registry_ignored)
         .map(|text| {
             Registry::parse(&text).context(
                 "installed.toml on the device does not parse: restore it from a backup, or remove it \
@@ -301,6 +390,7 @@ pub fn parse(output: &str, nonce: &str) -> anyhow::Result<DeviceState> {
             )
         })
         .transpose()?;
+    let updater_placed = updater_placed(get("PLACED"), get("PLACED_STATE"));
 
     let packs: BTreeSet<String> =
         get("PACKS").lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
@@ -317,6 +407,8 @@ pub fn parse(output: &str, nonce: &str) -> anyhow::Result<DeviceState> {
         plugins_toml,
         declared,
         registry,
+        registry_ignored,
+        updater_placed,
         packs,
         data_nonempty,
         user_exists,
@@ -340,6 +432,8 @@ mod tests {
             plugins_toml: None,
             declared: Vec::new(),
             registry: None,
+            registry_ignored: false,
+            updater_placed: BTreeMap::new(),
             packs: BTreeSet::new(),
             data_nonempty: BTreeSet::new(),
             user_exists: false,
@@ -405,6 +499,11 @@ version = \"0.2.0\"
 privileged = []
 @@n1@@ REGISTRY_STATE
 present
+@@n1@@ REGISTRY_OWNER
+0 644
+@@n1@@ PLACED
+@@n1@@ PLACED_STATE
+absent
 @@n1@@ PACKS
 ritornello-lang-fr
 ritornello-lang-es
@@ -477,6 +576,11 @@ present
 @@real@@ REGISTRY
 @@real@@ REGISTRY_STATE
 absent
+@@real@@ REGISTRY_OWNER
+0 644
+@@real@@ PLACED
+@@real@@ PLACED_STATE
+absent
 @@real@@ PACKS
 @@real@@ DATA
 @@real@@ END
@@ -522,6 +626,11 @@ present
 @@n@@ REGISTRY
 @@n@@ REGISTRY_STATE
 absent
+@@n@@ REGISTRY_OWNER
+0 644
+@@n@@ PLACED
+@@n@@ PLACED_STATE
+absent
 @@n@@ PACKS
 @@n@@ DATA
 @@n@@ END
@@ -556,6 +665,11 @@ no
 absent
 @@n@@ REGISTRY
 @@n@@ REGISTRY_STATE
+absent
+@@n@@ REGISTRY_OWNER
+0 644
+@@n@@ PLACED
+@@n@@ PLACED_STATE
 absent
 @@n@@ PACKS
 ritornello-lang-fr
@@ -667,6 +781,11 @@ version = \"0.2.0\"
 privileged = []
 @@n@@ REGISTRY_STATE
 present
+@@n@@ REGISTRY_OWNER
+0 644
+@@n@@ PLACED
+@@n@@ PLACED_STATE
+absent
 @@n@@ PACKS
 ritornello-lang-fr
 
@@ -748,6 +867,13 @@ radio
         assert!(out.status.success(), "probe_script exited non-zero:\n{}", String::from_utf8_lossy(&out.stderr));
         let stdout = String::from_utf8(out.stdout).expect("probe_script's output is UTF-8");
 
+        // The fixture's registry belongs to whoever runs the tests, not to
+        // root: as surveyed, it is not trusted. Read as root's, it parses.
+        if !running_as_root() {
+            let state = parse(&stdout, nonce).expect("parses");
+            assert!(state.registry_ignored && state.registry.is_none(), "{stdout}");
+        }
+        let stdout = as_if_root(&stdout, nonce);
         let state = match parse(&stdout, nonce) {
             Ok(state) => state,
             Err(e) => panic!("a device whose files lack a trailing newline must still parse as complete: {e}\n{stdout}"),
@@ -768,14 +894,206 @@ radio
     /// body exactly as `probe_script` frames it, i.e. the file's bytes plus
     /// the one `\n` the next marker opens with.
     fn survey_with(plugins_toml: (&str, &str), registry: (&str, &str)) -> String {
+        survey_with_placed(plugins_toml, registry, ("", "absent"))
+    }
+
+    /// The same, with the updater's `placed.json` too.
+    fn survey_with_placed(plugins_toml: (&str, &str), registry: (&str, &str), placed: (&str, &str)) -> String {
+        survey_full(plugins_toml, registry, "0 644", placed)
+    }
+
+    /// Every file of the survey, and the registry's `stat -L -c '%u %a'`.
+    fn survey_full(plugins_toml: (&str, &str), registry: (&str, &str), owner: &str, placed: (&str, &str)) -> String {
         format!(
             "\n@@n@@ KERNEL\nLinux\n\n@@n@@ MACHINE\nx86_64\n\n@@n@@ SYSTEMD\nyes\n\n@@n@@ UID\n0\n\
              \n@@n@@ SUDO\nnot-needed\n\n@@n@@ CORE\nyes\n\n@@n@@ USER\nyes\n\
              \n@@n@@ PLUGINS_TOML\n{}\n@@n@@ PLUGINS_TOML_STATE\n{}\n\
-             \n@@n@@ REGISTRY\n{}\n@@n@@ REGISTRY_STATE\n{}\n\
+             \n@@n@@ REGISTRY\n{}\n@@n@@ REGISTRY_STATE\n{}\n@@n@@ REGISTRY_OWNER\n{}\n\
+             \n@@n@@ PLACED\n{}\n@@n@@ PLACED_STATE\n{}\n\
              \n@@n@@ PACKS\n\n@@n@@ DATA\n\n@@n@@ END\n",
-            plugins_toml.0, plugins_toml.1, registry.0, registry.1
+            plugins_toml.0, plugins_toml.1, registry.0, registry.1, owner, placed.0, placed.1
         )
+    }
+
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        let uid = std::process::Command::new("id").arg("-u").output().expect("id runs");
+        String::from_utf8_lossy(&uid.stdout).trim() == "0"
+    }
+
+    /// The survey's output with the registry's owner line replaced by
+    /// root's: what the same files would say on a device.
+    #[cfg(unix)]
+    fn as_if_root(stdout: &str, nonce: &str) -> String {
+        let marker = format!("@@{nonce}@@ REGISTRY_OWNER\n");
+        let at = stdout.find(&marker).expect("the owner section") + marker.len();
+        let end = at + stdout[at..].find('\n').expect("one line");
+        format!("{}0 644{}", &stdout[..at], &stdout[end..])
+    }
+
+    const SAME_VERSION_REGISTRY: &str = "format = 1\n\n[components.radio]\nversion = \"0.2.0\"\nprivileged = []\n";
+
+    /// Only a registry root owns and only root may write is trusted; any
+    /// other is read as absent — the fail-safe direction, since an absent
+    /// registry makes the plan place everything.
+    ///
+    /// **[MUTATION]**, one per condition of `registry_trusted`, each
+    /// reddening this test: drop `uid == "0"`; drop the `0o022` mask (or
+    /// narrow it to `0o002`).
+    #[test]
+    fn a_registry_root_does_not_own_or_others_may_write_is_not_trusted() {
+        let read = |owner: &str| {
+            parse(&survey_full((RADIO_BLOCK, "present"), (SAME_VERSION_REGISTRY, "present"), owner, ("", "absent")), "n")
+                .unwrap_or_else(|e| panic!("{owner:?}: {e}"))
+        };
+        for owner in ["0 644", "0 600", "0 444", "0 4644"] {
+            let state = read(owner);
+            assert!(state.registry.is_some() && !state.registry_ignored, "{owner:?}");
+        }
+        for owner in ["1000 644", "0 664", "0 646", "0 666", "1000 600", "", "0", "0 rw", "0 644 x"] {
+            let state = read(owner);
+            assert!(state.registry.is_none() && state.registry_ignored, "{owner:?}");
+        }
+        // An untrusted registry is not even parsed: garbage in it is no
+        // refusal, only an unrecorded device.
+        let state = parse(&survey_full((RADIO_BLOCK, "present"), ("format = [[[", "present"), "1000 644", ("", "absent")), "n")
+            .expect("an untrusted registry is never parsed");
+        assert!(state.registry_ignored);
+        // No registry at all is not an ignored one.
+        let absent = parse(&survey_full((RADIO_BLOCK, "present"), ("", "absent"), "", ("", "absent")), "n").unwrap();
+        assert!(!absent.registry_ignored && absent.registry.is_none());
+    }
+
+    /// The plan's side of it: an ignored registry leaves the device
+    /// unrecorded, so a component the registry would have vouched for is
+    /// placed again.
+    #[test]
+    fn an_ignored_registry_makes_the_plan_place_everything() {
+        use crate::plan::tests as p;
+        let trusted = p::current_device();
+        assert!(p::keep(&trusted).nothing_to_do);
+        let mut ignored = p::current_device();
+        ignored.registry = None;
+        ignored.registry_ignored = true;
+        let plan = p::keep(&ignored);
+        assert!(!plan.nothing_to_do);
+        assert!(plan.summary.up_to_date.is_empty(), "{:?}", plan.summary);
+    }
+
+    /// The survey reads at most `READ_CAP` bytes and one more: a file of
+    /// exactly the cap is read whole, one byte over is refused by name for
+    /// `plugins.toml` and the registry (a prefix of `plugins.toml` could
+    /// parse, as a device declaring fewer plugins), and is no evidence for
+    /// the updater's memory.
+    ///
+    /// **[MUTATION]**: drop the `READ_CAP` check from `file_content` —
+    /// this test fails.
+    #[test]
+    fn a_file_over_the_read_cap_is_refused_not_parsed_in_part() {
+        let comment = |n: usize| format!("#{}", "x".repeat(n - 1));
+        let at_cap = comment(READ_CAP);
+        let state = parse(&survey_with((&at_cap, "present"), ("", "absent")), "n").expect("exactly the cap is read whole");
+        assert_eq!(state.plugins_toml.as_deref().map(str::len), Some(READ_CAP));
+        let over = comment(READ_CAP + 1);
+        let err = parse(&survey_with((&over, "present"), ("", "absent")), "n").unwrap_err();
+        assert!(err.to_string().contains("plugins.toml") && err.to_string().contains("larger than"), "{err}");
+        let err = parse(&survey_with((RADIO_BLOCK, "present"), (&over, "present")), "n").unwrap_err();
+        assert!(err.to_string().contains("installed.toml"), "{err}");
+        let big_json = format!("{}{}", PLACED_JSON, " ".repeat(READ_CAP));
+        let state =
+            parse(&survey_with_placed((RADIO_BLOCK, "present"), ("", "absent"), (&big_json, "present")), "n").unwrap();
+        assert!(state.updater_placed.is_empty(), "a memory over the cap is no evidence");
+    }
+
+    /// For real: a huge `plugins.toml` costs the survey `READ_CAP + 1`
+    /// bytes of output, not its size, and the run is refused by name.
+    ///
+    /// **[MUTATION]**: read with `cat` again in `rd` — this test fails on
+    /// the output's size.
+    #[test]
+    #[cfg(unix)]
+    fn probe_script_reads_no_more_than_the_cap_of_a_huge_file() {
+        let stdout = run_probe(|root| {
+            let mut text = String::from(RADIO_BLOCK);
+            text.push_str(&format!("#{}\n", "x".repeat(3 * READ_CAP)));
+            std::fs::write(root.join("etc/ritornello/plugins.toml"), text).expect("a huge plugins.toml");
+        });
+        assert!(stdout.len() < READ_CAP + 4096, "{} bytes of survey", stdout.len());
+        let err = parse(&stdout, "real").unwrap_err();
+        assert!(err.to_string().contains("larger than"), "{err}");
+    }
+
+    /// For real: `stat -L` answers the shape `registry_trusted` reads, and
+    /// a registry the test's own account owns is not trusted (skipped when
+    /// the tests run as root, whose files these would be).
+    #[test]
+    // GNU `stat -c` only: the probe runs on the device, which is GNU/Linux.
+    #[cfg(target_os = "linux")]
+    fn probe_script_reports_the_registry_s_owner_and_mode() {
+        if running_as_root() {
+            println!("SKIPPED: running as root, whose registry is trusted");
+            return;
+        }
+        let stdout = run_probe(|root| {
+            std::fs::write(root.join("var/lib/ritornello-install/installed.toml"), SAME_VERSION_REGISTRY)
+                .expect("registry");
+        });
+        let line = stdout.split("@@real@@ REGISTRY_OWNER\n").nth(1).unwrap().lines().next().unwrap();
+        let mut parts = line.split(' ');
+        assert!(parts.next().unwrap().parse::<u32>().unwrap() > 0, "{line}");
+        assert!(u32::from_str_radix(parts.next().unwrap(), 8).is_ok(), "{line}");
+        let state = parse(&stdout, "real").unwrap();
+        assert!(state.registry_ignored && state.registry.is_none(), "{stdout}");
+        let state = parse(&as_if_root(&stdout, "real"), "real").unwrap();
+        assert!(state.registry.is_some(), "{stdout}");
+    }
+
+    /// The owner's Pi's `placed.json`, verbatim (captured 2026-10-06, owner
+    /// and mode `ritornello:ritornello 0644`, readable by the ssh account):
+    /// what `update::placed::record` wrote after the web UI's updater placed
+    /// the core and eight plugins. The core's archive note rides along; only
+    /// each version is read.
+    const PLACED_JSON: &str = r#"{"cd":{"version":"0.2.0-beta.3"},"core":{"version":"0.2.0-beta.3","not_installed_files":["etc/polkit-1/rules.d/52-ritornello-update.rules","etc/polkit-1/rules.d/50-ritornello-power.rules","etc/systemd/system/ritornello-update.service","etc/systemd/system/ritornello.service","etc/systemd/system/ritornello-rollback.service","usr/local/lib/ritornello/ritornello-update"]},"generic-input":{"version":"0.2.0-beta.3"},"mpd":{"version":"0.2.0-beta.3"},"musicbrainz":{"version":"0.2.0-beta.3"},"nrj-metas":{"version":"0.2.0-beta.3"},"ouifm-metas":{"version":"0.2.0-beta.3"},"radio":{"version":"0.2.0-beta.3"},"radiofrance-metas":{"version":"0.2.0-beta.3"}}"#;
+
+    #[test]
+    fn the_updater_s_memory_is_read_version_by_version() {
+        let state = parse(&survey_with_placed((RADIO_BLOCK, "present"), ("", "absent"), (PLACED_JSON, "present")), "n")
+            .unwrap();
+        let names: Vec<&str> = state.updater_placed.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            ["cd", "core", "generic-input", "mpd", "musicbrainz", "nrj-metas", "ouifm-metas", "radio", "radiofrance-metas"]
+        );
+        assert!(state.updater_placed.values().all(|v| v == "0.2.0-beta.3"), "{:?}", state.updater_placed);
+    }
+
+    /// An untrusted file the run can do without: absent, unreadable, or not
+    /// the expected JSON, it is no evidence at all — never a refusal, which
+    /// would let the unprivileged account stop every install.
+    ///
+    /// **[MUTATION]**: make `updater_placed` refuse what does not parse
+    /// (`.expect` in place of `.unwrap_or_default()`) — this test fails.
+    #[test]
+    fn an_absent_unreadable_or_garbage_updater_memory_is_no_evidence() {
+        for placed in [("", "absent"), ("", "unreadable"), ("{\"core\": {\"vers", "present"), ("[1, 2]", "present"), ("", "present")] {
+            let state = parse(&survey_with_placed((RADIO_BLOCK, "present"), ("", "absent"), placed), "n")
+                .unwrap_or_else(|e| panic!("{placed:?}: {e}"));
+            assert!(state.updater_placed.is_empty(), "{placed:?}: {:?}", state.updater_placed);
+        }
+    }
+
+    /// For real: the survey reads the file where the core writes it.
+    #[test]
+    #[cfg(unix)]
+    fn probe_script_reads_the_updater_s_memory_where_the_core_keeps_it() {
+        let stdout = run_probe(|root| {
+            std::fs::create_dir_all(root.join("var/lib/ritornello/staging")).expect("staging dir");
+            std::fs::write(root.join("var/lib/ritornello/staging/placed.json"), PLACED_JSON).expect("placed.json");
+        });
+        let state = parse(&stdout, "real").expect("parses");
+        assert_eq!(state.updater_placed.get("radio").map(String::as_str), Some("0.2.0-beta.3"), "{stdout}");
+        let stdout = run_probe(|_| {});
+        assert!(parse(&stdout, "real").unwrap().updater_placed.is_empty(), "{stdout}");
     }
 
     const RADIO_BLOCK: &str = "[[plugin]]\nname = \"radio\"\nexec = \"/usr/local/lib/ritornello/plugins/ritornello-plugin-radio\"\n";

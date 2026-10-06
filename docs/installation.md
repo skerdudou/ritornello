@@ -38,6 +38,15 @@ it needs from GitHub itself, checking each against the release's
 `SHA256SUMS`. The [Deploying](#deploying) section below describes the same
 program in detail — its screens, its options, removal.
 
+Running it again is safe and cheap: what the device already has at the
+release's version is neither downloaded nor placed again, and on a device
+that is entirely up to date the program says so and stops — no sudo
+password, no archive downloaded (only the release list, its inventory and
+its `SHA256SUMS`), and the radio keeps playing. When only some of it
+changed, only that is fetched and placed (the service is still stopped and
+restarted around it). To place everything again anyway — a unit or a rule
+changed by hand — use `--reinstall`, or "Repair" on the first screen.
+
 **`--version`.** Without it, the newest final release is installed — or,
 while the project has published prereleases only, the newest prerelease.
 Name a tag (`--version v0.2.0-beta.2`) to install that release instead;
@@ -529,7 +538,14 @@ and hands over: `ritornello-install --from-dir release/install "$@"`. Every
 argument you give the script reaches the installer. `TARGET` names the
 compilation target (see [Building](#building)) and defaults to the Pi 2's.
 `DEPLOY_STOP_BEFORE_INSTALL=1` stops once `release/install/` is complete
-and the installer built, without contacting any device. Nothing in the
+and the installer built, without contacting any device. **The wrapper
+reinstalls everything by default**: it adds `--reinstall` to the
+installer's arguments, because a development build ships changed code
+under the version numbers the checkout already declares, which an ordinary
+run would leave alone (the installer compares versions, not bytes). It
+does not add it when the arguments already say `--reinstall` or
+`--remove-all`. `./deploy/deploy.sh --self-test` checks that rule without
+building anything; the Rust suite runs it. Nothing in the
 script places a file on the device: every path, unit and rule comes from
 the inventory, generated from `deploy/packaging.toml` like the archives.
 
@@ -551,7 +567,7 @@ supported.
 
     ritornello-install [--host account@host] [--plugins a,b|none]
         [--packs fr,de|none] [--keep] [--remove-all] [--purge-data]
-        [--version <tag>] [--from-dir <dir>] [--yes]
+        [--reinstall] [--version <tag>] [--from-dir <dir>] [--yes]
 
 - `--host`, or `RITORNELLO_HOST`: the device, as `account@host`.
 - `--plugins`, `--packs`: what is wanted, comma-separated; `none` is the
@@ -560,6 +576,17 @@ supported.
 - `--keep`: keep exactly what is installed — a plain update.
 - `--remove-all`: remove everything Ritornello placed. `--purge-data` also
   erases the data of what is removed.
+- `--reinstall`: place every component and language pack again, including
+  those the device already has at the offered version, which an ordinary
+  run leaves alone. It is the answer to a unit, a polkit rule or a binary
+  damaged or edited by hand (the version has not moved, so nothing else
+  would replace it). A downgrade does not need it as a rule — the versions
+  differ, so the older one is placed — except when the registry already
+  records the target version while the device runs another (the web UI's
+  updater moved past it) and the updater's own memory does not say so. It
+  combines with `--keep`,
+  `--plugins`, `--packs` and `--version`, and is refused with
+  `--remove-all`. On its own, in a terminal, the screens ask the rest.
 - `--version`: the release (a tag) to install; the newest final release by
   default. The wrapper never uses it: it installs its own directory.
 - `--from-dir`: install from a directory of local archives instead of a
@@ -578,6 +605,27 @@ checklists), the data of anything about to be removed, a summary and its
 confirmation ("Go ahead?"), and last the sudo password when one is needed.
 When an answer is missing and no terminal is there to give it, the run
 stops and names it before anything is downloaded or sent.
+
+What to do with an installation that is already there has three answers:
+"Install or update", "Repair (reinstall everything)" — the same as
+`--reinstall` — and "Remove everything".
+
+The summary names what is installed, updated and removed, and what is
+**already up to date** and left exactly as it is. When everything is — no
+component or pack to place, nothing to remove, `plugins.toml` and the
+registry unchanged — the run says that the device is already up to date
+and stops there, before the confirmation, the sudo password and any
+archive download (the release list, its inventory and its `SHA256SUMS`
+are still fetched, to know what is offered): nothing is sent to the device
+and the service is not stopped. That holds without a terminal too, even
+on a device whose `sudo` asks for a password: the missing password is
+only an error once the plan has something to do.
+A plugin the registry still records but `plugins.toml` no longer declares
+(uninstalled from the web interface) is listed as "no longer on the device,
+record cleared": what may be left of its binary is removed and its record
+forgotten. A language pack removed from the web interface only loses its
+record; a run whose only change is the registry writes it without stopping
+the service.
 
 ### Removal and total removal
 
@@ -602,11 +650,35 @@ and on a total removal a file or hidden entry sitting directly in it.
 
 ### The registry
 
-`/var/lib/ritornello-install/installed.toml` on the device records what
-`ritornello-install` placed, and which release it came from. It is what an
-update, a removal and a change of channel are computed from; do not edit it
-by hand. If it no longer parses, the installer says so and stops: restore
-it from a backup rather than deleting it.
+`/var/lib/ritornello-install/installed.toml` on the device records every
+component `ritornello-install` placed — the core, each plugin, each
+companion, each language pack (under its pack id, `ritornello-lang-fr`) —
+with the version of that component it placed and the privileged files it
+placed for it (none, for most plugins). It does not record which release a
+component came from: a component's version is its own, and moves only when
+it changes. It is what an update, a removal and a change of channel are
+computed from, and what lets a run leave alone a component already at the
+offered version; do not edit it by hand. If it no longer parses, the
+installer says so and stops: restore it from a backup rather than deleting
+it. A device with no registry, or one written by an older installer that
+recorded only the components with privileged files, simply has everything
+it does not record placed again on the next run.
+
+Only this file, which root owns, can make a run skip a component: what the
+`ritornello` account can write — the in-app updater's
+`/var/lib/ritornello/staging/placed.json`, `plugins.toml`, a pack's
+`pack.toml` — can only ever make it place more. In particular, when the web
+UI's updater has placed a version of a component other than the one
+recorded here, the next run places that component again. A registry that
+is not owned by root, or that its group or anyone else may write, is not
+trusted at all: the run treats the device as unrecorded and places
+everything.
+
+The installer never rewrites the updater's memory. So after going back to
+an older release (`--version <older>`, with `--reinstall` or not), that
+memory still names the newer version the web UI had placed, and every
+later run places that component again — expected, and safe — until the web
+UI's updater writes the memory again.
 
 It is also the one file the core reads from `ritornello-install`, for one
 field: the version of `files-mount`, the companion that carries the root
@@ -1022,7 +1094,18 @@ been observed for real:
   return, and the note is what stops a release that fails to start from
   being reinstalled every night; here the exit is a test closure that
   returns like any other, so the ordering is a property of the code's
-  shape rather than something observed.
+  shape rather than something observed;
+- `ritornello-install` leaving an up-to-date device alone. The comparison
+  with the registry, the "already up to date" stop before any question,
+  and the survey reading the updater's `placed.json` are tested against
+  computed plans, a fake of the steps that follow, and the survey run
+  under `sh` on a temporary root — never against the Pi, whose registry
+  was written by an installer that recorded only the core and the
+  companion, so its first run with this one places every plugin and pack
+  once more. What has been measured on the Pi, read-only: its
+  `placed.json` (`ritornello:ritornello 0644`, in a `0755` directory) is
+  readable by the `dietpi` account, and its content, captured, is what the
+  survey's parser is tested on.
 
 Every one of those is covered by unit and integration tests that fake the
 privileged step; none is covered by the privileged step itself.
@@ -1205,8 +1288,11 @@ proven on hardware. In particular:
   installer reads one generated locally by `scripts/install-inventory.py`,
   and the release workflow's own run of that step, and the `SHA256SUMS`
   line covering it, have not yet happened;
-- the registry, `/var/lib/ritornello-install/installed.toml`, has never
-  been written or read on a real device.
+- the registry, `/var/lib/ritornello-install/installed.toml`, had never
+  been written or read on a real device when this was first written. It
+  has since been seen on the Pi (read-only, 2026-10-06: `root:root 0644`,
+  recording the core and `files-mount`), but no installer run reading it
+  back has been observed there.
 
 **The move to one data directory per plugin has never run on a device.**
 Every plugin now writes only inside its own

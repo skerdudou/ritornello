@@ -49,10 +49,16 @@ pub enum Intent {
     /// declared) and exactly the languages in `packs`. Anything declared and
     /// not in `plugins` is removed; its data stays unless it is named in
     /// `erase_data`.
+    ///
+    /// A component or a pack the device already has at the offered version
+    /// is left as it is (`is_current`), unless `reinstall` says to place
+    /// everything again — the repair of a hand-damaged unit or rule, or a
+    /// device whose files no longer match what its registry says.
     InstallOrUpdate {
         plugins: BTreeSet<String>,
         packs: BTreeSet<String>,
         erase_data: BTreeSet<String>,
+        reinstall: bool,
     },
     /// Everything Ritornello placed. `/var/lib/ritornello` and the
     /// `ritornello` account go only with `erase_data`.
@@ -87,6 +93,17 @@ pub struct Summary {
     pub removed: Vec<String>,
     pub erased: Vec<String>,
     pub kept_third_party: Vec<String>,
+    /// Components and language packs already on the device at the offered
+    /// version, left exactly as they are.
+    pub up_to_date: Vec<String>,
+    /// Plugins of ours the registry still records but `plugins.toml` no
+    /// longer declares, with no root file of their own: uninstalled from
+    /// the web interface. Nothing of theirs runs any more; the plan only
+    /// removes what may be left of their binary and forgets their record.
+    pub cleared: Vec<String>,
+    /// Language packs placed (installed or replaced) and removed, by id.
+    pub languages_placed: Vec<String>,
+    pub languages_removed: Vec<String>,
 }
 
 /// Everything the device script does, in the order it does it: stop,
@@ -125,6 +142,11 @@ pub struct Plan {
     pub enable_units: Vec<String>,
     pub start_service: bool,
     pub remove_user: bool,
+    /// The device already is what was asked: nothing to place, extract or
+    /// remove, `plugins.toml` and the registry unchanged. The run says so
+    /// and stops before the confirmation, the sudo password, the downloads
+    /// and the apply; the service is neither stopped nor started.
+    pub nothing_to_do: bool,
     pub summary: Summary,
 }
 
@@ -150,6 +172,9 @@ pub enum PlanError {
     /// `plugins.toml` declares a plugin under the name of a component that
     /// ships beside a plugin (`files-mount`), which is never a plugin.
     DeclaredUnderCompanionName(String),
+    /// `plugins.toml` declares a plugin under a language pack's id
+    /// (`ritornello-lang-fr`), which keys that pack's registry record.
+    DeclaredUnderPackId(String),
 }
 
 /// One sentence per refusal, naming what is refused and what to do about
@@ -221,6 +246,13 @@ impl std::fmt::Display for PlanError {
                 names::PLUGINS_TOML,
                 names::PLUGINS_TOML
             ),
+            Self::DeclaredUnderPackId(n) => write!(
+                f,
+                "{} declares a plugin named {n:?}, which is the name of a language pack, never a plugin: \
+                 remove that [[plugin]] block from {} by hand, then run again",
+                names::PLUGINS_TOML,
+                names::PLUGINS_TOML
+            ),
         }
     }
 }
@@ -241,10 +273,16 @@ pub fn compute(inv: &Inventory, dev: &DeviceState, intent: &Intent) -> Result<Pl
     if let Some(d) = dev.declared.iter().find(|d| inv.companions.iter().any(|c| c.name == d.name)) {
         return Err(PlanError::DeclaredUnderCompanionName(d.name.clone()));
     }
+    // The same for a language pack's id, which keys the pack's record: a
+    // third-party plugin of that name, kept, would carry the pack's record
+    // over as its own, or lose it.
+    if let Some(d) = dev.declared.iter().find(|d| language_of(&d.name).is_some()) {
+        return Err(PlanError::DeclaredUnderPackId(d.name.clone()));
+    }
     match intent {
         Intent::RemoveAll { erase_data } => remove_all(inv, dev, *erase_data),
-        Intent::InstallOrUpdate { plugins, packs, erase_data } => {
-            install_or_update(inv, dev, arch, plugins, packs, erase_data)
+        Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall } => {
+            install_or_update(inv, dev, arch, plugins, packs, erase_data, *reinstall)
         }
     }
 }
@@ -409,6 +447,61 @@ fn finish(
     Ok(plan)
 }
 
+/// Whether the device already has `name` at `offered`, with exactly the
+/// privileged files `privileged` names, so that placing it again would
+/// change nothing.
+///
+/// **The trust rule: only root-owned data may justify a skip.** Skipping is
+/// the one decision here that makes the installer do *less* as root, so it
+/// rests on `/var/lib/ritornello-install/installed.toml` alone (`recorded`),
+/// which only root writes (root:root 0644). Everything the unprivileged
+/// `ritornello` account can write — the in-app updater's `placed.json`
+/// (`untrusted`), `plugins.toml`, a pack's `pack.toml` — may only ever push
+/// toward reinstalling, never toward skipping: an account that could forge
+/// a version there would otherwise keep a stale or tampered root unit, rule
+/// or binary in place across every run meant to repair it. Concretely:
+///
+/// - no record, another version recorded, or another set of privileged
+///   files recorded: not current, whatever anything else says;
+/// - a record that matches, but an updater memory naming another version
+///   for the same component (the updater moved its binary without telling
+///   the registry): not current either;
+/// - an updater memory that *agrees* adds nothing: it is never consulted
+///   for a yes, so a forged one can never turn a no into one.
+///
+/// Whether the component is on the device at all is the caller's
+/// precondition (`was_there`), and is likewise only ever a reason to place.
+fn is_current(
+    recorded: &BTreeMap<String, Recorded>,
+    untrusted: &BTreeMap<String, String>,
+    name: &str,
+    offered: &str,
+    privileged: &[String],
+) -> bool {
+    let Some(rec) = recorded.get(name) else { return false };
+    let same_files = {
+        let a: BTreeSet<&String> = rec.privileged.iter().collect();
+        let b: BTreeSet<&String> = privileged.iter().collect();
+        a == b
+    };
+    if rec.version != offered || !same_files {
+        return false;
+    }
+    untrusted.get(name).is_none_or(|v| v == offered)
+}
+
+/// Two registries that record the same components at the same versions
+/// with the same privileged files, in whatever order: rewriting one with
+/// the other changes nothing the installer or the core ever reads.
+fn same_registry(a: &Registry, b: &Registry) -> bool {
+    let files = |r: &Recorded| r.privileged.iter().cloned().collect::<BTreeSet<String>>();
+    a.format == b.format
+        && a.components.len() == b.components.len()
+        && a.components.iter().all(|(name, ra)| {
+            b.components.get(name).is_some_and(|rb| ra.version == rb.version && files(ra) == files(rb))
+        })
+}
+
 fn install_or_update(
     inv: &Inventory,
     dev: &DeviceState,
@@ -416,6 +509,7 @@ fn install_or_update(
     plugins: &BTreeSet<String>,
     packs: &BTreeSet<String>,
     erase_data: &BTreeSet<String>,
+    reinstall: bool,
 ) -> Result<Plan, PlanError> {
     let ours: BTreeSet<&str> = inv.plugins.iter().map(|p| p.name.as_str()).collect();
     let declared: BTreeSet<&str> = dev.declared.iter().map(|d| d.name.as_str()).collect();
@@ -501,9 +595,28 @@ fn install_or_update(
         placed.extend(companions.iter().filter(|(_, w)| *w == p.name).map(|(c, _)| c));
     }
     let mut going: Vec<&Component> = Vec::new();
+    // A plugin of ours only an unprivileged record remembers — not declared,
+    // nothing privileged recorded for it, no companion recorded: since every
+    // plugin placed is recorded, this is one uninstalled from the web
+    // interface. Its leftovers go like any removed plugin's, but the summary
+    // says what actually happens: it was already gone, and its record is
+    // cleared. (A plugin whose root files are still recorded is removed in
+    // earnest, R30, and said so.)
+    let already_gone = |p: &Component| {
+        !declared.contains(p.name.as_str())
+            && !companion_recorded(&p.name)
+            && recorded.get(&p.name).is_none_or(|r| r.privileged.is_empty())
+    };
+    let mut cleared: BTreeSet<&str> = BTreeSet::new();
     for p in &removed_ours {
         going.push(p);
-        going.extend(companions.iter().filter(|(_, w)| *w == p.name).map(|(c, _)| c));
+        let its_companions: Vec<&Component> =
+            companions.iter().filter(|(_, w)| *w == p.name).map(|(c, _)| c).collect();
+        if already_gone(p) {
+            cleared.insert(p.name.as_str());
+            cleared.extend(its_companions.iter().map(|c| c.name.as_str()));
+        }
+        going.extend(its_companions);
     }
 
     let mut plan = Plan::default();
@@ -511,43 +624,12 @@ fn install_or_update(
     let mut new_registry = BTreeMap::new();
 
     // 4. The core, every kept plugin of ours and each one's companions:
-    // placed in full.
+    // placed in full, unless the device already has it as offered.
     for c in placed {
-        let archive = c.archive_for(arch);
-        plan.archives.insert(archive.clone());
-        for f in &c.files {
-            plan.puts.push(Put {
-                archive: archive.clone(),
-                archive_path: f.archive_path.clone(),
-                dest: f.dest.clone(),
-                mode: f.mode.clone(),
-                owner: f.owner.clone(),
-            });
-        }
-        for i in &c.initial_config {
-            plan.initial.push(Initial {
-                archive: archive.clone(),
-                archive_path: i.archive_path.clone(),
-                plugin: c.name.clone(),
-                target: i.target.clone(),
-            });
-        }
-        for u in &c.enable {
-            push_unique(&mut plan.enable_units, u);
-        }
-        // 10. The registry records what this version places privileged.
+        // 10. The registry records every component placed, with its
+        // version and what it places privileged (none, for most plugins):
+        // the version is what lets the next run leave it alone.
         let privileged: Vec<String> = c.files.iter().filter(|f| f.privileged).map(|f| f.dest.clone()).collect();
-        // R27: what the previous version placed and this one no longer does.
-        if let Some(old) = recorded.get(&c.name) {
-            for p in &old.privileged {
-                if !c.files.iter().any(|f| &f.dest == p) {
-                    remove_files.insert(p.clone());
-                }
-            }
-        }
-        if !privileged.is_empty() {
-            new_registry.insert(c.name.clone(), Recorded { version: c.version.clone(), privileged });
-        }
         // A companion was there with its plugin, or on its own record.
         let was_there = if c.name == inv.core.name {
             dev.core_present
@@ -556,7 +638,47 @@ fn install_or_update(
         } else {
             declared.contains(c.name.as_str())
         };
-        if was_there {
+        let current =
+            !reinstall && was_there && is_current(&recorded, &dev.updater_placed, &c.name, &c.version, &privileged);
+        if !current {
+            let archive = c.archive_for(arch);
+            plan.archives.insert(archive.clone());
+            for f in &c.files {
+                plan.puts.push(Put {
+                    archive: archive.clone(),
+                    archive_path: f.archive_path.clone(),
+                    dest: f.dest.clone(),
+                    mode: f.mode.clone(),
+                    owner: f.owner.clone(),
+                });
+            }
+            for i in &c.initial_config {
+                plan.initial.push(Initial {
+                    archive: archive.clone(),
+                    archive_path: i.archive_path.clone(),
+                    plugin: c.name.clone(),
+                    target: i.target.clone(),
+                });
+            }
+        }
+        // Enabled even when left as it is: `systemctl enable` of an enabled
+        // unit changes nothing, and the list is what the script re-asserts.
+        for u in &c.enable {
+            push_unique(&mut plan.enable_units, u);
+        }
+        // R27: what the previous version placed and this one no longer does.
+        // (A current component recorded exactly these files: nothing here.)
+        if let Some(old) = recorded.get(&c.name) {
+            for p in &old.privileged {
+                if !c.files.iter().any(|f| &f.dest == p) {
+                    remove_files.insert(p.clone());
+                }
+            }
+        }
+        new_registry.insert(c.name.clone(), Recorded { version: c.version.clone(), privileged });
+        if current {
+            plan.summary.up_to_date.push(c.name.clone());
+        } else if was_there {
             plan.summary.updated.push(c.name.clone());
         } else {
             plan.summary.installed.push(c.name.clone());
@@ -588,7 +710,11 @@ fn install_or_update(
                 remove_files.insert(d.exec.clone());
             }
         }
-        plan.summary.removed.push(c.name.clone());
+        if cleared.contains(c.name.as_str()) {
+            plan.summary.cleared.push(c.name.clone());
+        } else {
+            plan.summary.removed.push(c.name.clone());
+        }
     }
 
     // 6. Every third-party plugin that goes: its binary, from the plugins
@@ -599,22 +725,6 @@ fn install_or_update(
     }
     plan.summary.kept_third_party = kept_third.iter().map(|n| n.to_string()).collect();
 
-    // A recorded component nothing keeps any more — gone from the release
-    // and not a third-party plugin still chosen — loses its files. One that
-    // is still chosen as a third-party plugin keeps its entry as it was. (A
-    // companion whose plugin goes lands here too, and its recorded files are
-    // already in `remove_files`.)
-    for (name, old) in &recorded {
-        if new_registry.contains_key(name) || name == &inv.core.name || ours.contains(name.as_str()) {
-            continue;
-        }
-        if kept_third.contains(&name.as_str()) {
-            new_registry.insert(name.clone(), old.clone());
-        } else {
-            remove_files.extend(old.privileged.iter().cloned());
-        }
-    }
-
     // 7. Data, only of what goes, only when asked.
     for n in erase_data {
         if dev.data_nonempty.contains(n) {
@@ -623,12 +733,33 @@ fn install_or_update(
         }
     }
 
-    // 8. Language packs: exactly the chosen ones.
+    // 8. Language packs: exactly the chosen ones. Each is recorded in the
+    // registry under its pack id (`ritornello-lang-fr`), with its version and
+    // no privileged file, so that a pack already there at the offered
+    // version is left alone. The pack's own `pack.toml` also carries a
+    // version, but the pack directory belongs to the `ritornello` account:
+    // by `is_current`'s trust rule it could only ever argue for replacing
+    // the pack, so it is not read at all. The directory being there is
+    // likewise only a precondition — a recorded pack whose directory is gone
+    // is placed again.
     let wanted_ids: BTreeSet<String> = packs.iter().map(|l| names::pack_id(l)).collect();
     for l in packs {
+        let id = names::pack_id(l);
         if let Some(p) = shipped(l) {
-            plan.archives.insert(p.archive.clone());
-            plan.packs.push((p.archive.clone(), names::pack_id(l)));
+            let current = !reinstall
+                && dev.packs.contains(&id)
+                && is_current(&recorded, &BTreeMap::new(), &id, &p.version, &[]);
+            if current {
+                plan.summary.up_to_date.push(id.clone());
+            } else {
+                plan.archives.insert(p.archive.clone());
+                plan.packs.push((p.archive.clone(), id.clone()));
+                plan.summary.languages_placed.push(id.clone());
+            }
+            new_registry.insert(id, Recorded { version: p.version.clone(), privileged: Vec::new() });
+        } else if let Some(old) = recorded.get(&id) {
+            // Kept as it is, not shipped by this release: so is its record.
+            new_registry.insert(id, old.clone());
         }
     }
     // Ours only: a third-party pack is the core's, installed from a source
@@ -637,6 +768,30 @@ fn install_or_update(
     for id in &dev.packs {
         if !wanted_ids.contains(id) && !names::third_party_pack_id(id) {
             plan.remove_trees.push(format!("{PACKS_ROOT}/{id}"));
+            plan.summary.languages_removed.push(id.clone());
+        }
+    }
+
+    // A recorded component nothing keeps any more — gone from the release
+    // and not a third-party plugin still chosen — loses its files. One that
+    // is still chosen as a third-party plugin keeps its entry as it was. (A
+    // companion whose plugin goes lands here too, and its recorded files are
+    // already in `remove_files`; so does a pack no longer chosen, whose
+    // record says it places nothing privileged.)
+    for (name, old) in &recorded {
+        if new_registry.contains_key(name) || name == &inv.core.name || ours.contains(name.as_str()) {
+            continue;
+        }
+        if kept_third.contains(&name.as_str()) {
+            new_registry.insert(name.clone(), old.clone());
+        } else {
+            remove_files.extend(old.privileged.iter().cloned());
+            // A pack recorded but no longer on the device (removed from the
+            // web interface): only its record goes, and the summary says so
+            // rather than leaving that registry write unexplained.
+            if language_of(name).is_some() && !dev.packs.contains(name) {
+                plan.summary.cleared.push(name.clone());
+            }
         }
     }
 
@@ -695,7 +850,50 @@ fn install_or_update(
         .filter(|d| plugins.contains(&d.name) && in_plugins_dir(&d.exec))
         .map(|d| d.exec.clone())
         .collect();
-    finish(plan, remove_files, &kept_execs, DataScope::Only(erase_data))
+    let plan = finish(plan, remove_files, &kept_execs, DataScope::Only(erase_data))?;
+    Ok(settle(plan, dev))
+}
+
+/// What is left to do once every component and pack has been weighed.
+///
+/// Nothing placed, extracted, disabled, unmounted or removed, and
+/// `plugins.toml` written back as it is: the core has nothing new to start
+/// with, so the service is neither stopped nor restarted (and the account,
+/// which the survey saw, is not ensured). Then either the registry is
+/// unchanged too — the device already is what was asked, `nothing_to_do` —
+/// or only a record differs (a pack or a plugin uninstalled from the web
+/// interface, whose record is cleared), and the run writes the registry
+/// alone. Checked on the finished plan, after `finish`, so that nothing
+/// the plan does can be missed by this test.
+fn settle(mut plan: Plan, dev: &DeviceState) -> Plan {
+    let quiet = plan.archives.is_empty()
+        && plan.puts.is_empty()
+        && plan.initial.is_empty()
+        && plan.packs.is_empty()
+        && plan.disable_units.is_empty()
+        && plan.unmount_roots.is_empty()
+        && plan.remove_mount_roots.is_empty()
+        && plan.remove_files.is_empty()
+        && plan.remove_trees.is_empty()
+        && !plan.remove_plugins_toml
+        && !plan.remove_registry
+        && !plan.remove_user
+        && plan.plugins_toml == dev.plugins_toml
+        && dev.user_exists;
+    if !quiet {
+        return plan;
+    }
+    plan.ensure_user = false;
+    plan.stop_service = false;
+    plan.start_service = false;
+    let unchanged = match (&plan.registry, &dev.registry) {
+        (Some(new), Some(old)) => same_registry(new, old),
+        _ => false,
+    };
+    if unchanged {
+        plan.nothing_to_do = true;
+    }
+    plan
 }
 
 /// The union of what the device recorded and what this plan records: per
@@ -926,6 +1124,8 @@ pub(crate) mod tests {
                 .map(|(n, e)| Declared { name: n.to_string(), exec: e.to_string() })
                 .collect(),
             registry,
+            registry_ignored: false,
+            updater_placed: BTreeMap::new(),
             packs: packs.iter().map(|p| p.to_string()).collect(),
             data_nonempty: data.iter().map(|d| d.to_string()).collect(),
             user_exists: installed,
@@ -955,7 +1155,7 @@ pub(crate) mod tests {
     }
 
     fn install(plugins: &[&str], packs: &[&str], erase: &[&str]) -> Intent {
-        Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: set(erase) }
+        Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: set(erase), reinstall: false }
     }
 
     fn declared_in(plan: &Plan) -> Vec<String> {
@@ -1013,7 +1213,11 @@ pub(crate) mod tests {
             Some(vec!["/etc/systemd/system/ritornello.service".to_string()])
         );
         assert_eq!(reg.components.get(CORE).map(|r| r.version.as_str()), Some("0.2.0-beta.2"));
-        assert!(!reg.components.contains_key("radio"), "radio places nothing privileged");
+        assert_eq!(
+            reg.components.get("radio"),
+            Some(&Recorded { version: "0.2.0-beta.2".to_string(), privileged: vec![] }),
+            "radio places nothing privileged, and is recorded all the same, with its version"
+        );
         assert_eq!(plan.summary.installed, vec!["core", "radio"]);
         assert!(plan.summary.updated.is_empty() && plan.summary.removed.is_empty());
     }
@@ -1233,7 +1437,7 @@ pub(crate) mod tests {
         assert!(plan.remove_files.is_empty() && plan.disable_units.is_empty(), "{plan:?}");
         assert!(has(&plan.enable_units, "ritornello-media-mount.service"));
         let reg = plan.registry.as_ref().unwrap();
-        assert!(!reg.components.contains_key("files"), "files places nothing privileged: {reg:?}");
+        assert_eq!(reg.components["files"].privileged, Vec::<String>::new(), "files places nothing privileged: {reg:?}");
         let rec = reg.components.get(MOUNT).cloned().unwrap();
         assert_eq!(rec.version, "0.2.0-beta.2");
         assert_eq!(rec.privileged, vec![MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER]);
@@ -1324,7 +1528,7 @@ pub(crate) mod tests {
         let exec = "/usr/local/lib/ritornello/plugins/acme-widget";
         let device = dev(&[("radio", RADIO_EXEC), ("Acme_Widget", exec)], None, &[], &[]);
         let (plugins, packs) = preselection(&inv(), &device);
-        let plan = compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() })
+        let plan = compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
             .expect("the preselection of a device with Acme_Widget plans");
         assert_eq!(plan.summary.kept_third_party, vec!["Acme_Widget"]);
         // Removed, it goes by its exec; its data, by name, is still refused.
@@ -1507,7 +1711,7 @@ pub(crate) mod tests {
         assert!(has(&plan.enable_units, "ritornello-media-mount.service"));
         let reg = plan.registry.as_ref().unwrap();
         assert_eq!(reg.components[MOUNT].privileged, vec![MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER]);
-        assert!(!reg.components.contains_key("files"));
+        assert_eq!(reg.components["files"].privileged, Vec::<String>::new(), "recorded, with no root file");
         assert_eq!(plan.summary.installed, vec!["core", "radio", "files", MOUNT]);
         assert_eq!(declared_in(&plan), vec!["radio", "files"], "a companion is never declared");
 
@@ -1535,7 +1739,7 @@ pub(crate) mod tests {
         let device = dev(&[("radio", RADIO_EXEC), ("files", FILES_EXEC)], Some(files_registry()), &[], &[]);
         let (plugins, packs) = preselection(&inv(), &device);
         assert_eq!(plugins, set(&["radio", "files"]));
-        let plan = compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() }).unwrap();
+        let plan = compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false }).unwrap();
         assert!(dests(&plan).contains(&MEDIA_HELPER));
     }
 
@@ -1562,9 +1766,32 @@ pub(crate) mod tests {
         assert_eq!(compute(&inv(), &device, &Intent::RemoveAll { erase_data: false }), refused);
         let (plugins, packs) = preselection(&inv(), &device);
         assert_eq!(
-            compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() }),
+            compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false }),
             refused
         );
+    }
+
+    /// A `plugins.toml` entry under a language pack's id is refused like
+    /// one under a companion's name, whatever the choice: kept as a third
+    /// party, it would take over the pack's registry record.
+    ///
+    /// **[MUTATION]**: drop the declared-under-a-pack-id check from
+    /// `compute` — this test fails.
+    #[test]
+    fn a_plugin_declared_under_a_pack_id_is_refused() {
+        let exec = "/usr/local/lib/ritornello/plugins/ritornello-lang-fr";
+        let device = dev(&[("radio", RADIO_EXEC), ("ritornello-lang-fr", exec)], None, &["ritornello-lang-fr"], &[]);
+        let refused = Err(PlanError::DeclaredUnderPackId("ritornello-lang-fr".to_string()));
+        assert_eq!(compute(&inv(), &device, &install(&["radio", "ritornello-lang-fr"], &["fr"], &[])), refused);
+        assert_eq!(compute(&inv(), &device, &install(&["radio"], &["fr"], &[])), refused);
+        assert_eq!(compute(&inv(), &device, &Intent::RemoveAll { erase_data: false }), refused);
+        says(
+            PlanError::DeclaredUnderPackId("ritornello-lang-fr".into()),
+            &["\"ritornello-lang-fr\"", "language pack", "remove that [[plugin]] block"],
+        );
+        // A name that merely starts like one but is no pack id is a plugin.
+        let device = dev(&[("radio", RADIO_EXEC), ("ritornello-lang-", THEIRS_EXEC)], None, &[], &[]);
+        assert!(compute(&inv(), &device, &install(&["radio", "ritornello-lang-"], &[], &[])).is_ok());
     }
 
     #[test]
@@ -1636,7 +1863,7 @@ privileged = [
         let device = the_pi(&real);
         let (plugins, packs) = preselection(&real, &device);
         assert!(plugins.contains("files"));
-        let plan = compute(&real, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() })
+        let plan = compute(&real, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
             .expect("the Pi's registry plans");
 
         let moved = [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER];
@@ -1662,7 +1889,11 @@ privileged = [
         want.sort();
         assert_eq!(recorded, want);
         assert_eq!(rec.version, mount.version);
-        assert!(!reg.components.contains_key("files"), "files records nothing privileged any more: {reg:?}");
+        assert_eq!(
+            reg.components["files"].privileged,
+            Vec::<String>::new(),
+            "files records nothing privileged any more: {reg:?}"
+        );
         // What the core recorded is placed again: nothing of it goes either.
         assert!(plan.remove_files.is_empty(), "no removal at all: {:?}", plan.remove_files);
         assert!(has(&plan.summary.updated, "files") && has(&plan.summary.updated, MOUNT), "{:?}", plan.summary);
@@ -1687,7 +1918,7 @@ privileged = [
         let device = the_pi(&real);
         let (mut plugins, packs) = preselection(&real, &device);
         plugins.remove("files");
-        let plan = compute(&real, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() })
+        let plan = compute(&real, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
             .expect("the Pi without files plans");
         for p in [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER, FILES_EXEC] {
             assert!(has(&plan.remove_files, p), "{p}: {:?}", plan.remove_files);
@@ -2023,7 +2254,7 @@ privileged = [
         assert_eq!(preselection(&inv(), &dev(&[], None, &[], &[])), (BTreeSet::new(), BTreeSet::new()));
         // The preselection, fed back unchanged, is a valid choice.
         let (plugins, packs) = preselection(&inv(), &device);
-        let intent = Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new() };
+        let intent = Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false };
         assert!(compute(&inv(), &device, &intent).is_ok());
     }
 
@@ -2089,7 +2320,7 @@ privileged = [
         let plan = compute(
             &real,
             &dev(&[], None, &[], &[]),
-            &Intent::InstallOrUpdate { plugins: all, packs: langs, erase_data: BTreeSet::new() },
+            &Intent::InstallOrUpdate { plugins: all, packs: langs, erase_data: BTreeSet::new(), reinstall: false },
         )
         .expect("the real inventory plans on a fresh device");
         assert_eq!(declared_in(&plan), real.reference_order);
@@ -2114,6 +2345,401 @@ privileged = [
         for p in recorded {
             assert!(has(&gone.remove_files, p), "{p}");
         }
+    }
+
+    // --- CAPTURE (temporary) ----------------------------------------------
+
+    fn projection(plan: &Plan) -> String {
+        format!(
+            "{:#?}",
+            (
+                (&plan.archives, plan.ensure_user, plan.stop_service, &plan.disable_units, &plan.unmount_roots),
+                (&plan.remove_mount_roots, &plan.remove_files, &plan.remove_trees, &plan.puts, &plan.initial),
+                (&plan.packs, &plan.plugins_toml, plan.remove_plugins_toml, plan.remove_registry),
+                (&plan.enable_units, plan.start_service, plan.remove_user),
+                (
+                    &plan.summary.installed,
+                    &plan.summary.updated,
+                    &plan.summary.removed,
+                    &plan.summary.erased,
+                    &plan.summary.kept_third_party
+                ),
+            )
+        )
+    }
+
+    /// The device the two fixtures were captured on: `files_registry()`
+    /// (the core and the companion, recorded at the offered version, the
+    /// plugins not recorded at all), radio, files and a third party's
+    /// declared, French installed.
+    fn capture_device() -> DeviceState {
+        let mut reg = files_registry();
+        for r in reg.components.values_mut() {
+            r.version = OFFERED.to_string();
+        }
+        dev(
+            &[("radio", RADIO_EXEC), ("files", FILES_EXEC), ("theirs", THEIRS_EXEC)],
+            Some(reg),
+            &["ritornello-lang-fr"],
+            &["radio"],
+        )
+    }
+
+    fn reinstall(plugins: &[&str], packs: &[&str]) -> Intent {
+        Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: BTreeSet::new(), reinstall: true }
+    }
+
+    /// The fixtures were written by `git checkout` with the platform's line
+    /// ends; the projection has `\n` only.
+    fn fixture(text: &str) -> String {
+        text.replace("\r\n", "\n")
+    }
+
+    /// `--reinstall` and the repair screen reproduce, field for field, the
+    /// plan this installer computed before it ever skipped anything:
+    /// `testdata/reinstall-plan-*.txt` are that plan, captured from the code
+    /// as it stood at `c45c19d6` (the registry aside — it now records every
+    /// component — and the summary's new headings, which are empty here).
+    /// The device is one an ordinary run would mostly leave alone.
+    ///
+    /// **[MUTATION]**: drop `!reinstall &&` from either `current` — the core
+    /// and the companion (or the pack) are then left out, and this test fails.
+    #[test]
+    fn a_reinstall_plans_exactly_what_was_planned_before_skipping_existed() {
+        let device = capture_device();
+        let a = compute(&inv(), &device, &reinstall(&["radio", "files", "theirs"], &["fr"])).unwrap();
+        assert_eq!(projection(&a), fixture(include_str!("testdata/reinstall-plan-a.txt")));
+        let b = compute(&inv(), &device, &reinstall(&["radio", "files", "cd", "theirs"], &["fr"])).unwrap();
+        assert_eq!(projection(&b), fixture(include_str!("testdata/reinstall-plan-b.txt")));
+        for plan in [&a, &b] {
+            assert!(plan.summary.up_to_date.is_empty() && plan.summary.cleared.is_empty(), "{:?}", plan.summary);
+            assert!(!plan.nothing_to_do);
+        }
+        // And on a device that is entirely up to date: everything again.
+        let full = compute(&inv(), &current_device(), &reinstall(&["radio", "files", "theirs"], &["fr"])).unwrap();
+        assert_eq!(projection(&full), fixture(include_str!("testdata/reinstall-plan-a.txt")));
+    }
+
+    /// The same device, an ordinary run: what its registry records at the
+    /// offered version is left alone, what it does not record is placed.
+    #[test]
+    fn an_ordinary_run_on_the_capture_device_places_only_the_unrecorded() {
+        let device = capture_device();
+        let plan = compute(&inv(), &device, &install(&["radio", "files", "theirs"], &["fr"], &[])).unwrap();
+        assert_eq!(plan.summary.up_to_date, vec![CORE, MOUNT]);
+        assert_eq!(plan.summary.updated, vec!["radio", "files"], "not recorded: placed again (fail-safe)");
+        assert_eq!(plan.summary.languages_placed, vec!["ritornello-lang-fr"], "no record of the pack: placed");
+        assert!(plan.stop_service && plan.start_service && plan.ensure_user);
+    }
+
+    // --- Leaving alone what is up to date --------------------------------
+
+    /// The version every component and pack of `inv()` offers.
+    const OFFERED: &str = "0.2.0-beta.2";
+
+    /// What this installer records after placing `inv()`'s core, radio,
+    /// files (and so its companion) and French.
+    pub(crate) fn current_registry() -> Registry {
+        let rec = |privileged: &[&str]| Recorded {
+            version: OFFERED.to_string(),
+            privileged: privileged.iter().map(|p| p.to_string()).collect(),
+        };
+        Registry {
+            format: 1,
+            components: [
+                (CORE, rec(&["/etc/systemd/system/ritornello.service"])),
+                ("radio", rec(&[])),
+                ("files", rec(&[])),
+                (MOUNT, rec(&[MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER])),
+                ("ritornello-lang-fr", rec(&[])),
+            ]
+            .into_iter()
+            .map(|(n, r)| (n.to_string(), r))
+            .collect(),
+        }
+    }
+
+    /// A device on which that run has just finished.
+    pub(crate) fn current_device() -> DeviceState {
+        dev(
+            &[("radio", RADIO_EXEC), ("files", FILES_EXEC), ("theirs", THEIRS_EXEC)],
+            Some(current_registry()),
+            &["ritornello-lang-fr"],
+            &["radio"],
+        )
+    }
+
+    /// The ordinary re-run, as `--keep` asks for it.
+    pub(crate) fn keep(device: &DeviceState) -> Plan {
+        let (plugins, packs) = preselection(&inv(), device);
+        compute(&inv(), device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
+            .expect("the re-run plans")
+    }
+
+    /// Whether `plan` places, extracts or removes nothing at all.
+    fn touches_nothing(plan: &Plan) -> bool {
+        plan.archives.is_empty()
+            && plan.puts.is_empty()
+            && plan.initial.is_empty()
+            && plan.packs.is_empty()
+            && plan.remove_files.is_empty()
+            && plan.remove_trees.is_empty()
+            && plan.disable_units.is_empty()
+            && plan.unmount_roots.is_empty()
+    }
+
+    /// The owner's case: a re-run on a device already up to date downloads
+    /// nothing, places nothing, does not stop the radio, and says so.
+    ///
+    /// **[MUTATION]**: make `current` always false (today's behaviour) —
+    /// this test fails on the archives. Drop `plan.nothing_to_do = true`
+    /// from `settle` — it fails on the flag.
+    #[test]
+    fn a_same_version_rerun_plans_nothing() {
+        let device = current_device();
+        let plan = keep(&device);
+        assert!(touches_nothing(&plan), "{plan:?}");
+        assert!(plan.nothing_to_do);
+        assert!(!plan.stop_service && !plan.start_service && !plan.ensure_user, "{plan:?}");
+        assert_eq!(plan.summary.up_to_date, vec![CORE, "radio", "files", MOUNT, "ritornello-lang-fr"]);
+        assert!(plan.summary.installed.is_empty() && plan.summary.updated.is_empty(), "{:?}", plan.summary);
+        assert!(plan.summary.removed.is_empty() && plan.summary.cleared.is_empty(), "{:?}", plan.summary);
+        assert_eq!(plan.summary.kept_third_party, vec!["theirs"]);
+        assert!(same_registry(plan.registry.as_ref().unwrap(), &current_registry()));
+        assert_eq!(plan.plugins_toml, device.plugins_toml);
+        // The units are still the ones the script would enable.
+        assert_eq!(plan.enable_units, vec!["ritornello.service", "ritornello-media-mount.service"]);
+    }
+
+    /// The registry's order of privileged files is not a change: what the
+    /// file says is the same set.
+    #[test]
+    fn privileged_files_recorded_in_another_order_are_the_same_record() {
+        let mut reg = current_registry();
+        reg.components.get_mut(MOUNT).unwrap().privileged.reverse();
+        let mut device = current_device();
+        device.registry = Some(reg);
+        assert!(keep(&device).nothing_to_do);
+    }
+
+    /// One plugin moved: only it is downloaded and placed (its initial
+    /// configuration offered again, written only where none exists), the
+    /// service is stopped and restarted around it, the rest is left alone.
+    ///
+    /// **[MUTATION]**: drop the `stop_service`/`start_service` resets'
+    /// `quiet` guard (always reset them) — this test fails.
+    #[test]
+    fn one_plugin_bumped_is_the_only_one_placed() {
+        let mut bumped = inv();
+        let radio = bumped.plugins.iter_mut().find(|p| p.name == "radio").unwrap();
+        radio.version = "0.2.0-beta.3".to_string();
+        radio.archive = "ritornello-plugin-radio-0.2.0-beta.3-{arch}.tar.gz".to_string();
+        let device = current_device();
+        let (plugins, packs) = preselection(&bumped, &device);
+        let plan = compute(&bumped, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
+            .unwrap();
+        assert_eq!(plan.archives, set(&["ritornello-plugin-radio-0.2.0-beta.3-arm64.tar.gz"]));
+        assert_eq!(dests(&plan), vec![RADIO_EXEC]);
+        assert_eq!(plan.initial.len(), 1, "{:?}", plan.initial);
+        assert!(plan.packs.is_empty());
+        assert!(plan.stop_service && plan.start_service && plan.ensure_user);
+        assert!(!plan.nothing_to_do);
+        assert_eq!(plan.summary.updated, vec!["radio"]);
+        assert_eq!(plan.summary.up_to_date, vec![CORE, "files", MOUNT, "ritornello-lang-fr"]);
+        assert_eq!(plan.registry.as_ref().unwrap().components["radio"].version, "0.2.0-beta.3");
+    }
+
+    /// Fail-safe: whatever the registry cannot vouch for is placed again —
+    /// no registry at all, one written before plugins were recorded, one
+    /// that records another version or other privileged files, a component
+    /// it does not name.
+    ///
+    /// **[MUTATION]**, one per condition of `is_current`, each reddening
+    /// this test: answer `true` for an unrecorded name; drop the version
+    /// comparison; drop the privileged-files comparison.
+    #[test]
+    fn what_the_registry_cannot_vouch_for_is_placed_again() {
+        let placed_names = |device: &DeviceState| {
+            let plan = keep(device);
+            assert!(!plan.nothing_to_do);
+            let mut names = plan.summary.updated.clone();
+            names.extend(plan.summary.languages_placed.iter().cloned());
+            names
+        };
+        let all = vec![CORE, "radio", "files", MOUNT, "ritornello-lang-fr"];
+
+        let mut none = current_device();
+        none.registry = None;
+        assert_eq!(placed_names(&none), all, "no registry");
+
+        let mut before = current_device();
+        before.registry = Some(capture_device().registry.unwrap());
+        assert_eq!(placed_names(&before), vec!["radio", "files", "ritornello-lang-fr"], "plugins and packs unrecorded");
+
+        let mut older = current_device();
+        older.registry.as_mut().unwrap().components.get_mut("files").unwrap().version = "0.2.0-beta.1".into();
+        assert_eq!(placed_names(&older), vec!["files"], "another version");
+
+        let mut fewer = current_device();
+        fewer.registry.as_mut().unwrap().components.get_mut(MOUNT).unwrap().privileged.pop();
+        assert_eq!(placed_names(&fewer), vec![MOUNT], "another set of privileged files");
+
+        let mut unnamed = current_device();
+        unnamed.registry.as_mut().unwrap().components.remove(CORE);
+        assert_eq!(placed_names(&unnamed), vec![CORE], "a component it does not name");
+    }
+
+    /// The registry is a precondition, never the whole proof: a component
+    /// recorded but not on the device — the core's binary gone, a plugin no
+    /// longer declared but chosen, a pack's directory gone — is placed.
+    #[test]
+    fn a_recorded_component_that_is_not_there_is_placed() {
+        let mut no_core = current_device();
+        no_core.core_present = false;
+        let plan = keep(&no_core);
+        assert_eq!(plan.summary.installed, vec![CORE]);
+        assert!(!plan.nothing_to_do);
+
+        let mut no_pack = current_device();
+        no_pack.packs.clear();
+        let (plugins, _) = preselection(&inv(), &no_pack);
+        let plan = compute(&inv(), &no_pack, &Intent::InstallOrUpdate { plugins, packs: set(&["fr"]), erase_data: BTreeSet::new(), reinstall: false })
+            .unwrap();
+        assert_eq!(plan.summary.languages_placed, vec!["ritornello-lang-fr"]);
+        assert_eq!(plan.packs.len(), 1);
+    }
+
+    /// The trust rule, from the untrusted side: the in-app updater's memory
+    /// (account-writable) naming another version reinstalls; naming the
+    /// offered version while the registry disagrees still reinstalls —
+    /// only the registry can say yes; and agreeing with a registry that
+    /// agrees changes nothing.
+    ///
+    /// **[MUTATION]**: drop the `untrusted` check from `is_current` — the
+    /// first assertion fails. Let a matching `untrusted` version vouch on
+    /// its own (`|| untrusted.get(name) == Some(offered)` before the
+    /// registry is consulted) — the second fails.
+    #[test]
+    fn the_updater_s_memory_can_only_ever_add_work() {
+        let mut moved = current_device();
+        moved.updater_placed.insert("radio".into(), "0.2.0-beta.3".into());
+        let plan = keep(&moved);
+        assert_eq!(plan.summary.updated, vec!["radio"], "the updater moved radio: placed again");
+        assert_eq!(dests(&plan), vec![RADIO_EXEC]);
+        assert!(plan.stop_service && plan.start_service);
+
+        let mut forged = current_device();
+        forged.registry.as_mut().unwrap().components.get_mut(CORE).unwrap().version = "0.2.0-beta.1".into();
+        forged.updater_placed.insert(CORE.into(), OFFERED.into());
+        assert_eq!(keep(&forged).summary.updated, vec![CORE], "an agreeing memory never makes a skip");
+        let mut unrecorded = current_device();
+        unrecorded.registry.as_mut().unwrap().components.remove("files");
+        unrecorded.updater_placed.insert("files".into(), OFFERED.into());
+        assert_eq!(keep(&unrecorded).summary.updated, vec!["files"], "nor stands in for a missing record");
+
+        let mut agrees = current_device();
+        agrees.updater_placed.insert("radio".into(), OFFERED.into());
+        agrees.updater_placed.insert(CORE.into(), OFFERED.into());
+        assert!(keep(&agrees).nothing_to_do, "a memory that agrees takes nothing away either");
+    }
+
+    /// The pack's own version is in a file its account owns, so a pack is
+    /// skipped on the registry's word only; its record follows it.
+    #[test]
+    fn a_pack_at_the_recorded_version_is_left_alone_and_another_is_placed() {
+        let mut stale = current_device();
+        stale.registry.as_mut().unwrap().components.get_mut("ritornello-lang-fr").unwrap().version = "0.2.0-beta.1".into();
+        let plan = keep(&stale);
+        assert_eq!(plan.packs, vec![("ritornello-lang-fr-0.2.0-beta.2.tar.gz".to_string(), "ritornello-lang-fr".to_string())]);
+        assert_eq!(plan.archives, set(&["ritornello-lang-fr-0.2.0-beta.2.tar.gz"]));
+        assert!(plan.puts.is_empty(), "nothing else is placed: {:?}", plan.puts);
+        assert_eq!(plan.registry.as_ref().unwrap().components["ritornello-lang-fr"].version, OFFERED);
+    }
+
+    /// A pack removed from the web interface: still recorded, no longer on
+    /// the device, not chosen. Only its record goes — said in the summary —
+    /// and nothing is placed or removed, so the service is left running.
+    #[test]
+    fn a_pack_gone_from_the_device_only_loses_its_record() {
+        let mut gone = current_device();
+        gone.packs.clear();
+        let plan = keep(&gone);
+        assert!(touches_nothing(&plan), "{plan:?}");
+        assert!(!plan.nothing_to_do, "the registry still changes");
+        assert!(!plan.registry.as_ref().unwrap().components.contains_key("ritornello-lang-fr"));
+        assert_eq!(plan.summary.cleared, vec!["ritornello-lang-fr"]);
+        assert!(!plan.stop_service && !plan.start_service, "a registry write alone needs no restart");
+    }
+
+    /// Decision 1's consequence: a plugin of ours placed by this installer
+    /// is now recorded even with no root file, so one uninstalled from the
+    /// web interface is "on the device" for R30. It goes like any removed
+    /// plugin — its binary's leftover `rm -f`, its record — but the summary
+    /// says what it is: already gone, record cleared, never "removed".
+    ///
+    /// **[MUTATION]**: report every removed plugin under `removed` — this
+    /// test fails.
+    #[test]
+    fn a_plugin_uninstalled_from_the_web_ui_is_reported_as_cleared() {
+        let mut device = current_device();
+        device.registry.as_mut().unwrap().components.insert(
+            "cd".to_string(),
+            Recorded { version: OFFERED.to_string(), privileged: vec![] },
+        );
+        let plan = keep(&device);
+        assert_eq!(plan.summary.cleared, vec!["cd"]);
+        assert!(plan.summary.removed.is_empty(), "{:?}", plan.summary);
+        assert!(has(&plan.remove_files, CD_EXEC), "{:?}", plan.remove_files);
+        assert!(!plan.registry.as_ref().unwrap().components.contains_key("cd"));
+        let lines = crate::ui::summary_lines(&plan).join("\n");
+        assert!(lines.contains("no longer on the device, record cleared: cd"), "{lines}");
+        // `files`, whose companion's root files are still recorded, is a
+        // removal in earnest (R30), and said so.
+        let mut files_gone = current_device();
+        files_gone.declared.retain(|d| d.name != "files");
+        let plan = keep(&files_gone);
+        assert_eq!(plan.summary.removed, vec!["files", MOUNT]);
+        assert!(plan.summary.cleared.is_empty());
+    }
+
+    /// What `settle` needs from the device before it calls a run quiet:
+    /// the account, the core, and a `plugins.toml` that is written back as
+    /// it was. Each missing one is work to do.
+    ///
+    /// **[MUTATION]**, one per condition, each reddening this test: drop
+    /// `dev.user_exists`; drop `plan.plugins_toml == dev.plugins_toml`.
+    #[test]
+    fn a_missing_account_or_plugins_toml_is_not_up_to_date() {
+        let mut no_user = current_device();
+        no_user.user_exists = false;
+        let plan = keep(&no_user);
+        assert!(!plan.nothing_to_do && plan.ensure_user, "{plan:?}");
+
+        // The core alone, up to date, and no `plugins.toml` at all: the
+        // header the core's update worker needs is still to be written.
+        let mut reg = current_registry();
+        reg.components.retain(|n, _| n == CORE || n == "ritornello-lang-fr");
+        let mut no_toml = dev(&[], Some(reg), &["ritornello-lang-fr"], &[]);
+        assert!(no_toml.plugins_toml.is_none() && no_toml.core_present);
+        let plan = compute(&inv(), &no_toml, &install(&[], &["fr"], &[])).unwrap();
+        assert!(touches_nothing(&plan), "{plan:?}");
+        assert!(!plan.nothing_to_do, "the header must be written: {plan:?}");
+        // With the header there, the same device is up to date.
+        no_toml.plugins_toml = Some(PLUGINS_TOML_HEADER.to_string());
+        assert!(compute(&inv(), &no_toml, &install(&[], &["fr"], &[])).unwrap().nothing_to_do);
+    }
+
+    /// The registry the installer now writes — plugins with no root file,
+    /// packs — round-trips through its own parser, and is read by the
+    /// core's lenient one (`ritornello-core`'s `install_registry`, tested
+    /// on this very shape there).
+    #[test]
+    fn the_registry_now_records_every_component_and_round_trips() {
+        let plan = compute(&inv(), &dev(&[], None, &[], &[]), &install(&["radio", "files"], &["fr"], &[])).unwrap();
+        let reg = plan.registry.unwrap();
+        assert!(same_registry(&reg, &current_registry()), "{reg:?}");
+        assert_eq!(Registry::parse(&reg.render()).unwrap(), reg);
+        assert!(reg.render().contains("[components.radio]\nversion = \"0.2.0-beta.2\"\nprivileged = []"), "{}", reg.render());
     }
 
     // --- 19 --------------------------------------------------------------
