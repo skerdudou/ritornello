@@ -1367,4 +1367,19 @@ mod tests {
         core.handle_command(Command::Select(9)).await.unwrap();
         assert_eq!(loop_calls(&player), vec!["loop_track true"]);
     }
+
+    #[tokio::test]
+    async fn an_unanswered_loop_command_leaves_the_state_unknown() {
+        // The IPC times out after 5 s although the command was written, and
+        // mpv may apply it anyway. Caching the old value would then let the
+        // next live stream play under `loop-file=inf`.
+        let (mut core, player, _src, _state, _dir) = setup();
+        on_the_cd(&mut core).await;
+        core.handle_command(Command::SetRepeat(Repeat::One)).await.unwrap();
+        core.player.loop_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(core.handle_command(Command::Select(9)).await.is_err());
+        core.player.loop_fails.store(false, std::sync::atomic::Ordering::SeqCst);
+        core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
+        assert_eq!(loop_calls(&player), vec!["loop_track true", "loop_track false"]);
+    }
 }

@@ -412,9 +412,13 @@ impl<P: Player> Core<P> {
     /// sequences pinned elsewhere stay untouched.
     pub(super) async fn sync_loop_track(&mut self) -> Result<()> {
         let wanted = self.repeat == ritornello_proto::Repeat::One && self.load_loopable;
-        if wanted != self.loop_track_armed {
+        if self.loop_track_armed != Some(wanted) {
+            // Unknown until answered: a timed-out command may still have
+            // been applied by mpv, so a failure must not leave the old value
+            // cached.
+            self.loop_track_armed = None;
             self.player.set_loop_track(wanted).await?;
-            self.loop_track_armed = wanted;
+            self.loop_track_armed = Some(wanted);
         }
         Ok(())
     }

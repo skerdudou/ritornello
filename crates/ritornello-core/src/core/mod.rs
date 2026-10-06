@@ -297,11 +297,15 @@ pub struct Core<P: Player> {
     /// `Play`, so a source switch — whose arrival is a `Play` of the new
     /// source — carries the new source's answer, and a stream says `false`.
     load_loopable: bool,
-    /// What mpv's `loop-file` was last set to. `false` at construction, which
-    /// is a fresh mpv's own default: the core does not outlive mpv (`main`
-    /// exits when it dies, and systemd restarts both), so the two never
-    /// drift. Only a change is sent — see `sync_loop_track`.
-    loop_track_armed: bool,
+    /// What mpv's `loop-file` was last set to, `None` when that is unknown.
+    /// `Some(false)` at construction, which is a fresh mpv's own default.
+    /// The cache stays true for two reasons: the core does not outlive mpv
+    /// (`main` exits when it dies, and systemd restarts both), and a command
+    /// that got no answer makes it `None` — the IPC times out after 5 s even
+    /// though the command was written and mpv may still apply it. `None`
+    /// means "send unconditionally next time"; a known state is only sent on
+    /// a change — see `sync_loop_track`.
+    loop_track_armed: Option<bool>,
     /// Identity of the last local day an automatic update run happened on.
     /// Round-tripped exactly like `random` and `repeat` — read from
     /// `PersistedState` at construction, written back unchanged by every
@@ -544,7 +548,7 @@ impl<P: Player> Core<P> {
             random: persisted.random,
             repeat: persisted.repeat,
             load_loopable: false,
-            loop_track_armed: false,
+            loop_track_armed: Some(false),
             update_last_run_day: persisted.update_last_run_day,
             update_sources: persisted.update_sources.clone(),
             pack_preferences: persisted.pack_preferences.clone(),

@@ -27,6 +27,9 @@ pub(super) struct FakePlayer {
     /// Shared and set after construction, for the same reason as
     /// `progress`.
     pub(super) pause_fails: Arc<std::sync::atomic::AtomicBool>,
+    /// When true, `set_loop_track` fails — the IPC timeout, which says
+    /// nothing about whether mpv applied the command.
+    pub(super) loop_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -94,6 +97,9 @@ impl crate::player::Player for FakePlayer {
     }
     async fn set_loop_track(&self, on: bool) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push(format!("loop_track {on}"));
+        if self.loop_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
         Ok(())
     }
 }
