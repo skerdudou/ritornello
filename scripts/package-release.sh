@@ -53,18 +53,17 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | tr -d '\r' | head -1)
 # see the comment on [workspace.package] version. A component that inherits
 # would land here as the literal `version.workspace = true`, which no `sed`
 # below matches, so the guard fires rather than naming an archive `-true-`.
-# The generation of a version: major and minor, with any prerelease suffix
-# removed FIRST.
-#
-# Removing it first is the whole point. `${v%.*}` alone cuts at the last dot,
-# which answers `0.2` for `0.2.0` but `0.2.1-beta` for `0.2.1-beta.1` — not a
-# generation, and equal to no other component's. A beta shipping only the
-# component it fixes was therefore refused outright, while the very same
-# suffix written without a dot (`0.2.1-beta1`) sailed through: the guard was
-# deciding on where the dots fell.
-generation() { # <version>
-  local core=${1%%-*}
-  echo "${core%.*}"
+# Compares two `major.minor.patch` target numbers (suffix already removed),
+# printing -1, 0 or 1. Numeric per component: `0.10.0` is above `0.9.0`.
+target_cmp() { # <a> <b>
+  local a b i
+  IFS=. read -r -a a <<< "$1"
+  IFS=. read -r -a b <<< "$2"
+  for i in 0 1 2; do
+    if [ "$((10#${a[i]}))" -lt "$((10#${b[i]}))" ]; then echo -1; return; fi
+    if [ "$((10#${a[i]}))" -gt "$((10#${b[i]}))" ]; then echo 1; return; fi
+  done
+  echo 0
 }
 
 # Semver precedence of two prerelease strings, as -1, 0 or 1. `sort -V` is
@@ -73,6 +72,10 @@ generation() { # <version>
 # lexically, numeric sorts below alphanumeric, and when every shared
 # identifier is equal the shorter list is the lower.
 prerelease_cmp() { # <a> <b>
+  # The C locale, because `[[ < ]]` collates by the locale in force: `RC`
+  # against `beta` is -1 under C (uppercase first, as semver's ASCII order
+  # has it) and +1 under en_US.UTF-8.
+  local LC_ALL=C
   local a b x y
   IFS=. read -r -a a <<< "$1"
   IFS=. read -r -a b <<< "$2"
@@ -99,50 +102,52 @@ prerelease_cmp() { # <a> <b>
   echo 0
 }
 
-# Whether a component may ship under $VERSION. Split out of crate_version so
-# --self-test exercises these expressions rather than a copy of them: a
-# self-test that restates the rule proves only that it can restate it.
+# Whether a core, plugin or language pack may ship under $VERSION. Split out
+# of crate_version so --self-test exercises these expressions rather than a
+# copy of them: a self-test that restates the rule proves only that it can
+# restate it. Mirrors `suffix_fits` in version_coherence.rs case for case.
+#
+# Only the MAJOR ties a component to the product: an unchanged component
+# keeps a number from an earlier minor (`0.2.4` inside `0.3.0`), because a
+# device compares versions for equality and a number that moves without a
+# change forces a pointless update. With P the product and C the component,
+# same major:
+#   - a target number (major.minor.patch) HIGHER than P's is refused, with or
+#     without a suffix: it would claim a release that does not exist yet;
+#   - P finished: C carries no suffix;
+#   - P prerelease, C bare: C must not be P's finished target number (a
+#     tester installing `0.2.1` out of `v0.2.1-beta.1` would never be given
+#     the real `0.2.1`, and would keep the beta's bytes for ever);
+#   - P prerelease, C prerelease: a lower target is fine whatever the suffix;
+#     the same target needs a suffix not newer than P's.
 version_fits() { # <label> <component version>   (reads $VERSION)
   local label="$1" v="$2"
-  # Major and minor must stay on the product generation. Asserted here as
-  # well as in version_coherence.rs, because this script runs without cargo
-  # and a release must not be buildable with a component off its generation.
-  if [ "$(generation "$v")" != "$(generation "$VERSION")" ]; then
-    echo "$label is $v, off the product generation $(generation "$VERSION")" >&2
+  local vt=${v%%-*} pt=${VERSION%%-*}
+  if [ "${vt%%.*}" != "${pt%%.*}" ]; then
+    echo "$label is $v, off the product's major ($VERSION): only the major ties a component to the product" >&2
     return 1
   fi
-  # A component need NOT carry the product's prerelease suffix: a beta may
-  # ship one component and leave the others where the last finished release
-  # left them — the device is offered only what differs, so the others are
-  # simply not part of that beta.
-  #
-  # What it must never do is declare the number the FINISHED release will
-  # carry. The device compares versions for equality: a tester installing
-  # `0.2.1` out of `v0.2.1-beta.1` would never be given the real `0.2.1`,
-  # and would keep the beta's bytes for ever, silently.
-  if [ "$VERSION" != "${VERSION%%-*}" ] && [ "$v" = "${VERSION%%-*}" ]; then
-    echo "$label is $v inside prerelease $VERSION: the finished ${VERSION%%-*} will carry that same number, so a device installing it here would never replace it" >&2
+  local ord
+  ord=$(target_cmp "$vt" "$pt")
+  if [ "$ord" -gt 0 ]; then
+    echo "$label is $v, a number higher than the product's $VERSION: it would claim a release that does not exist yet" >&2
     return 1
   fi
-  # A prerelease suffix on the component. A device compares versions for
-  # equality, so an unchanged component must be able to KEEP its number
-  # across prereleases: its suffix may be the product's own or an EARLIER
-  # one of the same target number (`0.2.0-beta.2` inside `0.2.0-beta.3`).
-  # Never a newer one (a release that does not exist yet), never another
-  # target number, and never any suffix inside a finished product.
-  if [ "$v" != "${v%%-*}" ]; then
-    if [ "$VERSION" = "${VERSION%%-*}" ]; then
-      echo "$label is $v, a prerelease number inside the stable product $VERSION" >&2
-      return 1
-    fi
-    if [ "${v%%-*}" != "${VERSION%%-*}" ]; then
-      echo "$label is $v: its target number is not the product's ${VERSION%%-*} ($VERSION)" >&2
-      return 1
-    fi
-    if [ "$(prerelease_cmp "${v#*-}" "${VERSION#*-}")" -gt 0 ]; then
-      echo "$label is $v, carrying a suffix newer than the product's $VERSION" >&2
-      return 1
-    fi
+  local v_pre=no p_pre=no
+  [ "$v" != "$vt" ] && v_pre=yes
+  [ "$VERSION" != "$pt" ] && p_pre=yes
+  if [ "$v_pre" = no ] && [ "$p_pre" = yes ] && [ "$ord" = 0 ]; then
+    echo "$label is $v inside prerelease $VERSION: the finished $pt will carry that same number, so a device installing it here would never replace it" >&2
+    return 1
+  fi
+  if [ "$v_pre" = yes ] && [ "$p_pre" = no ]; then
+    echo "$label is $v, a prerelease number inside the stable product $VERSION" >&2
+    return 1
+  fi
+  if [ "$v_pre" = yes ] && [ "$ord" = 0 ] \
+    && [ "$(prerelease_cmp "${v#*-}" "${VERSION#*-}")" -gt 0 ]; then
+    echo "$label is $v, carrying a suffix newer than the product's $VERSION" >&2
+    return 1
   fi
   return 0
 }
@@ -215,19 +220,34 @@ if [ -n "$SELF_TEST" ]; then
   }
   expect 0.2.0 0.2.0 ok "the ordinary case"
   expect 0.2.7 0.2.0 ok "a component unchanged for seven deliveries"
-  expect 0.3.0 0.2.9 refused "off the generation"
+  expect 0.3.0 0.2.9 ok "an unchanged component keeps an earlier minor"
+  expect 0.3.0 0.2.4 ok "an unchanged component keeps an earlier minor"
   expect 0.2.0-beta.1 0.2.0-beta.1 ok "a beta where every component moved"
   expect 0.2.1-beta.1 0.2.0 ok "a beta shipping one component, others left behind"
   expect 0.2.1-beta1 0.2.0 ok "the same, with a suffix carrying no dot"
   expect 0.2.1-beta.1 0.2.1 refused "the number the finished release will carry"
-  expect 0.2.1-beta.1 0.3.0 refused "off the generation, suffix or not"
+  expect 0.2.1-beta.1 0.3.0 refused "a number above the product's"
+  expect 0.3.0 0.4.0 refused "a target from a future release"
+  expect 0.3.0 0.3.1 refused "a patch from a future release"
+  expect 0.3.0 1.0.0 refused "another major"
+  expect 1.0.0 0.9.0 refused "another major, lower"
+  expect 0.3.0-beta.1 0.2.0-beta.3 ok "an earlier minor keeps its beta number"
+  expect 0.3.0-beta.1 0.2.0 ok "an earlier minor, finished"
+  expect 0.3.0-beta.1 0.3.0-beta.2 refused "a newer suffix of the same target"
+  expect 0.3.0-beta.1 0.3.0 refused "the finished number inside its prerelease"
+  expect 0.3.0-beta.1 0.3.1 refused "a bare number above the product's"
+  expect 0.3.0-beta.1 0.2.7-rc.1 ok "a lower target, whatever its suffix"
+  expect 0.3.0 0.2.7-beta.1 refused "any suffix in a finished product"
+  expect 0.10.0 0.9.0 ok "numeric target comparison: 9 < 10"
+  expect 0.9.0 0.10.0 refused "numeric target comparison: 10 > 9"
   # A component may keep an earlier suffix of the product's own target number.
   expect 0.2.0-beta.3 0.2.0-beta.2 ok "an unchanged component keeps its older beta number"
   expect 0.2.0-beta.3 0.2.0-beta.3 ok "the product's own suffix"
   expect 0.2.0-beta.3 0.2.0-beta.4 refused "a suffix newer than the product's"
-  expect 0.2.0-beta.3 0.2.1-beta.1 refused "another target number"
+  expect 0.2.0-beta.3 0.2.1-beta.1 refused "a higher target number"
   expect 0.2.0-beta.3 0.2.0-rc.1 refused "rc is newer than beta"
   expect 0.2.0-rc.1 0.2.0-beta.3 ok "beta precedes rc"
+  expect 0.2.0-beta.3 0.2.0-RC.1 ok "uppercase sorts before lowercase in ASCII, whatever the locale"
   expect 0.2.0-beta.10 0.2.0-beta.9 ok "numeric, not lexical: 9 < 10"
   expect 0.2.0-beta.9 0.2.0-beta.10 refused "numeric, not lexical: 10 > 9"
   expect 0.2.0-beta.3 0.2.0-beta ok "fewer identifiers is lower"
@@ -235,7 +255,7 @@ if [ -n "$SELF_TEST" ]; then
   # A language pack is a shipped component like any other: pack_version()
   # calls this same version_fits, so these two cases are the pack-specific
   # readings of the two rules above rather than a second code path.
-  expect 0.3.0 0.2.9 refused "a language pack off the product generation"
+  expect 0.3.0 1.0.0 refused "a language pack off the product major"
   expect 0.2.1-beta.1 0.2.1 refused "a language pack at the number the finished release will carry, inside a prerelease"
   # A companion is exempt from version_fits: crate_version() skips it for a
   # companion. The self-test runs the very function, with a companion label.
