@@ -17,6 +17,7 @@ mod cli;
 mod device;
 mod inventory;
 mod names;
+mod own_version;
 mod plan;
 mod registry;
 mod script;
@@ -130,10 +131,29 @@ fn check_sudo(sudo: Sudo, terminal: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reads the release list, unless `--from-dir` names a local directory
+/// instead. Done before the first question, so that the one thing the list
+/// says about the installer itself (a newer one exists) reaches the operator
+/// before any screen, and with no request beyond the list the run needs
+/// anyway.
+///
+/// The notice goes to stderr whether or not a terminal is here, as one line,
+/// and never stops the run.
+fn read_releases(args: &Args) -> anyhow::Result<Option<source::GitHub>> {
+    if args.from_dir.is_some() {
+        return Ok(None);
+    }
+    let github = source::GitHub::new(args.version.as_deref())?;
+    if let Some(notice) = github.newer_installer_notice() {
+        eprintln!("{notice}");
+    }
+    Ok(Some(github))
+}
+
 /// The source, with its version: `--from-dir`, or a GitHub release — the
 /// one `--version` names, the one the version screen picks when `ask`, or
-/// the default.
-fn open_source(args: &Args, ask: bool) -> anyhow::Result<Box<dyn Source>> {
+/// the default. `github` is what `read_releases` read.
+fn open_source(args: &Args, github: Option<source::GitHub>, ask: bool) -> anyhow::Result<Box<dyn Source>> {
     if let Some(dir) = &args.from_dir {
         anyhow::ensure!(
             args.version.is_none(),
@@ -141,7 +161,7 @@ fn open_source(args: &Args, ask: bool) -> anyhow::Result<Box<dyn Source>> {
         );
         return Ok(Box::new(source::LocalDir::new(dir.clone())));
     }
-    let mut github = source::GitHub::new(args.version.as_deref())?;
+    let mut github = github.expect("`read_releases` reads the list whenever --from-dir is absent");
     if ask && args.version.is_none() {
         let default = github.tag().to_string();
         let tag = ui::ask_version(github.releases(), &default)?;
@@ -187,11 +207,17 @@ fn web_address(host: &str) -> String {
 }
 
 fn run(args: &Args) -> anyhow::Result<()> {
+    // The first line of output: which installer this is, so that a report of
+    // a problem always says it. `--version` is not for this: it selects the
+    // product release to install.
+    eprintln!("ritornello-install {}", own_version::OWN_VERSION);
     let terminal = is_terminal(std::io::stdin().is_terminal(), std::io::stderr().is_terminal());
     cli::check_combination(args)?;
     if let Some(missing) = missing_before_connecting(args, terminal) {
         bail!(missing);
     }
+    // 0. The release list, and with it whether a newer installer exists.
+    let github = read_releases(args)?;
 
     // 1. The host.
     let host = match &args.host {
@@ -232,7 +258,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
     // 4 and 5. The source, its version, its inventory. A total removal
     // does not ask for a version: it removes what the registry and the
     // newest inventory know.
-    let mut source = open_source(args, interactive && action != Action::RemoveAll)?;
+    let mut source = open_source(args, github, interactive && action != Action::RemoveAll)?;
     eprintln!("Reading the inventory of {}...", source.label());
     let inv = Inventory::parse(&source.inventory()?)?;
 
