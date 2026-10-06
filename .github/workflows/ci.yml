@@ -136,9 +136,9 @@ jobs:
   web-test:
     name: Web UI (typecheck, vitest)
     # The other half of the former `web` job, run in parallel with `rust` and
-    # `e2e` instead of ahead of them. It is still a gate: `release` and
-    # `language-packs` need it, so no tag publishes with a red web suite, and
-    # `main` requires it by name.
+    # `e2e` instead of ahead of them. It is still a gate: `publish` needs it,
+    # so no tag drafts a release over a red web suite, and `main` requires it
+    # by name.
     #
     # It repeats `npm ci` (cached) instead of passing a node_modules
     # artifact, and does not build: vue-tsc and vitest read sources, not dist.
