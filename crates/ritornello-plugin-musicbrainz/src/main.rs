@@ -178,6 +178,26 @@ fn stream_url(identity: &Value) -> Option<String> {
     Some(url.to_string())
 }
 
+/// A stream URL as a log line may show it: without the credentials an owner
+/// may have typed into it (`https://user:pass@host/…`) and without its query
+/// and fragment, where stream providers put their tokens (`?token=…`).
+///
+/// The log is no longer only journald's: the core keeps every plugin line for
+/// the System page, which any device on the network can read. What remains —
+/// scheme, host, path — still tells one station from another.
+fn shown_url(url: &str) -> String {
+    let url = url.split(['?', '#']).next().unwrap_or_default();
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    format!("{scheme}://{host}{path}")
+}
+
 /// Should a cover be searched for this partial state?
 ///
 /// An artist **and** an album, never a lone ICY title: the latter is raw
@@ -1163,11 +1183,12 @@ async fn handle_icy(
         attempts.push((c, answer));
     }
     let tried_count = attempts.len();
+    let shown = shown_url(&url);
     // A silent cap reads as "everything was tried": say so when the number of
     // probed candidates hits the cap of icy::candidates.
     if tried_count >= icy::MAX_CANDIDATES {
         tracing::info!(
-            "ICY probe for {url}: hit the {}-candidate cap, some derivable candidates may not have been tried",
+            "ICY probe for {shown}: hit the {}-candidate cap, some derivable candidates may not have been tried",
             icy::MAX_CANDIDATES
         );
     }
@@ -1177,7 +1198,7 @@ async fn handle_icy(
             let cover_url =
                 attempts.iter().find(|(c, _)| *c == winner).and_then(|(_, r)| r.as_ref()).and_then(|e| e.cover_url.clone());
             tracing::info!(
-                "ICY probe for {url}: tried {tried_count} candidate(s), kept \"{}\" / \"{}\" (score {:?})",
+                "ICY probe for {shown}: tried {tried_count} candidate(s), kept \"{}\" / \"{}\" (score {:?})",
                 winner.artist,
                 winner.title,
                 score
@@ -1197,10 +1218,10 @@ async fn handle_icy(
             let lesson = unwinnable_probe_lesson(tried_count, unanswered);
             match &lesson {
                 Some(_) => tracing::info!(
-                    "ICY probe for {url}: tried {tried_count} candidate(s), none accepted"
+                    "ICY probe for {shown}: tried {tried_count} candidate(s), none accepted"
                 ),
                 None => tracing::info!(
-                    "ICY probe for {url}: nothing learned ({tried_count} candidate(s) probed, unanswered: {unanswered})"
+                    "ICY probe for {shown}: nothing learned ({tried_count} candidate(s) probed, unanswered: {unanswered})"
                 ),
             }
             IcyOutcome {
@@ -1242,6 +1263,26 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_logged_stream_url_keeps_no_credentials_and_no_token() {
+        assert_eq!(
+            shown_url("https://user:secret@stream.example.com:8443/live/aac?token=abc&x=1#f"),
+            "https://stream.example.com:8443/live/aac"
+        );
+        // An `@` in the path is not userinfo: only the authority is cut.
+        assert_eq!(shown_url("http://host/a@b/stream"), "http://host/a@b/stream");
+        // A password holding an `@` still leaves nothing of itself.
+        assert_eq!(shown_url("http://u:p@ss@host/s"), "http://host/s");
+        // No path, and no scheme at all: still nothing secret, nothing lost.
+        assert_eq!(shown_url("http://u:p@host?k=v"), "http://host");
+        assert_eq!(shown_url("not a url?k=v"), "not a url");
+        // An ordinary station URL goes through untouched.
+        assert_eq!(
+            shown_url("http://icecast.radiofrance.fr/fip-hifi.aac"),
+            "http://icecast.radiofrance.fr/fip-hifi.aac"
+        );
+    }
 
     #[test]
     fn embedded_musicbrainz_en_is_not_empty() {

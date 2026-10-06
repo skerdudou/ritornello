@@ -28,7 +28,7 @@ mod web;
 use crate::core::MetadataWiring;
 use crate::metadata::PlayerState;
 use crate::plugins::PluginManifest;
-use crate::status::{AppState, LogBuffer, LogBufferWriter, PluginAction, PluginStatus, StatusState};
+use crate::status::{AppState, JournalWriter, LogBuffer, LogBufferWriter, PluginAction, PluginStatus, StatusState};
 use crate::types::Event;
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -736,6 +736,10 @@ fn kill_incompatible_plugins(
 
 struct HotPlugChildren {
     sockets_dir: PathBuf,
+    /// **The same** `Arc` as the HTTP `AppState`'s: a plugin launched again
+    /// from the page must have its output relayed into the buffer the System
+    /// page reads, like the ones launched at startup.
+    logs: Arc<LogBuffer>,
     /// Where a hot-launched plugin's data directory is created, joined with
     /// its name (`plugins::data_dir_for`) — the same root the startup loop
     /// reads once from `plugins::PLUGIN_DATA_ROOT_ENV`.
@@ -1368,7 +1372,7 @@ async fn relaunch(
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         tracing::warn!("plugin {name}: creating {}: {e}", data_dir.display());
     }
-    match plugins::spawn(exec, register_path, name, &prefix, &data_dir) {
+    match plugins::spawn(exec, register_path, name, &prefix, &data_dir, &children.logs) {
         Ok(child) => {
             tracing::info!("plugin {name} re-enabled, launched again");
             let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1679,12 +1683,19 @@ fn frame_to_log(metadata: &tracing::Metadata<'_>) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 500 and not 50: the UI now has a popup listing the whole buffer behind
+    // Errors: 500 and not 50: the UI has a popup listing the whole ring behind
     // a filter, and 50 lines would not reach any further back than the card
-    // that already shows the latest ones. 500 lines weigh a few dozen KB,
-    // read once per popup opening — not on every poll.
-    let log_buffer = Arc::new(LogBuffer::new(500));
+    // that already shows the latest ones.
+    //
+    // Journal: 5000 lines, INFO and up, the core's and the plugins'. Sized
+    // for reach rather than thrift: an ordinary listening session writes a few
+    // lines per track and per cover, so 5000 covers hours on a quiet device,
+    // where 500 would barely cover the last album. Bounded in bytes too, by
+    // `MAX_LINE_BYTES`: a few hundred KB in practice, 5 MB at the very worst,
+    // read once per popup opening — never on a poll.
+    let log_buffer = Arc::new(LogBuffer::new(500).with_journal(5000));
     let log_buffer_for_writer = log_buffer.clone();
+    let log_buffer_for_journal = log_buffer.clone();
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .with(
@@ -1693,6 +1704,13 @@ async fn main() -> Result<()> {
                 .with_ansi(false)
                 .with_writer(move || LogBufferWriter(log_buffer_for_writer.clone()))
                 .with_filter(LevelFilter::WARN),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(move || JournalWriter(log_buffer_for_journal.clone()))
+                .with_filter(LevelFilter::INFO),
         )
         // Applied on the registry, not on a single layer: both layers above
         // must ignore it, the terminal as much as the buffer.
@@ -1895,7 +1913,7 @@ async fn main() -> Result<()> {
         if let Err(e) = std::fs::create_dir_all(&data_dir) {
             tracing::warn!("plugin {}: creating {}: {e}", p.name, data_dir.display());
         }
-        match plugins::spawn(&p.exec, &register_path, &p.name, &prefix, &data_dir) {
+        match plugins::spawn(&p.exec, &register_path, &p.name, &prefix, &data_dir, &log_buffer) {
             Ok(child) => {
                 let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
                 kill_triggers.insert(p.name.clone(), kill_tx);
@@ -2480,6 +2498,7 @@ async fn main() -> Result<()> {
     // update worker has just appended to.
     let mut hot_children = HotPlugChildren {
         sockets_dir: sockets_dir.clone(),
+        logs: log_buffer.clone(),
         plugin_data_root: plugin_data_root.clone(),
         manifest_order,
         source_update_tx: source_update_tx.clone(),
@@ -3446,6 +3465,7 @@ mod toggle_tests {
 
         let children = HotPlugChildren {
             sockets_dir: root.clone(),
+            logs: Arc::new(LogBuffer::new(10)),
             plugin_data_root: root.join("plugin-data"),
             manifest_order,
             source_update_tx: mpsc::channel(4).0,

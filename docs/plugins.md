@@ -202,6 +202,17 @@ repository](#publishing-from-your-own-repository):
    only directory the privileged installer writes to. Both refusals apply to
    official archives too; nothing here is a rule for strangers alone.
 
+**Your log lines reach the owner's System page**, with nothing to do on your
+side but write them. The core reads your plugin's stdout and stderr, tags
+every line with your plugin's name, passes it on to journald, and keeps the
+last 5000 in its "Full journal" (see [interface.md](interface.md#system-page)).
+A `tracing_subscriber::fmt()` subscriber, as every official plugin uses, is
+read as it is: its colour codes are removed and its timestamp is kept first.
+A WARN or ERROR line, and anything written to stderr, also lands in "Recent
+errors" — so keep stderr for what really is one. Each line is cut at 1 KB.
+A plugin started by hand, outside the core, logs wherever its own output
+goes, as before.
+
 The automatic policy reaches a third-party plugin only under its fourth
 setting, "Check and install, third-party plugins included", and then only to
 **update** one the device already has from the repository it announces. No
