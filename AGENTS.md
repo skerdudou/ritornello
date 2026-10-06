@@ -29,7 +29,7 @@ rather than quietly shrinking it.
 **Everything written into this repository is in English.** Code, comments,
 doc comments, test names, commit messages, documentation. No exceptions.
 
-**Four numbers, four questions.** The product number
+**Five numbers, five questions.** The product number
 (`[workspace.package] version`) names the release and the git tag. Each
 shipped component — the core and each plugin — declares **its own** version,
 and that is what its archive is named after. `PROTOCOL_VERSION` is the
@@ -40,6 +40,11 @@ component's own, and never a number from a release that does not exist yet.
 The fourth number is the root-privileged companion's (`files-mount`): it
 answers "did the root helper change?", is independent of the product's major
 and suffix (like `PROTOCOL_VERSION`), and moves only when the companion does.
+The fifth is the workstation installer's (`ritornello-install`): it names the
+tag `installer-vX.Y.Z` of a publication channel of its own, is a finished
+`X.Y.Z`, exempt from the product rules in the same way, and moves only when
+the installer does. The README links the installer by a permanent address that
+holds no number.
 
 **A device compares versions for equality, never for order.** This is what
 makes rollback and channel-switching work, and it is the reason every
@@ -58,6 +63,9 @@ prerelease component.
 **Never delete a published release, or any file attached to one.** The
 archive of a component that has not changed in a long time lives in the
 release where it last changed, and that is where a device installs it from.
+The one exception is the fixed release tagged `installer`, whose assets are
+replaced by each installer release: no device ever fetches the installer, so
+nothing depends on what it held before.
 
 **The security boundary.** The core runs unprivileged. A small root binary
 (`crates/ritornello-updater`) can form **exactly two** path shapes —
@@ -96,9 +104,13 @@ Several tests exist only to refuse a mistake that has actually been made
 here. Do not "fix" one by relaxing it — if a guard fires, it has found
 something.
 
-- `version_coherence.rs` — the four numbers above, including what a
+- `version_coherence.rs` — the five numbers above, including what a
   prerelease may and may not declare (a component may keep an older suffix
-  of the same generation; a companion is exempt from the product rules).
+  of the same generation; a companion and the installer are exempt from the
+  product rules), and that a product release no longer carries the installer.
+- `scripts/release-tags.sh --self-test` — which release is "the previous
+  one" once the installer's releases share the list, and that an installer tag
+  names the number the installer declares.
 - `packaging_manifest.rs` — `deploy/packaging.toml` against reality, and
   against the inventory `ritornello-install` reads. `deploy/deploy.sh` is only
   a wrapper around it, so there is no second installation path to agree with.

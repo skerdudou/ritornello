@@ -17,6 +17,9 @@ use crate::plan::{self, Intent};
 #[command(
     name = "ritornello-install",
     disable_version_flag = true,
+    // The installer's own number, first in `-h` and `--help`. `--version` is
+    // not the way to read it: that flag selects the product release.
+    before_help = concat!("ritornello-install ", env!("CARGO_PKG_VERSION")),
     about = "Installs, updates and removes Ritornello on a device over ssh.",
     long_about = "Installs, updates and removes Ritornello on a device over ssh.\n\n\
                   Without arguments, and in a terminal, it asks. With arguments, they describe the \
@@ -323,6 +326,23 @@ mod tests {
         let err = intent(&["--keep"], &fresh()).unwrap_err();
         assert_eq!(err, ArgError::NothingToKeep);
         assert!(err.to_string().contains("--plugins none"), "{err}");
+    }
+
+    /// The installer says which one it is in both forms of its help, and
+    /// `--version` stays what it always was: the product release to install,
+    /// never this program's own number.
+    #[test]
+    fn the_help_names_the_installers_own_number_and_version_still_selects_a_release() {
+        use clap::CommandFactory;
+        let own = crate::own_version::OWN_VERSION;
+        let line = format!("ritornello-install {own}");
+        let mut command = Args::command();
+        for help in [command.render_help().to_string(), command.render_long_help().to_string()] {
+            assert!(help.starts_with(&line), "the help must open with {line:?}: {help}");
+        }
+        use clap::Parser;
+        let args = Args::try_parse_from(["ritornello-install", "--version", "v0.2.0"]).unwrap();
+        assert_eq!(args.version.as_deref(), Some("v0.2.0"));
     }
 
     #[test]

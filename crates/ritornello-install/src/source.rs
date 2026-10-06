@@ -11,7 +11,7 @@
 //! **R37 — the checksums that verify an archive are not always the chosen
 //! release's own.** The publish job writes one `SHA256SUMS` per release,
 //! listing only the assets *that* release carries (`.github/workflows/
-//! ci.yml`: `sha256sum *.tar.gz *.zip catalogue.json inventory.json`). Because an
+//! ci.yml`: `sha256sum *.tar.gz catalogue.json inventory.json`). Because an
 //! unchanged component is never re-uploaded, its archive keeps living in the
 //! release where it last changed — and so does the `SHA256SUMS` line that
 //! verifies it. `locate` is what finds that release; an archive is always
@@ -46,6 +46,8 @@ use anyhow::Context;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+use crate::own_version::{self, is_installer_tag};
 
 /// Fixed at compile time, exactly as `ritornello-core::update::release::REPO`
 /// is: this is the authenticity anchor for what a device or a workstation
@@ -148,26 +150,46 @@ struct WireRelease {
     assets: Vec<WireAsset>,
 }
 
-/// Reads a releases-list response body, dropping every draft.
+/// Reads a releases-list response body into the product's releases and the
+/// installer's own tags, dropping every draft.
 ///
 /// GitHub lists drafts only to a reader with push access; this installer
 /// reads with no token at all, so in practice the filter is belt and braces
 /// — but it is kept, because nothing here should ever depend on which side
 /// of that stopped a draft from being read.
-pub fn parse_releases(json: &str) -> anyhow::Result<Vec<Release>> {
+///
+/// **The installer's releases are not the product's.** `installer-vX.Y.Z` and
+/// the fixed `installer` sit in the same list, published and final, and would
+/// otherwise be the "newest final release" this program installs from. Their
+/// tags are kept apart, for `own_version`'s notice, and nothing else reads
+/// them.
+fn parse_listing(json: &str) -> anyhow::Result<(Vec<Release>, Vec<String>)> {
     let wire: Vec<WireRelease> =
         serde_json::from_str(json).context("the releases list does not parse as JSON")?;
-    Ok(wire
-        .into_iter()
-        .filter(|r| !r.draft)
-        .map(|r| Release {
+    let mut installer_tags = Vec::new();
+    let mut releases = Vec::new();
+    for r in wire.into_iter().filter(|r| !r.draft) {
+        if is_installer_tag(&r.tag_name) {
+            installer_tags.push(r.tag_name);
+            continue;
+        }
+        releases.push(Release {
             tag: r.tag_name,
             prerelease: r.prerelease,
             draft: false,
             published_at: r.published_at.unwrap_or_default(),
             assets: r.assets.into_iter().map(|a| (a.name, a.browser_download_url)).collect(),
-        })
-        .collect())
+        });
+    }
+    Ok((releases, installer_tags))
+}
+
+/// The product's releases of a releases-list body: see `parse_listing`.
+/// What the tests read; the program itself takes both halves from
+/// `parse_listing` in one pass.
+#[cfg(test)]
+pub fn parse_releases(json: &str) -> anyhow::Result<Vec<Release>> {
+    parse_listing(json).map(|(releases, _)| releases)
 }
 
 /// The most recently published release matching `predicate`, or `None`.
@@ -480,6 +502,9 @@ impl Fetch for ReqwestFetch {
 pub struct GitHub<F: Fetch = ReqwestFetch> {
     fetch: F,
     releases: Vec<Release>,
+    /// The tags of the installer's own releases, from the same list. Not
+    /// releases of the product: only the newer-installer notice reads them.
+    installer_tags: Vec<String>,
     /// Index into `releases`, resolved once by `choose` and kept rather than
     /// re-resolved: a fresh `choose(&self.releases, tag)` call after the
     /// list has not changed would be pure ceremony, and re-running it against
@@ -510,13 +535,20 @@ impl<F: Fetch> GitHub<F> {
         let url = releases_url();
         let body = fetch.get(&url, TEXT_MAX as u64)?;
         let text = String::from_utf8(body).context("the releases list is not valid UTF-8")?;
-        let releases = parse_releases(&text)?;
+        let (releases, installer_tags) = parse_listing(&text)?;
         let chosen_tag = choose(&releases, tag)?.tag.clone();
         let chosen = releases
             .iter()
             .position(|r| r.tag == chosen_tag)
             .expect("choose only ever returns a release drawn from this same list");
-        Ok(Self { fetch, releases, chosen, sums: BTreeMap::new() })
+        Ok(Self { fetch, releases, installer_tags, chosen, sums: BTreeMap::new() })
+    }
+
+    /// What to tell the operator when the list shows an installer newer than
+    /// this one, or nothing. Read from the list already fetched: no request
+    /// of its own, and nothing it finds can fail a run.
+    pub fn newer_installer_notice(&self) -> Option<String> {
+        own_version::newer_installer_notice(self.installer_tags.iter().map(String::as_str))
     }
 
     fn chosen(&self) -> &Release {
@@ -1152,6 +1184,68 @@ mod tests {
         let sums_calls = |tag: &str| src.fetch.calls.iter().filter(|u| **u == asset_url(tag, "SHA256SUMS")).count();
         assert_eq!(sums_calls("v0.2.9"), 1, "{:?}", src.fetch.calls);
         assert_eq!(sums_calls("v0.2.8"), 1, "{:?}", src.fetch.calls);
+    }
+
+    /// **The installer's own releases share the list and are nobody's product
+    /// release.** `installer-vX.Y.Z` and the fixed `installer` are published,
+    /// final, newer than the product release most of the time, and carry
+    /// archives that are no component: left in the list, the default choice
+    /// would be one of them (the newest final release), the version screen
+    /// would offer it, and the install would then fail on a release with no
+    /// inventory.
+    #[test]
+    fn an_installer_release_is_never_a_product_release() {
+        let installer = |tag: &str| rel(tag, "2026-09-20T10:00:00Z", false, false, &["SHA256SUMS"]);
+        let releases = body(&[
+            installer("installer-v0.3.0"),
+            installer("installer"),
+            rel("v0.2.9", "2026-09-10T10:00:00Z", false, false, &["inventory.json", "SHA256SUMS"]),
+            rel("v0.3.0-beta.1", "2026-09-15T10:00:00Z", false, true, &["inventory.json", "SHA256SUMS"]),
+        ]);
+        let src = github(&releases, None, FakeFetch::new());
+        assert_eq!(src.tag(), "v0.2.9", "the newest final PRODUCT release, whatever was published after it");
+        let offered: Vec<&str> = src.releases().iter().map(|r| r.tag.as_str()).collect();
+        assert_eq!(offered, ["v0.2.9", "v0.3.0-beta.1"], "the version screen offers product releases only");
+        let parsed = parse_releases(&releases).unwrap();
+        assert!(choose(&parsed, Some("installer")).is_err());
+        assert!(choose(&parsed, Some("installer-v0.3.0")).is_err());
+        // With nothing but installer releases, there is no product release.
+        let only = body(&[installer("installer"), installer("installer-v0.3.0")]);
+        let fetch = FakeFetch::new().with(&releases_url(), only.as_bytes());
+        assert!(GitHub::with_fetch(fetch, None).is_err());
+    }
+
+    /// The newer-installer notice is read from the list already fetched: no
+    /// request of its own, and never a failure.
+    #[test]
+    fn the_newer_installer_notice_costs_no_request_and_follows_the_list() {
+        let own = crate::own_version::OWN_VERSION;
+        let (major, minor, _) = {
+            let mut p = own.split('.').map(|n| n.parse::<u64>().unwrap());
+            (p.next().unwrap(), p.next().unwrap(), p.next().unwrap())
+        };
+        let list = |installer_tags: &[String]| {
+            let mut releases: Vec<String> = installer_tags
+                .iter()
+                .map(|t| rel(t, "2026-09-20T10:00:00Z", false, false, &["SHA256SUMS"]))
+                .collect();
+            releases.push(rel("v0.2.9", "2026-09-10T10:00:00Z", false, false, &["inventory.json", "SHA256SUMS"]));
+            body(&releases)
+        };
+        let newer = format!("installer-v{major}.{}.0", minor + 1);
+        let src = github(&list(&[newer.clone(), "installer".to_string()]), None, FakeFetch::new());
+        let notice = src.newer_installer_notice().expect("a newer installer is listed");
+        assert!(notice.contains(&format!("({major}.{}.0; this one is {own})", minor + 1)), "{notice}");
+        assert_eq!(src.fetch.calls.len(), 1, "the list was the only request: {:?}", src.fetch.calls);
+
+        let equal = format!("installer-v{own}");
+        for tags in [vec![equal], vec!["installer".to_string()], vec![]] {
+            let src = github(&list(&tags), None, FakeFetch::new());
+            assert_eq!(src.newer_installer_notice(), None, "{tags:?}");
+        }
+        // Garbage beside nothing: still nothing, still no failure.
+        let src = github(&list(&["installer-vbanana".to_string()]), None, FakeFetch::new());
+        assert_eq!(src.newer_installer_notice(), None);
     }
 
     /// The version screen's answer moves what every later read acts on —

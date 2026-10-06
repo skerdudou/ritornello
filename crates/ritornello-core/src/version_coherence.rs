@@ -1,7 +1,7 @@
 //! Guard over the versioning scheme: every shipped component declares its own
 //! version, and none of them drifts off the product's major.
 //!
-//! Four numbers exist in this repository and only the first two are mostly
+//! Five numbers exist in this repository and only the first two are mostly
 //! here. The product number lives in `[workspace.package] version` and names
 //! the release; each shipped component declares its own version so a fix in
 //! one plugin does not renumber the whole product — which would make every
@@ -12,7 +12,9 @@
 //! prerelease may declare is `suffix_fits` below. The third number,
 //! `ritornello_proto::PROTOCOL_VERSION`, is the compatibility contract and is
 //! none of this file's business. The fourth is a root-privileged companion's
-//! own number, which none of the product rules touch (`tied_to_product`).
+//! own number, which none of the product rules touch (`tied_to_product`). The
+//! fifth is the workstation installer's own, exempt in the same way: it has a
+//! publication channel of its own and moves only when the installer does.
 //!
 //! What a red test here means: either a component started inheriting the
 //! product number again (so it can no longer be fixed on its own), or one
@@ -48,6 +50,15 @@ mod tests {
     /// a version of its own walks these too.
     const SHIPPED_COMPANIONS: &[&str] = &["ritornello-files-mount"];
 
+    /// The workstation installer: the fifth number. It is no component (no
+    /// device ever fetches it, so nothing compares its version for equality),
+    /// but its archives are named and tagged after a number it declares
+    /// itself, `installer-vX.Y.Z`, and that number moves only when the
+    /// installer does. It is exempt from the rules tying a number to the
+    /// product exactly as a companion is (`tied_to_product`), through the same
+    /// mechanism rather than a second one.
+    const THE_INSTALLER: &str = "ritornello-install";
+
     /// Crates that legitimately keep inheriting the product number: no
     /// archive is named after them. `ritornello-updater` is here because it
     /// travels inside the core's archive rather than as its own component.
@@ -59,19 +70,11 @@ mod tests {
         // Shared plugins.toml editing: it inherits the product number and no
         // archive is named after it.
         "ritornello-manifest",
-        // The workstation-side installer. Every release carries it, built
-        // for five workstation targets by the `installer` job of ci.yml, and
-        // it inherits the product number on purpose: no device ever fetches
-        // it, so the equality rule that makes a component's own number
-        // necessary never applies, and a person simply takes the one in the
-        // newest release. Its archives are named after a workstation target
-        // triple alone — no version, so that the README can link to
-        // `releases/latest/download/<file>` — and never after a component.
-        "ritornello-install",
     ];
 
-    /// Every crate whose version names an archive: the core, the plugins and
-    /// the companions. One list, so a rule cannot forget one of the three.
+    /// Every crate whose version names an archive or a tag: the core, the
+    /// plugins, the companions and the installer. One list, so a rule cannot
+    /// forget one of the four.
     fn shipped_crate_names() -> Vec<String> {
         let mut names = vec!["ritornello-core".to_string()];
         names.extend(
@@ -80,13 +83,16 @@ mod tests {
                 .map(|p| format!("ritornello-plugin-{p}")),
         );
         names.extend(SHIPPED_COMPANIONS.iter().map(|c| c.to_string()));
+        names.push(THE_INSTALLER.to_string());
         names
     }
 
     /// Whether a shipped crate's number is tied to the product's.
     ///
-    /// The core and the plugins are; a companion is NOT. A root-privileged
-    /// companion (`files-mount`) has a number of its own, independent of the
+    /// The core and the plugins are; the installer and a companion are NOT.
+    ///
+    /// A root-privileged companion (`files-mount`) has a number of its own,
+    /// independent of the
     /// product's generation and of its prerelease suffix, and it moves only
     /// when the companion itself changes. The reason is the device's own
     /// rule: it compares a companion's version for equality to decide whether
@@ -95,13 +101,17 @@ mod tests {
     /// a real change of the companion therefore forces an installer run for
     /// nothing -- across a beta, and across a minor or major product change
     /// (0.2 -> 0.3 -> 1.0) just as much.
+    ///
+    /// The installer's number is its own for another reason: it is published
+    /// on a channel of its own and moves only when the installer changes, so
+    /// the product's generation and prerelease suffix say nothing about it.
     fn tied_to_product(name: &str) -> bool {
-        !SHIPPED_COMPANIONS.contains(&name)
+        !SHIPPED_COMPANIONS.contains(&name) && name != THE_INSTALLER
     }
 
     /// The shipped crates whose number must follow the product rules
     /// (generation, finished number, prerelease suffix): everything but the
-    /// companions.
+    /// companions and the installer.
     fn product_tied_crate_names() -> Vec<String> {
         shipped_crate_names()
             .into_iter()
@@ -109,8 +119,8 @@ mod tests {
             .collect()
     }
 
-    /// Why `version` is off the product's major, or `None`. Companions are
-    /// never off it: see `tied_to_product`.
+    /// Why `version` is off the product's major, or `None`. Companions
+    /// and the installer are never off it: see `tied_to_product`.
     fn major_problem(product: &str, name: &str, version: &str) -> Option<String> {
         let major = |v: &str| v.split('.').next().unwrap_or_default().to_string();
         if !tied_to_product(name) || major(version) == major(product) {
@@ -1028,5 +1038,205 @@ serde = \"1\" # path=x
                 "{companion} inherits the product version"
             );
         }
+    }
+
+    /// The installer is the fifth number: explicit, its own, and a **finished**
+    /// `X.Y.Z`. Finished because its tag, `installer-vX.Y.Z`, is read back by
+    /// the installer itself (it compares that number with its own to say a
+    /// newer installer exists) and its releases are never prereleases; and
+    /// explicit because a number inherited from the product would move with
+    /// every delivery and make every product release look like a new
+    /// installer.
+    #[test]
+    fn the_installer_declares_a_finished_number_of_its_own() {
+        let version = declared_version(&crate_manifest(THE_INSTALLER))
+            .unwrap_or_else(|| panic!("{THE_INSTALLER} inherits the product version"));
+        assert!(
+            is_valid_semver(&version) && prerelease(&version).is_none(),
+            "{THE_INSTALLER} declares {version}: it must be a finished major.minor.patch, \
+             its tag installer-v{version} is compared by the installer itself"
+        );
+        // Exempt from everything that ties a number to the product, through the
+        // same mechanism as a companion -- and the rules are still alive for
+        // the ones that must keep them.
+        assert!(!tied_to_product(THE_INSTALLER));
+        assert_eq!(major_problem("0.3.0", THE_INSTALLER, "1.4.2"), None);
+        assert!(major_problem("0.3.0", "ritornello-core", "1.4.2").is_some());
+        assert!(
+            !product_tied_crate_names().iter().any(|n| n == THE_INSTALLER),
+            "the installer must not be held to the product's prerelease rules"
+        );
+        assert!(
+            shipped_crate_names().iter().any(|n| n == THE_INSTALLER),
+            "the installer must be among the crates that declare a number of their own"
+        );
+        assert!(
+            !INTERNAL_CRATES.contains(&THE_INSTALLER),
+            "listed as internal, the installer would have to inherit the product number"
+        );
+    }
+
+    fn workflow() -> String {
+        read(&repo_root().join(".github").join("workflows").join("ci.yml")).replace("\r\n", "\n")
+    }
+
+    /// One job of the release workflow, whole, by name.
+    fn ci_job(name: &str) -> String {
+        let ci = workflow();
+        let head = format!("\n  {name}:\n");
+        let rest = ci
+            .split(&head)
+            .nth(1)
+            .unwrap_or_else(|| panic!("ci.yml has no `{name}` job"));
+        // Up to the next job: a line indented by exactly two spaces ending in `:`.
+        let mut end = rest.len();
+        let mut offset = 0;
+        for line in rest.split_inclusive('\n') {
+            let bare = line.trim_end_matches('\n');
+            if offset > 0
+                && bare.starts_with("  ")
+                && !bare.starts_with("   ")
+                && bare.trim_end().ends_with(':')
+            {
+                end = offset;
+                break;
+            }
+            offset += line.len();
+        }
+        rest[..end].to_string()
+    }
+
+    /// **The installer has a channel of its own, and a product release no
+    /// longer carries it.** Each assertion is one way this has been, or could
+    /// silently be, undone:
+    /// - the product's `publish` job fetching `installer-*` artifacts again
+    ///   (five archives re-attached to every release, for a program that
+    ///   rarely changes), or its checksum file listing `*.zip`;
+    /// - the product's `publish` job waiting for the installer legs;
+    /// - the baseline queries asking for `--limit 1`, whose single answer is
+    ///   often an installer release, or not skipping them;
+    /// - the installer's tag not being a trigger, or its job publishing a
+    ///   prerelease / "latest" release, which would break what GitHub's
+    ///   "latest" means for the product.
+    #[test]
+    fn the_installer_is_published_on_its_own_channel_and_not_with_the_product() {
+        // Comments excluded: the jobs explain what they no longer do.
+        let code = |job: String| -> String {
+            job.lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .map(|l| format!("{l}\n"))
+                .collect()
+        };
+        let publish = code(ci_job("publish"));
+        assert!(
+            !publish.contains("installer-*") && !publish.contains("*.zip"),
+            "the product's publish job still attaches the workstation installers"
+        );
+        assert!(
+            !publish.contains("needs: [release, language-packs, installer]"),
+            "the product's publish job still waits for the installer legs"
+        );
+        for query in ["--exclude-pre-releases", "--exclude-drafts --limit"] {
+            let line = publish
+                .lines()
+                .find(|l| l.contains("gh release list") && l.contains(query))
+                .unwrap_or_else(|| panic!("no baseline query with {query}"));
+            assert!(
+                line.contains("release-tags.sh newest-product"),
+                "a baseline query does not skip the installer's releases: {line}"
+            );
+            assert!(!line.contains("--limit 1 "), "a single answer may be an installer release: {line}");
+        }
+        assert_eq!(
+            publish.matches("gh release list").count(),
+            2,
+            "a new release query appeared: it must skip the installer's releases too"
+        );
+
+        assert!(
+            workflow().contains("tags: ['v*', 'installer-v*']"),
+            "the installer's tag does not trigger the workflow"
+        );
+        let job = code(ci_job("publish-installer"));
+        assert!(job.contains("startsWith(github.ref, 'refs/tags/installer-v')"));
+        assert!(job.contains("needs: installer"), "the installer is published without its legs");
+        assert!(
+            job.contains("release-tags.sh check-installer-tag"),
+            "the tag is not checked against the installer's own number"
+        );
+        assert!(!job.contains("--prerelease "), "installer releases are never prereleases");
+        assert_eq!(
+            job.matches("--latest=false").count(),
+            3,
+            "the numbered release, the fixed release's creation and its update must each stay out of \"latest\""
+        );
+        assert!(job.contains("gh release upload installer assets/* --clobber"));
+        // Re-runnable: the numbered release is created only when absent, and
+        // the fixed one is found by `view` before it is created or edited.
+        assert!(
+            job.contains(r#"gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG""#),
+            "the numbered release is created unconditionally: a re-run of a failed job would die on 'already exists'"
+        );
+        assert!(
+            job.contains("if gh release view installer >/dev/null 2>&1; then"),
+            "the fixed release is not found before being created or edited"
+        );
+        let notes = read(&repo_root().join(".github").join("installer-release-notes.md"));
+        assert!(notes.contains("@VERSION@"), "the release notes template has lost its placeholder");
+        assert!(job.contains("installer-release-notes.md"));
+        // The product's own jobs never run for an installer tag.
+        assert!(
+            ci_job("web").contains("!startsWith(github.ref, 'refs/tags/installer-v')"),
+            "an installer tag would build the whole web UI"
+        );
+    }
+
+    /// The README's links must not carry a number or a badge for the
+    /// installer: nothing in it changes when the installer's version does.
+    #[test]
+    fn the_readme_holds_no_installer_version() {
+        let readme = read(&repo_root().join("README.md"));
+        let installer = declared_version(&crate_manifest(THE_INSTALLER)).expect("checked above");
+        for line in readme.lines().filter(|l| l.contains("ritornello-install")) {
+            assert!(
+                !line.contains(&installer) && !line.contains("installer-v"),
+                "the README names the installer's number: {line}"
+            );
+        }
+    }
+
+    /// The tag helpers of the release workflow, run for real: which release is
+    /// "the previous one" once the installer's releases share the list, and
+    /// whether an installer tag names the number the installer declares. Its
+    /// self-test is the only exercise they get before a tag is pushed.
+    #[test]
+    fn the_release_tag_helpers_agree_about_the_installers_releases() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let out = std::process::Command::new("bash")
+            .arg("scripts/release-tags.sh")
+            .arg("--self-test")
+            .current_dir(&root)
+            .output()
+            .expect("bash is available: the Rust suite runs on Linux here and in CI");
+        assert!(
+            out.status.success(),
+            "release-tags.sh --self-test failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // And on the real manifest: the tag the installer's own number names
+        // is accepted, another one is not.
+        let version = declared_version(&crate_manifest(THE_INSTALLER)).expect("checked above");
+        let manifest = root.join("crates/ritornello-install/Cargo.toml");
+        let check = |tag: &str| {
+            std::process::Command::new("bash")
+                .args(["scripts/release-tags.sh", "check-installer-tag", tag])
+                .arg(&manifest)
+                .current_dir(&root)
+                .status()
+                .expect("bash is available")
+                .success()
+        };
+        assert!(check(&format!("installer-v{version}")));
+        assert!(!check(&format!("installer-v{version}1")));
     }
 }

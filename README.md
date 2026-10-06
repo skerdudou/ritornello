@@ -35,19 +35,20 @@ program, `ritornello-install`, over ssh — nothing to build:
 
 | Your computer | Installer |
 |---|---|
-| Windows (64-bit) | [ritornello-install-x86_64-pc-windows-msvc.zip](https://github.com/skerdudou/ritornello/releases/latest/download/ritornello-install-x86_64-pc-windows-msvc.zip) |
-| macOS, Apple Silicon | [ritornello-install-aarch64-apple-darwin.tar.gz](https://github.com/skerdudou/ritornello/releases/latest/download/ritornello-install-aarch64-apple-darwin.tar.gz) |
-| macOS, Intel | [ritornello-install-x86_64-apple-darwin.tar.gz](https://github.com/skerdudou/ritornello/releases/latest/download/ritornello-install-x86_64-apple-darwin.tar.gz) |
-| Linux or WSL, x86_64 | [ritornello-install-x86_64-unknown-linux-musl.tar.gz](https://github.com/skerdudou/ritornello/releases/latest/download/ritornello-install-x86_64-unknown-linux-musl.tar.gz) |
-| Linux, 64-bit ARM | [ritornello-install-aarch64-unknown-linux-musl.tar.gz](https://github.com/skerdudou/ritornello/releases/latest/download/ritornello-install-aarch64-unknown-linux-musl.tar.gz) |
+| Windows (64-bit) | [ritornello-install-x86_64-pc-windows-msvc.zip](https://github.com/skerdudou/ritornello/releases/download/installer/ritornello-install-x86_64-pc-windows-msvc.zip) |
+| macOS, Apple Silicon | [ritornello-install-aarch64-apple-darwin.tar.gz](https://github.com/skerdudou/ritornello/releases/download/installer/ritornello-install-aarch64-apple-darwin.tar.gz) |
+| macOS, Intel | [ritornello-install-x86_64-apple-darwin.tar.gz](https://github.com/skerdudou/ritornello/releases/download/installer/ritornello-install-x86_64-apple-darwin.tar.gz) |
+| Linux or WSL, x86_64 | [ritornello-install-x86_64-unknown-linux-musl.tar.gz](https://github.com/skerdudou/ritornello/releases/download/installer/ritornello-install-x86_64-unknown-linux-musl.tar.gz) |
+| Linux, 64-bit ARM | [ritornello-install-aarch64-unknown-linux-musl.tar.gz](https://github.com/skerdudou/ritornello/releases/download/installer/ritornello-install-aarch64-unknown-linux-musl.tar.gz) |
 
 Then `./ritornello-install --host user@device` and follow the screens —
 the details per system are in
 [docs/installation.md](docs/installation.md#installing-on-a-device-without-building-anything).
-These links always point at the newest **final** release. While only
-prereleases are published they lead nowhere: take the files from the
-[releases page](https://github.com/skerdudou/ritornello/releases) instead
-— the program itself then installs the newest prerelease.
+These links always point at the newest installer, whatever the state of
+the product's own releases: the installer has its own releases, and the
+program itself installs the newest Ritornello release (the newest
+prerelease while no final one exists). It tells you when a newer installer
+exists.
 
 ## Highlights
 
