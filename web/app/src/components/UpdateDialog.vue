@@ -9,6 +9,9 @@ import {
   Switch,
 } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
+import { languageName } from '../composables/languages'
+import { packLanguage } from '../composables/packSource'
+import { refusedNote } from '../composables/refusedNote'
 import { useCatalog } from '../composables/useCatalog'
 import type { ComponentOffer } from '../types'
 
@@ -53,11 +56,17 @@ const relevant = computed(() =>
  * third-party (its own repository decides, not this release), and never a
  * component already known to need a manual step (checking it again would
  * only repeat the same refusal).
+ *
+ * "Third-party" is read from `third_party_repo` (ruling P6), not from the
+ * kind alone: a stranger's **language pack** has the kind `language_pack`
+ * and carries its source there, and used to be pre-ticked like one of ours.
+ * The kind is kept as well, so a third-party plugin row that names no
+ * repository fails closed too.
  */
 function defaultChecked(components: ComponentOffer[]): Set<string> {
   return new Set(
     components
-      .filter((c) => c.kind !== 'third_party')
+      .filter((c) => c.kind !== 'third_party' && !c.third_party_repo)
       .filter((c) => c.availability === 'update_available')
       .filter((c) => c.installable !== false)
       .map((c) => c.name),
@@ -113,9 +122,13 @@ function warningFor(c: ComponentOffer): string | null {
     if (c.needs_companion) {
       return t.value('update_row_needs_companion', { companion: c.needs_companion })
     }
-    return t.value('plugin_privileged_note')
+    // A stranger's plugin or a pack was refused for its archive, not for
+    // being privileged (`refusedNote`).
+    return refusedNote(t.value, c)
   }
-  if (c.kind === 'third_party') {
+  // A third-party pack: its label already names the source.
+  if (c.kind === 'language_pack' && c.third_party_repo) return t.value('update_row_third_party_pack')
+  if (c.kind === 'third_party' || c.third_party_repo) {
     return t.value('update_row_third_party', { repo: c.third_party_repo ?? '?' })
   }
   if (c.kind !== 'core' && checked.value.has(c.name) && coreLeftBehind.value) {
@@ -124,8 +137,25 @@ function warningFor(c: ComponentOffer): string | null {
   return null
 }
 
+/**
+ * What a row is called. A language pack is named by its language and its
+ * source — a third party's id is a digest (`ritornello-xlang-fr-<h12>`) and
+ * ours is an archive name, neither of which an operator should have to read.
+ * Every other row keeps its component name.
+ */
+function labelFor(c: ComponentOffer): string {
+  if (c.kind !== 'language_pack') return c.name
+  const code = packLanguage(c.name)
+  if (code === null) return c.name
+  const language = languageName(code)
+  return c.third_party_repo
+    ? t.value('update_row_pack_third_party', { language, repo: c.third_party_repo })
+    : t.value('update_row_pack_official', { language })
+}
+
 interface Row {
   offer: ComponentOffer
+  label: string
   checked: boolean
   warning: string | null
 }
@@ -133,6 +163,7 @@ interface Row {
 const rows = computed<Row[]>(() =>
   relevant.value.map((offer) => ({
     offer,
+    label: labelFor(offer),
     checked: checked.value.has(offer.name),
     warning: warningFor(offer),
   })),
@@ -179,11 +210,11 @@ function confirm() {
             data-update-row-check
             :model-value="row.checked"
             :disabled="row.offer.offered === null || row.offer.installable === false"
-            :aria-label="row.offer.name"
+            :aria-label="row.label"
             @update:model-value="(v: boolean) => setChecked(row.offer.name, v)"
           />
           <div class="grid gap-0.5 text-sm">
-            <span data-update-row-name>{{ row.offer.name }}</span>
+            <span data-update-row-name>{{ row.label }}</span>
             <span v-if="row.warning" data-update-row-warning class="text-xs text-muted-foreground">
               {{ row.warning }}
             </span>

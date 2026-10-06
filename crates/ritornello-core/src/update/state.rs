@@ -11,6 +11,7 @@
 //! do the wrong thing.
 
 use crate::update::release::{differs, origin, Offer, Origin, Published};
+use crate::update::sources::{Conflict, FreshOffer, PackOffer};
 use serde::Serialize;
 
 /// What the core knows about one plugin, before the release is consulted.
@@ -48,6 +49,10 @@ pub struct ThirdPartyOffer {
     /// its announcement echoed back.
     pub name: String,
     pub published: Published,
+    /// The repository that answered, as `release::origin` reads the
+    /// announcement — case kept, so it is the row's own `third_party_repo`
+    /// and the key the placement memory is read under (`placed_key`).
+    pub repo: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -120,6 +125,14 @@ pub struct ComponentOffer {
     /// inferred by the page from the plugin's name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_companion: Option<String>,
+    /// A name nobody on this device owns that two or more sources offer
+    /// (`sources::fresh_offers`, clause 4): every one of those repositories,
+    /// lowercased and sorted. The row is then `installable: Some(false)` with
+    /// nothing offered, and the page names the repositories so the operator
+    /// can remove the one they did not mean to read. Absent on every other
+    /// row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_repos: Option<Vec<String>>,
 }
 
 /// Declared plugins first, **in file order** — that order is the priority, for
@@ -130,12 +143,21 @@ pub struct ComponentOffer {
 /// a component this release never published simply has no entry, and that is
 /// answered `Availability::Unknown` for that component alone, its neighbours
 /// unaffected.
+///
+/// Eight lists, each a different fact the check collected, and every caller
+/// already holds them as separate fields of `Checked`: a struct built only to
+/// carry them here would be one more literal to keep in step, not a clearer
+/// call.
+#[allow(clippy::too_many_arguments)]
 pub fn component_offers(
     core_version: &str,
     published: &[Published],
     third_party: &[ThirdPartyOffer],
     installed: &[Installed],
     installed_packs: &[(String, String)],
+    packs: &[PackOffer],
+    fresh: &[FreshOffer],
+    conflicts: &[Conflict],
 ) -> Vec<ComponentOffer> {
     let core_offered = published.iter().find(|p| p.offer == Offer::Core).map(|p| p.version.clone());
 
@@ -179,6 +201,7 @@ pub fn component_offers(
         // has actually read an archive — `component_offers` never sees one.
         not_installed_files: None,
         needs_companion: None,
+        conflict_repos: None,
     });
 
     for plugin in installed {
@@ -205,9 +228,18 @@ pub fn component_offers(
         // it then meets is the check that the archive's bare name is the file
         // this plugin's `exec` declares: our archive carries
         // `ritornello-plugin-<name>`, so the install is refused with a named
-        // cause unless the author called their binary exactly that too. Three
-        // coincidences, all on their side, and the last one is the one they
-        // control.
+        // cause unless the binary is called exactly that too.
+        //
+        // **That last check is not always the author's to control.** A
+        // plugin installed fresh from a source is placed by this core as
+        // `ritornello-plugin-<name>` — the only binary name it accepts — so
+        // if it announces no repository and our release later publishes the
+        // same name (a name we had never shipped, or one dropped out of the
+        // release window this check reads), nothing on the device tells the
+        // two apart and the stranger's binary is replaced by ours. Announcing
+        // `repository` is what protects it, which `docs/plugins.md` says to
+        // the author in as many words; and such a plugin is never updated
+        // from its own source either, since nothing names that source.
         let is_third_party = !matches!(from, Origin::Unknown | Origin::Ours);
         // A third-party plugin's version is decided by **its own** repository,
         // and this release says nothing about it: never `plugin_offered`, even
@@ -243,6 +275,7 @@ pub fn component_offers(
             // about the core's archive alone.
             not_installed_files: None,
             needs_companion: None,
+            conflict_repos: None,
         });
     }
 
@@ -262,15 +295,18 @@ pub fn component_offers(
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            conflict_repos: None,
         });
     }
 
-    for p in published.iter() {
-        let Offer::LanguagePack(language) = &p.offer else { continue };
-        let id = crate::langpack::store::pack_id(language);
-        let installed = installed_packs.iter().find(|(pid, _)| pid == &id).map(|(_, v)| v.clone());
+    // One row per pack on offer, ours and every source's (`sources::
+    // pack_offers`), each named by its own id: two sources publishing one
+    // language are two rows, never one judged against the other's version.
+    for offer in packs {
+        let p = &offer.published;
+        let installed = installed_packs.iter().find(|(pid, _)| *pid == offer.id).map(|(_, v)| v.clone());
         out.push(ComponentOffer {
-            name: id,
+            name: offer.id.clone(),
             kind: ComponentKind::LanguagePack,
             // A pack declares nothing and has no binary: both are `false`
             // rather than absent, because the page reads them unconditionally
@@ -289,9 +325,59 @@ pub fn component_offers(
             // absent so the page never offers the "manual step" sentence for
             // something that has no manual step.
             installable: Some(true),
+            // The source a third-party pack comes from: what the automatic
+            // policy's scope and the placement key read (`update::
+            // automatic_install_list`), and what the page names.
+            third_party_repo: offer.repo.clone(),
+            not_installed_files: None,
+            needs_companion: None,
+            conflict_repos: None,
+        });
+    }
+
+    // What the sources offer under a name nobody owns (`sources::fresh_offers`).
+    // A name that already has a row is skipped: `fresh_offers` excludes every
+    // owned name already, but a row rebuilt after an install
+    // (`conclude_install`) reuses the check's offers while the device has
+    // moved on, and the plugin just placed must keep its one row.
+    for offer in fresh {
+        if out.iter().any(|r| r.name == offer.name) {
+            continue;
+        }
+        out.push(ComponentOffer {
+            name: offer.name.clone(),
+            kind: ComponentKind::ThirdParty,
+            declared: false,
+            binary_present: false,
+            installed: None,
+            offered: Some(offer.published.version.clone()),
+            availability: Availability::NotInstalled,
+            installable: None,
+            third_party_repo: Some(offer.repo.clone()),
+            not_installed_files: None,
+            needs_companion: None,
+            conflict_repos: None,
+        });
+    }
+    // A contested name: a row, so the page can say why nothing is offered
+    // and which repositories to choose between, and nothing on it to install.
+    for conflict in conflicts {
+        if out.iter().any(|r| r.name == conflict.name) {
+            continue;
+        }
+        out.push(ComponentOffer {
+            name: conflict.name.clone(),
+            kind: ComponentKind::ThirdParty,
+            declared: false,
+            binary_present: false,
+            installed: None,
+            offered: None,
+            availability: Availability::NotInstalled,
+            installable: Some(false),
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            conflict_repos: Some(conflict.repos.clone()),
         });
     }
     out
@@ -420,6 +506,23 @@ pub struct UpdateState {
     /// doctrine refuses two paragraphs up.
     #[serde(skip)]
     pub pending_removals: Vec<String>,
+    /// What the last check learnt per source it asked
+    /// (`sources::reports_of`), keyed by lowercased `owner/repo`.
+    ///
+    /// **`skip`**, like `pending_removals` and for the same reason: it is read
+    /// by `GET /api/update/sources`, which attaches each report to its row,
+    /// and is not part of `/api/update`'s contract.
+    #[serde(skip)]
+    pub source_reports: Vec<(String, crate::update::sources::SourceReport)>,
+    /// Per source with a fresh offer at the last check, where its own
+    /// catalogue lives and which names it may describe
+    /// (`sources::source_catalogues`). Read by `GET /api/update/catalogue?repo=`,
+    /// which only selects one of these: the address it fetches always comes
+    /// from here, never from the request.
+    ///
+    /// **`skip`**, like `source_reports`: not part of `/api/update`'s contract.
+    #[serde(skip)]
+    pub source_catalogues: Vec<crate::update::sources::SourceCatalogue>,
 }
 
 impl UpdateState {
@@ -431,7 +534,9 @@ impl UpdateState {
             release_url: None,
             catalogue_url: None,
             last_check_unix_s: None,
-            components: component_offers(core_version, &[], &[], installed, &[]),
+            // No check yet: no source has answered, so no stranger offers
+            // anything and no name is contested.
+            components: component_offers(core_version, &[], &[], installed, &[], &[], &[], &[]),
             busy: None,
             last_rollback: None,
             // Nothing can be in flight before the first HTTP request: this
@@ -439,6 +544,9 @@ impl UpdateState {
             // a core that restarts mid-erasure has no queue left to wait on,
             // and the row then tells the truth from the scan alone.
             pending_removals: Vec::new(),
+            // No check has answered yet.
+            source_reports: Vec::new(),
+            source_catalogues: Vec::new(),
         }
     }
 
@@ -513,6 +621,7 @@ impl UpdateState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::update::sources::pack_offers;
 
     /// Shorthand for the tests that have no third-party offer to make: the
     /// ordinary shape, where every row is judged against our own release.
@@ -521,7 +630,7 @@ mod tests {
         published: &[Published],
         installed: &[Installed],
     ) -> Vec<ComponentOffer> {
-        component_offers(core_version, published, &[], installed, &[])
+        component_offers(core_version, published, &[], installed, &[], &pack_offers(published, &[]), &[], &[])
     }
 
     fn declared(name: &str, version: Option<&str>, binary: bool) -> Installed {
@@ -646,7 +755,7 @@ mod tests {
     #[test]
     fn a_published_pack_the_device_does_not_have_is_offered_for_installation() {
         let published = vec![pack_published("fr", "0.2.1")];
-        let rows = component_offers("0.2.1", &published, &[], &[], &[]);
+        let rows = component_offers("0.2.1", &published, &[], &[], &[], &pack_offers(&published, &[]), &[], &[]);
         let row = rows.iter().find(|r| r.name == "ritornello-lang-fr").expect("a pack row");
         assert_eq!(row.kind, ComponentKind::LanguagePack);
         assert_eq!(row.availability, Availability::NotInstalled);
@@ -657,7 +766,7 @@ mod tests {
     fn an_installed_pack_at_another_version_is_offered_for_update() {
         let published = vec![pack_published("fr", "0.2.2")];
         let installed = vec![("ritornello-lang-fr".to_string(), "0.2.1".to_string())];
-        let rows = component_offers("0.2.2", &published, &[], &[], &installed);
+        let rows = component_offers("0.2.2", &published, &[], &[], &installed, &pack_offers(&published, &[]), &[], &[]);
         let row = rows.iter().find(|r| r.name == "ritornello-lang-fr").unwrap();
         assert_eq!(row.availability, Availability::UpdateAvailable);
     }
@@ -675,11 +784,34 @@ mod tests {
     fn an_installed_pack_at_the_offered_version_is_aligned() {
         let published = vec![pack_published("fr", "0.2.1")];
         let installed = vec![("ritornello-lang-fr".to_string(), "0.2.1".to_string())];
-        let rows = component_offers("0.2.1", &published, &[], &[], &installed);
+        let rows = component_offers("0.2.1", &published, &[], &[], &installed, &pack_offers(&published, &[]), &[], &[]);
         assert_eq!(
             rows.iter().find(|r| r.name == "ritornello-lang-fr").unwrap().availability,
             Availability::Aligned
         );
+    }
+
+    /// Two packs of one language, ours and a source's: two rows, each judged
+    /// against its own installed version, and only the stranger's carries a
+    /// repository (P6) — which is what the automatic policy's scope reads.
+    #[test]
+    fn a_third_party_pack_is_its_own_row_naming_its_source() {
+        use crate::langpack::store::third_party_pack_id;
+        let answers = [crate::update::sources::SourceAnswer {
+            repo: "z/zed".to_string(),
+            published: vec![pack_published("fr", "1.1.0")],
+        }];
+        let packs = pack_offers(&[pack_published("fr", "0.2.1")], &answers);
+        let theirs = third_party_pack_id("fr", "z/zed");
+        let installed = vec![(theirs.clone(), "1.0.0".to_string()), ("ritornello-lang-fr".to_string(), "0.2.1".to_string())];
+        let rows = component_offers("0.2.1", &[], &[], &[], &installed, &packs, &[], &[]);
+        let ours = rows.iter().find(|r| r.name == "ritornello-lang-fr").expect("our row");
+        assert_eq!((ours.availability, ours.third_party_repo.as_deref()), (Availability::Aligned, None));
+        let it = rows.iter().find(|r| r.name == theirs).expect("their row");
+        assert_eq!(it.kind, ComponentKind::LanguagePack);
+        assert_eq!(it.third_party_repo.as_deref(), Some("z/zed"));
+        assert_eq!((it.installed.as_deref(), it.offered.as_deref()), (Some("1.0.0"), Some("1.1.0")));
+        assert_eq!(it.availability, Availability::UpdateAvailable);
     }
 
     #[test]
@@ -803,6 +935,7 @@ mod tests {
         let theirs = ThirdPartyOffer {
             name: "someones-plugin".to_string(),
             published: published(Offer::Plugin("someones-plugin".to_string()), "2.0.0"),
+            repo: "someone/their-plugin".to_string(),
         };
         let rows = component_offers(
             "0.2.0",
@@ -818,6 +951,9 @@ mod tests {
                 version: Some("1.4.0".to_string()),
                 repository: Some("https://github.com/someone/their-plugin".to_string()),
             }],
+            &[],
+            &[],
+            &[],
             &[],
         );
         let it = rows.iter().find(|o| o.name == "someones-plugin").unwrap();
@@ -1011,6 +1147,76 @@ mod tests {
         assert_eq!(row.availability, Availability::Undeclared, "the binary is still there");
         assert!(row.binary_present);
         assert!(state.pending_removals.is_empty(), "but nothing is waiting on it any more");
+    }
+
+    /// A plugin nobody owns, offered by one source: a row the operator can
+    /// install, saying which repository it would come from.
+    #[test]
+    fn a_fresh_offer_is_a_not_installed_third_party_row_naming_its_source() {
+        let fresh = FreshOffer {
+            name: "zed".to_string(),
+            repo: "z/zed".to_string(),
+            published: published(Offer::Plugin("zed".to_string()), "1.0.0"),
+        };
+        let rows = component_offers("0.2.0", &[], &[], &[], &[], &[], &[fresh], &[]);
+        let zed = rows.iter().find(|r| r.name == "zed").expect("a row for the fresh offer");
+        assert_eq!(zed.kind, ComponentKind::ThirdParty);
+        assert_eq!(zed.availability, Availability::NotInstalled);
+        assert_eq!((zed.declared, zed.binary_present, zed.installed.as_deref()), (false, false, None));
+        assert_eq!(zed.offered.as_deref(), Some("1.0.0"));
+        assert_eq!(zed.third_party_repo.as_deref(), Some("z/zed"));
+        assert_eq!(zed.installable, None, "decided by the archive, once one is fetched");
+        assert_eq!(zed.conflict_repos, None);
+    }
+
+    /// A contested name: a row, so the operator learns why nothing is
+    /// offered, and nothing on it to install.
+    #[test]
+    fn a_conflict_is_a_row_offering_nothing_and_naming_every_repository() {
+        let conflict = Conflict { name: "dup".to_string(), repos: vec!["a/one".to_string(), "b/two".to_string()] };
+        let rows = component_offers("0.2.0", &[], &[], &[], &[], &[], &[], &[conflict]);
+        let dup = rows.iter().find(|r| r.name == "dup").expect("a row for the conflict");
+        assert_eq!(dup.kind, ComponentKind::ThirdParty);
+        assert_eq!(dup.availability, Availability::NotInstalled);
+        assert_eq!(dup.offered, None, "no source is believed");
+        assert_eq!(dup.installable, Some(false));
+        assert_eq!(dup.third_party_repo, None, "no one repository is its source");
+        assert_eq!(dup.conflict_repos, Some(vec!["a/one".to_string(), "b/two".to_string()]));
+    }
+
+    /// A row rebuilt after an install reuses the check's offers while the
+    /// plugin just placed is now on the device: it keeps its one row, and
+    /// that row is the installed one. **[MUTATION]** drop the skip: red.
+    #[test]
+    fn a_fresh_offer_for_a_name_already_listed_adds_no_second_row() {
+        let fresh = FreshOffer {
+            name: "zed".to_string(),
+            repo: "z/zed".to_string(),
+            published: published(Offer::Plugin("zed".to_string()), "1.0.0"),
+        };
+        let conflict = Conflict { name: "zed".to_string(), repos: vec!["a/one".to_string(), "b/two".to_string()] };
+        let installed = vec![Installed {
+            name: "zed".to_string(),
+            declared: true,
+            binary_present: true,
+            version: Some("1.0.0".to_string()),
+            repository: Some("https://github.com/z/zed".to_string()),
+        }];
+        let rows = component_offers("0.2.0", &[], &[], &installed, &[], &[], &[fresh], &[conflict]);
+        let zeds: Vec<&ComponentOffer> = rows.iter().filter(|r| r.name == "zed").collect();
+        assert_eq!(zeds.len(), 1, "{zeds:#?}");
+        assert!(zeds[0].declared);
+    }
+
+    /// The conflict's repositories reach the wire under their own key, and an
+    /// ordinary row carries no such key at all.
+    #[test]
+    fn conflict_repos_is_on_the_wire_only_for_a_conflict() {
+        let conflict = Conflict { name: "dup".to_string(), repos: vec!["a/one".to_string()] };
+        let rows = component_offers("0.2.0", &[], &[], &[], &[], &[], &[], &[conflict]);
+        let json = serde_json::to_value(&rows).unwrap();
+        assert_eq!(json[1]["conflict_repos"], serde_json::json!(["a/one"]));
+        assert!(json[0].get("conflict_repos").is_none(), "{}", json[0]);
     }
 
     /// Two presses queue two jobs, and the first answer clears by value: a

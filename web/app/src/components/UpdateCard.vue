@@ -26,7 +26,7 @@ import UpdateSummary from './UpdateSummary.vue'
  * racing each other's reload).
  */
 const props = defineProps<{ update: UpdatePayload; settings: SettingsPayload }>()
-const emit = defineEmits<{ check: []; install: []; save: [] }>()
+const emit = defineEmits<{ check: []; install: []; save: []; sources: [] }>()
 const { t } = useCatalog()
 
 const WEEKDAYS: Weekday[] = [
@@ -101,6 +101,8 @@ const updatePolicyLabel = computed(() => {
       return t.value('update_policy_check')
     case 'check_and_install':
       return t.value('update_policy_check_and_install')
+    case 'check_and_install_all':
+      return t.value('update_policy_check_and_install_all')
     default:
       return t.value('update_policy_off')
   }
@@ -202,6 +204,9 @@ function onCadenceKindChange(kind: unknown) {
         >
           {{ t('update_install') }}
         </Button>
+        <Button variant="outline" data-update-sources @click="emit('sources')">
+          {{ t('update_sources_configure') }}
+        </Button>
       </div>
 
       <!-- The separator is what makes this one card legitimate. Above it:
@@ -244,6 +249,7 @@ function onCadenceKindChange(kind: unknown) {
                 <SelectItem value="off">{{ t('update_policy_off') }}</SelectItem>
                 <SelectItem value="check">{{ t('update_policy_check') }}</SelectItem>
                 <SelectItem value="check_and_install">{{ t('update_policy_check_and_install') }}</SelectItem>
+                <SelectItem value="check_and_install_all">{{ t('update_policy_check_and_install_all') }}</SelectItem>
               </SelectContent>
             </Select>
           </label>

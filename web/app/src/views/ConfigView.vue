@@ -12,12 +12,14 @@ import { RouterLink } from 'vue-router'
 import AddLanguageDialog from '../components/AddLanguageDialog.vue'
 import CoverCacheDetails from '../components/CoverCacheDetails.vue'
 import InstallablesDialog from '../components/InstallablesDialog.vue'
+import SourcesDialog from '../components/SourcesDialog.vue'
 import LanguageCard from '../components/LanguageCard.vue'
 import LanguagePacksRow from '../components/LanguagePacksRow.vue'
 import UpdateCard from '../components/UpdateCard.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
 import { predictedThumbnailBytes } from '../composables/coverWeight'
 import { languageName } from '../composables/languages'
+import { packSourceLabel } from '../composables/packSource'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
 import type {
@@ -679,11 +681,17 @@ async function dropPlugin(targetName: string) {
  * being pressed twice in the same instant, though not to stop a second press
  * once the 202 has come back and the worker is still busy underneath it.
  */
-async function installPlugin(name: string) {
+async function installPlugin(name: string, confirmedRepo?: string) {
   if (inProgress.value.has(name)) return
   inProgress.value.add(name)
   try {
-    const err = await api.post('/api/update/install', { components: [name] })
+    // A plugin a third-party source offers fresh carries the repository its
+    // second consent named: the core installs it from that repository only,
+    // and refuses it if the check it runs now finds another one offering it.
+    const body = confirmedRepo === undefined
+      ? { components: [name] }
+      : { components: [name], from: { [name]: confirmedRepo } }
+    const err = await api.post('/api/update/install', body)
     if (err) {
       toast.error(err)
       return
@@ -693,6 +701,35 @@ async function installPlugin(name: string) {
   } finally {
     inProgress.value.delete(name)
   }
+}
+
+/**
+ * The plugin a third-party source offers fresh whose install is awaiting the
+ * second consent (spec §4.5), with the repository it comes from, or `null`
+ * when no such confirmation is open. Same shared-dialog idiom as
+ * `uninstallTarget`; the installables dialog is closed while it is open and
+ * reopened after, so only one dialog is ever on screen.
+ */
+const thirdPartyInstallTarget = ref<{ name: string; repo: string } | null>(null)
+
+function askThirdPartyInstall(name: string, repo: string) {
+  showInstallablesDialog.value = false
+  thirdPartyInstallTarget.value = { name, repo }
+}
+
+/** Closed without consent: nothing is sent, and the list comes back. */
+function cancelThirdPartyInstall() {
+  thirdPartyInstallTarget.value = null
+  showInstallablesDialog.value = true
+}
+
+/** Consent given: only now is the install asked for, through the same path
+ *  as any other row's, with the repository the confirmation named. */
+async function confirmThirdPartyInstall() {
+  const target = thirdPartyInstallTarget.value
+  thirdPartyInstallTarget.value = null
+  showInstallablesDialog.value = true
+  if (target) await installPlugin(target.name, target.repo)
 }
 
 /** Name of the plugin an uninstall confirmation is open for, or `null` when
@@ -844,15 +881,28 @@ function pollUpdateWhileBusy() {
 }
 
 /**
- * Ceiling for `pollLanguageWhileBusy`, in ticks of its own 2 s interval — 20 s
- * total. Not a measured worst case: a language pack is a small, text-only
- * archive, and an ordinary install or removal settles in well under this.
- * The ceiling exists so the poll cannot run forever if a job never reaches a
- * terminal state at all (the worker restarting mid-job, say) — the same
- * "no route may block, no page may wait on one" rule that gives the admin
- * protocol its own 5 s deadline, applied here on the polling side instead.
+ * Ceilings for `pollLanguageWhileBusy`, in ticks of its own 2 s interval.
+ *
+ * **While the update worker says it is idle**, 10 ticks — 20 s: enough for
+ * the worker to pick the job up and say it is busy, and for a removal, which
+ * never says so (`remove_language` sets no `busy`) and settles in well under
+ * that.
+ *
+ * **While it says it is busy**, the poll goes on, up to 150 ticks — 300 s. An
+ * install is a whole check before any pack is fetched: our release list (up
+ * to 60 s), the plugins settling (up to 15 s), every source asked under one
+ * 20-second deadline (`SOURCES_DEADLINE`) — a single silent source costs all
+ * of it — and then each pack's checksum file and archive. A 20 s ceiling
+ * used to stop the row before that check had even finished, so Install and
+ * Update looked like they did nothing whenever a source was slow.
+ *
+ * Both exist so the poll cannot run forever if a job never reaches a
+ * terminal state (the worker restarting mid-job, say) — the same "no route
+ * may block, no page may wait on one" rule that gives the admin protocol its
+ * own 5 s deadline, applied on the polling side.
  */
 const MAX_LANGUAGE_POLL_ATTEMPTS = 10
+const MAX_LANGUAGE_POLL_ATTEMPTS_WHILE_BUSY = 150
 
 let languagePoll: ReturnType<typeof setInterval> | null = null
 
@@ -893,11 +943,23 @@ function stopLanguagePoll() {
 function languageGestureSettled(
   packs: LanguagePackRow[],
   busy: LanguageBusy,
-  installedAtStart: string | null,
+  installedAtStart: string,
 ): boolean {
   const row = packs.find((p) => p.language === busy.language)
-  if (busy.action === 'remove') return !row || row.installed === null
-  return !!row && row.installed !== installedAtStart
+  if (busy.action === 'remove') return !row || row.packs.every((p) => p.installed === null)
+  return !!row && installedSignature(row) !== installedAtStart
+}
+
+/**
+ * What a language has on disk, as one comparable string: every pack's id and
+ * installed version. A language may carry several packs, and an Update can
+ * move a third party's while the official one stays put, so the official
+ * pack's version alone cannot tell "settled" from "not yet".
+ */
+function installedSignature(row: LanguagePackRow | undefined): string {
+  return row
+    ? row.packs.filter((p) => p.installed !== null).map((p) => `${p.id}=${p.installed}`).join('|')
+    : ''
 }
 
 /**
@@ -910,32 +972,30 @@ function languageGestureSettled(
  * happen in.
  *
  * **Why not just extend `pollUpdateWhileBusy`.** That poll stops on
- * `!update.value.busy`, which does not track a language job the way it
- * tracks a component install: `Job::RemoveLanguage` never calls `set_busy`
- * at all (`remove_language`, `update/mod.rs`), and `Job::InstallLanguage`
- * sets it only for the brief `check()` call ahead of the download — neither
- * shape stays "busy" for as long as the pack actually takes to land or
- * leave. Polling the payload this row actually reads, against a completion
- * predicate this component can state precisely (`languageGestureSettled`),
- * is what proves the row is right, rather than hoping a signal built for a
- * different job shape happens to still be true.
+ * `!update.value.busy`, which does not track every language job:
+ * `Job::RemoveLanguage` never calls `set_busy` at all (`remove_language`,
+ * `update/mod.rs`). `Job::InstallLanguage` does — its `check()` sets it, and
+ * the worker clears it only once the whole job is over — so `busy` is what
+ * keeps this poll going past its idle ceiling while an install is still
+ * checking (see the two ceilings above). Completion itself is still read
+ * from the payload this row actually reads, against a predicate this
+ * component can state precisely (`languageGestureSettled`), rather than
+ * from a signal built for a different job shape.
  *
  * `installedAtStart` is read by the caller from `locale.value.packs` at the
  * moment the gesture is enqueued, before anything here can have changed it
  * — see `languageGestureSettled`'s own doc for why an install needs it and
  * a remove does not.
  */
-function pollLanguageWhileBusy(busy: LanguageBusy, installedAtStart: string | null) {
+function pollLanguageWhileBusy(busy: LanguageBusy, installedAtStart: string) {
   stopLanguagePoll()
   let attempts = 0
   languagePoll = setInterval(async () => {
     attempts += 1
     await refreshUpdate()
     locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
-    if (
-      languageGestureSettled(locale.value.packs, busy, installedAtStart)
-      || attempts >= MAX_LANGUAGE_POLL_ATTEMPTS
-    ) {
+    const ceiling = update.value.busy ? MAX_LANGUAGE_POLL_ATTEMPTS_WHILE_BUSY : MAX_LANGUAGE_POLL_ATTEMPTS
+    if (languageGestureSettled(locale.value.packs, busy, installedAtStart) || attempts >= ceiling) {
       stopLanguagePoll()
       packBusy.value = null
     }
@@ -960,6 +1020,8 @@ const showInstallDialog = ref(false)
  * different question from managing the ones it runs, so it does not share
  * `showInstallDialog`. */
 const showInstallablesDialog = ref(false)
+/** The sources dialog (`SourcesDialog.vue`), opened from the update card. */
+const showSourcesDialog = ref(false)
 /** "Add a language" (`AddLanguageDialog.vue`), its mirror in the language
  * card: the packs a release offers and the device does not have. */
 const showAddLanguageDialog = ref(false)
@@ -1110,7 +1172,7 @@ const packBusy = ref<LanguageBusy | null>(null)
 async function installLanguage(language: string) {
   if (packBusy.value) return
   const busy: LanguageBusy = { language, action: 'install' }
-  const installedAtStart = locale.value.packs.find((p) => p.language === language)?.installed ?? null
+  const installedAtStart = installedSignature(locale.value.packs.find((p) => p.language === language))
   packBusy.value = busy
   const err = await api.post(`/api/languages/${encodeURIComponent(language)}`, {})
   if (err) {
@@ -1121,6 +1183,44 @@ async function installLanguage(language: string) {
   toast.success(t.value('language_pack_installing', { language: languageName(language) }))
   pollLanguageWhileBusy(busy, installedAtStart)
   await loadAll()
+}
+
+/**
+ * The sentence in front of "Remove". `DELETE /api/languages/{language}`
+ * retires **every** pack of the language, so when a third party's pack is on
+ * disk, or there is more than one, the sentence names each pack that will go
+ * with its source: the owner learns it before confirming, not after.
+ */
+const removeConfirmText = computed(() => {
+  const language = removeLanguageTarget.value
+  if (!language) return ''
+  const name = languageName(language)
+  const installed = (locale.value.packs.find((p) => p.language === language)?.packs ?? [])
+    .filter((p) => p.installed !== null)
+  if (installed.length > 1 || installed.some((p) => p.source !== null)) {
+    const packs = installed.map((p) => packSourceLabel(t.value, p.source)).join(', ')
+    return t.value('language_pack_remove_confirm_several', { language: name, packs })
+  }
+  return t.value('language_pack_remove_confirm', { language: name })
+})
+
+/** The last refused preference write, for the select it was made on. */
+const preferenceError = ref<{ language: string; module: string; message: string } | null>(null)
+
+/**
+ * Prefers `pack` for `module` in `language`: `PUT /api/languages/{language}/
+ * preference`. A refusal (422: the pack is not installed or does not carry
+ * the module, the ceiling; 503: the core is busy) is shown next to that
+ * select, with the route's own message. Either way `/api/locale` is read
+ * again, so the select shows what the core now says speaks — after a refusal
+ * that is what it said before, and the select goes back to it. Only the
+ * locale payload is refreshed: `loadAll` would also reset the language the
+ * owner may have picked above and not saved yet.
+ */
+async function setPackPreference(language: string, module: string, pack: string) {
+  const err = await api.put(`/api/languages/${encodeURIComponent(language)}/preference`, { module, pack })
+  preferenceError.value = err ? { language, module, message: err } : null
+  locale.value = await api.get<LocalePayload>('/api/locale').catch(() => locale.value)
 }
 
 /** Language a remove confirmation is open for, or `null` when the dialog is
@@ -1167,7 +1267,7 @@ async function confirmRemoveLanguage() {
   toast.success(t.value('language_pack_removing', { language: languageName(language) }))
   // `null`: `languageGestureSettled`'s `remove` branch never reads this
   // parameter, it only exists for the `install` branch (see its own doc).
-  pollLanguageWhileBusy(busy, null)
+  pollLanguageWhileBusy(busy, '')
   await loadAll()
 }
 
@@ -1241,7 +1341,13 @@ function goTo(id: string) {
           :settings="settings"
           @check="onUpdateCheck"
           @install="showInstallDialog = true"
+          @sources="showSourcesDialog = true"
           @save="saveSettings"
+        />
+
+        <SourcesDialog
+          :open="showSourcesDialog"
+          @update:open="(v: boolean) => (showSourcesDialog = v)"
         />
 
         <UpdateDialog
@@ -1633,8 +1739,40 @@ function goTo(id: string) {
           :busy="update.busy"
           @update:open="(v: boolean) => (showInstallablesDialog = v)"
           @install="installPlugin"
+          @install-third-party="askThirdPartyInstall"
           @refresh="onCheckSettled"
         />
+
+        <!-- The second consent for a stranger's plugin (spec §4.5): the
+             repository is named before anything is installed from it.
+             Closing it is the refusal, and sends nothing. -->
+        <Dialog
+          :open="thirdPartyInstallTarget !== null"
+          @update:open="(v: boolean) => { if (!v) cancelThirdPartyInstall() }"
+        >
+          <DialogContent data-third-party-install-dialog>
+            <DialogHeader>
+              <DialogTitle>{{ t('installables_confirm_third_party_title') }}</DialogTitle>
+              <DialogDescription>
+                {{
+                  thirdPartyInstallTarget
+                    ? t('installables_confirm_third_party', {
+                      component: thirdPartyInstallTarget.name,
+                      repo: thirdPartyInstallTarget.repo,
+                    })
+                    : ''
+                }}
+              </DialogDescription>
+            </DialogHeader>
+            <Button
+              data-third-party-install-confirm
+              :disabled="(thirdPartyInstallTarget !== null && inProgress.has(thirdPartyInstallTarget.name)) || !!update.busy"
+              @click="confirmThirdPartyInstall"
+            >
+              {{ t('installables_install') }}
+            </Button>
+          </DialogContent>
+        </Dialog>
 
         <!-- One shared dialog for the whole table, keyed by `uninstallTarget`
              rather than one per row: only one confirmation is ever on screen,
@@ -1741,8 +1879,10 @@ function goTo(id: string) {
             <LanguagePacksRow
               :payload="locale"
               :busy="packBusy"
+              :preference-error="preferenceError"
               @install="installLanguage"
               @remove="askRemoveLanguage"
+              @prefer="setPackPreference"
             />
 
             <!-- Adding a language nobody installed yet: its own dialog, the
@@ -1830,11 +1970,7 @@ function goTo(id: string) {
             <DialogHeader>
               <DialogTitle>{{ t('language_pack_remove') }}</DialogTitle>
               <DialogDescription>
-                {{
-                  removeLanguageTarget
-                    ? t('language_pack_remove_confirm', { language: languageName(removeLanguageTarget) })
-                    : ''
-                }}
+                {{ removeConfirmText }}
               </DialogDescription>
             </DialogHeader>
             <Button

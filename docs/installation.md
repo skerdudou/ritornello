@@ -1059,6 +1059,42 @@ tests that fake the network and use a temporary directory; none has run on
 a Pi, and the pack job of the release workflow has never run at all — like
 the rest of that workflow.
 
+**Sources — third-party repositories — have never met a real third party.**
+The list of sources, the fresh install of a third-party plugin, the
+per-language install of third-party packs and the fourth automatic policy are
+covered by tests that fake the network and by the web suites. Specifically:
+
+- no third-party repository exists. Nothing of this has run against a real
+  stranger's release, and nothing has run on the Pi;
+- the parallel sweep's 20-second deadline is proven under a paused clock, plus
+  one test over local sockets on the real clock with a short injected
+  deadline; it has not been observed against slow hosts on a real network;
+- a real third-party `catalogue.json` has never been read, so the install
+  dialog's descriptions of a stranger's plugin have only met fixtures;
+- **while only prereleases are published, a device on the stable channel is
+  offered no fresh third-party plugin at all** — and the same holds while
+  nothing is published. Whether a name is ours cannot be judged without our
+  release list (`Worker::settle_without_release`), and a name that merely
+  looks free would let a stranger be the only owner of one of ours; the core
+  chooses to offer nothing fresh and to declare no conflict. This is deliberate
+  and is today's situation for a stable-channel device, since no stable release
+  has been published: a device that ticked "Offer prereleases" sees our
+  release list and so sees the offers. Updates to third-party plugins already
+  installed, and third-party language packs, are still offered in that state;
+- a third-party language pack the pack reader refused is marked "do not retry"
+  in memory only (`remember_manual_step` on the row), so the automatic policy
+  does not fetch the same refused archive every night; the mark is forgotten
+  when the core restarts, which costs one extra download per restart;
+- `ritornello-install` leaves `ritornello-xlang-*` packs to the core: its
+  per-pack step neither installs nor removes them, and it removes them only
+  with the rest of `/etc/ritornello` on `--remove-all`. That is unit-tested
+  against a generated plan, never run on a device;
+- a core older than the one that introduced the fourth policy (reached by a
+  rollback, or by a channel switch that installs an older core) discards the
+  whole of `state.json` when it meets that value (see [the update
+  policy](interface.md#automatic-update-policy)); this has been reasoned from
+  the old loader and never tried by rolling a device back.
+
 **The German, Spanish and Italian packs have not been reviewed by a native
 speaker.** They were translated from the English catalogs, with the French
 pack as a reference for meaning, and the only thing checked mechanically is

@@ -1,6 +1,8 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import type { LanguageBusy, LocalePayload } from '../types'
+import { Select } from '@ritornello/ui'
+import type { LanguageBusy, LanguagePackRow, LocalePayload } from '../types'
+import { packRow } from '../testing/languagePacks'
 
 const CATALOGUE = {
   language_pack_install: 'Install',
@@ -9,6 +11,30 @@ const CATALOGUE = {
   language_pack_update_available: 'A newer pack is available',
   language_pack_installing: 'Installing {language}…',
   language_pack_removing: 'Removing {language}…',
+  language_pack_official: 'Ritornello (official pack)',
+  language_pack_from: 'From {source}',
+  language_pack_not_installed: 'Not installed',
+  language_pack_overlap_intro: 'Several packs cover the same module.',
+  language_pack_overlap_module: 'Module {module}',
+  language_pack_overlap_choose: 'Pack that speaks for {module}',
+}
+
+const THIRD = 'ritornello-xlang-fr-0123456789ab'
+const OFFICIAL = 'ritornello-lang-fr'
+
+/** `fr`: the official pack current, a third party's pack installed too. */
+function frWithThirdParty(extra: Partial<LanguagePackRow> = {}): LanguagePackRow {
+  return packRow('fr', '0.2.1', '0.2.1', {
+    packs: [
+      { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+      { id: THIRD, source: 'someone/fr-extra', installed: '1.0.0', offered: '1.0.0' },
+    ],
+    ...extra,
+  })
+}
+
+function payloadOf(...packs: LanguagePackRow[]): LocalePayload {
+  return { ...BASE, packs }
 }
 
 const BASE: LocalePayload = {
@@ -18,9 +44,9 @@ const BASE: LocalePayload = {
   fallback_current: 'en',
   fallback_candidates: ['en'],
   packs: [
-    { language: 'fr', installed: '0.2.1', offered: '0.2.1' },
-    { language: 'de', installed: null, offered: '0.2.1' },
-    { language: 'es', installed: '0.2.0', offered: '0.2.1' },
+    packRow('fr', '0.2.1', '0.2.1'),
+    packRow('de', null, '0.2.1'),
+    packRow('es', '0.2.0', '0.2.1'),
   ],
 }
 
@@ -60,7 +86,7 @@ describe('LanguagePacksRow', () => {
   })
 
   it('shows nothing when every pack is only offered', async () => {
-    const w = await mountRow({ ...BASE, packs: [{ language: 'de', installed: null, offered: '0.2.1' }] })
+    const w = await mountRow({ ...BASE, packs: [packRow('de', null, '0.2.1')] })
     expect(w.find('[data-language-packs]').exists()).toBe(false)
   })
 
@@ -116,5 +142,131 @@ describe('LanguagePacksRow', () => {
     const w = await mountRow(BASE, { language: 'fr', action: 'install' })
     expect(w.find('[data-pack-busy]').text()).toContain('Installing')
     expect(w.find('[data-pack-busy]').text()).not.toContain('Removing')
+  })
+})
+
+describe('LanguagePacksRow: several packs of one language', () => {
+  it("names each pack's source under a language that has more than one, official as such", async () => {
+    const w = await mountRow(payloadOf(frWithThirdParty()))
+    const lines = w.findAll('[data-pack-source]').map((l) => [l.attributes('data-pack-source'), l.text()])
+    expect(lines).toEqual([
+      [OFFICIAL, 'Ritornello (official pack) — 0.2.1'],
+      [THIRD, 'From someone/fr-extra — 1.0.0'],
+    ])
+  })
+
+  it('renders a single-pack language exactly as before: no source lines, no overlap block', async () => {
+    const w = await mountRow()
+    expect(w.find('[data-pack-sources]').exists()).toBe(false)
+    expect(w.find('[data-pack-overlaps]').exists()).toBe(false)
+  })
+
+  // The regression this guards: Update decided on the official pack alone
+  // (`offered !== installed`) hides a third party's news when ours is current.
+  it('offers Update when only a third-party pack has one, the official pack being current', async () => {
+    const row = frWithThirdParty({
+      update_available: true,
+      packs: [
+        { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: '1.0.0', offered: '1.1.0' },
+      ],
+    })
+    const w = await mountRow(payloadOf(row))
+    expect(w.find('[data-pack-update="fr"]').exists()).toBe(true)
+    expect(w.find('[data-pack-update-note]').exists()).toBe(true)
+  })
+
+  it('does not offer Update when no pack has news', async () => {
+    const w = await mountRow(payloadOf(frWithThirdParty()))
+    expect(w.find('[data-pack-update="fr"]').exists()).toBe(false)
+    expect(w.find('[data-pack-install="fr"]').exists()).toBe(false)
+  })
+
+  // H2: an installed language could not pick up a source's pack for it — no
+  // update (nothing installed moved), and "Add a language" lists only
+  // languages with no pack. The core says `install_available`; the row
+  // offers Install, the one language gesture, from the click.
+  // **[MUTATION]** drop the Install button: red.
+  it('offers Install when a source offers a pack of an installed language, and emits the language', async () => {
+    const row = packRow('fr', '0.2.1', '0.2.1', {
+      install_available: true,
+      packs: [
+        { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: null, offered: '1.0.0' },
+      ],
+    })
+    const w = await mountRow(payloadOf(row))
+    expect(w.find('[data-pack-update="fr"]').exists()).toBe(false)
+    await w.find('[data-pack-install="fr"]').trigger('click')
+    expect(w.emitted('install')).toEqual([['fr']])
+    expect(w.find(`[data-pack-source="${THIRD}"]`).text()).toBe('From someone/fr-extra — Not installed')
+  })
+
+  // H-M2: a language whose one installed pack is a stranger's names its
+  // source too — it must not read as ours. Ours alone still renders as
+  // before (the test above it). **[MUTATION]** list sources only for
+  // several packs again: red.
+  it("names the source of a language's single pack when it is a third party's", async () => {
+    const row = packRow('nl', null, null, {
+      packs: [{ id: 'ritornello-xlang-nl-0123456789ab', source: 'z/zed', installed: '3.0.0', offered: null }],
+    })
+    const w = await mountRow(payloadOf(row))
+    expect(w.find('[data-pack-sources]').text()).toBe('From z/zed — 3.0.0')
+  })
+
+  // P11: a filter on the official pack alone dropped this language from the
+  // card, leaving a third-party pack nothing to remove or update it with.
+  it("keeps a language whose only installed pack is a third party's", async () => {
+    const row = packRow('fr', null, '0.2.1', {
+      update_available: false,
+      packs: [
+        { id: OFFICIAL, source: null, installed: null, offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: '1.0.0', offered: '1.0.0' },
+      ],
+    })
+    const w = await mountRow(payloadOf(row))
+    expect(w.find('[data-pack-remove="fr"]').exists()).toBe(true)
+  })
+
+  it('shows no overlap block when no module is shared', async () => {
+    const w = await mountRow(payloadOf(frWithThirdParty({ overlaps: [] })))
+    expect(w.find('[data-pack-overlaps]').exists()).toBe(false)
+    expect(w.findComponent(Select).exists()).toBe(false)
+  })
+
+  const overlaps = [{ module: 'core', packs: [THIRD, OFFICIAL], active: THIRD }]
+
+  it('shows which pack speaks for an overlapping module, right at mount', async () => {
+    const w = await mountRow(payloadOf(frWithThirdParty({ overlaps })))
+    expect(w.find('[data-pack-overlaps]').exists()).toBe(true)
+    expect(w.get('[data-pack-overlap="core"]').text()).toContain('Module core')
+    expect(w.findComponent(Select).props('modelValue')).toBe(THIRD)
+    // The label is the pack's source, not a raw id nor a catalog key.
+    expect(w.get('[data-pack-preference="core"]').text()).toBe('From someone/fr-extra')
+  })
+
+  it('emits the preferred pack for the module when the operator picks another', async () => {
+    const w = await mountRow(payloadOf(frWithThirdParty({ overlaps })))
+    await w.findComponent(Select).vm.$emit('update:modelValue', OFFICIAL)
+    expect(w.emitted('prefer')).toEqual([['fr', 'core', OFFICIAL]])
+  })
+
+  it('follows the core after a reload: the label changes with the active pack', async () => {
+    const w = await mountRow(payloadOf(frWithThirdParty({ overlaps })))
+    await w.setProps({
+      payload: payloadOf(frWithThirdParty({
+        overlaps: [{ ...overlaps[0]!, packs: [OFFICIAL, THIRD], active: OFFICIAL }],
+      })),
+    })
+    expect(w.get('[data-pack-preference="core"]').text()).toBe('Ritornello (official pack)')
+  })
+
+  it('shows a refused preference next to the select it was made on, and nowhere else', async () => {
+    const w = await mountRow(payloadOf(frWithThirdParty({
+      overlaps: [...overlaps, { module: 'radio', packs: [THIRD, OFFICIAL], active: THIRD }],
+    })))
+    await w.setProps({ preferenceError: { language: 'fr', module: 'radio', message: 'not installed' } })
+    expect(w.get('[data-pack-overlap="radio"] [data-pack-preference-error]').text()).toBe('not installed')
+    expect(w.find('[data-pack-overlap="core"] [data-pack-preference-error]').exists()).toBe(false)
   })
 })

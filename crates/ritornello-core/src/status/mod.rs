@@ -202,6 +202,23 @@ pub struct AppState {
     /// cache key, so a check that keeps offering the same release costs this
     /// route no socket at all.
     pub update_catalogue_cache: Arc<RwLock<Option<(String, crate::update::catalogue::Catalogue)>>>,
+    /// The same, for the sources' own catalogues
+    /// (`GET /api/update/catalogue?repo=`): one entry per `(repo, url)`,
+    /// unfiltered. Pruned on every write against the sources the state names
+    /// at that moment (read after the fetch), and an answer no longer named
+    /// is not stored, so it never holds more than `SOURCES_MAX` entries.
+    pub update_source_catalogue_cache: Arc<RwLock<Vec<crate::update::routes::SourceCatalogueCached>>>,
+    /// The repositories the operator added as update sources, lowercased
+    /// `owner/repo` — the same handle the update `Worker` reads, so a check
+    /// started after a `POST` sees the addition. Written by the routes **only
+    /// after** the core loop accepted the change (the `locale_put` order), and
+    /// persisted by the core through `update_sources_tx`.
+    pub update_sources: Arc<RwLock<Vec<String>>>,
+    pub update_sources_tx: mpsc::Sender<Vec<String>>,
+    /// The whole new list of pack preferences, towards `Core::
+    /// set_pack_preferences`. The route then writes the same list into
+    /// `registry` (the `locale_put` order), which is the handle it reads back.
+    pub pack_preferences_tx: mpsc::Sender<Vec<crate::state::PackPreference>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -226,9 +243,21 @@ pub fn router(state: AppState) -> Router {
         .route("/api/update/check", axum::routing::post(crate::update::routes::update_check_post))
         .route("/api/update/install", axum::routing::post(crate::update::routes::update_install_post))
         .route(
+            "/api/update/sources",
+            get(crate::update::routes::sources_json).post(crate::update::routes::sources_post),
+        )
+        .route(
+            "/api/update/sources/{owner}/{repo}",
+            axum::routing::delete(crate::update::routes::sources_delete),
+        )
+        .route(
             "/api/languages/{language}",
             axum::routing::post(crate::update::routes::language_install_post)
                 .delete(crate::update::routes::language_remove_delete),
+        )
+        .route(
+            "/api/languages/{language}/preference",
+            axum::routing::put(crate::update::routes::language_preference_put),
         )
         .route(
             "/plugins/{name}/api/data",
@@ -613,6 +642,10 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_source_catalogue_cache: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources_tx: mpsc::channel(1).0,
+            pack_preferences_tx: mpsc::channel(1).0,
         }
     }
 
@@ -663,6 +696,10 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_source_catalogue_cache: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources_tx: mpsc::channel(1).0,
+            pack_preferences_tx: mpsc::channel(1).0,
         };
         (state, audio_rx)
     }
@@ -715,6 +752,10 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_source_catalogue_cache: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources_tx: mpsc::channel(1).0,
+            pack_preferences_tx: mpsc::channel(1).0,
         };
         (state, cmd_rx)
     }
@@ -799,6 +840,10 @@ pub(crate) mod tests_support {
             )),
             update_tx: tokio::sync::mpsc::channel(1).0,
             update_catalogue_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            update_source_catalogue_cache: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            update_sources_tx: mpsc::channel(1).0,
+            pack_preferences_tx: mpsc::channel(1).0,
         };
         (state, locale_rx, fallback_rx, dir)
     }
@@ -1482,6 +1527,49 @@ mod tests {
         assert_eq!(settings_current.read().await.overlay_ms, 5000);
         assert_eq!(settings_current.read().await.tens_window_ms, 5000);
         assert!(settings_rx.try_recv().is_err(), "nothing must go out on the channel");
+    }
+
+    #[tokio::test]
+    async fn put_settings_with_an_unknown_update_policy_is_refused_and_sends_nothing() {
+        // An unknown policy is refused at the door (axum's `Json` rejection):
+        // only `state::load` is lenient with a value from a newer core.
+        let (state, mut settings_rx) = app_state_with_settings();
+        let settings_current = state.settings_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"update_policy":"nonsense"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_client_error(), "got {}", resp.status());
+        assert_eq!(settings_current.read().await.update_policy, crate::update::schedule::UpdatePolicy::Off);
+        // The only sender lives in the state the router owned; once the router
+        // is gone the channel is closed, and an empty one answers `None`.
+        assert_eq!(settings_rx.recv().await, None, "nothing must go out on the channel");
+    }
+
+    #[tokio::test]
+    async fn put_settings_accepts_the_fourth_update_policy() {
+        let (state, mut settings_rx) = app_state_with_settings();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"update_policy":"check_and_install_all"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            settings_rx.recv().await.unwrap().update_policy,
+            crate::update::schedule::UpdatePolicy::CheckAndInstallAll
+        );
     }
 
     #[test]

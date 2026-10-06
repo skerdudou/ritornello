@@ -3,6 +3,7 @@ import {
   api, Button, Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
+import { refusedNote } from '../composables/refusedNote'
 import { useCatalog } from '../composables/useCatalog'
 import { checkFailure, hasUsableCheck, useUpdateCheck } from '../composables/useUpdateCheck'
 import type { ComponentOffer, UpdatePayload } from '../types'
@@ -19,7 +20,14 @@ const props = defineProps<{
    *  already does this). */
   busy: string | null
 }>()
-const emit = defineEmits<{ 'update:open': [boolean]; install: [string]; refresh: [] }>()
+const emit = defineEmits<{
+  'update:open': [boolean]
+  install: [string]
+  /** A plugin a third-party source offers fresh: the page asks the second
+   *  consent (spec §4.5), naming the repository, before anything is sent. */
+  'install-third-party': [name: string, repo: string]
+  refresh: []
+}>()
 const { t } = useCatalog()
 
 /**
@@ -39,9 +47,22 @@ const check = useUpdateCheck({
 })
 const failure = computed(() => checkFailure(check.phase.value, check.error.value, props.outcome))
 
+type CatalogueEntry = { kinds: string[]; description: string }
+
 /** What the release says about its components, `null` until asked. */
-const catalogue = ref<Record<string, { kinds: string[]; description: string }> | null>(null)
+const catalogue = ref<Record<string, CatalogueEntry> | null>(null)
 const asked = ref(false)
+
+/**
+ * What each third-party source says about the plugins it offers fresh, by
+ * lowercased `owner/repo` (`GET /api/update/catalogue?repo=`). The core only
+ * ever returns the entries for names that source is offered, and the rows
+ * below only ever read a source's entries for a row of that same source:
+ * neither side alone lets a stranger describe a name it does not offer.
+ */
+const sourceCatalogues = ref<Record<string, Record<string, CatalogueEntry>>>({})
+/** Repositories asked, or being asked: one request per source per page. */
+const sourcesAsked = new Set<string>()
 
 /**
  * Components the release publishes and this device does not have.
@@ -63,7 +84,72 @@ const asked = ref(false)
 const rows = computed(() =>
   props.components
     .filter((c) => c.availability === 'not_installed' && c.kind !== 'language_pack')
-    .map((c) => ({ offer: c, entry: catalogue.value?.[c.name] ?? null })),
+    .map((c) => ({ offer: c, entry: entryFor(c) })),
+)
+
+/**
+ * A row's description, from the catalogue of **where it comes from**: ours
+ * for our rows, its own source's for a third-party one — never ours for a
+ * stranger's name, nor a stranger's for ours. A contested row has no single
+ * source, so nothing describes it.
+ */
+function entryFor(c: ComponentOffer): CatalogueEntry | null {
+  if (c.kind !== 'third_party') return catalogue.value?.[c.name] ?? null
+  if (c.conflict_repos || !c.third_party_repo) return null
+  return sourceCatalogues.value[c.third_party_repo.toLowerCase()]?.[c.name] ?? null
+}
+
+/** A third-party row offered by exactly one source: installable, after the
+ *  second consent. */
+function isFreshThirdParty(c: ComponentOffer): c is ComponentOffer & { third_party_repo: string } {
+  return c.kind === 'third_party' && !c.conflict_repos && !!c.third_party_repo
+}
+
+/** Install on a row: ours at once, a stranger's through the page's
+ *  confirmation naming its repository (spec §4.5). */
+function onInstall(c: ComponentOffer) {
+  // Fails closed: a third-party row that is not a fresh offer from one named
+  // source never installs directly, whatever shape it arrives in.
+  if (c.kind !== 'third_party') emit('install', c.name)
+  else if (isFreshThirdParty(c)) emit('install-third-party', c.name, c.third_party_repo)
+}
+
+/** Whether a row has anything to install from here: ours, or a stranger's
+ *  fresh offer from one named source. A third-party row with no source to
+ *  name gets no button rather than a direct install. */
+function canInstall(c: ComponentOffer): boolean {
+  return c.kind !== 'third_party' || isFreshThirdParty(c)
+}
+
+/** The sources whose fresh offers are on screen. */
+const freshRepos = computed(() => [
+  ...new Set(props.components.filter(isFreshThirdParty).map((c) => c.third_party_repo.toLowerCase())),
+])
+
+watch(
+  () => [props.open, freshRepos.value] as const,
+  ([open, repos]) => {
+    if (!open) return
+    for (const repo of repos) {
+      if (sourcesAsked.has(repo)) continue
+      sourcesAsked.add(repo)
+      api
+        .get<{ components: Record<string, CatalogueEntry> }>(
+          `/api/update/catalogue?repo=${encodeURIComponent(repo)}`,
+        )
+        .then((answer) => {
+          sourceCatalogues.value = { ...sourceCatalogues.value, [repo]: answer.components }
+        })
+        .catch((e) => {
+          // No description is the documented fallback (name, source,
+          // version); a later opening asks again rather than latching a
+          // failure as "this source publishes nothing".
+          console.warn('source catalogue unavailable', repo, e)
+          sourcesAsked.delete(repo)
+        })
+    }
+  },
+  { immediate: true },
 )
 
 /**
@@ -89,10 +175,27 @@ const rows = computed(() =>
  *   itself is not removed: it still guards the `watch`'s own re-fetch below,
  *   an unrelated role from the one it played here.
  */
-const noCatalogue = computed(() => Object.keys(catalogue.value ?? {}).length === 0)
+const noCatalogue = computed(
+  // Our catalogue only speaks for our rows: a list made of strangers' offers
+  // alone must not blame our release for not describing them.
+  () => rows.value.some((r) => r.offer.kind !== 'third_party')
+    && Object.keys(catalogue.value ?? {}).length === 0,
+)
 
 /** See `hasUsableCheck`: whether an empty `rows` means "nothing to add". */
 const usableCheck = computed(() => hasUsableCheck(props.outcome, props.lastCheckUnixS))
+
+/**
+ * The check ran and found no release of ours for this appliance — nothing
+ * published, or only betas it declines. A state, not a failure, and the one
+ * every stable-channel device is in today: the core then offers no stranger's
+ * plugin either (ownership cannot be judged against a release it did not
+ * read), so "no usable check has run" would be false and "nothing to add"
+ * would hide why.
+ */
+const noRelease = computed(
+  () => props.outcome.kind === 'no_release' || props.outcome.kind === 'only_prereleases',
+)
 
 
 // Generation counter, as `PluginRoute.vue` does for a plugin catalogue: the
@@ -150,6 +253,13 @@ watch(
            "nothing to add": it would be an answer nobody has given yet. -->
       <template v-if="check.phase.value === 'checking'" />
       <p
+        v-else-if="rows.length === 0 && noRelease"
+        data-installables-no-release
+        class="text-sm text-muted-foreground"
+      >
+        {{ t('installables_no_release') }}
+      </p>
+      <p
         v-else-if="rows.length === 0 && !usableCheck"
         data-installables-unknown
         class="text-sm text-muted-foreground"
@@ -173,6 +283,14 @@ watch(
           >
             <div class="grid gap-0.5 text-sm">
               <span>{{ row.offer.name }}</span>
+              <!-- Where a stranger's offer comes from, and which version:
+                   with no catalogue of its own, that is all there is to say
+                   (spec §6: name, source, version). -->
+              <span
+                v-if="isFreshThirdParty(row.offer)"
+                data-installable-repo
+                class="text-xs text-muted-foreground"
+              >{{ t('installables_from_repo', { repo: row.offer.third_party_repo, version: row.offer.offered ?? '?' }) }}</span>
               <!-- A type is an IHM word, never the release's raw catalogue
                    string: it goes through the language catalogue like every
                    other label on this page (the French pack already has the
@@ -195,11 +313,22 @@ watch(
                  button here could only ever fail. `ritornello-install` does
                  the whole job instead, in the same sentence
                  `ConfigView.vue`'s table shows for the same reason. -->
+            <!-- Two or more sources offer this name: none is believed, so
+                 there is nothing to install, and every one is named so the
+                 operator can remove the one they did not mean to read. -->
             <span
-              v-if="row.offer.installable === false"
+              v-if="row.offer.conflict_repos"
+              data-installable-conflict
+              class="text-xs text-muted-foreground"
+            >{{ t('installables_conflict', { repos: row.offer.conflict_repos.join(', ') }) }}</span>
+            <!-- The sentence follows what the row is (`refusedNote`): only
+                 one of ours is "privileged"; a stranger's plugin was refused
+                 for what its archive carried. -->
+            <span
+              v-else-if="row.offer.installable === false"
               data-installable-privileged
               class="text-xs text-muted-foreground"
-            >{{ t('plugin_privileged_note') }}</span>
+            >{{ refusedNote(t, row.offer) }}</span>
             <!-- Never disabled for a missing description: installing does not
                  depend on knowing how to describe the component. Disabled
                  while `busy` (m6): the update card's own Install button
@@ -207,10 +336,10 @@ watch(
                  re-enqueues a second `Job::Install` of a component whose
                  first install has not finished yet. -->
             <Button
-              v-else
+              v-else-if="canInstall(row.offer)"
               variant="outline" size="xs" data-installable-install
               :disabled="!!busy"
-              @click="emit('install', row.offer.name)"
+              @click="onInstall(row.offer)"
             >{{ t('installables_install') }}</Button>
           </li>
         </ul>

@@ -20,6 +20,12 @@ const CATALOG = {
   plugin_privileged_note: 'Privileged component: install or uninstall it with ritornello-install.',
   plugin_kind_display: 'affichage',
   plugin_kind_source: 'source',
+  installables_from_repo: 'Third-party plugin from {repo}, version {version}.',
+  installables_conflict: 'Offered by several repositories ({repos}): none is trusted.',
+  installables_no_release:
+    'Third-party plugins are offered only once this appliance can read a release of Ritornello\'s own. “Offer beta versions” lets it read the betas.',
+  update_row_third_party_refused: 'Its last archive was refused: a third-party plugin\'s archive may carry nothing but its own binary.',
+  update_row_pack_refused: 'Its last archive was refused by the language pack checks.',
 }
 
 // The catalogue response the fake `fetch` answers `GET /api/update/catalogue`
@@ -35,6 +41,11 @@ let catalogueResponse: { components: Record<string, { kinds: string[]; descripti
     console: { kinds: ['display'], description: 'A tty or small display.' },
   },
 }
+
+/** What each source's own catalogue answers (`?repo=`), by the query string
+ *  the dialog sends; a repository absent here answers 404. */
+let sourceCatalogueResponses: Record<string, unknown> = {}
+const sourceCatalogueAsks: string[] = []
 
 /** Replaces the stubbed `/api/update/catalogue` answer for one test. */
 function stubCatalogue(response: { components: Record<string, { kinds: string[]; description: string }> }) {
@@ -52,6 +63,8 @@ beforeEach(async () => {
   resetCatalog()
   checkStatus = 202
   checkPosts = 0
+  sourceCatalogueResponses = {}
+  sourceCatalogueAsks.length = 0
   served = {
     outcome: { kind: 'ok' },
     release_version: null,
@@ -72,6 +85,13 @@ beforeEach(async () => {
       if (url === '/api/i18n') return new Response(JSON.stringify(CATALOG), { status: 200 })
       if (url === '/api/update/catalogue') {
         return new Response(JSON.stringify(catalogueResponse), { status: 200 })
+      }
+      if (url.startsWith('/api/update/catalogue?repo=')) {
+        const repo = decodeURIComponent(url.slice('/api/update/catalogue?repo='.length))
+        sourceCatalogueAsks.push(repo)
+        const answer = sourceCatalogueResponses[repo]
+        if (answer === undefined) return new Response('', { status: 404 })
+        return new Response(JSON.stringify(answer), { status: 200 })
       }
       if (url === '/api/update/check' && init?.method === 'POST') {
         checkPosts += 1
@@ -172,10 +192,10 @@ describe('InstallablesDialog', () => {
     // appliance already has everything this version publishes", which is
     // what the appliance would otherwise claim (and precisely what the e2e
     // harness would see, since it never runs a check).
+    // (`no_release` and `only_prereleases` have a sentence of their own,
+    // tested below: they are a state the check did reach, H3.)
     const outcomes: UpdatePayload['outcome'][] = [
       { kind: 'never_checked' },
-      { kind: 'no_release' },
-      { kind: 'only_prereleases' },
       { kind: 'failed', detail: 'boom' },
     ]
     for (const outcome of outcomes) {
@@ -186,6 +206,28 @@ describe('InstallablesDialog', () => {
       await flushPromises()
       expect(document.body.querySelector('[data-installables-unknown]')).not.toBeNull()
       expect(document.body.querySelector('[data-installables-empty]')).toBeNull()
+      w.unmount()
+      document.body.innerHTML = ''
+    }
+  })
+
+  // H3: a check that found no release of ours for this appliance (nothing
+  // published, or only betas it declines) offers no stranger's plugin either
+  // — the core cannot judge ownership against a release it did not read —
+  // and every stable-channel device is in that state today. The dialog says
+  // why and points to the beta switch, instead of "no usable check has run"
+  // (false: one did) or "nothing to add". One outcome per operand.
+  // **[MUTATION]** drop `no_release` from `noRelease`: red on the first.
+  // **[MUTATION]** drop `only_prereleases`: red on the second.
+  it('says strangers wait for a release of ours, when the check found none for this appliance', async () => {
+    for (const outcome of [{ kind: 'no_release' }, { kind: 'only_prereleases' }] as UpdatePayload['outcome'][]) {
+      checkStatus = 500
+      const w = mountDialog([], outcome, NOW_S)
+      await flushPromises()
+      expect(document.body.querySelector('[data-installables-no-release]')?.textContent, outcome.kind)
+        .toContain('Offer beta versions')
+      expect(document.body.querySelector('[data-installables-unknown]'), outcome.kind).toBeNull()
+      expect(document.body.querySelector('[data-installables-empty]'), outcome.kind).toBeNull()
       w.unmount()
       document.body.innerHTML = ''
     }
@@ -338,6 +380,113 @@ describe('InstallablesDialog', () => {
     document.body.querySelector<HTMLButtonElement>('[data-installable-install]')!.click()
     await flushPromises()
     expect(w.emitted('install')).toEqual([['console']])
+  })
+
+  describe('a third-party source', () => {
+    const fresh = (overrides: Partial<ComponentOffer> = {}) =>
+      offer({ name: 'zed', kind: 'third_party', offered: '1.2.0', third_party_repo: 'z/zed', ...overrides })
+    const row = (name: string) => document.body.querySelector(`[data-installable-row][data-name="${name}"]`)
+
+    // Spec §6: without a catalogue of its own, a stranger's offer is shown
+    // by name, source and version — and its Install does not install: it
+    // hands the page the name **and the repository** for the second consent.
+    // **[MUTATION]** emit `install` for every row (the first click installs):
+    // red here, and the ConfigView wiring test goes red too.
+    it('names the repository and version, and asks the page for consent rather than installing', async () => {
+      const w = mountDialog([fresh()])
+      await flushPromises()
+      expect(row('zed')?.querySelector('[data-installable-repo]')?.textContent)
+        .toBe('Third-party plugin from z/zed, version 1.2.0.')
+      expect(row('zed')?.querySelector('[data-installable-description]')).toBeNull()
+      ;(row('zed')!.querySelector('[data-installable-install]') as HTMLElement).click()
+      await flushPromises()
+      expect(w.emitted('install-third-party')).toEqual([['zed', 'z/zed']])
+      expect(w.emitted('install')).toBeUndefined()
+    })
+
+    // Both repositories named, and no button at all: a contested name is not
+    // installable from anyone. A neighbouring fresh row keeps its button, so
+    // a dialog that drops every Install cannot pass.
+    // **[MUTATION]** render Install on a conflict row: red.
+    it('shows a contested name with every repository and nothing to install', async () => {
+      mountDialog([
+        offer({ name: 'dup', kind: 'third_party', installable: false, conflict_repos: ['a/one', 'b/two'] }),
+        fresh(),
+      ])
+      await flushPromises()
+      const dup = row('dup')!
+      expect(dup.querySelector('[data-installable-install]')).toBeNull()
+      expect(dup.querySelector('[data-installable-conflict]')?.textContent).toContain('a/one, b/two')
+      expect(dup.querySelector('[data-installable-privileged]')).toBeNull()
+      expect(dup.querySelector('[data-installable-repo]')).toBeNull()
+      expect(row('zed')?.querySelector('[data-installable-install]')).not.toBeNull()
+    })
+
+    // H5: a stranger's row the core marked `installable: false` was refused
+    // for what its archive carried (`archive_allowed`), not because it is
+    // privileged: its note says that, never "install it with
+    // ritornello-install", which has nothing to do with a stranger's plugin.
+    // **[MUTATION]** drop the `third_party_repo` branch of `refusedNote`:
+    // red.
+    it('says a refused stranger archive was refused, never the privileged-plugin sentence', async () => {
+      mountDialog([fresh({ installable: false })])
+      await flushPromises()
+      const note = row('zed')?.querySelector('[data-installable-privileged]')?.textContent ?? ''
+      expect(note).toContain('may carry nothing but its own binary')
+      expect(note).not.toContain('ritornello-install')
+      expect(row('zed')?.querySelector('[data-installable-install]')).toBeNull()
+    })
+
+    // Fails closed (fix round 1): a third-party row with neither a source
+    // nor a conflict has no one to name in the second consent, so it gets no
+    // button at all rather than a direct install. Its fresh neighbour keeps
+    // its button, so a dialog that drops every Install cannot pass.
+    // **[MUTATION]** Install back to a plain `v-else`: red.
+    it('offers no Install for a third-party row that names no source', async () => {
+      const w = mountDialog([offer({ name: 'orphan', kind: 'third_party', offered: '1.0.0' }), fresh()])
+      await flushPromises()
+      expect(row('orphan')).not.toBeNull()
+      expect(row('orphan')?.querySelector('[data-installable-install]')).toBeNull()
+      expect(row('zed')?.querySelector('[data-installable-install]')).not.toBeNull()
+      expect(w.emitted('install')).toBeUndefined()
+    })
+
+    // The source's own catalogue describes its own offer — asked from the
+    // core by repository, once — and nothing else: its entry for `radio`
+    // never describes our `radio`, nor does our catalogue's `zed` describe
+    // the stranger's.
+    // **[MUTATION]** read a third-party row's entry from our catalogue, or
+    // any source's entry by name alone: red.
+    it('describes a stranger only from its own catalogue, and never one of our rows with it', async () => {
+      stubCatalogue({
+        components: {
+          radio: { kinds: ['source'], description: 'Ours' },
+          zed: { kinds: ['source'], description: 'Our catalogue on their name' },
+        },
+      })
+      sourceCatalogueResponses['z/zed'] = {
+        components: {
+          zed: { kinds: ['display'], description: 'Zed, by Z' },
+          radio: { kinds: ['display'], description: 'Not theirs to say' },
+        },
+      }
+      mountDialog([offer({ name: 'radio', offered: '0.3.0' }), fresh()])
+      await flushPromises()
+      expect(sourceCatalogueAsks).toEqual(['z/zed'])
+      expect(row('zed')?.querySelector('[data-installable-description]')?.textContent?.trim()).toBe('Zed, by Z')
+      expect(row('zed')?.querySelector('[data-installable-kind]')?.textContent).toBe('affichage')
+      expect(row('radio')?.querySelector('[data-installable-description]')?.textContent?.trim()).toBe('Ours')
+    })
+
+    // A list of strangers' offers alone does not blame our release for not
+    // describing them.
+    it('does not say our release has no catalogue when only strangers are listed', async () => {
+      stubCatalogue({ components: {} })
+      mountDialog([fresh()])
+      await flushPromises()
+      expect(document.body.querySelector('[data-installables-no-catalogue]')).toBeNull()
+      expect(row('zed')).not.toBeNull()
+    })
   })
 
   // Follow-up B: opening the dialog runs the check itself.

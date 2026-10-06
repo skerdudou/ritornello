@@ -18,6 +18,7 @@ import { Button, Dialog, DialogContent, DialogDescription, DialogHeader, DialogT
 import { computed } from 'vue'
 import { languageName } from '../composables/languages'
 import { useCatalog } from '../composables/useCatalog'
+import { packSourceLabel } from '../composables/packSource'
 import { checkFailure, hasUsableCheck, useUpdateCheck } from '../composables/useUpdateCheck'
 import type { LanguageBusy, LanguagePackRow as PackRow, UpdatePayload } from '../types'
 import UpdateCheckStatus from './UpdateCheckStatus.vue'
@@ -47,10 +48,25 @@ const check = useUpdateCheck({
 })
 const failure = computed(() => checkFailure(check.phase.value, check.error.value, props.outcome))
 
-/** Offered by the release and not on disk: the only rows this dialog is for. */
+/**
+ * Offered — by the release **or by a third-party source** — and with no pack
+ * of the language on disk: the only rows this dialog is for. A language only
+ * a third party offers is as installable as one the release publishes; the
+ * one gesture (`POST /api/languages/{language}`) installs every pack of it.
+ */
 const rows = computed<PackRow[]>(() =>
-  props.packs.filter((p) => p.offered !== null && p.installed === null),
+  props.packs.filter(
+    (p) => p.packs.some((x) => x.offered !== null) && p.packs.every((x) => x.installed === null),
+  ),
 )
+
+/** Where the offered packs come from, only worth saying when one is a third
+ * party's: a language only the release offers reads as it always did. */
+function offeredSources(row: PackRow): string | null {
+  const offered = row.packs.filter((x) => x.offered !== null)
+  if (offered.every((x) => x.source === null)) return null
+  return offered.map((x) => packSourceLabel(t.value, x.source)).join(', ')
+}
 const usableCheck = computed(() => hasUsableCheck(props.outcome, props.lastCheckUnixS))
 
 function isBusy(row: PackRow): boolean {
@@ -88,6 +104,9 @@ function isBusy(row: PackRow): boolean {
           class="flex flex-wrap items-center justify-between gap-2 text-sm"
         >
           <span>{{ languageName(row.language) }}</span>
+          <span v-if="offeredSources(row)" class="text-xs text-muted-foreground" data-pack-offered-from>
+            {{ offeredSources(row) }}
+          </span>
           <span v-if="isBusy(row)" class="text-xs text-muted-foreground" data-pack-busy>
             {{ t('language_pack_installing', { language: languageName(row.language) }) }}
           </span>

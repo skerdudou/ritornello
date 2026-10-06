@@ -29,6 +29,16 @@ pub fn seeded_registry(packs_root: std::path::PathBuf) -> Registry {
     registry
 }
 
+/// `seeded_registry` with the operator's pack preferences already set — what
+/// `main.rs` builds the first catalog from, so a device starts speaking
+/// through the pack its operator chose rather than ours until the first
+/// change.
+pub fn startup_registry(packs_root: std::path::PathBuf, prefs: Vec<crate::state::PackPreference>) -> Registry {
+    let mut registry = seeded_registry(packs_root);
+    registry.set_preferences(prefs);
+    registry
+}
+
 /// Seeds the registry's `core` and `common` modules with their embedded
 /// English, treating the core exactly like a plugin that "announced" its
 /// own catalogue — the uniform path `Registry::chain_for` relies on. Kept
@@ -188,5 +198,20 @@ mod tests {
         // that was never inserted.
         let layers = module_layers_from_catalog("console", &HashMap::new());
         assert_eq!(layers.languages().count(), 0);
+    }
+    /// The startup registry honours the persisted preference before anything
+    /// else changes: the first catalog already speaks through it.
+    /// **[MUTATION]** drop `set_preferences` from `startup_registry`: red.
+    #[test]
+    fn the_startup_registry_already_honours_the_persisted_preference() {
+        let packs = tempfile::tempdir().unwrap();
+        let write = crate::langpack::store::write_test_pack;
+        write(packs.path(), "fr", None, None, &[("core", "audio_output = \"Sortie ours\"\n")]);
+        let theirs = write(packs.path(), "fr", Some("z/zed"), None, &[("core", "audio_output = \"Sortie theirs\"\n")]);
+        let none = startup_registry(packs.path().to_path_buf(), Vec::new());
+        assert_eq!(core_catalog(&none, "fr", "en").get("audio_output"), "Sortie ours");
+        let prefs = vec![crate::state::PackPreference { language: "fr".into(), module: "core".into(), pack: theirs }];
+        let chosen = startup_registry(packs.path().to_path_buf(), prefs);
+        assert_eq!(core_catalog(&chosen, "fr", "en").get("audio_output"), "Sortie theirs");
     }
 }

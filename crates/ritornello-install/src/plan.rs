@@ -631,8 +631,11 @@ fn install_or_update(
             plan.packs.push((p.archive.clone(), names::pack_id(l)));
         }
     }
+    // Ours only: a third-party pack is the core's, installed from a source
+    // the operator added, and is neither offered here nor removed. Anything
+    // else unexpected still goes to `deletable_tree`, which refuses it.
     for id in &dev.packs {
-        if !wanted_ids.contains(id) {
+        if !wanted_ids.contains(id) && !names::third_party_pack_id(id) {
             plan.remove_trees.push(format!("{PACKS_ROOT}/{id}"));
         }
     }
@@ -1813,6 +1816,52 @@ privileged = [
             compute(&inv(), &device, &install(&["radio"], &["fr"], &[])),
             Err(PlanError::NotDeletable("/etc/ritornello/language-packs/notes".to_string()))
         );
+    }
+
+    const XLANG: &str = "ritornello-xlang-fr-0123456789ab";
+
+    /// A third-party pack (placed by the core from a source the operator
+    /// added) is not this installer's: an ordinary run keeps it and succeeds.
+    /// **[MUTATION]** drop the third-party exception: red (`NotDeletable`).
+    #[test]
+    fn a_third_party_pack_survives_an_ordinary_run() {
+        let device = dev(&[("radio", RADIO_EXEC)], None, &[XLANG, "ritornello-lang-de"], &[]);
+        let plan = compute(&inv(), &device, &install(&["radio"], &["fr"], &[])).unwrap();
+        assert_eq!(plan.remove_trees, vec!["/etc/ritornello/language-packs/ritornello-lang-de"], "ours only");
+        // Not offered as one of ours either. The exact set, not `.all(…)`,
+        // which an empty preselection would also have passed.
+        assert_eq!(preselection(&inv(), &device).1, set(&["de"]));
+    }
+
+    /// Nothing looser than the exact shape is spared: each name below breaks
+    /// one part of it and still stops the plan. **[MUTATION]** drop any one
+    /// check of `third_party_pack_id`: its line goes red.
+    #[test]
+    fn a_name_that_only_looks_like_a_third_party_pack_still_stops_the_plan() {
+        for bad in [
+            "ritornello-xlang-fr-0123456789a",   // eleven digits
+            "ritornello-xlang-fr-0123456789AB",  // uppercase hex
+            "ritornello-xlang-fr-0123456789ag",  // not hex
+            "ritornello-xlang--0123456789ab",    // no language
+            "ritornello-xlong-fr-0123456789ab",  // another prefix
+        ] {
+            let device = dev(&[("radio", RADIO_EXEC)], None, &[bad], &[]);
+            assert_eq!(
+                compute(&inv(), &device, &install(&["radio"], &["fr"], &[])),
+                Err(PlanError::NotDeletable(format!("/etc/ritornello/language-packs/{bad}"))),
+                "{bad}"
+            );
+        }
+    }
+
+    /// A total removal takes a third-party pack with the rest: it lives under
+    /// `/etc/ritornello`, which goes whole.
+    #[test]
+    fn a_total_removal_takes_a_third_party_pack_with_the_rest() {
+        let device = dev(&[("radio", RADIO_EXEC)], None, &[XLANG], &[]);
+        let plan = compute(&inv(), &device, &Intent::RemoveAll { erase_data: false }).unwrap();
+        assert!(has(&plan.remove_trees, "/etc/ritornello"), "{:?}", plan.remove_trees);
+        assert!(names::PACKS_ROOT.starts_with("/etc/ritornello/"));
     }
 
     // --- 13 --------------------------------------------------------------

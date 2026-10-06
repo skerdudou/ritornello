@@ -359,6 +359,81 @@ pub struct PersistedState {
     /// `schedule::day_key`: an identity, never compared for order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_last_run_day: Option<i64>,
+    /// Repositories the operator added as extra places to look for plugins and
+    /// language packs, lowercased `owner/repo`. Only the operator's own entries
+    /// are stored; the union with what installed plugins announce is computed at
+    /// read time (`update::sources`). Lenient at load: see `lenient_sources`.
+    #[serde(default, deserialize_with = "lenient_sources", skip_serializing_if = "Vec::is_empty")]
+    pub update_sources: Vec<String>,
+    /// Which pack speaks for one module in one language when several installed
+    /// packs carry it (`i18n::Registry::ordered_packs`). At most one entry per
+    /// `(language, module)` (`with_pack_preference`). Lenient at load, element
+    /// by element: see `lenient_preferences`.
+    #[serde(default, deserialize_with = "lenient_preferences", skip_serializing_if = "Vec::is_empty")]
+    pub pack_preferences: Vec<PackPreference>,
+}
+
+/// The operator's choice of `pack` (a pack id) for `module` in `language`.
+///
+/// Only a wish: it is honoured while it names an installed pack that carries
+/// that module in that language, and otherwise ignored — never an error, and
+/// never deleted on that account, so a pack removed and put back finds its
+/// preference again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackPreference {
+    pub language: String,
+    pub module: String,
+    pub pack: String,
+}
+
+/// How many pack preferences may be stored. Far above any real device (a
+/// handful of modules times the languages with two packs); it exists so an
+/// unauthenticated client cannot grow `state.json` without bound through
+/// `PUT /api/languages/{language}/preference`, which refuses a list that
+/// would grow past it.
+pub const PACK_PREFERENCES_MAX: usize = 256;
+
+/// `prefs` with the entry for `(language, module)` replaced by `pack`, or
+/// removed when `pack` is `None`. The language is compared without case, as
+/// everywhere a language is one language whatever a source spells it in.
+pub fn with_pack_preference(
+    prefs: &[PackPreference],
+    language: &str,
+    module: &str,
+    pack: Option<&str>,
+) -> Vec<PackPreference> {
+    let mut out: Vec<PackPreference> = prefs
+        .iter()
+        .filter(|p| !(p.language.eq_ignore_ascii_case(language) && p.module == module))
+        .cloned()
+        .collect();
+    if let Some(pack) = pack {
+        out.push(PackPreference { language: language.to_string(), module: module.to_string(), pack: pack.to_string() });
+    }
+    out
+}
+
+/// Keeps every array element that reads as a `PackPreference` and drops the
+/// rest; anything but an array reads as no preference at all. A hand-edited
+/// or future value must never take `load`'s all-or-nothing path, which would
+/// reset every other setting (`PersistedState.fallback`'s doc measured why).
+fn lenient_preferences<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<PackPreference>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(match v {
+        serde_json::Value::Array(items) => items.into_iter().filter_map(|i| serde_json::from_value(i).ok()).collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// Anything at all, keeping only the strings: a hand-edited or future value
+/// must never take `load`'s all-or-nothing path (`PersistedState.fallback`'s
+/// doc measured why). Validated where it is used, at the route.
+fn lenient_sources<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(match v {
+        serde_json::Value::Array(items) => items.into_iter().filter_map(|i| i.as_str().map(str::to_string)).collect(),
+        _ => Vec::new(),
+    })
 }
 
 impl Default for PersistedState {
@@ -376,15 +451,38 @@ impl Default for PersistedState {
             random: false,
             repeat_all: false,
             update_last_run_day: None,
+            update_sources: Vec::new(),
+            pack_preferences: Vec::new(),
         }
     }
 }
 
 pub fn load(path: &Path) -> PersistedState {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Ok(text) = std::fs::read_to_string(path) else { return PersistedState::default() };
+    if let Ok(state) = serde_json::from_str(&text) {
+        return state;
+    }
+    // One known shape of "a newer core wrote this": an `update_policy` this
+    // core does not know. Rewritten to `off` and parsed again; anything else
+    // still takes the all-or-nothing path, deliberately (see the test
+    // `a_file_broken_elsewhere_still_resets_to_defaults`).
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return PersistedState::default();
+    };
+    replace_unknown_update_policy(&mut value);
+    serde_json::from_value(value).unwrap_or_default()
+}
+
+/// Rewrites a `settings.update_policy` that is a string this core cannot read
+/// to `off`. A value that is not a string is damage, not a newer core's name,
+/// and a known name is left exactly as it is.
+fn replace_unknown_update_policy(value: &mut serde_json::Value) {
+    if let Some(policy) = value.pointer_mut("/settings/update_policy")
+        && policy.is_string()
+        && serde_json::from_value::<crate::update::schedule::UpdatePolicy>(policy.clone()).is_err()
+    {
+        *policy = serde_json::Value::String("off".into());
+    }
 }
 
 pub fn save(path: &Path, state: &PersistedState) -> Result<()> {
@@ -400,6 +498,97 @@ pub fn save(path: &Path, state: &PersistedState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writes `st`, swaps the serialized `update_policy` for `wire` (a JSON
+    /// value as text) and reads the file back through `load`.
+    fn load_with_policy_on_disk(st: &PersistedState, wire: &str) -> PersistedState {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        save(&path, st).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let marker = "\"update_policy\": \"off\"";
+        assert!(text.contains(marker), "the fixture must serialize the policy as expected");
+        let text = text.replace(marker, &format!("\"update_policy\": {wire}"));
+        assert!(text.contains(wire), "the fixture must actually carry the replaced value");
+        std::fs::write(&path, text).unwrap();
+        load(&path)
+    }
+
+    fn customised() -> PersistedState {
+        let mut st = PersistedState { volume: 37, locale: Some("fr".into()), ..PersistedState::default() };
+        st.settings.update_hour = 5;
+        st
+    }
+
+    #[test]
+    fn a_policy_this_core_does_not_know_falls_back_to_off_and_keeps_every_other_setting() {
+        // What a core rolled back under a newer one reads: the newer core wrote
+        // a value this one has never heard of.
+        let back = load_with_policy_on_disk(&customised(), "\"check_and_install_everything\"");
+        assert_eq!(back.volume, 37);
+        assert_eq!(back.locale.as_deref(), Some("fr"));
+        assert_eq!(back.settings.update_hour, 5);
+        assert_eq!(back.settings.update_policy, crate::update::schedule::UpdatePolicy::Off);
+    }
+
+    #[test]
+    fn the_repair_rewrites_an_unknown_policy_name_and_nothing_else() {
+        // Called directly: through `load` a known policy never reaches the
+        // repair (the first parse succeeds), so the "is it really unknown"
+        // operand can only be seen here.
+        let repaired = |wire: serde_json::Value| {
+            let mut v = serde_json::json!({ "settings": { "update_policy": wire } });
+            replace_unknown_update_policy(&mut v);
+            v["settings"]["update_policy"].clone()
+        };
+        assert_eq!(repaired(serde_json::json!("check")), serde_json::json!("check"));
+        assert_eq!(
+            repaired(serde_json::json!("check_and_install_all")),
+            serde_json::json!("check_and_install_all")
+        );
+        assert_eq!(repaired(serde_json::json!("whatever_comes_next")), serde_json::json!("off"));
+        assert_eq!(repaired(serde_json::json!(3)), serde_json::json!(3));
+    }
+
+    #[test]
+    fn a_known_policy_beside_damage_elsewhere_is_not_repaired_into_amnesty() {
+        // Damage elsewhere takes the all-or-nothing path even when the policy
+        // is known; the repair rewrites nothing in that case.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"volume":"loud","settings":{"update_policy":"check"}}"#).unwrap();
+        assert_eq!(load(&path), PersistedState::default());
+    }
+
+    #[test]
+    fn a_policy_that_is_not_even_a_string_is_not_a_newer_cores_value() {
+        // The repair is for an unknown *name*. A number is damage, and damage
+        // takes the all-or-nothing path.
+        let back = load_with_policy_on_disk(&customised(), "3");
+        assert_eq!(back, PersistedState::default());
+    }
+
+    #[test]
+    fn a_file_broken_elsewhere_still_resets_to_defaults() {
+        // The repair is for one field's value, not a general amnesty.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"active_source":"cd","volume":"loud"}"#).unwrap();
+        assert_eq!(load(&path), PersistedState::default());
+    }
+
+    #[test]
+    fn an_unknown_policy_and_damage_elsewhere_together_still_reset_to_defaults() {
+        // The repair rewrites one field; it must not make the rest lenient.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"volume":"loud","settings":{"update_policy":"check_and_install_everything"}}"#,
+        )
+        .unwrap();
+        assert_eq!(load(&path), PersistedState::default());
+    }
 
     #[test]
     fn default_if_file_missing_or_corrupted() {
@@ -428,6 +617,8 @@ mod tests {
             random: false,
             repeat_all: false,
             update_last_run_day: None,
+            update_sources: Vec::new(),
+            pack_preferences: Vec::new(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -459,6 +650,8 @@ mod tests {
             random: false,
             repeat_all: false,
             update_last_run_day: None,
+            update_sources: Vec::new(),
+            pack_preferences: Vec::new(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -483,6 +676,8 @@ mod tests {
             random: false,
             repeat_all: false,
             update_last_run_day: None,
+            update_sources: Vec::new(),
+            pack_preferences: Vec::new(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -661,5 +856,80 @@ mod tests {
         let st = PersistedState { standby: true, ..Default::default() };
         save(&path, &st).unwrap();
         assert!(load(&path).standby);
+    }
+
+    #[test]
+    fn a_malformed_source_list_never_resets_the_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        for bad in ["42", "\"z/zed\"", "[1, \"a/b\", null, \"c/d\"]", "{\"x\":1}"] {
+            std::fs::write(&path, format!(r#"{{"active_source":"cd","volume":41,"update_sources":{bad}}}"#)).unwrap();
+            let st = load(&path);
+            assert_eq!((st.active_source.as_str(), st.volume), ("cd", 41), "{bad}");
+        }
+        std::fs::write(&path, r#"{"active_source":"cd","volume":41,"update_sources":[1,"a/b",null,"c/d"]}"#).unwrap();
+        assert_eq!(load(&path).update_sources, vec!["a/b".to_string(), "c/d".to_string()]);
+    }
+
+    /// A malformed preference list must cost the preferences only, never the
+    /// other settings, and a malformed element only itself.
+    /// **[MUTATION]** read the field as a plain `Vec<PackPreference>` (no
+    /// `deserialize_with`): every shape below resets the volume, red.
+    #[test]
+    fn a_malformed_preference_list_never_resets_the_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let good = r#"{"language":"fr","module":"radio","pack":"p"}"#;
+        let mixed = format!(r#"[{{"language":"fr"}}, {good}, 3, null]"#);
+        for bad in ["\"x\"", "42", "{\"language\":\"fr\"}", mixed.as_str()] {
+            std::fs::write(&path, format!(r#"{{"active_source":"cd","volume":41,"pack_preferences":{bad}}}"#)).unwrap();
+            let st = load(&path);
+            assert_eq!((st.active_source.as_str(), st.volume), ("cd", 41), "{bad}");
+        }
+        std::fs::write(&path, format!(r#"{{"active_source":"cd","volume":41,"pack_preferences":{mixed}}}"#)).unwrap();
+        assert_eq!(
+            load(&path).pack_preferences,
+            vec![PackPreference { language: "fr".into(), module: "radio".into(), pack: "p".into() }],
+            "only the well-formed element is kept"
+        );
+    }
+
+    #[test]
+    fn the_preference_list_survives_a_round_trip_and_is_absent_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let prefs = vec![PackPreference { language: "fr".into(), module: "radio".into(), pack: "p".into() }];
+        save(&path, &PersistedState { pack_preferences: prefs.clone(), ..Default::default() }).unwrap();
+        assert_eq!(load(&path).pack_preferences, prefs);
+        save(&path, &PersistedState::default()).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("pack_preferences"));
+    }
+
+    /// One entry per `(language, module)`: a new choice replaces the old one
+    /// (the language compared without case), `None` removes it, and the other
+    /// entries are untouched.
+    #[test]
+    fn a_preference_replaces_or_removes_only_its_own_language_and_module() {
+        let pref = |l: &str, m: &str, p: &str| PackPreference { language: l.into(), module: m.into(), pack: p.into() };
+        let start = vec![pref("pt-BR", "radio", "a"), pref("pt-BR", "core", "b"), pref("de", "radio", "c")];
+        assert_eq!(
+            with_pack_preference(&start, "pt-br", "radio", Some("z")),
+            vec![pref("pt-BR", "core", "b"), pref("de", "radio", "c"), pref("pt-br", "radio", "z")]
+        );
+        assert_eq!(
+            with_pack_preference(&start, "pt-BR", "radio", None),
+            vec![pref("pt-BR", "core", "b"), pref("de", "radio", "c")]
+        );
+    }
+
+    #[test]
+    fn the_source_list_survives_a_round_trip_and_is_absent_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let st = PersistedState { update_sources: vec!["a/b".into()], ..Default::default() };
+        save(&path, &st).unwrap();
+        assert_eq!(load(&path).update_sources, vec!["a/b".to_string()]);
+        save(&path, &PersistedState::default()).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("update_sources"));
     }
 }

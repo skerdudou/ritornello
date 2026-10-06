@@ -936,9 +936,10 @@ mod tests {
     /// `set_settings` is the single passage point every settings change
     /// goes through — the same `persist()` any of them ends in. Regressing
     /// this would make the scheduler forget it already ran today the next
-    /// time the owner touches any other setting, and under
-    /// `UpdatePolicy::CheckAndInstall` that means firing — and installing —
-    /// a second time the same evening.
+    /// time the owner touches any other setting, and under either policy
+    /// that installs — `UpdatePolicy::CheckAndInstall` or
+    /// `UpdatePolicy::CheckAndInstallAll` — that means firing, and
+    /// installing, a second time the same evening.
     #[tokio::test]
     async fn an_unrelated_settings_write_does_not_reset_the_last_run_day() {
         let (mut core, _pc, _sc, _rx, dir) =

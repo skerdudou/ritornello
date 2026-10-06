@@ -2,7 +2,8 @@ import { api, Select, SelectItem, toast } from '@ritornello/ui'
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import type { LocalePayload } from '../types'
+import type { LanguagePackRow, LocalePayload } from '../types'
+import { packRow } from '../testing/languagePacks'
 
 // Same approach as `useTheme.test.ts`: we keep the real module (components,
 // `api`, ...) and replace only the two `toast` entries this view uses, so we
@@ -108,12 +109,22 @@ const CATALOGUE = {
   language_pack_update_available: 'Un greffon plus récent est disponible',
   language_pack_installing: 'Installation de {language}…',
   language_pack_removing: 'Retrait de {language}…',
+  language_pack_official: 'Ritornello (greffon officiel)',
+  language_pack_from: 'Depuis {source}',
+  language_pack_not_installed: 'Non installé',
+  language_pack_overlap_intro: 'Plusieurs greffons couvrent le même module.',
+  language_pack_overlap_module: 'Module {module}',
+  language_pack_overlap_choose: 'Greffon qui parle pour {module}',
+  language_pack_remove_confirm_several: 'Retirer tous les greffons de la langue {language} : {packs} ?',
   languages_add_title: 'Ajouter une langue',
   languages_add_description: 'Langues que cette version publie.',
   languages_add_empty: 'Rien à ajouter.',
   installables_title: 'Ajouter un greffon',
   installables_checking: 'Recherche des composants…',
   installables_retry: 'Réessayer',
+  installables_install: 'Installer',
+  installables_confirm_third_party_title: 'Installer un greffon tiers',
+  installables_confirm_third_party: "{component} vient de {repo}, un dépôt qui n'est pas celui de Ritornello.",
   language_pack_remove_confirm:
     "Retirer le greffon {language} ? L'interface repasse en anglais si c'est la langue utilisée.",
 }
@@ -190,7 +201,7 @@ type Payloads = ReturnType<typeof payloads>
  * overridden per call. Module-scoped so both the gesture tests and the
  * polling tests below can build on it. */
 function localeWithPacks(
-  packs: Array<{ language: string; installed: string | null; offered: string | null }>,
+  packs: LanguagePackRow[],
 ): LocalePayload {
   return {
     locales: ['en', 'fr'],
@@ -529,6 +540,80 @@ describe('ConfigView — plugin table', () => {
     ;(document.body.querySelector('[data-installable-install]') as HTMLElement).click()
     await flushPromises()
     expect(posts).toContainEqual({ url: '/api/update/install', body: { components: ['console'] } })
+  })
+
+  // Spec §4.5, the second consent, driven from the event: the Install
+  // button inside the dialog, inside the mounted page. A stranger's plugin
+  // is installed only once the page has named its repository and the
+  // operator confirmed; closing the confirmation sends nothing.
+  // **[MUTATION]** emit `install` from the dialog for a third-party row (the
+  // first click installs): red on "nothing sent yet". **[MUTATION]** drop
+  // `repo` from the confirmation's parameters: red on the text.
+  describe('installing a third-party plugin', () => {
+    const strangerOffer = () => ({
+      ...(freshUpdate() as object),
+      components: [
+        {
+          name: 'zed', kind: 'third_party', declared: false, binary_present: false,
+          installed: null, offered: '1.2.0', availability: 'not_installed', third_party_repo: 'z/zed',
+        },
+      ],
+    })
+
+    async function pressInstall(w: VueWrapper) {
+      await w.find('[data-installables-open]').trigger('click')
+      await flushPromises()
+      ;(document.body.querySelector('[data-installable-row][data-name="zed"] [data-installable-install]') as HTMLElement)
+        .click()
+      await flushPromises()
+    }
+
+    it('asks for consent naming the repository, and installs only once given', async () => {
+      const { w, posts } = await mountView({ '/api/update': strangerOffer() })
+      await pressInstall(w)
+      expect(posts.filter((p) => p.url === '/api/update/install')).toEqual([])
+      const dialog = document.body.querySelector('[data-third-party-install-dialog]')
+      expect(dialog?.textContent).toContain("zed vient de z/zed, un dépôt qui n'est pas celui de Ritornello.")
+      // One dialog at a time: the list is closed behind the confirmation.
+      expect(document.body.querySelector('[data-installables-dialog]')).toBeNull()
+
+      ;(document.body.querySelector('[data-third-party-install-confirm]') as HTMLElement).click()
+      await flushPromises()
+      // B3: the repository the confirmation named travels with the request,
+      // so the core installs from it and from nothing else.
+      // **[MUTATION]** drop `target.repo` from `confirmThirdPartyInstall`: red.
+      expect(posts.filter((p) => p.url === '/api/update/install'))
+        .toEqual([{ url: '/api/update/install', body: { components: ['zed'], from: { zed: 'z/zed' } } }])
+      expect(document.body.querySelector('[data-third-party-install-dialog]')).toBeNull()
+      expect(document.body.querySelector('[data-installables-dialog]')).not.toBeNull()
+    })
+
+    // Fix round 1: a job that starts while the confirmation is open (the
+    // update card's Install, a scheduled run) disables its confirm, as it
+    // disables the list's own Install. The page learns `busy` from a reload
+    // of `/api/update`, driven here by the dialog's own `refresh` event.
+    // **[MUTATION]** drop `|| !!update.busy`: red.
+    it('disables the consent while a job is running', async () => {
+      const { w, table } = await mountView({ '/api/update': strangerOffer() })
+      await pressInstall(w)
+      const confirm = () => document.body.querySelector<HTMLButtonElement>('[data-third-party-install-confirm]')!
+      expect(confirm().disabled).toBe(false)
+      ;(table as Record<string, unknown>)['/api/update'] = { ...strangerOffer(), busy: 'Installing radio…' }
+      w.findComponent({ name: 'InstallablesDialog' }).vm.$emit('refresh')
+      await flushPromises()
+      expect(confirm().disabled).toBe(true)
+    })
+
+    it('sends nothing when the confirmation is closed, and gives the list back', async () => {
+      const { w, posts } = await mountView({ '/api/update': strangerOffer() })
+      await pressInstall(w)
+      const close = document.body.querySelector('[data-third-party-install-dialog] [data-slot="dialog-close"]')
+      ;(close as HTMLElement).click()
+      await flushPromises()
+      expect(document.body.querySelector('[data-third-party-install-dialog]')).toBeNull()
+      expect(document.body.querySelector('[data-installables-dialog]')).not.toBeNull()
+      expect(posts.filter((p) => p.url === '/api/update/install')).toEqual([])
+    })
   })
 
   it('groups the kinds of a same plugin on a single row', async () => {
@@ -1542,7 +1627,7 @@ describe('ConfigView — language and display', () => {
   // rejection elsewhere in this codebase.
   it('installs a language pack: posts to the right route, acknowledges, and reloads the locale', async () => {
     const { w, spy, posts } = await mountView({
-      '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+      '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
       '/api/update': freshUpdate(),
     })
     const before = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
@@ -1561,7 +1646,7 @@ describe('ConfigView — language and display', () => {
   it('toasts the refusal from a language install and releases the busy row', async () => {
     const { w } = await mountView(
       {
-        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
         '/api/update': freshUpdate(),
       },
       undefined,
@@ -1581,8 +1666,8 @@ describe('ConfigView — language and display', () => {
   it('lists installed packs in the card, and offers the others only through the Add a language dialog', async () => {
     const { w } = await mountView({
       '/api/locale': localeWithPacks([
-        { language: 'fr', installed: '0.2.1', offered: '0.2.1' },
-        { language: 'de', installed: null, offered: '0.2.1' },
+        packRow('fr', '0.2.1', '0.2.1'),
+        packRow('de', null, '0.2.1'),
       ]),
       '/api/update': freshUpdate(),
     })
@@ -1629,7 +1714,7 @@ describe('ConfigView — language and display', () => {
       // The check lands: a timestamp, and the release now offers German.
       ;(table as Record<string, unknown>)['/api/update'] = freshUpdate()
       ;(table as Record<string, unknown>)['/api/locale'] =
-        localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }])
+        localeWithPacks([packRow('de', null, '0.2.1')])
       const localeReads = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
       await vi.advanceTimersByTimeAsync(2000)
       await flushPromises()
@@ -1645,7 +1730,7 @@ describe('ConfigView — language and display', () => {
 
   it('removes a language pack through its confirmation: deletes the right route, acknowledges, and reloads', async () => {
     const { w, spy, deletes } = await mountView({
-      '/api/locale': localeWithPacks([{ language: 'fr', installed: '0.2.1', offered: '0.2.1' }]),
+      '/api/locale': localeWithPacks([packRow('fr', '0.2.1', '0.2.1')]),
     })
     await w.find('[data-pack-remove="fr"]').trigger('click')
     await flushPromises()
@@ -1665,7 +1750,7 @@ describe('ConfigView — language and display', () => {
 
   it('toasts the refusal from a language removal and releases the busy row', async () => {
     const { w } = await mountView(
-      { '/api/locale': localeWithPacks([{ language: 'fr', installed: '0.2.1', offered: '0.2.1' }]) },
+      { '/api/locale': localeWithPacks([packRow('fr', '0.2.1', '0.2.1')]) },
       undefined,
       undefined,
       'fr pack not found',
@@ -2231,6 +2316,19 @@ describe('ConfigView — update', () => {
     }
   }
 
+  // Wiring, not behaviour (`SourcesDialog.test.ts` has the behaviour): the
+  // card's `sources` event must open the dialog, and the dialog must read the
+  // list when it opens. Deleting either the `@sources` handler or the `:open`
+  // binding in the view leaves the card and the dialog each green alone.
+  it('opens the sources dialog from the update card, and the dialog reads the list', async () => {
+    const { w, spy } = await mountView({ '/api/update/sources': [] } as Partial<Payloads>)
+    expect(document.body.querySelector('[data-sources-dialog]')).toBeNull()
+    await w.find('[data-update-sources]').trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('[data-sources-dialog]')).not.toBeNull()
+    expect(spy.mock.calls.map((c) => c[0])).toContain('/api/update/sources')
+  })
+
   it('sends a check with no body', async () => {
     const { w, posts } = await mountView()
     await w.find('[data-update-check]').trigger('click')
@@ -2426,7 +2524,7 @@ describe('ConfigView — language pack polling', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { w, table } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
         '/api/update': freshUpdate(),
       })
       await openAddLanguage(w)
@@ -2441,7 +2539,7 @@ describe('ConfigView — language pack polling', () => {
 
       // The worker catches up one tick later.
       ;(table as Record<string, unknown>)['/api/locale'] =
-        localeWithPacks([{ language: 'de', installed: '0.2.1', offered: '0.2.1' }])
+        localeWithPacks([packRow('de', '0.2.1', '0.2.1')])
       await vi.advanceTimersByTimeAsync(2000)
 
       expect(inDialog('[data-pack-busy]')).toBeNull()
@@ -2456,7 +2554,7 @@ describe('ConfigView — language pack polling', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { w, spy, table } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
         '/api/update': freshUpdate(),
       })
       await openAddLanguage(w)
@@ -2470,7 +2568,7 @@ describe('ConfigView — language pack polling', () => {
       const callsRightAfterClick = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
 
       ;(table as Record<string, unknown>)['/api/locale'] =
-        localeWithPacks([{ language: 'de', installed: '0.2.1', offered: '0.2.1' }])
+        localeWithPacks([packRow('de', '0.2.1', '0.2.1')])
       await vi.advanceTimersByTimeAsync(2000)
       expect(inDialog('[data-pack-busy]')).toBeNull()
       const callsAfterSettle = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
@@ -2495,7 +2593,7 @@ describe('ConfigView — language pack polling', () => {
       // `table['/api/locale']` never changes: the job never lands, from
       // this page's point of view.
       const { w, spy } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
         '/api/update': freshUpdate(),
       })
       await openAddLanguage(w)
@@ -2517,6 +2615,65 @@ describe('ConfigView — language pack polling', () => {
     }
   })
 
+  // H6: an install begins with a whole check, and one silent source holds
+  // that check for twenty seconds before any pack is fetched — so the poll
+  // used to give up at its 20 s ceiling with the job still running, and
+  // Install looked like it did nothing. While the worker says it is busy the
+  // poll goes on; once it lands, the row settles. And it is still bounded:
+  // a job that stays busy for ever releases the row at the busy ceiling.
+  // **[MUTATION]** drop the busy ceiling (always 10 ticks): red on "still
+  // busy at 30 s".
+  it('keeps polling while the worker is busy, past the idle ceiling, and settles when the pack lands', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, table } = await mountView({
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
+        '/api/update': freshUpdate(),
+      })
+      await openAddLanguage(w)
+      ;(table as Record<string, unknown>)['/api/update'] = {
+        ...(freshUpdate() as object), busy: 'Recherche de mises à jour…',
+      }
+      inDialog('[data-pack-install="de"]')!.click()
+      await flushPromises()
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(inDialog('[data-pack-busy]')!.textContent).toContain('Installation de')
+
+      ;(table as Record<string, unknown>)['/api/locale'] = localeWithPacks([packRow('de', '0.2.1', '0.2.1')])
+      ;(table as Record<string, unknown>)['/api/update'] = freshUpdate()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(inDialog('[data-pack-busy]')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('releases the row at the busy ceiling when the worker never stops being busy', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { w, table, spy } = await mountView({
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
+        '/api/update': freshUpdate(),
+      })
+      await openAddLanguage(w)
+      ;(table as Record<string, unknown>)['/api/update'] = {
+        ...(freshUpdate() as object), busy: 'Recherche de mises à jour…',
+      }
+      inDialog('[data-pack-install="de"]')!.click()
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(298_000)
+      expect(inDialog('[data-pack-busy]')).not.toBeNull()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(inDialog('[data-pack-busy]')).toBeNull()
+      const atCeiling = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(spy.mock.calls.filter((c) => c[0] === '/api/locale').length).toBe(atCeiling)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // Fix round 3 (F4 of the review): `LanguagePacksRow`'s "Update" button
   // calls the same `installLanguage` as "Install", producing the same
   // `busy.action === 'install'` — but a row only ever offers Update when
@@ -2530,7 +2687,7 @@ describe('ConfigView — language pack polling', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { w, table } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'es', installed: '0.2.0', offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('es', '0.2.0', '0.2.1')]),
       })
       await w.find('[data-pack-update="es"]').trigger('click')
       await flushPromises()
@@ -2546,7 +2703,7 @@ describe('ConfigView — language pack polling', () => {
 
       // Now the version actually moves.
       ;(table as Record<string, unknown>)['/api/locale'] =
-        localeWithPacks([{ language: 'es', installed: '0.2.1', offered: '0.2.1' }])
+        localeWithPacks([packRow('es', '0.2.1', '0.2.1')])
       await vi.advanceTimersByTimeAsync(2000)
       expect(w.find('[data-pack-busy]').exists()).toBe(false)
       expect(w.find('[data-pack-update="es"]').exists()).toBe(false)
@@ -2559,7 +2716,7 @@ describe('ConfigView — language pack polling', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { w, table } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'fr', installed: '0.2.1', offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('fr', '0.2.1', '0.2.1')]),
       })
       await w.find('[data-pack-remove="fr"]').trigger('click')
       await flushPromises()
@@ -2584,7 +2741,7 @@ describe('ConfigView — language pack polling', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { w, spy } = await mountView({
-        '/api/locale': localeWithPacks([{ language: 'de', installed: null, offered: '0.2.1' }]),
+        '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
         '/api/update': freshUpdate(),
       })
       await openAddLanguage(w)
@@ -2594,6 +2751,173 @@ describe('ConfigView — language pack polling', () => {
       const before = spy.mock.calls.filter((c) => c[0] === '/api/locale').length
       await vi.advanceTimersByTimeAsync(20_000)
       expect(spy.mock.calls.filter((c) => c[0] === '/api/locale').length).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('ConfigView — a language from several packs', () => {
+  const OFFICIAL = 'ritornello-lang-fr'
+  const THIRD = 'ritornello-xlang-fr-0123456789ab'
+
+  function frTwoPacks(extra: Partial<LanguagePackRow> = {}): LanguagePackRow {
+    return packRow('fr', '0.2.1', '0.2.1', {
+      packs: [
+        { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: '1.0.0', offered: '1.0.0' },
+      ],
+      overlaps: [{ module: 'core', packs: [THIRD, OFFICIAL], active: THIRD }],
+      ...extra,
+    })
+  }
+
+  const localeGets = (spy: ReturnType<typeof vi.fn>) =>
+    spy.mock.calls.filter(([url, init]) => url === '/api/locale' && !(init as RequestInit | undefined)?.method).length
+
+  function overlapSelect(w: VueWrapper) {
+    return w.findAllComponents(Select).find((s) => s.props('modelValue') === THIRD
+      || s.props('modelValue') === OFFICIAL)!
+  }
+
+  it('writes the preference from the select, then reads /api/locale again and shows who speaks', async () => {
+    const { w, spy, puts, table } = await mountView({ '/api/locale': localeWithPacks([frTwoPacks()]) })
+    expect(w.get('[data-pack-preference="core"]').text()).toBe('Depuis someone/fr-extra')
+    const before = localeGets(spy)
+
+    ;(table as Record<string, unknown>)['/api/locale'] = localeWithPacks([
+      frTwoPacks({ overlaps: [{ module: 'core', packs: [OFFICIAL, THIRD], active: OFFICIAL }] }),
+    ])
+    await overlapSelect(w).vm.$emit('update:modelValue', OFFICIAL)
+    await flushPromises()
+
+    expect(puts).toEqual([{ url: '/api/languages/fr/preference', body: { module: 'core', pack: OFFICIAL } }])
+    expect(localeGets(spy)).toBe(before + 1)
+    expect(w.get('[data-pack-preference="core"]').text()).toBe('Ritornello (greffon officiel)')
+    expect(w.find('[data-pack-preference-error]').exists()).toBe(false)
+  })
+
+  it("shows the route's own refusal next to the select, and the select goes back to what speaks", async () => {
+    const { w } = await mountView(
+      { '/api/locale': localeWithPacks([frTwoPacks()]) },
+      'This pack does not carry that module.',
+    )
+    await overlapSelect(w).vm.$emit('update:modelValue', OFFICIAL)
+    await flushPromises()
+    expect(w.get('[data-pack-overlap="core"] [data-pack-preference-error]').text())
+      .toBe('This pack does not carry that module.')
+    expect(w.get('[data-pack-preference="core"]').text()).toBe('Depuis someone/fr-extra')
+  })
+
+  it('shows no overlap block when the core reports none', async () => {
+    const { w } = await mountView({ '/api/locale': localeWithPacks([frTwoPacks({ overlaps: [] })]) })
+    expect(w.find('[data-pack-overlaps]').exists()).toBe(false)
+  })
+
+  it("Update, offered for a third party's news alone, posts the language's one gesture", async () => {
+    const row = frTwoPacks({
+      overlaps: [],
+      update_available: true,
+      packs: [
+        { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: '1.0.0', offered: '1.1.0' },
+      ],
+    })
+    const { w, posts } = await mountView({ '/api/locale': localeWithPacks([row]) })
+    await w.get('[data-pack-update="fr"]').trigger('click')
+    await flushPromises()
+    expect(posts.map((p) => p.url)).toContain('/api/languages/fr')
+  })
+
+  // H2, from the click: an installed language a source offers a new pack
+  // for shows Install, and Install is the language's one gesture.
+  it("Install, offered for a source's pack of an installed language, posts the language's one gesture", async () => {
+    const row = frTwoPacks({
+      overlaps: [],
+      install_available: true,
+      packs: [
+        { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: null, offered: '1.0.0' },
+      ],
+    })
+    const { w, posts } = await mountView({ '/api/locale': localeWithPacks([row]) })
+    expect(w.find('[data-pack-update="fr"]').exists()).toBe(false)
+    await w.get('[data-pack-install="fr"]').trigger('click')
+    await flushPromises()
+    expect(posts.map((p) => p.url)).toContain('/api/languages/fr')
+  })
+
+  it("keeps a language whose only installed pack is a third party's on the card", async () => {
+    const row = packRow('fr', null, '0.2.1', {
+      packs: [
+        { id: OFFICIAL, source: null, installed: null, offered: '0.2.1' },
+        { id: THIRD, source: 'someone/fr-extra', installed: '1.0.0', offered: '1.0.0' },
+      ],
+    })
+    const { w } = await mountView({ '/api/locale': localeWithPacks([row]) })
+    expect(w.find('[data-pack-remove="fr"]').exists()).toBe(true)
+  })
+
+  const confirmText = () =>
+    document.body.querySelector('[data-language-pack-remove-dialog]')?.textContent ?? ''
+
+  // Remove retires every pack of the language: the owner must read that
+  // before confirming.
+  it('names every pack and its source in the Remove confirmation when several are installed', async () => {
+    const { w, deletes } = await mountView({ '/api/locale': localeWithPacks([frTwoPacks({ overlaps: [] })]) })
+    await w.find('[data-pack-remove="fr"]').trigger('click')
+    await flushPromises()
+    expect(confirmText()).toContain('Retirer tous les greffons')
+    expect(confirmText()).toContain('Ritornello (greffon officiel), Depuis someone/fr-extra')
+    expect(deletes).toEqual([])
+  })
+
+  it('keeps the plain sentence for a language with its official pack alone', async () => {
+    const { w } = await mountView({ '/api/locale': localeWithPacks([packRow('fr', '0.2.1', '0.2.1')]) })
+    await w.find('[data-pack-remove="fr"]').trigger('click')
+    await flushPromises()
+    expect(confirmText()).toContain('Retirer le greffon')
+    expect(confirmText()).not.toContain('Retirer tous')
+  })
+
+  it('does not settle an Update because an offered-only pack appeared mid-poll', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const base = packRow('fr', '0.2.0', '0.2.1')
+      const { w, table } = await mountView({ '/api/locale': localeWithPacks([base]) })
+      await w.get('[data-pack-update="fr"]').trigger('click')
+      await flushPromises()
+      // Same installed versions, plus a pack that is only offered.
+      ;(table as Record<string, unknown>)['/api/locale'] = localeWithPacks([{
+        ...base,
+        packs: [...base.packs, { id: THIRD, source: 'someone/fr-extra', installed: null, offered: '1.0.0' }],
+      }])
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.find('[data-pack-busy]').exists()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("settles an Update on a third party's version moving, the official one staying put", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const news = (third: string) => frTwoPacks({
+        overlaps: [],
+        update_available: third !== '1.1.0',
+        packs: [
+          { id: OFFICIAL, source: null, installed: '0.2.1', offered: '0.2.1' },
+          { id: THIRD, source: 'someone/fr-extra', installed: third, offered: '1.1.0' },
+        ],
+      })
+      const { w, table } = await mountView({ '/api/locale': localeWithPacks([news('1.0.0')]) })
+      await w.get('[data-pack-update="fr"]').trigger('click')
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.find('[data-pack-busy]').exists()).toBe(true)
+      ;(table as Record<string, unknown>)['/api/locale'] = localeWithPacks([news('1.1.0')])
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(w.find('[data-pack-busy]').exists()).toBe(false)
     } finally {
       vi.useRealTimers()
     }

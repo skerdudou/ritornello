@@ -15,6 +15,12 @@ const CATALOG = {
     'Privileged component: install or uninstall it with ritornello-install. An update that leaves its root-run companion unchanged can be made from here.',
   update_row_needs_companion:
     'This update also changes the mount helper ({companion}): update with ritornello-install.',
+  update_row_third_party_pack: 'From a third-party repository. Never selected automatically.',
+  update_row_third_party_refused:
+    'Its last archive was refused: a third-party plugin\'s archive may carry nothing but its own binary.',
+  update_row_pack_refused: 'Its last archive was refused by the language pack checks; a new version will be tried.',
+  update_row_pack_official: '{language} language pack (Ritornello)',
+  update_row_pack_third_party: '{language} language pack from {repo}',
 }
 
 beforeEach(async () => {
@@ -553,5 +559,88 @@ describe('UpdateDialog', () => {
     await row('someones-plugin')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
     await flushPromises()
     expect(isChecked('someones-plugin')).toBe('true')
+  })
+
+  describe('language packs', () => {
+    const XLANG = 'ritornello-xlang-fr-0123456789ab'
+    const pack = (overrides: Partial<ComponentOffer> & { name: string }): ComponentOffer => ({
+      kind: 'language_pack',
+      declared: false,
+      binary_present: false,
+      installed: '1.0.0',
+      offered: '1.1.0',
+      availability: 'update_available',
+      installable: true,
+      ...overrides,
+    })
+
+    // H7: a third-party pack's row has the kind `language_pack`, and the
+    // pre-tick used to read only `kind === 'third_party'` — so a stranger's
+    // pack update was ticked like one of ours, against ruling P6. Ours, in
+    // the same state, still is: a dialog that ticks no pack cannot pass.
+    // **[MUTATION]** filter on the kind alone again: red on the stranger's.
+    it('never pre-ticks a third-party pack, and still pre-ticks ours', async () => {
+      mountDialog([pack({ name: 'ritornello-lang-fr' }), pack({ name: XLANG, third_party_repo: 'z/zed' })])
+      await flushPromises()
+      expect(isChecked('ritornello-lang-fr')).toBe('true')
+      expect(isChecked(XLANG)).toBe('false')
+    })
+
+    // The kind half of the same guard: a third-party plugin row that names
+    // no repository (none the core builds today) fails closed all the same.
+    // **[MUTATION]** drop `c.kind !== 'third_party'`: red.
+    it('never pre-ticks a third-party plugin row that names no repository', async () => {
+      mountDialog([
+        {
+          name: 'orphan', kind: 'third_party', declared: true, binary_present: true,
+          installed: '1.0.0', offered: '2.0.0', availability: 'update_available',
+        },
+      ])
+      await flushPromises()
+      expect(isChecked('orphan')).toBe('false')
+    })
+
+    // H7: a pack row is named by its language and source, never by its id
+    // (a stranger's id is a digest). The switch's accessible name follows.
+    // **[MUTATION]** render `offer.name` again: red.
+    it('names a pack by its language and source, never by its id', async () => {
+      mountDialog([pack({ name: 'ritornello-lang-fr' }), pack({ name: XLANG, third_party_repo: 'z/zed' })])
+      await flushPromises()
+      const label = (name: string) => row(name)?.querySelector('[data-update-row-name]')?.textContent?.trim()
+      expect(label('ritornello-lang-fr')).toBe('Français language pack (Ritornello)')
+      expect(label(XLANG)).toBe('Français language pack from z/zed')
+      expect(document.body.querySelector('[data-update-dialog]')?.textContent).not.toContain(XLANG)
+      expect(row(XLANG)?.querySelector('[data-update-row-check]')?.getAttribute('aria-label'))
+        .toBe('Français language pack from z/zed')
+      expect(row(XLANG)?.querySelector('[data-update-row-warning]')?.textContent?.trim())
+        .toBe('From a third-party repository. Never selected automatically.')
+    })
+
+    // H5: a pack whose archive the reader refused is marked like a manual
+    // step; its note says the pack was refused, never the privileged-plugin
+    // sentence. **[MUTATION]** drop the pack branch of `refusedNote`: red.
+    it('says a refused pack was refused, never that it is a privileged component', async () => {
+      mountDialog([pack({ name: XLANG, third_party_repo: 'z/zed', installable: false })])
+      await flushPromises()
+      const warning = row(XLANG)?.querySelector('[data-update-row-warning]')?.textContent ?? ''
+      expect(warning).toContain('language pack checks')
+      expect(warning).not.toContain('ritornello-install')
+    })
+
+    // H5, the plugin half: a stranger's plugin whose archive carried more
+    // than its binary. **[MUTATION]** drop the `third_party_repo` branch of
+    // `refusedNote`: red.
+    it('says a refused third-party plugin archive was refused for what it carried', async () => {
+      mountDialog([
+        {
+          name: 'zed', kind: 'third_party', declared: true, binary_present: true, installed: '1.0.0',
+          offered: '2.0.0', availability: 'update_available', third_party_repo: 'z/zed', installable: false,
+        },
+      ])
+      await flushPromises()
+      const warning = row('zed')?.querySelector('[data-update-row-warning]')?.textContent ?? ''
+      expect(warning).toContain('nothing but its own binary')
+      expect(warning).not.toContain('ritornello-install')
+    })
   })
 })

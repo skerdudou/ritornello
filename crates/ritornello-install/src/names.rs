@@ -17,6 +17,22 @@ pub fn pack_id(language: &str) -> String {
     format!("ritornello-lang-{language}")
 }
 
+/// Whether `id` is exactly a third-party pack's directory name, as the core
+/// forms it (`ritornello_core::langpack::store::third_party_pack_id`):
+/// `ritornello-xlang-<language>-<12 lowercase hex digits>`, with a language
+/// this module accepts. Restated rather than imported: this binary does not
+/// depend on the core.
+///
+/// Such a directory is the core's, placed from a source the operator added;
+/// this installer manages only our own packs and leaves it where it is. A
+/// total removal takes it with the rest of `/etc/ritornello`.
+pub fn third_party_pack_id(id: &str) -> bool {
+    let Some((language, hash)) = id.strip_prefix("ritornello-xlang-").and_then(|r| r.rsplit_once('-')) else {
+        return false;
+    };
+    hash.len() == 12 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) && valid_language(language)
+}
+
 pub fn valid_language(language: &str) -> bool {
     // `valid_pack_id` alone is not enough: it judges the composed pack id
     // (`ritornello-lang-<language>`), whose own leading character is always
@@ -169,6 +185,31 @@ mod tests {
         for bad in ["", "..", "fr/x", "-fr", "fr-"] {
             assert!(!valid_language(bad), "{bad:?}");
         }
+    }
+
+    /// The installer and the core agree on which directory names are a
+    /// third-party pack's: the same table the core's
+    /// `langpack::store::tests::the_core_agrees_with_the_installer_on_third_party_pack_ids`
+    /// reads, judged here by this crate's own function. A directory the core
+    /// may create and this function refuses stops every ordinary run of this
+    /// installer (`NotDeletable`), so the two must give the same verdicts —
+    /// and since the two binaries share no code but the shared crates, a
+    /// common table is how they are held to it.
+    #[test]
+    fn the_installer_agrees_with_the_core_on_third_party_pack_ids() {
+        let table = include_str!("../../ritornello-core/src/langpack/pack_language_agreement.txt");
+        let mut lines = 0;
+        for line in table.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            let (verdict, id) = line.split_once(' ').expect("`accept <id>` or `refuse <id>`");
+            let expected = match verdict {
+                "accept" => true,
+                "refuse" => false,
+                other => panic!("unknown verdict {other:?}"),
+            };
+            assert_eq!(third_party_pack_id(id), expected, "{id}");
+            lines += 1;
+        }
+        assert!(lines >= 10, "the table was read ({lines} lines)");
     }
 
     /// The last line of defence: whatever a registry or an inventory says, the

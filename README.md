@@ -98,8 +98,9 @@ prereleases are published they lead nowhere: take the files from the
 - **Self-update and plugin management** — the core and each plugin check
   GitHub releases and install what changed from the browser, with an
   automatic rollback if the new binary fails to start; a plugin can also be
-  installed, removed or reordered live, and a third-party plugin is checked
-  against its own repository.
+  installed, removed or reordered live. Third-party repositories can be
+  added as sources: a plugin from one is installed after a confirmation
+  naming the repository, a language pack with its source named on its row.
 
 <p align="center">
   <img src="docs/captures/home-dark.png" width="49%" alt="The same home page in dark mode">

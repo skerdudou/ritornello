@@ -1727,7 +1727,10 @@ async fn main() -> Result<()> {
     // root (`install_language`/`remove_language`) and must never compose a
     // second `PathBuf` of its own for it — see `Worker.packs_root`'s doc.
     let worker_packs_root = packs_root.clone();
-    let registry: i18n::Shared = Arc::new(RwLock::new(i18n::seeded_registry(packs_root)));
+    // With the operator's pack preferences, before the first catalog is
+    // built (`i18n::startup_registry`).
+    let registry: i18n::Shared =
+        Arc::new(RwLock::new(i18n::startup_registry(packs_root, persisted.pack_preferences.clone())));
     // The device's own persisted fallback (task 13), or "en" on a device
     // that has never set one — see `i18n::core_catalog`'s doc.
     let catalog = Arc::new(RwLock::new(i18n::core_catalog(
@@ -1767,6 +1770,8 @@ async fn main() -> Result<()> {
     let (sources_catalog_tx, catalog_rx) = watch::channel(SourcesCatalog::default());
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
+    let (update_sources_tx, mut update_sources_rx) = mpsc::channel::<Vec<String>>(4);
+    let (pack_preferences_tx, mut pack_preferences_rx) = mpsc::channel::<Vec<state::PackPreference>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
     let (fallback_tx, mut fallback_rx) = mpsc::channel::<String>(4);
     let (theme_tx, mut theme_rx) = mpsc::channel::<theme::ThemeState>(4);
@@ -2261,6 +2266,7 @@ async fn main() -> Result<()> {
             core.not_installed_files = Some(entries);
         }
     }
+    let update_sources = Arc::new(RwLock::new(persisted.update_sources.clone()));
     let worker = update::Worker {
         state: update_state.clone(),
         catalog: catalog.clone(),
@@ -2281,6 +2287,7 @@ async fn main() -> Result<()> {
         packs_root: worker_packs_root,
         locale_tx: locale_tx.clone(),
         locale_current: locale_current.clone(),
+        update_sources: update_sources.clone(),
     };
     // Read off the `Worker` actually built, not a second `PathBuf::from("/")`
     // literal: `status::PluginsControl.root` (below) must be the exact same
@@ -2376,6 +2383,10 @@ async fn main() -> Result<()> {
             update: update_state.clone(),
             update_tx,
             update_catalogue_cache: Arc::new(RwLock::new(None)),
+            update_source_catalogue_cache: Arc::new(RwLock::new(Vec::new())),
+            update_sources: update_sources.clone(),
+            update_sources_tx: update_sources_tx.clone(),
+            pack_preferences_tx: pack_preferences_tx.clone(),
         };
         let (app_state, core_engine) = assemble_covers_and_core(
             mpv_player,
@@ -2736,6 +2747,12 @@ async fn main() -> Result<()> {
             Some((path, r)) = extraction_rx.recv() => {
                 core.extraction_arrived(path, r).await;
             }
+            Some(list) = update_sources_rx.recv() => {
+                core.set_update_sources(list);
+            }
+            Some(prefs) = pack_preferences_rx.recv() => {
+                core.set_pack_preferences(prefs).await;
+            }
             Some(device) = audio_rx.recv() => {
                 if let Err(e) = core.set_audio_device(device).await {
                     tracing::warn!("audio output change: {e}");
@@ -2997,9 +3014,8 @@ async fn main() -> Result<()> {
                         // night — installing included.
                         let previous_run_day = core.update_last_run_day();
                         core.set_update_last_run_day(Some(now.day_key));
-                        let install = settings.update_policy
-                            == update::schedule::UpdatePolicy::CheckAndInstall;
-                        tracing::info!("scheduled update run (install: {install})");
+                        let install = settings.update_policy.install_scope();
+                        tracing::info!("scheduled update run (install: {install:?})");
                         // A full channel means a run is still in flight, and
                         // queuing a second one behind it would be the same
                         // work twice. `try_send` rather than `send` for that,

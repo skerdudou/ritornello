@@ -137,8 +137,9 @@ impl<P: Player> Core<P> {
     ///
     /// **Noted before the run rather than after it**, and that is the point:
     /// the ticker asks every minute, so a day noted only on success would fire
-    /// again sixty seconds after a failed check — and, under
-    /// `CheckAndInstall`, keep re-downloading all night. Once a day means once
+    /// again sixty seconds after a failed check — and, under a policy that
+    /// installs (`CheckAndInstall`, `CheckAndInstallAll`), keep
+    /// re-downloading all night. Once a day means once
     /// a day, whatever the outcome of the run.
     ///
     /// Which is why it takes an `Option` rather than a day: a run that never
@@ -151,6 +152,36 @@ impl<P: Player> Core<P> {
     pub fn set_update_last_run_day(&mut self, day: Option<i64>) {
         self.update_last_run_day = day;
         self.persist();
+    }
+
+    /// Replaces the stored list and persists it, so a following unrelated
+    /// settings write cannot lose it.
+    pub fn set_update_sources(&mut self, list: Vec<String>) {
+        self.update_sources = list;
+        self.persist();
+    }
+
+    /// Replaces the operator's pack preferences, retranslates and republishes
+    /// at once, and persists them — the shape of `set_fallback`, without its
+    /// resweep: a preference changes which installed pack speaks, never what
+    /// is installed, so there is nothing on disk to read again.
+    ///
+    /// Called from the `select!` loop of `main` on reception from the
+    /// `pack_preferences_rx` channel, fed by
+    /// `PUT /api/languages/{language}/preference`.
+    pub async fn set_pack_preferences(&mut self, prefs: Vec<crate::state::PackPreference>) {
+        self.pack_preferences = prefs.clone();
+        let locale = self.locale.clone().unwrap_or_else(|| "en".to_string());
+        let fallback = self.fallback.clone().unwrap_or_else(|| "en".to_string());
+        let new_catalog = {
+            let mut registry = self.registry.write().await;
+            registry.set_preferences(prefs);
+            crate::i18n::core_catalog(&registry, &locale, &fallback)
+        };
+        self.standby_status = Some(resolve_standby_status(&new_catalog));
+        *self.catalog.write().await = new_catalog;
+        self.persist();
+        self.publish_state();
     }
 
     pub(super) fn persist(&self) {
@@ -167,6 +198,8 @@ impl<P: Player> Core<P> {
             random: self.random,
             repeat_all: self.repeat_all,
             update_last_run_day: self.update_last_run_day,
+            update_sources: self.update_sources.clone(),
+            pack_preferences: self.pack_preferences.clone(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistence failed: {e}");
@@ -200,6 +233,8 @@ mod tests {
             random: false,
             repeat_all: false,
             update_last_run_day: None,
+            update_sources: Vec::new(),
+            pack_preferences: Vec::new(),
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
@@ -208,6 +243,61 @@ mod tests {
         let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"audio_device bluealsa:DEV=XX".to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_source_list_is_read_back_from_the_persisted_state_at_start() {
+        let persisted = PersistedState { update_sources: vec!["z/zed".into()], ..Default::default() };
+        let (core, _pc, _sc, _rx, _dir) = setup_persisted(persisted);
+        assert_eq!(core.update_sources, ["z/zed".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn the_source_list_is_persisted_and_survives_an_unrelated_write() {
+        let (mut core, _pc, _sc, _rx, dir) = setup();
+        core.set_update_sources(vec!["z/zed".into()]);
+        core.set_theme(crate::theme::ThemeState { theme: "t".into(), mode: "dark".into() });
+        let st = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!(st.update_sources, vec!["z/zed".to_string()]);
+        assert_eq!(core.update_sources, ["z/zed".to_string()]);
+    }
+
+    /// Two French packs carrying `core` — ours and a third party's — as an
+    /// install leaves them under the rig's packs root. Returns the third
+    /// party's id.
+    fn two_french_core_packs(root: &std::path::Path) -> String {
+        let packs = root.join("packs");
+        let write = crate::langpack::store::write_test_pack;
+        write(&packs, "fr", None, None, &[("core", "audio_output = \"Sortie ours\"\n")]);
+        write(&packs, "fr", Some("z/zed"), None, &[("core", "audio_output = \"Sortie theirs\"\n")])
+    }
+
+    /// The preference reaches what the core says at once, and is kept by a
+    /// later, unrelated write.
+    /// **[MUTATION]** drop `registry.set_preferences` from
+    /// `set_pack_preferences`: the catalog stays ours, red. **[MUTATION]**
+    /// drop the field from `persist`: red on the reload.
+    #[tokio::test]
+    async fn a_pack_preference_retranslates_at_once_and_is_persisted() {
+        let (mut core, _pc, _sc, _rx, dir) = setup();
+        let theirs = two_french_core_packs(dir.path());
+        core.set_locale("fr".into()).await.unwrap();
+        assert_eq!(core.catalog.read().await.get("audio_output"), "Sortie ours", "ours speaks by default");
+
+        let prefs = vec![crate::state::PackPreference { language: "fr".into(), module: "core".into(), pack: theirs }];
+        core.set_pack_preferences(prefs.clone()).await;
+        assert_eq!(core.catalog.read().await.get("audio_output"), "Sortie theirs");
+
+        core.set_theme(crate::theme::ThemeState { theme: "t".into(), mode: "dark".into() });
+        assert_eq!(crate::state::load(&dir.path().join("state.json")).pack_preferences, prefs);
+    }
+
+    #[tokio::test]
+    async fn the_pack_preferences_are_read_back_from_the_persisted_state_at_start() {
+        let prefs = vec![crate::state::PackPreference { language: "fr".into(), module: "core".into(), pack: "p".into() }];
+        let (core, _pc, _sc, _rx, _dir) =
+            setup_persisted(PersistedState { pack_preferences: prefs.clone(), ..Default::default() });
+        assert_eq!(core.pack_preferences, prefs);
     }
 
     #[tokio::test]

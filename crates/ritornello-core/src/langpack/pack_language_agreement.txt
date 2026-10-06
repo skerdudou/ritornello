@@ -1,0 +1,28 @@
+# Third-party pack directory names, and whether they are one.
+#
+# Read by two tests that cannot share code: the core's
+# `langpack::store::third_party_language_of` and ritornello-install's
+# `names::third_party_pack_id` must BOTH give the verdict written here. A
+# directory the core creates and the installer refuses stops every ordinary
+# installer run (`NotDeletable`), so the two must agree, and this table is
+# where they are made to.
+#
+# One id per line: `accept <id>` or `refuse <id>`. Languages here are at most
+# 16 bytes: past that the installer still accepts a name the core never
+# forms, which is the safe direction and is asserted on the core side alone.
+accept ritornello-xlang-fr-0123456789ab
+accept ritornello-xlang-pt-BR-0123456789ab
+accept ritornello-xlang-zh_Hant-0123456789ab
+accept ritornello-xlang-abcdefghijklmnop-0123456789ab
+refuse ritornello-xlang-fr--0123456789ab
+refuse ritornello-xlang--fr-0123456789ab
+refuse ritornello-xlang---0123456789ab
+refuse ritornello-xlang--0123456789ab
+refuse ritornello-xlang-0123456789ab
+refuse ritornello-xlang-a.b-0123456789ab
+refuse ritornello-xlang-fr-0123456789AB
+refuse ritornello-xlang-fr-0123456789a
+refuse ritornello-xlang-fr-0123456789abc
+refuse ritornello-xlang-fr-0123456789ag
+refuse ritornello-lang-fr-0123456789ab
+refuse ritornello-lang-fr

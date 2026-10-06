@@ -183,16 +183,29 @@ pub fn parse_repo_url(url: &str) -> Option<String> {
     let rest = rest.strip_suffix('/').unwrap_or(rest);
     let rest = rest.strip_suffix(".git").unwrap_or(rest);
     let (owner, repo) = rest.split_once('/')?;
-    if !is_repo_segment(owner) || !is_repo_segment(repo) {
+    if !is_repo_segment(owner, OWNER_MAX) || !is_repo_segment(repo, REPO_NAME_MAX) {
         return None;
     }
     Some(format!("{owner}/{repo}"))
 }
 
-/// One segment of a GitHub `owner/repo`: non-empty, `[A-Za-z0-9_.-]`, and not
-/// made of dots alone — `.` and `..` pass the charset and are path traversal.
-fn is_repo_segment(s: &str) -> bool {
+/// GitHub's own ceilings on the two halves of `owner/repo`: an account name
+/// is at most 39 characters, a repository name at most 100.
+const OWNER_MAX: usize = 39;
+const REPO_NAME_MAX: usize = 100;
+
+/// One segment of a GitHub `owner/repo`: non-empty, no longer than `max`,
+/// `[A-Za-z0-9_.-]`, and not made of dots alone — `.` and `..` pass the
+/// charset and are path traversal.
+///
+/// **The length is bounded too**, at GitHub's own limits. Without it the
+/// sources route accepted an `owner/repo` as long as a request body may be,
+/// sixteen times over: each stored in `state.json`, read back on every boot
+/// and interpolated into a URL on every check — for names no repository can
+/// carry.
+fn is_repo_segment(s: &str, max: usize) -> bool {
     !s.is_empty()
+        && s.len() <= max
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
         && !s.bytes().all(|b| b == b'.')
 }
@@ -591,8 +604,12 @@ pub fn classify_asset(name: &str, arch: &str) -> Option<(Offer, String)> {
     {
         for (dash, _) in rest.match_indices('-') {
             let (language, version) = (&rest[..dash], &rest[dash + 1..]);
-            if language.is_empty()
-                || language.starts_with('-')
+            // A language the pack store would not name a directory after —
+            // and `ritornello-install` would not plan around — is not a
+            // language: `fr-` out of `ritornello-lang-fr--1.0.0.tar.gz` once
+            // became `ritornello-xlang-fr--<h12>` on disk, which the
+            // installer then refused on every run.
+            if !crate::langpack::store::valid_pack_language(language)
                 || !is_version(version)
                 // A pack carries no architecture at all, so a version-shaped
                 // string that itself ends in ANY of the closed set of arch
@@ -1014,13 +1031,18 @@ mod tests {
         for name in [
             "ritornello-lang--0.2.1.tar.gz",
             // A lone dash as the language, reached on the loop's SECOND
-            // dash rather than its first: `language.starts_with('-')` is
-            // what refuses it. Fix round 1's review measured that this
-            // clause held no test of its own -- mutating it to `false` left
-            // the whole `update::` suite green, twice -- because every
-            // other malformed name above is already excluded earlier by
-            // `language.is_empty()` before this guard is ever reached.
+            // dash rather than its first: the dash rules of
+            // `store::valid_pack_language` are what refuse it (both of them
+            // do, so it cannot prove either alone -- the two names below
+            // do).
             "ritornello-lang---0.2.1.tar.gz",
+            // B2: a language ending or starting with a dash, which the pack
+            // store and `ritornello-install` both refuse as a directory name.
+            // **[MUTATION]** drop `!language.ends_with('-')` in
+            // `store::valid_pack_language`: red on `fr--`. **[MUTATION]** drop
+            // `!language.starts_with('-')`: red on `-fr`.
+            "ritornello-lang-fr--1.0.0.tar.gz",
+            "ritornello-lang--fr-1.0.0.tar.gz",
             "ritornello-lang-fr.tar.gz",
             "ritornello-lang-fr-armv7.tar.gz",
             "ritornello-lang-0.2.1.tar.gz",
@@ -1526,6 +1548,23 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
             parse_repo_url("https://github.com/Some-One_2/my.plugin-v2"),
             Some("Some-One_2/my.plugin-v2".to_string())
         );
+    }
+
+    /// GitHub's own ceilings, each half on its own: an owner of 39 characters
+    /// and a repository of 100 read, one more on either side does not.
+    /// **[MUTATION]** drop `s.len() <= max`: red on both oversized halves.
+    /// **[MUTATION]** swap the two maxima: red on the 39/100 pair.
+    #[test]
+    fn a_repository_longer_than_github_allows_is_not_a_repository() {
+        let (owner, repo) = ("o".repeat(39), "r".repeat(100));
+        assert_eq!(
+            parse_repo_url(&format!("https://github.com/{owner}/{repo}")),
+            Some(format!("{owner}/{repo}"))
+        );
+        let long_owner = format!("https://github.com/{}/{repo}", "o".repeat(40));
+        let long_repo = format!("https://github.com/{owner}/{}", "r".repeat(101));
+        assert_eq!(parse_repo_url(&long_owner), None, "owner of 40");
+        assert_eq!(parse_repo_url(&long_repo), None, "repository of 101");
     }
 
     /// **The majority path, and the one the other tests cannot reach.**
