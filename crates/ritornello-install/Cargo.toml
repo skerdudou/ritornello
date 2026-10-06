@@ -8,7 +8,7 @@ description = "Installs, updates and removes Ritornello on a device over ssh, fr
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
-dialoguer = "0.11"
+dialoguer = "0.12"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # The survey's nonce (R28). Already in the tree through ring, under reqwest.
 getrandom = "0.4"

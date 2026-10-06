@@ -139,7 +139,7 @@ pub fn offers_remove_all(dev: &DeviceState) -> bool {
 pub fn ask_action() -> anyhow::Result<Action> {
     let i = Select::new()
         .with_prompt("Ritornello is, or was, on this device")
-        .items(&["Install or update", "Remove everything"])
+        .items(["Install or update", "Remove everything"])
         .default(0)
         .interact()
         .context("asking what to do")?;
