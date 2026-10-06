@@ -54,7 +54,7 @@ pub enum Subsystem {
     /// moves it — otherwise a client subscribed to stored playlists alone
     /// would be woken at every second of playback.
     StoredPlaylist = 3,
-    /// The play modes: `random` and `repeat_all`.
+    /// The play modes: `random` and `repeat`.
     ///
     /// MPD's own name for this subsystem is `options`, and it is deliberately
     /// separate from `Player`: a physical remote or the SPA changes a mode
@@ -396,7 +396,7 @@ impl SharedState {
             if state.volume != before.volume || state.muted != before.muted {
                 mark(&mut moved, Subsystem::Mixer);
             }
-            if state.random != before.random || state.repeat_all != before.repeat_all {
+            if state.random != before.random || state.repeat != before.repeat {
                 // Its own subsystem and not `Player`: see `Subsystem::Options`
                 // for why a mode change must not be bundled with what is
                 // playing.
@@ -598,7 +598,7 @@ impl SharedState {
     ///
     /// **Five commands only**, and that is deliberate: `PlayPause` (toggles
     /// `Playing`↔`Paused`), `SetVolume` (sets the volume), `Mute` (toggles the
-    /// mute), and `SetRandom`/`SetRepeatAll` (set a play mode). Everything
+    /// mute), and `SetRandom`/`SetRepeat` (set a play mode). Everything
     /// else is ignored, because guessing the effect of a `Select` on the
     /// position, the track or the preset would be wrong more often than
     /// right — the active source decides, and it alone. A slightly late
@@ -682,7 +682,7 @@ impl SharedState {
                     }
                     // Same shape as `SetVolume`, and for the same reason: the
                     // core honours the absolute value (see
-                    // `Core::handle_command`'s `SetRandom`/`SetRepeatAll`
+                    // `Core::handle_command`'s `SetRandom`/`SetRepeat`
                     // arms), so without the increment done here the confirming
                     // frame would be identical to the previous one and nobody
                     // would be woken. Comparison and not blind assignment: an
@@ -714,12 +714,12 @@ impl SharedState {
                             mark(&mut moved, Subsystem::Options);
                         }
                     }
-                    Command::SetRepeatAll(v) => {
-                        let v = *v;
+                    Command::SetRepeat(r) => {
+                        let r = *r;
                         if !inst.state.has_finite_list {
                             mark(&mut moved, Subsystem::Options);
-                        } else if inst.state.repeat_all != v {
-                            inst.state.repeat_all = v;
+                        } else if inst.state.repeat != r {
+                            inst.state.repeat = r;
                             mark(&mut moved, Subsystem::Options);
                         }
                     }
@@ -801,6 +801,7 @@ impl SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ritornello_proto::Repeat;
 
     /// A catalog as the core emits one: every declared source is named, and
     /// its presets are those it knows how to enumerate (empty for the cd,
@@ -866,13 +867,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_frame_changing_random_or_repeat_all_wakes_options_alone() {
+    async fn a_frame_changing_random_or_repeat_wakes_options_alone() {
         // Each field tested separately: forgetting one of the two would leave
         // a client's mode button unrefreshed for the life of the connection,
         // since nothing else moves `Options`.
         for (name, frame) in [
             ("random", PlayerState { random: true, ..Default::default() }),
-            ("repeat_all", PlayerState { repeat_all: true, ..Default::default() }),
+            ("repeat", PlayerState { repeat: Repeat::All, ..Default::default() }),
         ] {
             let e = SharedState::default();
             let before = e.versions().await;
@@ -1505,11 +1506,11 @@ mod tests {
         // read `random: 1` right away: the confirming frame, for its part,
         // will be identical and move nothing.
         //
-        // **Alone**, and not alongside `SetRepeatAll`: a batched test would
+        // **Alone**, and not alongside `SetRepeat`: a batched test would
         // stay green even if this arm's `mark(&mut moved, Subsystem::Options)`
         // (or its comparison) were dropped, since the other command's own
         // marking would still move the counter and its own assignment would
-        // still make `inst.state.repeat_all` true — the assertion on
+        // still make `inst.state.repeat` set — the assertion on
         // `random` would be all that catches a regression here, and nothing
         // would be left to catch one on the mirror field. See the sibling
         // test just below for that half.
@@ -1528,18 +1529,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acknowledging_repeat_all_publishes_it_at_once_and_wakes_options() {
+    async fn acknowledging_repeat_publishes_it_at_once_and_wakes_options() {
         // The mirror of the test above, proved in isolation for the same
-        // reason: a batched acknowledgement would let a broken `SetRepeatAll`
+        // reason: a batched acknowledgement would let a broken `SetRepeat`
         // arm hide behind `SetRandom`'s own marking and assignment.
         let e = SharedState::default();
         e.apply_state(PlayerState { has_finite_list: true, ..Default::default() }).await;
         let before = e.versions().await;
 
-        e.acknowledge_optimistic(&[Command::SetRepeatAll(true)]).await;
+        e.acknowledge_optimistic(&[Command::SetRepeat(Repeat::All)]).await;
 
         let inst = e.read().await;
-        assert!(inst.state.repeat_all);
+        assert_eq!(inst.state.repeat, Repeat::All);
         assert_ne!(before[Subsystem::Options as usize], e.versions().await[Subsystem::Options as usize]);
     }
 
@@ -1569,11 +1570,11 @@ mod tests {
         let e = SharedState::default();
         let before = e.versions().await;
 
-        e.acknowledge_optimistic(&[Command::SetRandom(true), Command::SetRepeatAll(true)]).await;
+        e.acknowledge_optimistic(&[Command::SetRandom(true), Command::SetRepeat(Repeat::All)]).await;
 
         let inst = e.read().await;
         assert!(!inst.state.random, "the core refuses it, so we must not publish it either");
-        assert!(!inst.state.repeat_all, "and the same for repeat-all");
+        assert_eq!(inst.state.repeat, Repeat::Off, "and the same for repeat");
         assert_ne!(
             before[Subsystem::Options as usize],
             e.versions().await[Subsystem::Options as usize],

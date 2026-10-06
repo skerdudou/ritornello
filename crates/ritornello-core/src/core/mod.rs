@@ -185,7 +185,7 @@ pub struct Core<P: Player> {
     /// genuine ending and reopen a fresh pass at full speed, forever.
     /// `RETRY_BASE` already paces the *other* half of this same risk for
     /// streams (`expecting_stream`'s own `RetryIn`); this is its
-    /// counterpart for the reopening a `repeat_all` source performs on its
+    /// counterpart for the reopening a repeating source performs on its
     /// own, which that path never covers.
     ///
     /// `tokio::time::Instant`, not `std::time::Instant`: the wait this floor
@@ -290,10 +290,10 @@ pub struct Core<P: Player> {
     /// construction, pushed to every source (see `push_play_mode`) whenever
     /// it changes.
     random: bool,
-    /// Repeat-all, same persistence and same push as `random`.
-    repeat_all: bool,
+    /// The repeat setting, same persistence and same push as `random`.
+    repeat: ritornello_proto::Repeat,
     /// Identity of the last local day an automatic update run happened on.
-    /// Round-tripped exactly like `random` and `repeat_all` — read from
+    /// Round-tripped exactly like `random` and `repeat` — read from
     /// `PersistedState` at construction, written back unchanged by every
     /// `persist()` — even though nothing in this task yet sets it to
     /// anything but what was last on disk. The scheduler that actually
@@ -532,7 +532,7 @@ impl<P: Player> Core<P> {
             can_eject: false,
             has_finite_list: false,
             random: persisted.random,
-            repeat_all: persisted.repeat_all,
+            repeat: persisted.repeat,
             update_last_run_day: persisted.update_last_run_day,
             update_sources: persisted.update_sources.clone(),
             pack_preferences: persisted.pack_preferences.clone(),

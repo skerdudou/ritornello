@@ -310,7 +310,7 @@ impl<P: Player> Core<P> {
     /// just hot-wired, or any other single-source caller of
     /// `SourceReq::SetPlayMode`.
     ///
-    /// `random` and `repeat_all` always have a value (`false` by default,
+    /// `random` and `repeat` always have a value (`false` by default,
     /// read from `PersistedState` at construction), so there is never a
     /// reason to skip this send.
     ///
@@ -319,7 +319,7 @@ impl<P: Player> Core<P> {
     pub async fn send_play_mode_to(&self, name: &str) {
         if let Some(src) = self.sources.get(name)
             && let Err(e) = src
-                .request(SourceReq::SetPlayMode { random: self.random, repeat_all: self.repeat_all })
+                .request(SourceReq::SetPlayMode { random: self.random, repeat: self.repeat })
                 .await
         {
             tracing::warn!("SetPlayMode to {name}: {e}");
@@ -328,7 +328,7 @@ impl<P: Player> Core<P> {
 
     /// Broadcasts the current play mode to **every** wired source, active or
     /// not: unlike `can_eject`/`has_finite_list`, which describe the active
-    /// source's own capabilities, `random`/`repeat_all` are a setting of the
+    /// source's own capabilities, `random`/`repeat` are a setting of the
     /// device, and every source is entitled to know it — the SDK's default
     /// `set_play_mode` already no-ops for one that has no finite list to
     /// shuffle or repeat (see `SourcePlugin::set_play_mode`).
@@ -1021,7 +1021,7 @@ mod tests {
         assert!(
             calls.iter().any(|c| c.starts_with("files:SetPlayMode")
                 && c.contains("random: true")
-                && c.contains("repeat_all: false")),
+                && c.contains("repeat: Off")),
             "the late source must learn the mode already in force: {calls:?}"
         );
     }
@@ -1042,7 +1042,7 @@ mod tests {
         assert!(
             calls.iter().any(|c| c.starts_with("cd:SetPlayMode")
                 && c.contains("random: true")
-                && c.contains("repeat_all: false")),
+                && c.contains("repeat: Off")),
             "the newly active source must be handed the mode at its activation: {calls:?}"
         );
     }
@@ -1062,13 +1062,13 @@ mod tests {
         assert!(
             calls.iter().any(|c| c.starts_with("radio:SetPlayMode")
                 && c.contains("random: true")
-                && c.contains("repeat_all: false")),
+                && c.contains("repeat: Off")),
             "radio must relearn the mode on wake: {calls:?}"
         );
         assert!(
             calls.iter().any(|c| c.starts_with("cd:SetPlayMode")
                 && c.contains("random: true")
-                && c.contains("repeat_all: false")),
+                && c.contains("repeat: Off")),
             "cd, though inactive, must relearn it too: {calls:?}"
         );
     }
@@ -1076,8 +1076,8 @@ mod tests {
     #[tokio::test]
     async fn only_the_play_mode_is_pushed_to_a_hot_wired_source() {
         // The play mode is the only setting a hot-wired, non-first source is
-        // owed: `random` and `repeat_all` always have a value (`false` or
-        // `true`, never "unset"), so it is always pushed, at its default
+        // owed: `random` and `repeat` always have a value (`false`/`Off` or
+        // another one, never "unset"), so it is always pushed, at its default
         // value here.
         let (mut core, _pc, _sc, _rx, _d) = setup();
         let late_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1089,7 +1089,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             late_calls.lock().unwrap().as_slice(),
-            ["files:SetPlayMode { random: false, repeat_all: false }".to_string()]
+            ["files:SetPlayMode { random: false, repeat: Off }".to_string()]
         );
     }
 
@@ -1115,7 +1115,7 @@ mod tests {
         assert_eq!(
             seen.lock().unwrap().as_slice(),
             [
-                "radio:SetPlayMode { random: false, repeat_all: false }".to_string(),
+                "radio:SetPlayMode { random: false, repeat: Off }".to_string(),
                 "radio:Wake".into()
             ],
             "the play mode BEFORE the wake, exactly as at startup"
@@ -1143,7 +1143,7 @@ mod tests {
 
         assert_eq!(
             seen.lock().unwrap().as_slice(),
-            ["radio:SetPlayMode { random: false, repeat_all: false }".to_string()]
+            ["radio:SetPlayMode { random: false, repeat: Off }".to_string()]
         );
         assert!(
             !core.player.calls.lock().unwrap().iter().any(|c| c.starts_with("play")),

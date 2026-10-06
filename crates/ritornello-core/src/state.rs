@@ -352,9 +352,12 @@ pub struct PersistedState {
     /// it must read back the same after a restart, not fall back to "off".
     #[serde(default)]
     pub random: bool,
-    /// Repeat-all: same reasoning and same persistence as `random`.
+    /// The repeat setting, persisted like `random`. Replaces the former
+    /// `repeat_all` boolean outright: no compatibility kept before the first
+    /// final release, so a state file from before simply loses this one
+    /// setting (an unknown field is ignored, and this one then defaults).
     #[serde(default)]
-    pub repeat_all: bool,
+    pub repeat: ritornello_proto::Repeat,
     /// Identity of the last local day an automatic run happened on. See
     /// `schedule::day_key`: an identity, never compared for order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -449,7 +452,7 @@ impl Default for PersistedState {
             mode: None,
             settings: Settings::default(),
             random: false,
-            repeat_all: false,
+            repeat: Default::default(),
             update_last_run_day: None,
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
@@ -615,7 +618,7 @@ mod tests {
             mode: None,
             settings: Settings::default(),
             random: false,
-            repeat_all: false,
+            repeat: Default::default(),
             update_last_run_day: None,
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
@@ -648,7 +651,7 @@ mod tests {
             mode: None,
             settings: Settings::default(),
             random: false,
-            repeat_all: false,
+            repeat: Default::default(),
             update_last_run_day: None,
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
@@ -674,7 +677,7 @@ mod tests {
             mode: Some("dark".into()),
             settings: Settings::default(),
             random: false,
-            repeat_all: false,
+            repeat: Default::default(),
             update_last_run_day: None,
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),

@@ -496,7 +496,7 @@ pub(super) fn update_with_capabilities(can_eject: Option<bool>, has_finite_list:
 ///
 /// `setup()` starts with the capability unknown, hence false by the
 /// convention of `SourceMessage::has_finite_list`, so **a test that arms
-/// `random` or `repeat_all` for a reason of its own must say this first** or
+/// `random` or `repeat` for a reason of its own must say this first** or
 /// the command is refused and the test proves nothing about what it meant to
 /// prove. `can_eject` deliberately left alone: the two capabilities share a
 /// wire idiom, not a value.

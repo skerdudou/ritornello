@@ -65,15 +65,15 @@ pub enum SourceReq {
     /// believed playback was under way when idle arrived. `EndOfContent` is
     /// that answer: the source finished its list on its own. SDK-side
     /// default: behaves like `Stop`; a plugin may override `end_of_content()`
-    /// to advance to the next pass under random/repeat-all.
+    /// to advance to the next pass under random/repeat.
     EndOfContent,
     /// The two play modes together: `random` (draw the whole list without a
-    /// repeat, then stop) and `repeat_all` (start over). A single request for
-    /// both because they are read by the same source at the same instant, and
-    /// splitting them would let a delivery race set one without the other.
-    /// SDK-side default: `set_play_mode` does nothing, for a source with no
-    /// finite list to shuffle or repeat.
-    SetPlayMode { random: bool, repeat_all: bool },
+    /// repeat) and `repeat` (off, the whole list, or the playing track — see
+    /// `Repeat`). A single request for both because they are read by the
+    /// same source at the same instant, and splitting them would let a
+    /// delivery race set one without the other. SDK-side default:
+    /// `set_play_mode` does nothing, for a source with no finite list.
+    SetPlayMode { random: bool, repeat: crate::command::Repeat },
     /// The core obtained the full-size original of the cover retained for
     /// `identity`, and left it at `file`. The Source may keep it.
     ///
@@ -400,7 +400,7 @@ pub struct SourceMessage {
     /// **capability of the source**, not of what is loaded: an empty CD tray
     /// still "has" a finite list in the sense that matters here (the modes
     /// below apply to it, once it holds a disc). It is what lets the web
-    /// remote grey out its random/repeat-all buttons on a source, the radio,
+    /// remote grey out its random/repeat buttons on a source, the radio,
     /// for which "draw without repeat, then stop" and "start the list over"
     /// have no meaning.
     ///
@@ -754,8 +754,9 @@ mod tests {
 
     #[test]
     fn set_play_mode_carries_both_flags() {
-        let r = SourceReq::SetPlayMode { random: true, repeat_all: false };
+        let r = SourceReq::SetPlayMode { random: true, repeat: crate::command::Repeat::One };
         let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""random":true"#) && json.contains(r#""repeat":"one""#), "{json}");
         assert_eq!(serde_json::from_str::<SourceReq>(&json).unwrap(), r);
     }
 

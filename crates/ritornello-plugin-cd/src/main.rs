@@ -23,7 +23,7 @@ use admin::CdAdmin;
 use anyhow::Result;
 use rand::seq::SliceRandom;
 use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
-use ritornello_proto::{SourceAction, Text};
+use ritornello_proto::{Repeat, SourceAction, Text};
 use state::{OnArrival, Remembered};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -102,7 +102,7 @@ struct CdSource {
     /// `player_track`/`end_of_content`/`next`/`prev` to know whether a track
     /// number should come from the disc's own order or from `order` below.
     random: bool,
-    repeat_all: bool,
+    repeat: Repeat,
     /// The pass currently being walked when `random` is on: a permutation of
     /// `0..total_tracks`, drawn by `set_play_mode` on the transition that
     /// turns shuffle on (empty otherwise — sequential playback never reads
@@ -570,7 +570,7 @@ impl CdSource {
     /// needed, unlike `end_of_content`'s own restart (see its doc on
     /// regression #1).
     async fn finish_pass(&mut self) -> SourceOutcome {
-        if !self.repeat_all {
+        if self.repeat == Repeat::Off {
             self.playback = false;
             self.pending_chapter = None;
             return self.issue(SourceAction::Stop);
@@ -759,10 +759,10 @@ impl SourcePlugin for CdSource {
     /// (`next`/`prev`, or `player_track`'s own correction toward it) will
     /// read — mpv's own position is corrected the moment one of those
     /// actually fires, not immediately.
-    async fn set_play_mode(&mut self, random: bool, repeat_all: bool) {
+    async fn set_play_mode(&mut self, random: bool, repeat: Repeat) {
         let random_changed = random != self.random;
         self.random = random;
-        self.repeat_all = repeat_all;
+        self.repeat = repeat;
         if !random_changed {
             return;
         }
@@ -851,7 +851,7 @@ impl SourcePlugin for CdSource {
         // opened yet: any seek still owed from an arrival or a `select` is
         // moot once mpv itself reports the list ran its course.
         self.pending_chapter = None;
-        if !self.repeat_all {
+        if self.repeat == Repeat::Off {
             return self.stop().await;
         }
         self.cursor = 0;
@@ -1242,7 +1242,7 @@ async fn main() -> Result<()> {
         pending_chapter: None,
         draw: CdOrder::Random,
         random: false,
-        repeat_all: false,
+        repeat: Repeat::Off,
         order: Vec::new(),
         cursor: 0,
     };
@@ -1299,7 +1299,7 @@ mod tests {
             // exact.
             draw: CdOrder::Fixed(Vec::new()),
             random: false,
-            repeat_all: false,
+            repeat: Repeat::Off,
             order: Vec::new(),
             cursor: 0,
         };
@@ -1379,7 +1379,7 @@ mod tests {
     }
 
     /// A disc with no injected draw — for tests that only exercise
-    /// `repeat_all` under sequential order, or the capability flag, where
+    /// `repeat` under sequential order, or the capability flag, where
     /// the draw mechanism never runs.
     async fn source_with_disc(tracks: usize) -> CdSource {
         disc_with(tracks as i64)
@@ -1401,7 +1401,7 @@ mod tests {
         // `[2, 1, 1, 1]` here, not each track once — only a correction
         // toward the drawn order does.
         let mut s = source_with_disc_and_order(4, vec![2, 0, 3, 1]);
-        s.set_play_mode(true, false).await;
+        s.set_play_mode(true, Repeat::Off).await;
         let arrival = s.activate().await;
         assert_eq!(arrival.action, SourceAction::play("cdda://").finite());
         // mpv confirms the disc open at its own first physical chapter:
@@ -1437,7 +1437,7 @@ mod tests {
         // before the pass is walked in full must reload and keep going
         // (see its own mid-pass branch), not stop early.
         let mut s = source_with_disc_and_order(4, vec![2, 0, 3, 1]);
-        s.set_play_mode(true, false).await;
+        s.set_play_mode(true, Repeat::Off).await;
         s.activate().await; // order = [2, 0, 3, 1], cursor 0, pending on 2
         s.player_track(0).await; // confirms the disc open at entry 2
         s.player_track(1).await; // corrected toward order[1] == 0
@@ -1460,7 +1460,7 @@ mod tests {
         // this test used to be named for a reload and assert a move
         // instead.
         let mut s = source_with_disc(3).await;
-        s.set_play_mode(false, true).await;
+        s.set_play_mode(false, Repeat::All).await;
         s.activate().await;
         let out = s.end_of_content().await;
         assert_eq!(
@@ -1494,7 +1494,7 @@ mod tests {
         // comment on why calling `end_of_content` any earlier tests
         // nothing real): only then does the disc's true idle arrive.
         let mut s = source_with_disc_and_draw_queue(3, vec![vec![2, 0, 1], vec![1, 2, 0]]);
-        s.set_play_mode(true, true).await;
+        s.set_play_mode(true, Repeat::All).await;
         s.activate().await; // order = [2, 0, 1], cursor 0, pending on 2
         s.player_track(0).await; // confirms the disc open at entry 2
         s.player_track(1).await; // corrected toward order[1] == 0
@@ -1718,7 +1718,7 @@ mod tests {
         // and the owner's "every track once" applies with repeat-all off
         // too.
         let mut s = source_with_disc_and_order(4, vec![2, 0, 3, 1]);
-        s.set_play_mode(true, false).await; // repeat-all OFF
+        s.set_play_mode(true, Repeat::Off).await; // repeat-all OFF
         s.activate().await; // order = [2, 0, 3, 1], cursor 0, pending on 2
         s.player_track(0).await; // confirms the disc open at entry 2
 
@@ -1748,7 +1748,7 @@ mod tests {
         // not kept whenever the pass's own last entry did not coincide
         // with the disc's actual last physical track.
         let mut s = source_with_disc_and_order(4, vec![2, 0, 3, 1]);
-        s.set_play_mode(true, false).await;
+        s.set_play_mode(true, Repeat::Off).await;
         s.activate().await; // order = [2, 0, 3, 1], cursor 0, pending on 2
         s.player_track(0).await; // confirms the disc open at entry 2
         s.player_track(1).await; // corrected toward order[1] == 0
@@ -1769,7 +1769,7 @@ mod tests {
         // replaying the same permutation, so a queue is used to prove the
         // second pass really is drawn again.
         let mut s = source_with_disc_and_draw_queue(4, vec![vec![2, 0, 3, 1], vec![3, 1, 2, 0]]);
-        s.set_play_mode(true, true).await;
+        s.set_play_mode(true, Repeat::All).await;
         s.activate().await;
         s.player_track(0).await;
         s.player_track(1).await;
@@ -1803,7 +1803,7 @@ mod tests {
         source.present = false;
         source.draw = CdOrder::Sequence(vec![vec![], vec![2, 0, 1]]);
 
-        source.set_play_mode(true, false).await; // mode on, nothing in the tray
+        source.set_play_mode(true, Repeat::Off).await; // mode on, nothing in the tray
         assert!(source.order.is_empty(), "the useless first draw, over zero tracks");
 
         presence_tx.send(true).await.unwrap();
@@ -1839,7 +1839,7 @@ mod tests {
         s.player_track(1).await; // sequential natural advance: now on track 1
         assert_eq!(s.track, 1);
 
-        s.set_play_mode(true, false).await; // shuffle engaged mid-playback
+        s.set_play_mode(true, Repeat::Off).await; // shuffle engaged mid-playback
 
         assert_eq!(s.order, vec![1, 0, 3, 2], "the playing track swapped to the head of the draw");
         assert_eq!(s.cursor, 0);
@@ -1873,7 +1873,7 @@ mod tests {
         s.activate().await;
         s.player_track(0).await;
         s.player_track(1).await;
-        s.set_play_mode(true, false).await;
+        s.set_play_mode(true, Repeat::Off).await;
 
         assert_eq!(s.prev().await.action, SourceAction::Noop, "the playing track heads the pass");
         assert_eq!(s.next().await.action, SourceAction::PlayerChapter(0));
@@ -1889,7 +1889,7 @@ mod tests {
         s.track = 1; // stopped on track 1 earlier
         assert!(!s.playback);
 
-        s.set_play_mode(true, false).await;
+        s.set_play_mode(true, Repeat::Off).await;
 
         assert_eq!(s.order, vec![2, 0, 3, 1]);
         assert_eq!(s.cursor, 0);
@@ -1947,7 +1947,7 @@ mod tests {
         // the echo of the requested chapter; then the natural advance to
         // the physically next one; at the physical end, idle.
         let mut s = source_with_disc_and_draw_queue(4, vec![vec![2, 0, 3, 1], vec![1, 3, 0, 2]]);
-        s.set_play_mode(true, true).await;
+        s.set_play_mode(true, Repeat::All).await;
         s.activate().await;
         assert_eq!(s.player_track(0).await.action, SourceAction::PlayerChapter(2), "opened at 0, sent to 2");
 

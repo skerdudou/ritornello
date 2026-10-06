@@ -12,7 +12,7 @@
 
 use crate::state::{Snapshot, Subsystem};
 use crate::protocol::{ack, line, Ack};
-use ritornello_proto::{Command, Playback, Preset, SourceCatalog};
+use ritornello_proto::{Command, Playback, Preset, Repeat, SourceCatalog};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -330,7 +330,7 @@ pub fn handle(
         "volume" => volume(inst, index, remainder),
         // `random 0|1` / `repeat 0|1`: absolute values, unlike the physical
         // remote's toggle keys. Always emitted, never guarded by the current
-        // state: unlike `pause`'s toggle, `SetRandom`/`SetRepeatAll` carry no
+        // state: unlike `pause`'s toggle, `SetRandom`/`SetRepeat` carry no
         // ambiguity a resend could double, so there is no race to close here
         // — see `SharedState::acknowledge_optimistic` for where the
         // comparison actually lives (it decides whether to wake `options`,
@@ -345,7 +345,7 @@ pub fn handle(
         // command that did nothing, the same as every other key on this
         // device.
         "random" => play_mode(index, "random", remainder, Command::SetRandom),
-        "repeat" => play_mode(index, "repeat", remainder, Command::SetRepeatAll),
+        "repeat" => play_mode(index, "repeat", remainder, |on| Command::SetRepeat(if on { Repeat::All } else { Repeat::Off })),
         // `seek`/`seekid` ignore their first argument (position or id):
         // `SeekTo` cannot change track at the same time, and MPD only sends
         // this kind of command about what is already playing.
@@ -712,7 +712,7 @@ fn published_volume(inst: &Snapshot) -> u8 {
 fn status(inst: &Snapshot) -> Vec<String> {
     let queue = queue(inst);
     let mut lines = vec![line("volume", published_volume(inst))];
-    lines.push(line("repeat", u8::from(inst.state.repeat_all)));
+    lines.push(line("repeat", u8::from(!inst.state.repeat.is_off())));
     lines.push(line("random", u8::from(inst.state.random)));
     // `single` and `consume` stay reported as zero and **not omitted**:
     // clients always read them, and their absence makes them misbehave.
@@ -1947,14 +1947,14 @@ mod tests {
         // buttons. `single`/`consume` stay at zero — they are refused (see
         // the "not supported" test) and each would add a case to every
         // surface already delivered for this task.
-        let inst = snapshot_from(PlayerState { random: true, repeat_all: false, ..radio_stopped() });
+        let inst = snapshot_from(PlayerState { random: true, repeat: Repeat::Off, ..radio_stopped() });
         let lines = handle_ok(&inst, &["status"]);
         assert!(lines.contains(&"random: 1".to_string()), "{lines:?}");
         assert!(lines.contains(&"repeat: 0".to_string()), "{lines:?}");
         assert!(lines.contains(&"single: 0".to_string()), "{lines:?}");
         assert!(lines.contains(&"consume: 0".to_string()), "{lines:?}");
 
-        let inst = snapshot_from(PlayerState { random: false, repeat_all: true, ..radio_stopped() });
+        let inst = snapshot_from(PlayerState { random: false, repeat: Repeat::All, ..radio_stopped() });
         let lines = handle_ok(&inst, &["status"]);
         assert!(lines.contains(&"random: 0".to_string()), "{lines:?}");
         assert!(lines.contains(&"repeat: 1".to_string()), "{lines:?}");
@@ -2792,8 +2792,8 @@ mod tests {
         let inst = snapshot_stopped();
         assert_eq!(cmds(&inst, &["random", "1"]), vec![Command::SetRandom(true)]);
         assert_eq!(cmds(&inst, &["random", "0"]), vec![Command::SetRandom(false)]);
-        assert_eq!(cmds(&inst, &["repeat", "1"]), vec![Command::SetRepeatAll(true)]);
-        assert_eq!(cmds(&inst, &["repeat", "0"]), vec![Command::SetRepeatAll(false)]);
+        assert_eq!(cmds(&inst, &["repeat", "1"]), vec![Command::SetRepeat(Repeat::All)]);
+        assert_eq!(cmds(&inst, &["repeat", "0"]), vec![Command::SetRepeat(Repeat::Off)]);
     }
 
     #[test]

@@ -457,15 +457,15 @@ impl<P: Player> Core<P> {
             // would leave the web remote — which cannot send here at all —
             // disagreeing with the physical remote about what the device
             // remembers.
-            Command::ToggleRandom | Command::ToggleRepeatAll | Command::SetRandom(_) | Command::SetRepeatAll(_)
+            Command::ToggleRandom | Command::SetRandom(_) | Command::CycleRepeat | Command::SetRepeat(_)
                 if !self.has_finite_list => {}
             Command::ToggleRandom => {
                 self.random = !self.random;
                 self.persist();
                 self.push_play_mode().await;
             }
-            Command::ToggleRepeatAll => {
-                self.repeat_all = !self.repeat_all;
+            Command::CycleRepeat => {
+                self.repeat = self.repeat.next();
                 self.persist();
                 self.push_play_mode().await;
             }
@@ -474,8 +474,8 @@ impl<P: Player> Core<P> {
                 self.persist();
                 self.push_play_mode().await;
             }
-            Command::SetRepeatAll(v) => {
-                self.repeat_all = v;
+            Command::SetRepeat(r) => {
+                self.repeat = r;
                 self.persist();
                 self.push_play_mode().await;
             }
@@ -488,6 +488,7 @@ impl<P: Player> Core<P> {
 mod tests {
     use crate::core::*;
     use crate::core::test_support::*;
+    use ritornello_proto::Repeat;
 
     #[tokio::test]
     async fn standby_blocks_everything_but_power() {
@@ -1119,12 +1120,22 @@ mod tests {
         assert!(state_rx.borrow().random);
         core.handle_command(Command::ToggleRandom).await.unwrap();
         assert!(!state_rx.borrow().random, "the toggle serves the physical key");
-        core.handle_command(Command::SetRepeatAll(true)).await.unwrap();
-        assert!(state_rx.borrow().repeat_all);
-        core.handle_command(Command::ToggleRepeatAll).await.unwrap();
-        assert!(!state_rx.borrow().repeat_all, "the toggle serves the physical key here too");
-        core.handle_command(Command::ToggleRepeatAll).await.unwrap();
-        assert!(state_rx.borrow().repeat_all, "applied twice, the toggle returns to its starting value");
+        core.handle_command(Command::SetRepeat(Repeat::All)).await.unwrap();
+        assert_eq!(state_rx.borrow().repeat, Repeat::All);
+        core.handle_command(Command::CycleRepeat).await.unwrap();
+        assert_eq!(state_rx.borrow().repeat, Repeat::One, "the cycle serves the physical key here too");
+        core.handle_command(Command::CycleRepeat).await.unwrap();
+        assert_eq!(state_rx.borrow().repeat, Repeat::Off, "the cycle comes back to off after one");
+    }
+
+    #[tokio::test]
+    async fn the_repeat_key_cycles_off_all_one_and_back() {
+        let (mut core, _pc, _sc, state_rx, _d) = setup();
+        declare_finite_list(&mut core, "radio");
+        for expected in [Repeat::All, Repeat::One, Repeat::Off] {
+            core.handle_command(Command::CycleRepeat).await.unwrap();
+            assert_eq!(state_rx.borrow().repeat, expected);
+        }
     }
 
     #[tokio::test]
@@ -1133,7 +1144,7 @@ mod tests {
         let (mut core, _pc, _sc, _rx, dir) = setup();
         declare_finite_list(&mut core, "radio");
         core.handle_command(Command::SetRandom(true)).await.unwrap();
-        core.handle_command(Command::SetRepeatAll(true)).await.unwrap();
+        core.handle_command(Command::SetRepeat(Repeat::All)).await.unwrap();
 
         let persisted = crate::state::load(&dir.path().join("state.json"));
         let (mut reloaded, _pc2, _sc2, _rx2, _d2) = setup_persisted(persisted);
@@ -1144,7 +1155,7 @@ mod tests {
         // survived.
         declare_finite_list(&mut reloaded, "radio");
         assert!(reloaded.player_state().random, "random must survive a restart");
-        assert!(reloaded.player_state().repeat_all, "repeat_all must survive a restart");
+        assert_eq!(reloaded.player_state().repeat, Repeat::All, "repeat must survive a restart");
     }
 
     #[tokio::test]
@@ -1180,17 +1191,17 @@ mod tests {
         for cmd in [
             Command::SetRandom(true),
             Command::ToggleRandom,
-            Command::SetRepeatAll(true),
-            Command::ToggleRepeatAll,
+            Command::SetRepeat(Repeat::One),
+            Command::CycleRepeat,
         ] {
             let label = format!("{cmd:?}");
             core.handle_command(cmd).await.unwrap();
             assert!(!state_rx.borrow().random, "{label}: nothing may show through on a mute source");
-            assert!(!state_rx.borrow().repeat_all, "{label}: same for repeat-all");
+            assert_eq!(state_rx.borrow().repeat, Repeat::Off, "{label}: same for repeat");
 
             declare_finite_list(&mut core, "radio");
             assert!(!state_rx.borrow().random, "{label} armed random on a source with no list");
-            assert!(!state_rx.borrow().repeat_all, "{label} armed repeat-all on a source with no list");
+            assert_eq!(state_rx.borrow().repeat, Repeat::Off, "{label} armed repeat on a source with no list");
             core.handle_source_update("radio", update_with_capabilities(None, Some(false)));
         }
     }
@@ -1221,7 +1232,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_published_modes_never_outlive_the_finite_list() {
-        // The invariant every client leans on: `random`/`repeat_all` are
+        // The invariant every client leans on: `random`/`repeat` are
         // never true while `has_finite_list` is false. The owner reported
         // the shuffle icon lit on the radio, next to a key that refused to
         // be pressed, because this mask did not exist.
@@ -1233,16 +1244,16 @@ mod tests {
         let (mut core, _pc, _sc, state_rx, _d) = setup();
         declare_finite_list(&mut core, "radio");
         core.handle_command(Command::SetRandom(true)).await.unwrap();
-        core.handle_command(Command::SetRepeatAll(true)).await.unwrap();
+        core.handle_command(Command::SetRepeat(Repeat::All)).await.unwrap();
         assert!(state_rx.borrow().random);
-        assert!(state_rx.borrow().repeat_all);
+        assert_eq!(state_rx.borrow().repeat, Repeat::All);
 
         core.handle_source_update("radio", update_with_capabilities(None, Some(false)));
         {
             let s = state_rx.borrow();
             assert!(!s.has_finite_list);
             assert!(!s.random, "a mode the source cannot honour is not a mode the device is in");
-            assert!(!s.repeat_all, "and the same for repeat-all");
+            assert_eq!(s.repeat, Repeat::Off, "and the same for repeat");
         }
 
         declare_finite_list(&mut core, "radio");
@@ -1250,7 +1261,7 @@ mod tests {
         {
             let s = state_rx.borrow();
             assert!(!s.random, "standby masks the modes as it already masked has_finite_list");
-            assert!(!s.repeat_all, "and the same for repeat-all");
+            assert_eq!(s.repeat, Repeat::Off, "and the same for repeat");
         }
         core.handle_command(Command::Power).await.unwrap(); // wake
         // Still masked right after the wake, and that is not this rule's

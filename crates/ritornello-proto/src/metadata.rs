@@ -737,7 +737,7 @@ pub struct PlayerState {
     pub can_eject: bool,
     /// The active Source has a finite list to shuffle or repeat (see
     /// `SourceMessage::has_finite_list`): this is what lets the web remote
-    /// grey out its random/repeat-all keys on a source, the radio, for which
+    /// grey out its random/repeat keys on a source, the radio, for which
     /// neither mode has a meaning.
     ///
     /// **False by default**: not knowing is offering nothing — the same
@@ -756,7 +756,7 @@ pub struct PlayerState {
     /// client may lean on it: **never `true` while `has_finite_list` is
     /// `false`.**
     ///
-    /// A client greying its random/repeat-all keys still reads
+    /// A client greying its random/repeat keys still reads
     /// `has_finite_list` to decide, not this field: the key is greyed
     /// because the source has no list to shuffle, not because shuffle
     /// happens to be off.
@@ -765,13 +765,13 @@ pub struct PlayerState {
     /// JSON at its default value, so no existing frame changes shape.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub random: bool,
-    /// Repeat-all is on: the active list starts over once exhausted, instead
-    /// of stopping. Same convention as `random`, just above: a persisted
-    /// setting, published masked by `has_finite_list` and therefore never
-    /// `true` while that one is `false`, and `has_finite_list` remains what
-    /// a client must read to grey out the key.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub repeat_all: bool,
+    /// The repeat setting: off, the whole list, or the playing track. Same
+    /// convention as `random`, just above: a persisted setting, published
+    /// masked by `has_finite_list` and therefore never anything but `Off`
+    /// while that one is `false`, and `has_finite_list` remains what a client
+    /// must read to grey out the key.
+    #[serde(default, skip_serializing_if = "crate::command::Repeat::is_off")]
+    pub repeat: crate::command::Repeat,
     /// How this device writes a time and a date, as its owner set it.
     ///
     /// **A rendering preference in the state frame, and it has to be said

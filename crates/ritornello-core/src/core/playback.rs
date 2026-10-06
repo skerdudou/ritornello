@@ -131,7 +131,7 @@ impl<P: Player> Core<P> {
                 // indefinitely.
                 //
                 // `EndOfContent` only on a real ending: it is what lets a
-                // Source open another pass under random/repeat-all, which
+                // Source open another pass under random/repeat, which
                 // must never happen on a Stop the user asked for.
                 // Idempotent otherwise when the stop comes from a command
                 // (the Source has already been told by `Command::Stop`).
