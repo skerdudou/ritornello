@@ -67,8 +67,11 @@ async fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel(32);
     let hub = Hub::new(Bindings::load(&bindings_path), tx);
     let input_root = PathBuf::from(devices::INPUT_DIR);
-    let opened = hub.open_new_devices(&input_root);
+    let opened = hub.rescan(&input_root).await;
     tracing::info!("{opened} input device(s) opened");
+    // What "Refresh" does, on its own: a receiver plugged back in is met by
+    // the next tick instead of waiting for someone to click.
+    devices::spawn_periodic_rescan(hub.clone(), input_root.clone(), devices::RESCAN_PERIOD);
 
     // The two halves stay independent: a page failure must not cut off the
     // remote. `Runtime::run` now holds both, each in its own task — the page
