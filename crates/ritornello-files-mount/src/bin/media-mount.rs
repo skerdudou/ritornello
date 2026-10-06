@@ -57,6 +57,39 @@ fn mounted_under_root(proc_mounts: &str) -> Vec<PathBuf> {
     mount_points(proc_mounts).filter(|p| p.starts_with(MOUNT_ROOT)).collect()
 }
 
+/// Mount points of the declared shares that are mounted, but not in the mode
+/// the table now asks for: read-only where `writable` is set, or the reverse.
+///
+/// Without this, a share already mounted was skipped whatever its options, so
+/// ticking "writable" on the page wrote the table, started this service, and
+/// changed nothing until the next reboot — while the plugin, reading `writable`
+/// from the table, went on to try writes the kernel refused. `ro` is a mount
+/// option, not a flag read at every write: the only way to change it is to
+/// mount again.
+///
+/// Answered by keeping only the lines whose options say `rw` and asking
+/// `is_mounted_in` about those, rather than by reading the mount point column
+/// here: the unescaping of that column has a single implementation (see
+/// `mount_points`), and a second one in this binary is how the two would
+/// drift apart.
+fn mounted_in_another_mode(proc_mounts: &str, roots: &Roots) -> Vec<PathBuf> {
+    let read_write: String = proc_mounts
+        .lines()
+        .filter(|l| l.split_whitespace().nth(3).is_some_and(|o| o.split(',').any(|o| o == "rw")))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    roots
+        .root
+        .iter()
+        .filter(|r| r.kind == RootKind::Smb)
+        .map(|r| (r.mount_point(), r.writable))
+        .filter(|(point, writable)| {
+            is_mounted_in(proc_mounts, point) && is_mounted_in(&read_write, point) != *writable
+        })
+        .map(|(point, _)| point)
+        .collect()
+}
+
 /// Locations of the `mount.cifs` helper. Both, not just `/sbin`: on a
 /// merged-`/usr` distribution it is the same file, on the others it is not.
 const CIFS_HINTS: [&str; 2] = ["/sbin/mount.cifs", "/usr/sbin/mount.cifs"];
@@ -123,6 +156,32 @@ fn main() -> Result<()> {
             Err(e) => tracing::warn!("unmounting {}: {e}", mounted.display()),
         }
     }
+
+    // Then what is declared but mounted in the wrong mode: unmounted here so
+    // that the mount loop below mounts it again with the table's options.
+    // **Lazily**, unlike a removed root: the owner flips "writable" from the
+    // page, typically while a track of that very share is playing, and a
+    // plain `umount` would then fail with "target is busy" — a toggle that
+    // does nothing, again. Detached, the old mount lives on for the file mpv
+    // holds open, and the new one takes its place at once.
+    for point in mounted_in_another_mode(&proc_mounts, &roots) {
+        let output = std::process::Command::new("umount").arg("--lazy").arg(&point).output();
+        match output {
+            Ok(s) if s.status.success() => {
+                tracing::info!("unmounted {} to remount it in its new mode", point.display())
+            }
+            Ok(s) => tracing::error!(
+                "unmounting {} to change its mode: {}",
+                point.display(),
+                String::from_utf8_lossy(&s.stderr).trim()
+            ),
+            Err(e) => tracing::error!("unmounting {} to change its mode: {e}", point.display()),
+        }
+    }
+    // Read again rather than patched: what the loops above actually achieved
+    // is the kernel's to say, and a failed `umount` must leave its share
+    // counted as mounted, not mounted a second time on top of itself.
+    let proc_mounts = std::fs::read_to_string("/proc/mounts").context("reading /proc/mounts")?;
 
     // `mount -t cifs` does not mount by itself: it delegates to `mount.cifs`,
     // the only one that knows how to read a `credentials=` file. Without that
@@ -213,6 +272,109 @@ proc /proc proc rw,relatime 0 0
                 PathBuf::from("/mnt/ritornello/ma musique")
             ]
         );
+    }
+
+    /// The table as the plugin writes it, one share named `music`.
+    fn music_share(writable: bool) -> Roots {
+        toml::from_str(&format!(
+            "[[root]]\nname = \"music\"\nkind = \"smb\"\nhost = \"192.168.1.15\"\n\
+             share = \"music\"\nuser = \"ritornello\"\ndomain = \"\"\n\
+             writable = {writable}\narchive_covers = true\n"
+        ))
+        .unwrap()
+    }
+
+    /// Captured on the device on 2026-10-06, after "writable" had been ticked
+    /// on the page: the table said writable, the kernel still said `ro`, and
+    /// no cover could ever be archived.
+    const MOUNTED_RO: &str = "//192.168.1.15/music /mnt/ritornello/music cifs ro,relatime,vers=3.1.1,\
+cache=strict,upcall_target=app,username=ritornello,uid=986,forceuid,gid=986,forcegid,\
+addr=192.168.1.15,file_mode=0755,dir_mode=0755,iocharset=utf8,soft,nounix,serverino,\
+mapposix,reparse=nfs,nativesocket,symlink=native,rsize=4194304,wsize=4194304,\
+bsize=1048576,retrans=1,echo_interval=10,actimeo=30,closetimeo=1 0 0\n";
+
+    fn mounted_rw() -> String {
+        MOUNTED_RO.replacen(" ro,", " rw,", 1)
+    }
+
+    #[test]
+    fn a_share_made_writable_while_mounted_read_only_is_remounted() {
+        // The defect met on the device: skipped because it was mounted.
+        assert_eq!(
+            mounted_in_another_mode(MOUNTED_RO, &music_share(true)),
+            vec![PathBuf::from("/mnt/ritornello/music")]
+        );
+    }
+
+    #[test]
+    fn a_share_made_read_only_while_mounted_writable_is_remounted() {
+        // The other direction of the same toggle: withdrawing the permission
+        // must withdraw it from the kernel too, not only from the table.
+        assert_eq!(
+            mounted_in_another_mode(&mounted_rw(), &music_share(false)),
+            vec![PathBuf::from("/mnt/ritornello/music")]
+        );
+    }
+
+    #[test]
+    fn a_share_already_in_its_mode_is_left_alone() {
+        // Every reconciliation goes through here, at boot included: a share
+        // remounted when nothing changed would cut the music for nothing.
+        assert!(mounted_in_another_mode(MOUNTED_RO, &music_share(false)).is_empty());
+        assert!(mounted_in_another_mode(&mounted_rw(), &music_share(true)).is_empty());
+    }
+
+    #[test]
+    fn a_share_not_mounted_is_left_to_the_mount_loop() {
+        // Not mounted at all is not "mounted in another mode": unmounting it
+        // would fail, and the mount loop already mounts it with its options.
+        let elsewhere = "/dev/sda1 /media/usb ext4 rw 0 0\n";
+        assert!(mounted_in_another_mode(elsewhere, &music_share(true)).is_empty());
+        assert!(mounted_in_another_mode(elsewhere, &music_share(false)).is_empty());
+    }
+
+    #[test]
+    fn rw_is_read_in_the_options_column_only() {
+        // A share whose path or source holds "rw" is still read-only when its
+        // options say `ro`; and an option merely starting with "rw" is not `rw`.
+        let named_rw = "//nas/rw /mnt/ritornello/music cifs ro,rwpidforward 0 0\n";
+        assert_eq!(
+            mounted_in_another_mode(named_rw, &music_share(true)),
+            vec![PathBuf::from("/mnt/ritornello/music")]
+        );
+        assert!(mounted_in_another_mode(named_rw, &music_share(false)).is_empty());
+    }
+
+    #[test]
+    fn the_mode_of_a_share_whose_name_has_a_space_is_read_too() {
+        // The mount point column is escaped (`\040`): reading it here by hand
+        // would miss this share, and leave its toggle without effect again.
+        let roots: Roots = toml::from_str(
+            "[[root]]\nname = \"ma musique\"\nkind = \"smb\"\nhost = \"nas\"\n\
+             share = \"x\"\nuser = \"u\"\nwritable = true\n",
+        )
+        .unwrap();
+        let mounts = "//nas/x /mnt/ritornello/ma\\040musique cifs ro 0 0\n";
+        assert_eq!(
+            mounted_in_another_mode(mounts, &roots),
+            vec![PathBuf::from("/mnt/ritornello/ma musique")]
+        );
+        // And already writable, it is recognised as such: a column read by
+        // hand would not find it among the `rw` lines, and would remount this
+        // share at every reconciliation, cutting whatever it was playing.
+        let mounts = "//nas/x /mnt/ritornello/ma\\040musique cifs rw 0 0\n";
+        assert!(mounted_in_another_mode(mounts, &roots).is_empty());
+    }
+
+    #[test]
+    fn a_local_root_is_never_remounted() {
+        // Only shares are this binary's to mount; a device folder whose path
+        // happens to be a read-only mount is not its business.
+        let roots: Roots =
+            toml::from_str("[[root]]\nname = \"usb\"\nkind = \"local\"\npath = \"/mnt/ritornello/usb\"\nwritable = true\n")
+                .unwrap();
+        let mounts = "/dev/sda1 /mnt/ritornello/usb ext4 ro 0 0\n";
+        assert!(mounted_in_another_mode(mounts, &roots).is_empty());
     }
 
     #[test]

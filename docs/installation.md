@@ -1106,6 +1106,12 @@ been observed for real:
   `placed.json` (`ritornello:ritornello 0644`, in a `0755` directory) is
   readable by the `dietpi` account, and its content, captured, is what the
   survey's parser is tested on.
+- `files-mount` 1.0.1 remounting a share whose "writable" toggle changed.
+  The predicate is tested against the `/proc/mounts` line captured on the
+  Pi in the state it fixes (declared writable, mounted `ro`), but no
+  `umount --lazy` followed by `mount.cifs` has run on the device: neither
+  the remount while a track of that share is playing, nor the cover
+  archive writing once the share is back `rw`.
 
 Every one of those is covered by unit and integration tests that fake the
 privileged step; none is covered by the privileged step itself.
