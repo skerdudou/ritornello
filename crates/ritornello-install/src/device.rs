@@ -841,18 +841,23 @@ radio
         )
     }
 
-    /// The core's own `placed.json`, as `update::placed::record` writes it
-    /// (`serde_json::to_string` of the map), the core's archive note
-    /// included: only each version is read, the note is ignored.
-    const PLACED_JSON: &str = r#"{"core":{"version":"0.3.0","not_installed_files":["etc/systemd/system/ritornello.service"]},"radio":{"version":"1.7.3"}}"#;
+    /// The owner's Pi's `placed.json`, verbatim (captured 2026-10-06, owner
+    /// and mode `ritornello:ritornello 0644`, readable by the ssh account):
+    /// what `update::placed::record` wrote after the web UI's updater placed
+    /// the core and eight plugins. The core's archive note rides along; only
+    /// each version is read.
+    const PLACED_JSON: &str = r#"{"cd":{"version":"0.2.0-beta.3"},"core":{"version":"0.2.0-beta.3","not_installed_files":["etc/polkit-1/rules.d/52-ritornello-update.rules","etc/polkit-1/rules.d/50-ritornello-power.rules","etc/systemd/system/ritornello-update.service","etc/systemd/system/ritornello.service","etc/systemd/system/ritornello-rollback.service","usr/local/lib/ritornello/ritornello-update"]},"generic-input":{"version":"0.2.0-beta.3"},"mpd":{"version":"0.2.0-beta.3"},"musicbrainz":{"version":"0.2.0-beta.3"},"nrj-metas":{"version":"0.2.0-beta.3"},"ouifm-metas":{"version":"0.2.0-beta.3"},"radio":{"version":"0.2.0-beta.3"},"radiofrance-metas":{"version":"0.2.0-beta.3"}}"#;
 
     #[test]
     fn the_updater_s_memory_is_read_version_by_version() {
         let state = parse(&survey_with_placed((RADIO_BLOCK, "present"), ("", "absent"), (PLACED_JSON, "present")), "n")
             .unwrap();
-        let want: BTreeMap<String, String> =
-            [("core", "0.3.0"), ("radio", "1.7.3")].iter().map(|(n, v)| (n.to_string(), v.to_string())).collect();
-        assert_eq!(state.updater_placed, want);
+        let names: Vec<&str> = state.updater_placed.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            ["cd", "core", "generic-input", "mpd", "musicbrainz", "nrj-metas", "ouifm-metas", "radio", "radiofrance-metas"]
+        );
+        assert!(state.updater_placed.values().all(|v| v == "0.2.0-beta.3"), "{:?}", state.updater_placed);
     }
 
     /// An untrusted file the run can do without: absent, unreadable, or not
@@ -879,7 +884,7 @@ radio
             std::fs::write(root.join("var/lib/ritornello/staging/placed.json"), PLACED_JSON).expect("placed.json");
         });
         let state = parse(&stdout, "real").expect("parses");
-        assert_eq!(state.updater_placed.get("radio").map(String::as_str), Some("1.7.3"), "{stdout}");
+        assert_eq!(state.updater_placed.get("radio").map(String::as_str), Some("0.2.0-beta.3"), "{stdout}");
         let stdout = run_probe(|_| {});
         assert!(parse(&stdout, "real").unwrap().updater_placed.is_empty(), "{stdout}");
     }
