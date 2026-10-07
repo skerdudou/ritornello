@@ -511,6 +511,9 @@ jobs:
         # updater ignores it.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Through the environment, not spliced into the script: see the
+          # tag check above.
+          TAG: ${{ github.ref_name }}
         run: |
           # The previous PUBLISHED release, asked of GitHub and not of git.
           # `git describe` answers "the previous tag reachable from here",
@@ -525,13 +528,22 @@ jobs:
           # release is genuinely the previous one. Empty on a first release,
           # which publishes everything.
           #
-          # `--exclude-pre-releases` is what keeps the baseline the last
-          # **stable** release, and it carries an invariant worth naming: a
-          # component that a beta shipped had, by definition, changed since
-          # that same baseline — so the final delivery ships it too, and no
-          # tester is left holding a `-beta` binary that nothing will ever
-          # replace. Measuring against the last beta instead would break
-          # exactly that.
+          # What it is measured against depends on the tag, and the decision
+          # lives in `release-tags.sh base-for` so it can be run and broken
+          # on a development machine:
+          #
+          # - a PRERELEASE tag against the newest published product release,
+          #   prereleases included, so a beta carries only what moved since
+          #   the previous beta. That is safe because a device that asked for
+          #   prereleases folds over them too and finds each component in
+          #   the newest release carrying it, `ritornello-install` locates
+          #   each archive the same way, and the catalogue and the inventory
+          #   describe every component whatever this release carries;
+          # - a FINISHED tag against the newest FINISHED release, which keeps
+          #   an invariant worth naming: a component that a beta shipped had
+          #   changed since that same baseline, so the final delivery ships
+          #   it too and no tester is left holding a `-beta` binary that
+          #   nothing will ever replace.
           #
           # The installer's own releases (`installer-vX.Y.Z` and the fixed
           # `installer`) sit in the same list and are published, so "the
@@ -539,7 +551,7 @@ jobs:
           # an installer's commit, every component would look unchanged since
           # a baseline that never carried one. `release-tags.sh` skips them,
           # which is why the whole page is read and not `--limit 1`.
-          prev=$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 --json tagName --jq '.[].tagName' | bash ./scripts/release-tags.sh newest-product)
+          prev=$(gh release list --exclude-drafts --limit 100 --json tagName,isPrerelease --jq '.[] | [.tagName, .isPrerelease] | @tsv' | bash ./scripts/release-tags.sh base-for "$TAG")
           echo "previous published release: ${prev:-none}"
           echo "prev=$prev" >> "$GITHUB_OUTPUT"
           # A different question gets a different baseline: the coupled-change

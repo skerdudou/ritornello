@@ -769,7 +769,7 @@ Three consequences, none of them accidental:
 
 - **A tester is never stranded on a beta.** A component that a prerelease
   shipped had, by definition, changed since the last *finished* release —
-  which is the baseline the release workflow measures against — so the
+  which is the baseline the workflow measures a finished release against — so the
   finished delivery ships that component too, and the device installs it
   in the ordinary way.
 - **Turning the switch back off rolls nothing back.** It stops prereleases

@@ -1153,17 +1153,40 @@ serde = \"1\" # path=x
             !publish.contains("needs: [release, language-packs, installer]"),
             "the product's publish job still waits for the installer legs"
         );
-        for query in ["--exclude-pre-releases", "--exclude-drafts --limit"] {
+        // The previous release a component comparison is measured against
+        // depends on the tag (a prerelease against the newest published
+        // release, a finished one against the newest finished one) and that
+        // decision is `base-for`'s, fed the prerelease flag. The coupled-change
+        // guard's baseline is always the newest published, prereleases
+        // included, and drops installer releases by `newest-product`.
+        for (query, decider) in [
+            ("--json tagName,isPrerelease", "release-tags.sh base-for \"$TAG\""),
+            ("--json tagName --jq", "release-tags.sh newest-product"),
+        ] {
             let line = publish
                 .lines()
                 .find(|l| l.contains("gh release list") && l.contains(query))
                 .unwrap_or_else(|| panic!("no baseline query with {query}"));
             assert!(
-                line.contains("release-tags.sh newest-product"),
-                "a baseline query does not skip the installer's releases: {line}"
+                line.contains(decider),
+                "a baseline query is not decided by {decider}, which also skips the installer's releases: {line}"
             );
             assert!(!line.contains("--limit 1 "), "a single answer may be an installer release: {line}");
+            assert!(line.contains("--exclude-drafts"), "a draft was never delivered: {line}");
         }
+        assert!(
+            !publish.contains("--exclude-pre-releases"),
+            "a prerelease's baseline must include prereleases; a finished release's is chosen by base-for"
+        );
+        // Other steps of the job declare TAG too, so look at this step's own.
+        let step = publish
+            .split("      - name:")
+            .find(|s| s.contains("release-tags.sh base-for"))
+            .expect("the step that calls base-for");
+        assert!(
+            step.contains("TAG: ${{ github.ref_name }}"),
+            "base-for is given a tag the step does not receive through its environment"
+        );
         assert_eq!(
             publish.matches("gh release list").count(),
             2,
