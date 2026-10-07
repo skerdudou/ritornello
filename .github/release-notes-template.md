@@ -1,24 +1,4 @@
-**Action required** — the root mount helper for network shares,
-`files-mount`, changed (it now remounts a share whose "writable" setting
-changed). Only `ritornello-install` may place it, so the update page refuses
-to update the `files` plugin with "update with ritornello-install" until it
-is run. The core and the other plugins update from the page as usual.
-
-`files-mount` now carries its own number, independent of the product's:
-it moves from `0.2.0-beta.3` to `1.0.1`, and from now on it only moves when
-the helper itself changes — so this installer run is not one you will be
-asked for at every release.
-
-Take the installer for your computer from its permanent link (the README's
-Download table, or `releases/download/installer/<file>`), then:
-
-```sh
-./ritornello-install --host account@device --keep
-```
-
-This installer leaves alone what is already up to date. Its first run on a
-device installed by an older installer places every plugin and pack once
-more — the older one did not record them — and later runs only what changed.
+**Nothing to do** — replace the binaries.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -47,22 +27,16 @@ more — the older one did not record them — and later runs only what changed.
 
 ## Behaviour changes
 
-New: a "Full journal" on the System page. The core now relays every
-plugin's own output into its log, prefixed with the plugin's name, and keeps
-the latest lines (errors apart) for the page to show. A stream URL is never
-written there by the `musicbrainz` plugin.
+The update dialog says what it really shows: only the components that need
+updating are listed, and you choose which to install. It used to say that
+what is already up to date is left unchecked, but such rows never appear.
 
-The `generic-input` plugin reopens a remote receiver that is unplugged and
-plugged back in, without a restart, and warns once per device node rather
-than on every retry.
-
-The `files-mount` helper remounts a network share whose "writable" setting
-changed, instead of keeping it in the old mode until the next reboot.
-
-Fewer downloads: a component whose own code did not change now keeps its
-number, so a device only fetches what really moved — here the core, `files`,
-`generic-input`, `musicbrainz` and the language packs. The installer is now
-published on its own channel (see Action required above).
+Fewer downloads between betas: a beta now carries only what moved since the
+previous beta, not since the last finished release. This one carries the
+core and the four language packs. A device that offers prereleases finds
+every other component in the release that last carried it, and
+`ritornello-install` does the same. A finished release still carries
+everything that changed since the previous finished one.
 
 ## Install
 

@@ -29,13 +29,13 @@ members = [
 #
 # The shipped components (the core and the ten plugins) declare their OWN
 # version instead, so a fix in one plugin does not renumber the product and
-# does not make the device replace eleven components for one line. Major and
-# minor stay identical to this number everywhere; only the third digit is
-# free, component by component. `version_coherence.rs` asserts it.
+# does not make the device replace eleven components for one line. Only the
+# major stays identical to this number everywhere (before 1.0 it is 0); the
+# rest is each component's own. `version_coherence.rs` asserts it.
 #
 # It is NOT the compatibility contract between a core and a plugin: that one
 # is ritornello_proto::PROTOCOL_VERSION, which moves only on a wire break.
-version = "0.2.0-beta.4"
+version = "0.2.0-beta.5"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/skerdudou/ritornello"
