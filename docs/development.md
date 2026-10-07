@@ -250,11 +250,14 @@ and read the diff of the fixture: it is the exact record of what moved.
 `.github/workflows/ci.yml` runs those five commands on every push and pull
 request — the last three jobs below only on a tag:
 
-- `web` — `npm ci`, build of the npm workspaces (the SPA, the kit, and one
-  per plugin UI — a count deliberately not written here, it drifts every
-  time a plugin gains a page), `vue-tsc`, vitest; it
+- `web-build` ("Web UI (build)") — `npm ci`, build of the npm workspaces
+  (the SPA, the kit, and one per plugin UI — a count deliberately not
+  written here, it drifts every time a plugin gains a page); it
   publishes the `dist/` directories as an artifact, because they are
   git-ignored and the Rust jobs need them;
+- `web-test` ("Web UI (typecheck, vitest)") — `npm ci`, `vue-tsc`, vitest,
+  in parallel with `rust` and `e2e` rather than ahead of them: they read
+  the built dist, never a test result;
 - `rust` — downloads the dist, **refuses to go on if one is missing**
   (`build.rs` would otherwise embed a placeholder UI and only warn), then
   `cargo build`, `clippy -D warnings`, `cargo test`; `ffmpeg` is installed
@@ -274,13 +277,16 @@ request — the last three jobs below only on a tag:
   and moves the fixed release `installer` (see
   [Publishing the installer](installation.md#publishing-the-installer));
 - `release` — on a `v*` tag only, once per architecture (`armv7`,
-  `arm64`, `x86_64`): it refuses a tag that is not `v` + the product
+  `arm64`, `x86_64`), as soon as the web is built and while the tests
+  still run: it refuses a tag that is not `v` + the product
   number, then `cross build --release --workspace` and
   `scripts/package-release.sh`, which produces that architecture's
   archives;
 - `language-packs` — on a tag: the language pack archives, built once
   outside the per-architecture matrix since a pack has no architecture;
-- `publish` — also on a tag: keeps only the components whose own version
+- `publish` — also on a tag, and the one job that waits for every test
+  (`rust`, `e2e`, `web-test`), so archives built from a red tree are never
+  drafted: keeps only the components whose own version
   moved since the last **finished** release, checks the notes, generates
   `catalogue.json` (the kind and description of every installable
   component, read by the "Add a plugin" dialog) and `inventory.json` (for
