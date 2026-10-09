@@ -117,9 +117,26 @@ pub fn save(path: &Path, state: &State) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Serializes every `update` of this process.
+///
+/// Two writers share the file and run on different tasks: the Admin half
+/// (`set_data`, the page saving a setting) and the Source half (`remember` on
+/// every track change, `confirm_removal` on a removal). Unserialized, both can
+/// load the same state and each write it back without the other's change —
+/// or, worse, both write the same `state.json.tmp` and one renames a file the
+/// other is still writing: the next load finds it unparseable and, the load
+/// being all-or-nothing, resets **both** settings to their defaults. One
+/// process-wide lock rather than one per path: there is a single file, and a
+/// lock keyed by path would only add a map to get wrong.
+static UPDATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Re-reads, modifies, rewrites — and therefore preserves what the caller does
-/// not touch. The only write the two halves are allowed to use.
+/// not touch. The only write the two halves are allowed to use, and it holds
+/// `UPDATE` across the whole load-modify-save.
 pub fn update(path: &Path, f: impl FnOnce(&mut State)) -> anyhow::Result<()> {
+    // A poisoned lock only means another update panicked mid-way; the file
+    // itself is still whole (the rename is atomic), so carry on.
+    let _held = UPDATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut state = load(path);
     f(&mut state);
     save(path, &state)
@@ -176,6 +193,48 @@ mod tests {
         assert_eq!(reread.remembered.unwrap().track, 2);
         update(&f, |s| s.on_arrival = OnArrival::FirstTrack).unwrap();
         assert_eq!(load(&f).remembered.unwrap().toc, "deadbeef", "the resume point survived a save");
+    }
+
+    /// Final review, F10: the two halves write from different tasks. Three
+    /// threads each own one field and write it over and over; after each
+    /// write the writer reads its own field back. Without the lock in
+    /// `update`, a concurrent load-modify-save drops it (lost update), or a
+    /// shared `.tmp` renamed under another writer fails the write or leaves a
+    /// file the all-or-nothing load resets to the defaults.
+    #[test]
+    fn concurrent_updates_never_lose_a_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = std::sync::Arc::new(dir.path().join("plugin-cd.json"));
+        let writers: Vec<std::thread::JoinHandle<()>> = (0..3)
+            .map(|field| {
+                let f = f.clone();
+                std::thread::spawn(move || {
+                    for i in 0..200i64 {
+                        match field {
+                            0 => {
+                                update(&f, |s| s.on_arrival = OnArrival::LastTrack).unwrap();
+                                assert_eq!(load(&f).on_arrival, OnArrival::LastTrack, "write {i}");
+                            }
+                            1 => {
+                                update(&f, |s| s.on_insertion = OnInsertion::WakeSwitchAndPlay).unwrap();
+                                assert_eq!(load(&f).on_insertion, OnInsertion::WakeSwitchAndPlay, "write {i}");
+                            }
+                            _ => {
+                                update(&f, |s| s.remembered = Some(Remembered { toc: "t".into(), track: i })).unwrap();
+                                assert_eq!(load(&f).remembered.map(|r| r.track), Some(i), "write {i}");
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().expect("a writer lost its own write");
+        }
+        let last = load(&f);
+        assert_eq!(last.on_arrival, OnArrival::LastTrack);
+        assert_eq!(last.on_insertion, OnInsertion::WakeSwitchAndPlay);
+        assert_eq!(last.remembered.map(|r| r.track), Some(199));
     }
 
     #[test]

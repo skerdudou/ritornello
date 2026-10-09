@@ -65,9 +65,9 @@ struct CdSource {
     /// answered it yet: the next `play` starts that disc from its beginning,
     /// whatever `on_arrival` says. A newly inserted disc has no listening
     /// history to resume, and under shuffle "the beginning" is the first entry
-    /// of the pass drawn for it. Cleared by `deactivate`, `eject` and
+    /// of the pass drawn for it. Cleared by `deactivate`, `stop`, `eject` and
     /// `confirm_removal`: a request nobody answered belongs to a disc that
-    /// may be gone.
+    /// may be gone. Never armed while the disc already plays.
     play_from_start: bool,
     total_tracks: usize,
     /// True if the plugin requested playback and has not stopped it since.
@@ -765,6 +765,10 @@ impl SourcePlugin for CdSource {
         // `self.playback` has just been set to false, so its `plays_nothing()`
         // branch applies, without `preset`, exactly as before.
         self.playback = false;
+        // A request still unanswered when the player stops belongs to a
+        // moment that has passed: the next Play is the user's own, and obeys
+        // the arrival setting (see `arrive`).
+        self.play_from_start = false;
         // Whatever seek was still owed no longer applies to a stopped
         // player: without this, the setting could switch to "start at
         // track 1" and the next arrival would still jump to a track a much
@@ -865,6 +869,13 @@ impl SourcePlugin for CdSource {
     /// with a bare `PlayerChapter`, which only ever logged its own
     /// failure).
     async fn end_of_content(&mut self) -> SourceOutcome {
+        // No disc in the drive: mpv went idle because the tray was opened
+        // under it, not because the disc ran its course. Every branch below
+        // would reload `cdda://` on an empty drive and declare a playback
+        // that cannot exist; this ends like a Stop instead (final review, F9).
+        if !self.present {
+            return self.stop().await;
+        }
         // Repeat-one on the disc's last track: mpv went idle with nothing
         // loaded, so the disc is reopened like an arrival, armed to land back
         // on the track that was playing (see repeat-all's reload below for
@@ -1153,13 +1164,17 @@ impl SourcePlugin for CdSource {
                 if epoch != self.epoch {
                     return None;
                 }
-                // Classified before anything below mutates the state it reads,
-                // and the pending flag is consumed by *any* current TOC
-                // arrival, readable or not: otherwise an unreadable disc would
-                // leave it armed and a later flicker would be taken for an
-                // insertion.
+                // Classified before anything below mutates the state it reads.
+                // The pending flag is consumed only by a **readable** TOC: an
+                // insertion is a disc whose TOC is read after a confirmed
+                // removal, so a first read that failed (a dirty disc, a drive
+                // still spinning up) leaves it armed, and the same disc read
+                // successfully afterwards — after a flicker, or put back — is
+                // still the insertion it is.
                 let inserted = self.is_insertion(toc.as_ref());
-                self.insertion_pending = false;
+                if toc.is_some() {
+                    self.insertion_pending = false;
+                }
                 self.total_tracks = total_tracks;
                 // Disc **different** from the previous one: it was swapped, so
                 // nothing can be playing — mpv no longer plays what it was
@@ -1254,7 +1269,14 @@ impl SourcePlugin for CdSource {
                         OnInsertion::SwitchAndPlay => Some(PlayRequest::Switch),
                         OnInsertion::WakeSwitchAndPlay => Some(PlayRequest::WakeAndSwitch),
                     };
-                    self.play_from_start = notification.play_request.is_some();
+                    // Armed only when nothing plays. A disc the user already
+                    // started before its TOC landed (the CD key, or Play,
+                    // pressed in that window) is one the core will not
+                    // restart — the request is ignored as "already plays" —
+                    // and a flag armed for it would wait for the next Play,
+                    // long after, and force track 1 over a resume point the
+                    // listener has built since.
+                    self.play_from_start = notification.play_request.is_some() && !self.playback;
                 }
                 Some(notification)
             }
@@ -1283,6 +1305,14 @@ impl CdSource {
     /// owner asked for that last one explicitly: once a disc has been ejected,
     /// the next insertion starts from the beginning.
     fn confirm_removal(&mut self) {
+        // Once per removal: an Eject is followed by the watcher seeing the
+        // tray open, and a tray opened, closed empty and opened again has
+        // read no disc in between — both are still the one removal, already
+        // logged. (The watcher itself only reports changes, never a repeated
+        // state.)
+        if !self.insertion_pending {
+            tracing::info!("disc removed (tray open or eject): resume point forgotten, next disc is an insertion");
+        }
         self.playback = false;
         self.play_from_start = false;
         self.pending_chapter = None;
@@ -1894,6 +1924,26 @@ mod tests {
         // have expected `order[1] == 0` instead and corrected to that
         // different track.
         assert_eq!(source.player_track(1).await.action, SourceAction::PlayerChapter(3));
+    }
+
+    /// Final review, F9: the tray opened under a playing disc makes mpv go
+    /// idle, and the core reports that as an end of content. Under repeat the
+    /// disc used to be reloaded on an empty drive, with `playback` re-armed.
+    #[tokio::test]
+    async fn end_of_content_with_the_tray_open_stops_whatever_the_repeat() {
+        for repeat in [Repeat::All, Repeat::One] {
+            let mut s = playing_source();
+            let (presence_tx, presence_rx) = mpsc::channel(8);
+            s.presence_rx = presence_rx;
+            s.set_play_mode(false, repeat).await;
+            presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
+            s.poll_notification().await;
+            assert!(!s.present);
+            let out = s.end_of_content().await;
+            assert_eq!(out.action, SourceAction::Noop, "{repeat:?}: no reload on an empty drive");
+            assert!(!s.playback, "{repeat:?}: nothing plays");
+            assert_eq!(s.pending_chapter, None, "{repeat:?}");
+        }
     }
 
     #[tokio::test]
@@ -3257,6 +3307,44 @@ mod tests {
         assert!(source.insertion_pending);
     }
 
+    /// Final review, F7: the journal says when the resume point was dropped,
+    /// once per removal — an Eject followed by the watcher seeing the tray
+    /// open is one removal, not two.
+    #[tokio::test]
+    async fn a_removal_is_logged_once() {
+        use tracing_subscriber::fmt::MakeWriter;
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buffer {
+            type Writer = Buffer;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+        let buffer = Buffer::default();
+        let subscriber = tracing_subscriber::fmt().with_writer(buffer.clone()).with_ansi(false).finish();
+        // `#[tokio::test]` runs on one thread: the default holds across awaits.
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let mut source = playing_source();
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        source.eject().await;
+        presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
+        source.poll_notification().await;
+        let log = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(log.matches("disc removed").count(), 1, "{log}");
+    }
+
     #[tokio::test]
     async fn ejecting_forgets_the_resume_point_too() {
         let dir = tempfile::tempdir().unwrap();
@@ -3380,22 +3468,39 @@ mod tests {
         assert!(!source.insertion_pending);
     }
 
+    /// An insertion is a disc whose TOC is *read* after a confirmed removal
+    /// (final review, F8): a failed first read is not one, and must not use
+    /// up the removal either — the same disc read successfully afterwards
+    /// (here after a flicker) is the insertion.
     #[tokio::test]
-    async fn an_unreadable_disc_is_not_an_insertion_and_consumes_the_pending_flag() {
-        let mut source = playing_source();
+    async fn an_unreadable_disc_is_not_an_insertion_and_leaves_the_pending_flag_armed() {
+        let mut source = playing_source(); // toc INSERTED_TOC
+        *source.on_insertion.write().unwrap() = OnInsertion::SwitchAndPlay;
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
+        let (toc_tx, toc_rx) = mpsc::channel(4);
+        source.toc_tx = toc_tx.clone();
+        source.toc_rx = toc_rx;
         presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
         source.poll_notification().await;
         assert!(source.insertion_pending);
         assert!(!source.is_insertion(None));
-        // Deliver an unreadable TOC result for the current epoch.
-        let (toc_tx, toc_rx) = mpsc::channel(4);
-        source.toc_tx = toc_tx.clone();
-        source.toc_rx = toc_rx;
-        toc_tx.send((source.epoch, None, 0)).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         source.poll_notification().await;
-        assert!(!source.insertion_pending);
+        // An unreadable TOC result for the current epoch.
+        toc_tx.send((source.epoch, None, 0)).await.unwrap();
+        let n = source.poll_notification().await.expect("the TOC arm notifies");
+        assert_eq!(n.play_request, None, "an unreadable disc asks for nothing");
+        assert!(source.insertion_pending, "an unreadable read does not consume the removal");
+        // The drive flickers, then the same disc is read.
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
+        source.poll_notification().await;
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
+        source.poll_notification().await;
+        toc_tx.send((source.epoch, Some(INSERTED_TOC.to_string()), 3)).await.unwrap();
+        let n = source.poll_notification().await.expect("the TOC arm notifies");
+        assert_eq!(n.play_request, Some(PlayRequest::Switch), "the first readable TOC is the insertion");
+        assert!(!source.insertion_pending, "and it consumes the flag");
     }
 
     // ---- Asking to be played on an insertion ----
@@ -3542,6 +3647,39 @@ mod tests {
         assert_eq!(source.track, 2, "Play resumes; the stale request must not force track 0");
     }
 
+    /// Final review, F1: the user starts the disc in the window between the
+    /// tray closing and its TOC landing. The TOC then makes it an insertion,
+    /// the core ignores the request (the CD already plays), and the flag must
+    /// not survive to force track 1 on the Play that follows a later Stop.
+    #[tokio::test]
+    async fn a_disc_already_playing_when_its_toc_lands_is_not_restarted_by_a_later_play() {
+        let mut source = playing_source(); // toc INSERTED_TOC
+        *source.on_insertion.write().unwrap() = OnInsertion::SwitchAndPlay;
+        *source.on_arrival.write().unwrap() = OnArrival::LastTrack;
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        let (toc_tx, toc_rx) = mpsc::channel(4);
+        source.presence_rx = presence_rx;
+        source.toc_rx = toc_rx;
+        presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
+        source.poll_notification().await;
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
+        source.poll_notification().await;
+        // Play pressed before the TOC is read.
+        assert_eq!(source.play().await.action, SourceAction::play("cdda://").finite());
+        assert!(source.playback);
+        toc_tx.send((source.epoch, Some(INSERTED_TOC.to_string()), 3)).await.unwrap();
+        let n = source.poll_notification().await.expect("the TOC arm notifies");
+        assert!(n.play_request.is_some(), "still an insertion: the core decides");
+        assert!(!source.play_from_start, "nothing to answer: the disc already plays");
+        // mpv confirms the disc, then advances on its own to track index 2.
+        source.player_track(0).await;
+        source.player_track(2).await;
+        assert_eq!(source.track, 2);
+        source.stop().await;
+        source.play().await;
+        assert_eq!(source.track, 2, "Play after Stop resumes where the listener was");
+    }
+
     #[tokio::test]
     async fn without_a_request_the_play_key_still_obeys_the_arrival_setting() {
         let mut source = source_arriving_with(OnArrival::LastTrack);
@@ -3552,11 +3690,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unanswered_request_is_forgotten_by_eject_deactivate_and_removal() {
+    async fn an_unanswered_request_is_forgotten_by_eject_deactivate_stop_and_removal() {
         let mut source = playing_source();
         source.play_from_start = true;
         source.eject().await;
         assert!(!source.play_from_start);
+
+        // Stop: the core's own, and the end of a disc without repeat.
+        let mut source = playing_source();
+        source.play_from_start = true;
+        source.stop().await;
+        assert!(!source.play_from_start, "Stop forgets the request");
 
         let mut source = playing_source();
         source.play_from_start = true;
