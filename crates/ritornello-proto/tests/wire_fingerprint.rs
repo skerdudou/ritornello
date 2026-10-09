@@ -777,19 +777,22 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
         // A contract section whose content moved while its version did not
         // move UP: a decision was skipped. Compared as (major, minor), so
         // bumping, regenerating, then putting the constant back and
-        // regenerating again is refused too. Refused even under
-        // UPDATE_WIRE_FINGERPRINT: regenerating is no way around it. Identical
-        // lines under a lower version (a revert of a bump) are not refused,
-        // to keep the rule simple: only a change of content needs a decision.
-        if is_contract(&s.header) && r.lines != s.lines {
-            let moved_up = match (header_version(&s.header), header_version(&r.header)) {
-                (Some(now_v), Some(before_v)) => now_v > before_v,
+        // regenerating again is refused too. A version that went DOWN is
+        // refused even when the lines are identical: the test cannot see git,
+        // so a lower header over the content of a higher one would record
+        // that content under the old version, which is the same bypass. A
+        // legitimate revert of a bump restores the fixture from git instead.
+        // Refused even under UPDATE_WIRE_FINGERPRINT.
+        if is_contract(&s.header) {
+            let ok = match (header_version(&s.header), header_version(&r.header)) {
+                (Some(now_v), Some(before_v)) => now_v > before_v || (now_v == before_v && r.lines == s.lines),
                 _ => false,
             };
-            if !moved_up {
+            if !ok {
                 refusals.push(format!(
-                    "{}: the messages of this contract changed but its version did not move up \
-                     (recorded: {}).\n  A break (an old peer would misread it): bump the MAJOR of \
+                    "{}: the messages of this contract changed but its version did not move up, \
+                     or its version moved down (recorded: {}). A version never goes down: restore the \
+                     fixture from git.\n  A break (an old peer would misread it): bump the MAJOR of \
                      {} in crates/ritornello-proto/src/contract.rs.\n  A compatible addition: bump its \
                      MINOR.\n  Then regenerate. First difference:\n{}",
                     s.header,
