@@ -17,7 +17,10 @@
 //! of its kinds are.
 //!
 //! Order of checks, the first that applies wins: legacy binary, missing
-//! contract, unexpected contract, major gap, then minor gaps.
+//! contract, unexpected contract, major gap, then minor gaps. A pair of contract
+//! sets (`judge_pair`) skips the kinds check, since there is no declaration to
+//! compare with; a contract the plugin speaks and the core does not serve maps
+//! to the unexpected contract refusal.
 
 use ritornello_proto::{Announcement, Contract, ContractVersion, PROTOCOL_VERSION};
 use serde::{Deserialize, Serialize};
@@ -158,7 +161,7 @@ pub fn describe(refusal: &Refusal) -> String {
             format!("it declares the {} contract but announces no version for it", name(*contract))
         }
         Refusal::UnexpectedContract { contract } => {
-            format!("it announces a version of the {} contract, which it does not declare", name(*contract))
+            format!("it speaks the {} contract, which it does not declare or this core does not serve", name(*contract))
         }
         Refusal::Major { gaps } => {
             format!("another major on {}", gaps.iter().map(gap).collect::<Vec<_>>().join(", "))
@@ -340,7 +343,7 @@ mod tests {
         );
         assert_eq!(
             describe(&Refusal::UnexpectedContract { contract: Contract::Admin }),
-            "it announces a version of the admin contract, which it does not declare"
+            "it speaks the admin contract, which it does not declare or this core does not serve"
         );
         assert_eq!(
             describe(&Refusal::Major {
@@ -401,6 +404,15 @@ mod tests {
         let p = speaks(PROTOCOL_VERSION, &[(Contract::Display, (1, 0))]);
         let c = speaks(PROTOCOL_VERSION, &[(Contract::Source, (1, 0))]);
         assert_eq!(judge_pair(&p, &c), Verdict::Refused(Refusal::UnexpectedContract { contract: Contract::Display }));
+    }
+
+    // The catalogue and the web UI read this shape: changing it is a wire change.
+    #[test]
+    fn speaks_serialises_and_reads_back_in_its_published_shape() {
+        let literal = serde_json::json!({"protocol":2,"contracts":{"source":{"major":1,"minor":1},"admin":{"major":1,"minor":0}}});
+        let s = speaks(2, &[(Contract::Source, (1, 1)), (Contract::Admin, (1, 0))]);
+        assert_eq!(serde_json::to_value(&s).unwrap(), literal);
+        assert_eq!(serde_json::from_value::<Speaks>(literal).unwrap(), s);
     }
 
     #[test]
