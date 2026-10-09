@@ -1,5 +1,6 @@
 mod audio_output;
 mod admin;
+mod compat;
 mod core;
 mod cover;
 #[cfg(test)]
