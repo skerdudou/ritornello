@@ -44,8 +44,10 @@ pub enum OnArrival {
 /// arrived at (that is `OnArrival`'s job), but when a disc appears in the drive
 /// after a confirmed removal or a swap.
 ///
-/// Persisted for the part of the plugin that acts on it; today it is only
-/// shown, saved and read into a log line.
+/// The plugin acts on it by asking, never by commanding: on an insertion the
+/// notification that announces the disc carries a play request
+/// (`PlayRequest`), and the core decides whether to honour it — switch the
+/// source, leave standby, or only play if the CD is already the current one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnInsertion {

@@ -23,7 +23,7 @@ use admin::CdAdmin;
 use anyhow::Result;
 use rand::seq::SliceRandom;
 use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
-use ritornello_proto::{Repeat, SourceAction, Text};
+use ritornello_proto::{PlayRequest, Repeat, SourceAction, Text};
 use state::{OnArrival, OnInsertion, Remembered};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,6 +61,14 @@ struct CdSource {
     /// even if it is the same disc. Without it, a disc pulled out and pushed
     /// back would look exactly like a presence flicker.
     insertion_pending: bool,
+    /// A request to play an inserted disc was emitted and no `play` has
+    /// answered it yet: the next `play` starts that disc from its beginning,
+    /// whatever `on_arrival` says. A newly inserted disc has no listening
+    /// history to resume, and under shuffle "the beginning" is the first entry
+    /// of the pass drawn for it. Cleared by `deactivate`, `eject` and
+    /// `confirm_removal`: a request nobody answered belongs to a disc that
+    /// may be gone.
+    play_from_start: bool,
     total_tracks: usize,
     /// True if the plugin requested playback and has not stopped it since.
     ///
@@ -280,7 +288,10 @@ impl CdSource {
     /// are the same when a resume point exists, and the first track is the
     /// only answer that needs no memory at all.
     fn play_now(&mut self) -> SourceOutcome {
+        // The request of an insertion is consumed here, answered or not.
+        let from_start = std::mem::take(&mut self.play_from_start);
         let where_to = match *self.on_arrival.read().unwrap() {
+            _ if from_start => OnArrival::FirstTrack,
             OnArrival::Nothing => OnArrival::FirstTrack,
             elsewhere => elsewhere,
         };
@@ -370,10 +381,11 @@ impl CdSource {
     ///   plugin already reads it to tell a swap from a flicker of the tray;
     /// - the TOC not read yet. This one is a genuine limitation and it is
     ///   worth stating: the read is asynchronous (`spawn_toc_read`), and the
-    ///   answer to an `Activate` is due before it lands; a spontaneous
-    ///   notification carries a state and at most one request the core
-    ///   decides on, never a playback order. So a boot whose TOC
-    ///   read has not landed yet resumes at the first track. The everyday
+    ///   answer to an `Activate` is due before it lands, and it cannot wait
+    ///   for it. A disc *inserted* has a later recourse — the play request
+    ///   that rides on the notification of its TOC, answered by a `Play` that
+    ///   starts from the beginning — but a boot, or a source key pressed
+    ///   before the read, has none: it resumes at the first track. The everyday
     ///   case, pressing the source key on a disc that has been sitting in the
     ///   drive, has had its TOC read long since.
     fn resume_track(&self) -> i64 {
@@ -605,6 +617,7 @@ impl SourcePlugin for CdSource {
     }
     async fn deactivate(&mut self) -> SourceOutcome {
         self.playback = false;
+        self.play_from_start = false;
         // Leaving the source behind means whatever seek was owed is owed to
         // nothing any more: the next arrival decides fresh.
         self.pending_chapter = None;
@@ -1089,6 +1102,7 @@ impl SourcePlugin for CdSource {
         // failures, there is nothing to collect here.
         tokio::task::spawn_blocking(move || cd::eject(&cd_dev));
         self.present = false;
+        self.play_from_start = false;
         self.forget_disc();
         // Unlike `forget_disc`'s own reset, this one is decided by the
         // user: the tray is really opening, not flickering, so the removal
@@ -1214,11 +1228,23 @@ impl SourcePlugin for CdSource {
                 // Deferred arrival of the TOC: this is the moment the track
                 // becomes identifiable, hence when the `metadata` plugins can
                 // finally work — hence the identity in the notification.
+                //
+                // The request to play rides on this very notification, the one
+                // that also carries the disc's identity and track count: the
+                // core then finds the disc described when it decides.
+                let mut notification = self.notification();
                 if inserted {
-                    // Part B turns this into a request to play the disc.
-                    tracing::info!("disc inserted (on insertion: {:?})", *self.on_insertion.read().unwrap());
+                    let setting = *self.on_insertion.read().unwrap();
+                    tracing::debug!("disc inserted (on insertion: {setting:?})");
+                    notification.play_request = match setting {
+                        OnInsertion::Nothing => None,
+                        OnInsertion::PlayIfActive => Some(PlayRequest::IfActive),
+                        OnInsertion::SwitchAndPlay => Some(PlayRequest::Switch),
+                        OnInsertion::WakeSwitchAndPlay => Some(PlayRequest::WakeAndSwitch),
+                    };
+                    self.play_from_start = notification.play_request.is_some();
                 }
-                Some(self.notification())
+                Some(notification)
             }
         }
     }
@@ -1246,6 +1272,7 @@ impl CdSource {
     /// the next insertion starts from the beginning.
     fn confirm_removal(&mut self) {
         self.playback = false;
+        self.play_from_start = false;
         self.pending_chapter = None;
         self.order.clear();
         self.cursor = 0;
@@ -1287,7 +1314,8 @@ impl CdSource {
             // Nor does it offer to keep one: there is nothing on a disc to
             // write a cover file next to (see `SourceMessage::cover_archivable`).
             cover_archivable: None,
-            // No request yet: the insertion behaviour arrives in a later task.
+            // Only the TOC arm of `poll_notification` asks to be played, and
+            // only on an insertion: every other frame describes a state.
             play_request: None,
         }
     }
@@ -1320,6 +1348,7 @@ async fn main() -> Result<()> {
         toc: None,
         previous_toc: None,
         insertion_pending: false,
+        play_from_start: false,
         total_tracks: 0,
         playback: false,
         epoch: 0,
@@ -1369,6 +1398,7 @@ mod tests {
             toc: None,
             previous_toc: None,
             insertion_pending: false,
+            play_from_start: false,
             total_tracks: 0,
             playback: false,
             epoch: 5,
@@ -3354,5 +3384,142 @@ mod tests {
         toc_tx.send((source.epoch, None, 0)).await.unwrap();
         source.poll_notification().await;
         assert!(!source.insertion_pending);
+    }
+
+    // ---- Asking to be played on an insertion ----
+
+    const INSERTED_TOC: &str = "3 150 22767 41887 63000";
+
+    /// Drives the source through a real insertion — tray open, disc seen, TOC
+    /// of the current epoch — and returns the notification of the TOC arm,
+    /// the one that carries the disc's identity.
+    async fn insert_disc(source: &mut CdSource) -> Notification {
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        let (toc_tx, toc_rx) = mpsc::channel(4);
+        source.presence_rx = presence_rx;
+        source.toc_rx = toc_rx;
+        presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
+        source.poll_notification().await;
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
+        source.poll_notification().await;
+        toc_tx.send((source.epoch, Some(INSERTED_TOC.to_string()), 3)).await.unwrap();
+        source.poll_notification().await.expect("the TOC arm notifies")
+    }
+
+    #[tokio::test]
+    async fn each_insertion_setting_asks_for_its_own_request() {
+        for (setting, expected) in [
+            (OnInsertion::Nothing, None),
+            (OnInsertion::PlayIfActive, Some(PlayRequest::IfActive)),
+            (OnInsertion::SwitchAndPlay, Some(PlayRequest::Switch)),
+            (OnInsertion::WakeSwitchAndPlay, Some(PlayRequest::WakeAndSwitch)),
+        ] {
+            let mut source = playing_source();
+            *source.on_insertion.write().unwrap() = setting;
+            let n = insert_disc(&mut source).await;
+            assert_eq!(n.play_request, expected, "{setting:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_request_rides_on_the_notification_that_describes_the_disc() {
+        let mut source = playing_source();
+        *source.on_insertion.write().unwrap() = OnInsertion::SwitchAndPlay;
+        let n = insert_disc(&mut source).await;
+        assert_eq!(n.play_request, Some(PlayRequest::Switch));
+        // The same frame names the disc and its tracks: the core decides on a
+        // described disc, not on a bare request.
+        assert_eq!(n.preset_count, Some(3));
+        assert_eq!(source.toc.as_deref(), Some(INSERTED_TOC));
+    }
+
+    #[tokio::test]
+    async fn a_flicker_asks_for_nothing() {
+        let mut source = playing_source();
+        *source.on_insertion.write().unwrap() = OnInsertion::WakeSwitchAndPlay;
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        let (toc_tx, toc_rx) = mpsc::channel(4);
+        source.presence_rx = presence_rx;
+        source.toc_rx = toc_rx;
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
+        source.poll_notification().await;
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
+        source.poll_notification().await;
+        toc_tx.send((source.epoch, Some(INSERTED_TOC.to_string()), 3)).await.unwrap();
+        let n = source.poll_notification().await.expect("the TOC arm notifies");
+        assert_eq!(n.play_request, None);
+        assert!(!source.play_from_start);
+    }
+
+    #[tokio::test]
+    async fn the_first_disc_after_startup_asks_for_nothing() {
+        let (mut source, _p, _t) = source_with_channels(); // previous_toc None
+        *source.on_insertion.write().unwrap() = OnInsertion::WakeSwitchAndPlay;
+        let (toc_tx, toc_rx) = mpsc::channel(4);
+        source.toc_rx = toc_rx;
+        toc_tx.send((source.epoch, Some(INSERTED_TOC.to_string()), 3)).await.unwrap();
+        let n = source.poll_notification().await.expect("the TOC arm notifies");
+        assert_eq!(n.play_request, None);
+        assert!(!source.play_from_start);
+    }
+
+    #[tokio::test]
+    async fn an_inserted_disc_starts_from_the_beginning_whatever_the_arrival_setting() {
+        let mut source = playing_source();
+        *source.on_insertion.write().unwrap() = OnInsertion::SwitchAndPlay;
+        *source.on_arrival.write().unwrap() = OnArrival::LastTrack;
+        let n = insert_disc(&mut source).await;
+        assert!(n.play_request.is_some());
+        // A resume point for this very disc, put back after the removal made
+        // the plugin forget it: only the request can keep it from applying.
+        source.remembered = Some(Remembered { toc: INSERTED_TOC.into(), track: 2 });
+        assert_eq!(source.play().await.action, SourceAction::play("cdda://").finite());
+        assert_eq!(source.track, 0);
+        assert_eq!(source.pending_chapter, Some(0));
+        assert!(!source.play_from_start, "a request is answered once");
+    }
+
+    #[tokio::test]
+    async fn under_shuffle_an_inserted_disc_starts_at_the_first_entry_of_its_pass() {
+        let mut source = source_with_disc_and_order(3, vec![2, 0, 1]);
+        source.random = true;
+        *source.on_insertion.write().unwrap() = OnInsertion::SwitchAndPlay;
+        *source.on_arrival.write().unwrap() = OnArrival::LastTrack;
+        let n = insert_disc(&mut source).await;
+        assert!(n.play_request.is_some());
+        assert_eq!(source.order, vec![2, 0, 1]);
+        // Stale resume point, as if the departed disc had left one behind.
+        source.remembered = Some(Remembered { toc: INSERTED_TOC.into(), track: 1 });
+        source.play().await;
+        assert_eq!(source.track, 2, "the first entry of the drawn pass, not track 1");
+        assert_eq!(source.cursor, 0);
+        assert_eq!(source.pending_chapter, Some(2));
+    }
+
+    #[tokio::test]
+    async fn without_a_request_the_play_key_still_obeys_the_arrival_setting() {
+        let mut source = source_arriving_with(OnArrival::LastTrack);
+        source.remembered = Some(Remembered { toc: INSERTED_TOC.into(), track: 2 });
+        assert!(!source.play_from_start);
+        source.play().await;
+        assert_eq!(source.track, 2);
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_request_is_forgotten_by_eject_deactivate_and_removal() {
+        let mut source = playing_source();
+        source.play_from_start = true;
+        source.eject().await;
+        assert!(!source.play_from_start);
+
+        let mut source = playing_source();
+        source.play_from_start = true;
+        source.deactivate().await;
+        assert!(!source.play_from_start);
+
+        let mut source = playing_source();
+        source.play_from_start = true;
+        source.confirm_removal();
+        assert!(!source.play_from_start);
     }
 }

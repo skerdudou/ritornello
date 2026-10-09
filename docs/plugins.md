@@ -820,17 +820,46 @@ instead, which is also what happens when nothing has been remembered yet, when
 the remembered number falls outside the disc (the file is editable by hand),
 and when the TOC has not been read yet. That last case is a real limitation
 worth stating: the read is asynchronous, and the answer to an activation is
-due before it lands — a spontaneous notification carries a state and at most
-one play request, which the core decides on (honoured in spontaneous
-notifications only, ignored in replies) — so a boot that outruns the TOC read resumes at the first track. Pressing the
-source key on a disc that has been sitting in the drive, the everyday case,
-has had its TOC read long since.
+due before it lands and cannot wait for it, so a boot that outruns the TOC
+read resumes at the first track. Pressing the source key on a disc that has
+been sitting in the drive, the everyday case, has had its TOC read long since.
+(A disc *inserted* has a later recourse, the play request described under
+[What it does on insertion](#what-it-does-on-insertion); a boot has none.)
 
 **Ejecting forgets the track.** When the tray is seen open, or Ritornello's own
 Eject is used, the remembered resume point and the shuffle order are dropped,
 in memory and on disk: a disc put back afterwards, even the same one, starts at
 track 1 rather than resuming. A momentary loss of presence with the tray closed
 is only a flicker and forgets nothing.
+
+### What it does on insertion
+
+A second setting on the same admin page says what happens when a disc is
+**inserted** — a disc read after a confirmed removal (tray seen open, or
+Eject), or one whose TOC differs from the last one. A disc already in the
+drive when the device boots is not being inserted, and a presence flicker
+with the tray closed is not an insertion either. Four values:
+
+- **Do nothing** (the default, for the reason arrival also defaults to
+  nothing: a drive spinning up is audible and must not happen unasked).
+- **Play, if the CD is already the current source.**
+- **Switch to the CD and play.**
+- **Leave standby if needed, switch to the CD and play.**
+
+The plugin never starts anything by itself here: it *asks*. The notification
+that announces the inserted disc — the one that also carries its identity and
+track count — carries a play request (`play_request`, see [Now-playing
+metadata](#now-playing-metadata-the-metadata-kind)), and the **core decides** whether to honour
+it: switching the source, leaving standby, or playing only when the CD is
+already the active one and idle. The setting therefore acts through the core,
+and a disc already playing is never restarted.
+
+**A newly inserted disc starts from the beginning**, whatever the arrival
+setting says: a disc just put in has no listening history to resume, and the
+resume point was forgotten when it was ejected. Under shuffle, the beginning
+is the first entry of the pass drawn for that disc. The next `Play` the core
+sends answers the request and consumes it; ejecting, or leaving the source
+before it was answered, cancels it.
 
 Only one disc is remembered, the last one: swapping discs and coming back
 loses the position, which is the honest reading of "the last track played".
@@ -2320,6 +2349,17 @@ request/response cycle of `Play`. A Source's own declaration reaches
 [the cover chain](#the-cover-chain) below for how `files` uses exactly
 this to announce a `folder.jpg` without making playback wait on an SMB
 `readdir`.
+
+**A Source can also ask to be played.** A spontaneous notification may carry
+`play_request`, an optional field with three values: `if_active` (play, but
+only if this source is already the active one), `switch` (make it the active
+source and play; nothing is done to a device in standby) and
+`wake_and_switch` (the same, leaving standby first). It is **honoured in
+spontaneous notifications only** and ignored in a correlated reply, and it is
+a request: the core decides, and a source that is unknown, switched off or
+being torn down is ignored. The core answers by sending the source an
+ordinary `Play`, never `Activate`. The cd plugin uses it for its insertion
+setting.
 
 **Updating an existing installation.** `ritornello-install` installs the
 new binaries and appends the missing `metadata` plugin entries to an

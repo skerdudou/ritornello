@@ -1251,7 +1251,11 @@ point, in memory and in `state.json`, and the shuffle order. A disc read after
 a confirmed removal, or one with a different TOC, counts as an insertion; the
 same TOC with the tray closed is a presence flicker and changes nothing; the
 first disc seen after startup is not an insertion. All of it is proven only by
-tests that inject drive events, since the owner has no CD drive. One limit is
+tests that inject drive events, since the owner has no CD drive. The same holds
+for what an insertion then does: the notification that announces the disc
+carries a play request (switch, wake and switch, or play if active, per the
+"on insertion" setting) and the core's answer to it, a `Play` from the start of
+the disc, has never been seen with a drive. One limit is
 known in advance: a slot-loading drive may never report `CDS_TRAY_OPEN`, so
 the same disc pulled and pushed back by hand would read there as a flicker (no
 insertion, resume point kept). Ritornello's own Eject is unaffected.
