@@ -36,9 +36,28 @@ pub fn drive_status(dev: &Path) -> Result<DriveStatus> {
     })
 }
 
-/// Polls every 2 s; sends `true`/`false` whenever the disc presence changes.
-pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<bool>) {
-    let mut present = false;
+/// What the plugin needs from the drive's status: is a disc there, and —
+/// the one distinction a bare presence boolean threw away — has the tray been
+/// seen **open**. A flicker happens with the tray closed; a real removal goes
+/// through an open tray, so this is what confirms one (see `CdSource::confirm_removal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drive {
+    Disc,
+    Empty,
+    TrayOpen,
+}
+
+pub fn classify(status: DriveStatus) -> Drive {
+    match status {
+        DriveStatus::DiscOk => Drive::Disc,
+        DriveStatus::TrayOpen => Drive::TrayOpen,
+        DriveStatus::NoDisc | DriveStatus::NotReady | DriveStatus::Unknown(_) => Drive::Empty,
+    }
+}
+
+/// Polls every 2 s; sends the drive state whenever it changes.
+pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<Drive>) {
+    let mut last = Drive::Empty;
     // A probe error counts as "no disc" for presence — an unplugged drive must
     // not make the plugin panic — but it is logged **on the first failure**
     // (then silenced until things return to normal): a binary outside the
@@ -50,18 +69,18 @@ pub async fn watch(dev: PathBuf, tx: tokio::sync::mpsc::Sender<bool>) {
         let now = match drive_status(&dev) {
             Ok(status) => {
                 last_error_reported = false;
-                status == DriveStatus::DiscOk
+                classify(status)
             }
             Err(e) => {
                 if !last_error_reported {
                     tracing::warn!("cd drive probe {}: {e:#}", dev.display());
                     last_error_reported = true;
                 }
-                false
+                Drive::Empty
             }
         };
-        if now != present {
-            present = now;
+        if now != last {
+            last = now;
             let _ = tx.send(now).await;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -122,6 +141,15 @@ pub fn eject(dev: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_open_tray_is_told_apart_from_an_empty_drive() {
+        assert_eq!(classify(DriveStatus::DiscOk), Drive::Disc);
+        assert_eq!(classify(DriveStatus::TrayOpen), Drive::TrayOpen);
+        for s in [DriveStatus::NoDisc, DriveStatus::NotReady, DriveStatus::Unknown(9)] {
+            assert_eq!(classify(s), Drive::Empty, "{s:?}");
+        }
+    }
 
     #[test]
     fn counts_the_tracks_of_a_well_formed_toc() {

@@ -56,6 +56,11 @@ struct CdSource {
     /// the drive (same disc, playback goes on) from a **disc swap** (nothing
     /// can play any more).
     previous_toc: Option<String>,
+    /// A confirmed removal happened (tray seen open, or Eject) and no disc
+    /// TOC has been read since: the next TOC that arrives is an **insertion**,
+    /// even if it is the same disc. Without it, a disc pulled out and pushed
+    /// back would look exactly like a presence flicker.
+    insertion_pending: bool,
     total_tracks: usize,
     /// True if the plugin requested playback and has not stopped it since.
     ///
@@ -65,7 +70,7 @@ struct CdSource {
     /// a third-party service get queried for nothing.
     playback: bool,
     epoch: u64,
-    presence_rx: mpsc::Receiver<bool>,
+    presence_rx: mpsc::Receiver<cd::Drive>,
     toc_tx: mpsc::Sender<ReadToc>,
     toc_rx: mpsc::Receiver<ReadToc>,
     /// What to do when the source is arrived at, shared with the Admin half
@@ -1080,23 +1085,22 @@ impl SourcePlugin for CdSource {
         // failures, there is nothing to collect here.
         tokio::task::spawn_blocking(move || cd::eject(&cd_dev));
         self.present = false;
-        self.playback = false;
         self.forget_disc();
         // Unlike `forget_disc`'s own reset, this one is decided by the
-        // user: the tray is really opening, not flickering, so any seek
-        // still owed is owed to nothing any more — same reasoning the
-        // confirmed-swap branch of `poll_notification` applies to `order`
-        // and `cursor` below.
-        self.pending_chapter = None;
-        self.order.clear();
-        self.cursor = 0;
+        // user: the tray is really opening, not flickering, so the removal
+        // is confirmed — see `confirm_removal`.
+        self.confirm_removal();
         self.issue(SourceAction::Stop)
     }
 
     async fn poll_notification(&mut self) -> Option<Notification> {
         tokio::select! {
-            presence = self.presence_rx.recv() => {
-                let present = presence?;
+            drive = self.presence_rx.recv() => {
+                let drive = drive?;
+                if drive == cd::Drive::TrayOpen {
+                    self.confirm_removal();
+                }
+                let present = drive == cd::Drive::Disc;
                 self.present = present;
                 // `playback` is **not** touched here, and that is deliberate:
                 // `issue` already requires `playback && present`, so a gone
@@ -1206,6 +1210,24 @@ impl SourcePlugin for CdSource {
 }
 
 impl CdSource {
+    /// The disc is really gone — the tray was seen open, or Eject ran. Unlike
+    /// `forget_disc` (every presence change, flicker included), this is certain,
+    /// so it clears what belongs to the departed disc: the shuffle pass, any
+    /// seek still owed, and the resume point — in memory **and** on disk. The
+    /// owner asked for that last one explicitly: once a disc has been ejected,
+    /// the next insertion starts from the beginning.
+    fn confirm_removal(&mut self) {
+        self.playback = false;
+        self.pending_chapter = None;
+        self.order.clear();
+        self.cursor = 0;
+        self.remembered = None;
+        if let Err(e) = state::update(&self.state_path, |s| s.remembered = None) {
+            tracing::warn!("forgetting the resume point: {e}");
+        }
+        self.insertion_pending = true;
+    }
+
     /// Spontaneous notification carrying the status **and** the identity, built
     /// from the same outcome as the answers to requests (so as not to have two
     /// identity rules to keep consistent).
@@ -1266,6 +1288,7 @@ async fn main() -> Result<()> {
         track: 0,
         toc: None,
         previous_toc: None,
+        insertion_pending: false,
         total_tracks: 0,
         playback: false,
         epoch: 0,
@@ -1304,7 +1327,7 @@ mod tests {
         assert_eq!(state.file_name().unwrap(), "state.json");
     }
 
-    fn source_with_channels() -> (CdSource, mpsc::Sender<bool>, mpsc::Sender<ReadToc>) {
+    fn source_with_channels() -> (CdSource, mpsc::Sender<cd::Drive>, mpsc::Sender<ReadToc>) {
         let (presence_tx, presence_rx) = mpsc::channel(8);
         let (toc_tx, toc_rx) = mpsc::channel(4);
         let source = CdSource {
@@ -1313,6 +1336,7 @@ mod tests {
             track: 0,
             toc: None,
             previous_toc: None,
+        insertion_pending: false,
             total_tracks: 0,
             playback: false,
             epoch: 5,
@@ -1620,9 +1644,9 @@ mod tests {
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
 
-        presence_tx.send(false).await.unwrap();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
         source.poll_notification().await;
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         source.poll_notification().await;
         // The TOC confirms it really was a flicker: same disc as before.
         let epoch = source.epoch;
@@ -1655,9 +1679,9 @@ mod tests {
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
 
-        presence_tx.send(false).await.unwrap();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
         source.poll_notification().await;
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         source.poll_notification().await;
         // A genuinely different disc, not the one the order was drawn for.
         let epoch = source.epoch;
@@ -1716,7 +1740,7 @@ mod tests {
 
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
-        presence_tx.send(false).await.unwrap();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
         source.poll_notification().await;
 
         assert_eq!(source.next().await.action, SourceAction::Noop);
@@ -1895,7 +1919,7 @@ mod tests {
         source.set_play_mode(true, Repeat::Off).await; // mode on, nothing in the tray
         assert!(source.order.is_empty(), "the useless first draw, over zero tracks");
 
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         source.poll_notification().await;
         let epoch = source.epoch;
         toc_tx.send((epoch, Some("3 150 22767 41887".into()), 3)).await.unwrap();
@@ -2229,7 +2253,7 @@ mod tests {
     async fn an_inserted_but_unread_disc_is_not_a_track() {
         let (mut source, presence_tx, _t) = source_with_channels();
         source.present = false;
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         let n = source.poll_notification().await.expect("notification expected");
         assert!(source.present);
         assert_eq!(
@@ -2433,9 +2457,9 @@ mod tests {
         source.presence_rx = presence_rx;
 
         // The disc is removed, then **another** one is inserted.
-        presence_tx.send(false).await.unwrap();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
         source.poll_notification().await;
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         source.poll_notification().await;
         let epoch = source.epoch;
         toc_tx.send((epoch, Some("12 150 200 300".into()), 12)).await.unwrap();
@@ -2459,9 +2483,9 @@ mod tests {
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
 
-        presence_tx.send(false).await.unwrap();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
         source.poll_notification().await;
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         source.poll_notification().await;
         let epoch = source.epoch;
         toc_tx.send((epoch, Some(current_toc), 3)).await.unwrap();
@@ -2483,11 +2507,11 @@ mod tests {
         let mut source = playing_source();
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
-        presence_tx.send(false).await.unwrap();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
         let n = source.poll_notification().await.expect("notification");
         assert_eq!(n.identity, Some(IdentityUpdate::Nothing), "disc gone: nothing plays");
 
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         let _ = source.poll_notification().await;
         assert!(source.playback, "playback must not have been switched off by the flicker");
     }
@@ -2505,7 +2529,7 @@ mod tests {
         // logic that builds it.
         let (mut source, presence_tx, _toc_tx) = source_with_channels();
         source.present = false;
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         let n = source.poll_notification().await.expect("a presence change notifies");
         assert_eq!(
             n.status_text,
@@ -2677,9 +2701,9 @@ mod tests {
         // The drive flickers while mpv is still opening the disc.
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
-        presence_tx.send(false).await.unwrap();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
         source.poll_notification().await;
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         source.poll_notification().await;
         assert_eq!(source.pending_chapter, Some(2), "a flicker must not disarm it");
 
@@ -2713,9 +2737,9 @@ mod tests {
 
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
-        presence_tx.send(false).await.unwrap();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
         source.poll_notification().await;
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         source.poll_notification().await;
         assert_eq!(source.total_tracks, 0, "the track count is unknown again");
 
@@ -2750,9 +2774,9 @@ mod tests {
         // The drive flickers, resetting `total_tracks` to 0.
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
-        presence_tx.send(false).await.unwrap();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
         source.poll_notification().await;
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         source.poll_notification().await;
         assert_eq!(source.total_tracks, 0);
 
@@ -2789,9 +2813,9 @@ mod tests {
 
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
-        presence_tx.send(false).await.unwrap();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
         source.poll_notification().await;
-        presence_tx.send(true).await.unwrap();
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
         source.poll_notification().await;
 
         // A genuinely different disc, not the one the resume was armed for.
@@ -3137,5 +3161,68 @@ mod tests {
     #[test]
     fn embedded_en_cd_is_not_empty() {
         assert!(!ritornello_i18n::try_parse(CD_EN).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_open_tray_forgets_the_resume_point_in_memory_and_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = source_remembering_into(&dir);
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        source.track = 2;
+        source.remember(); // persists {toc, track: 2}
+        assert!(state::load(&source.state_path).remembered.is_some());
+
+        presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
+        source.poll_notification().await;
+
+        assert_eq!(source.remembered, None);
+        assert_eq!(state::load(&source.state_path).remembered, None);
+        assert!(source.insertion_pending);
+    }
+
+    #[tokio::test]
+    async fn ejecting_forgets_the_resume_point_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = source_remembering_into(&dir);
+        source.track = 1;
+        source.remember();
+        assert!(state::load(&source.state_path).remembered.is_some());
+        source.eject().await;
+        assert_eq!(source.remembered, None);
+        assert_eq!(state::load(&source.state_path).remembered, None);
+        assert!(source.insertion_pending);
+    }
+
+    #[tokio::test]
+    async fn an_open_tray_clears_the_drawn_order() {
+        let mut source = playing_source();
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        source.random = true;
+        source.order = vec![2, 0, 1];
+        source.cursor = 1;
+        presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
+        source.poll_notification().await;
+        assert!(source.order.is_empty());
+        assert_eq!(source.cursor, 0);
+        assert!(!source.playback, "a disc behind an open tray is not playing");
+    }
+
+    #[tokio::test]
+    async fn a_flicker_with_the_tray_closed_keeps_the_resume_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = source_remembering_into(&dir);
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        source.track = 2;
+        source.remember();
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
+        source.poll_notification().await;
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
+        source.poll_notification().await;
+        assert!(source.remembered.is_some());
+        assert!(state::load(&source.state_path).remembered.is_some());
+        assert!(!source.insertion_pending);
     }
 }
