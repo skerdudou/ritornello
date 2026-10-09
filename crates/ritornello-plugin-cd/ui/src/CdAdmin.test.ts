@@ -157,6 +157,22 @@ describe('CdAdmin', () => {
     expect(trigger.text()).not.toContain('wake_switch_and_play')
   })
 
+  it('gives each insertion value its own label', async () => {
+    // A label mapped to the wrong key would pass the key-existence guard
+    // (`i18nKeysUsed.test.ts` only checks that a used key exists), so each
+    // value is checked against the text it must show.
+    const expected = {
+      nothing: CATALOG.insertion_nothing,
+      play_if_active: CATALOG.insertion_play_if_active,
+      switch_and_play: CATALOG.insertion_switch_and_play,
+      wake_switch_and_play: CATALOG.insertion_wake_switch_and_play,
+    }
+    for (const [value, text] of Object.entries(expected)) {
+      const { w } = await mountView('nothing', value)
+      expect(w.get('[data-insertion]').text(), value).toBe(text)
+    }
+  })
+
   it('sends the insertion value the server gave, not a default', async () => {
     const { w, puts } = await mountView('last_track', 'switch_and_play')
     await w.get('[data-save]').trigger('click')
