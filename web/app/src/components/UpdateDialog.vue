@@ -11,7 +11,7 @@ import {
 import { computed, ref, watch } from 'vue'
 import { contractLabel, fmt, refusalText } from '../composables/contractText'
 import { languageName } from '../composables/languages'
-import { defaultSelection, refusedByNewCore } from '../composables/majorUpdate'
+import { defaultSelection, refusedByNewCore, refusedIfLeftAlone } from '../composables/majorUpdate'
 import { packLanguage } from '../composables/packSource'
 import { refusedNote } from '../composables/refusedNote'
 import { useCatalog } from '../composables/useCatalog'
@@ -98,6 +98,21 @@ const pluginsLeftBehind = computed(() =>
 )
 
 /**
+ * A major update is ticked and this plugin, on the device, is not: the binary
+ * it keeps is refused by the new core (`refusedIfLeftAlone`, the core's own
+ * verdict on what that binary announced).
+ */
+function leftRefused(c: ComponentOffer): boolean {
+  return (
+    (c.kind === 'plugin' || c.kind === 'third_party') &&
+    majorUpdate.value &&
+    !checked.value.has(c.name) &&
+    c.binary_present &&
+    refusedIfLeftAlone(c)
+  )
+}
+
+/**
  * The verdict a plugin row's offered version gets from the core it will
  * actually meet, as the core judged it — never re-judged here.
  *
@@ -132,6 +147,10 @@ function gapsText(gaps: ContractGap[]): string {
  * say. One literal key per branch (`i18nKeysUsed`).
  */
 function fitLineFor(c: ComponentOffer): string | null {
+  // The row already says its binary will be refused as it is; what its
+  // offered version would be is beside that point and reads as a
+  // contradiction next to it.
+  if (leftRefused(c)) return null
   const judged = fitFor(c)
   if (!judged) return null
   const { fit, running } = judged
@@ -179,6 +198,11 @@ function warningFor(c: ComponentOffer): string | null {
     // being privileged (`refusedNote`).
     return refusedNote(t.value, c)
   }
+  // A major update without this plugin's own: the core that will run
+  // refuses the binary that stays. Before the third-party note: being
+  // refused is what the operator must act on, and the row's label already
+  // reads as a third party's.
+  if (leftRefused(c)) return t.value('update_row_refused_until_updated')
   // A third-party pack: its label already names the source.
   if (c.kind === 'language_pack' && c.third_party_repo) return t.value('update_row_third_party_pack')
   if (c.kind === 'third_party' || c.third_party_repo) {
@@ -190,18 +214,6 @@ function warningFor(c: ComponentOffer): string | null {
     // general "may" would only repeat it less exactly.
     if (c.with_running_core?.fit === 'refused') return null
     return t.value('update_row_core_not_selected', { component: c.name })
-  }
-  // A major update without this plugin's own: the core that will run
-  // refuses what stays installed, since its new version is the one built
-  // for that core (`with_running_core` refused is the core's own definition
-  // of a dependent).
-  if (
-    c.kind !== 'core' &&
-    !checked.value.has(c.name) &&
-    majorUpdate.value &&
-    c.with_running_core?.fit === 'refused'
-  ) {
-    return t.value('update_row_refused_until_updated')
   }
   // The symmetrical case: the core is ticked and plugins of ours that have
   // an update are not. Across a wire break, this core refuses each of them

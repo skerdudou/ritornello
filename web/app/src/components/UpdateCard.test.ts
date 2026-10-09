@@ -438,14 +438,26 @@ describe('UpdateCard', () => {
       },
       plugin('radio', { with_core: { fit: 'compatible' }, with_running_core: REFUSED }),
       plugin('files', { installable: false, needs_companion: 'files-mount', with_core: { fit: 'compatible' }, with_running_core: REFUSED }),
-      plugin('zed', { kind: 'third_party', third_party_repo: 'someone/zed', offered: null, availability: 'unknown', with_core: REFUSED }),
+      plugin('zed', { kind: 'third_party', third_party_repo: 'someone/zed', offered: null, availability: 'unknown', with_core: REFUSED, installed_with_core: REFUSED }),
+      // A third party with an update the running core accepts, never ticked
+      // by default, whose running binary the new core refuses.
+      plugin('yak', {
+        kind: 'third_party', third_party_repo: 'someone/yak',
+        with_core: REFUSED, with_running_core: { fit: 'compatible' }, installed_with_core: REFUSED,
+      }),
+      // An unticked-by-default third party whose update depends on the new
+      // core but whose running binary it accepts: not refused.
+      plugin('gnu', {
+        kind: 'third_party', third_party_repo: 'someone/gnu',
+        with_core: { fit: 'compatible' }, with_running_core: REFUSED, installed_with_core: { fit: 'compatible' },
+      }),
     ]
 
     it('says it waits for a gesture and names what the new core would refuse', () => {
       const w = mountCard(payload({ components: rows(), major_update_waiting: true }))
       expect(w.get('[data-update-major-waiting]').text()).toBe(CATALOG.update_major_waiting)
       expect(w.get('[data-update-major-waiting-refused]').text()).toBe(
-        'Refused by the new core until updated: files, zed',
+        'Refused by the new core until updated: files, zed, yak',
       )
     })
 

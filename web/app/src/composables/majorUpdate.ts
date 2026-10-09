@@ -25,35 +25,43 @@ export function defaultSelection(components: ComponentOffer[]): Set<string> {
   )
 }
 
-/** Does the core's own row offer a core that breaks the wire. */
-export function coreBreaks(components: ComponentOffer[]): boolean {
-  return components.some((c) => c.kind === 'core' && c.breaking === true && c.offered !== null)
+/**
+ * Will the core it meets refuse this plugin **if nothing is placed for it** —
+ * the binary on the device left as it is.
+ *
+ * Read from `installed_with_core`, the core's own verdict on what that binary
+ * announced: exact, whether or not the row has an update. Inferring it from
+ * the offered version was wrong both ways — a dependent whose new version
+ * *adds* the moved contract keeps a binary the new core accepts, and a third
+ * party still built for the old major is refused while its offered version
+ * says nothing about it.
+ *
+ * Only a plugin that announced nothing (disabled, not started) lacks that
+ * verdict; then the offered version's verdicts are all there is, and either
+ * one refused counts.
+ */
+export function refusedIfLeftAlone(c: ComponentOffer): boolean {
+  if (c.installed_with_core) return c.installed_with_core.fit === 'refused'
+  return c.with_running_core?.fit === 'refused' || c.with_core?.fit === 'refused'
 }
 
 /**
  * The plugins the **offered** core will refuse once installed, given what is
- * installed with it (`selected`). Read from the core's verdicts only, never
- * deduced here:
+ * installed with it (`selected`). Read from the core's verdicts only:
  *
  * - a plugin installed with it: its offered version against that core
  *   (`with_core`);
- * - a plugin with an update left behind: refused when its new version needs
- *   the new core (`with_running_core` refused — the core's own definition of
- *   a plugin that depends on it), since what stays installed was built for
- *   the core being replaced;
- * - a plugin the release does not update (a third party's, typically): its
- *   live announcement against that core (`with_core`).
+ * - any other plugin on the device: its binary left as it is
+ *   (`refusedIfLeftAlone`).
  *
- * A row whose contracts are unpublished carries no verdict and is not listed:
- * the device cannot tell, and says so on that row instead.
+ * A component the device does not have (no binary) has nothing to refuse.
  */
 export function refusedByNewCore(components: ComponentOffer[], selected: Set<string>): string[] {
   return components
     .filter((c) => c.kind === 'plugin' || c.kind === 'third_party')
     .filter((c) => {
       if (selected.has(c.name)) return c.with_core?.fit === 'refused'
-      if (c.with_running_core) return c.with_running_core.fit === 'refused'
-      return c.with_core?.fit === 'refused'
+      return c.binary_present && refusedIfLeftAlone(c)
     })
     .map((c) => c.name)
 }

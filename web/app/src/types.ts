@@ -170,6 +170,10 @@ export interface ComponentOffer {
   with_core?: Fit
   /** A plugin row that installs something: its verdict against the running core. */
   with_running_core?: Fit
+  /** A plugin row whose binary announced itself: that binary, left as it is,
+   * against the same core as `with_core`. Set with or without an update;
+   * absent for a plugin that announced nothing (disabled, not started). */
+  installed_with_core?: Fit
   /** The core row only: the offered core breaks the wire against the running one. */
   breaking?: boolean
   /** Set together with `installable: false`: why. */

@@ -33,7 +33,7 @@ const CATALOG = {
     'Will be refused by the running core unless the core is updated too: {reason}',
   update_row_refused_until_updated: 'Left as it is, it will be refused by the new core until it is updated.',
   update_major_banner:
-    'Major update: the core and these plugins change how they talk. Plugins left unticked or not updated will be refused until they are.',
+    'Major update: the core changes how it talks to its plugins. Plugins left unticked or not updated will be refused until they are updated.',
   update_major_refused: 'Refused by the new core until updated: {components}',
   plugin_kind_source: 'source',
   plugin_incompatible_major: 'Incompatible {contract} contract: built for {found}, this core speaks {expected}',
@@ -826,7 +826,7 @@ describe('UpdateDialog', () => {
       ])
       await flushPromises()
       expect(banner()?.querySelector('p')?.textContent?.trim()).toBe(
-        'Major update: the core and these plugins change how they talk. Plugins left unticked or not updated will be refused until they are.',
+        'Major update: the core changes how it talks to its plugins. Plugins left unticked or not updated will be refused until they are updated.',
       )
       expect(banner()?.querySelector('[data-update-major-refused]')?.textContent?.trim()).toBe(
         'Refused by the new core until updated: zed',
@@ -844,6 +844,48 @@ describe('UpdateDialog', () => {
       // The core unticked: the running core stays, nothing breaks.
       await click('core')
       expect(banner()).toBeNull()
+    })
+
+    it('names a plugin whose running binary the new core refuses, though its update is accepted by the running one', async () => {
+      // A third party's plugin from its own repository, still built for the
+      // old major: its update is accepted by the running core, so nothing
+      // about the offered version says it depends on the core. Its binary,
+      // left as it is, is refused by the new core all the same.
+      mountDialog([
+        breakingCore(),
+        offer('zed', {
+          kind: 'third_party', third_party_repo: 'z/zed',
+          with_core: REFUSED, with_running_core: { fit: 'compatible' }, installed_with_core: REFUSED,
+        }),
+      ])
+      await flushPromises()
+      expect(isChecked('zed')).toBe('false')
+      expect(banner()?.querySelector('[data-update-major-refused]')?.textContent?.trim()).toBe(
+        'Refused by the new core until updated: zed',
+      )
+      expect(warning('zed')).toBe('Left as it is, it will be refused by the new core until it is updated.')
+      // The warning speaks of the binary kept; the offered version's line
+      // would contradict it, so it is not shown.
+      expect(fit('zed')).toBeNull()
+    })
+
+    it('does not warn about a dependent whose running binary the new core accepts', async () => {
+      // Its new version adds the contract the break moves (so the running
+      // core refuses that version: a dependent), but the binary installed now
+      // does not speak it at all, and the new core accepts it as it is.
+      mountDialog([
+        breakingCore(),
+        offer('cd', { with_core: { fit: 'compatible' }, with_running_core: REFUSED, installed_with_core: { fit: 'compatible' } }),
+      ])
+      await flushPromises()
+      await click('cd')
+      expect(isChecked('cd')).toBe('false')
+      expect(warning('cd')).toBeNull()
+      expect(banner()?.querySelector('[data-update-major-refused]')).toBeNull()
+      // The banner itself stays, and claims no list it does not show.
+      expect(banner()?.querySelector('p')?.textContent?.trim()).toBe(
+        'Major update: the core changes how it talks to its plugins. Plugins left unticked or not updated will be refused until they are updated.',
+      )
     })
 
     it('shows no major banner for a core that does not break the wire', async () => {

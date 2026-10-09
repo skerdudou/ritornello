@@ -193,6 +193,16 @@ pub struct RowContracts {
     /// must travel with the core.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_running_core: Option<Fit>,
+    /// A plugin row whose binary is running: what it **announced** against
+    /// the core it will meet (the same target as `with_core`) — the verdict
+    /// on the binary that stays if the row is left as it is. Set whether or
+    /// not the row has an update; absent when the plugin announced nothing
+    /// (disabled, not started). The page reads it to say what a core left
+    /// alone, or a plugin left unticked, will be refused — never inferring
+    /// it from the offered version, which can differ in which contracts it
+    /// speaks at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_with_core: Option<Fit>,
     /// The core row only: the offered core breaks the wire against the
     /// running one (`compat::breaks`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -260,6 +270,10 @@ pub fn judge_contracts(
     }
     for row in rows.iter_mut().filter(|r| matches!(r.kind, ComponentKind::Plugin | ComponentKind::ThirdParty)) {
         let speaks = offered.get(&row.name).cloned();
+        // The binary running now, by its own announcement: what stays if
+        // nothing is placed for this row.
+        let now = live.iter().find(|(name, _)| *name == row.name).map(|(_, s)| s);
+        row.contracts.installed_with_core = now.map(|s| judge_pair(s, &target).into());
         if installs_something(row) {
             match &speaks {
                 Some(s) => {
@@ -271,7 +285,6 @@ pub fn judge_contracts(
         } else {
             // Nothing placed: the binary that will meet the core is the one
             // running, and its own announcement is the truth about it.
-            let now = live.iter().find(|(name, _)| *name == row.name).map(|(_, s)| s);
             if let Some(s) = now {
                 row.contracts.with_core = Some(judge_pair(s, &target).into());
             }
@@ -1478,6 +1491,57 @@ mod tests {
         assert_eq!(radio.contracts.with_running_core, Some(Fit::Compatible));
     }
 
+    /// The binary that stays if a row is left as it is gets its own verdict,
+    /// from its live announcement, **even on a row with an update** — the
+    /// one `with_core` (the offered version) cannot give.
+    #[test]
+    fn an_update_row_also_judges_its_running_binary_from_its_announcement() {
+        let mut rows = rows_with(Some("0.3.0"));
+        let new = source_at(running_source().major + 1, 0);
+        let offered = BTreeMap::from([("core".to_string(), breaking_core()), ("radio".to_string(), new)]);
+        let live = vec![("radio".to_string(), source_at(running_source().major, running_source().minor))];
+        judge_contracts(&mut rows, &offered, &Speaks::this_core(), &live);
+        let radio = named(&rows, "radio");
+        assert_eq!(radio.contracts.with_core, Some(Fit::Compatible), "{radio:?}");
+        assert!(matches!(radio.contracts.with_running_core, Some(Fit::Refused { .. })), "{radio:?}");
+        assert!(
+            matches!(&radio.contracts.installed_with_core, Some(Fit::Refused { refusal: Refusal::Major { .. } })),
+            "the old binary left in place is refused by the new core: {radio:?}"
+        );
+
+        // Without an announcement there is nothing to judge, and nothing is
+        // guessed.
+        let mut quiet = rows_with(Some("0.3.0"));
+        let offered = BTreeMap::from([
+            ("core".to_string(), breaking_core()),
+            ("radio".to_string(), source_at(running_source().major + 1, 0)),
+        ]);
+        judge_contracts(&mut quiet, &offered, &Speaks::this_core(), &[]);
+        assert_eq!(named(&quiet, "radio").contracts.installed_with_core, None);
+    }
+
+    /// A dependent whose new version **adds** the contract the break moves:
+    /// the running core refuses that new version, yet the binary installed
+    /// now does not speak the contract at all, so the new core accepts it.
+    /// "Dependent" does not mean "left alone, refused" — the reason the page
+    /// reads `installed_with_core` instead of inferring it.
+    #[test]
+    fn a_dependent_that_adds_the_moved_contract_keeps_a_binary_the_new_core_accepts() {
+        let mut rows = rows_with(Some("0.3.0"));
+        let admin = Contract::Admin.current();
+        let only_admin = Speaks {
+            protocol: PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Admin, admin)]),
+        };
+        let mut new = only_admin.clone();
+        new.contracts.insert(Contract::Source, ContractVersion::new(running_source().major + 1, 0));
+        let offered = BTreeMap::from([("core".to_string(), breaking_core()), ("radio".to_string(), new)]);
+        judge_contracts(&mut rows, &offered, &Speaks::this_core(), &[("radio".to_string(), only_admin)]);
+        let radio = named(&rows, "radio");
+        assert!(matches!(radio.contracts.with_running_core, Some(Fit::Refused { .. })), "a dependent: {radio:?}");
+        assert_eq!(radio.contracts.installed_with_core, Some(Fit::Compatible), "{radio:?}");
+    }
+
     /// The other side of the flag: a core on offer speaking the running
     /// majors does not break, and the plugin is judged against it.
     #[test]
@@ -1542,6 +1606,7 @@ mod tests {
         judge_contracts(&mut rows, &offered, &Speaks::this_core(), &live);
         let zed = named(&rows, "zed");
         assert!(matches!(&zed.contracts.with_core, Some(Fit::Refused { .. })), "{zed:?}");
+        assert!(matches!(&zed.contracts.installed_with_core, Some(Fit::Refused { .. })), "{zed:?}");
         assert_eq!(zed.installable, None, "nothing is installed for it, so nothing is refused");
 
         let mut rows = offers("0.2.0", &[], &installed);
@@ -1556,7 +1621,7 @@ mod tests {
     fn the_row_carries_its_verdicts_flat_and_omits_what_it_does_not_know() {
         let mut rows = rows_with(Some("0.3.0"));
         let quiet = serde_json::to_value(named(&rows, "radio")).unwrap();
-        for key in ["speaks", "with_core", "with_running_core", "breaking", "not_installable_reason"] {
+        for key in ["speaks", "with_core", "with_running_core", "installed_with_core", "breaking", "not_installable_reason"] {
             assert!(quiet.get(key).is_none(), "{key} present before any judgement: {quiet}");
         }
         let old = source_at(running_source().major, running_source().minor);
