@@ -113,6 +113,44 @@ def plugin_block(name: str) -> str:
     return out
 
 
+def speaks(crate: str, contract: str) -> int:
+    """Whether a plugin crate speaks a wire contract, from the
+    `[package.metadata.ritornello]` table of its Cargo.toml: `admin = true`
+    for the admin contract, the name among `kinds` for the others. Parsed,
+    not matched line by line, so that a trailing comment, a missing space or
+    a multi-line `kinds` array cannot make a speaker look silent (and be left
+    out of a release that had to include it).
+
+    Exit status: 0 it speaks, 3 it does not, anything else means "could not
+    tell". "Does not speak" has a code no crash can produce: an uncaught
+    exception exits 1 and a missing interpreter 127, and neither may ever be
+    read as a plugin that is simply not required to move. The shapes are
+    checked explicitly (2) for the same reason.
+    """
+    def unreadable(why: str) -> int:
+        print(f"cannot read the declaration of {crate}: {why}", file=sys.stderr)
+        return 2
+
+    try:
+        manifest = tomllib.loads((ROOT / "crates" / crate / "Cargo.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:  # ValueError: bad UTF-8 and bad TOML alike
+        return unreadable(str(e))
+    package = manifest.get("package", {})
+    metadata = package.get("metadata", {}) if isinstance(package, dict) else None
+    declared = metadata.get("ritornello", {}) if isinstance(metadata, dict) else None
+    if not isinstance(declared, dict):
+        return unreadable("[package.metadata.ritornello] is not a table")
+    kinds = declared.get("kinds", [])
+    if not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds):
+        return unreadable("`kinds` is not a list of strings")
+    admin = declared.get("admin", False)
+    if not isinstance(admin, bool):
+        return unreadable("`admin` is not a boolean")
+    if contract == "admin":
+        return 0 if admin else 3
+    return 0 if contract in kinds else 3
+
+
 def main() -> int:
     cmd = sys.argv[1]
     if cmd == "stage-core":
@@ -151,6 +189,8 @@ def main() -> int:
             return 2
         for entry in section.get("tree", []):
             sys.stdout.buffer.write(f"{entry['from']}\n".encode("utf-8"))
+    elif cmd == "speaks":
+        return speaks(sys.argv[2], sys.argv[3])
     elif cmd == "fragment":
         # Written to stdout as bytes: a text-mode stdout on Windows would
         # turn every "\n" back into the CRLF this function just removed.

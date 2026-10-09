@@ -23,7 +23,15 @@
 
      The updater cannot write any of those, by design. Say so here, with the
      command, or the device will update its binaries and silently keep the
-     old unit. -->
+     old unit.
+
+     A release that moves the bootstrap `PROTOCOL_VERSION` (or a contract's
+     major) is a wire break, and needs this line too:
+
+     **Action required** — wire break: install the core and every plugin
+     together. A rollback of the core leaves every plugin refused until the
+     core is reinstalled. -->
+
 
 ## Behaviour changes
 
@@ -96,9 +104,10 @@ sudo chown -R ritornello: /etc/ritornello/language-packs/ritornello-lang-<langua
 ## What this release carries
 
 This release carries the components whose own version moved since the
-previous one. When `PROTOCOL_VERSION` or the product's major changed, every
-component moved (the release script refuses a wire break that left a core or
-plugin on its old number). A component missing from the assets below is
+previous one. When the bootstrap `PROTOCOL_VERSION` or the product's major changed, every
+component moved; when a wire contract's major changed, the core and every
+plugin that speaks it moved (the release script refuses a break that left one
+of them on its old number). A component missing from the assets below is
 unchanged, not removed — do not read its absence as a regression.
 
 **If a shared crate changed** (`ritornello-proto`, `ritornello-i18n`,

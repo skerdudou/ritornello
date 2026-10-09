@@ -178,17 +178,21 @@ release and carries the generation: `0.2.7` is the seventh delivery of the
 `0.2` generation. Each shipped component (the core, each plugin) declares
 **its own** version, so a fix confined to one plugin does not
 renumber everything else and does not make the updater think ten unrelated
-components changed too. `PROTOCOL_VERSION`, the wire-compatibility contract
-between the core and a plugin (see [plugins.md](plugins.md)), is a third
-number, and it moves only on a breaking change to that wire format — not on
-every release, and not with every component's own patch bumps. Only the **major** ties
+components changed too. The **contract versions**, a third number, are the
+wire compatibility between the core and a plugin (see
+[plugins.md](plugins.md)): one `major.minor` per wire contract (`source`,
+`display`, `input`, `metadata`, `admin`), whose major moves at a break of that
+contract and whose minor at a compatible addition, plus the bootstrap
+`PROTOCOL_VERSION` that guards the announcement's own format (it moves at a
+break of that format, or when a contract is added). They do not move
+on every release, nor with every component's own patch bumps. Only the **major** ties
 the core, the plugins and the language packs to the product number: an
 unchanged component may keep a number from an earlier minor (`0.2.4` inside
 product `0.3.0`), and it may never carry a number from a release that does
 not exist yet (`0.4.0` inside `0.3.0` is refused). Before 1.0 the major stays
 `0`, so nothing forces republishing everything; what keeps the core and the
-plugins in step is the shared-crate rule: a change to a crate they all link
-must move every component that links it.
+plugins in step is the contract rule below: a break of a wire contract must
+move the core and every plugin that speaks it.
 
 The **fourth number** belongs to a root-privileged companion
 (`ritornello-files-mount`, see [plugins.md](plugins.md)). It is its own
@@ -228,12 +232,20 @@ component whose current binary still works with the new core. A component
 is published when
 
 1. its own version moved (its code changed, as always);
-2. `PROTOCOL_VERSION` changed: a wire break, old binaries can no longer talk
-   to the core. Every component that links `ritornello-proto` (the core and
-   the plugins; not a companion, which depends on no shared crate, nor a
-   language pack, which is data) **must** have moved its version, and the
-   script refuses the release, naming those that did not;
-3. the product's **major** changed: everything is republished.
+2. the bootstrap `PROTOCOL_VERSION` changed: the announcement's own format
+   broke, or a contract was added (an older core cannot read a contract name
+   it does not know), so old binaries can no longer be read. Every component that links
+   `ritornello-proto` (the core and the plugins; not a companion, which
+   depends on no shared crate, nor a language pack, which is data) **must**
+   have moved its version, and the script refuses the release, naming those
+   that did not;
+3. a wire contract's **major** changed: a break of that contract. The core and
+   every plugin that speaks it **must** have moved, and the script refuses the
+   release naming those that did not. "Speaks" is read from the plugin's
+   `[package.metadata.ritornello]` table (`kinds`, and `admin = true`), through
+   `scripts/packaging.py speaks`. A plugin that does not speak the contract is
+   not asked to move. A contract's **minor** requires nothing;
+4. the product's **major** changed: everything is republished.
 
 A *compatible* change to a shared crate (`ritornello-proto`,
 `ritornello-i18n`, `ritornello-plugin-sdk`, `ritornello-updater`) republishes
@@ -241,10 +253,12 @@ nothing by itself: the script prints a note on stderr. If the fix must reach
 plugins, bump those plugins by hand: that is a delivery choice, not a
 compatibility matter. The decision between "break" and "compatible" for the
 wire is forced by a test, `crates/ritornello-proto/tests/wire_fingerprint.rs`,
-which compares a sample of every wire message with a committed fixture (see
-[development.md](development.md#tests)); `PROTOCOL_VERSION` moves at every
-break, before and after the first stable release, and a plugin announcing
-another number is shown "incompatible" on the System page.
+which compares a sample of every wire message, section by contract, with a
+committed fixture (see [development.md](development.md#the-wire-fingerprint)):
+a contract's content cannot change without that contract's version going up.
+A plugin whose contract major differs from the core's is shown "incompatible"
+on the System page, naming the contract; one whose minor is newer is shown
+"limited", wired and working with some features inactive.
 
 The **first finished release** republishes everything: a finished product
 refuses any prerelease component (see below), so every component still on a
@@ -1243,13 +1257,41 @@ every tagged release like the other two architectures (see
 [Architectures](#installing-from-a-release) above), but nobody owns a
 board of that class to try it on.
 
-**The protocol-incompatibility refusal is proven only by tests.** The core
-refuses a plugin whose announced `protocol` is not strictly equal to its
-own `PROTOCOL_VERSION` (see [plugins.md](plugins.md)), but that number has
-never actually moved in this project's history — there has been no real
-wire break to refuse. The path is exercised by unit tests that fabricate a
-mismatched announcement, not by an actually incompatible plugin built
-against an older protocol.
+**The contract refusal, and the "limited" state, are proven only by tests.**
+The core refuses a plugin whose contract major differs from its own, or that
+announces from before contract versions (see [plugins.md](plugins.md)), but
+no contract major has ever moved in this project's history — there has been no
+real wire break to refuse. The same goes for "limited", a newer minor of a
+contract the core also speaks: no real plugin is in that state at release.
+Both paths are exercised by unit tests that fabricate an announcement, not by
+an actually incompatible plugin built against another version of the
+protocol.
+
+**The upgrade across the bootstrap break (`PROTOCOL_VERSION` 1 to 2) has
+never run on a device**, and neither has a rollback across it. It is this
+project's first real wire break: a core and a plugin on either side of it
+refuse each other. What the code says will happen, traced and not observed:
+
+- the update worker installs the plugins first and the core last
+  (`install_order` in `crates/ritornello-core/src/update/mod.rs`). While the
+  plugins are being placed, the old core still runs, and it refuses each new
+  plugin as it restarts: the configuration page turns red row by row, and
+  the music stops if the active source is one of them. Everything heals when
+  the new core is placed and restarted;
+- if the core's own step fails, the device is left with the old core and
+  every new plugin refused. The automatic update retries the core the next
+  night; by hand, install the core from the update dialog;
+- a **rollback** (the new core failing to start, see below) restores the
+  core alone: the backup of each privileged run covers only what that run
+  placed, and the core is placed last, on its own. The device then runs the
+  old core with every plugin refused, so it is silent, and the nightly
+  update does not try again, since it never retries a version it has
+  already placed. Recovery is by hand: place a matching core and plugins
+  together, from one release, with `ritornello-install` (or the core again
+  from the update dialog, once the reason it failed to start is known).
+
+The same holds, on a smaller scale, for a contract's major: a core and a
+plugin speaking that contract on either side of the move refuse each other.
 
 **The language-packs chantier has not been verified on real hardware,
 physical display included.** Sixteen tasks rebuilt how text is resolved —

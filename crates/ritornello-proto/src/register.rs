@@ -7,7 +7,8 @@
 //! corresponding sockets already accept a connection.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use crate::{Contract, ContractVersion};
+use std::collections::{BTreeMap, HashMap};
 
 /// Upper bound, in bytes, on a single announcement line.
 ///
@@ -108,8 +109,8 @@ pub struct Announcement {
     /// shell then builds an unstamped URL and the old revalidation applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_version: Option<String>,
-    /// Protocol this binary was compiled against, compared by the core against
-    /// its own `PROTOCOL_VERSION`.
+    /// Bootstrap number this binary was compiled against, compared by the core
+    /// against its own `PROTOCOL_VERSION`.
     ///
     /// Derived, never asked: the SDK writes it from the constant, so a plugin
     /// author cannot get it wrong and cannot lie about it — the invariant of
@@ -117,10 +118,33 @@ pub struct Announcement {
     ///
     /// Absent = `1`, and that is not a fallback but a definition: the field
     /// was introduced while the protocol was at 1, so an announcement written
-    /// before it existed describes protocol 1 exactly. The core therefore
-    /// always compares a number, never an `Option`.
+    /// before it existed describes protocol 1 exactly. That is also how a
+    /// binary predating contract versions is recognised, and refused. The core
+    /// therefore always compares a number, never an `Option`.
     #[serde(default = "default_protocol")]
     pub protocol: u32,
+    /// The version of every wire contract this binary speaks: one per kind it
+    /// registered, plus `admin` when it serves an admin page.
+    ///
+    /// **Derived, never asked**, like `kinds` and `admin`: the SDK writes it
+    /// from what was registered, so an author can neither claim a contract the
+    /// binary does not serve nor forget one it does.
+    ///
+    /// Absent = empty, which only a binary predating contract versions sends;
+    /// such a binary is refused on `protocol` anyway.
+    ///
+    /// The keys are a closed enum, like `PluginKind`: a contract name this
+    /// build does not know makes the whole announcement unreadable, not
+    /// ignored. That is why **adding a contract moves `PROTOCOL_VERSION`**: a
+    /// new contract comes with a new kind or a new socket, which an older core
+    /// cannot serve either, so every component must be republished together,
+    /// and moving the bootstrap number is what makes the release script demand
+    /// it. It does not make an older core *say* "incompatible": that core
+    /// fails to parse the announcement before it reaches `protocol`, logs
+    /// "unreadable announcement ignored", and shows the plugin as silent. That
+    /// is accepted, deliberately, rather than reading unknown names leniently.
+    #[serde(default)]
+    pub contracts: BTreeMap<Contract, ContractVersion>,
     /// Version of the plugin binary itself.
     ///
     /// Relayed to the configuration page so the operator can see **what is
@@ -177,12 +201,11 @@ pub struct Announcement {
     /// apart:
     /// - `None` — a binary **predating this field entirely**. It does not
     ///   mean "no text": it means the plugin never had the chance to say.
-    ///   The one place this matters in practice is `PROTOCOL_VERSION`
-    ///   staying at 1 across this whole effort (an explicit choice, not an
-    ///   oversight — see its own doc): nothing at the wire level refuses
-    ///   such a plugin, so the core names it instead, on the Système page
-    ///   (`PluginStatus::catalog_unknown`), rather than letting it degrade
-    ///   in silence.
+    ///   Since the bootstrap number moved to 2, every accepted plugin built
+    ///   with the SDK sends `catalog`, so from an SDK-built plugin `None` only
+    ///   comes from a binary that is refused anyway. A plugin that writes its
+    ///   announcement by hand, without the SDK, can still send `None` with
+    ///   `protocol` 2; it then simply has no text of its own to offer.
     /// - `Some({})` — a module that genuinely **has no text of its own**.
     ///   Four plugins ship this way today (`console`, `nrj-metas`,
     ///   `ouifm-metas`, `radiofrance-metas`), and it is what a plugin built
@@ -210,7 +233,11 @@ fn default_protocol() -> u32 {
 mod tests {
     use super::*;
 
-    use crate::PROTOCOL_VERSION;
+    use crate::{
+        ADMIN_CONTRACT, DISPLAY_CONTRACT, INPUT_CONTRACT, METADATA_CONTRACT, PROTOCOL_VERSION,
+        SOURCE_CONTRACT,
+    };
+    use std::collections::BTreeMap;
 
     #[test]
     fn kinds_serialize_in_lowercase() {
@@ -221,6 +248,11 @@ mod tests {
             covers: true,
             ui_version: None,
             protocol: PROTOCOL_VERSION,
+            contracts: BTreeMap::from([
+                (Contract::Display, DISPLAY_CONTRACT),
+                (Contract::Input, INPUT_CONTRACT),
+                (Contract::Admin, ADMIN_CONTRACT),
+            ]),
             version: Some("0.2.0".into()),
             repository: Some("https://github.com/skerdudou/ritornello".into()),
             catalog: None,
@@ -228,7 +260,9 @@ mod tests {
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(
             line,
-            r#"{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":1,"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}"#
+            format!(
+                r#"{{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":{PROTOCOL_VERSION},"contracts":{{"display":{{"major":1,"minor":0}},"input":{{"major":1,"minor":0}},"admin":{{"major":1,"minor":0}}}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}}"#
+            )
         );
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
     }
@@ -266,6 +300,14 @@ mod tests {
     }
 
     #[test]
+    fn an_announcement_without_contracts_reads_back_with_none() {
+        let a: Announcement =
+            serde_json::from_str(r#"{"name":"radio","kinds":["source"]}"#).unwrap();
+        assert!(a.contracts.is_empty());
+        assert_eq!(a.protocol, 1);
+    }
+
+    #[test]
     fn an_absent_version_stays_unknown() {
         // `None` and not a string: a plugin predating the field says nothing
         // about its version, and inventing one here would be the announcement
@@ -289,12 +331,16 @@ mod tests {
             covers: false,
             ui_version: None,
             protocol: PROTOCOL_VERSION,
+            contracts: BTreeMap::from([
+                (Contract::Source, SOURCE_CONTRACT),
+                (Contract::Admin, ADMIN_CONTRACT),
+            ]),
             version: None,
             repository: None,
             catalog: None,
         };
         let line = serde_json::to_string(&a).unwrap();
-        assert!(line.contains(r#""protocol":1"#), "the protocol must always travel: {line}");
+        assert!(line.contains(r#""protocol":2"#), "the protocol must always travel: {line}");
         assert!(!line.contains("version\":null"), "an unknown version is omitted, not null: {line}");
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
     }
@@ -315,6 +361,10 @@ mod tests {
             covers: false,
             ui_version: None,
             protocol: PROTOCOL_VERSION,
+            contracts: BTreeMap::from([
+                (Contract::Source, SOURCE_CONTRACT),
+                (Contract::Metadata, METADATA_CONTRACT),
+            ]),
             version: None,
             repository: None,
             catalog: None,
@@ -343,6 +393,7 @@ mod tests {
             covers: false,
             ui_version: Some("deadbeef".into()),
             protocol: PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Source, SOURCE_CONTRACT)]),
             version: None,
             repository: None,
             catalog: None,
@@ -364,7 +415,7 @@ mod tests {
 
     /// A minimal announcement for tests that only care about one field —
     /// `catalog` here — and want `..base_announcement()` to fill in the
-    /// rest, rather than repeating all eight neighbouring fields verbatim.
+    /// rest, rather than repeating all nine neighbouring fields verbatim.
     fn base_announcement() -> Announcement {
         Announcement {
             name: "x".into(),
@@ -373,6 +424,7 @@ mod tests {
             covers: false,
             ui_version: None,
             protocol: PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Source, SOURCE_CONTRACT)]),
             version: None,
             repository: None,
             catalog: None,

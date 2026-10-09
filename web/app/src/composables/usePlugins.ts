@@ -24,7 +24,7 @@ import type { StatusPayload } from '../types'
  * and that source re-reads itself — see `watch`.
  */
 
-const state = ref<StatusPayload>({ plugins: [], active_source: '', protocol: 0, session: '', locale: '' })
+const state = ref<StatusPayload>({ plugins: [], active_source: '', contracts: {}, session: '', locale: '' })
 
 /**
  * `/api/status` unreachable. Distinguished from an empty state: a navigation

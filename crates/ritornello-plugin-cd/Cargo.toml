@@ -16,6 +16,7 @@ repository.workspace = true
 [package.metadata.ritornello]
 kinds = ["source"]
 description = "Plays audio CDs: disc presence, playback, current track, and eject."
+admin = true
 
 [[bin]]
 name = "ritornello-plugin-cd"

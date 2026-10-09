@@ -10,8 +10,9 @@
 //! product's (before 1.0 the major stays 0, so nothing forces republishing
 //! everything); an unchanged component may keep an earlier minor, and what a
 //! prerelease may declare is `suffix_fits` below. The third number,
-//! `ritornello_proto::PROTOCOL_VERSION`, is the compatibility contract and is
-//! none of this file's business. The fourth is a root-privileged companion's
+//! the wire contracts' `major.minor` versions and the frozen bootstrap
+//! `ritornello_proto::PROTOCOL_VERSION`, are the compatibility between a core
+//! and a plugin and are none of this file's business. The fourth is a root-privileged companion's
 //! own number, which none of the product rules touch (`tied_to_product`). The
 //! fifth is the workstation installer's own, exempt in the same way: it has a
 //! publication channel of its own and moves only when the installer does.

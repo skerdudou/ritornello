@@ -234,16 +234,31 @@ that is the only visibility the split introduced.
 
 `crates/ritornello-proto/tests/wire_fingerprint.rs` serializes a sample of
 every message that crosses the core/plugin wire and compares it with
-`tests/wire-fingerprint.txt`, which records the `PROTOCOL_VERSION` it was
-taken under. When it fails, the wire changed or the number moved without the
+`tests/wire-fingerprint.txt`. The fixture has one section per wire contract,
+headed with that contract's version (`[display 1.0]`), plus an
+`[announcement protocol=2]` section for the announcement and the bootstrap
+number. When it fails, the wire changed or a version moved without the
 fixture: decide whether an old plugin can still understand the new shape. If
-not, it is a break, so bump `PROTOCOL_VERSION` and regenerate; if it is
-compatible (an added optional field, an added variant nobody old receives),
-regenerate only, and say why in the commit. Regenerate with:
+not, it is a break, so bump that contract's **major**; if it is compatible
+(an added optional field, an added variant nobody old receives), bump its
+**minor**. Either way the version goes strictly up, in
+`crates/ritornello-proto/src/contract.rs`, and the fixture is regenerated:
 
     UPDATE_WIRE_FINGERPRINT=1 cargo test -p ritornello-proto --test wire_fingerprint
 
-and read the diff of the fixture: it is the exact record of what moved.
+Regeneration is not a way round the rule: a contract's section cannot change
+unless its version went strictly up, and the test refuses otherwise, even
+under `UPDATE_WIRE_FINGERPRINT=1`. A version never goes down: to revert a
+bump, restore the fixture from git. A missing fixture is a panic, and so is a
+section named twice. A brand-new contract **moves `PROTOCOL_VERSION`**: a
+contract name is a closed enum in the announcement, so an older core cannot
+read an announcement that names a new one (it logs it as unreadable and shows
+the plugin as silent, not as incompatible), and every component must be
+republished together. Then it is introduced by hand-adding its `[<name> 0.0]`
+header to the fixture, and regenerating. The announcement section regenerates freely for
+additions; a *break* of the announcement moves `PROTOCOL_VERSION` (and
+republishes everything). Read the diff of the fixture: it is the exact record
+of what moved.
 
 ### Continuous integration
 
@@ -418,9 +433,12 @@ before opening it:
 - a compatible change to a shared crate (`ritornello-proto`,
   `ritornello-i18n`, `ritornello-plugin-sdk`, `ritornello-updater`)
   republishes nothing: bump the plugins it must reach by hand. A change to
-  `PROTOCOL_VERSION` or to the product's major republishes everything, and
-  the script refuses a wire break that left a core or plugin on its old
-  number;
+  the bootstrap `PROTOCOL_VERSION` or to the product's major republishes
+  everything, and the script refuses a bootstrap move that left a core or
+  plugin on its old number. A contract's major moved obliges the core and
+  every plugin that speaks it to have moved (declared in
+  `[package.metadata.ritornello]`), and the script names those that did not;
+  a contract's minor requires nothing;
 - the release lands as a draft, and a tag with a prerelease suffix lands
   as a prerelease. **A draft is invisible to every device** — GitHub lists
   drafts to a reader with push access alone, and the core polls with no
@@ -442,11 +460,12 @@ series of fixes visible in the history. Debt identified and **accepted**
 at this stage, in order of interest:
 
 - ~~no protocol version between core and plugins~~ — **settled since**:
-  `ritornello_proto::PROTOCOL_VERSION` exists and the core refuses a
-  plugin whose announced number is not strictly equal to its own. The
-  refusal is proven by tests that fabricate a mismatched announcement,
-  never by an actually incompatible binary: that number has not moved
-  once in this project's history;
+  each wire contract carries its own `major.minor` version
+  (`ritornello_proto::contract`), announced by the plugin, and the core
+  refuses a plugin whose major differs and flags one whose minor is newer as
+  limited. The refusal is proven by tests that fabricate a mismatched
+  announcement, never by an actually incompatible binary: no contract major
+  has moved in this project's history;
 - the "two halves" bootstrap (source/input + admin) and the
   `build.rs`/placeholder pair are duplicated between radio and
   generic-input, as are the `env_or`/`log_half` helpers — to be hoisted

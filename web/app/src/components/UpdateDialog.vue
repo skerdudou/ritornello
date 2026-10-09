@@ -101,6 +101,14 @@ const coreChecked = computed(() => !!coreRow.value && checked.value.has(coreRow.
 // comes *before* the refusal screen a mismatched protocol produces — that
 // screen is the backstop, this is the earlier word.
 const coreLeftBehind = computed(() => coreRow.value?.availability === 'update_available' && !coreChecked.value)
+// The plugins of ours that have an update and stay unchecked: what the core
+// row warns about when it is checked without them.
+const pluginsLeftBehind = computed(() =>
+  relevant.value
+    .filter((c) => c.kind === 'plugin' && !c.third_party_repo)
+    .filter((c) => c.availability === 'update_available' && !checked.value.has(c.name))
+    .map((c) => c.name),
+)
 
 /** `null` when a row has nothing to say. */
 function warningFor(c: ComponentOffer): string | null {
@@ -133,6 +141,15 @@ function warningFor(c: ComponentOffer): string | null {
   }
   if (c.kind !== 'core' && checked.value.has(c.name) && coreLeftBehind.value) {
     return t.value('update_row_core_not_selected', { component: c.name })
+  }
+  // The symmetrical case: the core is ticked and plugins of ours that have
+  // an update are not. Across a wire break, this core refuses each of them
+  // until it is updated too, so the page would turn red row by row with no
+  // earlier word. Our plugins only: a third-party row is never ticked by
+  // default and already carries its own warning, so counting it here would
+  // make this one a permanent fixture of the core row.
+  if (c.kind === 'core' && checked.value.has(c.name) && pluginsLeftBehind.value.length > 0) {
+    return t.value('update_row_plugins_not_selected', { components: pluginsLeftBehind.value.join(', ') })
   }
   return null
 }
