@@ -61,7 +61,15 @@ impl<P: Player> Core<P> {
     /// sequence: player stop, best-effort `Deactivate`, forgetting of the
     /// identity, the preset count, the status and eject, `persist()` **before**
     /// `Activate`, final publication.
-    pub(super) async fn cycle_source(&mut self, next: Option<String>) -> Result<()> {
+    ///
+    /// `arrival` is what the incoming source is sent: `Activate` on every
+    /// switch the user makes or a removal causes ("this source is now the
+    /// one", which a source may answer by playing nothing), `Play` only when
+    /// the incoming source itself asked to be played (`handle_play_request`).
+    /// One request, not `Activate` then `Play`: two would load the content
+    /// twice, and a cd whose arrival setting says "play nothing" must not be
+    /// muted by it when the disc asked to play.
+    pub(super) async fn cycle_source(&mut self, next: Option<String>, arrival: SourceReq) -> Result<()> {
         // Changing source always means changing what plays — and it is the
         // core that stops, without depending on the plugins' answers. Before,
         // the action returned by `Deactivate` (the radio plugin's `Stop`) was
@@ -121,7 +129,7 @@ impl<P: Player> Core<P> {
         // itself, though: a failed request here still leaves the source
         // with whatever it last knew.
         self.send_play_mode_to(&self.active_source).await;
-        if let Some(action) = self.active_request(SourceReq::Activate).await? {
+        if let Some(action) = self.active_request(arrival).await? {
             self.apply(action).await?;
         }
         // The sequence is only complete once the new state is published: all
@@ -237,7 +245,7 @@ impl<P: Player> Core<P> {
             // could still land on a process that no longer exists — that is
             // the whole principle of an acknowledgement that only describes
             // an already-true state.
-            if let Err(e) = self.cycle_source(next.clone()).await {
+            if let Err(e) = self.cycle_source(next.clone(), SourceReq::Activate).await {
                 tracing::warn!("switching away from {name} while removing it: {e:#}");
                 // `cycle_source` sets `active_source` **before** its stage
                 // that can fail (`Activate`) but **after** a `stop()` that can

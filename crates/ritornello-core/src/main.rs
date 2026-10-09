@@ -2779,7 +2779,12 @@ async fn main() -> Result<()> {
                 }
             }
             Some((name, update)) = source_update_rx.recv() => {
-                core.handle_source_update(&name, update);
+                // A frame carrying a play request may have switched the
+                // active source, exactly as a command can: the status page
+                // follows, as after the command arm above.
+                if core.handle_source_frame(&name, update).await {
+                    status_state.write().await.active_source = core.active_source().to_string();
+                }
             }
             Some((plugin, enrichment)) = enrich_rx.recv() => {
                 core.handle_enrichment(&plugin, enrichment);

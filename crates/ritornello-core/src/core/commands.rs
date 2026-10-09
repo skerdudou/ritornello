@@ -113,12 +113,25 @@ impl<P: Player> Core<P> {
         if in_standby {
             return self.start_in_standby().await;
         }
-        // `resume` is also the "wake" half of `Command::Power`, where the
-        // flag is already lowered; here it is this method that lowers it,
-        // so that the file describes an awake device.
+        // Lowered and written here too, so that the file describes an awake
+        // device.
+        self.leave_standby();
+        self.resume().await
+    }
+
+    /// The flag half of every wake: lowered, then written to disk **before**
+    /// anything that can wait on a plugin. An unreachable Source makes the
+    /// caller wait up to 5 s, and `StartupPower::Previous` must find the
+    /// intended state even if the power is cut during that wait.
+    ///
+    /// Shared by the three ways out of standby — the Power key, startup, and
+    /// a source asking to be played (`handle_play_request`) — which differ
+    /// only in what they ask the sources afterwards. Leaving the standby view
+    /// needs nothing more: `player_state` derives it from this flag, and each
+    /// caller publishes on its way out.
+    pub(super) fn leave_standby(&mut self) {
         self.standby = false;
         self.persist();
-        self.resume().await
     }
 
     /// Startup in standby (`settings.startup_power`): mpv is configured
@@ -305,14 +318,18 @@ impl<P: Player> Core<P> {
                 }
             }
             Command::Power => {
-                self.standby = !self.standby;
-                // Persist **before** notifying the Source, for the same
-                // reason as at `SourceCycle` below: an unreachable Source
-                // makes us wait up to 5 s, and `StartupPower::Previous` must
-                // find the intended standby even if the power is cut during
-                // that wait.
-                self.persist();
                 if self.standby {
+                    // The flag first, then the wake: see `leave_standby`.
+                    self.leave_standby();
+                    self.resume().await?;
+                } else {
+                    self.standby = true;
+                    // Persist **before** notifying the Source, for the same
+                    // reason as at `SourceCycle` below: an unreachable Source
+                    // makes us wait up to 5 s, and `StartupPower::Previous`
+                    // must find the intended standby even if the power is cut
+                    // during that wait.
+                    self.persist();
                     let _ = self.active_request(SourceReq::Deactivate).await;
                     self.player.stop().await?;
                     self.expecting_stream = false;
@@ -346,8 +363,6 @@ impl<P: Player> Core<P> {
                     // doc) — never again at the moment standby is entered.
                     // A held key must re-press after standby: stale deadlines don't survive it.
                     self.volume_deadline = None;
-                } else {
-                    self.resume().await?;
                 }
             }
             Command::SourceCycle => {
@@ -363,7 +378,7 @@ impl<P: Player> Core<P> {
                     Some(idx) => self.source_order.get((idx + 1) % self.source_order.len()).cloned(),
                     None => self.source_order.first().cloned(),
                 };
-                self.cycle_source(next).await?;
+                self.cycle_source(next, SourceReq::Activate).await?;
             }
             Command::SelectSource(name) => {
                 // Unknown: silently ignored, like an unbound key. The MPD
@@ -382,7 +397,7 @@ impl<P: Player> Core<P> {
                     // `Some(name)`: `cycle_source` accepts `None` — "no
                     // source at all" — but this path always designates a
                     // name, the guard above having checked it in the order.
-                    self.cycle_source(Some(name)).await?;
+                    self.cycle_source(Some(name), SourceReq::Activate).await?;
                 }
             }
             Command::Plus10 => {
