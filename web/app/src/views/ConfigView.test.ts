@@ -26,11 +26,11 @@ const CATALOGUE = {
   col_version: 'Version', col_actions: 'Actions',
   connected: 'connecté', unavailable: 'unavailable', stalled: 'figé', disabled: 'désactivé',
   starting: 'démarrage', busy: 'occupé',
-  plugin_incompatible_legacy: 'Construit pour un protocole ancien ({found}) ; réinstallez ce greffon',
-  plugin_incompatible_missing: 'Annonce sa partie {contract} sans la version de ce contrat',
-  plugin_incompatible_unexpected: "Annonce un contrat {contract} qu'il ne sert pas",
-  plugin_incompatible_major: 'Contrat {contract} : construit pour {found}, ce cœur parle {expected}',
-  plugin_limited: 'Limité — contrat {contract} {found}, ce cœur parle {expected} : certaines fonctions de ce greffon sont inactives ; mettez à jour le cœur',
+  plugin_incompatible_legacy: 'Construit pour un protocole ancien ({found}) ; mettez à jour ce greffon',
+  plugin_incompatible_missing: 'Annonce sa partie « {contract} » sans la version de ce contrat',
+  plugin_incompatible_unexpected: "Annonce le contrat « {contract} », qu'il ne sert pas",
+  plugin_incompatible_major: 'Contrat « {contract} » incompatible : construit pour {found}, ce cœur parle {expected}',
+  plugin_limited: 'Limité — contrat « {contract} » {found}, ce cœur parle {expected} : certaines fonctions de ce greffon sont inactives ; mettez à jour le cœur',
   admin_link: 'admin', toggle_plugin: 'Activer ou désactiver {name}',
   plugin_enabled: '{name} activé.', plugin_disabled: '{name} désactivé.',
   update_binary_missing: 'Non installé', update_undeclared: 'Installé mais non déclaré',
@@ -106,6 +106,7 @@ const CATALOGUE = {
   plugin_kind_display: 'affichage',
   plugin_kind_input: 'entrée',
   plugin_kind_metadata: 'métadonnées',
+  plugin_kind_admin: 'administration',
   language_pack_install: 'Installer',
   language_pack_update: 'Mettre à jour',
   language_pack_remove: 'Retirer',
@@ -723,7 +724,9 @@ describe('ConfigView — plugin table', () => {
       contracts: { display: { major: 1, minor: 0 } },
     })
     const row = rowNamed(w, 'radio')
-    expect(stateText(row)).toBe('Contrat display : construit pour 2.0, ce cœur parle 1.0')
+    // The contract is named in the reader's language (`plugin_kind_display`),
+    // never by its wire word.
+    expect(stateText(row)).toBe('Contrat « affichage » incompatible : construit pour 2.0, ce cœur parle 1.0')
     expect(badge(row).classes()).toContain('bg-destructive')
     // The raw key must never reach the screen: that is what a missing catalog
     // entry looks like.
@@ -740,11 +743,11 @@ describe('ConfigView — plugin table', () => {
       contracts: {},
     })
     const text = stateText(rowNamed(w, 'mpd'))
-    expect(text).toContain('Contrat display : construit pour 2.0, ce cœur parle 1.0')
-    expect(text).toContain('Contrat input : construit pour 3.1, ce cœur parle 1.0')
+    expect(text).toContain('Contrat « affichage » incompatible : construit pour 2.0, ce cœur parle 1.0')
+    expect(text).toContain('Contrat « entrée » incompatible : construit pour 3.1, ce cœur parle 1.0')
   })
 
-  it('says a pre-contract plugin must be reinstalled', async () => {
+  it('says a pre-contract plugin must be updated', async () => {
     // The badge tests `!== undefined` on the refusal object, so no `found`
     // value (0 included) can make a refusal read as "no refusal".
     const w = await mountWithStatus({
@@ -753,7 +756,7 @@ describe('ConfigView — plugin table', () => {
       contracts: {},
     })
     const row = rowNamed(w, 'radio')
-    expect(stateText(row)).toBe('Construit pour un protocole ancien (1) ; réinstallez ce greffon')
+    expect(stateText(row)).toBe('Construit pour un protocole ancien (1) ; mettez à jour ce greffon')
     expect(badge(row).classes()).toContain('bg-destructive')
   })
 
@@ -766,8 +769,9 @@ describe('ConfigView — plugin table', () => {
       active_source: '',
       contracts: {},
     })
-    expect(stateText(rowNamed(w, 'a'))).toBe('Annonce sa partie input sans la version de ce contrat')
-    expect(stateText(rowNamed(w, 'b'))).toBe("Annonce un contrat admin qu'il ne sert pas")
+    expect(stateText(rowNamed(w, 'a'))).toBe('Annonce sa partie « entrée » sans la version de ce contrat')
+    // `admin` has no kind of its own: `plugin_kind_admin` names it.
+    expect(stateText(rowNamed(w, 'b'))).toBe("Annonce le contrat « administration », qu'il ne sert pas")
   })
 
   it('shows the version each plugin announced', async () => {
@@ -783,7 +787,9 @@ describe('ConfigView — plugin table', () => {
   })
 
   const LIMITED_TEXT =
-    'Limité — contrat display 1.1, ce cœur parle 1.0 : certaines fonctions de ce greffon sont inactives ; mettez à jour le cœur'
+    'Limité — contrat « affichage » 1.1, ce cœur parle 1.0 : certaines fonctions de ce greffon sont inactives ; mettez à jour le cœur'
+  const LIMITED_INPUT_TEXT =
+    'Limité — contrat « entrée » 1.2, ce cœur parle 1.0 : certaines fonctions de ce greffon sont inactives ; mettez à jour le cœur'
 
   it('shows a limited plugin as limited, with the contract', async () => {
     // Fully wired — `connected: true` — so the badge must not say a bare
@@ -826,16 +832,33 @@ describe('ConfigView — plugin table', () => {
     expect(row.text()).not.toContain('plugin_limited')
   })
 
-  it('a plugin limited on one kind is limited as a whole row', async () => {
+  it('a plugin limited on one contract reads it once, though every line carries it', async () => {
+    // The shape the core really sends: it stamps the plugin's **whole** list
+    // of limited contracts on every line of that plugin (`announced_plugin_line`
+    // in main.rs), so mpd's display and input lines both carry the display
+    // gap. One sentence, not two: the merge de-duplicates by contract.
     const w = await mountWithStatus({
       plugins: [
         { name: 'mpd', kind: 'display', connected: true, admin: false, limited: [gap('display', [1, 1], [1, 0])] },
-        { name: 'mpd', kind: 'input', connected: true, admin: false },
+        { name: 'mpd', kind: 'input', connected: true, admin: false, limited: [gap('display', [1, 1], [1, 0])] },
       ],
       active_source: '',
       contracts: {},
     })
     expect(stateText(rowNamed(w, 'mpd'))).toBe(LIMITED_TEXT)
+  })
+
+  it('a plugin limited on two contracts reads both, once each', async () => {
+    const both = [gap('display', [1, 1], [1, 0]), gap('input', [1, 2], [1, 0])]
+    const w = await mountWithStatus({
+      plugins: [
+        { name: 'mpd', kind: 'display', connected: true, admin: false, limited: both },
+        { name: 'mpd', kind: 'input', connected: true, admin: false, limited: both },
+      ],
+      active_source: '',
+      contracts: {},
+    })
+    expect(stateText(rowNamed(w, 'mpd'))).toBe(`${LIMITED_TEXT} · ${LIMITED_INPUT_TEXT}`)
   })
 
   it('a wired plugin with nothing limited reads as plain connected', async () => {

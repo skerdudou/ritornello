@@ -86,7 +86,9 @@ export interface PluginStatus {
 export interface StatusPayload {
   plugins: PluginStatus[]
   active_source: string
-  /** The version of each contract this core speaks, by wire name. */
+  /** Informational: the version of each contract this core speaks, by wire
+   * name. The page does not read it to explain a refused or limited plugin:
+   * each gap already carries the core's side (`ContractGap.core`). */
   contracts: Partial<Record<Contract, ContractVersion>>
   /**
    * Identifier of this run of the core, used by the shell as the `v=` stamp

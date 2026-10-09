@@ -23,8 +23,8 @@ import { packSourceLabel } from '../composables/packSource'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
 import type {
-  AudioPayload, ContractGap, ContractVersion, LanguageBusy, LanguagePackRow, LocalePayload, Refusal,
-  SettingsPayload, UpdatePayload,
+  AudioPayload, Contract, ContractGap, ContractVersion, LanguageBusy, LanguagePackRow, LocalePayload,
+  Refusal, SettingsPayload, UpdatePayload,
 } from '../types'
 
 const { t, reload } = useCatalog()
@@ -446,9 +446,10 @@ const plugins = computed<PluginRow[]>(() => {
     // tested with `!== undefined`.
     acc.version = acc.version ?? p.version
     acc.incompatible = acc.incompatible ?? p.incompatible
-    // Unlike the refusal, a limitation is per contract, and a contract belongs
-    // to one kind of a plugin (mpd: display + input + admin): each line carries
-    // its own gaps, so they are concatenated, one entry per contract.
+    // Every line of a plugin carries the plugin's whole list of limited
+    // contracts (the core stamps the same list on each of its kinds), so the
+    // lines are merged with a de-dup by contract: without it, mpd (display +
+    // input) limited on one contract would read that sentence twice.
     for (const gap of p.limited ?? []) {
       if (!acc.limited.some((g) => g.contract === gap.contract)) acc.limited.push(gap)
     }
@@ -567,6 +568,25 @@ const isLastDeclared = (name: string) =>
 /** `1.1`: a contract version as the page writes it. */
 const fmt = (v: ContractVersion) => `${v.major}.${v.minor}`
 
+/** A contract's name in the reader's language, never its wire word: the
+ * same `plugin_kind_*` nouns the plugin table uses for a kind, plus
+ * `plugin_kind_admin`. One literal key per branch, so the check that every key
+ * the page uses exists sees all five. */
+function contractLabel(c: Contract): string {
+  switch (c) {
+    case 'source':
+      return t.value('plugin_kind_source')
+    case 'display':
+      return t.value('plugin_kind_display')
+    case 'input':
+      return t.value('plugin_kind_input')
+    case 'metadata':
+      return t.value('plugin_kind_metadata')
+    case 'admin':
+      return t.value('plugin_kind_admin')
+  }
+}
+
 /** The sentence a refused plugin's badge reads, one per cause. Each branch
  * names its key literally: a computed key would escape the checks that every
  * key the page uses exists in every language. Several gaps give several
@@ -576,13 +596,17 @@ function refusalText(r: Refusal): string {
     case 'legacy':
       return t.value('plugin_incompatible_legacy', { found: r.found })
     case 'missing_contract':
-      return t.value('plugin_incompatible_missing', { contract: r.contract })
+      return t.value('plugin_incompatible_missing', { contract: contractLabel(r.contract) })
     case 'unexpected_contract':
-      return t.value('plugin_incompatible_unexpected', { contract: r.contract })
+      return t.value('plugin_incompatible_unexpected', { contract: contractLabel(r.contract) })
     case 'major':
       return r.gaps
         .map((g) =>
-          t.value('plugin_incompatible_major', { contract: g.contract, found: fmt(g.plugin), expected: fmt(g.core) }),
+          t.value('plugin_incompatible_major', {
+            contract: contractLabel(g.contract),
+            found: fmt(g.plugin),
+            expected: fmt(g.core),
+          }),
         )
         .join(' · ')
   }
@@ -592,7 +616,9 @@ function refusalText(r: Refusal): string {
  * joined. */
 function limitedText(gaps: ContractGap[]): string {
   return gaps
-    .map((g) => t.value('plugin_limited', { contract: g.contract, found: fmt(g.plugin), expected: fmt(g.core) }))
+    .map((g) =>
+      t.value('plugin_limited', { contract: contractLabel(g.contract), found: fmt(g.plugin), expected: fmt(g.core) }),
+    )
     .join(' · ')
 }
 

@@ -10,6 +10,8 @@ const CATALOG = {
   update_row_third_party: 'Third-party plugin from {repo}. Never selected automatically.',
   update_row_core_not_selected:
     '{component} will move while the core stays behind — this may make them incompatible.',
+  update_row_plugins_not_selected:
+    'The core will move while these plugins stay behind: {components}. This core may refuse them until they are updated too.',
   update_confirm: 'Install selected',
   plugin_privileged_note:
     'Privileged component: install or uninstall it with ritornello-install. An update that leaves its root-run companion unchanged can be made from here.',
@@ -434,6 +436,79 @@ describe('UpdateDialog', () => {
     expect(row('core')).toBeNull()
     expect(isChecked('radio')).toBe('true')
     expect(row('radio')?.querySelector('[data-update-row-warning]')).toBeNull()
+  })
+
+  function plugin(name: string, extra: Partial<ComponentOffer> = {}): ComponentOffer {
+    return {
+      name,
+      kind: 'plugin',
+      declared: true,
+      binary_present: true,
+      installed: '0.2.0',
+      offered: '0.3.0',
+      availability: 'update_available',
+      ...extra,
+    }
+  }
+
+  const coreWarning = () => row('core')?.querySelector('[data-update-row-warning]')?.textContent ?? null
+
+  it('warns on the core row when it is checked and a plugin with an update is not', async () => {
+    // The symmetrical warning: across a wire break, the new core refuses
+    // every plugin left on the old side, and the page would turn red row by
+    // row with no earlier word.
+    mountDialog([core(), plugin('radio'), plugin('cd')])
+    await flushPromises()
+    // Everything ticked by default: nothing is left behind.
+    expect(coreWarning()).toBeNull()
+
+    await row('radio')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
+    await flushPromises()
+    expect(isChecked('core')).toBe('true')
+    expect(coreWarning()).toBe(
+      'The core will move while these plugins stay behind: radio. This core may refuse them until they are updated too.',
+    )
+
+    await row('cd')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
+    await flushPromises()
+    expect(coreWarning()).toBe(
+      'The core will move while these plugins stay behind: radio, cd. This core may refuse them until they are updated too.',
+    )
+  })
+
+  it('does not warn on the core row when the core itself is unchecked', async () => {
+    mountDialog([core(), plugin('radio')])
+    await flushPromises()
+    await row('radio')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
+    await row('core')!.querySelector<HTMLElement>('[data-update-row-check]')!.click()
+    await flushPromises()
+    expect(isChecked('core')).toBe('false')
+    expect(isChecked('radio')).toBe('false')
+    expect(coreWarning()).toBeNull()
+  })
+
+  it('does not count a third-party plugin among those the core leaves behind', async () => {
+    // Never ticked by default, and it carries its own warning: counting it
+    // would put this warning on the core row of every such device.
+    mountDialog([
+      core(),
+      plugin('x', { kind: 'third_party', third_party_repo: 'owner/repo', installed: '1.0.0', offered: '2.0.0' }),
+      plugin('y', { third_party_repo: 'owner/other', installed: '1.0.0', offered: '2.0.0' }),
+    ])
+    await flushPromises()
+    expect(isChecked('core')).toBe('true')
+    expect(isChecked('x')).toBe('false')
+    expect(isChecked('y')).toBe('false')
+    expect(coreWarning()).toBeNull()
+  })
+
+  it('does not count a plugin that is not out of step', async () => {
+    // A `binary_missing` row is listed but not `update_available`: it is a
+    // repair, not a version the core could disagree with.
+    mountDialog([core(), plugin('cd', { availability: 'binary_missing', installed: null })])
+    await flushPromises()
+    expect(isChecked('cd')).toBe('false')
+    expect(coreWarning()).toBeNull()
   })
 
   it('emits confirm with exactly the checked names', async () => {

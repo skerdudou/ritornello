@@ -53,7 +53,9 @@ that the core opens before launching a single plugin:
    kind it serves (`source`, `display`, `input`, `metadata`), plus
    `{prefix}-admin.sock` if it has an admin page — and **only then**
    connects to the register socket and writes a single line of JSON
-   describing exactly what it just bound, e.g.:
+   describing exactly what it just bound, e.g. (trimmed: the SDK also
+   sends `catalog`, the plugin's own translations, described below, and
+   omitted here for length):
 
    ```json
    {"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":2,"contracts":{"display":{"major":1,"minor":0},"input":{"major":1,"minor":0},"admin":{"major":1,"minor":0}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}
@@ -79,9 +81,10 @@ and the next derived field then costs nothing at ten call sites.
 `contracts` holds one `major.minor` version per wire contract the plugin
 speaks: one for each kind it registered (`source`, `display`, `input`,
 `metadata`) and `admin` when it serves an admin page. `protocol` is
-`ritornello_proto::PROTOCOL_VERSION` as the plugin was built: the frozen
+`ritornello_proto::PROTOCOL_VERSION` as the plugin was built: the
 **bootstrap** number, which only guards the announcement's own format (it
-carries the contract versions, so it cannot be versioned by them).
+carries the contract versions, so it cannot be versioned by them) and moves
+when that format breaks or a contract is added.
 
 ### Where a plugin keeps its data
 
@@ -249,10 +252,12 @@ anything. Either way the core keeps running and every other plugin is
 unaffected — the same tolerance a merely dead plugin already gets. A plugin
 refused at startup and re-announcing hot with a good announcement is wired:
 the refusal is lifted. The configuration page names the cause and the
-contract, for instance "Display contract: built for 2.0, this core speaks
-1.0", or "Limited — display contract 1.1, this core speaks 1.0: some features
-of this plugin are inactive; update the core". The versions are placed by the
-language rather than concatenated into the sentence. `/api/status` carries
+contract, for instance "Incompatible display contract: built for 2.0, this
+core speaks 1.0", or "Limited — display contract 1.1, this core speaks 1.0:
+some features of this plugin are inactive; update the core". The versions and
+the contract's name are placed by the language rather than concatenated into
+the sentence, and the name is translated (the same words the page uses for a
+plugin's kinds, plus one for `admin`), never the wire word. `/api/status` carries
 the core's own contract versions under `contracts`.
 
 This refusal is deliberately **not** the `enabled` switch described below,
@@ -267,10 +272,13 @@ compatible addition (an optional field, a variant nobody old receives), which
 a serde default absorbs, so an older plugin and a newer core (or the reverse)
 keep understanding each other. The contract versions live in
 `crates/ritornello-proto/src/contract.rs`. `PROTOCOL_VERSION` is a separate,
-frozen number: it moved once, from 1 to 2, to introduce the contracts, so that
-a pre-contract core and a post-contract plugin refuse each other; it moves
-again only if the **announcement's own format** breaks, and that republishes
-everything. The decision is forced: the wire fingerprint test of
+nearly frozen number: it moved once, from 1 to 2, to introduce the contracts,
+so that a pre-contract core and a post-contract plugin refuse each other; it
+moves again only if the **announcement's own format** breaks, or when a
+**contract is added** (a contract name is a closed enum in the announcement,
+so an older core cannot even read an announcement that names a new one: it
+logs it as unreadable and shows the plugin as silent). Either move
+republishes everything. The decision is forced: the wire fingerprint test of
 `ritornello-proto` serializes a sample of every message, one section per
 contract plus the announcement, and compares it with a committed fixture. The
 content of a contract's section cannot change unless that contract's version

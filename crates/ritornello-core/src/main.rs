@@ -2040,15 +2040,25 @@ async fn main() -> Result<()> {
         let Some(announcement) = gathered.announcements.get(name) else {
             continue;
         };
-        wire_announced_catalog(&registry, name, announcement).await;
         // `gather` only kept announcements `compat::judge` accepted, and
         // logged their limits: the verdict is asked again here for those
         // limits alone — the judge is a pure function of the announcement,
-        // so it cannot answer differently the second time.
+        // so it cannot answer differently the second time. If it ever does,
+        // that invariant is broken: say so loudly and wire nothing of this
+        // plugin, rather than wiring a refused one as if it were normal. Not
+        // a panic: a daemon must not die at boot over one plugin.
         let limited = match compat::judge(announcement) {
             Verdict::Accepted { limited } => limited,
-            Verdict::Refused(_) => Vec::new(),
+            Verdict::Refused(refusal) => {
+                tracing::error!(
+                    "{name}: accepted by the rendezvous but refused when wired ({}); the judge must \
+                     answer the same both times — this plugin is not wired",
+                    compat::describe(&refusal)
+                );
+                continue;
+            }
         };
+        wire_announced_catalog(&registry, name, announcement).await;
         let prefix = sockets_dir.join(name);
 
         for kind in &announcement.kinds {
