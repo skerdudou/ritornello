@@ -20,9 +20,18 @@
 //! version moves: the MAJOR for a break, the MINOR for a compatible addition.
 //! The test refuses that change even when the fixture is being regenerated
 //! (`UPDATE_WIRE_FINGERPRINT=1`), since regenerating must not be a way
-//! around the decision. Bump the version in `src/contract.rs` first, then
-//! regenerate and read the diff of the fixture: it is the exact record of
-//! what moved.
+//! around the decision, and it compares versions as (major, minor): the
+//! recorded one must be strictly lower, so a bump, a regeneration and a
+//! revert of the constant do not get around it. Bump the version in
+//! `src/contract.rs` first, then regenerate and read the diff of the
+//! fixture: it is the exact record of what moved.
+//!
+//! The fixture itself is guarded: one that cannot be read, a header that
+//! names no section, lines before the first header, or a contract section
+//! missing from it are refused, never regenerated from. The one deliberate
+//! way to add a contract: put an empty `[<name> 0.0]` header in the fixture
+//! by hand, then regenerate. The samples of the announcement use fixed
+//! contract versions, so that a contract bump does not rewrite it.
 //!
 //! **The announcement differs.** It is the bootstrap, read before any
 //! contract is known, and it has no version of its own to bump: an addition
@@ -363,7 +372,7 @@ fn announcement_section() -> Vec<String> {
             covers: true,
             ui_version: Some("abc123".into()),
             protocol: PROTOCOL_VERSION,
-            contracts: Contract::ALL.into_iter().map(|c| (c, c.current())).collect(),
+            contracts: Contract::ALL.into_iter().map(|c| (c, ContractVersion::new(1, 0))).collect(),
             version: Some("1.2.3".into()),
             repository: Some("https://example.invalid/r".into()),
             catalog: Some(HashMap::from([("en".to_string(), one("key", "text"))])),
@@ -638,8 +647,8 @@ struct Section {
 }
 
 /// Splits a fixture into its sections. A line starting with `[` opens one.
-/// A line before the first header (an old-format fixture) opens a section
-/// with an empty header, which matches no current section.
+/// A line before the first header is filed under an empty header, which
+/// names no section and is refused by the test.
 fn sections(text: &str) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
     for line in text.lines() {
@@ -671,6 +680,20 @@ fn is_contract(header: &str) -> bool {
     Contract::ALL.iter().any(|c| contract_name(*c) == section_name(header))
 }
 
+/// The `(major, minor)` of a contract header such as `[source 1.0]`; `None`
+/// when the header carries no well-formed version.
+fn header_version(header: &str) -> Option<(u32, u32)> {
+    let inner = header.strip_prefix('[')?.strip_suffix(']')?;
+    let (_, version) = inner.split_once(' ')?;
+    let (major, minor) = version.split_once('.')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// The constant to edit for a contract section, named in the refusals.
+fn contract_constant(header: &str) -> String {
+    format!("{}_CONTRACT", section_name(header).to_uppercase())
+}
+
 fn first_difference(recorded: &[String], now: &[String]) -> String {
     for (i, (a, b)) in now.iter().zip(recorded.iter()).enumerate() {
         if a != b {
@@ -696,28 +719,85 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
     let path = fixture_path();
     // Compared with line endings normalized: a Windows checkout may hand the
     // fixture back with CRLF, which says nothing about the wire.
-    let recorded_text = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+    // A fixture that cannot be read is a defect, never a blank to regenerate
+    // from: regenerating from nothing would accept any change.
+    let recorded_text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| {
+            panic!(
+                "cannot read the wire fingerprint fixture {} ({e}). A missing fixture is a defect: \
+                 restore it from git (git checkout -- <path>); do not regenerate it from nothing.",
+                path.display()
+            )
+        })
+        .replace("\r\n", "\n");
     let update = std::env::var_os("UPDATE_WIRE_FINGERPRINT").is_some();
     let recorded = sections(&recorded_text);
+    let current = sections(&now);
 
     let mut refusals = Vec::new();
-    for s in sections(&now) {
-        let before = recorded.iter().find(|r| same_section(&r.header, &s.header));
-        match before {
-            // A section whose content moved while its header (the contract's
-            // version) did not: a decision was skipped. Refused even under
-            // UPDATE_WIRE_FINGERPRINT, so that regenerating is no way around it.
-            Some(r) if r.header == s.header && r.lines != s.lines && is_contract(&s.header) => {
+
+    // The recorded fixture must be well formed and must not hold a section the
+    // test no longer produces (dropped or renamed here, or a header typo).
+    for r in &recorded {
+        let name = section_name(&r.header);
+        if r.header.is_empty() {
+            refusals.push(
+                "the fixture has lines before its first section header; restore it from git".to_string(),
+            );
+        } else if !current.iter().any(|s| same_section(&s.header, &r.header)) {
+            refusals.push(format!(
+                "{}: the fixture holds a section named `{name}` that this test does not produce \
+                 (an unknown name, a typo in a header, or a contract dropped or renamed here). \
+                 Restore the fixture from git, or fix the test.",
+                r.header
+            ));
+        } else if is_contract(&r.header) && header_version(&r.header).is_none() {
+            refusals.push(format!("{}: the header of a contract section must read `[<name> <major>.<minor>]`.", r.header));
+        }
+    }
+
+    for s in &current {
+        let Some(r) = recorded.iter().find(|r| same_section(&r.header, &s.header)) else {
+            if is_contract(&s.header) {
                 refusals.push(format!(
-                    "{}: the messages of this contract changed but its version did not.\n  \
-                     A break (an old peer would misread it): bump the MAJOR of this contract in \
-                     crates/ritornello-proto/src/contract.rs.\n  A compatible addition: bump its MINOR.\n  \
-                     Then regenerate. First difference:\n{}",
+                    "{}: this contract has no section in the fixture. Adding a contract is a deliberate, \
+                     rare change: first add an empty header `[{} 0.0]` to the fixture by hand, then \
+                     regenerate. (If the fixture was damaged, restore it from git instead.)",
                     s.header,
+                    section_name(&s.header)
+                ));
+            } else {
+                refusals.push(format!(
+                    "{}: the fixture has no such section; restore it from git.",
+                    s.header
+                ));
+            }
+            continue;
+        };
+        // A contract section whose content moved while its version did not
+        // move UP: a decision was skipped. Compared as (major, minor), so
+        // bumping, regenerating, then putting the constant back and
+        // regenerating again is refused too. Refused even under
+        // UPDATE_WIRE_FINGERPRINT: regenerating is no way around it. Identical
+        // lines under a lower version (a revert of a bump) are not refused,
+        // to keep the rule simple: only a change of content needs a decision.
+        if is_contract(&s.header) && r.lines != s.lines {
+            let moved_up = match (header_version(&s.header), header_version(&r.header)) {
+                (Some(now_v), Some(before_v)) => now_v > before_v,
+                _ => false,
+            };
+            if !moved_up {
+                refusals.push(format!(
+                    "{}: the messages of this contract changed but its version did not move up \
+                     (recorded: {}).\n  A break (an old peer would misread it): bump the MAJOR of \
+                     {} in crates/ritornello-proto/src/contract.rs.\n  A compatible addition: bump its \
+                     MINOR.\n  Then regenerate. First difference:\n{}",
+                    s.header,
+                    r.header,
+                    contract_constant(&s.header),
                     first_difference(&r.lines, &s.lines)
                 ));
             }
-            _ => {}
         }
     }
     assert!(refusals.is_empty(), "{}", refusals.join("\n\n"));
