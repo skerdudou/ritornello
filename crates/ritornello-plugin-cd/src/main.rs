@@ -24,7 +24,7 @@ use anyhow::Result;
 use rand::seq::SliceRandom;
 use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
 use ritornello_proto::{Repeat, SourceAction, Text};
-use state::{OnArrival, Remembered};
+use state::{OnArrival, OnInsertion, Remembered};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -78,6 +78,9 @@ struct CdSource {
     /// setting changed from the page must apply to the next press, not to the
     /// next reboot.
     on_arrival: Arc<RwLock<OnArrival>>,
+    /// What to do when a disc is inserted, shared with the Admin half that
+    /// writes it. Read at each insertion, never cached.
+    on_insertion: Arc<RwLock<OnInsertion>>,
     /// Where the setting and the resume point live. Written by this half for
     /// the resume point only, always through `state::update` — the Admin half
     /// writes the setting into the same file.
@@ -1212,7 +1215,7 @@ impl SourcePlugin for CdSource {
                 // finally work — hence the identity in the notification.
                 if inserted {
                     // Part B turns this into a request to play the disc.
-                    tracing::info!("disc inserted");
+                    tracing::info!("disc inserted (on insertion: {:?})", *self.on_insertion.read().unwrap());
                 }
                 Some(self.notification())
             }
@@ -1305,6 +1308,7 @@ async fn main() -> Result<()> {
     // Shared, not copied into each half: the page writes it and the Source
     // half reads it at every arrival, so a change applies to the next press.
     let on_arrival = Arc::new(RwLock::new(persisted.on_arrival));
+    let on_insertion = Arc::new(RwLock::new(persisted.on_insertion));
 
     let source = CdSource {
         cd_dev,
@@ -1320,6 +1324,7 @@ async fn main() -> Result<()> {
         toc_tx,
         toc_rx,
         on_arrival: on_arrival.clone(),
+        on_insertion: on_insertion.clone(),
         state_path: state_path.clone(),
         remembered: persisted.remembered,
         pending_chapter: None,
@@ -1329,7 +1334,7 @@ async fn main() -> Result<()> {
         order: Vec::new(),
         cursor: 0,
     };
-    let admin = CdAdmin { state_path, on_arrival };
+    let admin = CdAdmin { state_path, on_arrival, on_insertion };
     ritornello_plugin_sdk::declare_runtime!()?
         .texts([("en", CD_EN)])?
         .source(source)?
@@ -1360,7 +1365,7 @@ mod tests {
             track: 0,
             toc: None,
             previous_toc: None,
-        insertion_pending: false,
+            insertion_pending: false,
             total_tracks: 0,
             playback: false,
             epoch: 5,
@@ -1368,6 +1373,7 @@ mod tests {
             toc_tx: toc_tx.clone(),
             toc_rx,
             on_arrival: Arc::new(RwLock::new(OnArrival::default())),
+            on_insertion: Arc::new(RwLock::new(OnInsertion::default())),
             // A writable path that no test reads: `remember` is called by
             // every track change, and pointing it at an unwritable place
             // would fill the test output with warnings for nothing. The tests
@@ -3301,6 +3307,31 @@ mod tests {
     fn the_first_disc_after_startup_is_not_an_insertion() {
         let (source, _p, _t) = source_with_channels(); // previous_toc None, insertion_pending false
         assert!(!source.is_insertion(Some(&"3 150 22767 41887 63000".to_string())));
+    }
+
+    #[tokio::test]
+    async fn a_stale_toc_after_an_open_tray_leaves_the_insertion_armed_until_a_current_one() {
+        let mut source = playing_source();
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        let (toc_tx, toc_rx) = mpsc::channel(4);
+        source.toc_tx = toc_tx.clone();
+        source.toc_rx = toc_rx;
+        let before_the_tray_opened = source.epoch;
+        presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
+        source.poll_notification().await;
+        assert!(source.insertion_pending);
+        // A read that was spawned before the tray opened lands late: it
+        // belongs to a disc that is gone, so it must neither consume the
+        // pending flag nor count as an insertion.
+        let toc = "3 150 22767 41887 63000".to_string();
+        toc_tx.send((before_the_tray_opened, Some(toc.clone()), 3)).await.unwrap();
+        assert!(source.poll_notification().await.is_none());
+        assert!(source.insertion_pending, "a stale TOC must not consume the pending insertion");
+        // The first current TOC does.
+        toc_tx.send((source.epoch, Some(toc), 3)).await.unwrap();
+        assert!(source.poll_notification().await.is_some());
+        assert!(!source.insertion_pending);
     }
 
     #[tokio::test]

@@ -1,10 +1,11 @@
-//! Persisted state: what to do on arriving at the source, and the track last
-//! listened to on the last disc.
+//! Persisted state: what to do on arriving at the source, what to do when a
+//! disc is inserted, and the track last listened to on the last disc.
 //!
 //! Same pattern as `crates/ritornello-plugin-files/src/state.rs`, including the
 //! `update` that preserves the fields it does not touch — and here that is not
-//! a precaution but a requirement: the Admin half writes `on_arrival`, the
-//! Source half writes `remembered`, into this same file. A `save` rebuilt by
+//! a precaution but a requirement: the Admin half writes the two settings
+//! (`on_arrival`, `on_insertion`), the Source half writes `remembered`, into
+//! this same file. A `save` rebuilt by
 //! either would erase the other's field.
 //!
 //! One file for a setting **and** a playback position, which may look like a
@@ -39,6 +40,27 @@ pub enum OnArrival {
     LastTrack,
 }
 
+/// What the plugin does when a disc is **inserted** — not when the source is
+/// arrived at (that is `OnArrival`'s job), but when a disc appears in the drive
+/// after a confirmed removal or a swap.
+///
+/// Persisted for the part of the plugin that acts on it; today it is only
+/// shown, saved and read into a log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnInsertion {
+    /// Do nothing. The default, for the same reason as `OnArrival::Nothing`:
+    /// spinning up a drive must not happen unasked.
+    #[default]
+    Nothing,
+    /// Play the disc, but only if the CD is already the current source.
+    PlayIfActive,
+    /// Switch to the CD source and play the disc.
+    SwitchAndPlay,
+    /// Leave standby if needed, switch to the CD source and play the disc.
+    WakeSwitchAndPlay,
+}
+
 /// The track last listened to, and the disc it belongs to.
 ///
 /// The TOC is what makes this usable: a track number alone, applied to
@@ -64,6 +86,8 @@ pub struct Remembered {
 pub struct State {
     #[serde(default)]
     pub on_arrival: OnArrival,
+    #[serde(default)]
+    pub on_insertion: OnInsertion,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remembered: Option<Remembered>,
 }
@@ -127,6 +151,7 @@ mod tests {
         let f = dir.path().join("plugin-cd.json");
         let state = State {
             on_arrival: OnArrival::LastTrack,
+            on_insertion: OnInsertion::PlayIfActive,
             remembered: Some(Remembered { toc: "abcd1234".into(), track: 4 }),
         };
         save(&f, &state).unwrap();
@@ -152,11 +177,30 @@ mod tests {
     }
 
     #[test]
+    fn insertion_defaults_to_nothing_and_is_stored_under_a_readable_name() {
+        assert_eq!(State::default().on_insertion, OnInsertion::Nothing);
+        let s = State { on_insertion: OnInsertion::WakeSwitchAndPlay, ..State::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"wake_switch_and_play\""), "{json}");
+    }
+
+    #[test]
+    fn a_file_without_the_insertion_setting_keeps_its_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-cd.json");
+        std::fs::write(&path, r#"{"on_arrival":"last_track"}"#).unwrap();
+        let s = load(&path);
+        assert_eq!(s.on_arrival, OnArrival::LastTrack);
+        assert_eq!(s.on_insertion, OnInsertion::Nothing);
+    }
+
+    #[test]
     fn the_setting_is_stored_under_a_readable_name() {
         // The file is read by a human when something looks wrong on the
         // device: `last_track` says what it does, a bare `2` would not.
         let json = serde_json::to_string(&State {
             on_arrival: OnArrival::LastTrack,
+            on_insertion: OnInsertion::Nothing,
             remembered: None,
         })
         .unwrap();
