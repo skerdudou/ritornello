@@ -66,28 +66,41 @@ impl<P: Player> Core<P> {
     }
 
     async fn act_on_play_request(&mut self, name: &str, request: PlayRequest) -> Result<()> {
+        // One journal line per decision, whatever it is: the owner who
+        // inserts a disc and hears nothing (or hears it start) has
+        // `journalctl` to find out which rule answered.
         if !self.source_order.iter().any(|n| n == name) {
-            tracing::debug!("play request {request:?} from {name} ignored: not a wired source");
+            tracing::info!("play request {request:?} from {name} ignored: not a wired source");
             return Ok(());
         }
         let mut request = request;
         if self.standby {
             if request != PlayRequest::WakeAndSwitch {
+                tracing::info!("play request {request:?} from {name} ignored: the device is in standby");
                 return Ok(());
             }
+            tracing::info!("play request {request:?} from {name}: leaving standby for {name}");
             self.leave_standby();
             self.prepare_player().await?;
             request = PlayRequest::Switch;
         }
         if name != self.active_source {
             if request == PlayRequest::IfActive {
+                tracing::info!(
+                    "play request {request:?} from {name} ignored: not the active source ({})",
+                    self.active_source
+                );
                 return Ok(());
             }
+            tracing::info!("play request {request:?} from {name}: switching to {name}");
             return self.cycle_source(Some(name.to_string()), SourceReq::Play).await;
         }
-        if !self.playback
-            && let Some(action) = self.active_request(SourceReq::Play).await?
-        {
+        if self.playback {
+            tracing::info!("play request {request:?} from {name} ignored: {name} already plays");
+            return Ok(());
+        }
+        tracing::info!("play request {request:?} from {name}: asking {name} to play");
+        if let Some(action) = self.active_request(SourceReq::Play).await? {
             self.apply(action).await?;
         }
         Ok(())
@@ -200,12 +213,23 @@ mod tests {
 
     #[tokio::test]
     async fn wake_and_switch_leaves_standby_without_waking_the_old_source() {
-        let (mut core, _pc, source_calls, mut state_rx, dir) = setup();
+        let (mut core, player_calls, source_calls, mut state_rx, dir) = setup();
+        core.set_audio_device(Some("bluealsa:DEV=XX".into())).await.unwrap();
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         assert!(state_rx.borrow_and_update().standby);
         source_calls.lock().unwrap().clear();
+        player_calls.lock().unwrap().clear();
         core.handle_play_request("cd", PlayRequest::WakeAndSwitch).await.unwrap();
+        // mpv is prepared as the Power key's wake prepares it (final review,
+        // F3): the volume and the output the owner chose, and the play mode
+        // handed to every source — the old one included, which a switch alone
+        // never reaches.
+        let mpv = player_calls.lock().unwrap().clone();
+        assert!(mpv.iter().any(|c| c.starts_with("vol ")), "volume set on the wake: {mpv:?}");
+        assert!(mpv.contains(&"audio_device bluealsa:DEV=XX".to_string()), "audio output set on the wake: {mpv:?}");
+        let all = source_calls.lock().unwrap().clone();
+        assert!(all.iter().any(|c| c.starts_with("radio:SetPlayMode")), "play mode broadcast on the wake: {all:?}");
         let log = calls(&source_calls);
         assert!(!log.iter().any(|c| c.contains("Wake")), "no source woken: {log:?}");
         assert!(!log.contains(&"radio:Play".to_string()) && !log.contains(&"radio:Activate".to_string()), "the old source is never asked to play: {log:?}");
@@ -255,6 +279,57 @@ mod tests {
         let log = calls(&source_calls);
         assert!(log.contains(&"radio:Activate".to_string()), "{log:?}");
         assert!(!log.iter().any(|c| c.ends_with(":Play")), "{log:?}");
+    }
+
+    /// Final review, F2: every decision leaves one line at `info`, the level
+    /// the device's journal keeps, naming the request and the source.
+    #[tokio::test]
+    async fn every_decision_is_written_to_the_journal() {
+        use tracing_subscriber::fmt::MakeWriter;
+        #[derive(Clone, Default)]
+        struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buffer {
+            type Writer = Buffer;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+        let buffer = Buffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        // `#[tokio::test]` runs on one thread: the default holds across awaits.
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let take = || String::from_utf8(std::mem::take(&mut *buffer.0.lock().unwrap())).unwrap();
+
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        core.handle_play_request("ghost", PlayRequest::Switch).await.unwrap();
+        assert!(take().contains("play request Switch from ghost ignored: not a wired source"));
+        core.handle_play_request("cd", PlayRequest::IfActive).await.unwrap();
+        assert!(take().contains("play request IfActive from cd ignored: not the active source (radio)"));
+        core.handle_play_request("radio", PlayRequest::IfActive).await.unwrap();
+        assert!(take().contains("play request IfActive from radio: asking radio to play"));
+        core.handle_play_request("radio", PlayRequest::Switch).await.unwrap();
+        assert!(take().contains("play request Switch from radio ignored: radio already plays"));
+        core.handle_command(Command::Power).await.unwrap();
+        take();
+        core.handle_play_request("cd", PlayRequest::Switch).await.unwrap();
+        assert!(take().contains("play request Switch from cd ignored: the device is in standby"));
+        core.handle_play_request("cd", PlayRequest::WakeAndSwitch).await.unwrap();
+        let log = take();
+        assert!(log.contains("play request WakeAndSwitch from cd: leaving standby for cd"), "{log}");
+        assert!(log.contains("play request Switch from cd: switching to cd"), "{log}");
     }
 
     /// The path the main loop takes: a frame carrying a request reaches
