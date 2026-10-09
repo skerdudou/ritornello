@@ -2,7 +2,7 @@ import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetCatalog, useCatalog } from '../composables/useCatalog'
-import type { SettingsPayload, UpdatePayload } from '../types'
+import type { ComponentOffer, Fit, SettingsPayload, UpdatePayload } from '../types'
 import UpdateCard from './UpdateCard.vue'
 
 // The catalog keys this card reads are already shipped in `en.toml` (Ruling
@@ -58,6 +58,9 @@ const CATALOG = {
   weekday_friday: 'Friday',
   weekday_saturday: 'Saturday',
   save: 'Save',
+  update_major_waiting:
+    'A major update is available: it changes how the core and its plugins talk, so it is not installed automatically. Install it from here when you can.',
+  update_major_refused: 'Refused by the new core until updated: {components}',
 }
 
 // The card is handed its payload as a prop and never fetches anything itself
@@ -100,6 +103,7 @@ function payload(over: Partial<UpdatePayload> = {}): UpdatePayload {
         availability: 'update_available',
       },
     ],
+    major_update_waiting: false,
     busy: null,
     last_rollback: null,
     ...over,
@@ -406,5 +410,49 @@ describe('UpdateCard', () => {
     await button.trigger('click')
     expect(w.emitted('sources')).toHaveLength(1)
     expect(w.emitted('save')).toBeUndefined()
+  })
+  describe('a major update waiting', () => {
+    const REFUSED: Fit = {
+      fit: 'refused',
+      refusal: { reason: 'major', gaps: [{ contract: 'source', plugin: { major: 1, minor: 0 }, core: { major: 2, minor: 0 } }] },
+    }
+    const plugin = (name: string, over: Partial<ComponentOffer>): ComponentOffer => ({
+      name,
+      kind: 'plugin',
+      declared: true,
+      binary_present: true,
+      installed: '0.2.0',
+      offered: '0.3.0',
+      availability: 'update_available',
+      ...over,
+    })
+    // The night skipped a break: the core row breaks, `radio` depends on it
+    // and goes with it by default (not refused), `files` depends on it but
+    // cannot be installed from the device, and a third party's `zed` is not
+    // updated by the release and its live announcement is refused by the
+    // offered core.
+    const rows = (): ComponentOffer[] => [
+      {
+        name: 'core', kind: 'core', declared: true, binary_present: true,
+        installed: '0.2.0', offered: '0.3.0', availability: 'update_available', breaking: true,
+      },
+      plugin('radio', { with_core: { fit: 'compatible' }, with_running_core: REFUSED }),
+      plugin('files', { installable: false, needs_companion: 'files-mount', with_core: { fit: 'compatible' }, with_running_core: REFUSED }),
+      plugin('zed', { kind: 'third_party', third_party_repo: 'someone/zed', offered: null, availability: 'unknown', with_core: REFUSED }),
+    ]
+
+    it('says it waits for a gesture and names what the new core would refuse', () => {
+      const w = mountCard(payload({ components: rows(), major_update_waiting: true }))
+      expect(w.get('[data-update-major-waiting]').text()).toBe(CATALOG.update_major_waiting)
+      expect(w.get('[data-update-major-waiting-refused]').text()).toBe(
+        'Refused by the new core until updated: files, zed',
+      )
+    })
+
+    it('says nothing when no major update waits', () => {
+      const w = mountCard(payload({ components: rows(), major_update_waiting: false }))
+      expect(w.find('[data-update-major-waiting]').exists()).toBe(false)
+      expect(w.find('[data-update-major-waiting-refused]').exists()).toBe(false)
+    })
   })
 })

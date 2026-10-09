@@ -4,6 +4,7 @@ import {
   Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch,
 } from '@ritornello/ui'
 import { computed } from 'vue'
+import { defaultSelection, refusedByNewCore } from '../composables/majorUpdate'
 import { useCatalog } from '../composables/useCatalog'
 import type { SettingsPayload, UpdatePayload, Weekday } from '../types'
 import UpdateSummary from './UpdateSummary.vue'
@@ -36,6 +37,20 @@ const WEEKDAYS: Weekday[] = [
 /** Components an install would act on: everything out of step, core included. */
 const actionable = computed(() =>
   props.update.components.filter((c) => c.availability === 'update_available'),
+)
+
+/**
+ * A core that breaks the wire is never installed by the night: it waits for
+ * a gesture here. Alongside that sentence, what the new core would refuse
+ * if the operator accepted the dialog's own defaults — a third party's
+ * plugin the release does not update, a plugin the device cannot install
+ * itself (its companion must move first) — so the gesture is made knowing
+ * it. Read from the core's verdicts (`refusedByNewCore`), never re-judged.
+ */
+const majorRefused = computed(() =>
+  props.update.major_update_waiting
+    ? refusedByNewCore(props.update.components, defaultSelection(props.update.components))
+    : [],
 )
 
 /**
@@ -150,6 +165,13 @@ function onCadenceKindChange(kind: unknown) {
     <CardHeader><CardTitle>{{ t('update_title') }}</CardTitle></CardHeader>
     <CardContent class="space-y-2">
       <UpdateSummary :update="update" />
+
+      <p v-if="update.major_update_waiting" data-update-major-waiting class="text-sm">
+        {{ t('update_major_waiting') }}
+      </p>
+      <p v-if="majorRefused.length > 0" data-update-major-waiting-refused class="text-xs text-muted-foreground">
+        {{ t('update_major_refused', { components: majorRefused.join(', ') }) }}
+      </p>
 
       <p v-if="errorDetail" data-update-error class="text-sm text-destructive">{{ errorDetail }}</p>
       <!-- A separate line from the error itself: `data-update-error`'s text

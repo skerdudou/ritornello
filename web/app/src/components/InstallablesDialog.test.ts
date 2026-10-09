@@ -71,6 +71,7 @@ beforeEach(async () => {
     release_url: null,
     last_check_unix_s: NOW_S,
     components: [],
+    major_update_waiting: false,
     busy: null,
     last_rollback: null,
   }
