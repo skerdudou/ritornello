@@ -609,6 +609,13 @@ pub struct UpdateState {
     pub catalogue_url: Option<String>,
     pub last_check_unix_s: Option<u64>,
     pub components: Vec<ComponentOffer>,
+    /// The offered core breaks the wire against the running one
+    /// (`RowContracts::breaking` on the core row): a **major update**, which
+    /// the automatic policy never installs (`automatic_install_list`) and
+    /// which waits for a gesture on the page. Recomputed from the rows by
+    /// every check and every install pass, never carried: once the release no
+    /// longer offers a break, it goes.
+    pub major_update_waiting: bool,
     /// What is happening right now, as a catalog message, or `None` when idle.
     /// The page shows it and disables its buttons.
     pub busy: Option<String>,
@@ -688,6 +695,8 @@ impl UpdateState {
             // No check yet: no source has answered, so no stranger offers
             // anything and no name is contested.
             components: component_offers(core_version, &[], &[], installed, &[], &[], &[], &[]),
+            // Nothing is offered before a check.
+            major_update_waiting: false,
             busy: None,
             last_rollback: None,
             // Nothing can be in flight before the first HTTP request: this

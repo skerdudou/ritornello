@@ -223,6 +223,12 @@ export interface UpdatePayload {
   release_url: string | null
   last_check_unix_s: number | null
   components: ComponentOffer[]
+  /**
+   * The offered core breaks the wire against the running one: never installed
+   * automatically, it waits for a gesture here (`update_major_waiting`).
+   * Always sent by the core; optional only so older fixtures still type.
+   */
+  major_update_waiting?: boolean
   /** What is happening right now, as a catalog message, or `null` when idle. */
   busy: string | null
   /** Left by the rollback unit. `null` when nothing has ever rolled back. */

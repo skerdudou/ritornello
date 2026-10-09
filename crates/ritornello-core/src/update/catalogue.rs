@@ -103,10 +103,6 @@ mod tests {
         assert_eq!(c.components["radio"].kinds, vec!["source"]);
     }
 
-    /// A body that is not a catalogue at all is an error, not an empty
-    /// catalogue: "GitHub answered a rate-limit page" and "this release
-    /// publishes nothing" are different facts, and the second already has a
-    /// representation.
     /// The contracts are read when the release publishes them, entry by
     /// entry: a malformed one is skipped and the rest of the file is kept.
     #[test]
@@ -135,6 +131,10 @@ mod tests {
         assert!(c.contracts.is_empty());
     }
 
+    /// A body that is not a catalogue at all is an error, not an empty
+    /// catalogue: "GitHub answered a rate-limit page" and "this release
+    /// publishes nothing" are different facts, and the second already has a
+    /// representation.
     #[test]
     fn a_body_that_is_not_json_is_an_error() {
         assert!(parse("<html>rate limited</html>").is_err());

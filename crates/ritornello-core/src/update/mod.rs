@@ -39,7 +39,7 @@ use crate::update::release::{
 use crate::compat::Speaks;
 use crate::update::state::{
     component_offers, installs_something, judge_contracts, Availability, CheckOutcome,
-    ComponentKind, ComponentOffer, Installed, ThirdPartyOffer, UpdateState,
+    ComponentKind, ComponentOffer, Fit, Installed, NotInstallable, ThirdPartyOffer, UpdateState,
 };
 use ritornello_i18n::Chain;
 use ritornello_updater::request::{Action, Request, REQUEST_FORMAT};
@@ -306,13 +306,29 @@ fn carries(published: &Published, name: &str) -> bool {
 ///   lying archive is downloaded once per offered version, not every night.
 ///   A pack refused for another reason (no room, a download that failed) is
 ///   not marked, and is tried again, as a plugin would be.
+///
+/// - **a break is never installed unattended** (the owner's rule): when the
+///   offered core breaks the wire against the running one
+///   (`RowContracts::breaking`), the core is left out, and so is every plugin
+///   the **running** core refuses (`with_running_core` refused). Such a
+///   plugin may only travel in the same request as the core
+///   (`Worker::install_group`): installed alone tonight, it would be refused
+///   by the core that keeps running until someone presses Install.
+///
+///   A plugin the running core accepts **stays in**, even when the offered
+///   core would refuse it: the core is not installed at night, so that
+///   plugin runs under the running core, which accepts it — and the manual
+///   gesture that later installs the core updates it again. The page says a
+///   major update waits (`UpdateState::major_update_waiting`).
 fn automatic_install_list(
     components: &[ComponentOffer],
     placed: &placed::Placed,
     scope: schedule::InstallScope,
 ) -> Vec<String> {
+    let breaking = core_breaks(components);
     components
         .iter()
+        .filter(|c| !(breaking && (c.kind == ComponentKind::Core || refused_by_running_core(c))))
         .filter(|c| c.availability == Availability::UpdateAvailable)
         // Keyed on the repository and not on the kind, so a third-party
         // language pack (Task 7) follows the same rule as a third-party
@@ -323,6 +339,21 @@ fn automatic_install_list(
         .filter(|c| c.offered.as_deref() != placed::version_of(placed, &placed_key(c)))
         .map(|c| c.name.clone())
         .collect()
+}
+
+/// Does the core row offer an update that breaks the wire against the running
+/// core? `judge_contracts` sets `breaking` only on a core row that has an
+/// update and whose contracts are published.
+fn core_breaks(components: &[ComponentOffer]) -> bool {
+    components
+        .iter()
+        .any(|c| c.kind == ComponentKind::Core && c.contracts.breaking && c.offered.is_some())
+}
+
+/// Is this row a plugin the **running** core would refuse — one that can only
+/// be installed in the same request as the core it needs?
+fn refused_by_running_core(row: &ComponentOffer) -> bool {
+    matches!(row.contracts.with_running_core, Some(Fit::Refused { .. }))
 }
 
 /// The key a component's placement is remembered under: its name for ours, a
@@ -831,6 +862,16 @@ enum Refusal {
     /// in the request, or another one than the source offering it now
     /// (spec §4.5, the second consent). Carries the source that offers it.
     NotConsented(String),
+    /// The release carrying this component's archive publishes no contracts
+    /// for it (`NotInstallable::ContractsUnpublished`): the device cannot know
+    /// what it would run, so it is not installed from here, by hand either.
+    /// Refused at the gesture before anything is fetched.
+    ContractsUnpublished,
+    /// A breaking core and the plugins that depend on it travel in one
+    /// request (`Worker::install_group`), and `failed` could not be prepared:
+    /// no request was written, so neither the core nor any of those plugins
+    /// moved. `reason` is that member's own refusal, for the log.
+    GroupPostponed { failed: String, reason: Box<Refusal> },
 }
 
 impl std::fmt::Display for Refusal {
@@ -864,6 +905,13 @@ impl std::fmt::Display for Refusal {
             Self::NotConsented(repo) => {
                 write!(f, "offered by {repo}, which is not the repository confirmed for it")
             }
+            Self::ContractsUnpublished => {
+                write!(f, "the release carrying it publishes no contracts for it")
+            }
+            Self::GroupPostponed { failed, reason } => write!(
+                f,
+                "{failed} could not be prepared ({reason}); the core and the plugins that depend on it were not installed"
+            ),
         }
     }
 }
@@ -895,6 +943,15 @@ fn refusal_message(catalog: &Chain, component: &str, why: &Refusal) -> String {
         Refusal::NothingPublished => ("update_nothing_published", None),
         Refusal::PluginsUnreadable => ("update_plugins_unreadable", None),
         Refusal::NotConsented(repo) => ("update_not_consented", Some(("repo", repo.as_str()))),
+        // The same sentence the row already shows before any press.
+        Refusal::ContractsUnpublished => ("update_row_contracts_unpublished", None),
+        Refusal::GroupPostponed { .. } => ("update_group_postponed", None),
+    };
+    // A postponed group names the member that failed, whichever name the
+    // caller reports it under: that member is what the operator can act on.
+    let component = match why {
+        Refusal::GroupPostponed { failed, .. } => failed.as_str(),
+        _ => component,
     };
     let mut params: Vec<(&str, &str)> = vec![("component", component)];
     params.extend(param);
@@ -1212,6 +1269,12 @@ const RESTART_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 thread_local! {
     static FAKE_PRIVILEGED: std::cell::RefCell<Option<Result<(), String>>> =
         const { std::cell::RefCell::new(None) };
+    // Every `request.json` written for the privileged unit on this thread, in
+    // order: `request.json` itself is overwritten by the next request, and the
+    // grouped install's whole property is the **sequence** — the compatible
+    // plugins one by one, then one request ending with the core.
+    static SEEN_REQUESTS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Asks systemd for the privileged unit, and waits for it.
@@ -1288,6 +1351,32 @@ enum Placed {
     /// configuration is on disk and its `[[plugin]]` block is written. Nothing
     /// runs it yet — the core loop has never heard of it.
     NewPlugin,
+}
+
+/// One component made ready by `Worker::stage`: its binary is in the staging
+/// directory and its `/etc/ritornello` files are written, and root has been
+/// asked nothing yet. What `Worker::place` needs to put it in a request and
+/// to remember it once placed.
+struct Staged {
+    name: String,
+    version: String,
+    /// Remembered under a namespaced key (`third_party_placed_key`).
+    third_party: bool,
+    repo: Option<String>,
+    action: Action,
+    /// The bare name of the staged file, removed once placed.
+    staged_file: String,
+    /// The `[[plugin]]` block to write once the binary is placed: `Some` only
+    /// for a plugin the device did not have.
+    fragment: Option<String>,
+    /// For the core: what its archive carries that nothing here installs.
+    core_notes: Option<Vec<String>>,
+}
+
+impl Staged {
+    fn is_core(&self) -> bool {
+        matches!(self.action, Action::PlaceCore { .. })
+    }
 }
 
 /// One component actually placed during a pass.
@@ -2107,9 +2196,11 @@ impl Worker {
         Some(self.settle_with_release(client, published, installed.as_deref(), &targets, answers).await)
     }
 
-    /// A check whose release list was read, once the sources have answered:
-    /// no I/O but the registry and the companions file, so a test can hand
-    /// it the answers a sweep would have collected.
+    /// A check whose release list was read, once the sources have answered.
+    /// Its I/O is the registry, the companions file and the catalogues that
+    /// describe what is offered (`fetch_contracts`, as in
+    /// `settle_without_release`), so a test hands it the answers a sweep
+    /// would have collected and serves those catalogues itself.
     ///
     /// `known` is `None` when `plugins.toml` could not be read. The rows are
     /// then built from an empty list, as before, but **no fresh offer and no
@@ -2170,6 +2261,7 @@ impl Worker {
         deny_privileged_install(&mut components);
         deny_moved_companion(&mut components, &checked.ours, &companions);
         judge_rows(&mut components, &checked, &live);
+        state.major_update_waiting = core_breaks(&components);
         state.outcome = CheckOutcome::Ok;
         state.release_version = core.map(|p| p.version.clone());
         state.release_url = core.map(|p| release_page(&p.release_tag));
@@ -2252,6 +2344,7 @@ impl Worker {
         carry_core_notes(&state.components, &mut components);
         deny_privileged_install(&mut components);
         judge_rows(&mut components, &checked, &live);
+        state.major_update_waiting = core_breaks(&components);
         state.outcome = match why {
             ReleasesError::OnlyPrereleases => CheckOutcome::OnlyPrereleases,
             _ => CheckOutcome::NoRelease,
@@ -2320,7 +2413,32 @@ impl Worker {
         // in here: it exits at the end of its own install and this function
         // has already returned.
         let mut placed: Vec<Placement> = Vec::new();
+        // The rows the check this install rests on has just written: what
+        // each offered component speaks, and whether the core breaks.
+        let rows = self.state.read().await.components.clone();
+        // **A breaking core travels with the plugins that depend on it.** On
+        // a wire break, a plugin the running core refuses can only be placed
+        // in the same request as the core (`install_group`); every other
+        // plugin goes first, alone and restarted, as always — it runs under
+        // the running core and survives a rollback of the new one. A
+        // dependent the operator did not tick is simply not in `names`: the
+        // core goes without it (the dialog warned), and the new core refuses
+        // it afterwards.
+        let group: Option<Vec<String>> = (names.iter().any(|n| n == CORE) && core_breaks(&rows))
+            .then(|| {
+                names
+                    .iter()
+                    .filter(|n| *n != CORE)
+                    .filter(|n| rows.iter().any(|r| r.name == **n && refused_by_running_core(r)))
+                    .cloned()
+                    .collect()
+            });
         for name in install_order(names) {
+            if let Some(dependents) = &group
+                && (name == CORE || dependents.contains(&name))
+            {
+                continue;
+            }
             // By id, and only an id this check offers: ours (`ritornello-lang-
             // fr`) or a source's (`ritornello-xlang-fr-<h12>`), each carrying
             // the source it must come from.
@@ -2357,88 +2475,18 @@ impl Worker {
                 }
                 continue;
             }
-            // Past the packs, every name is a plugin's or the core's, and
-            // whose plugin it is was judged against `plugins.toml`. Unread,
-            // that judgement said "nobody's": a plugin is refused rather than
-            // resolved, or a fork named like ours would be replaced by our
-            // archive. **The core is exempt**: `core` is reserved, no fork
-            // takes its shape, its placement path is its own — and a
-            // self-update is exactly what may repair a device whose
-            // `plugins.toml` the running core cannot parse.
-            if checked.plugins_unknown && name != CORE {
-                tracing::warn!("update: plugins.toml was unreadable at the check, not installing {name}");
-                let catalog = self.catalog.read().await;
-                let message = refusal_message(&catalog, &name, &Refusal::PluginsUnreadable);
-                drop(catalog);
-                first_failure.get_or_insert(message);
-                continue;
-            }
-            // What the component **is** decides which list answers for it —
-            // never which lookup happened to return something. See `resolve`.
-            let (offered, repo, provenance) = match resolve(checked, &name) {
-                Resolved::Theirs { published, repo } => (published, Some(repo), Provenance::Theirs),
-                Resolved::Ours(published) => (published, None, Provenance::Ours),
-                Resolved::UncheckedThirdParty => {
-                    // A named refusal and not a silent skip: the operator
-                    // ticked this row, and "nothing happened" would read as a
-                    // failure of the gesture rather than as what it is.
-                    tracing::warn!(
-                        "update: {name} is a third-party plugin whose repository this check did not consult, skipping it"
-                    );
-                    let catalog = self.catalog.read().await;
-                    let message = refusal_message(&catalog, &name, &Refusal::ThirdPartyUnchecked);
-                    drop(catalog);
-                    first_failure.get_or_insert(message);
-                    continue;
-                }
-                Resolved::FreshTheirs { published, repo } => {
-                    // The second consent named a repository: only that one
-                    // may supply this name (see `install_consented`).
-                    let confirmed = consented
-                        .iter()
-                        .any(|(n, r)| *n == name && sources::normalize_repo(r).is_some_and(|r| r.eq_ignore_ascii_case(repo)));
-                    if !confirmed {
-                        tracing::warn!("update: {name} is offered by {repo}, which was not the repository confirmed for it");
-                        let catalog = self.catalog.read().await;
-                        let message = refusal_message(&catalog, &name, &Refusal::NotConsented(repo.to_string()));
-                        drop(catalog);
-                        first_failure.get_or_insert(message);
-                        continue;
-                    }
-                    // The check judged this name free; the gesture asks
-                    // again, because the device may have changed since and
-                    // a fresh offer must never replace anyone's plugin.
-                    if let Err(why) = self.still_unowned(&name) {
-                        tracing::warn!("update: installing {name}: {why}");
+            let (offered, repo, provenance) =
+                match self.resolve_for_install(checked, &rows, &name, consented) {
+                    Ok(resolved) => resolved,
+                    Err(why) => {
+                        tracing::warn!("update: not installing {name}: {why}");
                         let catalog = self.catalog.read().await;
                         let message = refusal_message(&catalog, &name, &why);
                         drop(catalog);
                         first_failure.get_or_insert(message);
                         continue;
                     }
-                    // Its `[[plugin]]` block is the core's own, written by
-                    // `install_one` (`third_party_fragment`); `repo` is the
-                    // key the placement is remembered under, which is the
-                    // one this plugin's later updates (`Theirs`) read.
-                    (published, Some(repo), Provenance::Fresh)
-                }
-                Resolved::Nothing => {
-                    // A named refusal, not a silent skip (task 18's review,
-                    // C1): a `missing_binary` or `undeclared_binary` row's
-                    // badge does **not** read `Unknown` (it reads "Not
-                    // installed" or "Installed but not declared" — see
-                    // `ConfigView.vue`), so silence here was never the
-                    // harmless case its old comment assumed. It is also the
-                    // one shape that made "Declare" fail with no toast at
-                    // all when the row's name did not match the release.
-                    tracing::warn!("update: nothing published for {name}, skipping it");
-                    let catalog = self.catalog.read().await;
-                    let message = refusal_message(&catalog, &name, &Refusal::NothingPublished);
-                    drop(catalog);
-                    first_failure.get_or_insert(message);
-                    continue;
-                }
-            };
+                };
             self.set_busy(Some(self.message_for("update_installing", &name).await))
                 .await;
             // The repository that answered travels with its offer: it is the
@@ -2490,7 +2538,207 @@ impl Worker {
                 }
             }
         }
+        if let Some(dependents) = group {
+            match self.install_group(client, checked, &rows, &dependents, consented).await {
+                Ok(()) => {
+                    // As for a core installed alone: the process leaves, and
+                    // the new core starts every plugin, the group's included.
+                    tracing::info!(
+                        "update: the core and {dependents:?} have been replaced, leaving so systemd starts the new core"
+                    );
+                    (self.restart)();
+                    return;
+                }
+                Err(why) => {
+                    tracing::warn!("update: installing the core with {dependents:?}: {why}");
+                    let catalog = self.catalog.read().await;
+                    let message = refusal_message(&catalog, CORE, &why);
+                    drop(catalog);
+                    first_failure.get_or_insert(message);
+                }
+            }
+        }
         self.conclude_install(checked, &placed, first_failure).await;
+    }
+
+    /// What `name` is to be installed from, or why it may not be — every
+    /// refusal that needs no byte of the archive. One function for the
+    /// component-by-component path and for the group, so a member of the
+    /// group is held to exactly the rules it would meet alone.
+    ///
+    /// `rows` are the rows of the check this install rests on.
+    fn resolve_for_install<'c>(
+        &self,
+        checked: &'c Checked,
+        rows: &[ComponentOffer],
+        name: &str,
+        consented: &[(String, String)],
+    ) -> Result<(&'c Published, Option<&'c str>, Provenance), Refusal> {
+        // Past the packs, every name is a plugin's or the core's, and
+        // whose plugin it is was judged against `plugins.toml`. Unread,
+        // that judgement said "nobody's": a plugin is refused rather than
+        // resolved, or a fork named like ours would be replaced by our
+        // archive. **The core is exempt**: `core` is reserved, no fork
+        // takes its shape, its placement path is its own — and a
+        // self-update is exactly what may repair a device whose
+        // `plugins.toml` the running core cannot parse.
+        if checked.plugins_unknown && name != CORE {
+            return Err(Refusal::PluginsUnreadable);
+        }
+        // Whose plugin it is comes first: unknown, nothing else about it
+        // can be trusted.
+        //
+        // **Not installable from the device, by hand either**: the release
+        // carrying this archive does not say what it speaks, so nothing can
+        // tell whether it would run (`judge_contracts`). Only this reason is
+        // honoured here: an `installable: Some(false)` remembered from an
+        // archive refused earlier, or from a moved companion, stops only the
+        // automatic policy, and a hand install retries it as it always has.
+        if rows.iter().any(|r| {
+            r.name == name
+                && r.contracts.not_installable_reason == Some(NotInstallable::ContractsUnpublished)
+        }) {
+            return Err(Refusal::ContractsUnpublished);
+        }
+        // What the component **is** decides which list answers for it —
+        // never which lookup happened to return something. See `resolve`.
+        match resolve(checked, name) {
+            Resolved::Theirs { published, repo } => Ok((published, Some(repo), Provenance::Theirs)),
+            Resolved::Ours(published) => Ok((published, None, Provenance::Ours)),
+            // A named refusal and not a silent skip: the operator ticked
+            // this row, and "nothing happened" would read as a failure of
+            // the gesture rather than as what it is.
+            Resolved::UncheckedThirdParty => Err(Refusal::ThirdPartyUnchecked),
+            Resolved::FreshTheirs { published, repo } => {
+                // The second consent named a repository: only that one may
+                // supply this name (see `install_consented`).
+                let confirmed = consented.iter().any(|(n, r)| {
+                    *n == name
+                        && sources::normalize_repo(r).is_some_and(|r| r.eq_ignore_ascii_case(repo))
+                });
+                if !confirmed {
+                    return Err(Refusal::NotConsented(repo.to_string()));
+                }
+                // The check judged this name free; the gesture asks again,
+                // because the device may have changed since and a fresh
+                // offer must never replace anyone's plugin.
+                self.still_unowned(name)?;
+                // Its `[[plugin]]` block is the core's own, written by
+                // `stage` (`third_party_fragment`); `repo` is the key the
+                // placement is remembered under, which is the one this
+                // plugin's later updates (`Theirs`) read.
+                Ok((published, Some(repo), Provenance::Fresh))
+            }
+            // A named refusal, not a silent skip (task 18's review, C1): a
+            // `missing_binary` or `undeclared_binary` row's badge does
+            // **not** read `Unknown` (it reads "Not installed" or "Installed
+            // but not declared" — see `ConfigView.vue`), so silence here was
+            // never the harmless case its old comment assumed. It is also
+            // the one shape that made "Declare" fail with no toast at all
+            // when the row's name did not match the release.
+            Resolved::Nothing => Err(Refusal::NothingPublished),
+        }
+    }
+
+    /// **A breaking core and the plugins that depend on it, in one request.**
+    ///
+    /// Why one request: the privileged installer rewrites its backup manifest
+    /// at every request, and the rollback (`OnFailure=` of the core's unit,
+    /// only when the request replaced the core) restores every entry of that
+    /// manifest. Sent one by one, as outside a break, the core's request
+    /// would erase the plugins' backups, and a rollback would put the old
+    /// core back beside new plugins it refuses — a silent device. In one
+    /// request, a rollback restores the core **and** them.
+    ///
+    /// The compatible plugins have already gone, one by one, before this
+    /// runs (`install_consented`): the running core accepts them, so they
+    /// survive a rollback of the new one.
+    ///
+    /// In order: every refusal that needs no download, for each member; room
+    /// for **the whole group** (each archive may fit alone and the group
+    /// not); every member staged, dependents first and the core last; one
+    /// request, plugins before the core — the order only matters if a write
+    /// fails half-way, and then the core is never the one placed without
+    /// them. **Any member that cannot be prepared keeps the whole group out**
+    /// (`Refusal::GroupPostponed`): no request is written, the staged
+    /// binaries are cleared, and placing the core without that plugin would
+    /// have switched it off without the operator choosing so. The
+    /// `/etc/ritornello` presets and a fresh member's initial configuration,
+    /// written while staging, stay: the same harmless leftover a refused
+    /// privileged step already leaves (see `stage`).
+    ///
+    /// On success every placement is remembered and every fresh member
+    /// declared, and **no plugin of the group is restarted**: the core is
+    /// about to leave, and the new one starts them all. A declaration that
+    /// fails is logged and does not stop the restart — the core is already
+    /// placed, and the binary left undeclared shows on the page as such.
+    ///
+    /// The request itself is not transactional: a failure inside root may
+    /// leave some plugins placed and not the core. The page then reports the
+    /// privileged failure, and the next press completes it.
+    async fn install_group(
+        &self,
+        client: &reqwest::Client,
+        checked: &Checked,
+        rows: &[ComponentOffer],
+        dependents: &[String],
+        consented: &[(String, String)],
+    ) -> Result<(), Refusal> {
+        self.set_busy(Some(self.message_for("update_installing", CORE).await)).await;
+        let postponed = |failed: &str, reason: Refusal| Refusal::GroupPostponed {
+            failed: failed.to_string(),
+            reason: Box::new(reason),
+        };
+        let mut members = Vec::new();
+        for name in dependents.iter().map(String::as_str).chain([CORE]) {
+            let (offered, repo, provenance) = self
+                .resolve_for_install(checked, rows, name, consented)
+                .map_err(|why| postponed(name, why))?;
+            members.push((name, offered, repo, provenance));
+        }
+        let total: u64 = members.iter().map(|(_, offered, _, _)| offered.size).sum();
+        let root = self.root.to_string_lossy().to_string();
+        if !enough_room(crate::system::disk_usage(&root), total as usize) {
+            return Err(Refusal::NoRoom);
+        }
+        let mut staged = Vec::new();
+        for (name, offered, repo, provenance) in &members {
+            let companion = if *provenance == Provenance::Ours {
+                companion_offered(&checked.ours, name)
+            } else {
+                None
+            };
+            match self.stage(client, name, offered, *provenance, *repo, companion).await {
+                Ok(member) => staged.push(member),
+                Err(why) => {
+                    // Nothing was asked of root: clear what this group put in
+                    // staging, the failing member's own leftover included.
+                    for (_, offered, _, _) in &members {
+                        if let Some(file) = download_name(&offered.offer)
+                            && let Err(e) = std::fs::remove_file(self.staging.join(&file))
+                            && e.kind() != std::io::ErrorKind::NotFound
+                        {
+                            tracing::debug!("update: leaving {file} in staging: {e}");
+                        }
+                    }
+                    return Err(postponed(name, why));
+                }
+            }
+        }
+        if let Err(why) = self.place(&staged).await {
+            tracing::warn!(
+                "update: the grouped request failed; some of its plugins may have been placed without the core, and installing again completes it"
+            );
+            return Err(why);
+        }
+        for member in staged.iter().filter(|m| !m.is_core()) {
+            if let Some(fragment) = &member.fragment
+                && let Err(why) = self.write_declaration(&member.name, fragment)
+            {
+                tracing::warn!("update: {} is placed but could not be declared: {why}", member.name);
+            }
+        }
+        Ok(())
     }
 
     /// The end of an install pass: the rows the page reads, and the report of
@@ -2541,6 +2789,7 @@ impl Worker {
             deny_privileged_install(&mut components);
             deny_moved_companion(&mut components, &checked.ours, &companions);
             judge_rows(&mut components, checked, &live);
+            state.major_update_waiting = core_breaks(&components);
             state.components = components;
         }
         let report = {
@@ -2566,6 +2815,10 @@ impl Worker {
     /// plugin's companion (`companion_offered`, `None` when the plugin has
     /// none or the release carries none): it is what `companion_allows`
     /// compares with the version `ritornello-install` recorded.
+    ///
+    /// `stage` then `commit_one`: the two halves a grouped install
+    /// (`install_group`) runs separately, so several components can be
+    /// prepared before one request places them all.
     async fn install_one(
         &self,
         client: &reqwest::Client,
@@ -2575,6 +2828,23 @@ impl Worker {
         repo: Option<&str>,
         companion_offered: Option<&str>,
     ) -> Result<Placed, Refusal> {
+        let staged = self.stage(client, name, offered, provenance, repo, companion_offered).await?;
+        self.commit_one(staged).await
+    }
+
+    /// Everything about one component that happens **before** root is asked
+    /// anything: room, bytes, digest, archive, the staged binary, the
+    /// `/etc/ritornello` files and, for a fresh plugin, its initial
+    /// configuration. No request is written.
+    async fn stage(
+        &self,
+        client: &reqwest::Client,
+        name: &str,
+        offered: &Published,
+        provenance: Provenance,
+        repo: Option<&str>,
+        companion_offered: Option<&str>,
+    ) -> Result<Staged, Refusal> {
         let is_core = offered.offer == Offer::Core;
         let third_party = provenance != Provenance::Ours;
         // **A privileged plugin's companion is `ritornello-install`'s**, and
@@ -2771,50 +3041,22 @@ impl Worker {
         if fresh {
             self.write_initial_config(name, &contents.initial_config)?;
         }
+        Ok(Staged {
+            name: name.to_string(),
+            version: offered.version.clone(),
+            third_party,
+            repo: repo.map(str::to_string),
+            action,
+            staged_file: staged,
+            fragment,
+            core_notes,
+        })
+    }
 
-        let request = Request { format: REQUEST_FORMAT, actions: vec![action] };
-        let request_path = self.staging.join("request.json");
-        let text = serde_json::to_string(&request)
-            .map_err(|e| Refusal::Prepare(format!("the request: {e}")))?;
-        std::fs::write(&request_path, text)
-            .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", request_path.display())))?;
-
-        if let Err(detail) = run_privileged_unit().await {
-            // systemctl's own words travel verbatim to the page. They do not
-            // name the missing polkit rule — see `run_privileged_unit` — but
-            // they are the only account of the failure that exists on this
-            // side of the boundary.
-            return Err(Refusal::Privileged(detail));
-        }
-        // Written only once the placement actually succeeded: a refusal above
-        // must not claim that anything was placed. And written **here**,
-        // before this function returns — the core's caller leaves the process
-        // the moment it sees `Placed::Core`, so this is the last instant at
-        // which anything can be remembered about a core update. See
-        // `remember_placed`, and `automatic_install_list` for what reads it.
-        // A third party is remembered under a namespaced key, never its bare
-        // name: that name is a stranger's choice and may be one of ours.
-        match (third_party, repo) {
-            (false, _) => self.remember_placed(name, &offered.version, core_notes),
-            (true, Some(repo)) => {
-                self.remember_placed(&third_party_placed_key(repo, name), &offered.version, core_notes)
-            }
-            // No repository to namespace by: nothing is remembered, which
-            // fails open (the component is attempted again) as the module
-            // doc says it should.
-            (true, None) => {}
-        }
-        // The installer **copies** what it places (it renames a copy made
-        // inside the target's own directory, since a rename across mounts is
-        // not atomic), so the staged binary survives its own installation.
-        // Left alone they accumulate: one uncompressed binary per component,
-        // for ever, on the SD card of a device with no janitor. Removed
-        // best-effort — the bytes are now at their target, and a stale
-        // `request.json` naming a file that no longer exists is refused by
-        // the installer rather than silently re-applied.
-        if let Err(e) = std::fs::remove_file(self.staging.join(&staged)) {
-            tracing::debug!("update: leaving {staged} in staging: {e}");
-        }
+    /// The second half of `install_one`: one request for one staged
+    /// component, then its declaration when it is fresh.
+    async fn commit_one(&self, staged: Staged) -> Result<Placed, Refusal> {
+        self.place(std::slice::from_ref(&staged)).await?;
         // The order matters, and it is not the intuitive one: **the binary is
         // placed before the declaration is written.**
         //
@@ -2823,11 +3065,80 @@ impl Worker {
         // and creating it on a failure path would be careless. The reverse
         // leftover — a binary nobody declares — is harmless, visible on the
         // page as `Undeclared`, and undone by one gesture.
-        if let Some(fragment) = &fragment {
-            self.write_declaration(name, fragment)?;
+        if let Some(fragment) = &staged.fragment {
+            self.write_declaration(&staged.name, fragment)?;
             return Ok(Placed::NewPlugin);
         }
-        Ok(if is_core { Placed::Core } else { Placed::Plugin })
+        Ok(if staged.is_core() { Placed::Core } else { Placed::Plugin })
+    }
+
+    /// Writes **one** request placing every member, in the order given, asks
+    /// root for it once, and — only once it succeeded — remembers each
+    /// placement and clears each staged file.
+    ///
+    /// One request is what makes a group one unit for the rollback: the
+    /// privileged installer rewrites its backup manifest at every request
+    /// and the rollback restores every entry of the **last** one, so members
+    /// placed by separate requests would each erase the previous one's
+    /// backup.
+    async fn place(&self, members: &[Staged]) -> Result<(), Refusal> {
+        let request = Request {
+            format: REQUEST_FORMAT,
+            actions: members.iter().map(|m| m.action.clone()).collect(),
+        };
+        let request_path = self.staging.join("request.json");
+        let text = serde_json::to_string(&request)
+            .map_err(|e| Refusal::Prepare(format!("the request: {e}")))?;
+        std::fs::write(&request_path, &text)
+            .map_err(|e| Refusal::Prepare(format!("writing {}: {e}", request_path.display())))?;
+        #[cfg(test)]
+        SEEN_REQUESTS.with(|seen| seen.borrow_mut().push(text.clone()));
+
+        if let Err(detail) = run_privileged_unit().await {
+            // systemctl's own words travel verbatim to the page. They do not
+            // name the missing polkit rule — see `run_privileged_unit` — but
+            // they are the only account of the failure that exists on this
+            // side of the boundary.
+            return Err(Refusal::Privileged(detail));
+        }
+        for member in members {
+            // Written only once the placement actually succeeded: a refusal
+            // above must not claim that anything was placed. And written
+            // **here**, before the caller sees success — a core placement
+            // ends with the process leaving, so this is the last instant at
+            // which anything can be remembered about it. See
+            // `remember_placed`, and `automatic_install_list` for what reads
+            // it. A third party is remembered under a namespaced key, never
+            // its bare name: that name is a stranger's choice and may be one
+            // of ours.
+            match (member.third_party, member.repo.as_deref()) {
+                (false, _) => {
+                    self.remember_placed(&member.name, &member.version, member.core_notes.clone())
+                }
+                (true, Some(repo)) => self.remember_placed(
+                    &third_party_placed_key(repo, &member.name),
+                    &member.version,
+                    member.core_notes.clone(),
+                ),
+                // No repository to namespace by: nothing is remembered, which
+                // fails open (the component is attempted again) as the module
+                // doc says it should.
+                (true, None) => {}
+            }
+            // The installer **copies** what it places (it renames a copy made
+            // inside the target's own directory, since a rename across mounts
+            // is not atomic), so the staged binary survives its own
+            // installation. Left alone they accumulate: one uncompressed
+            // binary per component, for ever, on the SD card of a device with
+            // no janitor. Removed best-effort — the bytes are now at their
+            // target, and a stale `request.json` naming a file that no longer
+            // exists is refused by the installer rather than silently
+            // re-applied.
+            if let Err(e) = std::fs::remove_file(self.staging.join(&member.staged_file)) {
+                tracing::debug!("update: leaving {} in staging: {e}", member.staged_file);
+            }
+        }
+        Ok(())
     }
 
     fn write_staged(&self, staged: &str, bytes: &[u8]) -> Result<(), Refusal> {
@@ -2839,13 +3150,14 @@ impl Worker {
     /// Writes down what this pass just placed, and — for the core — what its
     /// archive carried that nothing here installs.
     ///
-    /// **Called from `install_one`, after the privileged unit has succeeded
-    /// and before it returns**, which is what puts it before the restart: the
-    /// core's placement ends with `install` calling `self.restart`, and that
-    /// hook does not return. Anything written after it would be written never.
-    /// Keeping the write inside `install_one` rather than at the three `Ok`
-    /// arms of `install` is what makes that ordering a fact about the shape of
-    /// the code instead of a rule three call sites have to remember.
+    /// **Called from `place`, after the privileged unit has succeeded and
+    /// before it returns**, which is what puts it before the restart: a core
+    /// placement — alone or in a group — ends with `install` calling
+    /// `self.restart`, and that hook does not return. Anything written after
+    /// it would be written never. Keeping the write inside `place` rather than
+    /// at the `Ok` arms of `install` is what makes that ordering a fact about
+    /// the shape of the code instead of a rule several call sites have to
+    /// remember.
     ///
     /// **A third-party component is remembered under a namespaced key**
     /// (`third_party_placed_key`), now that the fourth policy may install one
@@ -2869,7 +3181,7 @@ impl Worker {
     /// would be a lie. A memory that fails to be written costs one more
     /// attempt at the next run, which is where this started.
     ///
-    /// **One production caller, on purpose** (`install_one`). The tests reach
+    /// **One production caller, on purpose** (`place`). The tests reach
     /// the memory through `placed::record` instead, which leaves this method
     /// dead the moment that call is deleted and makes
     /// `cargo clippy --all-targets -- -D warnings` say so. That tripwire is
@@ -4665,6 +4977,8 @@ mod tests {
             Refusal::NothingPublished,
             Refusal::PluginsUnreadable,
             Refusal::NotConsented("z/zed".to_string()),
+            Refusal::ContractsUnpublished,
+            Refusal::GroupPostponed { failed: "mpd".to_string(), reason: Box::new(Refusal::DigestMismatch) },
         ];
         for catalog in [&english, &french()] {
             for why in &all {
@@ -5235,6 +5549,7 @@ mod tests {
     impl Privileged {
         fn answers(answer: Result<(), String>) -> Self {
             FAKE_PRIVILEGED.with(|f| *f.borrow_mut() = Some(answer));
+            SEEN_REQUESTS.with(|seen| seen.borrow_mut().clear());
             Self
         }
     }
@@ -5242,6 +5557,7 @@ mod tests {
     impl Drop for Privileged {
         fn drop(&mut self) {
             FAKE_PRIVILEGED.with(|f| *f.borrow_mut() = None);
+            SEEN_REQUESTS.with(|seen| seen.borrow_mut().clear());
         }
     }
 
@@ -8354,5 +8670,355 @@ mod tests {
         let mut fresh = vec![row("radio", ComponentKind::Plugin, Availability::UpdateAvailable)];
         carry_installable(&[previous], &mut fresh);
         assert_eq!(fresh[0].installable, None);
+    }
+
+    // ---- A breaking core and its dependents: one request ------------------
+    //
+    // Driven through the real `install` pass with the privileged unit's
+    // answer faked (`Privileged`) and every request it was handed recorded
+    // (`SEEN_REQUESTS`): the property is the **sequence** of requests, and
+    // `request.json` alone only keeps the last one.
+
+    /// The requests the privileged unit was handed on this thread, in order,
+    /// each as the list of what it places: a plugin by its file, the core as
+    /// `core`.
+    fn seen_requests() -> Vec<Vec<String>> {
+        SEEN_REQUESTS.with(|seen| {
+            seen.borrow()
+                .iter()
+                .map(|text| {
+                    let request: Request = serde_json::from_str(text).unwrap();
+                    request
+                        .actions
+                        .iter()
+                        .map(|action| match action {
+                            Action::PlaceCore { .. } => CORE.to_string(),
+                            Action::PlacePlugin { file, .. } => file.clone(),
+                            other => format!("{other:?}"),
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+    }
+
+    /// Refused by the running core: a plugin that can only travel with the
+    /// core. Which refusal does not matter to the installer.
+    fn refused_fit() -> Fit {
+        Fit::Refused { refusal: crate::compat::Refusal::Legacy { found: 1 } }
+    }
+
+    /// The rows a check leaves when it offers a core (`breaking` or not),
+    /// `mpd` refused by the running core, and `radio` accepted by it.
+    fn break_rows(breaking: bool) -> Vec<ComponentOffer> {
+        let mut core = row(CORE, ComponentKind::Core, Availability::UpdateAvailable);
+        core.contracts.breaking = breaking;
+        let mut mpd = row("mpd", ComponentKind::Plugin, Availability::UpdateAvailable);
+        mpd.contracts.with_running_core = Some(refused_fit());
+        let mut radio = row("radio", ComponentKind::Plugin, Availability::UpdateAvailable);
+        radio.contracts.with_running_core = Some(Fit::Compatible);
+        vec![core, mpd, radio]
+    }
+
+    fn plugin_archive(name: &str) -> Vec<u8> {
+        targz(&[(&format!("usr/local/lib/ritornello/plugins/ritornello-plugin-{name}"), b"ELF")])
+    }
+
+    /// A worker declaring `radio` and `mpd`, whose rows are `rows`, whose
+    /// core loop acknowledges every order and records it, and whose restart
+    /// hook counts its calls and snapshots the placement memory at that
+    /// instant — the instant a real core leaves.
+    struct GroupRig {
+        worker: Worker,
+        _dir: tempfile::TempDir,
+        orders: Arc<std::sync::Mutex<Vec<(String, PluginAction)>>>,
+        exits: Arc<std::sync::Mutex<Vec<placed::Placed>>>,
+    }
+
+    async fn group_rig(rows: Vec<ComponentOffer>) -> GroupRig {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = worker_at(dir.path(), one_line(PluginStatus::kind("radio", "source", true, false)));
+        let mpd = plugins_dir(dir.path()).join("ritornello-plugin-mpd");
+        std::fs::write(&mpd, b"the old mpd").unwrap();
+        let mut manifest = std::fs::read_to_string(&worker.manifest).unwrap();
+        manifest.push_str(&format!("\n[[plugin]]\nname = \"mpd\"\nexec = {:?}\n", mpd.to_string_lossy()));
+        std::fs::write(&worker.manifest, manifest).unwrap();
+        let (tx, mut rx) = mpsc::channel::<PluginOrder>(8);
+        worker.plugins_tx = tx;
+        let orders: Arc<std::sync::Mutex<Vec<(String, PluginAction)>>> = Arc::default();
+        let recorded = orders.clone();
+        tokio::spawn(async move {
+            while let Some(order) = rx.recv().await {
+                recorded.lock().unwrap().push((order.name.clone(), order.action));
+                let _ = order.ack.send(true);
+            }
+        });
+        let exits: Arc<std::sync::Mutex<Vec<placed::Placed>>> = Arc::default();
+        let at_exit = exits.clone();
+        let staging = worker.staging.clone();
+        worker.restart = Arc::new(move || at_exit.lock().unwrap().push(placed::read(&staging)));
+        worker.state.write().await.components = rows;
+        GroupRig { worker, _dir: dir, orders, exits }
+    }
+
+    /// Our release offering the core, `mpd` and `radio`, each served once.
+    async fn group_release(mpd: Published) -> Checked {
+        ours(vec![
+            served_core(&core_archive()).await,
+            mpd,
+            served("radio", &plugin_archive("radio")).await,
+        ])
+    }
+
+    async fn run_install(worker: &Worker, checked: &Checked, list: &[&str]) {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            worker.install(&client().unwrap(), checked, &names(list)),
+        )
+        .await
+        .expect("the install pass hung");
+    }
+
+    /// **The break, end to end.** `radio`, which the running core accepts,
+    /// goes first in its own request and is restarted, as outside a break;
+    /// `mpd`, which the running core refuses, travels in **one** request
+    /// with the core, the core last; `mpd` is not restarted (the new core
+    /// starts it) and the process leaves once.
+    ///
+    /// **[MUTATION]** put `PlaceCore` first in the group's request: red on
+    /// the sequence. **[MUTATION]** restart the group's plugins after the
+    /// request: red on the orders.
+    #[tokio::test]
+    async fn a_breaking_core_goes_in_one_request_with_its_dependents_core_last() {
+        let rig = group_rig(break_rows(true)).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = group_release(served("mpd", &plugin_archive("mpd")).await).await;
+
+        run_install(&rig.worker, &checked, &[CORE, "mpd", "radio"]).await;
+
+        assert_eq!(
+            seen_requests(),
+            vec![
+                vec!["ritornello-plugin-radio".to_string()],
+                vec!["ritornello-plugin-mpd".to_string(), CORE.to_string()],
+            ],
+            "the compatible plugin alone first, then the dependent and the core in one request, core last"
+        );
+        assert_eq!(
+            *rig.orders.lock().unwrap(),
+            vec![("radio".to_string(), PluginAction::Restart)],
+            "only the compatible plugin is restarted under the running core"
+        );
+        assert_eq!(rig.exits.lock().unwrap().len(), 1, "the core leaves once, after the group");
+    }
+
+    /// Every member of the group is remembered **before** the process
+    /// leaves: the next night's process reads that memory, and the one that
+    /// placed the group no longer exists by then.
+    ///
+    /// **[MUTATION]** remember only the core in `place` (or after the
+    /// restart): red.
+    #[tokio::test]
+    async fn every_member_of_the_group_is_remembered_before_the_process_leaves() {
+        let rig = group_rig(break_rows(true)).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = group_release(served("mpd", &plugin_archive("mpd")).await).await;
+
+        run_install(&rig.worker, &checked, &[CORE, "mpd", "radio"]).await;
+
+        let exits = rig.exits.lock().unwrap();
+        let memory = exits.first().expect("the install never reached the restart");
+        assert_eq!(placed::version_of(memory, "mpd"), Some("2.0.0"));
+        assert_eq!(placed::version_of(memory, CORE), Some("2.0.0"));
+        assert_eq!(
+            memory[CORE].not_installed_files.as_deref(),
+            Some(["etc/systemd/system/ritornello-rollback.service".to_string()].as_slice()),
+            "and the core's note too"
+        );
+    }
+
+    /// **A dependent that cannot be prepared keeps the core out.** `mpd`'s
+    /// digest does not match: no request carrying the core is ever written,
+    /// nothing of the group is left in staging, the process does not leave,
+    /// `radio` — which went first — stays installed, and the page names
+    /// `mpd` and says the rest waits.
+    ///
+    /// **[MUTATION]** carry on staging the rest of the group after a failure
+    /// (and send it): red on the sequence.
+    #[tokio::test]
+    async fn a_dependent_that_fails_to_stage_keeps_the_core_out() {
+        let rig = group_rig(break_rows(true)).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = group_release(served_with_wrong_digest("mpd", &plugin_archive("mpd")).await).await;
+
+        run_install(&rig.worker, &checked, &[CORE, "mpd", "radio"]).await;
+
+        assert_eq!(seen_requests(), vec![vec!["ritornello-plugin-radio".to_string()]], "no request carries the core");
+        assert!(rig.exits.lock().unwrap().is_empty(), "the core did not leave");
+        assert_eq!(*rig.orders.lock().unwrap(), vec![("radio".to_string(), PluginAction::Restart)]);
+        for file in ["staged-core", "staged-plugin-mpd"] {
+            assert!(!rig.worker.staging.join(file).exists(), "{file} left in staging");
+        }
+        let english = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+        let expected = ritornello_i18n::interpolate(english.get("update_group_postponed"), [("component", "mpd")]);
+        assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
+    }
+
+    /// **Room for the group as a whole.** Each archive fits alone, the two do
+    /// not: nothing is fetched, nothing written, nothing asked of root.
+    ///
+    /// **[MUTATION]** check the room of each member alone: red.
+    #[tokio::test]
+    async fn the_group_s_room_is_checked_as_a_whole() {
+        let rig = group_rig(break_rows(true)).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let disk = crate::system::disk_usage(&rig.worker.root.to_string_lossy());
+        let available_kb = disk.as_ref().expect("this test needs the free space of its temporary root").available_kb;
+        let size = available_kb * 1024 * 2 / 9;
+        assert!(enough_room(disk, size as usize), "each archive fits alone");
+        assert!(!enough_room(disk, (2 * size) as usize), "the two together do not");
+        let nowhere = refused_url().await;
+        let core = Published { size, url: nowhere.clone(), ..served_core(b"never fetched").await };
+        let mpd = Published { size, url: nowhere, ..served("mpd", b"never fetched").await };
+        let checked = ours(vec![core, mpd]);
+
+        run_install(&rig.worker, &checked, &[CORE, "mpd"]).await;
+
+        assert!(seen_requests().is_empty(), "nothing asked of root");
+        assert!(rig.exits.lock().unwrap().is_empty());
+        assert!(!rig.worker.staging.join("staged-core").exists() && !rig.worker.staging.join("staged-plugin-mpd").exists());
+        let expected = refusal_message(&*rig.worker.catalog.read().await, CORE, &Refusal::NoRoom);
+        assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
+    }
+
+    /// **Outside a break nothing changes**: the same three rows with a core
+    /// that does not break, and each component goes in its own request,
+    /// plugins first, each plugin restarted, the core last.
+    #[tokio::test]
+    async fn a_non_breaking_core_keeps_the_per_component_path() {
+        let rig = group_rig(break_rows(false)).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = group_release(served("mpd", &plugin_archive("mpd")).await).await;
+
+        run_install(&rig.worker, &checked, &[CORE, "mpd", "radio"]).await;
+
+        assert_eq!(
+            seen_requests(),
+            vec![
+                vec!["ritornello-plugin-mpd".to_string()],
+                vec!["ritornello-plugin-radio".to_string()],
+                vec![CORE.to_string()],
+            ]
+        );
+        assert_eq!(
+            *rig.orders.lock().unwrap(),
+            vec![("mpd".to_string(), PluginAction::Restart), ("radio".to_string(), PluginAction::Restart)]
+        );
+        assert_eq!(rig.exits.lock().unwrap().len(), 1);
+    }
+
+    /// The owner unticked the dependent: the dialog warned, and the core
+    /// installs anyway — alone, in a request of its own. Nothing else.
+    #[tokio::test]
+    async fn an_unticked_dependent_is_left_behind_and_the_core_installs() {
+        let rig = group_rig(break_rows(true)).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = ours(vec![served_core(&core_archive()).await]);
+
+        run_install(&rig.worker, &checked, &[CORE]).await;
+
+        assert_eq!(seen_requests(), vec![vec![CORE.to_string()]]);
+        assert!(rig.orders.lock().unwrap().is_empty());
+        assert_eq!(rig.exits.lock().unwrap().len(), 1);
+    }
+
+    /// **Unpublished contracts refuse the gesture too**, by hand, before
+    /// anything is fetched — while a row marked `installable: Some(false)`
+    /// for another reason (an archive refused earlier) is still retried by
+    /// hand, as it always was.
+    ///
+    /// **[MUTATION]** drop the check in `resolve_for_install`: red on the
+    /// first half. **[MUTATION]** refuse on `installable == Some(false)`
+    /// instead: red on the second.
+    #[tokio::test]
+    async fn a_component_whose_contracts_are_unpublished_is_refused_at_the_gesture() {
+        let mut unpublished = row("radio", ComponentKind::Plugin, Availability::UpdateAvailable);
+        unpublished.installable = Some(false);
+        unpublished.contracts.not_installable_reason = Some(NotInstallable::ContractsUnpublished);
+        let rig = group_rig(vec![unpublished]).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = ours(vec![served("radio", &plugin_archive("radio")).await]);
+
+        run_install(&rig.worker, &checked, &["radio"]).await;
+
+        assert!(seen_requests().is_empty(), "nothing asked of root");
+        let expected = refusal_message(&*rig.worker.catalog.read().await, "radio", &Refusal::ContractsUnpublished);
+        assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
+        drop(_privileged);
+
+        let mut refused_before = row("radio", ComponentKind::Plugin, Availability::UpdateAvailable);
+        refused_before.installable = Some(false);
+        let rig = group_rig(vec![refused_before]).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = ours(vec![served("radio", &plugin_archive("radio")).await]);
+
+        run_install(&rig.worker, &checked, &["radio"]).await;
+
+        assert_eq!(seen_requests(), vec![vec!["ritornello-plugin-radio".to_string()]], "a hand retry still goes through");
+    }
+
+    /// **The night never installs a break.** With the offered core breaking:
+    /// not the core, not `mpd` (refused by the running core — alone it would
+    /// be refused until someone installs the core); `radio`, which the
+    /// running core accepts, still updates even though the offered core
+    /// would refuse it, because the running core is the one it will meet
+    /// tonight; `cd` too. The same rows without a break install everything.
+    ///
+    /// **[MUTATION]** drop the break filter: red.
+    #[test]
+    fn the_nightly_run_never_installs_a_break() {
+        let rows = |breaking: bool| {
+            let mut rows = break_rows(breaking);
+            rows[2].contracts.with_core = Some(refused_fit());
+            let mut cd = row("cd", ComponentKind::Plugin, Availability::UpdateAvailable);
+            cd.contracts.with_running_core = Some(Fit::Compatible);
+            rows.push(cd);
+            rows
+        };
+        let list = |breaking| automatic_install_list(&rows(breaking), &nothing_placed(), schedule::InstallScope::Official);
+        assert_eq!(list(true), names(&["radio", "cd"]));
+        assert_eq!(list(false), names(&[CORE, "mpd", "radio", "cd"]), "without a break, everything as before");
+    }
+
+    /// **The page learns that a major update waits, from the check that
+    /// sees it — and only from that one.** A check offering a core with
+    /// another bootstrap sets the flag; the next check, offering a core
+    /// that does not break, clears it.
+    ///
+    /// **[MUTATION]** never clear the flag (`|=`): red on the second check.
+    #[tokio::test]
+    async fn a_major_update_is_flagged_by_the_check_that_sees_it_and_only_by_that_one() {
+        let (worker, _dir) = worker_rig(one_line(PluginStatus::kind("radio", "source", true, false)));
+        let core_asset = format!("ritornello-core-0.3.0-{ARCH}.tar.gz");
+        let release = |catalogue: &str| {
+            vec![Release {
+                tag: "v0.3.0".into(),
+                published_at: "2026-10-02T00:00:00Z".into(),
+                assets: vec![asset(&core_asset, "https://x/core"), asset("catalogue.json", catalogue)],
+            }]
+        };
+        let breaking = Speaks { protocol: ritornello_proto::PROTOCOL_VERSION + 1, ..Speaks::this_core() };
+        let (breaking_url, _) = serve_counting(contracts_body(&[("core", breaking)]), "catalogue.json").await;
+        let (aligned_url, _) = serve_counting(contracts_body(&[("core", Speaks::this_core())]), "catalogue.json").await;
+
+        for (url, expected) in [(breaking_url, true), (aligned_url, false)] {
+            tokio::time::timeout(std::time::Duration::from_secs(30), worker.settle_check(&client().unwrap(), &release(&url)))
+                .await
+                .expect("settle_check hung")
+                .expect("a check over a readable release list");
+            let state = worker.state.read().await;
+            assert_eq!(check_row(&state, CORE).contracts.breaking, expected);
+            assert_eq!(state.major_update_waiting, expected);
+        }
     }
 }
