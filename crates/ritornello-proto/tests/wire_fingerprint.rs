@@ -598,6 +598,9 @@ fn contract_name(c: Contract) -> &'static str {
     }
 }
 
+/// Produces the sample lines of one section.
+type SectionFn = fn() -> Vec<String>;
+
 /// The whole fixture: the announcement first, then one section per contract,
 /// each introduced by its header line.
 fn fingerprint() -> String {
@@ -611,7 +614,7 @@ fn fingerprint() -> String {
         }
     };
     push(format!("[announcement protocol={PROTOCOL_VERSION}]"), announcement_section());
-    let contract_sections: [(Contract, fn() -> Vec<String>); 5] = [
+    let contract_sections: [(Contract, SectionFn); 5] = [
         (Contract::Source, source_section),
         (Contract::Display, display_section),
         (Contract::Input, input_section),
