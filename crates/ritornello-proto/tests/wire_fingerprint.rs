@@ -110,6 +110,14 @@ fn source_req_label(r: &SourceReq) -> &'static str {
     }
 }
 
+fn play_request_label(r: &PlayRequest) -> &'static str {
+    match r {
+        PlayRequest::IfActive => "IfActive",
+        PlayRequest::Switch => "Switch",
+        PlayRequest::WakeAndSwitch => "WakeAndSwitch",
+    }
+}
+
 fn source_action_label(a: &SourceAction) -> &'static str {
     match a {
         SourceAction::Noop => "Noop",
@@ -429,6 +437,10 @@ fn source_section() -> Vec<String> {
     add_cover_refs(&mut l);
     add_repeat(&mut l);
 
+    for r in [PlayRequest::IfActive, PlayRequest::Switch, PlayRequest::WakeAndSwitch] {
+        l.add(&format!("PlayRequest::{}", play_request_label(&r)), &r);
+    }
+
     l.add("SourceMessage::default", &SourceMessage::default());
     l.add(
         "SourceMessage::full",
@@ -447,6 +459,7 @@ fn source_section() -> Vec<String> {
             cover: Some(CoverRef::Path { path: "/c".into() }),
             cover_thumb: Some(CoverRef::Url { url: "https://example.invalid/t".into() }),
             cover_archivable: Some(true),
+            play_request: Some(PlayRequest::Switch),
         },
     );
     l.0

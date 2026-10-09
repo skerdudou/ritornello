@@ -170,7 +170,7 @@ impl SourcePlugin for RadioSource {
     /// just been re-saved, this is what propagates a station's renaming
     /// without an MPD client having to ask for it again.
     ///
-    /// Carries **no status, no identity, and never an action**: the radio
+    /// Carries **no status, no identity, and no play request**: the radio
     /// plays a single stream, there is nothing to reload, only the record to
     /// set straight — and the sound is not interrupted. `presets`, `preset`,
     /// `preset_name` and `preset_count` are facts about the source, not a

@@ -60,14 +60,45 @@ function label(choice: Choice): string {
   }
 }
 
+/** The four values of `state::OnInsertion`, from the quietest to the most eager. */
+const CHOICES_INSERTION = [
+  'nothing',
+  'play_if_active',
+  'switch_and_play',
+  'wake_switch_and_play',
+] as const
+type InsertionChoice = (typeof CHOICES_INSERTION)[number]
+
+/** Default matching `OnInsertion::default`, for the same reason as `onArrival`. */
+const onInsertion = ref<InsertionChoice>('nothing')
+
+/** Same exhaustive switch with literal keys as `label`, for the same reason. */
+function insertionLabel(choice: InsertionChoice): string {
+  switch (choice) {
+    case 'nothing':
+      return t.value('insertion_nothing')
+    case 'play_if_active':
+      return t.value('insertion_play_if_active')
+    case 'switch_and_play':
+      return t.value('insertion_switch_and_play')
+    case 'wake_switch_and_play':
+      return t.value('insertion_wake_switch_and_play')
+  }
+}
+
 async function reload(): Promise<void> {
   try {
-    const data = await api.get<{ on_arrival: Choice }>(url('api/data'))
+    const data = await api.get<{ on_arrival: Choice; on_insertion: InsertionChoice }>(
+      url('api/data'),
+    )
     // Guarded rather than assigned blindly: an unknown value — an older
     // plugin, a hand-edited state file — would leave the `Select` pointing at
     // a value with no matching `SelectItem`, i.e. a blank control. Falling
     // back on the default shows what the plugin actually does in that case.
     onArrival.value = CHOICES.includes(data.on_arrival) ? data.on_arrival : 'nothing'
+    onInsertion.value = CHOICES_INSERTION.includes(data.on_insertion)
+      ? data.on_insertion
+      : 'nothing'
   } catch (e) {
     // No catalog key covers this failure (the plugin always serves a setting,
     // at worst the default): the raw request message is the only text
@@ -79,9 +110,9 @@ async function reload(): Promise<void> {
 onMounted(reload)
 
 /**
- * Saves the setting. It applies from the next arrival on — the Source half
- * reads the shared value at each `Activate`/`Wake` rather than caching it —
- * so there is nothing to restart.
+ * Saves both settings. They apply from the next arrival or insertion on — the
+ * Source half reads the shared values each time rather than caching them — so
+ * there is nothing to restart.
  *
  * `api.put` never rejects (network down included): the result is the only
  * source of truth, never an exception to catch. A refusal already carries the
@@ -89,7 +120,10 @@ onMounted(reload)
  * retranslating it.
  */
 async function save(): Promise<void> {
-  const err = await api.put(url('api/data'), { on_arrival: onArrival.value })
+  const err = await api.put(url('api/data'), {
+    on_arrival: onArrival.value,
+    on_insertion: onInsertion.value,
+  })
   toast[err ? 'error' : 'success'](err ?? t.value('saved'))
 }
 </script>
@@ -141,6 +175,22 @@ async function save(): Promise<void> {
         >
           {{ t('arrival_last_track_help') }}
         </p>
+      </div>
+      <div class="space-y-1">
+        <label class="text-sm font-medium">{{ t('insertion_label') }}</label>
+        <Select v-model="onInsertion">
+          <!-- Label rendered in the slot for the same reason as the arrival
+               select above (language change on a mounted component). -->
+          <SelectTrigger data-insertion class="w-full" :aria-label="t('insertion_label')">
+            <SelectValue>{{ insertionLabel(onInsertion) }}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem v-for="choice in CHOICES_INSERTION" :key="choice" :value="choice">
+              {{ insertionLabel(choice) }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        <p data-insertion-help class="text-xs text-muted-foreground">{{ t('insertion_help') }}</p>
       </div>
       <Button data-save @click="save">{{ t('btn_save') }}</Button>
     </CardContent>

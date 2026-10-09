@@ -1,10 +1,11 @@
-//! Persisted state: what to do on arriving at the source, and the track last
-//! listened to on the last disc.
+//! Persisted state: what to do on arriving at the source, what to do when a
+//! disc is inserted, and the track last listened to on the last disc.
 //!
 //! Same pattern as `crates/ritornello-plugin-files/src/state.rs`, including the
 //! `update` that preserves the fields it does not touch — and here that is not
-//! a precaution but a requirement: the Admin half writes `on_arrival`, the
-//! Source half writes `remembered`, into this same file. A `save` rebuilt by
+//! a precaution but a requirement: the Admin half writes the two settings
+//! (`on_arrival`, `on_insertion`), the Source half writes `remembered`, into
+//! this same file. A `save` rebuilt by
 //! either would erase the other's field.
 //!
 //! One file for a setting **and** a playback position, which may look like a
@@ -39,6 +40,29 @@ pub enum OnArrival {
     LastTrack,
 }
 
+/// What the plugin does when a disc is **inserted** — not when the source is
+/// arrived at (that is `OnArrival`'s job), but when a disc appears in the drive
+/// after a confirmed removal or a swap.
+///
+/// The plugin acts on it by asking, never by commanding: on an insertion the
+/// notification that announces the disc carries a play request
+/// (`PlayRequest`), and the core decides whether to honour it — switch the
+/// source, leave standby, or only play if the CD is already the current one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnInsertion {
+    /// Do nothing. The default, for the same reason as `OnArrival::Nothing`:
+    /// spinning up a drive must not happen unasked.
+    #[default]
+    Nothing,
+    /// Play the disc, but only if the CD is already the current source.
+    PlayIfActive,
+    /// Switch to the CD source and play the disc.
+    SwitchAndPlay,
+    /// Leave standby if needed, switch to the CD source and play the disc.
+    WakeSwitchAndPlay,
+}
+
 /// The track last listened to, and the disc it belongs to.
 ///
 /// The TOC is what makes this usable: a track number alone, applied to
@@ -64,6 +88,8 @@ pub struct Remembered {
 pub struct State {
     #[serde(default)]
     pub on_arrival: OnArrival,
+    #[serde(default)]
+    pub on_insertion: OnInsertion,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remembered: Option<Remembered>,
 }
@@ -91,9 +117,26 @@ pub fn save(path: &Path, state: &State) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Serializes every `update` of this process.
+///
+/// Two writers share the file and run on different tasks: the Admin half
+/// (`set_data`, the page saving a setting) and the Source half (`remember` on
+/// every track change, `confirm_removal` on a removal). Unserialized, both can
+/// load the same state and each write it back without the other's change —
+/// or, worse, both write the same `state.json.tmp` and one renames a file the
+/// other is still writing: the next load finds it unparseable and, the load
+/// being all-or-nothing, resets **both** settings to their defaults. One
+/// process-wide lock rather than one per path: there is a single file, and a
+/// lock keyed by path would only add a map to get wrong.
+static UPDATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Re-reads, modifies, rewrites — and therefore preserves what the caller does
-/// not touch. The only write the two halves are allowed to use.
+/// not touch. The only write the two halves are allowed to use, and it holds
+/// `UPDATE` across the whole load-modify-save.
 pub fn update(path: &Path, f: impl FnOnce(&mut State)) -> anyhow::Result<()> {
+    // A poisoned lock only means another update panicked mid-way; the file
+    // itself is still whole (the rename is atomic), so carry on.
+    let _held = UPDATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut state = load(path);
     f(&mut state);
     save(path, &state)
@@ -127,6 +170,7 @@ mod tests {
         let f = dir.path().join("plugin-cd.json");
         let state = State {
             on_arrival: OnArrival::LastTrack,
+            on_insertion: OnInsertion::PlayIfActive,
             remembered: Some(Remembered { toc: "abcd1234".into(), track: 4 }),
         };
         save(&f, &state).unwrap();
@@ -151,12 +195,73 @@ mod tests {
         assert_eq!(load(&f).remembered.unwrap().toc, "deadbeef", "the resume point survived a save");
     }
 
+    /// Final review, F10: the two halves write from different tasks. Three
+    /// threads each own one field and write it over and over; after each
+    /// write the writer reads its own field back. Without the lock in
+    /// `update`, a concurrent load-modify-save drops it (lost update), or a
+    /// shared `.tmp` renamed under another writer fails the write or leaves a
+    /// file the all-or-nothing load resets to the defaults.
+    #[test]
+    fn concurrent_updates_never_lose_a_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = std::sync::Arc::new(dir.path().join("plugin-cd.json"));
+        let writers: Vec<std::thread::JoinHandle<()>> = (0..3)
+            .map(|field| {
+                let f = f.clone();
+                std::thread::spawn(move || {
+                    for i in 0..200i64 {
+                        match field {
+                            0 => {
+                                update(&f, |s| s.on_arrival = OnArrival::LastTrack).unwrap();
+                                assert_eq!(load(&f).on_arrival, OnArrival::LastTrack, "write {i}");
+                            }
+                            1 => {
+                                update(&f, |s| s.on_insertion = OnInsertion::WakeSwitchAndPlay).unwrap();
+                                assert_eq!(load(&f).on_insertion, OnInsertion::WakeSwitchAndPlay, "write {i}");
+                            }
+                            _ => {
+                                update(&f, |s| s.remembered = Some(Remembered { toc: "t".into(), track: i })).unwrap();
+                                assert_eq!(load(&f).remembered.map(|r| r.track), Some(i), "write {i}");
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().expect("a writer lost its own write");
+        }
+        let last = load(&f);
+        assert_eq!(last.on_arrival, OnArrival::LastTrack);
+        assert_eq!(last.on_insertion, OnInsertion::WakeSwitchAndPlay);
+        assert_eq!(last.remembered.map(|r| r.track), Some(199));
+    }
+
+    #[test]
+    fn insertion_defaults_to_nothing_and_is_stored_under_a_readable_name() {
+        assert_eq!(State::default().on_insertion, OnInsertion::Nothing);
+        let s = State { on_insertion: OnInsertion::WakeSwitchAndPlay, ..State::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"wake_switch_and_play\""), "{json}");
+    }
+
+    #[test]
+    fn a_file_without_the_insertion_setting_keeps_its_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-cd.json");
+        std::fs::write(&path, r#"{"on_arrival":"last_track"}"#).unwrap();
+        let s = load(&path);
+        assert_eq!(s.on_arrival, OnArrival::LastTrack);
+        assert_eq!(s.on_insertion, OnInsertion::Nothing);
+    }
+
     #[test]
     fn the_setting_is_stored_under_a_readable_name() {
         // The file is read by a human when something looks wrong on the
         // device: `last_track` says what it does, a bare `2` would not.
         let json = serde_json::to_string(&State {
             on_arrival: OnArrival::LastTrack,
+            on_insertion: OnInsertion::Nothing,
             remembered: None,
         })
         .unwrap();

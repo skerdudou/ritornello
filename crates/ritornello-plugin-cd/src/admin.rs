@@ -1,7 +1,7 @@
-//! Admin half: the single setting this source has — what it does when it is
-//! arrived at.
+//! Admin half: the two settings this source has — what it does when it is
+//! arrived at, and what it does when a disc is inserted.
 
-use crate::state::{self, OnArrival};
+use crate::state::{self, OnArrival, OnInsertion};
 use ritornello_plugin_sdk::AdminPlugin;
 use ritornello_proto::Text;
 use serde::Deserialize;
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-/// Body of `SetData`, distinct from `State`: the field is **mandatory** here,
+/// Body of `SetData`, distinct from `State`: both fields are **mandatory** here,
 /// with no `#[serde(default)]`. That default is right for `state::load`, which
 /// completes a partial file, but wrong for a write — a `PUT {}` must be
 /// rejected, not silently understood as "put it back to play nothing".
@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Deserialize)]
 struct SettingWrite {
     on_arrival: OnArrival,
+    on_insertion: OnInsertion,
 }
 
 pub struct CdAdmin {
@@ -28,6 +29,8 @@ pub struct CdAdmin {
     /// obeyed must be what is saved, otherwise a setting applied but not
     /// persisted would silently revert at the next restart.
     pub on_arrival: Arc<RwLock<OnArrival>>,
+    /// Same contract as `on_arrival`, for the insertion setting.
+    pub on_insertion: Arc<RwLock<OnInsertion>>,
 }
 
 #[async_trait::async_trait]
@@ -48,7 +51,10 @@ impl AdminPlugin for CdAdmin {
         // Served from the shared value rather than re-read from disk: it is
         // the one the Source half actually obeys, so the page cannot show a
         // setting that is not the one in force.
-        serde_json::json!({ "on_arrival": *self.on_arrival.read().unwrap() })
+        serde_json::json!({
+            "on_arrival": *self.on_arrival.read().unwrap(),
+            "on_insertion": *self.on_insertion.read().unwrap(),
+        })
     }
 
     async fn set_data(&mut self, data: serde_json::Value) -> Result<(), Text> {
@@ -62,11 +68,16 @@ impl AdminPlugin for CdAdmin {
         // The disk first, the shared value second. The other order would obey
         // a setting the file does not carry — a power cut in between, and the
         // device would come back on a setting the owner had changed.
-        state::update(&self.state_path, |s| s.on_arrival = write.on_arrival).map_err(|e| {
-            tracing::warn!("persisting the arrival setting: {e}");
+        state::update(&self.state_path, |s| {
+            s.on_arrival = write.on_arrival;
+            s.on_insertion = write.on_insertion;
+        })
+        .map_err(|e| {
+            tracing::warn!("persisting the settings: {e}");
             Text::Keyed { key: "save_failed".into(), params: HashMap::new() }
         })?;
         *self.on_arrival.write().unwrap() = write.on_arrival;
+        *self.on_insertion.write().unwrap() = write.on_insertion;
         Ok(())
     }
 }
@@ -83,7 +94,11 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("plugin-cd.json");
-        let admin = CdAdmin { state_path, on_arrival: Arc::new(RwLock::new(OnArrival::default())) };
+        let admin = CdAdmin {
+            state_path,
+            on_arrival: Arc::new(RwLock::new(OnArrival::default())),
+            on_insertion: Arc::new(RwLock::new(OnInsertion::default())),
+        };
         Fixture { admin, _dir: dir }
     }
 
@@ -122,17 +137,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_data_persists_both_settings_and_replaces_the_shared_values() {
+        let mut f = fixture();
+        let body = serde_json::json!({ "on_arrival": "first_track", "on_insertion": "switch_and_play" });
+        f.admin.set_data(body).await.unwrap();
+        assert_eq!(*f.admin.on_insertion.read().unwrap(), OnInsertion::SwitchAndPlay);
+        assert_eq!(state::load(&f.admin.state_path).on_insertion, OnInsertion::SwitchAndPlay);
+        assert_eq!(f.admin.get_data().await["on_insertion"], "switch_and_play");
+    }
+
+    #[tokio::test]
+    async fn set_data_accepts_the_four_insertion_values_and_only_those() {
+        let mut f = fixture();
+        for v in ["nothing", "play_if_active", "switch_and_play", "wake_switch_and_play"] {
+            let r = f.admin.set_data(serde_json::json!({ "on_arrival": "nothing", "on_insertion": v })).await;
+            assert!(r.is_ok(), "{v} must be accepted: {r:?}");
+        }
+        let r = f
+            .admin
+            .set_data(serde_json::json!({ "on_arrival": "nothing", "on_insertion": "explode" }))
+            .await;
+        assert!(r.is_err());
+        // A refusal leaves the value in force untouched.
+        assert_eq!(*f.admin.on_insertion.read().unwrap(), OnInsertion::WakeSwitchAndPlay);
+    }
+
+    #[tokio::test]
+    async fn a_request_without_the_insertion_field_is_refused_not_defaulted() {
+        // Both fields are mandatory on a write: no backward compatibility
+        // before the final release, and a missing one must not silently reset
+        // the owner's choice.
+        let mut f = fixture();
+        f.admin
+            .set_data(serde_json::json!({ "on_arrival": "nothing", "on_insertion": "switch_and_play" }))
+            .await
+            .unwrap();
+        assert!(f.admin.set_data(serde_json::json!({ "on_arrival": "nothing" })).await.is_err());
+        assert_eq!(*f.admin.on_insertion.read().unwrap(), OnInsertion::SwitchAndPlay);
+    }
+
+    #[tokio::test]
+    async fn saving_the_insertion_setting_keeps_the_other_fields_of_the_file() {
+        let mut f = fixture();
+        state::update(&f.admin.state_path, |s| {
+            s.remembered = Some(state::Remembered { toc: "abcd1234".into(), track: 6 })
+        })
+        .unwrap();
+        f.admin
+            .set_data(serde_json::json!({ "on_arrival": "first_track", "on_insertion": "play_if_active" }))
+            .await
+            .unwrap();
+        let reread = state::load(&f.admin.state_path);
+        assert_eq!(reread.on_arrival, OnArrival::FirstTrack);
+        assert_eq!(reread.on_insertion, OnInsertion::PlayIfActive);
+        assert_eq!(reread.remembered.unwrap().track, 6);
+    }
+
+    #[tokio::test]
     async fn get_data_returns_the_setting_in_force() {
         let f = fixture();
-        assert_eq!(f.admin.get_data().await, serde_json::json!({ "on_arrival": "nothing" }));
+        assert_eq!(f.admin.get_data().await,
+            serde_json::json!({ "on_arrival": "nothing", "on_insertion": "nothing" })
+        );
     }
 
     #[tokio::test]
     async fn set_data_persists_and_replaces_the_shared_value() {
         let mut f = fixture();
-        assert!(f.admin.set_data(serde_json::json!({ "on_arrival": "last_track" })).await.is_ok());
+        let body = serde_json::json!({ "on_arrival": "last_track", "on_insertion": "nothing" });
+        assert!(f.admin.set_data(body).await.is_ok());
         // What the page will show,
-        assert_eq!(f.admin.get_data().await, serde_json::json!({ "on_arrival": "last_track" }));
+        assert_eq!(
+            f.admin.get_data().await,
+            serde_json::json!({ "on_arrival": "last_track", "on_insertion": "nothing" })
+        );
         // what the Source half obeys,
         assert_eq!(*f.admin.on_arrival.read().unwrap(), OnArrival::LastTrack);
         // and what survives a restart. The three must agree, and the
@@ -145,10 +223,16 @@ mod tests {
     async fn set_data_accepts_the_three_values_and_only_those() {
         let mut f = fixture();
         for value in ["nothing", "first_track", "last_track"] {
-            let r = f.admin.set_data(serde_json::json!({ "on_arrival": value })).await;
+            let r = f
+                .admin
+                .set_data(serde_json::json!({ "on_arrival": value, "on_insertion": "nothing" }))
+                .await;
             assert!(r.is_ok(), "{value} must be accepted: {r:?}");
         }
-        let r = f.admin.set_data(serde_json::json!({ "on_arrival": "eject_and_run" })).await;
+        let r = f
+            .admin
+            .set_data(serde_json::json!({ "on_arrival": "eject_and_run", "on_insertion": "nothing" }))
+            .await;
         assert!(r.is_err(), "an unknown value must be refused, not silently ignored");
         // And the refusal leaves the setting in force untouched: a rejected
         // request must not be a way to reset it.
@@ -162,7 +246,10 @@ mod tests {
         // write it would turn a malformed request into "play nothing" — a
         // silent reset of the owner's choice.
         let mut f = fixture();
-        f.admin.set_data(serde_json::json!({ "on_arrival": "first_track" })).await.unwrap();
+        f.admin
+            .set_data(serde_json::json!({ "on_arrival": "first_track", "on_insertion": "nothing" }))
+            .await
+            .unwrap();
         assert!(f.admin.set_data(serde_json::json!({})).await.is_err());
         assert_eq!(*f.admin.on_arrival.read().unwrap(), OnArrival::FirstTrack);
     }
@@ -175,7 +262,11 @@ mod tests {
         // owns is the shape the plugin still controls — the key and the
         // `{detail}` parameter, unresolved.
         let mut f = fixture();
-        let err = f.admin.set_data(serde_json::json!({ "on_arrival": 7 })).await.unwrap_err();
+        let err = f
+            .admin
+            .set_data(serde_json::json!({ "on_arrival": 7, "on_insertion": "nothing" }))
+            .await
+            .unwrap_err();
         match err {
             Text::Keyed { key, params } => {
                 assert_eq!(key, "bad_request");
@@ -194,7 +285,10 @@ mod tests {
             s.remembered = Some(state::Remembered { toc: "abcd1234".into(), track: 6 })
         })
         .unwrap();
-        f.admin.set_data(serde_json::json!({ "on_arrival": "last_track" })).await.unwrap();
+        f.admin
+            .set_data(serde_json::json!({ "on_arrival": "last_track", "on_insertion": "nothing" }))
+            .await
+            .unwrap();
         let reread = state::load(&f.admin.state_path);
         assert_eq!(reread.on_arrival, OnArrival::LastTrack);
         assert_eq!(reread.remembered.unwrap().track, 6, "the resume point was erased by a save");

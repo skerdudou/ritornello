@@ -298,6 +298,23 @@ pub enum Text {
     Verbatim(String),
 }
 
+/// What a source asks the core to do, in a spontaneous notification.
+///
+/// The core decides and acts (see `Core::handle_play_request`); the request
+/// is never an order. It is honoured only in a spontaneous notification
+/// (`id` absent) and ignored in a correlated reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayRequest {
+    /// Play, but only if this source is already the active one.
+    IfActive,
+    /// Make this source the active one and play it; does nothing to a
+    /// device in standby.
+    Switch,
+    /// Like `Switch`, and leave standby first if the device is in it.
+    WakeAndSwitch,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SourceMessage {
     /// `Some(id)` = reply correlated to a request; `None` = spontaneous notification.
@@ -488,6 +505,14 @@ pub struct SourceMessage {
     /// the convention of `preset` and `cover` — not that of `status`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_archivable: Option<bool>,
+    /// A request for the core to start playing this source, sent **only in a
+    /// spontaneous notification** (`id` absent) and ignored in a reply. A
+    /// notification therefore carries a state, and at most one request the
+    /// core decides on (see [`PlayRequest`] for the three scopes).
+    ///
+    /// Absent = no request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_request: Option<PlayRequest>,
 }
 
 #[cfg(test)]
@@ -519,7 +544,34 @@ mod tests {
             cover: None,
             cover_thumb: None,
             cover_archivable: None,
+            play_request: None,
         }
+    }
+
+    #[test]
+    fn a_play_request_travels_under_its_snake_case_name() {
+        for (r, name) in [
+            (PlayRequest::IfActive, "if_active"),
+            (PlayRequest::Switch, "switch"),
+            (PlayRequest::WakeAndSwitch, "wake_and_switch"),
+        ] {
+            let m = SourceMessage { play_request: Some(r), ..empty_message() };
+            let json = serde_json::to_string(&m).unwrap();
+            assert!(json.contains(&format!(r#""play_request":"{name}""#)), "{json}");
+            assert_eq!(serde_json::from_str::<SourceMessage>(&json).unwrap().play_request, Some(r));
+        }
+    }
+
+    #[test]
+    fn a_message_without_a_play_request_omits_the_field() {
+        let json = serde_json::to_string(&SourceMessage::default()).unwrap();
+        assert!(!json.contains("play_request"), "{json}");
+    }
+
+    #[test]
+    fn an_old_message_reads_back_without_a_request() {
+        let m: SourceMessage = serde_json::from_str(r#"{"can_eject":true}"#).unwrap();
+        assert_eq!(m.play_request, None);
     }
 
     #[test]

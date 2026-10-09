@@ -19,6 +19,12 @@ const CATALOG = {
   arrival_first_track: 'Lancer la piste 1',
   arrival_last_track: 'Reprendre la dernière piste écoutée',
   arrival_last_track_help: 'Uniquement sur le même disque.',
+  insertion_label: "À l'insertion d'un disque",
+  insertion_nothing: 'Ne rien faire',
+  insertion_play_if_active: 'Le lire si le CD est la source écoutée',
+  insertion_switch_and_play: 'Basculer sur le CD et le lire',
+  insertion_wake_switch_and_play: 'Sortir de veille, basculer sur le CD et le lire',
+  insertion_help: 'Éjecter un disque oublie toujours la piste où il en était.',
   btn_save: 'Enregistrer',
   saved: 'Enregistré',
   save_failed: "l'enregistrement a échoué",
@@ -29,15 +35,15 @@ const CATALOG = {
 // the contract, this view does not know the name under which it is served.
 const BASE = '/plugins/cd/'
 
-/** Mounts the component with a spied `fetch` serving `on_arrival` on GET. */
-async function mountView(on_arrival = 'nothing') {
+/** Mounts the component with a spied `fetch` serving both settings on GET. */
+async function mountView(on_arrival = 'nothing', on_insertion = 'nothing') {
   const puts: Array<{ url: string; body: unknown }> = []
   const spy = vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'PUT') {
       puts.push({ url, body: JSON.parse(String(init.body)) })
       return new Response(null, { status: 204 })
     }
-    return new Response(JSON.stringify({ on_arrival }), { status: 200 })
+    return new Response(JSON.stringify({ on_arrival, on_insertion }), { status: 200 })
   })
   vi.stubGlobal('fetch', spy)
   const w = mount(CdAdmin, { props: { catalog: CATALOG, base: BASE } })
@@ -105,11 +111,13 @@ describe('CdAdmin', () => {
     expect(spy.mock.calls[0]?.[0]).toBe(`${BASE}api/data`)
   })
 
-  it('sends the chosen value and confirms the save', async () => {
+  it('sends both settings and confirms the save', async () => {
     const { w, puts } = await mountView('nothing')
     await w.get('[data-save]').trigger('click')
     await flushPromises()
-    expect(puts).toEqual([{ url: `${BASE}api/data`, body: { on_arrival: 'nothing' } }])
+    expect(puts).toEqual([
+      { url: `${BASE}api/data`, body: { on_arrival: 'nothing', on_insertion: 'nothing' } },
+    ])
     expect(toast.success).toHaveBeenCalledWith(CATALOG.saved)
     expect(toast.error).not.toHaveBeenCalled()
   })
@@ -139,6 +147,54 @@ describe('CdAdmin', () => {
     // control. The default at least shows what the plugin really does.
     const { w } = await mountView('eject_and_run')
     expect(w.get('[data-arrival]').text()).toContain(CATALOG.arrival_nothing)
+  })
+
+  it('shows the insertion setting received from the server, by its label', async () => {
+    const { w } = await mountView('nothing', 'wake_switch_and_play')
+    expect(w.text()).toContain(CATALOG.insertion_label)
+    const trigger = w.get('[data-insertion]')
+    expect(trigger.text()).toContain(CATALOG.insertion_wake_switch_and_play)
+    expect(trigger.text()).not.toContain('wake_switch_and_play')
+  })
+
+  it('gives each insertion value its own label', async () => {
+    // A label mapped to the wrong key would pass the key-existence guard
+    // (`i18nKeysUsed.test.ts` only checks that a used key exists), so each
+    // value is checked against the text it must show.
+    const expected = {
+      nothing: CATALOG.insertion_nothing,
+      play_if_active: CATALOG.insertion_play_if_active,
+      switch_and_play: CATALOG.insertion_switch_and_play,
+      wake_switch_and_play: CATALOG.insertion_wake_switch_and_play,
+    }
+    for (const [value, text] of Object.entries(expected)) {
+      const { w } = await mountView('nothing', value)
+      expect(w.get('[data-insertion]').text(), value).toBe(text)
+    }
+  })
+
+  it('sends the insertion value the server gave, not a default', async () => {
+    const { w, puts } = await mountView('last_track', 'switch_and_play')
+    await w.get('[data-save]').trigger('click')
+    await flushPromises()
+    expect(puts).toEqual([
+      { url: `${BASE}api/data`, body: { on_arrival: 'last_track', on_insertion: 'switch_and_play' } },
+    ])
+  })
+
+  it('falls back on "nothing" when the server sends an insertion value it does not know', async () => {
+    const { w } = await mountView('nothing', 'explode')
+    expect(w.get('[data-insertion]').text()).toContain(CATALOG.insertion_nothing)
+  })
+
+  it('names the insertion control for a screen reader', async () => {
+    const { w } = await mountView()
+    expect(w.get('[data-insertion]').attributes('aria-label')).toBe(CATALOG.insertion_label)
+  })
+
+  it('explains that ejecting always forgets the track', async () => {
+    const { w } = await mountView()
+    expect(w.get('[data-insertion-help]').text()).toBe(CATALOG.insertion_help)
   })
 
   it('shows the server refusal as it stands, without retranslating it', async () => {

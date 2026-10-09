@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use ritornello_proto::{
-    SourcesCatalog, Cover, DisplayFrame, Enrichment, IdentityUpdate, NowPlaying, PlayerState, Preset,
+    SourcesCatalog, Cover, DisplayFrame, Enrichment, IdentityUpdate, NowPlaying, PlayRequest, PlayerState, Preset,
     SourceAction, SourceMessage, SourceReq, SourceRequest, Text,
 };
 use std::path::Path;
@@ -118,9 +118,9 @@ impl SourceOutcome {
 /// Spontaneous notification from a Source: track change, delayed arrival of a
 /// TOC, disc insertion.
 ///
-/// Deliberately without an action: the core alone decides what goes into
-/// playback. A Source that could trigger a `Play` on its own initiative would
-/// make playback unpredictable from the remote control.
+/// It carries a state, and at most one [`PlayRequest`] the core decides on,
+/// never an order. The core alone decides what goes into playback, so a
+/// Source cannot trigger a `Play` on its own initiative, only ask.
 #[derive(Default)]
 pub struct Notification {
     pub identity: Option<IdentityUpdate>,
@@ -143,11 +143,20 @@ pub struct Notification {
     pub cover_thumb: Option<ritornello_proto::CoverRef>,
     /// See `SourceMessage::cover_archivable`.
     pub cover_archivable: Option<bool>,
+    /// See `SourceMessage::play_request`. Written only on this spontaneous
+    /// path; a reply never carries one.
+    pub play_request: Option<PlayRequest>,
 }
 
 impl Notification {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// See `SourceMessage::play_request`.
+    pub fn play_request(mut self, request: PlayRequest) -> Self {
+        self.play_request = Some(request);
+        self
     }
 
     /// See `SourceOutcome::preset`.
@@ -489,6 +498,8 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     // Same reasoning as `cover` just above: a reply never
                     // declares this, only the spontaneous notification does.
                     cover_archivable: None,
+                    // A request exists only in a spontaneous notification.
+                    play_request: None,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -513,6 +524,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             cover: n.cover,
                             cover_thumb: n.cover_thumb,
                             cover_archivable: n.cover_archivable,
+                            play_request: n.play_request,
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }
@@ -2020,6 +2032,54 @@ mod tests {
             msg.identity,
             Some(IdentityUpdate::Playing(serde_json::json!({"kind": "disc", "track": 2})))
         );
+    }
+
+    #[tokio::test]
+    async fn a_notification_carries_its_play_request_and_a_reply_never_does() {
+        struct AskingSource {
+            emitted: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for AskingSource {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.emitted {
+                    std::future::pending::<()>().await;
+                }
+                self.emitted = true;
+                Some(Notification::new().play_request(PlayRequest::Switch))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(AskingSource { emitted: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines.next_line().await.unwrap().unwrap();
+        assert!(line.contains(r#""play_request":"switch""#), "{line}");
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, None, "the request rides a spontaneous frame: {line}");
+
+        write.write_all(b"{\"id\":3,\"req\":\"Activate\"}
+").await.unwrap();
+        let reply = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&reply).unwrap();
+        assert_eq!(msg.id, Some(3));
+        assert!(!reply.contains("play_request"), "a reply never carries a request: {reply}");
     }
 
     #[tokio::test]

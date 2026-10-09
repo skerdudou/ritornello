@@ -9,6 +9,7 @@
 //! - `commands`: remote and UI control — playback/standby, volume, tens, seek, startup
 //! - `deadlines`: overlays and deadlines that the `main.rs` loop must wake up for
 //! - `player`: mpv events, restart with growing backoff, resume on wake
+//! - `play_request`: a source asking to be played, and what the core decides
 //! - `metadata`: identity, ICY, tags, enrichments, covers and extraction
 //! - `position`: progress reported by mpv, anchor set by a plugin
 //! - `publish`: player state and sources_catalog pushed to displays, SPA and plugins
@@ -36,6 +37,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 
 mod commands;
 mod deadlines;
+mod play_request;
 mod playback;
 mod track_metadata;
 mod position;
@@ -680,6 +682,11 @@ impl<P: Player> Core<P> {
             cover,
             cover_thumb,
             cover_archivable,
+            // Belongs to neither half: it is not a fact about the source but
+            // a wish, acted on after this frame by `handle_source_frame`,
+            // which takes it out before calling here. Named so the
+            // destructuring stays exhaustive.
+            play_request: _,
         } = update;
         // Read **before** the guard below, and this is intentional: the
         // sources_catalog describes every source, not the one that is

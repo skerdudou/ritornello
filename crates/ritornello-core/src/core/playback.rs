@@ -3,7 +3,28 @@
 use super::*;
 
 impl<P: Player> Core<P> {
+    /// A whole wake: mpv prepared (`prepare_player`), `Wake` to the active
+    /// source, the state published.
     pub async fn resume(&mut self) -> Result<()> {
+        self.prepare_player().await?;
+        if let Some(action) = self.active_request(SourceReq::Wake).await? {
+            self.apply(action).await?;
+        }
+        // The UI must know the volume and the source from the first display,
+        // without waiting for something to be touched.
+        self.publish_state();
+        Ok(())
+    }
+
+    /// What every wake owes mpv and the sources **before** any source is
+    /// asked to play: volume, audio device, play mode. No source request.
+    ///
+    /// Split out of `resume` for the one wake that must not send `Wake` to
+    /// the active source: a source asking to be played while the device is
+    /// in standby (`handle_play_request`). The device is about to switch to
+    /// that source; waking the old one first would start it for an instant
+    /// only to cut it off.
+    pub(super) async fn prepare_player(&mut self) -> Result<()> {
         self.player.set_volume(self.volume).await?;
         if let Some(device) = self.audio_device.clone() {
             self.player.set_audio_device(&device).await?;
@@ -13,12 +34,6 @@ impl<P: Player> Core<P> {
         // switch would otherwise start from whatever default
         // `set_play_mode` never corrected.
         self.push_play_mode().await;
-        if let Some(action) = self.active_request(SourceReq::Wake).await? {
-            self.apply(action).await?;
-        }
-        // The UI must know the volume and the source from the first display,
-        // without waiting for something to be touched.
-        self.publish_state();
         Ok(())
     }
 

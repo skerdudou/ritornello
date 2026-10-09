@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use ritornello_proto::{
     AdminReq, AdminRequest, AdminResponse, AdminResult, SourcesCatalog, Cover, CoverRef, DisplayFrame,
-    Enrichment, IdentityUpdate, InputMessage, NowPlaying, PlayerState, Preset, SourceAction,
+    Enrichment, IdentityUpdate, InputMessage, NowPlaying, PlayRequest, PlayerState, Preset, SourceAction,
     SourceMessage, SourceReq, SourceRequest, Text,
 };
 use std::collections::HashMap;
@@ -22,6 +22,10 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 /// `metadata` plugins contradict each other.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SourceUpdate {
+    /// See `SourceMessage::play_request`. Copied from the received frame
+    /// **only when it is spontaneous** (`id` absent): a request inside a
+    /// correlated reply is dropped here, so the core never sees it.
+    pub play_request: Option<PlayRequest>,
     pub identity: Option<IdentityUpdate>,
     /// See `SourceMessage::transient`.
     pub transient: bool,
@@ -168,6 +172,7 @@ impl SourceClient {
                 // it here. This is the "the question is forced" half of the
                 // guard-rail.
                 let update = SourceUpdate {
+                    play_request: if msg.id.is_none() { msg.play_request } else { None },
                     identity: msg.identity,
                     transient: msg.transient,
                     preset: msg.preset,
@@ -222,6 +227,7 @@ impl SourceClient {
                     has_finite_list: update.has_finite_list,
                     ..Default::default()
                 };
+                let play_request = update.play_request;
                 if update != inert && update_tx.try_send((name.clone(), update)).is_err() {
                     // A lost status or preset is repaired by the next frame, a
                     // lost **identity** never is — the Source only re-emits it
@@ -237,12 +243,11 @@ impl SourceClient {
                     // deadlock until `request`'s 5 s timeout. Losing a frame
                     // while flagging it loudly beats a second of frozen
                     // device.
-                    if carries_identity {
-                        tracing::error!(
-                            "identity update for {name} lost (channel full): display and metadata possibly stale until next change"
-                        );
+                    let (serious, line) = lost_update_message(&name, carries_identity, play_request);
+                    if serious {
+                        tracing::error!("{line}");
                     } else {
-                        tracing::warn!("source update for {name} lost (channel full)");
+                        tracing::warn!("{line}");
                     }
                 }
             }
@@ -607,10 +612,44 @@ pub async fn run_input_client(socket_path: &Path, cmd_tx: mpsc::Sender<InputMess
     bail!("input plugin connection closed")
 }
 
+/// The journal line for a Source frame dropped on a full channel, and whether
+/// it is serious enough for `error`. A lost identity is (nothing re-emits it);
+/// so is a lost play request — an inserted disc that should have started and
+/// stays silent, with this line as the only trace of why.
+fn lost_update_message(name: &str, carries_identity: bool, play_request: Option<PlayRequest>) -> (bool, String) {
+    match (play_request, carries_identity) {
+        (Some(request), _) => (
+            true,
+            format!("source update for {name} lost (channel full): play request {request:?} lost"),
+        ),
+        (None, true) => (
+            true,
+            format!(
+                "identity update for {name} lost (channel full): display and metadata possibly stale until next change"
+            ),
+        ),
+        (None, false) => (false, format!("source update for {name} lost (channel full)")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ritornello_proto::SourceAction;
+
+    #[test]
+    fn a_lost_frame_names_the_play_request_it_carried() {
+        let (serious, line) = lost_update_message("cd", true, Some(PlayRequest::WakeAndSwitch));
+        assert!(serious);
+        assert!(line.contains("play request WakeAndSwitch lost"), "{line}");
+        let (serious, line) = lost_update_message("cd", true, None);
+        assert!(serious);
+        assert!(line.contains("identity update for cd lost"), "{line}");
+        assert!(!line.contains("play request"), "{line}");
+        let (serious, line) = lost_update_message("cd", false, None);
+        assert!(!serious);
+        assert!(!line.contains("play request"), "{line}");
+    }
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -696,6 +735,44 @@ mod tests {
         // The preset name travels in the same update as the rest.
         assert_eq!(update.preset, Some(1));
         assert_eq!(update.preset_name.as_deref(), Some("FIP"));
+    }
+
+    #[tokio::test]
+    async fn a_play_request_is_relayed_from_a_spontaneous_frame_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            // The reply first, carrying a request it must not be able to make
+            // (and a status so that the frame is relayed at all), then the
+            // spontaneous frame carrying only the request.
+            let reply = serde_json::to_string(&ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                play_request: Some(PlayRequest::Switch),
+                status_text: Some(Text::Verbatim("x".into())),
+                ..Default::default()
+            })
+            .unwrap();
+            write.write_all(format!("{reply}
+").as_bytes()).await.unwrap();
+            let spontaneous = r#"{"play_request":"switch","has_finite_list":true,"can_eject":true}"#;
+            write.write_all(format!("{spontaneous}
+").as_bytes()).await.unwrap();
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "cd".into(), update_tx).await.unwrap();
+        client.request(ritornello_proto::SourceReq::Activate).await.unwrap();
+        let (_, reply) = update_rx.recv().await.unwrap();
+        assert_eq!(reply.play_request, None, "a request inside a reply is never relayed");
+        let (_, spontaneous) = update_rx.recv().await.unwrap();
+        assert_eq!(spontaneous.play_request, Some(PlayRequest::Switch));
     }
 
     #[tokio::test]
