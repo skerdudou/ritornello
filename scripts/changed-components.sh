@@ -124,6 +124,9 @@ contract_version() { # <CONST_NAME>
   [ -n "$v" ] || v=absent
   printf '%s\n' "$v"
 }
+# Written by hand, so --self-test holds it to the `pub const *_CONTRACT`
+# lines of contract.rs: a contract added there and forgotten here would never
+# be checked for its speakers.
 CONTRACTS=(source:SOURCE_CONTRACT display:DISPLAY_CONTRACT input:INPUT_CONTRACT metadata:METADATA_CONTRACT admin:ADMIN_CONTRACT)
 
 # Does plugin crate <c> speak contract <name>? Read, parsed, from its
@@ -830,14 +833,17 @@ kinds = [
   rel_repo
   contract_set ADMIN "2, 0"
   printf '[package]\nname = "ritornello-plugin-musicbrainz"\nversion = "0.1.0"\n# \377\376\n' > "$R/crates/ritornello-plugin-musicbrainz/Cargo.toml"
-  for c in ritornello-core ritornello-plugin-musicbrainz; do rel_bump "$c"; done
-  expect_rel 1 "" "cannot tell whether ritornello-plugin-musicbrainz speaks" "a manifest that is not valid UTF-8 aborts the release instead of reading as a silent plugin (the plugin is bumped, so only the abort can refuse)"
+  # The core and every admin speaker moved, the unreadable one included: no
+  # other refusal is left, so exit 1 can only be the abort (read as "does not
+  # speak", it would pass with 0).
+  for c in $admin_plugins; do rel_bump "$c"; done
+  expect_rel 1 "" "cannot tell whether ritornello-plugin-musicbrainz speaks" "a manifest that is not valid UTF-8 aborts the release instead of reading as a silent plugin (every speaker is bumped, so only the abort can refuse)"
 
   rel_repo
   contract_set DISPLAY "2, 0"
   printf '[package]\nname = "ritornello-plugin-console"\nversion = "0.1.0"\n\n[package.metadata.ritornello]\nkinds = 5\n' > "$R/crates/ritornello-plugin-console/Cargo.toml"
-  for c in ritornello-core ritornello-plugin-console; do rel_bump "$c"; done
-  expect_rel 1 "" "cannot tell whether ritornello-plugin-console speaks" "kinds = 5 aborts the release instead of reading as a silent plugin (the plugin is bumped, so only the abort can refuse)"
+  for c in ritornello-core ritornello-plugin-console ritornello-plugin-mpd; do rel_bump "$c"; done
+  expect_rel 1 "" "cannot tell whether ritornello-plugin-console speaks" "kinds = 5 aborts the release instead of reading as a silent plugin (every display speaker is bumped, so only the abort can refuse)"
 
   # The language packs, kept in the output this time: they are data, and a
   # wire break must not republish them under their unchanged numbers.
@@ -869,6 +875,22 @@ kinds = [
 
   rel_repo
   expect_rel 0 "$all_crates" "" "no baseline reference at all: every component, as for a first release" --guard-baseline ""
+
+  # The hand-written CONTRACTS list against the constants contract.rs
+  # declares, both ways: the names, and the wire name each one is read under.
+  declared=$(tr -d '\r' < crates/ritornello-proto/src/contract.rs \
+    | sed -n 's/^pub const \([A-Z][A-Z_]*_CONTRACT\): ContractVersion = .*/\1/p' | sort | tr '\n' ' ')
+  listed=$(for e in "${CONTRACTS[@]}"; do printf '%s\n' "${e#*:}"; done | sort | tr '\n' ' ')
+  if [ -z "$declared" ] || [ "$declared" != "$listed" ]; then
+    echo "self-test: CONTRACTS lists [${listed% }] but contract.rs declares [${declared% }]: a contract missing from the list is never checked for its speakers" >&2
+    fails=$((fails + 1))
+  fi
+  for e in "${CONTRACTS[@]}"; do
+    if [ "$(printf '%s' "${e%%:*}" | tr 'a-z' 'A-Z')_CONTRACT" != "${e#*:}" ]; then
+      echo "self-test: CONTRACTS entry $e reads its constant under another contract's wire name" >&2
+      fails=$((fails + 1))
+    fi
+  done
 
   # The pairs the real check walks, read from packaging.toml.
   found_pair=no
