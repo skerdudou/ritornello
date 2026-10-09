@@ -1123,6 +1123,13 @@ impl SourcePlugin for CdSource {
                 if epoch != self.epoch {
                     return None;
                 }
+                // Classified before anything below mutates the state it reads,
+                // and the pending flag is consumed by *any* current TOC
+                // arrival, readable or not: otherwise an unreadable disc would
+                // leave it armed and a later flicker would be taken for an
+                // insertion.
+                let inserted = self.is_insertion(toc.as_ref());
+                self.insertion_pending = false;
                 self.total_tracks = total_tracks;
                 // Disc **different** from the previous one: it was swapped, so
                 // nothing can be playing — mpv no longer plays what it was
@@ -1203,6 +1210,10 @@ impl SourcePlugin for CdSource {
                 // Deferred arrival of the TOC: this is the moment the track
                 // becomes identifiable, hence when the `metadata` plugins can
                 // finally work — hence the identity in the notification.
+                if inserted {
+                    // Part B turns this into a request to play the disc.
+                    tracing::info!("disc inserted");
+                }
                 Some(self.notification())
             }
         }
@@ -1210,6 +1221,19 @@ impl SourcePlugin for CdSource {
 }
 
 impl CdSource {
+    /// Is the disc whose TOC just arrived an **insertion**? Yes after a
+    /// confirmed removal (`insertion_pending`), whatever the disc; yes for a TOC
+    /// different from the last known one (a swap, even if the tray was never
+    /// seen open — a slot-loading drive may never report it). Never for an
+    /// unreadable disc, and never for the first disc after startup: a disc
+    /// already in the drive when the device boots is not being inserted (the
+    /// owner's decision).
+    fn is_insertion(&self, toc: Option<&String>) -> bool {
+        let Some(toc) = toc else { return false };
+        self.insertion_pending
+            || self.previous_toc.as_ref().is_some_and(|previous| previous != toc)
+    }
+
     /// The disc is really gone — the tray was seen open, or Eject ran. Unlike
     /// `forget_disc` (every presence change, flicker included), this is certain,
     /// so it clears what belongs to the departed disc: the shuffle pass, any
@@ -3223,6 +3247,77 @@ mod tests {
         source.poll_notification().await;
         assert!(source.remembered.is_some());
         assert!(state::load(&source.state_path).remembered.is_some());
+        assert!(!source.insertion_pending);
+    }
+
+    #[tokio::test]
+    async fn a_disc_read_after_an_open_tray_is_an_insertion_even_the_same_one() {
+        let mut source = playing_source(); // toc "3 150 22767 41887 63000"
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
+        source.poll_notification().await;
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
+        source.poll_notification().await;
+        let same = "3 150 22767 41887 63000".to_string();
+        assert!(source.is_insertion(Some(&same)));
+    }
+
+    #[tokio::test]
+    async fn a_tray_opened_and_closed_empty_still_makes_the_next_disc_an_insertion() {
+        let mut source = playing_source();
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        for d in [cd::Drive::TrayOpen, cd::Drive::Empty, cd::Drive::Disc] {
+            presence_tx.send(d).await.unwrap();
+            source.poll_notification().await;
+        }
+        assert!(source.is_insertion(Some(&"3 150 22767 41887 63000".to_string())));
+    }
+
+    #[tokio::test]
+    async fn the_same_disc_back_after_a_closed_tray_flicker_is_not_an_insertion() {
+        let mut source = playing_source();
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
+        source.poll_notification().await;
+        presence_tx.send(cd::Drive::Disc).await.unwrap();
+        source.poll_notification().await;
+        assert!(!source.is_insertion(Some(&"3 150 22767 41887 63000".to_string())));
+    }
+
+    #[tokio::test]
+    async fn another_disc_without_an_open_tray_is_an_insertion() {
+        let mut source = playing_source();
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        presence_tx.send(cd::Drive::Empty).await.unwrap();
+        source.poll_notification().await; // toc moves to previous_toc
+        assert!(source.is_insertion(Some(&"5 150 20000 40000 60000 80000 100000".to_string())));
+    }
+
+    #[test]
+    fn the_first_disc_after_startup_is_not_an_insertion() {
+        let (source, _p, _t) = source_with_channels(); // previous_toc None, insertion_pending false
+        assert!(!source.is_insertion(Some(&"3 150 22767 41887 63000".to_string())));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_disc_is_not_an_insertion_and_consumes_the_pending_flag() {
+        let mut source = playing_source();
+        let (presence_tx, presence_rx) = mpsc::channel(8);
+        source.presence_rx = presence_rx;
+        presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
+        source.poll_notification().await;
+        assert!(source.insertion_pending);
+        assert!(!source.is_insertion(None));
+        // Deliver an unreadable TOC result for the current epoch.
+        let (toc_tx, toc_rx) = mpsc::channel(4);
+        source.toc_tx = toc_tx.clone();
+        source.toc_rx = toc_rx;
+        toc_tx.send((source.epoch, None, 0)).await.unwrap();
+        source.poll_notification().await;
         assert!(!source.insertion_pending);
     }
 }
