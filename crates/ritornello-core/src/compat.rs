@@ -57,7 +57,6 @@ pub enum Verdict {
 }
 
 /// What a component speaks: its bootstrap number and its contract versions.
-#[allow(dead_code)] // consumed by the grouped update that follows; remove with its first use
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Speaks {
     pub protocol: u32,
@@ -66,7 +65,6 @@ pub struct Speaks {
 
 impl Speaks {
     /// What this build speaks: the compiled bootstrap and every contract's current version.
-    #[allow(dead_code)] // consumed by the grouped update that follows; remove with its first use
     pub fn this_core() -> Self {
         Speaks { protocol: PROTOCOL_VERSION, contracts: Contract::ALL.into_iter().map(|c| (c, c.current())).collect() }
     }
@@ -86,14 +84,12 @@ fn judge_against(a: &Announcement, core: impl Fn(Contract) -> ContractVersion) -
 /// kinds check (a catalogue's contracts are derived from the declaration, so they are
 /// consistent by construction). A contract the plugin speaks and the core does not is
 /// refused as unexpected.
-#[allow(dead_code)] // consumed by the grouped update that follows; remove with its first use
 pub fn judge_pair(plugin: &Speaks, core: &Speaks) -> Verdict {
     verdict(plugin.protocol, &plugin.contracts, None, core.protocol, |c| core.contracts.get(&c).copied())
 }
 
 /// Does `offered` break the wire against `running`: another bootstrap, or another major on
 /// any contract. A contract present in one set and absent in the other is a break.
-#[allow(dead_code)] // consumed by the grouped update that follows; remove with its first use
 pub fn breaks(offered: &Speaks, running: &Speaks) -> bool {
     offered.protocol != running.protocol
         || Contract::ALL.into_iter().any(|c| match (offered.contracts.get(&c), running.contracts.get(&c)) {

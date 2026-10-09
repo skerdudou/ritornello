@@ -126,6 +126,8 @@ async fn source_catalogue_json(state: &AppState, repo: &str) -> Response {
             .filter(|(name, _)| entry.names.contains(name))
             .map(|(name, e)| (name.clone(), e.clone()))
             .collect(),
+        // Never served (`Catalogue::contracts` is `skip`): nothing to filter.
+        contracts: Default::default(),
     };
     let Some(url) = entry.url.clone() else {
         return Json(Catalogue::default()).into_response();
@@ -159,13 +161,10 @@ async fn source_catalogue_json(state: &AppState, repo: &str) -> Response {
 /// no client, a transport error, a non-200, an unreadable body — collapses to
 /// one `None`: the page's honest fallback is the same empty catalogue whether
 /// GitHub refused the request or answered something this core cannot parse.
+/// The read itself is `catalogue::fetch`, the one the update worker uses too.
 async fn fetch_catalogue(url: &str) -> Option<Catalogue> {
     let client = crate::update::download::client().ok()?;
-    let (status, body) = crate::update::download::fetch_text(&client, url).await.ok()?;
-    if status != 200 {
-        return None;
-    }
-    catalogue::parse(&body).ok()
+    catalogue::fetch(&client, url).await
 }
 
 /// The announcements the sources view is built from: one `(plugin, repository)`
@@ -593,7 +592,7 @@ mod tests {
             Entry { kinds: vec!["source".to_string()], description: "Stations".to_string() },
         );
         *state.update_catalogue_cache.write().await =
-            Some(("https://127.0.0.1:9/unreachable/catalogue.json".to_string(), Catalogue { components }));
+            Some(("https://127.0.0.1:9/unreachable/catalogue.json".to_string(), Catalogue { components, contracts: Default::default() }));
         let app = router(state);
         let resp = app
             .oneshot(Request::get("/api/update/catalogue").body(Body::empty()).unwrap())
@@ -713,7 +712,7 @@ mod tests {
         let mut components = std::collections::BTreeMap::new();
         components.insert("zed".to_string(), Entry { kinds: vec!["display".into()], description: "Zed".into() });
         components.insert("radio".to_string(), Entry { kinds: vec!["source".into()], description: "Not yours".into() });
-        Catalogue { components }
+        Catalogue { components, contracts: Default::default() }
     }
 
     async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {

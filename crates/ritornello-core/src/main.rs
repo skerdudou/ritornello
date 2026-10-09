@@ -688,6 +688,10 @@ fn announced_plugin_line(
         version: announcement.version.clone(),
         repository: announcement.repository.clone(),
         limited: limited.to_vec(),
+        // Only ever built for an accepted announcement (both doors call this
+        // after `compat::judge` said yes), so this is what a wired binary
+        // speaks — what the update worker judges it by against an offered core.
+        speaks: Some(compat::Speaks { protocol: announcement.protocol, contracts: announcement.contracts.clone() }),
         ..PluginStatus::kind(name, kind, connected, announcement.admin)
     }
 }
@@ -5065,6 +5069,11 @@ mod toggle_tests {
         assert_eq!(line.ui_version.as_deref(), Some("3"));
         assert_eq!(line.repository.as_deref(), Some("https://example.invalid/cd"));
         assert_eq!(line.limited, limited, "the verdict's limits must reach the line");
+        assert_eq!(
+            line.speaks,
+            Some(compat::Speaks { protocol: a.protocol, contracts: a.contracts.clone() }),
+            "what the plugin speaks must reach the line, for the update worker to judge it by"
+        );
         assert!(announced_plugin_line("cd", "source", true, &a, &[]).limited.is_empty());
     }
 

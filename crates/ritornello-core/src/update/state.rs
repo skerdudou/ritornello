@@ -10,9 +10,11 @@
 //! gesture, and collapsing either into a neighbour would tell the operator to
 //! do the wrong thing.
 
+use crate::compat::{breaks, judge_pair, ContractGap, Refusal, Speaks, Verdict};
 use crate::update::release::{differs, origin, Offer, Origin, Published};
 use crate::update::sources::{Conflict, FreshOffer, PackOffer};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// What the core knows about one plugin, before the release is consulted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +135,149 @@ pub struct ComponentOffer {
     /// row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_repos: Option<Vec<String>>,
+    /// What the row's archive speaks and what that means against the core it
+    /// will meet. Filled by `judge_contracts` alone, after every other rule;
+    /// flattened, so its fields sit on the row like every other one.
+    #[serde(flatten)]
+    pub contracts: RowContracts,
+}
+
+/// A plugin's verdict against one core, as the page reads it: the same
+/// judge as the doors (`compat::judge_pair`), never a second rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "fit", rename_all = "snake_case")]
+pub enum Fit {
+    Compatible,
+    /// Wired, with the features of these contracts' newer minors inactive.
+    Limited { gaps: Vec<ContractGap> },
+    Refused { refusal: Refusal },
+}
+
+impl From<Verdict> for Fit {
+    fn from(verdict: Verdict) -> Self {
+        match verdict {
+            Verdict::Accepted { limited } if limited.is_empty() => Fit::Compatible,
+            Verdict::Accepted { limited } => Fit::Limited { gaps: limited },
+            Verdict::Refused(refusal) => Fit::Refused { refusal },
+        }
+    }
+}
+
+/// Why a row cannot be installed from the device, when the reason is a fact
+/// the check established rather than an archive already read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotInstallable {
+    /// The release carrying the offered archive publishes no contracts for
+    /// it — no catalogue, no entry, or a catalogue that could not be read.
+    /// Never read as "compatible": the device cannot know what it would run.
+    ContractsUnpublished,
+}
+
+/// The contract half of a row (`judge_contracts`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RowContracts {
+    /// What the offered version speaks, from the catalogue of **the release
+    /// that carries its archive** — not the newest one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaks: Option<Speaks>,
+    /// A plugin row only: its verdict against the core it will meet — the
+    /// offered core when the core has an update whose contracts are known,
+    /// the running one otherwise. Judged from the offered archive when the
+    /// row installs something, from the live announcement when it does not
+    /// (an installed third-party plugin the release does not update).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_core: Option<Fit>,
+    /// A plugin row that installs something: its verdict against the
+    /// **running** core — what decides whether it may go first, alone, or
+    /// must travel with the core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with_running_core: Option<Fit>,
+    /// The core row only: the offered core breaks the wire against the
+    /// running one (`compat::breaks`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub breaking: bool,
+    /// Set together with `installable: Some(false)`: why. Recomputed by every
+    /// check, never carried (`carry_installable`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_installable_reason: Option<NotInstallable>,
+}
+
+/// Does this row's gesture place the offered archive: an update, a first
+/// install, a missing binary put back, an undeclared binary declared.
+pub fn installs_something(row: &ComponentOffer) -> bool {
+    row.offered.is_some()
+        && matches!(
+            row.availability,
+            Availability::UpdateAvailable
+                | Availability::NotInstalled
+                | Availability::BinaryMissing
+                | Availability::Undeclared
+        )
+}
+
+/// **The one place a row learns what its archive speaks**, and what that
+/// means against the core it will meet. Pure: the catalogues are fetched by
+/// the worker, which hands over what they said.
+///
+/// - `offered`: what each row's offered archive speaks, keyed by row name
+///   (`core` for the core), read from the catalogue of the release carrying
+///   that archive. A name absent here is a row whose contracts are not
+///   published, and a row that would install something without them is
+///   `installable: Some(false)` with `ContractsUnpublished` — never assumed
+///   compatible.
+/// - `running_core`: what this build speaks (`Speaks::this_core()`).
+/// - `live`: what each running plugin announced, from its status lines.
+///
+/// Only marks, never clears an `installable` another rule set. Language packs
+/// speak no contract and are left alone.
+pub fn judge_contracts(
+    rows: &mut [ComponentOffer],
+    offered: &BTreeMap<String, Speaks>,
+    running_core: &Speaks,
+    live: &[(String, Speaks)],
+) {
+    fn deny(row: &mut ComponentOffer) {
+        row.installable = Some(false);
+        row.contracts.not_installable_reason = Some(NotInstallable::ContractsUnpublished);
+    }
+    // The core first: what it offers decides what every plugin is judged
+    // against.
+    let mut target = running_core.clone();
+    if let Some(core) = rows.iter_mut().find(|r| r.kind == ComponentKind::Core) {
+        core.contracts.speaks = offered.get(&core.name).cloned();
+        if core.availability == Availability::UpdateAvailable {
+            match &core.contracts.speaks {
+                Some(speaks) => {
+                    core.contracts.breaking = breaks(speaks, running_core);
+                    target = speaks.clone();
+                }
+                // A core the device cannot install is not the core the
+                // plugins will meet.
+                None => deny(core),
+            }
+        }
+    }
+    for row in rows.iter_mut().filter(|r| matches!(r.kind, ComponentKind::Plugin | ComponentKind::ThirdParty)) {
+        let speaks = offered.get(&row.name).cloned();
+        if installs_something(row) {
+            match &speaks {
+                Some(s) => {
+                    row.contracts.with_core = Some(judge_pair(s, &target).into());
+                    row.contracts.with_running_core = Some(judge_pair(s, running_core).into());
+                }
+                None => deny(row),
+            }
+        } else {
+            // Nothing placed: the binary that will meet the core is the one
+            // running, and its own announcement is the truth about it.
+            let now = live.iter().find(|(name, _)| *name == row.name).map(|(_, s)| s);
+            if let Some(s) = now {
+                row.contracts.with_core = Some(judge_pair(s, &target).into());
+            }
+        }
+        row.contracts.speaks = speaks;
+    }
 }
 
 /// Declared plugins first, **in file order** — that order is the priority, for
@@ -202,6 +347,7 @@ pub fn component_offers(
         not_installed_files: None,
         needs_companion: None,
         conflict_repos: None,
+        contracts: RowContracts::default(),
     });
 
     for plugin in installed {
@@ -276,6 +422,7 @@ pub fn component_offers(
             not_installed_files: None,
             needs_companion: None,
             conflict_repos: None,
+            contracts: RowContracts::default(),
         });
     }
 
@@ -296,6 +443,7 @@ pub fn component_offers(
             not_installed_files: None,
             needs_companion: None,
             conflict_repos: None,
+            contracts: RowContracts::default(),
         });
     }
 
@@ -332,6 +480,7 @@ pub fn component_offers(
             not_installed_files: None,
             needs_companion: None,
             conflict_repos: None,
+            contracts: RowContracts::default(),
         });
     }
 
@@ -357,6 +506,7 @@ pub fn component_offers(
             not_installed_files: None,
             needs_companion: None,
             conflict_repos: None,
+            contracts: RowContracts::default(),
         });
     }
     // A contested name: a row, so the page can say why nothing is offered
@@ -378,6 +528,7 @@ pub fn component_offers(
             not_installed_files: None,
             needs_companion: None,
             conflict_repos: Some(conflict.repos.clone()),
+            contracts: RowContracts::default(),
         });
     }
     out
@@ -1230,5 +1381,189 @@ mod tests {
 
         state.removal_answered("console", "ritornello-plugin-console", false);
         assert!(state.pending_removals.is_empty());
+    }
+
+    // ---- What the offered archives speak (`judge_contracts`) -------------
+
+    use ritornello_proto::{Contract, ContractVersion, PROTOCOL_VERSION};
+
+    /// What a plugin speaking only the source contract at `major.minor` speaks.
+    fn source_at(major: u32, minor: u32) -> Speaks {
+        Speaks { protocol: PROTOCOL_VERSION, contracts: BTreeMap::from([(Contract::Source, ContractVersion::new(major, minor))]) }
+    }
+
+    /// The running core, with its source contract moved to another major:
+    /// an offered core that breaks the wire.
+    fn breaking_core() -> Speaks {
+        let mut core = Speaks::this_core();
+        let source = Contract::Source.current();
+        core.contracts.insert(Contract::Source, ContractVersion::new(source.major + 1, 0));
+        core
+    }
+
+    fn published_core(version: &str) -> Published {
+        published(Offer::Core, version)
+    }
+
+    /// The running core is `0.2.0`; `radio` installed at `0.2.0`, offered
+    /// `0.3.0`; the core offered at `core` when `Some`.
+    fn rows_with(core: Option<&str>) -> Vec<ComponentOffer> {
+        let mut list = vec![published(Offer::Plugin("radio".to_string()), "0.3.0")];
+        if let Some(core) = core {
+            list.push(published_core(core));
+        }
+        offers("0.2.0", &list, &[declared("radio", Some("0.2.0"), true)])
+    }
+
+    fn named<'a>(rows: &'a [ComponentOffer], name: &str) -> &'a ComponentOffer {
+        rows.iter().find(|r| r.name == name).unwrap()
+    }
+
+    fn running_source() -> ContractVersion {
+        Contract::Source.current()
+    }
+
+    #[test]
+    fn a_plugin_speaking_the_core_s_contracts_is_compatible_with_it() {
+        let mut rows = rows_with(None);
+        let s = source_at(running_source().major, running_source().minor);
+        judge_contracts(&mut rows, &BTreeMap::from([("radio".to_string(), s.clone())]), &Speaks::this_core(), &[]);
+        let radio = named(&rows, "radio");
+        assert_eq!(radio.contracts.speaks, Some(s));
+        assert_eq!(radio.contracts.with_core, Some(Fit::Compatible));
+        assert_eq!(radio.contracts.with_running_core, Some(Fit::Compatible));
+        assert_eq!((radio.installable, radio.contracts.not_installable_reason), (None, None));
+    }
+
+    #[test]
+    fn a_plugin_speaking_a_newer_minor_is_limited() {
+        let mut rows = rows_with(None);
+        let s = source_at(running_source().major, running_source().minor + 1);
+        judge_contracts(&mut rows, &BTreeMap::from([("radio".to_string(), s)]), &Speaks::this_core(), &[]);
+        let gaps = vec![ContractGap {
+            contract: Contract::Source,
+            plugin: ContractVersion::new(running_source().major, running_source().minor + 1),
+            core: running_source(),
+        }];
+        assert_eq!(named(&rows, "radio").contracts.with_core, Some(Fit::Limited { gaps }));
+    }
+
+    /// A breaking core on offer: the core row says so, and a plugin still
+    /// speaking the running major is judged **against the offered core**
+    /// (refused) while its verdict against the running one stays separate
+    /// (compatible) — the split the grouped install reads.
+    #[test]
+    fn a_breaking_core_refuses_a_plugin_that_the_running_core_accepts() {
+        let mut rows = rows_with(Some("0.3.0"));
+        let old = source_at(running_source().major, running_source().minor);
+        let offered = BTreeMap::from([("core".to_string(), breaking_core()), ("radio".to_string(), old)]);
+        judge_contracts(&mut rows, &offered, &Speaks::this_core(), &[]);
+        let core = named(&rows, "core");
+        assert!(core.contracts.breaking, "{core:?}");
+        assert_eq!(core.contracts.speaks, Some(breaking_core()));
+        let radio = named(&rows, "radio");
+        assert!(
+            matches!(&radio.contracts.with_core, Some(Fit::Refused { refusal: Refusal::Major { .. } })),
+            "{radio:?}"
+        );
+        assert_eq!(radio.contracts.with_running_core, Some(Fit::Compatible));
+    }
+
+    /// The other side of the flag: a core on offer speaking the running
+    /// majors does not break, and the plugin is judged against it.
+    #[test]
+    fn a_core_with_the_same_majors_is_not_breaking() {
+        let mut rows = rows_with(Some("0.3.0"));
+        let source = running_source();
+        let mut offered_core = Speaks::this_core();
+        offered_core.contracts.insert(Contract::Source, ContractVersion::new(source.major, source.minor + 1));
+        let newer = source_at(source.major, source.minor + 1);
+        let offered = BTreeMap::from([("core".to_string(), offered_core), ("radio".to_string(), newer)]);
+        judge_contracts(&mut rows, &offered, &Speaks::this_core(), &[]);
+        assert!(!named(&rows, "core").contracts.breaking);
+        // Compatible with the offered core, limited under the running one:
+        // proof that `with_core` was judged against the offered core.
+        assert_eq!(named(&rows, "radio").contracts.with_core, Some(Fit::Compatible));
+        assert!(matches!(named(&rows, "radio").contracts.with_running_core, Some(Fit::Limited { .. })));
+    }
+
+    /// **No backward compatibility**: an offer whose carrying release
+    /// publishes no contracts is not installable from the device, with the
+    /// reason — never judged compatible. The core's own row, a plugin's
+    /// update and a first install alike.
+    #[test]
+    fn an_offer_without_published_contracts_is_not_installable_and_says_why() {
+        let mut rows = offers(
+            "0.2.0",
+            &[
+                published(Offer::Plugin("radio".to_string()), "0.3.0"),
+                published(Offer::Plugin("mpd".to_string()), "0.3.0"),
+                published_core("0.3.0"),
+            ],
+            &[declared("radio", Some("0.2.0"), true)],
+        );
+        judge_contracts(&mut rows, &BTreeMap::new(), &Speaks::this_core(), &[]);
+        for name in ["core", "radio", "mpd"] {
+            let r = named(&rows, name);
+            assert_eq!(
+                (r.installable, r.contracts.not_installable_reason),
+                (Some(false), Some(NotInstallable::ContractsUnpublished)),
+                "{r:?}"
+            );
+            assert_eq!((&r.contracts.with_core, &r.contracts.with_running_core), (&None, &None), "{r:?}");
+        }
+        assert!(!named(&rows, "core").contracts.breaking);
+    }
+
+    /// An installed third-party plugin the release does not update is judged
+    /// by its **live** announcement against the offered core: a breaking core
+    /// will refuse it, and the row says so before anyone presses anything.
+    /// Against a core that is not moving, the same plugin is compatible.
+    #[test]
+    fn a_running_third_party_plugin_is_judged_by_what_it_announced_against_the_offered_core() {
+        let installed = vec![Installed {
+            repository: Some("https://github.com/z/zed".to_string()),
+            ..declared("zed", Some("1.0.0"), true)
+        }];
+        let live = vec![("zed".to_string(), source_at(running_source().major, running_source().minor))];
+
+        let mut rows = offers("0.2.0", &[published_core("0.3.0")], &installed);
+        assert_eq!(named(&rows, "zed").kind, ComponentKind::ThirdParty);
+        let offered = BTreeMap::from([("core".to_string(), breaking_core())]);
+        judge_contracts(&mut rows, &offered, &Speaks::this_core(), &live);
+        let zed = named(&rows, "zed");
+        assert!(matches!(&zed.contracts.with_core, Some(Fit::Refused { .. })), "{zed:?}");
+        assert_eq!(zed.installable, None, "nothing is installed for it, so nothing is refused");
+
+        let mut rows = offers("0.2.0", &[], &installed);
+        judge_contracts(&mut rows, &BTreeMap::new(), &Speaks::this_core(), &live);
+        assert_eq!(named(&rows, "zed").contracts.with_core, Some(Fit::Compatible));
+    }
+
+    /// The wire shape the page reads (mirrored in `types.ts`): the verdicts
+    /// tagged by `fit`, the refusal nested with its own `reason` tag, and
+    /// every field absent when it has nothing to say.
+    #[test]
+    fn the_row_carries_its_verdicts_flat_and_omits_what_it_does_not_know() {
+        let mut rows = rows_with(Some("0.3.0"));
+        let quiet = serde_json::to_value(named(&rows, "radio")).unwrap();
+        for key in ["speaks", "with_core", "with_running_core", "breaking", "not_installable_reason"] {
+            assert!(quiet.get(key).is_none(), "{key} present before any judgement: {quiet}");
+        }
+        let old = source_at(running_source().major, running_source().minor);
+        let offered = BTreeMap::from([("core".to_string(), breaking_core()), ("radio".to_string(), old)]);
+        judge_contracts(&mut rows, &offered, &Speaks::this_core(), &[]);
+        let radio = serde_json::to_value(named(&rows, "radio")).unwrap();
+        assert_eq!(radio["with_core"]["fit"], "refused", "{radio}");
+        assert_eq!(radio["with_core"]["refusal"]["reason"], "major", "{radio}");
+        assert_eq!(radio["with_running_core"], serde_json::json!({"fit": "compatible"}));
+        assert_eq!(radio["speaks"]["protocol"], PROTOCOL_VERSION);
+        assert_eq!(serde_json::to_value(named(&rows, "core")).unwrap()["breaking"], true);
+
+        let mut unpublished = rows_with(None);
+        judge_contracts(&mut unpublished, &BTreeMap::new(), &Speaks::this_core(), &[]);
+        let radio = serde_json::to_value(named(&unpublished, "radio")).unwrap();
+        assert_eq!(radio["not_installable_reason"], "contracts_unpublished");
+        assert_eq!(radio["installable"], false);
     }
 }
