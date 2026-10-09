@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use ritornello_proto::{
     AdminReq, AdminRequest, AdminResponse, AdminResult, SourcesCatalog, Cover, CoverRef, DisplayFrame,
-    Enrichment, IdentityUpdate, InputMessage, NowPlaying, PlayerState, Preset, SourceAction,
+    Enrichment, IdentityUpdate, InputMessage, NowPlaying, PlayRequest, PlayerState, Preset, SourceAction,
     SourceMessage, SourceReq, SourceRequest, Text,
 };
 use std::collections::HashMap;
@@ -22,6 +22,10 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 /// `metadata` plugins contradict each other.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SourceUpdate {
+    /// See `SourceMessage::play_request`. Copied from the received frame
+    /// **only when it is spontaneous** (`id` absent): a request inside a
+    /// correlated reply is dropped here, so the core never sees it.
+    pub play_request: Option<PlayRequest>,
     pub identity: Option<IdentityUpdate>,
     /// See `SourceMessage::transient`.
     pub transient: bool,
@@ -168,6 +172,7 @@ impl SourceClient {
                 // it here. This is the "the question is forced" half of the
                 // guard-rail.
                 let update = SourceUpdate {
+                    play_request: if msg.id.is_none() { msg.play_request } else { None },
                     identity: msg.identity,
                     transient: msg.transient,
                     preset: msg.preset,
@@ -696,6 +701,44 @@ mod tests {
         // The preset name travels in the same update as the rest.
         assert_eq!(update.preset, Some(1));
         assert_eq!(update.preset_name.as_deref(), Some("FIP"));
+    }
+
+    #[tokio::test]
+    async fn a_play_request_is_relayed_from_a_spontaneous_frame_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            // The reply first, carrying a request it must not be able to make
+            // (and a status so that the frame is relayed at all), then the
+            // spontaneous frame carrying only the request.
+            let reply = serde_json::to_string(&ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                play_request: Some(PlayRequest::Switch),
+                status_text: Some(Text::Verbatim("x".into())),
+                ..Default::default()
+            })
+            .unwrap();
+            write.write_all(format!("{reply}
+").as_bytes()).await.unwrap();
+            let spontaneous = r#"{"play_request":"switch","has_finite_list":true,"can_eject":true}"#;
+            write.write_all(format!("{spontaneous}
+").as_bytes()).await.unwrap();
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "cd".into(), update_tx).await.unwrap();
+        client.request(ritornello_proto::SourceReq::Activate).await.unwrap();
+        let (_, reply) = update_rx.recv().await.unwrap();
+        assert_eq!(reply.play_request, None, "a request inside a reply is never relayed");
+        let (_, spontaneous) = update_rx.recv().await.unwrap();
+        assert_eq!(spontaneous.play_request, Some(PlayRequest::Switch));
     }
 
     #[tokio::test]

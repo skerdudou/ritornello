@@ -680,6 +680,10 @@ impl<P: Player> Core<P> {
             cover,
             cover_thumb,
             cover_archivable,
+            // Named so the destructuring stays exhaustive; the core does not
+            // act on a play request yet (`Core::handle_play_request` comes
+            // with the next task of the chantier).
+            play_request: _,
         } = update;
         // Read **before** the guard below, and this is intentional: the
         // sources_catalog describes every source, not the one that is

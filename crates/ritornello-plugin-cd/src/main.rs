@@ -369,9 +369,10 @@ impl CdSource {
     ///   its track count altogether. This is what the TOC is for, and the
     ///   plugin already reads it to tell a swap from a flicker of the tray;
     /// - the TOC not read yet. This one is a genuine limitation and it is
-    ///   worth stating: the read is asynchronous (`spawn_toc_read`), and a
-    ///   plugin has no way to ask for playback later — a spontaneous
-    ///   notification carries a state, never an action. So a boot whose TOC
+    ///   worth stating: the read is asynchronous (`spawn_toc_read`), and the
+    ///   answer to an `Activate` is due before it lands; a spontaneous
+    ///   notification carries a state and at most one request the core
+    ///   decides on, never a playback order. So a boot whose TOC
     ///   read has not landed yet resumes at the first track. The everyday
     ///   case, pressing the source key on a disc that has been sitting in the
     ///   drive, has had its TOC read long since.
@@ -1286,6 +1287,8 @@ impl CdSource {
             // Nor does it offer to keep one: there is nothing on a disc to
             // write a cover file next to (see `SourceMessage::cover_archivable`).
             cover_archivable: None,
+            // No request yet: the insertion behaviour arrives in a later task.
+            play_request: None,
         }
     }
 }
@@ -3070,8 +3073,9 @@ mod tests {
         assert_eq!(fresh.pending_chapter, Some(0));
 
         // TOC not read yet — the read is asynchronous, and a plugin cannot
-        // ask for playback later on (a spontaneous notification carries a
-        // state, never an action). So a boot that outruns the TOC read
+        // ask for playback at the moment the TOC lands (a spontaneous
+        // notification carries a state and at most one request the core
+        // decides on, never an order). So a boot that outruns the TOC read
         // resumes at the first track rather than trusting a number it cannot
         // check.
         let mut unread = source_arriving_with(OnArrival::LastTrack);
