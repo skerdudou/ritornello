@@ -858,8 +858,10 @@ and a disc already playing is never restarted.
 setting says: a disc just put in has no listening history to resume, and the
 resume point was forgotten when it was ejected. Under shuffle, the beginning
 is the first entry of the pass drawn for that disc. The next `Play` the core
-sends answers the request and consumes it; ejecting, or leaving the source
-before it was answered, cancels it.
+sends answers the request and consumes it. A request the core ignored does not
+linger: arriving on the source, navigating (a track number, next, previous),
+ejecting or leaving the source drops it, so a later Play obeys the arrival
+setting again.
 
 Only one disc is remembered, the last one: swapping discs and coming back
 loses the position, which is the honest reading of "the last track played".

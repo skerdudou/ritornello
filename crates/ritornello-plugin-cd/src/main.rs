@@ -271,6 +271,11 @@ impl CdSource {
     /// value changed from the page must apply to the next press, not to the
     /// next restart.
     fn arrive(&mut self) -> SourceOutcome {
+        // `play_from_start` means "the very next Play follows my own insertion
+        // request", nothing later: arriving here means the core did not (or
+        // did not need to) answer it by a `Play`, and what the user listens to
+        // from now on is theirs to resume.
+        self.play_from_start = false;
         let setting = *self.on_arrival.read().unwrap();
         self.start(setting)
     }
@@ -640,6 +645,11 @@ impl SourcePlugin for CdSource {
         self.play_now()
     }
     async fn select(&mut self, n: u8) -> SourceOutcome {
+        // Navigating is the user taking over: the request is stale (see
+        // `arrive`). `player_track` is left alone on purpose — it also reports
+        // mpv's own advance, which only exists after a `Play` already
+        // consumed the flag.
+        self.play_from_start = false;
         if !self.present || n == 0 {
             return SourceOutcome::new(SourceAction::Noop);
         }
@@ -681,6 +691,7 @@ impl SourcePlugin for CdSource {
         }
     }
     async fn next(&mut self) -> SourceOutcome {
+        self.play_from_start = false;
         // Nothing playing: a seek on a stopped mpv loads nothing, so
         // skipping a track makes no sense. Above all, `playback` must not be
         // armed here: that would declare a track in progress on a silent
@@ -721,6 +732,7 @@ impl SourcePlugin for CdSource {
         self.issue(SourceAction::PlayerChapter(self.track))
     }
     async fn prev(&mut self) -> SourceOutcome {
+        self.play_from_start = false;
         // See `next`: same guard, same reason.
         if !self.playback {
             return SourceOutcome::new(SourceAction::Noop);
@@ -1235,7 +1247,7 @@ impl SourcePlugin for CdSource {
                 let mut notification = self.notification();
                 if inserted {
                     let setting = *self.on_insertion.read().unwrap();
-                    tracing::debug!("disc inserted (on insertion: {setting:?})");
+                    tracing::info!("disc inserted (on insertion: {setting:?})");
                     notification.play_request = match setting {
                         OnInsertion::Nothing => None,
                         OnInsertion::PlayIfActive => Some(PlayRequest::IfActive),
@@ -3418,6 +3430,7 @@ mod tests {
             *source.on_insertion.write().unwrap() = setting;
             let n = insert_disc(&mut source).await;
             assert_eq!(n.play_request, expected, "{setting:?}");
+            assert_eq!(source.play_from_start, expected.is_some(), "{setting:?}");
         }
     }
 
@@ -3494,6 +3507,39 @@ mod tests {
         assert_eq!(source.track, 2, "the first entry of the drawn pass, not track 1");
         assert_eq!(source.cursor, 0);
         assert_eq!(source.pending_chapter, Some(2));
+    }
+
+    #[tokio::test]
+    async fn arriving_drops_an_ignored_request_so_a_later_play_resumes() {
+        // The core ignored the request (say IfActive while the radio played);
+        // the user then switched to the CD and listened to track 2.
+        let mut source = playing_source();
+        *source.on_insertion.write().unwrap() = OnInsertion::PlayIfActive;
+        *source.on_arrival.write().unwrap() = OnArrival::LastTrack;
+        let n = insert_disc(&mut source).await;
+        assert!(n.play_request.is_some());
+        source.remembered = Some(Remembered { toc: INSERTED_TOC.into(), track: 2 });
+        source.activate().await;
+        assert_eq!(source.track, 2);
+        // Stop (not leaving the source: `deactivate` would clear the flag too).
+        source.playback = false;
+        source.play().await;
+        assert_eq!(source.track, 2, "Play resumes; the stale request must not force track 0");
+    }
+
+    #[tokio::test]
+    async fn navigating_drops_an_ignored_request_so_a_later_play_resumes() {
+        let mut source = playing_source();
+        *source.on_insertion.write().unwrap() = OnInsertion::PlayIfActive;
+        *source.on_arrival.write().unwrap() = OnArrival::LastTrack;
+        let n = insert_disc(&mut source).await;
+        assert!(n.play_request.is_some());
+        source.select(2).await; // track index 1
+        assert!(!source.play_from_start);
+        source.remembered = Some(Remembered { toc: INSERTED_TOC.into(), track: 2 });
+        source.playback = false;
+        source.play().await;
+        assert_eq!(source.track, 2, "Play resumes; the stale request must not force track 0");
     }
 
     #[tokio::test]
