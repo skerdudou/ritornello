@@ -713,9 +713,14 @@ never installs a plugin the running core would refuse either, break or not;
 the plugins it accepts are still installed. The update card then says that a
 major update waits for a manual gesture and lists what the new core would
 refuse, and the dialog installs the break as one group (see [Update
-card](#update-card)). This holds from the core that carries it on: the first
-break (`PROTOCOL_VERSION` 1 to 2) is met by an older core, which knows none of
-this (see
+card](#update-card)). This holds only for a core that carries it, and every
+core published so far predates it: such a core installs whatever is out of
+step, the core included. So the first break (`PROTOCOL_VERSION` 1 to 2) **will
+be installed unattended and ungrouped** by a device on "Check and install" or
+on "Check and install, third-party plugins included", at its first scheduled
+run after that release is published, with a rollback that restores the core
+alone. Before publishing that release, set every device's policy to Off or
+Check, then install it with `ritornello-install` or a watched Install (see
 [installation.md](installation.md#what-has-not-been-verified)).
 
 **The fourth setting has a price on rollback.** The value is written to

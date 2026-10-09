@@ -948,6 +948,11 @@ fn refusal_message(catalog: &Chain, component: &str, why: &Refusal) -> String {
         Refusal::NotConsented(repo) => ("update_not_consented", Some(("repo", repo.as_str()))),
         // The same sentence the row already shows before any press.
         Refusal::ContractsUnpublished => ("update_row_contracts_unpublished", None),
+        // A group lacking room says what is wrong: trying again changes
+        // nothing until space is freed.
+        Refusal::GroupPostponed { reason, .. } if matches!(**reason, Refusal::NoRoom) => {
+            ("update_group_no_room", None)
+        }
         Refusal::GroupPostponed { .. } => ("update_group_postponed", None),
     };
     // A postponed group names the member that failed, whichever name the
@@ -8911,12 +8916,13 @@ mod tests {
         assert!(seen_requests().is_empty(), "nothing asked of root");
         assert!(rig.exits.lock().unwrap().is_empty());
         assert!(!rig.worker.staging.join("staged-core").exists() && !rig.worker.staging.join("staged-plugin-mpd").exists());
-        // Postponed, like a staging failure: the page says the rest waits,
-        // not a bare "not enough free space" under the core's name.
+        // Postponed, like a staging failure, with a sentence of its own: the
+        // page says the whole group lacks room and what to do about it.
         let postponed = Refusal::GroupPostponed { failed: CORE.to_string(), reason: Box::new(Refusal::NoRoom) };
         let expected = refusal_message(&*rig.worker.catalog.read().await, CORE, &postponed);
         let english = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
-        assert_eq!(expected, ritornello_i18n::interpolate(english.get("update_group_postponed"), [("component", CORE)]));
+        assert_eq!(expected, english.get("update_group_no_room"), "the room shortfall is named, not a bare \"Try again\"");
+        assert!(expected.contains("Free some space"), "{expected}");
         assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
     }
 
@@ -8925,12 +8931,22 @@ mod tests {
     /// would back up the bytes the first one just wrote, and a rollback
     /// would put the new `mpd` back beside the old core.
     ///
-    /// **[MUTATION]** drop the deduplication in `install_consented`: red.
+    /// `mpd` is served as often as it is asked for, so a second staging of
+    /// it succeeds and the duplicate reaches the request itself.
+    ///
+    /// **[MUTATION]** drop the deduplication in `install_consented`: red on
+    /// the request, which then carries `PlacePlugin mpd` twice.
     #[tokio::test]
     async fn a_dependent_asked_twice_is_placed_once() {
         let rig = group_rig(break_rows(true)).await;
         let _privileged = Privileged::answers(Ok(()));
-        let checked = group_release(served("mpd", &plugin_archive("mpd")).await).await;
+        let archive = plugin_archive("mpd");
+        let file = "ritornello-plugin-mpd-2.0.0-x86_64.tar.gz";
+        let (url, _) = serve_counting(archive.clone(), file).await;
+        let sums = format!("{}  {file}\n", digest_hex(&archive));
+        let (checksums_url, _) = serve_counting(sums.into_bytes(), "SHA256SUMS").await;
+        let mpd = Published { url, checksums_url: Some(checksums_url), ..served("mpd", &archive).await };
+        let checked = group_release(mpd).await;
 
         run_install(&rig.worker, &checked, &["mpd", "mpd", CORE]).await;
 

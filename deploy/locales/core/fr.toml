@@ -403,6 +403,7 @@ update_row_core_not_selected = "{component} va évoluer alors que le cœur reste
 update_row_plugins_not_selected = "Le cœur va évoluer alors que ces greffons restent en retrait : {components}. Ce cœur peut les refuser tant qu'ils ne sont pas mis à jour eux aussi."
 update_row_contracts_unpublished = "{component} ne peut pas être installé depuis cet appareil : sa version ne publie pas les versions de protocole qu'il parle. Une installation à la main, hors de l'appareil, reste possible."
 update_group_postponed = "{component} n'a pas pu être préparé : le cœur et les greffons qui en dépendent n'ont donc pas été installés, rien n'a changé pour eux. Réessayez."
+update_group_no_room = "Pas assez d'espace libre pour le cœur et les greffons qui en dépendent : rien n'a changé pour eux. Libérez de l'espace, puis relancez l'installation."
 update_major_waiting = "Une mise à jour majeure est disponible : elle change la façon dont le cœur et ses greffons se parlent, elle n'est donc pas installée automatiquement. Lancez-la d'ici quand vous le pouvez."
 update_row_fit_gap = "« {contract} » {found} contre {expected}"
 update_row_fit_limited = "Limité avec ce cœur : {contracts}. Certaines de ses fonctions seront inactives."

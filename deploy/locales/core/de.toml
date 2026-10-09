@@ -406,6 +406,7 @@ update_row_core_not_selected = "{component} wird aktualisiert, während der Kern
 update_row_plugins_not_selected = "Der Kern wird aktualisiert, während diese Plugins zurückbleiben: {components}. Dieser Kern kann sie ablehnen, bis sie ebenfalls aktualisiert sind."
 update_row_contracts_unpublished = "{component} kann nicht von diesem Gerät aus installiert werden: Seine Version veröffentlicht nicht, welche Protokollversionen es spricht. Eine Installation von Hand, außerhalb des Geräts, bleibt möglich."
 update_group_postponed = "{component} konnte nicht vorbereitet werden, daher wurden der Kern und die davon abhängigen Plugins nicht installiert; für sie hat sich nichts geändert. Bitte erneut versuchen."
+update_group_no_room = "Nicht genug freier Platz für den Kern und die davon abhängigen Plugins; für sie hat sich nichts geändert. Bitte Platz freigeben und dann erneut installieren."
 update_major_waiting = "Ein größeres Update ist verfügbar: Es ändert, wie der Kern und seine Plugins miteinander sprechen, und wird daher nicht automatisch installiert. Installieren Sie es von hier aus, sobald es passt."
 update_row_fit_gap = "„{contract}“ {found} statt {expected}"
 update_row_fit_limited = "Mit diesem Kern eingeschränkt: {contracts}. Einige seiner Funktionen werden inaktiv sein."

@@ -406,6 +406,7 @@ update_row_core_not_selected = "{component} se actualizará mientras el núcleo 
 update_row_plugins_not_selected = "El núcleo se actualizará mientras estos complementos se quedan atrás: {components}. Este núcleo puede rechazarlos hasta que también se actualicen."
 update_row_contracts_unpublished = "{component} no se puede instalar desde este dispositivo: su versión no publica qué versiones de protocolo habla. Sigue siendo posible instalarlo a mano, fuera del dispositivo."
 update_group_postponed = "No se pudo preparar {component}, así que no se instalaron el núcleo ni los complementos que dependen de él; nada cambió para ellos. Inténtalo de nuevo."
+update_group_no_room = "No hay suficiente espacio libre para el núcleo y los complementos que dependen de él; nada cambió para ellos. Libera algo de espacio y vuelve a instalar."
 update_major_waiting = "Hay una actualización mayor disponible: cambia cómo se comunican el núcleo y sus complementos, así que no se instala automáticamente. Instálala desde aquí cuando puedas."
 update_row_fit_gap = "«{contract}» {found} frente a {expected}"
 update_row_fit_limited = "Limitado con este núcleo: {contracts}. Algunas de sus funciones estarán inactivas."

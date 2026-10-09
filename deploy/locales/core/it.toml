@@ -406,6 +406,7 @@ update_row_core_not_selected = "{component} verrà aggiornato mentre il core res
 update_row_plugins_not_selected = "Il core verrà aggiornato mentre questi plugin restano indietro: {components}. Questo core può rifiutarli finché non vengono aggiornati anche loro."
 update_row_contracts_unpublished = "{component} non si può installare da questo dispositivo: la sua release non pubblica quali versioni del protocollo parla. Resta possibile installarlo a mano, fuori dal dispositivo."
 update_group_postponed = "Impossibile preparare {component}, quindi il core e i plugin che ne dipendono non sono stati installati; per loro non è cambiato nulla. Riprova."
+update_group_no_room = "Spazio libero insufficiente per il core e i plugin che ne dipendono; per loro non è cambiato nulla. Libera un po' di spazio, poi installa di nuovo."
 update_major_waiting = "È disponibile un aggiornamento importante: cambia il modo in cui il core e i suoi plugin comunicano, quindi non viene installato automaticamente. Installalo da qui quando puoi."
 update_row_fit_gap = "«{contract}» {found} invece di {expected}"
 update_row_fit_limited = "Limitato con questo core: {contracts}. Alcune sue funzioni saranno inattive."

@@ -472,9 +472,12 @@ recognises a break by itself and installs it as one gesture:
 - **Before this mechanism existed.** It works only once the core doing the
   install carries it, and none published before it does: the first break
   (`PROTOCOL_VERSION` 1 to 2) is installed by an old core, component by
-  component, with a rollback that restores the core alone. See [What has not
-  been verified](#what-has-not-been-verified) for what that means and how to
-  cross it safely.
+  component, with a rollback that restores the core alone, and under either
+  "Check and install" setting it installs that break unattended on its next
+  scheduled run. Set the automatic policy to Off or Check on every device
+  before that release is published; see [What has not been
+  verified](#what-has-not-been-verified) for what that means and how to cross
+  it safely.
 - **Never at night.** The automatic policy installs neither the breaking core
   nor any plugin the running core would refuse — the latter whether or not
   the core breaks; a plugin the running core
@@ -1368,13 +1371,19 @@ what it has always done. From its code, traced and not observed:
   the backup holds the last request's entries, and the last request placed
   the core alone. The new plugins stay, the old core refuses them, and **the
   device stays silent until someone acts**;
-- the old core has no notion of a break, so its automatic policy may install
-  it at night like any other update.
+- the old core has no notion of a break, and its automatic policy installs
+  everything out of step. **A device on "Check and install" or on "Check and
+  install, third-party plugins included" that runs a published core will
+  install the 1 to 2 break unattended and ungrouped**, at its first scheduled
+  run after the release is published — the following night on a daily
+  cadence — with the consequences above and nobody watching.
 
-The safe way across that first break is `ritornello-install` (see
-[Deploying](#deploying)), which places the core and the plugins from the
-workstation; failing that, an Install pressed on the device by someone
-watching that the new core starts.
+The safe way across that first break: **before publishing that release**, set
+the automatic policy of every device to Off or Check (see
+[interface.md](interface.md#automatic-update-policy)); then install it with
+`ritornello-install` (see [Deploying](#deploying)), which places the core and
+the plugins from the workstation, or with an Install pressed on the device by
+someone watching that the new core starts.
 
 **The grouped update applies to breaks installed by a core that carries it**
 — the break after the next one at the earliest. What the code says it will
@@ -1386,9 +1395,9 @@ dependents](#a-breaking-core-is-installed-with-its-dependents)):
   never meets a new plugin it would refuse for long (`install_group` in
   `crates/ritornello-core/src/update/mod.rs`). The request is applied entry by
   entry: a failure in the middle can leave some plugins placed under the old
-  core but not restarted. Their old processes keep running until those
-  plugins next restart, and after the next restart of those plugins the old
-  core refuses them, until a second click finishes the group;
+  core but not restarted. Their old processes keep running; once those
+  plugins restart, the old core refuses them until a second click finishes
+  the group;
 - if staging any member fails, no request is written and the old core keeps
   running with whatever the compatible step placed;
 - a **rollback** (the new core failing to start, see below) restores the core
