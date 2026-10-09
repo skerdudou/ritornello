@@ -132,6 +132,12 @@ pub struct Announcement {
     ///
     /// Absent = empty, which only a binary predating contract versions sends;
     /// such a binary is refused on `protocol` anyway.
+    ///
+    /// The keys are a closed enum, like `PluginKind`: a contract name this
+    /// build does not know makes the whole announcement unreadable, not
+    /// ignored. That is acceptable because a new contract is a new build of
+    /// both sides, and the bootstrap number is what keeps a binary that speaks
+    /// one from being read by a core that cannot.
     #[serde(default)]
     pub contracts: BTreeMap<Contract, ContractVersion>,
     /// Version of the plugin binary itself.
@@ -402,7 +408,7 @@ mod tests {
 
     /// A minimal announcement for tests that only care about one field —
     /// `catalog` here — and want `..base_announcement()` to fill in the
-    /// rest, rather than repeating all eight neighbouring fields verbatim.
+    /// rest, rather than repeating all nine neighbouring fields verbatim.
     fn base_announcement() -> Announcement {
         Announcement {
             name: "x".into(),

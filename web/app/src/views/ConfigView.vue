@@ -442,8 +442,8 @@ const plugins = computed<PluginRow[]>(() => {
     acc.busy = acc.busy || !!p.busy
     acc.admin = acc.admin || p.admin
     // All lines of a plugin carry the same version and the same refusal: the
-    // first one to define it suffices. `??`, not `||`, so a refusal at
-    // a refusal is an object, and the badge tests it with `!== undefined`.
+    // first defined one suffices. `??`, not `||`: a refusal is an object,
+    // tested with `!== undefined`.
     acc.version = acc.version ?? p.version
     acc.incompatible = acc.incompatible ?? p.incompatible
     // Unlike the refusal, a limitation is per contract, and a contract belongs

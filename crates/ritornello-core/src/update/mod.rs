@@ -3019,7 +3019,7 @@ impl Worker {
     /// A plugin that is enabled and simply **dead** is a different case and
     /// is relaunched: replacing the binary and starting it again is precisely
     /// the gesture that used to require a restart of the whole core after a
-    /// plugin was refused for its protocol.
+    /// plugin was refused for its contracts.
     async fn restart_plugin(&self, name: &str) {
         if !self.enabled(name) {
             tracing::info!(

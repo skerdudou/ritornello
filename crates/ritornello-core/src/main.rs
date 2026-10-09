@@ -4616,7 +4616,7 @@ mod toggle_tests {
         assert_eq!(
             b.gathered.incompatible.get("mpd"),
             Some(&Refusal::Legacy { found: foreign }),
-            "bench precondition: refused, and for its protocol"
+            "bench precondition: refused as a legacy binary (another bootstrap number)"
         );
         assert!(
             b.core.sources_catalog().sources.is_empty(),
@@ -4672,7 +4672,7 @@ mod toggle_tests {
         assert_eq!(
             b.gathered.incompatible.get("mpd"),
             Some(&Refusal::Legacy { found: ritornello_proto::PROTOCOL_VERSION + 1 }),
-            "bench precondition: refused, and for its protocol"
+            "bench precondition: refused as a legacy binary (another bootstrap number)"
         );
         assert!(
             b.children.admin_assets.read().await.is_empty(),

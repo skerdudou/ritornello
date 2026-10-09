@@ -56,7 +56,7 @@ that the core opens before launching a single plugin:
    describing exactly what it just bound, e.g.:
 
    ```json
-   {"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":1,"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}
+   {"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":2,"contracts":{"display":{"major":1,"minor":0},"input":{"major":1,"minor":0},"admin":{"major":1,"minor":0}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}
    ```
 
    before closing the connection. That last flag is a display's opt-in for
@@ -65,7 +65,7 @@ that the core opens before launching a single plugin:
    implements rather than asked of its author, which is the invariant of
    this handshake: an announcement cannot lie.
 
-The announcement carries four more fields, `protocol`, `version`,
+The announcement carries five more fields, `protocol`, `contracts`, `version`,
 `repository` and `catalog`, all **derived** the same way `admin` and
 `covers` are — the SDK writes them, never the plugin's author, so an
 announcement cannot misreport any of them. The version is
@@ -76,8 +76,12 @@ the SDK instead, they would report the SDK's, since that is whose `Cargo.toml`
 a Rust binary compiles against. That is also why it is a macro rather than two
 more parameters on `Runtime::from_args` — `env!` expands where it is written,
 and the next derived field then costs nothing at ten call sites.
-`protocol` is `ritornello_proto::PROTOCOL_VERSION` as the plugin was built, a
-single number shared by the whole protocol crate, not one per message kind.
+`contracts` holds one `major.minor` version per wire contract the plugin
+speaks: one for each kind it registered (`source`, `display`, `input`,
+`metadata`) and `admin` when it serves an admin page. `protocol` is
+`ritornello_proto::PROTOCOL_VERSION` as the plugin was built: the frozen
+**bootstrap** number, which only guards the announcement's own format (it
+carries the contract versions, so it cannot be versioned by them).
 
 ### Where a plugin keeps its data
 
@@ -219,17 +223,37 @@ setting, "Check and install, third-party plugins included", and then only to
 setting ever adds a plugin or a pack by itself: a device does not fetch bytes
 from a repository nobody vetted that it was never told to want.
 
-The core compares that number to its own `PROTOCOL_VERSION` by **strict
-equality**, at both doors an announcement can come through — the startup
-rendezvous and a plugin re-announcing hot, hours or months later. A mismatch
-gets the plugin **refused**: nothing of it is wired, its process is
-terminated when the core owns it (`SIGTERM`, the same grace as switching a
-plugin off), and when the core does not own it, the log says so rather than
-pretending it stopped anything. Either way the core keeps running and every
-other plugin is unaffected — the same tolerance a merely dead plugin already
-gets. The configuration page names the cause, "Built for protocol N; this
-core speaks M", both numbers placed by the language rather than concatenated
-into it.
+The core judges every announcement with one function, at both doors an
+announcement can come through — the startup rendezvous and a plugin
+re-announcing hot, hours or months later — so the two can never disagree. The
+verdict is one of three, taken from the first rule that applies:
+
+- **refused** when the plugin is a *legacy* binary (its `protocol` is not the
+  core's `PROTOCOL_VERSION`: built before contract versions, or for another
+  core), when it declares a kind or an admin page **without** the matching
+  contract in `contracts`, when it announces a contract it does **not**
+  declare, or when the **major** of any contract differs from the core's. One
+  refused contract refuses the whole plugin: a half-wired plugin is a state
+  the core avoids everywhere else;
+- **limited** when a contract's major is the core's but its **minor** is
+  newer: the plugin is wired, connected and working, and the features added
+  by the newer minor are inactive. Its other contracts stay normal, so a
+  plugin speaking several (mpd: display, input and admin) is limited on one
+  line only;
+- **normal** otherwise, including a minor *older* than the core's.
+
+A refusal wires nothing of the plugin, and its process is terminated when the
+core owns it (`SIGTERM`, the same grace as switching a plugin off); when the
+core does not own it, the log says so rather than pretending it stopped
+anything. Either way the core keeps running and every other plugin is
+unaffected — the same tolerance a merely dead plugin already gets. A plugin
+refused at startup and re-announcing hot with a good announcement is wired:
+the refusal is lifted. The configuration page names the cause and the
+contract, for instance "Display contract: built for 2.0, this core speaks
+1.0", or "Limited — display contract 1.1, this core speaks 1.0: some features
+of this plugin are inactive; update the core". The versions are placed by the
+language rather than concatenated into the sentence. `/api/status` carries
+the core's own contract versions under `contracts`.
 
 This refusal is deliberately **not** the `enabled` switch described below,
 and persists nothing: no file is written, so a plugin refused today is
@@ -237,29 +261,34 @@ simply wired again the moment a matching binary replaces the incompatible
 one — there is no manifest entry to undo, because there was never one to
 write.
 
-`PROTOCOL_VERSION` moves at **every break** of the wire format, never on an
-addition: every field this protocol has gained so far — `admin`, `covers`,
-`ui_version`, the eject capability, `catalog`, and now `protocol` and
-`version` themselves — was absorbed by a serde default, so an old plugin and
-a new core (or the reverse) keep understanding each other, with tests pinning
-that an old announcement still parses. The decision is forced: the wire
-fingerprint test of `ritornello-proto` serializes a sample of every message
-and compares it with a committed fixture, so a rename, a removal or a changed
-type cannot ship without either a bump of this number or an explicit
-statement that the change is compatible. A bump republishes every component
-that links the crate under a new version (`scripts/changed-components.sh`
-refuses the release otherwise), and a plugin announcing another number is
-refused as above and shown "incompatible". There is no backward
-compatibility to maintain: breaks stay free, they are only signalled. It is
-not, any more, a single version inherited by every crate: the core and each
-plugin declare their own version, so a device legitimately runs its components
-at different patch levels from each other and from the core — that is not a
-misconfiguration to repair, it is the point of the per-component release
-scheme. `ritornello-proto`, `ritornello-plugin-sdk`, `ritornello-i18n` and
-`ritornello-updater` are the exception and keep inheriting the workspace
-version, since none of them ships as its own archive (see
-`ritornello_proto::PROTOCOL_VERSION`'s own doc comment, which this paragraph
-otherwise mirrors).
+**What each number means.** Each contract's *major* moves at a break of that
+contract (a rename, a removal, a changed type); its *minor* moves at a
+compatible addition (an optional field, a variant nobody old receives), which
+a serde default absorbs, so an older plugin and a newer core (or the reverse)
+keep understanding each other. The contract versions live in
+`crates/ritornello-proto/src/contract.rs`. `PROTOCOL_VERSION` is a separate,
+frozen number: it moved once, from 1 to 2, to introduce the contracts, so that
+a pre-contract core and a post-contract plugin refuse each other; it moves
+again only if the **announcement's own format** breaks, and that republishes
+everything. The decision is forced: the wire fingerprint test of
+`ritornello-proto` serializes a sample of every message, one section per
+contract plus the announcement, and compares it with a committed fixture. The
+content of a contract's section cannot change unless that contract's version
+goes strictly up — the test refuses to regenerate it otherwise — so a rename,
+a removal or a changed type cannot ship without a bump. A bump of a major
+republishes the core and every plugin that speaks that contract
+(`scripts/changed-components.sh` refuses the release otherwise, reading what
+a plugin speaks from `[package.metadata.ritornello]`: `kinds`, and
+`admin = true`); a bump of a minor republishes nothing by itself. There is no
+backward compatibility to maintain: breaks stay free, they are only
+signalled. The wire is no longer a single version inherited by every crate,
+nor is the product: the core and each plugin declare their own version, so a
+device legitimately runs its components at different patch levels from each
+other and from the core — that is not a misconfiguration to repair, it is the
+point of the per-component release scheme. `ritornello-proto`,
+`ritornello-plugin-sdk`, `ritornello-i18n` and `ritornello-updater` are the
+exception and keep inheriting the workspace version, since none of them ships
+as its own archive.
 
 This "bind first, announce second" order is not merely a convention:
 the SDK's `Runtime` enforces it structurally (see [Writing a `metadata`
