@@ -47,6 +47,8 @@ pub enum Refusal {
     Major { gaps: Vec<ContractGap> },
 }
 
+/// The core's decision on one announcement: wired (possibly with some features
+/// inactive on the contracts listed in `limited`) or refused for the given reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     Accepted { limited: Vec<ContractGap> },
@@ -76,7 +78,7 @@ fn judge_against(a: &Announcement, core: impl Fn(Contract) -> ContractVersion) -
 
     let major: Vec<ContractGap> = Contract::ALL
         .into_iter()
-        .filter(|c| a.contracts.contains_key(c) && a.contracts[c].major != core(*c).major)
+        .filter(|c| a.contracts.get(c).is_some_and(|v| v.major != core(*c).major))
         .map(gap)
         .collect();
     if !major.is_empty() {
@@ -85,7 +87,7 @@ fn judge_against(a: &Announcement, core: impl Fn(Contract) -> ContractVersion) -
 
     let limited = Contract::ALL
         .into_iter()
-        .filter(|c| a.contracts.contains_key(c) && a.contracts[c].minor > core(*c).minor)
+        .filter(|c| a.contracts.get(c).is_some_and(|v| v.minor > core(*c).minor))
         .map(gap)
         .collect();
     Verdict::Accepted { limited }
@@ -185,6 +187,45 @@ mod tests {
     fn an_unexpected_contract_outranks_a_major_gap() {
         let a = ann(&[PluginKind::Source], false, &[(Contract::Source, (2, 0)), (Contract::Admin, (1, 0))]);
         assert_eq!(judge(&a), Verdict::Refused(Refusal::UnexpectedContract { contract: Contract::Admin }));
+    }
+
+    #[test]
+    fn duplicate_kinds_expect_their_contract_once() {
+        let a = ann(&[PluginKind::Source, PluginKind::Source], false, &[(Contract::Source, (1, 0))]);
+        assert_eq!(judge(&a), Verdict::Accepted { limited: vec![] });
+    }
+
+    #[test]
+    fn a_plugin_declaring_nothing_and_announcing_nothing_is_accepted() {
+        let a = ann(&[], false, &[]);
+        assert_eq!(judge(&a), Verdict::Accepted { limited: vec![] });
+    }
+
+    // The web UI reads these shapes: changing one is a wire change.
+    #[test]
+    fn a_refusal_serialises_with_its_reason_tag() {
+        let major = Refusal::Major { gaps: vec![gap(Contract::Display, (2, 0), (1, 0))] };
+        assert_eq!(
+            serde_json::to_value(&major).unwrap(),
+            serde_json::json!({"reason":"major","gaps":[{"contract":"display","plugin":{"major":2,"minor":0},"core":{"major":1,"minor":0}}]})
+        );
+        assert_eq!(serde_json::to_value(Refusal::Legacy { found: 1 }).unwrap(), serde_json::json!({"reason":"legacy","found":1}));
+        assert_eq!(
+            serde_json::to_value(Refusal::MissingContract { contract: Contract::Input }).unwrap(),
+            serde_json::json!({"reason":"missing_contract","contract":"input"})
+        );
+        assert_eq!(
+            serde_json::to_value(Refusal::UnexpectedContract { contract: Contract::Admin }).unwrap(),
+            serde_json::json!({"reason":"unexpected_contract","contract":"admin"})
+        );
+    }
+
+    #[test]
+    fn a_gap_serialises_with_both_versions() {
+        assert_eq!(
+            serde_json::to_value(gap(Contract::Input, (1, 2), (1, 0))).unwrap(),
+            serde_json::json!({"contract":"input","plugin":{"major":1,"minor":2},"core":{"major":1,"minor":0}})
+        );
     }
 
     #[test]
