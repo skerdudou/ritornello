@@ -357,6 +357,117 @@ mod tests {
         }
     }
 
+    /// Runs `plugin-catalogue.py --shipped <names>` from the repo root and
+    /// returns the process output.
+    fn catalogue_shipping(names: &[&str]) -> std::process::Output {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let shipped = dir.path().join("changed.txt");
+        std::fs::write(&shipped, names.join("\n") + "\n").expect("changed.txt is written");
+        std::process::Command::new("python3")
+            .arg("scripts/plugin-catalogue.py")
+            .arg("--shipped")
+            .arg(&shipped)
+            .current_dir(repo_root())
+            .output()
+            .expect("python3 is available")
+    }
+
+    fn contracts_of(out: &std::process::Output) -> serde_json::Map<String, serde_json::Value> {
+        assert!(out.status.success(), "plugin-catalogue.py failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        let catalogue: serde_json::Value = serde_json::from_slice(&out.stdout).expect("catalogue.json is JSON");
+        catalogue["contracts"].as_object().expect("contracts is an object").clone()
+    }
+
+    /// `contracts` is what this release ships and nothing else: an archive
+    /// carried by an older release must never be described with the current
+    /// tree's numbers. A companion and a language pack speak no wire.
+    #[test]
+    fn the_catalogue_publishes_contracts_only_for_what_the_release_ships() {
+        let out = catalogue_shipping(&[
+            "ritornello-core",
+            "ritornello-plugin-radio",
+            "ritornello-files-mount",
+            "ritornello-lang-de",
+        ]);
+        let contracts = contracts_of(&out);
+        let mut keys: Vec<&str> = contracts.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["core", "radio"]);
+    }
+
+    /// The published numbers are the code's: the core entry is exactly what
+    /// `Speaks::this_core()` serializes to, and each plugin's is what its
+    /// own `[package.metadata.ritornello]` implies with the current
+    /// constants (one contract per kind, plus `admin` iff it declares it).
+    #[test]
+    fn the_catalogue_s_contracts_are_the_code_s() {
+        use crate::compat::Speaks;
+        use ritornello_proto::{Contract, PluginKind};
+
+        let m = manifest();
+        let archives: Vec<String> = std::iter::once("ritornello-core".to_string())
+            .chain(m.plugins.keys().map(|p| format!("ritornello-plugin-{p}")))
+            .collect();
+        let refs: Vec<&str> = archives.iter().map(String::as_str).collect();
+        let contracts = contracts_of(&catalogue_shipping(&refs));
+        assert_eq!(contracts.len(), archives.len(), "one entry per shipped component");
+
+        assert_eq!(contracts["core"], serde_json::to_value(Speaks::this_core()).unwrap());
+
+        for name in m.plugins.keys() {
+            let manifest_path = repo_root().join("crates").join(format!("ritornello-plugin-{name}")).join("Cargo.toml");
+            let cargo: toml::Value = toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+            let meta = &cargo["package"]["metadata"]["ritornello"];
+            let mut expected = std::collections::BTreeMap::new();
+            for kind in meta["kinds"].as_array().expect("kinds is an array") {
+                let kind: PluginKind = serde_json::from_value(serde_json::json!(kind.as_str().unwrap())).unwrap();
+                let c = Contract::of_kind(kind);
+                expected.insert(c, c.current());
+            }
+            if meta.get("admin").and_then(toml::Value::as_bool).unwrap_or(false) {
+                expected.insert(Contract::Admin, Contract::Admin.current());
+            }
+            let expected = Speaks { protocol: ritornello_proto::PROTOCOL_VERSION, contracts: expected };
+            assert_eq!(contracts[name.as_str()], serde_json::to_value(expected).unwrap(), "contracts of {name}");
+        }
+    }
+
+    /// A name the script cannot place is a release it must refuse to
+    /// describe, not one it silently skips.
+    #[test]
+    fn an_unknown_shipped_name_fails_the_catalogue() {
+        let out = catalogue_shipping(&["ritornello-core", "ritornello-plugin-no-such-plugin"]);
+        assert!(!out.status.success(), "an unknown shipped name was accepted");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("no-such-plugin"));
+    }
+
+    /// A wire constant the script cannot read is a release it must refuse
+    /// to describe: a catalogue with a guessed number would be believed.
+    #[test]
+    fn an_unreadable_constant_fails_the_catalogue() {
+        let src = tempfile::tempdir().expect("a temp dir");
+        let proto = repo_root().join("crates/ritornello-proto/src");
+        let lib = std::fs::read_to_string(proto.join("lib.rs")).unwrap();
+        std::fs::write(src.path().join("lib.rs"), lib).unwrap();
+        let contract = std::fs::read_to_string(proto.join("contract.rs")).unwrap();
+        let mangled = contract.replace("pub const INPUT_CONTRACT", "pub const INPUT_CONTRACT_GONE");
+        assert_ne!(contract, mangled, "the mutation changed nothing");
+        std::fs::write(src.path().join("contract.rs"), mangled).unwrap();
+        let shipped = src.path().join("changed.txt");
+        std::fs::write(&shipped, "ritornello-core\n").unwrap();
+        let out = std::process::Command::new("python3")
+            .arg("scripts/plugin-catalogue.py")
+            .arg("--shipped")
+            .arg(&shipped)
+            .arg("--proto-src")
+            .arg(src.path())
+            .current_dir(repo_root())
+            .output()
+            .expect("python3 is available");
+        assert!(!out.status.success(), "an unreadable constant was accepted");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("INPUT_CONTRACT"));
+    }
+
     /// **No component archive carries translated text any more.**
     ///
     /// The rule with no list to keep: a component that shipped its own

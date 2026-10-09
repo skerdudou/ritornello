@@ -847,6 +847,7 @@ mod tests {
             not_installed_files: None,
             needs_companion: None,
             conflict_repos: None,
+            contracts: Default::default(),
         }
     }
 

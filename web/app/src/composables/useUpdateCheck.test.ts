@@ -20,6 +20,7 @@ function payload(over: Partial<UpdatePayload> = {}): UpdatePayload {
     release_url: null,
     last_check_unix_s: NOW,
     components: [],
+    major_update_waiting: false,
     busy: null,
     last_rollback: null,
     ...over,

@@ -17,13 +17,14 @@ import LanguageCard from '../components/LanguageCard.vue'
 import LanguagePacksRow from '../components/LanguagePacksRow.vue'
 import UpdateCard from '../components/UpdateCard.vue'
 import UpdateDialog from '../components/UpdateDialog.vue'
+import { limitedText as sharedLimitedText, refusalText as sharedRefusalText } from '../composables/contractText'
 import { predictedThumbnailBytes } from '../composables/coverWeight'
 import { languageName } from '../composables/languages'
 import { packSourceLabel } from '../composables/packSource'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
 import type {
-  AudioPayload, Contract, ContractGap, ContractVersion, LanguageBusy, LanguagePackRow, LocalePayload,
+  AudioPayload, ContractGap, LanguageBusy, LanguagePackRow, LocalePayload,
   Refusal, SettingsPayload, UpdatePayload,
 } from '../types'
 
@@ -94,6 +95,7 @@ const update = ref<UpdatePayload>({
   release_url: null,
   last_check_unix_s: null,
   components: [],
+  major_update_waiting: false,
   busy: null,
   last_rollback: null,
 })
@@ -565,62 +567,10 @@ const isFirstDeclared = (name: string) => declaredOrder.value[0] === name
 const isLastDeclared = (name: string) =>
   declaredOrder.value[declaredOrder.value.length - 1] === name
 
-/** `1.1`: a contract version as the page writes it. */
-const fmt = (v: ContractVersion) => `${v.major}.${v.minor}`
-
-/** A contract's name in the reader's language, never its wire word: the
- * same `plugin_kind_*` nouns the plugin table uses for a kind, plus
- * `plugin_kind_admin`. One literal key per branch, so the check that every key
- * the page uses exists sees all five. */
-function contractLabel(c: Contract): string {
-  switch (c) {
-    case 'source':
-      return t.value('plugin_kind_source')
-    case 'display':
-      return t.value('plugin_kind_display')
-    case 'input':
-      return t.value('plugin_kind_input')
-    case 'metadata':
-      return t.value('plugin_kind_metadata')
-    case 'admin':
-      return t.value('plugin_kind_admin')
-  }
-}
-
-/** The sentence a refused plugin's badge reads, one per cause. Each branch
- * names its key literally: a computed key would escape the checks that every
- * key the page uses exists in every language. Several gaps give several
- * sentences, joined. */
-function refusalText(r: Refusal): string {
-  switch (r.reason) {
-    case 'legacy':
-      return t.value('plugin_incompatible_legacy', { found: r.found })
-    case 'missing_contract':
-      return t.value('plugin_incompatible_missing', { contract: contractLabel(r.contract) })
-    case 'unexpected_contract':
-      return t.value('plugin_incompatible_unexpected', { contract: contractLabel(r.contract) })
-    case 'major':
-      return r.gaps
-        .map((g) =>
-          t.value('plugin_incompatible_major', {
-            contract: contractLabel(g.contract),
-            found: fmt(g.plugin),
-            expected: fmt(g.core),
-          }),
-        )
-        .join(' · ')
-  }
-}
-
-/** The sentence a limited plugin's badge reads: one per limited contract,
- * joined. */
-function limitedText(gaps: ContractGap[]): string {
-  return gaps
-    .map((g) =>
-      t.value('plugin_limited', { contract: contractLabel(g.contract), found: fmt(g.plugin), expected: fmt(g.core) }),
-    )
-    .join(' · ')
-}
+/** The contract sentences live in `contractText.ts`, shared with the update
+ * dialog; these bind them to this page's catalog. */
+const refusalText = (r: Refusal) => sharedRefusalText(t.value, r)
+const limitedText = (gaps: ContractGap[]) => sharedLimitedText(t.value, gaps)
 
 // Names of the plugins whose toggle is in flight: disabling the only source
 // can cost up to 15 s (stop + Deactivate + Activate, each capped at 5 s) when

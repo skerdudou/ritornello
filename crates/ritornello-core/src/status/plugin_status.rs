@@ -1,7 +1,7 @@
 //! The plugins as seen from the status page: one line per (name, kind), the order of the plugins.toml file, the enabled/disabled switch, and what a disconnection or a re-announcement changes.
 
 use super::*;
-use crate::compat::{ContractGap, Refusal};
+use crate::compat::{ContractGap, Refusal, Speaks};
 
 /// One line of the status page: a (name, kind) pair.
 ///
@@ -176,6 +176,16 @@ pub struct PluginStatus {
     /// Additive like `stalled` and `busy`: absent from the JSON when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limited: Vec<ContractGap>,
+    /// What this plugin's accepted announcement said it speaks: its
+    /// bootstrap number and its contract versions. Set on every line of an
+    /// accepted plugin (`announced_plugin_line` in `main.rs`), absent
+    /// otherwise.
+    ///
+    /// Not read by the page: the update worker reads it to judge a running
+    /// plugin the release does not replace against the core it offers — the
+    /// binary's own word, which no catalogue can give for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaks: Option<Speaks>,
     /// This plugin is one of `plugins::PRIVILEGED_PLUGINS`: its packaging
     /// places files a privileged install alone can place (a root binary
     /// outside the plugins directory, a systemd unit, a polkit rule), so
@@ -223,6 +233,7 @@ impl PluginStatus {
             repository: None,
             incompatible: None,
             limited: Vec::new(),
+            speaks: None,
             privileged: false,
         }
     }
@@ -251,6 +262,7 @@ impl PluginStatus {
             repository: None,
             incompatible: None,
             limited: Vec::new(),
+            speaks: None,
             privileged: false,
         }
     }
@@ -310,6 +322,7 @@ impl PluginStatus {
             repository: None,
             incompatible: None,
             limited: Vec::new(),
+            speaks: None,
             privileged: false,
         }
     }
@@ -335,6 +348,7 @@ impl PluginStatus {
             repository: None,
             incompatible: None,
             limited: Vec::new(),
+            speaks: None,
             privileged: false,
         }
     }
@@ -363,6 +377,7 @@ impl PluginStatus {
             repository: None,
             incompatible: Some(refusal),
             limited: Vec::new(),
+            speaks: None,
             privileged: false,
         }
     }
@@ -1379,6 +1394,7 @@ mod tests {
                 not_installed_files: None,
                 needs_companion: None,
                 conflict_repos: None,
+                contracts: Default::default(),
             }],
             ..UpdateState::initial("0.2.0", &[])
         }));

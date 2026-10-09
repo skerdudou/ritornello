@@ -17,10 +17,14 @@
 //! of its kinds are.
 //!
 //! Order of checks, the first that applies wins: legacy binary, missing
-//! contract, unexpected contract, major gap, then minor gaps.
+//! contract, unexpected contract, major gap, then minor gaps. A pair of contract
+//! sets (`judge_pair`) skips the kinds check, since there is no declaration to
+//! compare with; a contract the plugin speaks and the core does not serve maps
+//! to the unexpected contract refusal.
 
 use ritornello_proto::{Announcement, Contract, ContractVersion, PROTOCOL_VERSION};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A contract on which the plugin and the core do not speak the same version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,30 +56,79 @@ pub enum Verdict {
     Refused(Refusal),
 }
 
+/// What a component speaks: its bootstrap number and its contract versions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Speaks {
+    pub protocol: u32,
+    pub contracts: BTreeMap<Contract, ContractVersion>,
+}
+
+impl Speaks {
+    /// What this build speaks: the compiled bootstrap and every contract's current version.
+    pub fn this_core() -> Self {
+        Speaks { protocol: PROTOCOL_VERSION, contracts: Contract::ALL.into_iter().map(|c| (c, c.current())).collect() }
+    }
+}
+
 /// Judge an announcement against the contracts this build speaks.
 pub fn judge(a: &Announcement) -> Verdict {
     judge_against(a, |c| c.current())
 }
 
 fn judge_against(a: &Announcement, core: impl Fn(Contract) -> ContractVersion) -> Verdict {
-    if a.protocol != PROTOCOL_VERSION {
-        return Verdict::Refused(Refusal::Legacy { found: a.protocol });
-    }
-
     let expected = |c: Contract| (a.admin && c == Contract::Admin) || a.kinds.iter().any(|k| Contract::of_kind(*k) == c);
+    verdict(a.protocol, &a.contracts, Some(&expected), PROTOCOL_VERSION, |c| Some(core(c)))
+}
 
-    if let Some(contract) = Contract::ALL.into_iter().find(|c| expected(*c) && !a.contracts.contains_key(c)) {
-        return Verdict::Refused(Refusal::MissingContract { contract });
+/// A plugin's contract set judged against a core's: the same rules as [`judge`], minus the
+/// kinds check (a catalogue's contracts are derived from the declaration, so they are
+/// consistent by construction). A contract the plugin speaks and the core does not is
+/// refused as unexpected.
+pub fn judge_pair(plugin: &Speaks, core: &Speaks) -> Verdict {
+    verdict(plugin.protocol, &plugin.contracts, None, core.protocol, |c| core.contracts.get(&c).copied())
+}
+
+/// Does `offered` break the wire against `running`: another bootstrap, or another major on
+/// any contract. A contract present in one set and absent in the other is a break.
+pub fn breaks(offered: &Speaks, running: &Speaks) -> bool {
+    offered.protocol != running.protocol
+        || Contract::ALL.into_iter().any(|c| match (offered.contracts.get(&c), running.contracts.get(&c)) {
+            (Some(o), Some(r)) => o.major != r.major,
+            (None, None) => false,
+            _ => true,
+        })
+}
+
+/// The one verdict. `expected` (announcements only) says which contracts the plugin's
+/// declaration requires; `core` looks up the core's version of a contract, if it speaks it.
+fn verdict(
+    protocol: u32,
+    contracts: &BTreeMap<Contract, ContractVersion>,
+    expected: Option<&dyn Fn(Contract) -> bool>,
+    core_protocol: u32,
+    core: impl Fn(Contract) -> Option<ContractVersion>,
+) -> Verdict {
+    if protocol != core_protocol {
+        return Verdict::Refused(Refusal::Legacy { found: protocol });
     }
-    if let Some(contract) = Contract::ALL.into_iter().find(|c| a.contracts.contains_key(c) && !expected(*c)) {
+
+    if let Some(expected) = expected {
+        if let Some(contract) = Contract::ALL.into_iter().find(|c| expected(*c) && !contracts.contains_key(c)) {
+            return Verdict::Refused(Refusal::MissingContract { contract });
+        }
+        if let Some(contract) = Contract::ALL.into_iter().find(|c| contracts.contains_key(c) && !expected(*c)) {
+            return Verdict::Refused(Refusal::UnexpectedContract { contract });
+        }
+    }
+    if let Some(contract) = Contract::ALL.into_iter().find(|c| contracts.contains_key(c) && core(*c).is_none()) {
         return Verdict::Refused(Refusal::UnexpectedContract { contract });
     }
 
-    let gap = |c: Contract| ContractGap { contract: c, plugin: a.contracts[&c], core: core(c) };
+    let gap = |c: Contract| ContractGap { contract: c, plugin: contracts[&c], core: core(c).expect("checked above") };
 
     let major: Vec<ContractGap> = Contract::ALL
         .into_iter()
-        .filter(|c| a.contracts.get(c).is_some_and(|v| v.major != core(*c).major))
+        .filter(|c| contracts.get(c).is_some_and(|v| v.major != core(*c).expect("checked above").major))
         .map(gap)
         .collect();
     if !major.is_empty() {
@@ -84,7 +137,7 @@ fn judge_against(a: &Announcement, core: impl Fn(Contract) -> ContractVersion) -
 
     let limited = Contract::ALL
         .into_iter()
-        .filter(|c| a.contracts.get(c).is_some_and(|v| v.minor > core(*c).minor))
+        .filter(|c| contracts.get(c).is_some_and(|v| v.minor > core(*c).expect("checked above").minor))
         .map(gap)
         .collect();
     Verdict::Accepted { limited }
@@ -104,7 +157,7 @@ pub fn describe(refusal: &Refusal) -> String {
             format!("it declares the {} contract but announces no version for it", name(*contract))
         }
         Refusal::UnexpectedContract { contract } => {
-            format!("it announces a version of the {} contract, which it does not declare", name(*contract))
+            format!("it speaks the {} contract, which it does not declare or this core does not serve", name(*contract))
         }
         Refusal::Major { gaps } => {
             format!("another major on {}", gaps.iter().map(gap).collect::<Vec<_>>().join(", "))
@@ -286,7 +339,7 @@ mod tests {
         );
         assert_eq!(
             describe(&Refusal::UnexpectedContract { contract: Contract::Admin }),
-            "it announces a version of the admin contract, which it does not declare"
+            "it speaks the admin contract, which it does not declare or this core does not serve"
         );
         assert_eq!(
             describe(&Refusal::Major {
@@ -309,5 +362,91 @@ mod tests {
         for c in Contract::ALL {
             assert_eq!(serde_json::to_value(c).unwrap(), serde_json::json!(name(c)));
         }
+    }
+
+    fn speaks(protocol: u32, contracts: &[(Contract, (u32, u32))]) -> Speaks {
+        Speaks { protocol, contracts: contracts.iter().map(|(c, (ma, mi))| (*c, ContractVersion::new(*ma, *mi))).collect() }
+    }
+
+    #[test]
+    fn a_pair_speaking_the_same_versions_is_accepted() {
+        let p = speaks(PROTOCOL_VERSION, &[(Contract::Source, (1, 0))]);
+        assert_eq!(judge_pair(&p, &Speaks::this_core()), Verdict::Accepted { limited: vec![] });
+    }
+
+    #[test]
+    fn a_pair_with_a_newer_plugin_minor_is_limited() {
+        let p = speaks(PROTOCOL_VERSION, &[(Contract::Source, (1, 1))]);
+        let c = speaks(PROTOCOL_VERSION, &[(Contract::Source, (1, 0))]);
+        assert_eq!(judge_pair(&p, &c), Verdict::Accepted { limited: vec![gap(Contract::Source, (1, 1), (1, 0))] });
+    }
+
+    #[test]
+    fn a_pair_on_another_major_is_refused_with_its_gaps() {
+        let p = speaks(PROTOCOL_VERSION, &[(Contract::Source, (2, 0))]);
+        let c = speaks(PROTOCOL_VERSION, &[(Contract::Source, (1, 0))]);
+        assert_eq!(judge_pair(&p, &c), Verdict::Refused(Refusal::Major { gaps: vec![gap(Contract::Source, (2, 0), (1, 0))] }));
+    }
+
+    #[test]
+    fn a_pair_on_another_bootstrap_is_refused_as_legacy_against_the_core_s_number() {
+        let p = speaks(2, &[(Contract::Source, (1, 0))]);
+        let c = speaks(3, &[(Contract::Source, (1, 0))]);
+        assert_eq!(judge_pair(&p, &c), Verdict::Refused(Refusal::Legacy { found: 2 }));
+    }
+
+    #[test]
+    fn a_pair_contract_the_core_does_not_speak_is_refused_as_unexpected() {
+        let p = speaks(PROTOCOL_VERSION, &[(Contract::Display, (1, 0))]);
+        let c = speaks(PROTOCOL_VERSION, &[(Contract::Source, (1, 0))]);
+        assert_eq!(judge_pair(&p, &c), Verdict::Refused(Refusal::UnexpectedContract { contract: Contract::Display }));
+    }
+
+    // The catalogue and the web UI read this shape: changing it is a wire change.
+    #[test]
+    fn speaks_serialises_and_reads_back_in_its_published_shape() {
+        let literal = serde_json::json!({"protocol":2,"contracts":{"source":{"major":1,"minor":1},"admin":{"major":1,"minor":0}}});
+        let s = speaks(2, &[(Contract::Source, (1, 1)), (Contract::Admin, (1, 0))]);
+        assert_eq!(serde_json::to_value(&s).unwrap(), literal);
+        assert_eq!(serde_json::from_value::<Speaks>(literal).unwrap(), s);
+    }
+
+    #[test]
+    fn this_core_speaks_every_contract_at_its_current_version() {
+        let s = Speaks::this_core();
+        assert_eq!(s.protocol, PROTOCOL_VERSION);
+        for c in Contract::ALL {
+            assert_eq!(s.contracts[&c], c.current());
+        }
+    }
+
+    #[test]
+    fn breaks_is_false_for_the_same_set_and_for_a_minor_move() {
+        let r = speaks(3, &[(Contract::Source, (1, 0)), (Contract::Admin, (1, 0))]);
+        assert!(!breaks(&r, &r));
+        let minor = speaks(3, &[(Contract::Source, (1, 4)), (Contract::Admin, (1, 0))]);
+        assert!(!breaks(&minor, &r));
+    }
+
+    #[test]
+    fn breaks_on_a_major_move_on_any_contract() {
+        let r = speaks(3, &[(Contract::Source, (1, 0)), (Contract::Admin, (1, 0))]);
+        let o = speaks(3, &[(Contract::Source, (1, 0)), (Contract::Admin, (2, 0))]);
+        assert!(breaks(&o, &r));
+    }
+
+    #[test]
+    fn breaks_when_the_bootstrap_differs() {
+        let r = speaks(3, &[(Contract::Source, (1, 0))]);
+        let o = speaks(4, &[(Contract::Source, (1, 0))]);
+        assert!(breaks(&o, &r));
+    }
+
+    #[test]
+    fn breaks_when_a_contract_is_present_on_one_side_only() {
+        let both = speaks(3, &[(Contract::Source, (1, 0)), (Contract::Admin, (1, 0))]);
+        let one = speaks(3, &[(Contract::Source, (1, 0))]);
+        assert!(breaks(&one, &both), "a removed contract is a break");
+        assert!(breaks(&both, &one), "an added contract is a break");
     }
 }

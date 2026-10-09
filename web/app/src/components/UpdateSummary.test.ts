@@ -93,6 +93,7 @@ function payload(
     release_url: null,
     last_check_unix_s: 1_760_000_000,
     components,
+    major_update_waiting: false,
     busy: null,
     last_rollback: null,
   }

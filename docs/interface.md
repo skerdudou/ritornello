@@ -651,6 +651,39 @@ systemd starts the replacement (see the paragraph below on what that does
 to the device's power state), installing a plugin stops and relaunches
 only that plugin.
 
+**A break is judged before anything is downloaded.** Each plugin row
+carries a second line, its *fit*: how that plugin's wire contracts sit with
+the core it will meet (the offered core when the core is ticked or no core
+update is on offer, the running core when the core is left unticked).
+Compatible says nothing; limited says which features are inactive; refused
+says which contract differs. The versions come from the `contracts` of the
+`catalogue.json` of the release that carries each component's archive. A
+component whose release publishes none is **not installable from the
+device**, its switch is disabled and the row says why (installing by hand
+remains possible).
+
+When the offered core breaks the wire, ticking it shows a banner: the
+plugins left unticked, or not updated by this release, will be refused until
+they are updated, and the plugins that would be refused are listed. The
+list is recomputed as ticks change. Each row warns on its own:
+
+- a plugin that will be refused if left as it is, judged from its **running
+  announcement** (`installed_with_core`, not from what the release offers: a
+  third-party plugin the release does not touch, or a plugin whose installed
+  binary the new core accepts, is told apart);
+- a plugin ticked while the breaking core is not, which the running core
+  will refuse unless the core is updated too. The core installs anyway if the
+  owner leaves a dependent out: this is a warning, not a veto.
+
+Confirming a ticked breaking core installs the compatible plugins first,
+then the core with its ticked dependents in **one** request, so that no
+moment leaves the old core facing a new plugin. If preparing any member of
+the group fails, nothing of the group is placed and the page names the
+member and says the rest waits; room is checked for the group's total, and
+the group's failure is the one the page shows. See
+[installation.md](installation.md#a-breaking-core-is-installed-with-its-dependents)
+for the sequence, the rollback and what the device does not do at night.
+
 ### Automatic update policy
 
 Four settings, backed by `GET`/`PUT /api/settings`: **Off** (default —
@@ -673,6 +706,22 @@ device does not have, and the first three never touch a third-party
 component at all (see [Third-party plugins](#third-party-plugins) below).
 It can restart the core and any plugin it updates, the same as a manual
 install.
+
+**It never installs a major update.** When the offered core breaks the wire
+(another bootstrap or contract major), the night run leaves out the core. It
+never installs a plugin the running core would refuse either, break or not;
+the plugins it accepts are still installed. The update card then says that a
+major update waits for a manual gesture and lists what the new core would
+refuse, and the dialog installs the break as one group (see [Update
+card](#update-card)). This holds only for a core that carries it, and every
+core published so far predates it: such a core installs whatever is out of
+step, the core included. So the first break (`PROTOCOL_VERSION` 1 to 2) **will
+be installed unattended and ungrouped** by a device on "Check and install" or
+on "Check and install, third-party plugins included", at its first scheduled
+run after that release is published, with a rollback that restores the core
+alone. Before publishing that release, set every device's policy to Off or
+Check, then install it with `ritornello-install` or a watched Install (see
+[installation.md](installation.md#what-has-not-been-verified)).
 
 **The fourth setting has a price on rollback.** The value is written to
 `state.json` as `check_and_install_all`. A core older than the one that

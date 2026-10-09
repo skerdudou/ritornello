@@ -9,11 +9,13 @@ import {
   Switch,
 } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
+import { contractLabel, fmt, refusalText } from '../composables/contractText'
 import { languageName } from '../composables/languages'
+import { defaultSelection, refusedByNewCore, refusedIfLeftAlone } from '../composables/majorUpdate'
 import { packLanguage } from '../composables/packSource'
 import { refusedNote } from '../composables/refusedNote'
 import { useCatalog } from '../composables/useCatalog'
-import type { ComponentOffer } from '../types'
+import type { ComponentOffer, ContractGap, Fit } from '../types'
 
 /**
  * The recap the operator sees before an install actually starts: one row per
@@ -51,28 +53,7 @@ const relevant = computed(() =>
   ),
 )
 
-/**
- * What is out of step and nothing else: `update_available`, never
- * third-party (its own repository decides, not this release), and never a
- * component already known to need a manual step (checking it again would
- * only repeat the same refusal).
- *
- * "Third-party" is read from `third_party_repo` (ruling P6), not from the
- * kind alone: a stranger's **language pack** has the kind `language_pack`
- * and carries its source there, and used to be pre-ticked like one of ours.
- * The kind is kept as well, so a third-party plugin row that names no
- * repository fails closed too.
- */
-function defaultChecked(components: ComponentOffer[]): Set<string> {
-  return new Set(
-    components
-      .filter((c) => c.kind !== 'third_party' && !c.third_party_repo)
-      .filter((c) => c.availability === 'update_available')
-      .filter((c) => c.installable !== false)
-      .map((c) => c.name),
-  )
-}
-
+// What the dialog ticks by itself (`defaultSelection`, shared with the card).
 // Recomputed on every opening rather than once at mount: `Dialog` stays
 // mounted when closed (see `CoverCacheDetails.vue`), and the components
 // prop can have moved on since the last time this was open. `immediate`
@@ -83,7 +64,7 @@ function defaultChecked(components: ComponentOffer[]): Set<string> {
 watch(
   () => props.open,
   (open) => {
-    if (open) checked.value = defaultChecked(relevant.value)
+    if (open) checked.value = defaultSelection(relevant.value)
   },
   { immediate: true },
 )
@@ -101,6 +82,12 @@ const coreChecked = computed(() => !!coreRow.value && checked.value.has(coreRow.
 // comes *before* the refusal screen a mismatched protocol produces — that
 // screen is the backstop, this is the earlier word.
 const coreLeftBehind = computed(() => coreRow.value?.availability === 'update_available' && !coreChecked.value)
+// The offered core breaks the wire and is ticked: a **major update**. The
+// banner says so, and names what that core will refuse once it runs.
+const majorUpdate = computed(() => coreRow.value?.breaking === true && coreChecked.value)
+const refusedAfterMajor = computed(() =>
+  majorUpdate.value ? refusedByNewCore(props.components, checked.value) : [],
+)
 // The plugins of ours that have an update and stay unchecked: what the core
 // row warns about when it is checked without them.
 const pluginsLeftBehind = computed(() =>
@@ -109,6 +96,77 @@ const pluginsLeftBehind = computed(() =>
     .filter((c) => c.availability === 'update_available' && !checked.value.has(c.name))
     .map((c) => c.name),
 )
+
+/**
+ * A major update is ticked and this plugin, on the device, is not: the binary
+ * it keeps is refused by the new core (`refusedIfLeftAlone`, the core's own
+ * verdict on what that binary announced).
+ */
+function leftRefused(c: ComponentOffer): boolean {
+  return (
+    (c.kind === 'plugin' || c.kind === 'third_party') &&
+    majorUpdate.value &&
+    !checked.value.has(c.name) &&
+    c.binary_present &&
+    refusedIfLeftAlone(c)
+  )
+}
+
+/**
+ * The verdict a plugin row's offered version gets from the core it will
+ * actually meet, as the core judged it — never re-judged here.
+ *
+ * `with_core` is the verdict against the core the release offers (or the
+ * running one when the release offers none), which is the core this row
+ * meets **with the core ticked** — the state the dialog describes. Only
+ * when a newer core is on offer and left unticked does the row meet the
+ * running core instead, and `with_running_core` is then the verdict that
+ * holds — for a ticked row only: with neither the core nor the row ticked,
+ * nothing moves and there is nothing to judge.
+ */
+function fitFor(c: ComponentOffer): { fit: Fit; running: boolean } | null {
+  if (coreLeftBehind.value) {
+    if (!checked.value.has(c.name) || !c.with_running_core) return null
+    return { fit: c.with_running_core, running: true }
+  }
+  return c.with_core ? { fit: c.with_core, running: false } : null
+}
+
+/** `source 2.0 vs 1.3`, one per gap, joined. */
+function gapsText(gaps: ContractGap[]): string {
+  return gaps
+    .map((g) =>
+      t.value('update_row_fit_gap', { contract: contractLabel(t.value, g.contract), found: fmt(g.plugin), expected: fmt(g.core) }),
+    )
+    .join(' · ')
+}
+
+/**
+ * The second line of a plugin row: what its offered version becomes with
+ * the core it will meet. `null` for a compatible one, which has nothing to
+ * say. One literal key per branch (`i18nKeysUsed`).
+ */
+function fitLineFor(c: ComponentOffer): string | null {
+  // The row already says its binary will be refused as it is; what its
+  // offered version would be is beside that point and reads as a
+  // contradiction next to it.
+  if (leftRefused(c)) return null
+  const judged = fitFor(c)
+  if (!judged) return null
+  const { fit, running } = judged
+  if (fit.fit === 'limited') return t.value('update_row_fit_limited', { contracts: gapsText(fit.gaps) })
+  if (fit.fit === 'refused') {
+    const reason = refusalText(t.value, fit.refusal)
+    // A ticked plugin with the core left unticked is installed alone (the
+    // worker groups it with the core only when the core is part of the
+    // gesture), and the core that keeps running refuses it: say so on the
+    // row, with what ticking the core would change.
+    return running
+      ? t.value('update_row_fit_refused_unless_core', { reason })
+      : t.value('update_row_fit_refused', { reason })
+  }
+  return null
+}
 
 /** `null` when a row has nothing to say. */
 function warningFor(c: ComponentOffer): string | null {
@@ -124,6 +182,12 @@ function warningFor(c: ComponentOffer): string | null {
   // is the sentence that tells the operator why, the same one `ConfigView`'s
   // table and `InstallablesDialog` show in place of a button.
   if (c.installable === false) {
+    // The release carrying this archive does not say what it speaks: the
+    // device cannot know whether the core would accept it, and never
+    // assumes so.
+    if (c.not_installable_reason === 'contracts_unpublished') {
+      return t.value('update_row_contracts_unpublished', { component: c.name })
+    }
     // The core says which companion, when that is the reason: the sentence
     // then tells the operator what to do about this very update, rather
     // than restating the privileged plugin's general rule.
@@ -134,12 +198,28 @@ function warningFor(c: ComponentOffer): string | null {
     // being privileged (`refusedNote`).
     return refusedNote(t.value, c)
   }
+  // A major update without this plugin's own: the core that will run
+  // refuses the binary that stays. First, because being refused is what the
+  // operator must act on — but a third-party row keeps its source note
+  // after it: the label is the bare plugin name, and the note is the only
+  // place on the row that names the repository it comes from.
+  if (leftRefused(c)) {
+    const refused = t.value('update_row_refused_until_updated')
+    if (c.kind === 'third_party' || c.third_party_repo) {
+      return `${refused} ${t.value('update_row_third_party', { repo: c.third_party_repo ?? '?' })}`
+    }
+    return refused
+  }
   // A third-party pack: its label already names the source.
   if (c.kind === 'language_pack' && c.third_party_repo) return t.value('update_row_third_party_pack')
   if (c.kind === 'third_party' || c.third_party_repo) {
     return t.value('update_row_third_party', { repo: c.third_party_repo ?? '?' })
   }
   if (c.kind !== 'core' && checked.value.has(c.name) && coreLeftBehind.value) {
+    // The precise word, when the core already judged it: the fit line says
+    // this row will be refused unless the core is ticked too, and the
+    // general "may" would only repeat it less exactly.
+    if (c.with_running_core?.fit === 'refused') return null
     return t.value('update_row_core_not_selected', { component: c.name })
   }
   // The symmetrical case: the core is ticked and plugins of ours that have
@@ -148,7 +228,15 @@ function warningFor(c: ComponentOffer): string | null {
   // earlier word. Our plugins only: a third-party row is never ticked by
   // default and already carries its own warning, so counting it here would
   // make this one a permanent fixture of the core row.
-  if (c.kind === 'core' && checked.value.has(c.name) && pluginsLeftBehind.value.length > 0) {
+  //
+  // A breaking core says it in the banner instead, with the precise list of
+  // what it will refuse, and each such row says so on its own line.
+  if (
+    c.kind === 'core' &&
+    checked.value.has(c.name) &&
+    !c.breaking &&
+    pluginsLeftBehind.value.length > 0
+  ) {
     return t.value('update_row_plugins_not_selected', { components: pluginsLeftBehind.value.join(', ') })
   }
   return null
@@ -175,6 +263,7 @@ interface Row {
   label: string
   checked: boolean
   warning: string | null
+  fit: string | null
 }
 
 const rows = computed<Row[]>(() =>
@@ -183,6 +272,7 @@ const rows = computed<Row[]>(() =>
     label: labelFor(offer),
     checked: checked.value.has(offer.name),
     warning: warningFor(offer),
+    fit: offer.kind === 'core' ? null : fitLineFor(offer),
   })),
 )
 
@@ -200,6 +290,22 @@ function confirm() {
         <DialogTitle>{{ t('update_dialog_title') }}</DialogTitle>
         <DialogDescription>{{ t('update_dialog_description') }}</DialogDescription>
       </DialogHeader>
+
+      <!-- Between the header and the list: the core and some plugins change
+           how they talk, and what is not updated with it is refused until it
+           is. Shown only for a breaking core that is ticked — unticked, the
+           running core stays and nothing breaks. -->
+      <div
+        v-if="majorUpdate"
+        data-update-major
+        role="note"
+        class="rounded-md border border-border p-3 text-sm"
+      >
+        <p>{{ t('update_major_banner') }}</p>
+        <p v-if="refusedAfterMajor.length > 0" data-update-major-refused class="text-xs text-muted-foreground">
+          {{ t('update_major_refused', { components: refusedAfterMajor.join(', ') }) }}
+        </p>
+      </div>
 
       <ul class="space-y-3">
         <li
@@ -234,6 +340,9 @@ function confirm() {
             <span data-update-row-name>{{ row.label }}</span>
             <span v-if="row.warning" data-update-row-warning class="text-xs text-muted-foreground">
               {{ row.warning }}
+            </span>
+            <span v-if="row.fit" data-update-row-fit class="text-xs text-muted-foreground">
+              {{ row.fit }}
             </span>
           </div>
         </li>

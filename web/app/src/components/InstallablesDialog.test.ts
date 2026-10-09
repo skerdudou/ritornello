@@ -26,6 +26,8 @@ const CATALOG = {
     'Third-party plugins are offered only once this appliance can read a release of Ritornello\'s own. “Offer beta versions” lets it read the betas.',
   update_row_third_party_refused: 'Its last archive was refused: a third-party plugin\'s archive may carry nothing but its own binary.',
   update_row_pack_refused: 'Its last archive was refused by the language pack checks.',
+  update_row_contracts_unpublished:
+    '{component} cannot be installed from this device: its release does not publish which protocol versions it speaks.',
 }
 
 // The catalogue response the fake `fetch` answers `GET /api/update/catalogue`
@@ -71,6 +73,7 @@ beforeEach(async () => {
     release_url: null,
     last_check_unix_s: NOW_S,
     components: [],
+    major_update_waiting: false,
     busy: null,
     last_rollback: null,
   }
@@ -371,6 +374,27 @@ describe('InstallablesDialog', () => {
     expect(consoleRow.querySelector('[data-installable-install]')).not.toBeNull()
   })
 
+  // An official row refused because its release publishes no contracts is
+  // not "privileged": the sentence names the real reason, the one the update
+  // dialog shows for the same row.
+  // **[MUTATION]** drop the `contracts_unpublished` branch: red.
+  it('says the release publishes no contracts for an official row refused for that, not the privileged sentence', async () => {
+    mountDialog([
+      offer({
+        name: 'console',
+        offered: '0.2.1',
+        installable: false,
+        not_installable_reason: 'contracts_unpublished',
+      }),
+    ])
+    await flushPromises()
+    const row = document.body.querySelector('[data-installable-row][data-name="console"]')!
+    const note = row.querySelector('[data-installable-privileged]')?.textContent ?? ''
+    expect(note).toContain('console cannot be installed from this device')
+    expect(note).not.toContain('ritornello-install')
+    expect(row.querySelector('[data-installable-install]')).toBeNull()
+  })
+
   it('emits install for one row at a time', async () => {
     // One button per row rather than a multi-selection: installing a plugin
     // is the rare gesture, and the update dialog's checkbox list exists for
@@ -434,6 +458,18 @@ describe('InstallablesDialog', () => {
       const note = row('zed')?.querySelector('[data-installable-privileged]')?.textContent ?? ''
       expect(note).toContain('may carry nothing but its own binary')
       expect(note).not.toContain('ritornello-install')
+      expect(row('zed')?.querySelector('[data-installable-install]')).toBeNull()
+    })
+
+    // A fresh stranger's offer whose release publishes no contracts was not
+    // refused for its archive: it was never fetched. The note says why.
+    // **[MUTATION]** drop the `contracts_unpublished` branch: red.
+    it('says the release publishes no contracts for a stranger refused for that, not that its archive was refused', async () => {
+      mountDialog([fresh({ installable: false, not_installable_reason: 'contracts_unpublished' })])
+      await flushPromises()
+      const note = row('zed')?.querySelector('[data-installable-privileged]')?.textContent ?? ''
+      expect(note).toContain('zed cannot be installed from this device')
+      expect(note).not.toContain('was refused')
       expect(row('zed')?.querySelector('[data-installable-install]')).toBeNull()
     })
 

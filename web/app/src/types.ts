@@ -161,7 +161,39 @@ export interface ComponentOffer {
   needs_companion?: string
   /** A plugin announced by two or more repositories that disagree: every one of them, lowercased and sorted. Absent on every other row. */
   conflict_repos?: string[]
+  /** What the offered version speaks, from the catalogue of the release
+   * carrying its archive. Absent when that release publishes none. */
+  speaks?: Speaks
+  /** A plugin row: its verdict against the core it will meet — the offered
+   * core when the core has an update, the running one otherwise. Judged from
+   * the live announcement when the row installs nothing. */
+  with_core?: Fit
+  /** A plugin row that installs something: its verdict against the running core. */
+  with_running_core?: Fit
+  /** A plugin row whose binary announced itself: that binary, left as it is,
+   * against the same core as `with_core`. Set with or without an update;
+   * absent for a plugin that announced nothing (disabled, not started). */
+  installed_with_core?: Fit
+  /** The core row only: the offered core breaks the wire against the running one. */
+  breaking?: boolean
+  /** Set together with `installable: false`: why. */
+  not_installable_reason?: NotInstallableReason
 }
+
+/** What a component speaks, mirroring `compat::Speaks`. */
+export interface Speaks {
+  protocol: number
+  contracts: Partial<Record<Contract, ContractVersion>>
+}
+
+/** A plugin's verdict against one core, tagged by `fit` (`update::state::Fit`). */
+export type Fit =
+  | { fit: 'compatible' }
+  | { fit: 'limited'; gaps: ContractGap[] }
+  | { fit: 'refused'; refusal: Refusal }
+
+/** Why a row cannot be installed from the device (`update::state::NotInstallable`). */
+export type NotInstallableReason = 'contracts_unpublished'
 
 /** Left by the rollback unit, mirroring `ritornello_updater::rollback::Report`. */
 export interface RollbackSummary {
@@ -195,6 +227,12 @@ export interface UpdatePayload {
   release_url: string | null
   last_check_unix_s: number | null
   components: ComponentOffer[]
+  /**
+   * The offered core breaks the wire against the running one: never installed
+   * automatically, it waits for a gesture here (`update_major_waiting`).
+   * Always sent by the core.
+   */
+  major_update_waiting: boolean
   /** What is happening right now, as a catalog message, or `null` when idle. */
   busy: string | null
   /** Left by the rollback unit. `null` when nothing has ever rolled back. */

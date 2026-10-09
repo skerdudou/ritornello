@@ -321,14 +321,19 @@ watch(
               data-installable-conflict
               class="text-xs text-muted-foreground"
             >{{ t('installables_conflict', { repos: row.offer.conflict_repos.join(', ') }) }}</span>
-            <!-- The sentence follows what the row is (`refusedNote`): only
-                 one of ours is "privileged"; a stranger's plugin was refused
-                 for what its archive carried. -->
+            <!-- The sentence follows why the row is refused: a release that
+                 publishes no contracts for it says so whatever the row is
+                 (the same sentence the update dialog shows); otherwise it
+                 follows what the row is (`refusedNote`): only one of ours is
+                 "privileged"; a stranger's plugin was refused for what its
+                 archive carried. -->
             <span
               v-else-if="row.offer.installable === false"
               data-installable-privileged
               class="text-xs text-muted-foreground"
-            >{{ refusedNote(t, row.offer) }}</span>
+            >{{ row.offer.not_installable_reason === 'contracts_unpublished'
+              ? t('update_row_contracts_unpublished', { component: row.offer.name })
+              : refusedNote(t, row.offer) }}</span>
             <!-- Never disabled for a missing description: installing does not
                  depend on knowing how to describe the component. Disabled
                  while `busy` (m6): the update card's own Install button
