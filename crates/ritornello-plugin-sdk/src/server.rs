@@ -118,8 +118,8 @@ impl SourceOutcome {
 /// Spontaneous notification from a Source: track change, delayed arrival of a
 /// TOC, disc insertion.
 ///
-/// It carries a state, and at most one [`PlayRequest`] the core decides on:
-/// never an action. The core alone decides what goes into playback, so a
+/// It carries a state, and at most one [`PlayRequest`] the core decides on,
+/// never an order. The core alone decides what goes into playback, so a
 /// Source cannot trigger a `Play` on its own initiative, only ask.
 #[derive(Default)]
 pub struct Notification {

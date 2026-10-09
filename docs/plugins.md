@@ -819,9 +819,10 @@ from a flicker of the tray. Insert another disc and playback starts at track 1
 instead, which is also what happens when nothing has been remembered yet, when
 the remembered number falls outside the disc (the file is editable by hand),
 and when the TOC has not been read yet. That last case is a real limitation
-worth stating: the read is asynchronous, and a plugin cannot ask for playback
-after the fact — a spontaneous notification carries a state, never an action
-— so a boot that outruns the TOC read resumes at the first track. Pressing the
+worth stating: the read is asynchronous, and the answer to an activation is
+due before it lands — a spontaneous notification carries a state and at most
+one play request, which the core decides on (honoured in spontaneous
+notifications only, ignored in replies) — so a boot that outruns the TOC read resumes at the first track. Pressing the
 source key on a disc that has been sitting in the drive, the everyday case,
 has had its TOC read long since.
 
