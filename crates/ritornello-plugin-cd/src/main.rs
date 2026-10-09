@@ -1304,13 +1304,18 @@ impl CdSource {
     /// seek still owed, and the resume point — in memory **and** on disk. The
     /// owner asked for that last one explicitly: once a disc has been ejected,
     /// the next insertion starts from the beginning.
-    fn confirm_removal(&mut self) {
+    ///
+    /// Returns whether this call announced the removal in the journal, so the
+    /// tests read the decision rather than scrape a captured log (a `tracing`
+    /// capture races with the parallel tests that reach the same call site).
+    fn confirm_removal(&mut self) -> bool {
         // Once per removal: an Eject is followed by the watcher seeing the
         // tray open, and a tray opened, closed empty and opened again has
         // read no disc in between — both are still the one removal, already
         // logged. (The watcher itself only reports changes, never a repeated
         // state.)
-        if !self.insertion_pending {
+        let announce = !self.insertion_pending;
+        if announce {
             tracing::info!("disc removed (tray open or eject): resume point forgotten, next disc is an insertion");
         }
         self.playback = false;
@@ -1323,6 +1328,7 @@ impl CdSource {
             tracing::warn!("forgetting the resume point: {e}");
         }
         self.insertion_pending = true;
+        announce
     }
 
     /// Spontaneous notification carrying the status **and** the identity, built
@@ -3309,40 +3315,25 @@ mod tests {
 
     /// Final review, F7: the journal says when the resume point was dropped,
     /// once per removal — an Eject followed by the watcher seeing the tray
-    /// open is one removal, not two.
+    /// open is one removal, not two. Read from `confirm_removal`'s own answer,
+    /// never from a captured log: a `tracing` capture here raced with the
+    /// parallel tests reaching the same call site (350 failures in 400 runs).
     #[tokio::test]
-    async fn a_removal_is_logged_once() {
-        use tracing_subscriber::fmt::MakeWriter;
-        #[derive(Clone, Default)]
-        struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Buffer {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for Buffer {
-            type Writer = Buffer;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-        let buffer = Buffer::default();
-        let subscriber = tracing_subscriber::fmt().with_writer(buffer.clone()).with_ansi(false).finish();
-        // `#[tokio::test]` runs on one thread: the default holds across awaits.
-        let _guard = tracing::subscriber::set_default(subscriber);
-
+    async fn a_removal_is_announced_once() {
         let mut source = playing_source();
+        assert!(source.confirm_removal(), "the first confirmation announces the removal");
+        assert!(!source.confirm_removal(), "a second one, no disc read since, is the same removal");
+
+        // A disc read again makes the next removal a new one; an Eject then
+        // the watcher seeing the tray open is still a single removal.
+        insert_disc(&mut source).await;
+        assert!(!source.insertion_pending);
         let (presence_tx, presence_rx) = mpsc::channel(8);
         source.presence_rx = presence_rx;
         source.eject().await;
         presence_tx.send(cd::Drive::TrayOpen).await.unwrap();
         source.poll_notification().await;
-        let log = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
-        assert_eq!(log.matches("disc removed").count(), 1, "{log}");
+        assert!(!source.confirm_removal(), "Eject and the open tray were one removal, already announced");
     }
 
     #[tokio::test]
