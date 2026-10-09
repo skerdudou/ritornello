@@ -441,6 +441,33 @@ mod tests {
         assert!(String::from_utf8_lossy(&out.stderr).contains("no-such-plugin"));
     }
 
+    /// A wire constant the script cannot read is a release it must refuse
+    /// to describe: a catalogue with a guessed number would be believed.
+    #[test]
+    fn an_unreadable_constant_fails_the_catalogue() {
+        let src = tempfile::tempdir().expect("a temp dir");
+        let proto = repo_root().join("crates/ritornello-proto/src");
+        let lib = std::fs::read_to_string(proto.join("lib.rs")).unwrap();
+        std::fs::write(src.path().join("lib.rs"), lib).unwrap();
+        let contract = std::fs::read_to_string(proto.join("contract.rs")).unwrap();
+        let mangled = contract.replace("pub const INPUT_CONTRACT", "pub const INPUT_CONTRACT_GONE");
+        assert_ne!(contract, mangled, "the mutation changed nothing");
+        std::fs::write(src.path().join("contract.rs"), mangled).unwrap();
+        let shipped = src.path().join("changed.txt");
+        std::fs::write(&shipped, "ritornello-core\n").unwrap();
+        let out = std::process::Command::new("python3")
+            .arg("scripts/plugin-catalogue.py")
+            .arg("--shipped")
+            .arg(&shipped)
+            .arg("--proto-src")
+            .arg(src.path())
+            .current_dir(repo_root())
+            .output()
+            .expect("python3 is available");
+        assert!(!out.status.success(), "an unreadable constant was accepted");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("INPUT_CONTRACT"));
+    }
+
     /// **No component archive carries translated text any more.**
     ///
     /// The rule with no list to keep: a component that shipped its own

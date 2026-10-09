@@ -32,9 +32,16 @@ import re
 import sys
 import tomllib
 
-import packaging
+# No scripts/__pycache__/ left behind by the import below, and found whatever
+# the interpreter's flags (`-I` drops the script directory from the path).
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import packaging  # noqa: E402  (scripts/packaging.py, not the PyPI package)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+# Where the two wire-constant files live; `--proto-src <dir>` moves it, for
+# tests that mangle a constant on a copy.
+PROTO_SRC = ROOT / "crates" / "ritornello-proto" / "src"
 
 
 def plugin_names() -> list[str]:
@@ -105,7 +112,7 @@ def read_constant(path: pathlib.Path, pattern: str, what: str) -> re.Match:
 
 def protocol_version() -> int:
     m = read_constant(
-        ROOT / "crates" / "ritornello-proto" / "src" / "lib.rs",
+        PROTO_SRC / "lib.rs",
         r"^pub const PROTOCOL_VERSION: u32 = (\d+);",
         "PROTOCOL_VERSION",
     )
@@ -114,7 +121,7 @@ def protocol_version() -> int:
 
 def contract_versions() -> dict[str, dict]:
     """The five wire contracts of this tree, by lowercase name."""
-    path = ROOT / "crates" / "ritornello-proto" / "src" / "contract.rs"
+    path = PROTO_SRC / "contract.rs"
     out = {}
     for name in ("source", "display", "input", "metadata", "admin"):
         const = f"{name.upper()}_CONTRACT"
@@ -167,11 +174,17 @@ def build_contracts(shipped: list[str]) -> dict:
 def main() -> None:
     args = sys.argv[1:]
     shipped: list[str] = []
-    if args:
-        if len(args) != 2 or args[0] != "--shipped":
-            raise SystemExit("usage: plugin-catalogue.py [--shipped <changed.txt>]")
-        lines = pathlib.Path(args[1]).read_text(encoding="utf-8").splitlines()
-        shipped = [l.strip() for l in lines if l.strip()]
+    global PROTO_SRC
+    usage = "usage: plugin-catalogue.py [--shipped <changed.txt>] [--proto-src <dir>]"
+    while args:
+        if len(args) < 2 or args[0] not in ("--shipped", "--proto-src"):
+            raise SystemExit(usage)
+        if args[0] == "--shipped":
+            lines = pathlib.Path(args[1]).read_text(encoding="utf-8").splitlines()
+            shipped = [l.strip() for l in lines if l.strip()]
+        else:
+            PROTO_SRC = pathlib.Path(args[1])
+        args = args[2:]
     catalogue = build_catalogue()
     catalogue["contracts"] = build_contracts(shipped)
     json.dump(catalogue, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
