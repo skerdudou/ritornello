@@ -2694,8 +2694,10 @@ impl Worker {
     /// placed, and the binary left undeclared shows on the page as such.
     ///
     /// The request itself is not transactional: a failure inside root may
-    /// leave some plugins placed and not the core. The page then reports the
-    /// privileged failure, and the next press completes it.
+    /// leave some plugins placed and not the core. Those plugins are not
+    /// restarted: their old processes keep running, and after the next
+    /// restart of those plugins the running core refuses them. The page then
+    /// reports the privileged failure, and the next press completes it.
     async fn install_group(
         &self,
         client: &reqwest::Client,

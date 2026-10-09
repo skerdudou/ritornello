@@ -679,7 +679,8 @@ Confirming a ticked breaking core installs the compatible plugins first,
 then the core with its ticked dependents in **one** request, so that no
 moment leaves the old core facing a new plugin. If preparing any member of
 the group fails, nothing of the group is placed and the page names the
-member and says the rest waits; room is checked for the group's total. See
+member and says the rest waits; room is checked for the group's total, and
+the group's failure is the one the page shows. See
 [installation.md](installation.md#a-breaking-core-is-installed-with-its-dependents)
 for the sequence, the rollback and what the device does not do at night.
 
@@ -707,11 +708,15 @@ It can restart the core and any plugin it updates, the same as a manual
 install.
 
 **It never installs a major update.** When the offered core breaks the wire
-(another bootstrap or contract major), the night run leaves out the core and
-every plugin the running core would refuse; the plugins it accepts are still
-installed. The update card then says that a major update waits for a manual
-gesture and lists what the new core would refuse, and the dialog installs the
-break as one group (see [Update card](#update-card)).
+(another bootstrap or contract major), the night run leaves out the core. It
+never installs a plugin the running core would refuse either, break or not;
+the plugins it accepts are still installed. The update card then says that a
+major update waits for a manual gesture and lists what the new core would
+refuse, and the dialog installs the break as one group (see [Update
+card](#update-card)). This holds from the core that carries it on: the first
+break (`PROTOCOL_VERSION` 1 to 2) is met by an older core, which knows none of
+this (see
+[installation.md](installation.md#what-has-not-been-verified)).
 
 **The fourth setting has a price on rollback.** The value is written to
 `state.json` as `check_and_install_all`. A core older than the one that

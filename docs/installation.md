@@ -447,8 +447,8 @@ recognises a break by itself and installs it as one gesture:
   entry for it, **is not installable from the device**: the row says so and
   only a manual install remains. It is never treated as compatible by
   default.
-- **Who goes together.** The plugins the offered core accepts as they are
-  install first, one by one, as for any update. The **dependents** — the
+- **Who goes together.** The plugins the **running** core accepts in their
+  offered version install first, one by one, as for any update. The **dependents** — the
   ticked plugins the *running* core refuses to see updated alongside the
   offered core (their new version speaks a wire the running core does not) —
   then go in one privileged request with
@@ -460,12 +460,24 @@ recognises a break by itself and installs it as one gesture:
   verified and staged before any request is written, and room is checked for
   the **total** of the group. If staging any member fails, no request is
   written, the page names that member and says the rest waits, and the
-  plugins already installed in the compatible step stay. Once the single
+  plugins already installed in the compatible step stay; so it does when
+  the group as a whole lacks room. Once the single
   request is written the privileged helper applies it entry by entry:
-  a failure in the middle can leave some plugins placed and the core not, and
-  a new click on Install finishes the job.
+  a failure in the middle can leave some plugins placed and the core not.
+  Those plugins are not restarted: their old processes keep running, and
+  after the next restart of those plugins the running core refuses them,
+  until a new click on Install finishes the job. When the group fails, the
+  page reports the group's failure even if a compatible plugin failed before
+  it; that plugin's failure is in the log.
+- **Before this mechanism existed.** It works only once the core doing the
+  install carries it, and none published before it does: the first break
+  (`PROTOCOL_VERSION` 1 to 2) is installed by an old core, component by
+  component, with a rollback that restores the core alone. See [What has not
+  been verified](#what-has-not-been-verified) for what that means and how to
+  cross it safely.
 - **Never at night.** The automatic policy installs neither the breaking core
-  nor any plugin the running core would refuse; a plugin the running core
+  nor any plugin the running core would refuse — the latter whether or not
+  the core breaks; a plugin the running core
   accepts (and only the offered core refuses) is kept, since the core is not
   installed and that plugin keeps running under the old one. The update card
   says that a major update waits for a manual gesture, and lists what the new
@@ -542,8 +554,11 @@ that the previous beta already delivered. Nothing is lost by that. A device
 that ticked "Offer prereleases" resolves each component to the newest
 release carrying its archive, prereleases included, so a component unchanged
 since beta.3 is found in beta.3. `ritornello-install` does the same, per
-archive, from the release that carries it, and `catalogue.json` and
-`inventory.json` describe every component whatever the release carries. The
+archive, from the release that carries it. `inventory.json`, and the
+`components` part of `catalogue.json`, describe every component whatever the
+release carries; the `contracts` part of `catalogue.json` lists only the
+components that release ships, and a device reads each component's contracts
+from the release that carries its archive. The
 bundle of all plugins is attached to every release regardless. The one
 visible consequence is for someone assembling an install by hand from a
 beta's assets: it may need an archive from an older beta; the installer
@@ -1339,8 +1354,31 @@ protocol.
 **The upgrade across the bootstrap break (`PROTOCOL_VERSION` 1 to 2) has
 never run on a device**, and neither has a rollback across it. It is this
 project's first real wire break: a core and a plugin on either side of it
-refuse each other. What the code says will happen, traced and not observed
-(see [A breaking core is installed with its
+refuse each other.
+
+**That first break is not grouped.** A device installs an update with the
+core it is *running*, and every release published so far predates the
+grouped update: the core that will install 1 to 2 is an old one, and it does
+what it has always done. From its code, traced and not observed:
+
+- one privileged request per component, the plugins first, each restarted
+  under the old core (which refuses them from then on), the core alone and
+  last;
+- if the new core does not start, the rollback restores **the core only**:
+  the backup holds the last request's entries, and the last request placed
+  the core alone. The new plugins stay, the old core refuses them, and **the
+  device stays silent until someone acts**;
+- the old core has no notion of a break, so its automatic policy may install
+  it at night like any other update.
+
+The safe way across that first break is `ritornello-install` (see
+[Deploying](#deploying)), which places the core and the plugins from the
+workstation; failing that, an Install pressed on the device by someone
+watching that the new core starts.
+
+**The grouped update applies to breaks installed by a core that carries it**
+— the break after the next one at the earliest. What the code says it will
+do then, traced and not observed (see [A breaking core is installed with its
 dependents](#a-breaking-core-is-installed-with-its-dependents)):
 
 - the compatible plugins install first, one by one. The dependents and the
@@ -1348,18 +1386,23 @@ dependents](#a-breaking-core-is-installed-with-its-dependents)):
   never meets a new plugin it would refuse for long (`install_group` in
   `crates/ritornello-core/src/update/mod.rs`). The request is applied entry by
   entry: a failure in the middle can leave some plugins placed under the old
-  core, refused until a second click finishes the group;
+  core but not restarted. Their old processes keep running until those
+  plugins next restart, and after the next restart of those plugins the old
+  core refuses them, until a second click finishes the group;
 - if staging any member fails, no request is written and the old core keeps
   running with whatever the compatible step placed;
 - a **rollback** (the new core failing to start, see below) restores the core
   and the plugins that request replaced, together
   (`undoing_a_grouped_update_restores_the_plugins_it_replaced` in
   `crates/ritornello-updater/src/rollback.rs`);
-- the nightly update never installs the break. **The grouped update and its
+- the nightly update never installs the break, nor any plugin the running
+  core refuses. **The grouped update and its
   rollback have never run on a device**: the whole of the above is covered
   by tests with a faked privileged step, a fake restart and a temporary root,
   and the real one-request group, the real `systemd` start limit and the real
-  restoration of several plugins at once have not been watched.
+  restoration of several plugins at once have not been watched. Nor has the
+  old core's ungrouped path across 1 to 2 described above: it is read from
+  the code of the releases already published, not observed.
 
 The same holds, on a smaller scale, for a contract's major: a core and a
 plugin speaking that contract on either side of the move refuse each other.
