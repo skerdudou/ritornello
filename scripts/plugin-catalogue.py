@@ -16,11 +16,23 @@ The catalogue describes every declared component, not only the ones a given
 release ships: the device resolves each component to the newest release that
 carries its own archive, so a component untouched for several deliveries
 would otherwise be described by nothing.
+
+The `contracts` entry is the opposite: it lists only the components whose
+archive is in *this* release (`--shipped <changed.txt>`), with the wire
+versions of the tree this release was cut from. An archive carried by an
+older release must never be described with the current tree's numbers, so
+a component the release does not ship has no entry, and the device reads
+its contracts from the release that carries its archive. Without
+`--shipped` (development use) `contracts` is empty. Companions and language
+packs speak no wire and never appear.
 """
 import json
 import pathlib
+import re
 import sys
 import tomllib
+
+import packaging
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -80,8 +92,89 @@ def build_catalogue() -> dict:
     return {"components": components}
 
 
+def read_constant(path: pathlib.Path, pattern: str, what: str) -> re.Match:
+    """The first line of `path` matching `pattern`; exits if there is none
+    (the constants keep a one-line shape on purpose, as changed-components.sh
+    relies on)."""
+    text = path.read_text(encoding="utf-8").replace("\r", "")
+    m = re.search(pattern, text, re.MULTILINE)
+    if not m:
+        raise SystemExit(f"cannot read {what} from {path}")
+    return m
+
+
+def protocol_version() -> int:
+    m = read_constant(
+        ROOT / "crates" / "ritornello-proto" / "src" / "lib.rs",
+        r"^pub const PROTOCOL_VERSION: u32 = (\d+);",
+        "PROTOCOL_VERSION",
+    )
+    return int(m.group(1))
+
+
+def contract_versions() -> dict[str, dict]:
+    """The five wire contracts of this tree, by lowercase name."""
+    path = ROOT / "crates" / "ritornello-proto" / "src" / "contract.rs"
+    out = {}
+    for name in ("source", "display", "input", "metadata", "admin"):
+        const = f"{name.upper()}_CONTRACT"
+        m = read_constant(
+            path,
+            rf"^pub const {const}: ContractVersion = ContractVersion::new\((\d+), *(\d+)\);",
+            const,
+        )
+        out[name] = {"major": int(m.group(1)), "minor": int(m.group(2))}
+    return out
+
+
+def plugin_contracts(name: str, all_contracts: dict) -> list[str]:
+    """The contracts a plugin speaks: one per declared kind, plus `admin`
+    iff it declares `admin = true`."""
+    meta = crate_metadata(name)
+    spoken = set(meta["kinds"])
+    if meta.get("admin", False):
+        spoken.add("admin")
+    unknown = spoken - set(all_contracts)
+    if unknown:
+        raise SystemExit(f"plugin {name} declares kinds with no contract: {sorted(unknown)}")
+    return sorted(spoken)
+
+
+def build_contracts(shipped: list[str]) -> dict:
+    """The contracts of the shipped components, named as a device names
+    them: `core`, and the plugin's bare name."""
+    plugins = plugin_names()
+    companions = {f"ritornello-{c}" for c in packaging.companions()}
+    contracts = {}
+    proto = protocol_version()
+    versions = contract_versions()
+    for archive in shipped:
+        if archive == "ritornello-core":
+            contracts["core"] = {"protocol": proto, "contracts": dict(versions)}
+        elif archive.startswith("ritornello-plugin-") and archive.removeprefix("ritornello-plugin-") in plugins:
+            name = archive.removeprefix("ritornello-plugin-")
+            contracts[name] = {
+                "protocol": proto,
+                "contracts": {c: versions[c] for c in plugin_contracts(name, versions)},
+            }
+        elif archive in companions or archive.startswith("ritornello-lang-"):
+            continue  # no wire
+        else:
+            raise SystemExit(f"shipped component {archive!r} is neither the core, a declared plugin, a companion nor a language pack")
+    return contracts
+
+
 def main() -> None:
-    json.dump(build_catalogue(), sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
+    args = sys.argv[1:]
+    shipped: list[str] = []
+    if args:
+        if len(args) != 2 or args[0] != "--shipped":
+            raise SystemExit("usage: plugin-catalogue.py [--shipped <changed.txt>]")
+        lines = pathlib.Path(args[1]).read_text(encoding="utf-8").splitlines()
+        shipped = [l.strip() for l in lines if l.strip()]
+    catalogue = build_catalogue()
+    catalogue["contracts"] = build_contracts(shipped)
+    json.dump(catalogue, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
     sys.stdout.write("\n")
 
 

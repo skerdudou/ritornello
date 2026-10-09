@@ -415,7 +415,7 @@ included:
 | A plugin | `ritornello-plugin-<name>-<version>-<arch>.tar.gz` | exactly one file, `usr/local/lib/ritornello/plugins/ritornello-plugin-<name>` |
 | A language pack | `ritornello-lang-<lang>-<version>.tar.gz` (no architecture) | `pack.toml` and the module catalogs, the shape of ours |
 | Digests | `SHA256SUMS` | a line for every archive above; **mandatory** |
-| Descriptions | `catalogue.json` | optional, the format of ours |
+| Descriptions and contracts | `catalogue.json` | **mandatory** with a plugin, the format of ours |
 
 - **The one file is named after the plugin, exactly.** `<name>` in the asset
   name and in `ritornello-plugin-<name>` must agree; a bare `<name>` file, a
@@ -435,12 +435,31 @@ included:
   Where two installed packs carry the same module, ours speaks unless the
   operator records a preference; between two third-party packs, the one
   installed first speaks, the id breaking a tie.
-- **`catalogue.json` is optional.** When present, the install dialog shows
-  its description of your plugin; only the entries for names your repository
-  legitimately offers are ever shown (entries for a name the device already
-  has, one of ours, or one a second source also offers are dropped), so a
-  catalogue cannot describe anyone else's plugin. Without one the row shows
-  the name, your repository and the version.
+- **`catalogue.json` is required, and carries your contracts.** Its
+  `contracts` entry, keyed by your plugin's bare name, says which wire
+  version of each contract the archive of *that* release speaks (`protocol`
+  is `PROTOCOL_VERSION`; list one contract per kind you declare, plus
+  `admin` if you declare `admin = true`). The device judges an update
+  against the core before downloading anything, from this entry alone. A
+  release without a catalogue, or whose catalogue lacks your entry, cannot
+  be installed or updated from the device (the page says why); only a
+  manual install remains. List only the plugins whose archive is in that
+  release: a plugin carried by an older release is described by that
+  release's catalogue.
+
+  ```json
+  {
+    "components": {"mine": {"kinds": ["source"], "description": "What it does"}},
+    "contracts": {
+      "mine": {"protocol": 2, "contracts": {"source": {"major": 1, "minor": 1}}}
+    }
+  }
+  ```
+
+  `components` is what the install dialog shows; only the entries for names
+  your repository legitimately offers are ever shown (entries for a name the
+  device already has, one of ours, or one a second source also offers are
+  dropped), so a catalogue cannot describe anyone else's plugin.
 - **Prerelease and draft flags behave as for ours** (see point 2 above).
 
 **Names that are refused.** A plugin is offered *fresh* — to a device that has

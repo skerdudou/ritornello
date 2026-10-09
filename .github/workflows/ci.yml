@@ -599,11 +599,14 @@ jobs:
         # their artefacts, so one arch-independent file produced three times
         # would collide. It is arch-independent, so it is built once.
         #
-        # It describes **every** component, not the ones this release ships:
-        # the device resolves each component to the newest release carrying
-        # its archive, so a component untouched for seven deliveries is
-        # described by a catalogue it never met otherwise.
-        run: python3 scripts/plugin-catalogue.py > assets/catalogue.json
+        # `components` describes **every** component, not the ones this
+        # release ships: the device resolves each component to the newest
+        # release carrying its archive, so a component untouched for seven
+        # deliveries is described by a catalogue it never met otherwise.
+        # `contracts` is the opposite: only what this release ships
+        # (changed.txt, produced above), so that an archive carried by an
+        # older release is never described with this tree's numbers.
+        run: python3 scripts/plugin-catalogue.py --shipped changed.txt > assets/catalogue.json
       - name: One install inventory for the whole release
         # What each component places on the device, for ritornello-install.
         # Built here beside the catalogue, for the same two reasons, and like
