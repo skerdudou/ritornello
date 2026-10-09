@@ -443,7 +443,8 @@ included:
   against the core before downloading anything, from this entry alone. A
   release without a catalogue, or whose catalogue lacks your entry, cannot
   be installed or updated from the device (the page says why); only a
-  manual install remains. List only the plugins whose archive is in that
+  manual install remains (what the device does with a break is in
+  [installation.md](installation.md#a-breaking-core-is-installed-with-its-dependents)). List only the plugins whose archive is in that
   release: a plugin carried by an older release is described by that
   release's catalogue.
 

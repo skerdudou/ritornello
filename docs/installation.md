@@ -430,6 +430,59 @@ cross-compiled) and `arm64` (Pi 3/4/5 class) — cross-compiled on every
 release but **never started on real hardware**, for lack of a device to try
 it on.
 
+### A breaking core is installed with its dependents
+
+Most updates move one component at a time. A **break** does not: it is
+a core whose bootstrap `PROTOCOL_VERSION`, or the major of a contract, differs
+from the running one's. A plugin on either side of that move is refused by the
+other core, so no order of one-at-a-time installs is safe. The device
+recognises a break by itself and installs it as one gesture:
+
+- **What it reads.** Each component's wire versions come from the
+  `contracts` entry of the `catalogue.json` of the release that carries
+  *that component's archive* (see [Publishing a
+  prerelease](#publishing-a-prerelease) and [plugins.md](plugins.md#writing-a-plugin-of-your-own)),
+  fetched by the update worker during the check, never by a route. A
+  component whose release has no catalogue, or whose catalogue has no
+  entry for it, **is not installable from the device**: the row says so and
+  only a manual install remains. It is never treated as compatible by
+  default.
+- **Who goes together.** The plugins the offered core accepts as they are
+  install first, one by one, as for any update. The **dependents** — the
+  ticked plugins the *running* core refuses to see updated alongside the
+  offered core (their new version speaks a wire the running core does not) —
+  then go in one privileged request with
+  the core, **the core last**, and the plugins are not restarted (the new core
+  starts them). A dependent the owner left unticked is not added: the core
+  installs anyway, the dialog having warned that the plugin will be refused
+  until it is updated.
+- **Nothing is half-placed by the worker.** Every member is downloaded,
+  verified and staged before any request is written, and room is checked for
+  the **total** of the group. If staging any member fails, no request is
+  written, the page names that member and says the rest waits, and the
+  plugins already installed in the compatible step stay. Once the single
+  request is written the privileged helper applies it entry by entry:
+  a failure in the middle can leave some plugins placed and the core not, and
+  a new click on Install finishes the job.
+- **Never at night.** The automatic policy installs neither the breaking core
+  nor any plugin the running core would refuse; a plugin the running core
+  accepts (and only the offered core refuses) is kept, since the core is not
+  installed and that plugin keeps running under the old one. The update card
+  says that a major update waits for a manual gesture, and lists what the new
+  core would refuse as things stand (a third-party plugin the release does
+  not update, a companion the device cannot place).
+- **One net for the group.** The rollback keeps its own conditions: it fires
+  only when the new core does not start (the start limit of
+  `ritornello.service`: five failures in 120 s, then `OnFailure=`). It
+  restores the core **and the plugins that request replaced, together**, from
+  the same backup, so the old core is not left running against a plugin built
+  for the new wire. A plugin gesture (install or uninstall) within the ten
+  minutes after the group disarms the net, as for any plugin gesture
+  (see [interface.md](interface.md#automatic-update-policy)).
+
+What the dialog shows is described in
+[interface.md](interface.md#update-card).
+
 ### Publishing a prerelease
 
 For trying a redeployment before it reaches anyone, or for offering an edge
@@ -1286,25 +1339,27 @@ protocol.
 **The upgrade across the bootstrap break (`PROTOCOL_VERSION` 1 to 2) has
 never run on a device**, and neither has a rollback across it. It is this
 project's first real wire break: a core and a plugin on either side of it
-refuse each other. What the code says will happen, traced and not observed:
+refuse each other. What the code says will happen, traced and not observed
+(see [A breaking core is installed with its
+dependents](#a-breaking-core-is-installed-with-its-dependents)):
 
-- the update worker installs the plugins first and the core last
-  (`install_order` in `crates/ritornello-core/src/update/mod.rs`). While the
-  plugins are being placed, the old core still runs, and it refuses each new
-  plugin as it restarts: the configuration page turns red row by row, and
-  the music stops if the active source is one of them. Everything heals when
-  the new core is placed and restarted;
-- if the core's own step fails, the device is left with the old core and
-  every new plugin refused. The automatic update retries the core the next
-  night; by hand, install the core from the update dialog;
-- a **rollback** (the new core failing to start, see below) restores the
-  core alone: the backup of each privileged run covers only what that run
-  placed, and the core is placed last, on its own. The device then runs the
-  old core with every plugin refused, so it is silent, and the nightly
-  update does not try again, since it never retries a version it has
-  already placed. Recovery is by hand: place a matching core and plugins
-  together, from one release, with `ritornello-install` (or the core again
-  from the update dialog, once the reason it failed to start is known).
+- the compatible plugins install first, one by one. The dependents and the
+  core then go in **one** privileged request, the core last, so the old core
+  never meets a new plugin it would refuse for long (`install_group` in
+  `crates/ritornello-core/src/update/mod.rs`). The request is applied entry by
+  entry: a failure in the middle can leave some plugins placed under the old
+  core, refused until a second click finishes the group;
+- if staging any member fails, no request is written and the old core keeps
+  running with whatever the compatible step placed;
+- a **rollback** (the new core failing to start, see below) restores the core
+  and the plugins that request replaced, together
+  (`undoing_a_grouped_update_restores_the_plugins_it_replaced` in
+  `crates/ritornello-updater/src/rollback.rs`);
+- the nightly update never installs the break. **The grouped update and its
+  rollback have never run on a device**: the whole of the above is covered
+  by tests with a faked privileged step, a fake restart and a temporary root,
+  and the real one-request group, the real `systemd` start limit and the real
+  restoration of several plugins at once have not been watched.
 
 The same holds, on a smaller scale, for a contract's major: a core and a
 plugin speaking that contract on either side of the move refuse each other.
