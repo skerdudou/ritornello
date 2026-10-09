@@ -129,13 +129,17 @@ CONTRACTS=(source:SOURCE_CONTRACT display:DISPLAY_CONTRACT input:INPUT_CONTRACT 
 # Does plugin crate <c> speak contract <name>? Read, parsed, from its
 # declaration (the same one plugin_catalogue_declaration.rs holds to what the
 # binary registers) by packaging.py, so that no TOML is read with sed. Status
-# 0 speaks, 1 does not; anything else is a manifest nobody could read, and the
-# release is refused rather than the plugin taken for silent.
+# 0 speaks, 3 does not. ANY other status (a crash is 1, a manifest packaging.py
+# could not read is 2, a missing python is 127) aborts the release: a plugin
+# that could not be read must never be taken for one that is not required.
 speaks() { # <crate> <contract>
   local rc=0
   python3 scripts/packaging.py speaks "$1" "$2" || rc=$?
-  [ "$rc" -le 1 ] || exit 1
-  return "$rc"
+  case "$rc" in
+    0) return 0 ;;
+    3) return 1 ;;
+    *) echo "cannot tell whether $1 speaks the $2 contract (packaging.py exited $rc): release refused" >&2; exit 1 ;;
+  esac
 }
 
 # The product's major, from a workspace Cargo.toml on stdin: the first
@@ -805,7 +809,7 @@ kinds = ["metadata"]
 admin=true # served by a page
 ' > "$R/crates/ritornello-plugin-musicbrainz/Cargo.toml"
   for c in ritornello-core ritornello-plugin-cd ritornello-plugin-files ritornello-plugin-generic-input ritornello-plugin-mpd ritornello-plugin-radio; do rel_bump "$c"; done
-  expect_rel 1 "" "ritornello-plugin-musicbrainz" "admin=true with a trailing comment still speaks admin"
+  expect_rel 1 "" "admin contract major moved" "admin=true with a trailing comment still speaks admin, and the refusal is the contract's, not a parse failure"
 
   rel_repo
   contract_set DISPLAY "2, 0"
@@ -819,7 +823,21 @@ kinds = [
 ]
 ' > "$R/crates/ritornello-plugin-console/Cargo.toml"
   for c in ritornello-core ritornello-plugin-mpd; do rel_bump "$c"; done
-  expect_rel 1 "" "ritornello-plugin-console" "a multi-line kinds array still speaks display"
+  expect_rel 1 "" "display contract major moved" "a multi-line kinds array still speaks display, and the refusal is the contract's, not a parse failure"
+
+  # A declaration that cannot be read is never "does not speak": the release
+  # is refused, naming the crate, whatever the cause (bad UTF-8, a wrong shape).
+  rel_repo
+  contract_set ADMIN "2, 0"
+  printf '[package]\nname = "ritornello-plugin-musicbrainz"\nversion = "0.1.0"\n# \377\376\n' > "$R/crates/ritornello-plugin-musicbrainz/Cargo.toml"
+  for c in ritornello-core ritornello-plugin-musicbrainz; do rel_bump "$c"; done
+  expect_rel 1 "" "cannot tell whether ritornello-plugin-musicbrainz speaks" "a manifest that is not valid UTF-8 aborts the release instead of reading as a silent plugin (the plugin is bumped, so only the abort can refuse)"
+
+  rel_repo
+  contract_set DISPLAY "2, 0"
+  printf '[package]\nname = "ritornello-plugin-console"\nversion = "0.1.0"\n\n[package.metadata.ritornello]\nkinds = 5\n' > "$R/crates/ritornello-plugin-console/Cargo.toml"
+  for c in ritornello-core ritornello-plugin-console; do rel_bump "$c"; done
+  expect_rel 1 "" "cannot tell whether ritornello-plugin-console speaks" "kinds = 5 aborts the release instead of reading as a silent plugin (the plugin is bumped, so only the abort can refuse)"
 
   # The language packs, kept in the output this time: they are data, and a
   # wire break must not republish them under their unchanged numbers.

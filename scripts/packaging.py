@@ -119,18 +119,36 @@ def speaks(crate: str, contract: str) -> int:
     for the admin contract, the name among `kinds` for the others. Parsed,
     not matched line by line, so that a trailing comment, a missing space or
     a multi-line `kinds` array cannot make a speaker look silent (and be left
-    out of a release that had to include it). Exit status: 0 it speaks, 1 it
-    does not, 2 the manifest cannot be read.
+    out of a release that had to include it).
+
+    Exit status: 0 it speaks, 3 it does not, anything else means "could not
+    tell". "Does not speak" has a code no crash can produce: an uncaught
+    exception exits 1 and a missing interpreter 127, and neither may ever be
+    read as a plugin that is simply not required to move. The shapes are
+    checked explicitly (2) for the same reason.
     """
+    def unreadable(why: str) -> int:
+        print(f"cannot read the declaration of {crate}: {why}", file=sys.stderr)
+        return 2
+
     try:
         manifest = tomllib.loads((ROOT / "crates" / crate / "Cargo.toml").read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as e:
-        print(f"cannot read the declaration of {crate}: {e}", file=sys.stderr)
-        return 2
-    declared = manifest.get("package", {}).get("metadata", {}).get("ritornello", {})
+    except (OSError, ValueError) as e:  # ValueError: bad UTF-8 and bad TOML alike
+        return unreadable(str(e))
+    package = manifest.get("package", {})
+    metadata = package.get("metadata", {}) if isinstance(package, dict) else None
+    declared = metadata.get("ritornello", {}) if isinstance(metadata, dict) else None
+    if not isinstance(declared, dict):
+        return unreadable("[package.metadata.ritornello] is not a table")
+    kinds = declared.get("kinds", [])
+    if not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds):
+        return unreadable("`kinds` is not a list of strings")
+    admin = declared.get("admin", False)
+    if not isinstance(admin, bool):
+        return unreadable("`admin` is not a boolean")
     if contract == "admin":
-        return 0 if declared.get("admin") is True else 1
-    return 0 if contract in declared.get("kinds", []) else 1
+        return 0 if admin else 3
+    return 0 if contract in kinds else 3
 
 
 def main() -> int:
