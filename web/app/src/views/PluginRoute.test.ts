@@ -28,7 +28,7 @@ const PluginViewStub = {
 async function statusAnswered(locale = 'fr', session = 'sess-1') {
   const { usePlugins } = await import('../composables/usePlugins')
   const p = usePlugins()
-  p.state.value = { plugins: [], active_source: '', protocol: 0, session, locale }
+  p.state.value = { plugins: [], active_source: '', contracts: {}, session, locale }
   p.settled.value = true
   return p
 }
@@ -37,7 +37,7 @@ async function statusAnswered(locale = 'fr', session = 'sess-1') {
 async function statusPending() {
   const { usePlugins } = await import('../composables/usePlugins')
   const p = usePlugins()
-  p.state.value = { plugins: [], active_source: '', protocol: 0, session: '', locale: '' }
+  p.state.value = { plugins: [], active_source: '', contracts: {}, session: '', locale: '' }
   p.settled.value = false
   return p
 }
@@ -233,7 +233,7 @@ describe('PluginRoute', () => {
     // all, not a half-stamped one.
     const { usePlugins } = await import('../composables/usePlugins')
     const p = usePlugins()
-    p.state.value = { plugins: [], active_source: '', protocol: 0, session: '', locale: '' }
+    p.state.value = { plugins: [], active_source: '', contracts: {}, session: '', locale: '' }
     p.settled.value = true
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })))
     const PluginRoute = (await import('./PluginRoute.vue')).default

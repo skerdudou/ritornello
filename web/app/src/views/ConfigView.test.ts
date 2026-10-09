@@ -26,8 +26,11 @@ const CATALOGUE = {
   col_version: 'Version', col_actions: 'Actions',
   connected: 'connecté', unavailable: 'unavailable', stalled: 'figé', disabled: 'désactivé',
   starting: 'démarrage', busy: 'occupé',
-  plugin_incompatible: 'Compilé pour le protocole {found} ; ce cœur parle le {expected}',
-  plugin_catalog_unknown: 'Compilé avant les packs de langue',
+  plugin_incompatible_legacy: 'Construit pour un protocole ancien ({found}) ; réinstallez ce greffon',
+  plugin_incompatible_missing: 'Annonce sa partie {contract} sans la version de ce contrat',
+  plugin_incompatible_unexpected: "Annonce un contrat {contract} qu'il ne sert pas",
+  plugin_incompatible_major: 'Contrat {contract} : construit pour {found}, ce cœur parle {expected}',
+  plugin_limited: 'Limité — contrat {contract} {found}, ce cœur parle {expected} : certaines fonctions de ce greffon sont inactives ; mettez à jour le cœur',
   admin_link: 'admin', toggle_plugin: 'Activer ou désactiver {name}',
   plugin_enabled: '{name} activé.', plugin_disabled: '{name} désactivé.',
   update_binary_missing: 'Non installé', update_undeclared: 'Installé mais non déclaré',
@@ -695,43 +698,76 @@ describe('ConfigView — plugin table', () => {
     expect(wrapper.find('[data-plugin-state]').text()).toBe('unavailable')
   })
 
-  it('says which protocol a refused plugin was built for', async () => {
-    // The number must reach the screen through the catalog, never concatenated:
-    // a language places its own numbers, and a test that accepted "protocol 2"
-    // glued to a label would let an untranslatable string through.
+  const gap = (contract: string, plugin: [number, number], core: [number, number]) => ({
+    contract,
+    plugin: { major: plugin[0], minor: plugin[1] },
+    core: { major: core[0], minor: core[1] },
+  })
+  const rowNamed = (w: Awaited<ReturnType<typeof mountWithStatus>>, name: string) =>
+    w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === name)!
+  const stateText = (row: ReturnType<typeof rowNamed>) =>
+    row.get('[data-plugin-state]').text().replace(/\s+/g, ' ')
+  const badge = (row: ReturnType<typeof rowNamed>) => row.get('[data-plugin-state] [data-slot="badge"]')
+
+  it('names the contract a refused plugin was built for', async () => {
+    // The numbers must reach the screen through the catalog, never
+    // concatenated, and the **whole** sentence is asserted: `found` and
+    // `expected` swapped would tell the operator to install exactly the binary
+    // they already have, and a side-by-side `toContain` would not notice.
     const w = await mountWithStatus({
-      plugins: [{ name: 'radio', kind: 'unknown', connected: false, admin: false, incompatible: 2 }],
+      plugins: [{
+        name: 'radio', kind: 'unknown', connected: false, admin: false,
+        incompatible: { reason: 'major', gaps: [gap('display', [2, 0], [1, 0])] },
+      }],
       active_source: '',
-      protocol: 1,
+      contracts: { display: { major: 1, minor: 0 } },
     })
-    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'radio')!
-    // The **whole** sentence, not `toContain('2')` and `toContain('1')` side by
-    // side: those two pass just as well with `found` and `expected` swapped in
-    // the `t()` call, and swapping them tells the operator to install exactly
-    // the binary they already have. The full string is the only assertion that
-    // fixes which number goes where.
-    expect(row.get('[data-plugin-state]').text().replace(/\s+/g, ' ')).toBe(
-      'Compilé pour le protocole 2 ; ce cœur parle le 1',
-    )
+    const row = rowNamed(w, 'radio')
+    expect(stateText(row)).toBe('Contrat display : construit pour 2.0, ce cœur parle 1.0')
+    expect(badge(row).classes()).toContain('bg-destructive')
     // The raw key must never reach the screen: that is what a missing catalog
-    // entry looks like, and this repo has a test class dedicated to catching it.
+    // entry looks like.
     expect(row.text()).not.toContain('plugin_incompatible')
   })
 
-  it('treats a refusal at protocol 0 as a refusal, not as "no refusal"', async () => {
-    // `"incompatible":0` deserializes perfectly well — serde's default only
-    // applies when the key is *absent* — so the badge must test `!== undefined`
-    // and never truthiness. A truthy test shows the plugin as merely
-    // "unavailable" and loses the one piece of information that explains it.
+  it('lists every contract of a refusal', async () => {
     const w = await mountWithStatus({
-      plugins: [{ name: 'radio', kind: 'unknown', connected: false, admin: false, incompatible: 0 }],
+      plugins: [{
+        name: 'mpd', kind: 'display', connected: false, admin: false,
+        incompatible: { reason: 'major', gaps: [gap('display', [2, 0], [1, 0]), gap('input', [3, 1], [1, 0])] },
+      }],
       active_source: '',
-      protocol: 1,
+      contracts: {},
     })
-    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'radio')!
-    expect(row.get('[data-plugin-state]').text().replace(/\s+/g, ' ')).toBe(
-      'Compilé pour le protocole 0 ; ce cœur parle le 1',
-    )
+    const text = stateText(rowNamed(w, 'mpd'))
+    expect(text).toContain('Contrat display : construit pour 2.0, ce cœur parle 1.0')
+    expect(text).toContain('Contrat input : construit pour 3.1, ce cœur parle 1.0')
+  })
+
+  it('says a pre-contract plugin must be reinstalled', async () => {
+    // The badge tests `!== undefined` on the refusal object, so no `found`
+    // value (0 included) can make a refusal read as "no refusal".
+    const w = await mountWithStatus({
+      plugins: [{ name: 'radio', kind: 'unknown', connected: false, admin: false, incompatible: { reason: 'legacy', found: 1 } }],
+      active_source: '',
+      contracts: {},
+    })
+    const row = rowNamed(w, 'radio')
+    expect(stateText(row)).toBe('Construit pour un protocole ancien (1) ; réinstallez ce greffon')
+    expect(badge(row).classes()).toContain('bg-destructive')
+  })
+
+  it('says which contract is missing or unexpected', async () => {
+    const w = await mountWithStatus({
+      plugins: [
+        { name: 'a', kind: 'unknown', connected: false, admin: false, incompatible: { reason: 'missing_contract', contract: 'input' } },
+        { name: 'b', kind: 'unknown', connected: false, admin: false, incompatible: { reason: 'unexpected_contract', contract: 'admin' } },
+      ],
+      active_source: '',
+      contracts: {},
+    })
+    expect(stateText(rowNamed(w, 'a'))).toBe('Annonce sa partie input sans la version de ce contrat')
+    expect(stateText(rowNamed(w, 'b'))).toBe("Annonce un contrat admin qu'il ne sert pas")
   })
 
   it('shows the version each plugin announced', async () => {
@@ -740,51 +776,71 @@ describe('ConfigView — plugin table', () => {
     const w = await mountWithStatus({
       plugins: [{ name: 'radio', kind: 'source', connected: true, admin: false, version: '0.2.1' }],
       active_source: '',
-      protocol: 1,
+      contracts: {},
     })
     const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'radio')!
     expect(row.text()).toContain('0.2.1')
   })
 
-  it('names a wired plugin whose announcement predates the catalog field', async () => {
-    // Unlike `incompatible`, this plugin is fully wired — `connected: true`
-    // — and the badge must say so is not the point: it must name the
-    // missing language packs instead of a bare "connected" that would say
-    // nothing about them. See `PluginRow.catalog_unknown`'s own doc.
+  const LIMITED_TEXT =
+    'Limité — contrat display 1.1, ce cœur parle 1.0 : certaines fonctions de ce greffon sont inactives ; mettez à jour le cœur'
+
+  it('shows a limited plugin as limited, with the contract', async () => {
+    // Fully wired — `connected: true` — so the badge must not say a bare
+    // "connected": that would hide that some of its features are inactive.
     const w = await mountWithStatus({
-      plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false, catalog_unknown: true }],
+      plugins: [{ name: 'cd', kind: 'display', connected: true, admin: false, limited: [gap('display', [1, 1], [1, 0])] }],
       active_source: '',
+      contracts: {},
     })
-    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'cd')!
-    expect(row.get('[data-plugin-state]').text()).toBe('Compilé avant les packs de langue')
-    // The raw key must never reach the screen — same discipline as
-    // `plugin_incompatible` above.
-    expect(row.text()).not.toContain('plugin_catalog_unknown')
+    const row = rowNamed(w, 'cd')
+    expect(stateText(row)).toBe(LIMITED_TEXT)
+    expect(badge(row).classes()).not.toContain('bg-destructive')
+    expect(badge(row).classes()).not.toContain('bg-secondary')
+    expect(row.text()).not.toContain('plugin_limited')
   })
 
-  it('a legacy plugin whose socket failed reads as unavailable, not as legacy', async () => {
-    // The defect this test was added to catch (fix round 2, Important 1):
-    // the core sets `catalog_unknown` from the announcement alone, at the
-    // same site as `ui_version`/`version`/`repository` — whether or not the
-    // socket connect that follows succeeds — so `catalog_unknown: true` and
-    // `connected: false` is a real combination, not a hypothetical one. The
-    // more urgent fact (this specific attempt failed) must win: a legacy
-    // binary that cannot even be reached needs "unavailable", not a
-    // sentence about its language packs.
+  it('a limited plugin that is busy reads as busy', async () => {
+    // A real fault outranks the limitation, in the label and in the variant.
     const w = await mountWithStatus({
-      plugins: [{ name: 'cd', kind: 'source', connected: false, admin: false, catalog_unknown: true }],
+      plugins: [{ name: 'cd', kind: 'display', connected: true, busy: true, admin: false, limited: [gap('display', [1, 1], [1, 0])] }],
       active_source: '',
+      contracts: {},
     })
-    const row = w.findAll('[data-plugin-row]').find((r) => r.get('[data-plugin-name]').text() === 'cd')!
-    expect(row.get('[data-plugin-state]').text()).toBe('unavailable')
-    expect(row.text()).not.toContain('plugin_catalog_unknown')
+    expect(stateText(rowNamed(w, 'cd'))).toBe('occupé')
   })
 
-  it('a wired plugin with an announced but empty catalog is not named as legacy', async () => {
-    // The mirror case: no `catalog_unknown` in the payload at all — exactly
-    // what a textless but up-to-date plugin (`console`, `ouifm-metas`,
-    // `radiofrance-metas`) announces. Conflating the two would make every
-    // legitimately textless plugin look like an old binary.
+  it('a limited plugin whose socket failed reads as unavailable', async () => {
+    // The core sets `limited` from the announcement alone, whether or not the
+    // socket connect that follows succeeds, so `limited` with
+    // `connected: false` is a real combination. The more urgent fact (this
+    // attempt failed) must win: a defect an earlier review caught with a probe
+    // test on the same rung, when it was still named `catalog_unknown`.
+    const w = await mountWithStatus({
+      plugins: [{ name: 'cd', kind: 'display', connected: false, admin: false, limited: [gap('display', [1, 1], [1, 0])] }],
+      active_source: '',
+      contracts: {},
+    })
+    const row = rowNamed(w, 'cd')
+    expect(stateText(row)).toBe('unavailable')
+    expect(row.text()).not.toContain('plugin_limited')
+  })
+
+  it('a plugin limited on one kind is limited as a whole row', async () => {
+    const w = await mountWithStatus({
+      plugins: [
+        { name: 'mpd', kind: 'display', connected: true, admin: false, limited: [gap('display', [1, 1], [1, 0])] },
+        { name: 'mpd', kind: 'input', connected: true, admin: false },
+      ],
+      active_source: '',
+      contracts: {},
+    })
+    expect(stateText(rowNamed(w, 'mpd'))).toBe(LIMITED_TEXT)
+  })
+
+  it('a wired plugin with nothing limited reads as plain connected', async () => {
+    // The mirror case: no `limited` in the payload at all — what an
+    // up-to-date plugin announces. It must read as plain "connected".
     const w = await mountWithStatus({
       plugins: [{ name: 'cd', kind: 'source', connected: true, admin: false }],
       active_source: '',
@@ -835,7 +891,7 @@ describe('ConfigView — plugin table', () => {
     const w = await mountWithStatus({
       plugins: [{ name: 'mpd', kind: 'source', connected: false, admin: false, missing_binary: true }],
       active_source: 'radio',
-      protocol: 1,
+      contracts: {},
     })
     expect(w.get('[data-plugin-row] [data-plugin-state]').text()).toBe('Non installé')
   })
@@ -849,7 +905,7 @@ describe('ConfigView — plugin table', () => {
         { name: 'mpd', kind: 'unknown', connected: false, admin: false, undeclared_binary: true },
       ],
       active_source: 'radio',
-      protocol: 1,
+      contracts: {},
     })
     const row = w.get('[data-plugin-row]')
     expect(row.find('[data-plugin-declare]').exists()).toBe(true)
@@ -878,7 +934,7 @@ describe('ConfigView — plugin table', () => {
         },
       ],
       active_source: 'radio',
-      protocol: 1,
+      contracts: {},
     })
     const row = w.get('[data-plugin-row]')
     expect(row.find('[data-plugin-declare]').exists()).toBe(false)
@@ -956,7 +1012,7 @@ describe('ConfigView — plugin table', () => {
           { name: 'radio', kind: 'source', connected: true, admin: false },
         ],
         active_source: 'radio',
-        protocol: 1,
+        contracts: {},
       },
     })
     const files = rowOf(w, 'files')
@@ -993,7 +1049,7 @@ describe('ConfigView — plugin table', () => {
           { name: 'mpd', kind: 'unknown', connected: false, admin: false, missing_binary: true },
         ],
         active_source: 'radio',
-        protocol: 1,
+        contracts: {},
       },
       '/api/update': offering('files', 'mpd'),
     })
@@ -1034,7 +1090,7 @@ describe('ConfigView — plugin table', () => {
           },
         ],
         active_source: 'radio',
-        protocol: 1,
+        contracts: {},
       },
       '/api/update': offering('files', 'mpd'),
     })

@@ -1,5 +1,24 @@
 import type { Mode } from '@ritornello/ui'
 
+/** Wire names of the five contracts a plugin can serve. */
+export type Contract = 'source' | 'display' | 'input' | 'metadata' | 'admin'
+export interface ContractVersion {
+  major: number
+  minor: number
+}
+/** One contract on which a plugin and this core disagree. */
+export interface ContractGap {
+  contract: Contract
+  plugin: ContractVersion
+  core: ContractVersion
+}
+/** Why a plugin was refused, tagged by `reason`. */
+export type Refusal =
+  | { reason: 'legacy'; found: number }
+  | { reason: 'missing_contract'; contract: Contract }
+  | { reason: 'unexpected_contract'; contract: Contract }
+  | { reason: 'major'; gaps: ContractGap[] }
+
 export interface PluginStatus {
   name: string
   kind: string
@@ -29,15 +48,13 @@ export interface PluginStatus {
    * for completeness; the update rows carry the interpreted `owner/repo` as
    * `ComponentOffer.third_party_repo`. */
   repository?: string
-  /** Protocol this binary announced, present **only** when it differs from
-   * this core's own (see `StatusPayload.protocol`). Its presence is the
-   * refusal itself. */
-  incompatible?: number
-  /** This plugin's announcement carried no `catalog` field at all — a binary
-   * built before this core could ask for its embedded translation layers.
-   * Distinct from a plugin that announced an empty catalog, which has no
-   * text of its own and sets nothing here. Optional: absent when false. */
-  catalog_unknown?: boolean
+  /** Why this plugin was refused, present **only** when it was. Its presence
+   * is the refusal itself. */
+  incompatible?: Refusal
+  /** Contracts on which this plugin is ahead of this core by a minor: it is
+   * wired and connected, but some of its features are inactive. Absent when
+   * nothing is limited. */
+  limited?: ContractGap[]
   /** Declared, and its binary is not on disk. Optional: absent when false. */
   missing_binary?: boolean
   /** A binary sitting in the plugins directory that nothing declares — the
@@ -69,10 +86,8 @@ export interface PluginStatus {
 export interface StatusPayload {
   plugins: PluginStatus[]
   active_source: string
-  /** Protocol this core speaks. The other half of what the configuration page
-   * needs to explain a refused plugin: a line carries what its binary
-   * claimed, this carries what the core expects. */
-  protocol: number
+  /** The version of each contract this core speaks, by wire name. */
+  contracts: Partial<Record<Contract, ContractVersion>>
   /**
    * Identifier of this run of the core, used by the shell as the `v=` stamp
    * of a plugin's catalog URL (see `PluginRoute.vue`'s `catalogQuery`).
