@@ -254,6 +254,60 @@ mod tests {
         );
     }
 
+    /// **A grouped update is undone as a whole.** A breaking core travels with
+    /// the plugins that depend on it in one request; if the new core does not
+    /// start, the plugin it replaced must go back with the core, or the old
+    /// core would be left running against a plugin built for the new wire.
+    #[test]
+    fn undoing_a_grouped_update_restores_the_plugins_it_replaced() {
+        let (_d, prefix, staging) = fake_root();
+        let plugins = prefix.join("usr/local/lib/ritornello/plugins");
+        let core = prefix.join("usr/local/bin/ritornello-core");
+        fs::write(plugins.join("ritornello-plugin-mpd"), b"old mpd").unwrap();
+        fs::write(&core, b"the core that worked").unwrap();
+        fs::write(staging.join("staged-mpd"), b"new mpd").unwrap();
+        fs::write(staging.join("staged-radio"), b"fresh radio").unwrap();
+        fs::write(staging.join("staged-core"), b"the core that does not start").unwrap();
+        let req = Request {
+            format: REQUEST_FORMAT,
+            actions: vec![
+                Action::PlacePlugin {
+                    file: "ritornello-plugin-mpd".to_string(),
+                    staged: "staged-mpd".to_string(),
+                },
+                Action::PlacePlugin {
+                    file: "ritornello-plugin-radio".to_string(),
+                    staged: "staged-radio".to_string(),
+                },
+                Action::PlaceCore { staged: "staged-core".to_string() },
+            ],
+        };
+        let applied = apply(&prefix, &staging, &req).unwrap();
+        crate::marker::arm(&prefix, &applied, 1_000).unwrap();
+        assert_eq!(fs::read(plugins.join("ritornello-plugin-mpd")).unwrap(), b"new mpd");
+
+        let report = rollback(&prefix, 1_005).unwrap().expect("a fresh marker authorises it");
+
+        assert_eq!(fs::read(plugins.join("ritornello-plugin-mpd")).unwrap(), b"old mpd");
+        assert!(
+            !plugins.join("ritornello-plugin-radio").exists(),
+            "a plugin the device did not have is deleted, not restored empty"
+        );
+        assert_eq!(fs::read(&core).unwrap(), b"the core that worked");
+        assert!(report.core_restored);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        let mut restored = report.restored.clone();
+        restored.sort();
+        assert_eq!(
+            restored,
+            vec![
+                "core".to_string(),
+                "plugin-ritornello-plugin-mpd".to_string(),
+                "plugin-ritornello-plugin-radio".to_string(),
+            ]
+        );
+    }
+
     /// **A plugin gesture arms nothing.** `marker::arm` writes no marker, and
     /// — for the device whose installer predates this rule, which is every
     /// device that has not been redeployed by hand — `rollback` refuses one
