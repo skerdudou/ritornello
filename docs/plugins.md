@@ -788,6 +788,12 @@ after the fact — a spontaneous notification carries a state, never an action
 source key on a disc that has been sitting in the drive, the everyday case,
 has had its TOC read long since.
 
+**Ejecting forgets the track.** When the tray is seen open, or Ritornello's own
+Eject is used, the remembered resume point and the shuffle order are dropped,
+in memory and on disk: a disc put back afterwards, even the same one, starts at
+track 1 rather than resuming. A momentary loss of presence with the tray closed
+is only a flicker and forgets nothing.
+
 Only one disc is remembered, the last one: swapping discs and coming back
 loses the position, which is the honest reading of "the last track played".
 The resume point is written on every track change — including the disc
