@@ -182,8 +182,9 @@ components changed too. The **contract versions**, a third number, are the
 wire compatibility between the core and a plugin (see
 [plugins.md](plugins.md)): one `major.minor` per wire contract (`source`,
 `display`, `input`, `metadata`, `admin`), whose major moves at a break of that
-contract and whose minor at a compatible addition, plus the frozen bootstrap
-`PROTOCOL_VERSION` that guards the announcement's own format. They do not move
+contract and whose minor at a compatible addition, plus the bootstrap
+`PROTOCOL_VERSION` that guards the announcement's own format (it moves at a
+break of that format, or when a contract is added). They do not move
 on every release, nor with every component's own patch bumps. Only the **major** ties
 the core, the plugins and the language packs to the product number: an
 unchanged component may keep a number from an earlier minor (`0.2.4` inside
@@ -232,7 +233,8 @@ is published when
 
 1. its own version moved (its code changed, as always);
 2. the bootstrap `PROTOCOL_VERSION` changed: the announcement's own format
-   broke, old binaries can no longer be read. Every component that links
+   broke, or a contract was added (an older core cannot read a contract name
+   it does not know), so old binaries can no longer be read. Every component that links
    `ritornello-proto` (the core and the plugins; not a companion, which
    depends on no shared crate, nor a language pack, which is data) **must**
    have moved its version, and the script refuses the release, naming those
@@ -1264,6 +1266,32 @@ contract the core also speaks: no real plugin is in that state at release.
 Both paths are exercised by unit tests that fabricate an announcement, not by
 an actually incompatible plugin built against another version of the
 protocol.
+
+**The upgrade across the bootstrap break (`PROTOCOL_VERSION` 1 to 2) has
+never run on a device**, and neither has a rollback across it. It is this
+project's first real wire break: a core and a plugin on either side of it
+refuse each other. What the code says will happen, traced and not observed:
+
+- the update worker installs the plugins first and the core last
+  (`install_order` in `crates/ritornello-core/src/update/mod.rs`). While the
+  plugins are being placed, the old core still runs, and it refuses each new
+  plugin as it restarts: the configuration page turns red row by row, and
+  the music stops if the active source is one of them. Everything heals when
+  the new core is placed and restarted;
+- if the core's own step fails, the device is left with the old core and
+  every new plugin refused. The automatic update retries the core the next
+  night; by hand, install the core from the update dialog;
+- a **rollback** (the new core failing to start, see below) restores the
+  core alone: the backup of each privileged run covers only what that run
+  placed, and the core is placed last, on its own. The device then runs the
+  old core with every plugin refused, so it is silent, and the nightly
+  update does not try again, since it never retries a version it has
+  already placed. Recovery is by hand: place a matching core and plugins
+  together, from one release, with `ritornello-install` (or the core again
+  from the update dialog, once the reason it failed to start is known).
+
+The same holds, on a smaller scale, for a contract's major: a core and a
+plugin speaking that contract on either side of the move refuse each other.
 
 **The language-packs chantier has not been verified on real hardware,
 physical display included.** Sixteen tasks rebuilt how text is resolved —

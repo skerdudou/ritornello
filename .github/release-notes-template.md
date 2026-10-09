@@ -23,7 +23,15 @@
 
      The updater cannot write any of those, by design. Say so here, with the
      command, or the device will update its binaries and silently keep the
-     old unit. -->
+     old unit.
+
+     A release that moves the bootstrap `PROTOCOL_VERSION` (or a contract's
+     major) is a wire break, and needs this line too:
+
+     **Action required** — wire break: install the core and every plugin
+     together. A rollback of the core leaves every plugin refused until the
+     core is reinstalled. -->
+
 
 ## Behaviour changes
 
