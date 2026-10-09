@@ -4665,7 +4665,7 @@ mod tests {
         Arc::new(RwLock::new(StatusState {
             plugins: vec![line],
             active_source: "radio".to_string(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: crate::status::core_contracts(),
         }))
     }
 

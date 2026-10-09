@@ -26,6 +26,7 @@ mod types;
 mod update;
 mod web;
 
+use crate::compat::{ContractGap, Verdict};
 use crate::core::MetadataWiring;
 use crate::metadata::PlayerState;
 use crate::plugins::PluginManifest;
@@ -624,8 +625,8 @@ fn should_downgrade(statuses: &StatusState, name: &str) -> bool {
 }
 
 /// The status lines of every plugin that did not end up wired: the silent
-/// ones (stalled), the gone ones (dead), and the ones refused for speaking
-/// another protocol.
+/// ones (stalled), the gone ones (dead), and the ones `compat::judge`
+/// refused.
 ///
 /// Extracted from `main`'s inline assembly for one reason: it was the only
 /// part of this page's construction that no test could reach, and its failure
@@ -648,19 +649,20 @@ fn unwired_plugin_lines(gathered: &register::Gathered) -> Vec<PluginStatus> {
     }
 
     // Third source of lines, after the stalled and the dead: a plugin refused
-    // for speaking another protocol. It belongs to neither list — it spoke,
+    // by `compat::judge`. It belongs to neither list — it spoke,
     // on time, and what it said was that it cannot be understood — so without
     // this loop it would have no line at all and would simply vanish from the
     // page. Disappearing is the one thing a broken plugin must never do.
-    for (name, found) in &gathered.incompatible {
-        lines.push(PluginStatus::incompatible_line(name, *found));
+    for (name, refusal) in &gathered.incompatible {
+        lines.push(PluginStatus::incompatible_line(name, refusal.clone()));
     }
 
     lines
 }
 
-/// One status line built from what a plugin **announced**: the four fields
-/// every wiring site copies out of its `Announcement`, in one place.
+/// One status line built from what a plugin **announced**: the fields every
+/// wiring site copies out of its `Announcement`, and the contracts on which
+/// its verdict limited it, in one place.
 ///
 /// Extracted from `main`'s inline assembly for the reason
 /// `unwired_plugin_lines` just above was: twelve call sites — six at the
@@ -670,12 +672,22 @@ fn unwired_plugin_lines(gathered: &register::Gathered) -> Vec<PluginStatus> {
 /// the path every boot takes with `cargo test --workspace` still green
 /// (final whole-branch review, boundaries pass, finding 2). One copy, one
 /// guard: `an_announced_line_carries_what_the_plugin_announced`.
-fn announced_plugin_line(name: &str, kind: &str, connected: bool, announcement: &Announcement) -> PluginStatus {
+///
+/// `limited` is the same list on every line of one plugin: a contract limits
+/// the plugin, not one of its kinds — the admin contract has no line of its
+/// own, and a plugin is "connected" only if all of its kinds are.
+fn announced_plugin_line(
+    name: &str,
+    kind: &str,
+    connected: bool,
+    announcement: &Announcement,
+    limited: &[ContractGap],
+) -> PluginStatus {
     PluginStatus {
         ui_version: announcement.ui_version.clone(),
         version: announcement.version.clone(),
         repository: announcement.repository.clone(),
-        catalog_unknown: announcement.catalog.is_none(),
+        limited: limited.to_vec(),
         ..PluginStatus::kind(name, kind, connected, announcement.admin)
     }
 }
@@ -706,8 +718,8 @@ async fn wire_announced_catalog(registry: &i18n::Shared, name: &str, announcemen
     }
 }
 
-/// Stops a plugin refused at the startup rendezvous for speaking another
-/// protocol — the rendezvous-side half of what `hotplug` already does when
+/// Stops a plugin refused at the startup rendezvous by `compat::judge` —
+/// the rendezvous-side half of what `hotplug` already does when
 /// the same refusal arrives hot.
 ///
 /// `gather` cannot do this itself: it only reads the announcements channel
@@ -817,74 +829,76 @@ async fn hotplug<P: player::Player>(
         tracing::warn!("late announcement from unknown plugin {name}, ignored");
         return;
     }
-    // Same rule as at the startup rendezvous, at the second and last door an
+    // Same judge as at the startup rendezvous, at the second and last door an
     // announcement can come through. A check placed only in `gather` would
     // leave this one open, and nothing at startup would reveal it — a plugin
     // relaunched by hand a month later is exactly the case that matters.
-    if announcement.protocol != ritornello_proto::PROTOCOL_VERSION {
-        tracing::error!(
-            "{} speaks protocol {} and this core speaks {}: refused",
-            name,
-            announcement.protocol,
-            ritornello_proto::PROTOCOL_VERSION
-        );
-        // A previously wired incarnation must go: the binary on disk was
-        // replaced by an incompatible one, and keeping the old wiring would
-        // show a plugin that works while the installed file does not.
-        gathered.announcements.remove(&name);
-        gathered.stalled.retain(|n| n != &name);
-        gathered.dead.retain(|n| n != &name);
-        gathered.incompatible.insert(name.clone(), announcement.protocol);
-        core.set_metadata_order(register::metadata_order(&children.manifest_order, gathered));
-        // **Unwired if it was a Source**, exactly like `hot_unplug`. Neither
-        // ordinary cleanup path can compensate for its absence here: the call
-        // site bumps `wirings[name]` *before* calling us, so the closing of
-        // the killed process's sockets reaches `unreachable_rx` with a stale
-        // wiring number and takes the `debug!` branch; and the kill sets
-        // `requested = true` in `supervise`, so `plugin_waits` routes to the
-        // "stopped: disabled from the admin UI" branch, which forgets
-        // nothing. Without this line the core would keep the source client of
-        // an incarnation it just killed: still listed in the sources catalog,
-        // still offered by the remote, and every command sent into a dead
-        // socket.
-        //
-        // `forget_dead_source` and not `remove_source`, the same distinction
-        // `hot_unplug`'s doc draws: nobody requested this shutdown, so nothing
-        // should switch sources. The music keeps its name and it is the
-        // conjunction "active source X, X refused" that carries the honest
-        // diagnosis.
-        if !core.forget_dead_source(&name) {
-            tracing::debug!("refused plugin {name} was not a wired source, nothing to unwire");
+    // `compat::judge` is the only judge, so the two doors cannot disagree.
+    let limited = match compat::judge(&announcement) {
+        Verdict::Accepted { limited } => limited,
+        Verdict::Refused(refusal) => {
+            tracing::error!("{name} refused: {}", compat::describe(&refusal));
+            // A previously wired incarnation must go: the binary on disk was
+            // replaced by an incompatible one, and keeping the old wiring would
+            // show a plugin that works while the installed file does not.
+            gathered.announcements.remove(&name);
+            gathered.stalled.retain(|n| n != &name);
+            gathered.dead.retain(|n| n != &name);
+            gathered.incompatible.insert(name.clone(), refusal.clone());
+            core.set_metadata_order(register::metadata_order(&children.manifest_order, gathered));
+            // **Unwired if it was a Source**, exactly like `hot_unplug`. Neither
+            // ordinary cleanup path can compensate for its absence here: the call
+            // site bumps `wirings[name]` *before* calling us, so the closing of
+            // the killed process's sockets reaches `unreachable_rx` with a stale
+            // wiring number and takes the `debug!` branch; and the kill sets
+            // `requested = true` in `supervise`, so `plugin_waits` routes to the
+            // "stopped: disabled from the admin UI" branch, which forgets
+            // nothing. Without this line the core would keep the source client of
+            // an incarnation it just killed: still listed in the sources catalog,
+            // still offered by the remote, and every command sent into a dead
+            // socket.
+            //
+            // `forget_dead_source` and not `remove_source`, the same distinction
+            // `hot_unplug`'s doc draws: nobody requested this shutdown, so nothing
+            // should switch sources. The music keeps its name and it is the
+            // conjunction "active source X, X refused" that carries the honest
+            // diagnosis.
+            if !core.forget_dead_source(&name) {
+                tracing::debug!("refused plugin {name} was not a wired source, nothing to unwire");
+            }
+            // The screen, too, must stop describing the previous incarnation. The
+            // startup assembly builds these lines once; a refusal arriving hot has
+            // to correct them itself, or the page keeps showing "connected" for a
+            // binary that cannot work. Same gesture as `hot_unplug`'s.
+            let mut statuses = children.status_state.write().await;
+            status::replace_plugin_lines(
+                &mut statuses,
+                &name,
+                vec![PluginStatus::incompatible_line(&name, refusal)],
+                false,
+            );
+            // Under the same lock as the line above, like `hot_unplug`: the
+            // refusal and the name of the active source describe one instant.
+            statuses.active_source = core.active_source().to_string();
+            drop(statuses);
+            // After the status lock, not before: `forget_page` takes two other
+            // locks, and nesting them would make safety depend on an order never
+            // to reverse elsewhere. Without it, `/api/admin/<name>` and
+            // `/plugins/<name>/` would burn the request's whole timeout budget
+            // against a dead backend instead of answering 404 right away.
+            admin::forget_page(&children.admin_backends, &children.admin_assets, &children.registry, &name).await;
+            // Nothing is persisted: this is a refusal to run, not the `disabled`
+            // switch. `enabled = false` written here would keep the plugin off
+            // even after a matching binary was installed, and the fix would look
+            // like it had not worked. `hotplug` has no manifest path to write to
+            // in the first place: the persistence lives in the HTTP layer, in
+            // `PluginsControl.manifest`, out of reach from here — structurally,
+            // not just by choice.
+            return;
         }
-        // The screen, too, must stop describing the previous incarnation. The
-        // startup assembly builds these lines once; a refusal arriving hot has
-        // to correct them itself, or the page keeps showing "connected" for a
-        // binary that cannot work. Same gesture as `hot_unplug`'s.
-        let mut statuses = children.status_state.write().await;
-        status::replace_plugin_lines(
-            &mut statuses,
-            &name,
-            vec![PluginStatus::incompatible_line(&name, announcement.protocol)],
-            false,
-        );
-        // Under the same lock as the line above, like `hot_unplug`: the
-        // refusal and the name of the active source describe one instant.
-        statuses.active_source = core.active_source().to_string();
-        drop(statuses);
-        // After the status lock, not before: `forget_page` takes two other
-        // locks, and nesting them would make safety depend on an order never
-        // to reverse elsewhere. Without it, `/api/admin/<name>` and
-        // `/plugins/<name>/` would burn the request's whole timeout budget
-        // against a dead backend instead of answering 404 right away.
-        admin::forget_page(&children.admin_backends, &children.admin_assets, &children.registry, &name).await;
-        // Nothing is persisted: this is a refusal to run, not the `disabled`
-        // switch. `enabled = false` written here would keep the plugin off
-        // even after a matching binary was installed, and the fix would look
-        // like it had not worked. `hotplug` has no manifest path to write to
-        // in the first place: the persistence lives in the HTTP layer, in
-        // `PluginsControl.manifest`, out of reach from here — structurally,
-        // not just by choice.
-        return;
+    };
+    if !limited.is_empty() {
+        tracing::warn!("{name} is limited: {}", compat::describe_limits(&limited));
     }
     tracing::info!(
         "{name} announced late {:?} (admin: {}), wiring it now",
@@ -944,8 +958,8 @@ async fn hotplug<P: player::Player>(
     // reader.
     gathered.stalled.retain(|n| n != &name);
     gathered.dead.retain(|n| n != &name);
-    // This plugin has just announced a protocol we speak, so any record of a
-    // past incompatibility is stale — and stale here is expensive twice over:
+    // This plugin has just been accepted by `compat::judge`, so any record of
+    // a past incompatibility is stale — and stale here is expensive twice over:
     // the call site reads this map to decide whether to stop the process it
     // just wired, and the configuration page builds its "incompatible" line
     // from it. Without this, a plugin fixed by installing a matching binary
@@ -1053,11 +1067,11 @@ async fn hotplug<P: player::Player>(
                                 tracing::debug!("list_presets for {catalog_name}: {e}");
                             }
                         });
-                        lines.push(announced_plugin_line(&name, "source", true, &announcement));
+                        lines.push(announced_plugin_line(&name, "source", true, &announcement, &limited));
                     }
                     Err(e) => {
                         tracing::warn!("plugin {name} source unavailable: {e}");
-                        lines.push(announced_plugin_line(&name, "source", false, &announcement));
+                        lines.push(announced_plugin_line(&name, "source", false, &announcement, &limited));
                     }
                 }
             }
@@ -1075,11 +1089,11 @@ async fn hotplug<P: player::Player>(
                         children.catalog_rx.clone(),
                         UnreachableNotice { wiring, tx: children.unreachable_tx.clone() },
                     );
-                    lines.push(announced_plugin_line(&name, "display", true, &announcement));
+                    lines.push(announced_plugin_line(&name, "display", true, &announcement, &limited));
                 }
                 Err(e) => {
                     tracing::warn!("display plugin {name} unavailable: {e}");
-                    lines.push(announced_plugin_line(&name, "display", false, &announcement));
+                    lines.push(announced_plugin_line(&name, "display", false, &announcement, &limited));
                 }
             },
             PluginKind::Input => {
@@ -1097,7 +1111,7 @@ async fn hotplug<P: player::Player>(
                     // receiver with it — so it does not need to be distinguished.
                     let _ = unreachable.send((task_name, wiring)).await;
                 });
-                lines.push(announced_plugin_line(&name, "input", true, &announcement));
+                lines.push(announced_plugin_line(&name, "input", true, &announcement, &limited));
             }
             PluginKind::Metadata => {
                 let tx = children.enrich_tx.clone();
@@ -1113,7 +1127,7 @@ async fn hotplug<P: player::Player>(
                     }
                     let _ = unreachable.send((task_name, wiring)).await;
                 });
-                lines.push(announced_plugin_line(&name, "metadata", true, &announcement));
+                lines.push(announced_plugin_line(&name, "metadata", true, &announcement, &limited));
             }
         }
     }
@@ -1319,7 +1333,7 @@ async fn hot_unplug<P: player::Player>(
     gathered.dead.retain(|n| n != name);
     // The fourth collection, cleared for the same reason as the other three:
     // a name belongs to only one of them. A plugin switched off from the UI
-    // is `disabled`, not `refused for its protocol`, and leaving a stale
+    // is `disabled`, not `refused by its contracts`, and leaving a stale
     // `incompatible` entry would make the call site in `main`'s `select!`
     // read the next announcement of this name as "just refused" and kill the
     // very process a turn-on had relaunched.
@@ -1970,7 +1984,7 @@ async fn main() -> Result<()> {
         kill_triggers.remove(name);
     }
 
-    // Symmetry with the hot path: a plugin refused here for its protocol is
+    // Symmetry with the hot path: a plugin refused here by its contracts is
     // not wired, so nothing would ever talk to it — but left alone it stays
     // alive, holding the sockets it bound and its share of a small machine's
     // memory. See `kill_incompatible_plugins`.
@@ -2027,6 +2041,14 @@ async fn main() -> Result<()> {
             continue;
         };
         wire_announced_catalog(&registry, name, announcement).await;
+        // `gather` only kept announcements `compat::judge` accepted, and
+        // logged their limits: the verdict is asked again here for those
+        // limits alone — the judge is a pure function of the announcement,
+        // so it cannot answer differently the second time.
+        let limited = match compat::judge(announcement) {
+            Verdict::Accepted { limited } => limited,
+            Verdict::Refused(_) => Vec::new(),
+        };
         let prefix = sockets_dir.join(name);
 
         for kind in &announcement.kinds {
@@ -2058,22 +2080,22 @@ async fn main() -> Result<()> {
                     {
                         Ok(client) => {
                             sources.insert(name.clone(), client);
-                            plugin_statuses.push(announced_plugin_line(name, "source", true, announcement));
+                            plugin_statuses.push(announced_plugin_line(name, "source", true, announcement, &limited));
                         }
                         Err(e) => {
                             tracing::warn!("plugin {name} source unavailable: {e}");
-                            plugin_statuses.push(announced_plugin_line(name, "source", false, announcement));
+                            plugin_statuses.push(announced_plugin_line(name, "source", false, announcement, &limited));
                         }
                     }
                 }
                 PluginKind::Display => match DisplayClient::connect(&socket).await {
                     Ok(client) => {
                         display_clients.push((name.clone(), client, announcement.covers));
-                        plugin_statuses.push(announced_plugin_line(name, "display", true, announcement));
+                        plugin_statuses.push(announced_plugin_line(name, "display", true, announcement, &limited));
                     }
                     Err(e) => {
                         tracing::warn!("display plugin {name} unavailable: {e}");
-                        plugin_statuses.push(announced_plugin_line(name, "display", false, announcement));
+                        plugin_statuses.push(announced_plugin_line(name, "display", false, announcement, &limited));
                     }
                 },
                 PluginKind::Input => {
@@ -2093,7 +2115,7 @@ async fn main() -> Result<()> {
                         // name.
                         let _ = unreachable.send((task_name, 0)).await;
                     });
-                    plugin_statuses.push(announced_plugin_line(name, "input", true, announcement));
+                    plugin_statuses.push(announced_plugin_line(name, "input", true, announcement, &limited));
                 }
                 PluginKind::Metadata => {
                     // Two-way relay, in its own task: its failure concerns
@@ -2112,7 +2134,7 @@ async fn main() -> Result<()> {
                         }
                         let _ = unreachable.send((task_name, 0)).await;
                     });
-                    plugin_statuses.push(announced_plugin_line(name, "metadata", true, announcement));
+                    plugin_statuses.push(announced_plugin_line(name, "metadata", true, announcement, &limited));
                 }
             }
         }
@@ -2187,7 +2209,7 @@ async fn main() -> Result<()> {
     let status_state = Arc::new(RwLock::new(StatusState {
         plugins: plugin_statuses,
         active_source: persisted.active_source.clone(),
-        protocol: ritornello_proto::PROTOCOL_VERSION,
+        contracts: status::core_contracts(),
     }));
     let audio_current = Arc::new(RwLock::new(persisted.audio_device.clone()));
     let locale_current = Arc::new(RwLock::new(persisted.locale.clone()));
@@ -2647,8 +2669,8 @@ async fn main() -> Result<()> {
                 //
                 // `contains_key` is only trustworthy as "this exact
                 // announcement was just refused" because `hotplug`'s accepted
-                // path removes the name from `incompatible` the instant a
-                // matching protocol is wired. The two lines are coupled:
+                // path removes the name from `incompatible` the instant an
+                // accepted announcement is wired. The two lines are coupled:
                 // without that removal, a plugin fixed by a matching binary
                 // would still read as refused here and be killed on sight.
                 if gathered.incompatible.contains_key(&refused_name) {
@@ -2664,7 +2686,7 @@ async fn main() -> Result<()> {
                         // standpoint a process the core never launched is
                         // identically out of reach, and the remedy is the same.
                         Liveness::OutOfReach | Liveness::Off => tracing::warn!(
-                            "{refused_name} speaks another protocol but the core does not own its process, so it cannot be stopped — kill it yourself"
+                            "{refused_name} was refused but the core does not own its process, so it cannot be stopped — kill it yourself"
                         ),
                         Liveness::Supervised => {
                             if let Some(tx) = kill_triggers.remove(&refused_name) {
@@ -3334,7 +3356,8 @@ mod toggle_tests {
     use super::*;
     use crate::core::{Wiring, MetadataWiring};
     use crate::cover::CoverCache;
-    use ritornello_proto::{Announcement, Contract, PluginKind};
+    use crate::compat::{ContractGap, Refusal};
+    use ritornello_proto::{Announcement, Contract, ContractVersion, PluginKind};
     use std::collections::BTreeMap;
 
     /// A `Player` that does nothing: no test here looks at the player.
@@ -3484,7 +3507,7 @@ mod toggle_tests {
                 // is not the shape of the status line.
                 plugins: vec![PluginStatus::kind("mpd", "display", true, true)],
                 active_source: String::new(),
-                protocol: ritornello_proto::PROTOCOL_VERSION,
+                contracts: status::core_contracts(),
             })),
             admin_backends: Arc::new(RwLock::new(HashMap::new())),
             admin_assets: Arc::new(Default::default()),
@@ -3558,7 +3581,7 @@ mod toggle_tests {
         StatusState {
             plugins: lines,
             active_source: String::new(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: status::core_contracts(),
         }
     }
 
@@ -4468,8 +4491,8 @@ mod toggle_tests {
         );
         assert_eq!(
             b.gathered.incompatible.get("mpd"),
-            Some(&foreign),
-            "the refusal must carry the number, otherwise the screen cannot say why"
+            Some(&Refusal::Legacy { found: foreign }),
+            "the refusal must carry its reason and the number, otherwise the screen cannot say why"
         );
     }
 
@@ -4480,9 +4503,12 @@ mod toggle_tests {
     /// refused" and kill the very process this call just wired: fixed once,
     /// killed forever.
     #[tokio::test]
-    async fn a_plugin_that_comes_back_with_a_matching_protocol_stops_being_incompatible() {
+    async fn a_plugin_that_comes_back_with_matching_contracts_stops_being_incompatible() {
         let mut b = bench();
-        b.gathered.incompatible.insert("mpd".to_string(), ritornello_proto::PROTOCOL_VERSION + 1);
+        b.gathered.incompatible.insert(
+            "mpd".to_string(),
+            Refusal::Major { gaps: vec![display_gap(ContractVersion::new(2, 0))] },
+        );
 
         let a = Announcement {
             name: "mpd".into(),
@@ -4543,7 +4569,7 @@ mod toggle_tests {
         let statuses = b.children.status_state.read().await;
         let lines: Vec<_> = statuses.plugins.iter().filter(|l| l.name == "mpd").collect();
         assert_eq!(lines.len(), 1, "one line, not the old connected ones");
-        assert_eq!(lines[0].incompatible, Some(foreign));
+        assert_eq!(lines[0].incompatible, Some(Refusal::Legacy { found: foreign }));
         assert!(!lines[0].connected, "a refused plugin must not read as connected");
     }
 
@@ -4587,6 +4613,11 @@ mod toggle_tests {
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
             .await;
 
+        assert_eq!(
+            b.gathered.incompatible.get("mpd"),
+            Some(&Refusal::Legacy { found: foreign }),
+            "bench precondition: refused, and for its protocol"
+        );
         assert!(
             b.core.sources_catalog().sources.is_empty(),
             "the refused plugin must stop being offered as a source: selecting it would send commands into a dead socket"
@@ -4638,10 +4669,41 @@ mod toggle_tests {
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
             .await;
 
+        assert_eq!(
+            b.gathered.incompatible.get("mpd"),
+            Some(&Refusal::Legacy { found: ritornello_proto::PROTOCOL_VERSION + 1 }),
+            "bench precondition: refused, and for its protocol"
+        );
         assert!(
             b.children.admin_assets.read().await.is_empty(),
             "the refused incarnation's page must be forgotten, exactly as `hot_unplug` forgets it"
         );
+    }
+
+    /// The gap a display contract at `plugin` makes with this core's.
+    fn display_gap(plugin: ContractVersion) -> ContractGap {
+        ContractGap { contract: Contract::Display, plugin, core: Contract::Display.current() }
+    }
+
+    /// An mpd-like announcement — display, input and an admin page — whose
+    /// display contract is at `display`, the others at this core's versions.
+    fn mpd_like(display: ContractVersion) -> Announcement {
+        Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Display, PluginKind::Input],
+            admin: true,
+            covers: false,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([
+                (Contract::Display, display),
+                (Contract::Input, Contract::Input.current()),
+                (Contract::Admin, Contract::Admin.current()),
+            ]),
+            version: Some("0.2.0".into()),
+            repository: None,
+            catalog: None,
+        }
     }
 
     #[tokio::test]
@@ -4649,98 +4711,110 @@ mod toggle_tests {
         // From the announcement to the JSON the page reads: proving the
         // constructor works would prove nothing about anything calling it.
         let mut b = bench();
-        let foreign = ritornello_proto::PROTOCOL_VERSION + 1;
-        let a = Announcement {
-            name: "mpd".into(),
-            kinds: vec![PluginKind::Display],
-            admin: false,
-            covers: false,
-            ui_version: None,
-            protocol: foreign,
-            contracts: Default::default(),
-            version: Some("0.2.0".into()),
-            repository: None,
-            catalog: None,
-        };
+        let a = mpd_like(ContractVersion::new(2, 0));
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
 
         let statuses = b.children.status_state.read().await;
         let line = statuses.plugins.iter().find(|l| l.name == "mpd").unwrap();
-        assert_eq!(line.incompatible, Some(foreign));
+        assert_eq!(
+            line.incompatible,
+            Some(Refusal::Major { gaps: vec![display_gap(ContractVersion::new(2, 0))] })
+        );
         assert!(!line.stalled, "the plugin spoke, on time: accusing it of silence would be false");
 
-        let json = serde_json::to_string(line).unwrap();
-        assert!(json.contains(&format!("\"incompatible\":{foreign}")), "{json}");
-        assert!(!json.contains("stalled"), "{json}");
+        let json = serde_json::to_value(line).unwrap();
+        assert_eq!(
+            json["incompatible"],
+            serde_json::json!({
+                "reason": "major",
+                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 0}}],
+            }),
+            "{json}"
+        );
+        assert!(json.get("stalled").is_none(), "{json}");
+        assert!(json.get("limited").is_none(), "a refused plugin is not limited: {json}");
     }
 
-    /// Twin of `the_status_page_says_why_a_plugin_was_refused`, for the other
-    /// silent failure `PROTOCOL_VERSION` staying at 1 lets through: a
-    /// **matching** protocol, so nothing refuses the plugin, but no
-    /// `catalog` at all in the announcement — the binary is legitimately
-    /// wired and simply predates the field. From the announcement to the
-    /// JSON the page reads, exactly as its sibling: proving the constructor
-    /// works would prove nothing about `hotplug` actually calling it.
+    /// The two doors an announcement can come through — the startup
+    /// rendezvous (`register::gather`) and the late one (`hotplug`) — must
+    /// reach the same verdict on the same announcement. Each door is driven
+    /// through its real event: the line on the register socket for the
+    /// first, the announcement handed to `hotplug` for the second.
     #[tokio::test]
-    async fn the_status_page_names_a_wired_plugin_that_predates_the_catalog_field() {
+    async fn the_late_door_and_the_rendezvous_give_the_same_verdict() {
+        let a = mpd_like(ContractVersion::new(2, 0));
+        let expected = Refusal::Major { gaps: vec![display_gap(ContractVersion::new(2, 0))] };
+
+        let dir = tempfile::tempdir().unwrap();
+        let register_path = dir.path().join("register.sock");
+        let listener = tokio::net::UnixListener::bind(&register_path).unwrap();
+        let line = serde_json::to_string(&a).unwrap();
+        let r = register_path.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let mut s = tokio::net::UnixStream::connect(&r).await.unwrap();
+            s.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+            s.shutdown().await.unwrap();
+        });
+        let (tx, mut rx) = mpsc::channel::<Announcement>(16);
+        let g = register::gather(
+            &listener,
+            &["mpd".to_string()],
+            futures::stream::pending::<String>(),
+            std::time::Duration::from_secs(3600),
+            &tx,
+            &mut rx,
+        )
+        .await;
+
         let mut b = bench();
-        let a = Announcement {
-            name: "mpd".into(),
-            kinds: vec![PluginKind::Display],
-            admin: false,
-            covers: false,
-            ui_version: None,
-            protocol: ritornello_proto::PROTOCOL_VERSION,
-            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
-            version: Some("0.2.0".into()),
-            repository: None,
-            catalog: None,
-        };
+        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
+
+        assert_eq!(g.incompatible.get("mpd"), Some(&expected), "the rendezvous refuses it, naming the gap");
+        assert_eq!(b.gathered.incompatible.get("mpd"), Some(&expected), "the late door refuses it the same way");
+        assert!(!g.announcements.contains_key("mpd"));
+        assert!(!b.gathered.announcements.contains_key("mpd"));
+    }
+
+    /// A plugin one minor ahead on one contract is **wired**, every one of
+    /// its lines connected, and every one of them names that contract — and
+    /// that contract only: its input and admin contracts are normal.
+    #[tokio::test]
+    async fn a_limited_plugin_is_wired_and_its_lines_name_the_contract() {
+        let mut b = bench();
+        // A bound display socket: the announcement proves it is there, and a
+        // refused `connect` would make the display line disconnected for a
+        // reason that is not this test's.
+        let socket = ritornello_plugin_sdk::socket_kind(&b.children.sockets_dir.join("mpd"), PluginKind::Display);
+        let _display = tokio::net::UnixListener::bind(&socket).unwrap();
+        let a = mpd_like(ContractVersion::new(1, 1));
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
 
+        assert!(b.gathered.incompatible.is_empty(), "a newer minor is not a refusal");
+        assert!(b.gathered.announcements.contains_key("mpd"), "a limited plugin is wired");
         let statuses = b.children.status_state.read().await;
-        let line = statuses.plugins.iter().find(|l| l.name == "mpd").unwrap();
-        assert!(line.catalog_unknown, "an absent catalog must be named, not silently absorbed");
-        assert_eq!(line.incompatible, None, "the protocol itself matched: not the same refusal");
-
-        let json = serde_json::to_string(line).unwrap();
-        assert!(json.contains("\"catalog_unknown\":true"), "{json}");
-        assert!(!json.contains("incompatible"), "{json}");
-    }
-
-    /// The mirror case: a plugin that **does** announce a catalog — even an
-    /// empty one, `Some({})`, exactly what a textless but up-to-date plugin
-    /// (`console`, `nrj-metas`, `ouifm-metas`, `radiofrance-metas`) writes —
-    /// must not be named as predating the field. Conflating the two would
-    /// make every legitimately textless plugin look like a lagging binary.
-    #[tokio::test]
-    async fn a_wired_plugin_with_an_empty_but_present_catalog_is_not_named() {
-        let mut b = bench();
-        let a = Announcement {
-            name: "mpd".into(),
-            kinds: vec![PluginKind::Display],
-            admin: false,
-            covers: false,
-            ui_version: None,
-            protocol: ritornello_proto::PROTOCOL_VERSION,
-            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
-            version: Some("0.2.0".into()),
-            repository: None,
-            catalog: Some(Default::default()),
-        };
-
-        hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
-
-        let statuses = b.children.status_state.read().await;
-        let line = statuses.plugins.iter().find(|l| l.name == "mpd").unwrap();
-        assert!(!line.catalog_unknown, "an announced, empty catalog is a legitimate state");
+        let lines: Vec<_> = statuses.plugins.iter().filter(|l| l.name == "mpd").collect();
+        assert_eq!(
+            lines.iter().map(|l| l.kind.as_str()).collect::<Vec<_>>(),
+            vec!["display", "input"],
+            "one line per kind"
+        );
+        for line in lines {
+            assert!(line.connected, "the {} line must be connected: a limited plugin works", line.kind);
+            assert_eq!(line.incompatible, None);
+            assert_eq!(
+                line.limited,
+                vec![display_gap(ContractVersion::new(1, 1))],
+                "the {} line must name the display contract, and only it",
+                line.kind
+            );
+        }
     }
 
     /// From the announcement to the shared `Registry`: `hotplug` must
-    /// actually wire `Announcement.catalog` in, not just derive
-    /// `catalog_unknown` from it. Driven through the real event, as the
+    /// actually wire `Announcement.catalog` in. Driven through the real event, as the
     /// sibling tests above are — a test that called `insert_announced`
     /// directly would prove the registry's own logic, never that `hotplug`
     /// calls it.
@@ -4943,12 +5017,11 @@ mod toggle_tests {
     /// pure transcription from the announcement, and the six startup sites
     /// doing it were reachable by no test (final whole-branch review,
     /// boundaries pass, finding 2). All twelve now go through
-    /// `announced_plugin_line`; this is its guard, both branches of the
-    /// `catalog` predicate included, since `None` and `Some({})` are
-    /// different facts about a binary, not degrees of the same one.
+    /// `announced_plugin_line`; this is its guard, the verdict's limits
+    /// included.
     #[test]
     fn an_announced_line_carries_what_the_plugin_announced() {
-        let mut a = Announcement {
+        let a = Announcement {
             name: "cd".into(),
             kinds: vec![PluginKind::Source],
             admin: true,
@@ -4964,21 +5037,20 @@ mod toggle_tests {
             catalog: None,
         };
 
-        let line = announced_plugin_line("cd", "source", true, &a);
+        let limited = vec![ContractGap {
+            contract: Contract::Admin,
+            plugin: ContractVersion::new(1, 4),
+            core: Contract::Admin.current(),
+        }];
+        let line = announced_plugin_line("cd", "source", true, &a, &limited);
         assert_eq!(line.kind, "source");
         assert!(line.connected);
         assert!(line.admin, "the line's `admin` flag must come from the announcement, not be invented");
         assert_eq!(line.version.as_deref(), Some("0.2.0"));
         assert_eq!(line.ui_version.as_deref(), Some("3"));
         assert_eq!(line.repository.as_deref(), Some("https://example.invalid/cd"));
-        assert!(line.catalog_unknown, "an absent catalogue must be named, not silently absorbed");
-
-        // `Some({})` is what every legitimately textless plugin announces
-        // (`console`, `nrj-metas`, `ouifm-metas`, `radiofrance-metas`):
-        // conflating it with `None` would make four healthy plugins look
-        // like binaries that never confided anything.
-        a.catalog = Some(Default::default());
-        assert!(!announced_plugin_line("cd", "source", true, &a).catalog_unknown);
+        assert_eq!(line.limited, limited, "the verdict's limits must reach the line");
+        assert!(announced_plugin_line("cd", "source", true, &a, &[]).limited.is_empty());
     }
 
     #[test]
@@ -4989,7 +5061,7 @@ mod toggle_tests {
         let g = register::Gathered {
             stalled: vec!["unwired".to_string()],
             dead: vec!["gone".to_string()],
-            incompatible: std::collections::BTreeMap::from([("foreign".to_string(), 7u32)]),
+            incompatible: std::collections::BTreeMap::from([("foreign".to_string(), Refusal::Legacy { found: 7 })]),
             ..Default::default()
         };
 
@@ -5003,7 +5075,7 @@ mod toggle_tests {
         assert!(!dead.stalled, "its exit was observed, it is not silent");
 
         let refused = lines.iter().find(|l| l.name == "foreign").unwrap();
-        assert_eq!(refused.incompatible, Some(7));
+        assert_eq!(refused.incompatible, Some(Refusal::Legacy { found: 7 }));
         assert!(!refused.connected, "nothing of it was wired");
         assert!(!refused.disabled, "nobody switched it off");
         assert!(!refused.stalled, "it spoke, on time");
@@ -5012,7 +5084,7 @@ mod toggle_tests {
     #[tokio::test]
     async fn an_incompatible_name_never_gets_a_second_line_from_stalled() {
         // The guarantee this function leans on lives in `register::gather`,
-        // not here: a name refused for its protocol is excluded from
+        // not here: a name refused by `compat::judge` is excluded from
         // `stalled` at the source (register.rs, the filter task 4 added).
         // Building the `Gathered` by hand would only prove this function
         // once; going through a real `gather()` call proves the two stay in
@@ -5044,7 +5116,7 @@ mod toggle_tests {
             &mut rx,
         )
         .await;
-        assert!(g.incompatible.contains_key("radio"), "bench precondition");
+        assert_eq!(g.incompatible.get("radio"), Some(&Refusal::Legacy { found: foreign }), "bench precondition");
         assert!(!g.stalled.contains(&"radio".to_string()), "bench precondition");
 
         let lines = unwired_plugin_lines(&g);
@@ -5070,7 +5142,7 @@ mod toggle_tests {
         // rely on: the entry leaves `kill_triggers`, and its receiver
         // actually gets the kill signal, rather than merely being dropped.
         let g = register::Gathered {
-            incompatible: std::collections::BTreeMap::from([("radio".to_string(), 99u32)]),
+            incompatible: std::collections::BTreeMap::from([("radio".to_string(), Refusal::Legacy { found: 99 })]),
             ..Default::default()
         };
         let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
@@ -5091,7 +5163,7 @@ mod toggle_tests {
     #[test]
     fn kill_incompatible_plugins_leaves_every_other_entry_untouched() {
         let g = register::Gathered {
-            incompatible: std::collections::BTreeMap::from([("radio".to_string(), 99u32)]),
+            incompatible: std::collections::BTreeMap::from([("radio".to_string(), Refusal::Legacy { found: 99 })]),
             ..Default::default()
         };
         let (radio_tx, _radio_rx) = tokio::sync::oneshot::channel::<()>();
@@ -5112,7 +5184,7 @@ mod toggle_tests {
         // comment: a send error (here, no sender to find) means the process
         // is already gone, nothing to catch up on.
         let g = register::Gathered {
-            incompatible: std::collections::BTreeMap::from([("radio".to_string(), 99u32)]),
+            incompatible: std::collections::BTreeMap::from([("radio".to_string(), Refusal::Legacy { found: 99 })]),
             ..Default::default()
         };
         let mut kill_triggers: HashMap<String, tokio::sync::oneshot::Sender<()>> = HashMap::new();

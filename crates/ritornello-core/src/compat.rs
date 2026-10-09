@@ -19,9 +19,6 @@
 //! Order of checks, the first that applies wins: legacy binary, missing
 //! contract, unexpected contract, major gap, then minor gaps.
 
-// wired in the next task
-#![cfg_attr(not(test), allow(dead_code))]
-
 use ritornello_proto::{Announcement, Contract, ContractVersion, PROTOCOL_VERSION};
 use serde::{Deserialize, Serialize};
 
@@ -91,6 +88,49 @@ fn judge_against(a: &Announcement, core: impl Fn(Contract) -> ContractVersion) -
         .map(gap)
         .collect();
     Verdict::Accepted { limited }
+}
+
+/// One English sentence naming why a plugin was refused, for the log.
+///
+/// The status page does not read this: it receives the structured `Refusal`
+/// and writes its own sentence in the operator's language.
+pub fn describe(refusal: &Refusal) -> String {
+    let gap = |g: &ContractGap| format!("{} {} (this core speaks {})", name(g.contract), g.plugin, g.core);
+    match refusal {
+        Refusal::Legacy { found } => format!(
+            "it speaks protocol {found} and this core speaks {PROTOCOL_VERSION}: a binary built before contract versions, or for another core"
+        ),
+        Refusal::MissingContract { contract } => {
+            format!("it declares the {} contract but announces no version for it", name(*contract))
+        }
+        Refusal::UnexpectedContract { contract } => {
+            format!("it announces a version of the {} contract, which it does not declare", name(*contract))
+        }
+        Refusal::Major { gaps } => {
+            format!("another major on {}", gaps.iter().map(gap).collect::<Vec<_>>().join(", "))
+        }
+    }
+}
+
+/// One English sentence listing the contracts on which an accepted plugin is
+/// limited, for the log.
+pub fn describe_limits(limited: &[ContractGap]) -> String {
+    limited
+        .iter()
+        .map(|g| format!("{} {} is newer than this core's {}, some features are inactive", name(g.contract), g.plugin, g.core))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// A contract's wire name, the one the announcement and the page use.
+fn name(contract: Contract) -> &'static str {
+    match contract {
+        Contract::Source => "source",
+        Contract::Display => "display",
+        Contract::Input => "input",
+        Contract::Metadata => "metadata",
+        Contract::Admin => "admin",
+    }
 }
 
 #[cfg(test)]
@@ -232,5 +272,42 @@ mod tests {
     fn a_major_gap_outranks_a_minor_gap() {
         let a = ann(&[PluginKind::Display, PluginKind::Input], false, &[(Contract::Display, (2, 0)), (Contract::Input, (1, 1))]);
         assert_eq!(judge(&a), Verdict::Refused(Refusal::Major { gaps: vec![gap(Contract::Display, (2, 0), (1, 0))] }));
+    }
+
+    #[test]
+    fn a_refusal_is_described_in_one_sentence_naming_its_cause() {
+        assert_eq!(
+            describe(&Refusal::Legacy { found: 1 }),
+            format!("it speaks protocol 1 and this core speaks {PROTOCOL_VERSION}: a binary built before contract versions, or for another core")
+        );
+        assert_eq!(
+            describe(&Refusal::MissingContract { contract: Contract::Input }),
+            "it declares the input contract but announces no version for it"
+        );
+        assert_eq!(
+            describe(&Refusal::UnexpectedContract { contract: Contract::Admin }),
+            "it announces a version of the admin contract, which it does not declare"
+        );
+        assert_eq!(
+            describe(&Refusal::Major {
+                gaps: vec![gap(Contract::Display, (2, 0), (1, 0)), gap(Contract::Input, (0, 3), (1, 0))]
+            }),
+            "another major on display 2.0 (this core speaks 1.0), input 0.3 (this core speaks 1.0)"
+        );
+    }
+
+    #[test]
+    fn limits_are_described_contract_by_contract() {
+        assert_eq!(
+            describe_limits(&[gap(Contract::Display, (1, 1), (1, 0)), gap(Contract::Admin, (1, 2), (1, 0))]),
+            "display 1.1 is newer than this core's 1.0, some features are inactive; admin 1.2 is newer than this core's 1.0, some features are inactive"
+        );
+    }
+
+    #[test]
+    fn a_contract_is_described_under_its_wire_name() {
+        for c in Contract::ALL {
+            assert_eq!(serde_json::to_value(c).unwrap(), serde_json::json!(name(c)));
+        }
     }
 }

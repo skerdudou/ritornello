@@ -472,7 +472,7 @@ mod tests {
             status: Arc::new(tokio::sync::RwLock::new(StatusState {
                 plugins: vec![],
                 active_source: "radio".into(),
-                protocol: ritornello_proto::PROTOCOL_VERSION,
+                contracts: crate::status::core_contracts(),
             })),
             logs: Arc::new(LogBuffer::new(10)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),

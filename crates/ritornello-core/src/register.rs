@@ -7,6 +7,7 @@
 //! two guessed waits of before — the 2 s window of the admin page and the
 //! 10 s of connection retries.
 
+use crate::compat::{self, Refusal, Verdict};
 use futures::{Stream, StreamExt};
 use ritornello_proto::{Announcement, PluginKind, ANNOUNCEMENT_MAX_BYTES};
 use std::collections::HashMap;
@@ -33,9 +34,10 @@ pub struct Gathered {
     /// before speaking, or dead during the gathering after having spoken (their
     /// announcement is then withdrawn, see the deaths branch).
     pub dead: Vec<String>,
-    /// Announced a protocol this core does not speak: refused, and the number
-    /// it claimed is kept so the page can say **why** rather than showing yet
-    /// another unexplained "unavailable".
+    /// Refused by `compat::judge`: a binary this core cannot talk to, on at
+    /// least one of its contracts. The refusal is kept, structured, so the
+    /// page can say **why** rather than showing yet another unexplained
+    /// "unavailable".
     ///
     /// A fourth state next to `stalled` and `dead`, and not a variant of
     /// either: this plugin is neither silent nor gone — it spoke, correctly,
@@ -48,7 +50,7 @@ pub struct Gathered {
     /// them at every restart, so the operator's page would reorder itself for
     /// no reason. Alphabetical is not the manifest's order, but it is *an*
     /// order, and a stable one.
-    pub incompatible: std::collections::BTreeMap<String, u32>,
+    pub incompatible: std::collections::BTreeMap<String, Refusal>,
 }
 
 /// Time given to a connection to write its announcement line.
@@ -152,7 +154,7 @@ where
     // report, exactly the diagnosis this gathering exists to name.
     let mut remaining: Vec<String> = expected.to_vec();
     let mut announcements: HashMap<String, Announcement> = HashMap::new();
-    let mut incompatible: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    let mut incompatible: std::collections::BTreeMap<String, Refusal> = std::collections::BTreeMap::new();
     // The **observed** deaths. This is what separates a living silent plugin
     // from a dead one: without this trace, the deadline could only deduce, and
     // a merely slow plugin would be reported as a lost one.
@@ -196,21 +198,24 @@ where
                     }
                     continue;
                 }
-                // The protocol is checked before anything is wired: an
-                // announcement is well-formed and still describes a binary
-                // this core cannot talk to. Strict equality, because the nine
-                // plugins are built together — a range would only earn its
-                // keep for a third-party binary that cannot be rebuilt.
-                if announcement.protocol != ritornello_proto::PROTOCOL_VERSION {
-                    tracing::error!(
-                        "{} speaks protocol {} and this core speaks {}: refused",
-                        announcement.name,
-                        announcement.protocol,
-                        ritornello_proto::PROTOCOL_VERSION
-                    );
-                    remaining.retain(|n| n != &announcement.name);
-                    incompatible.insert(announcement.name.clone(), announcement.protocol);
-                    continue;
+                // The contracts are judged before anything is wired: an
+                // announcement can be well-formed and still describe a binary
+                // this core cannot talk to. Contract by contract, by
+                // `compat::judge` — the one judge, which `hotplug` calls too,
+                // so the two doors can never disagree. A plugin may be a minor
+                // ahead on a contract: it is wired, limited on that contract,
+                // and the limits are carried by its status lines, not here.
+                match compat::judge(&announcement) {
+                    Verdict::Refused(refusal) => {
+                        tracing::error!("{} refused: {}", announcement.name, compat::describe(&refusal));
+                        remaining.retain(|n| n != &announcement.name);
+                        incompatible.insert(announcement.name.clone(), refusal);
+                        continue;
+                    }
+                    Verdict::Accepted { limited } if !limited.is_empty() => {
+                        tracing::warn!("{} is limited: {}", announcement.name, compat::describe_limits(&limited));
+                    }
+                    Verdict::Accepted { .. } => {}
                 }
 
                 remaining.retain(|n| n != &announcement.name);
@@ -376,20 +381,67 @@ mod tests {
     /// Writes an announcement on the register socket, as a plugin would, then
     /// closes.
     ///
-    /// A line that names no `protocol` is stamped with this core's own: an
-    /// absent `protocol` reads as 1, which is a binary predating contract
-    /// versions and is refused, and the tests that are not about that refusal
-    /// want a plugin of today. A line that carries a `protocol` is written
-    /// untouched.
+    /// See `of_today` for what is stamped into the line on the way.
     async fn announcement(register: &std::path::Path, line: &str) {
-        let line = if line.contains(r#""protocol""#) {
-            line.to_string()
-        } else {
-            format!(r#"{{"protocol":{},{}"#, ritornello_proto::PROTOCOL_VERSION, &line[1..])
-        };
+        let line = of_today(line);
         let mut s = UnixStream::connect(register).await.unwrap();
         s.write_all(format!("{line}\n").as_bytes()).await.unwrap();
         s.shutdown().await.unwrap();
+    }
+
+    /// Makes a terse test line the announcement of a plugin of today.
+    ///
+    /// A line that names no `protocol` is stamped with this core's own: an
+    /// absent `protocol` reads as 1, which is a binary predating contract
+    /// versions and is refused. A line that names no `contracts` gets the ones
+    /// its `kinds` and `admin` call for, at this core's versions: without
+    /// them it would be refused for a missing contract. The tests that are
+    /// not about those refusals want a plugin of today. A line that names
+    /// either field keeps it untouched, and a line that is not a JSON object
+    /// is passed through unchanged — it is what an unreadable announcement
+    /// looks like.
+    fn of_today(line: &str) -> String {
+        let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_str::<serde_json::Value>(line) else {
+            return line.to_string();
+        };
+        fields.entry("protocol").or_insert_with(|| ritornello_proto::PROTOCOL_VERSION.into());
+        if !fields.contains_key("contracts") {
+            let kinds: Vec<PluginKind> = fields
+                .get("kinds")
+                .map(|k| serde_json::from_value(k.clone()).unwrap())
+                .unwrap_or_default();
+            let admin = fields.get("admin").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let contracts: std::collections::BTreeMap<_, _> = kinds
+                .into_iter()
+                .map(ritornello_proto::Contract::of_kind)
+                .chain(admin.then_some(ritornello_proto::Contract::Admin))
+                .map(|c| (c, c.current()))
+                .collect();
+            fields.insert("contracts".into(), serde_json::to_value(contracts).unwrap());
+        }
+        serde_json::Value::Object(fields).to_string()
+    }
+
+    #[test]
+    fn a_test_line_is_made_a_plugin_of_today_only_where_it_says_nothing() {
+        let stamped: serde_json::Value =
+            serde_json::from_str(&of_today(r#"{"name":"mpd","kinds":["display","input"],"admin":true}"#)).unwrap();
+        assert_eq!(stamped["protocol"], ritornello_proto::PROTOCOL_VERSION);
+        assert_eq!(
+            stamped["contracts"],
+            serde_json::json!({
+                "display": {"major": 1, "minor": 0},
+                "input": {"major": 1, "minor": 0},
+                "admin": {"major": 1, "minor": 0},
+            })
+        );
+        let explicit = r#"{"name":"radio","kinds":["source"],"protocol":1}"#;
+        let kept: serde_json::Value = serde_json::from_str(&of_today(explicit)).unwrap();
+        assert_eq!(kept["protocol"], 1, "a named protocol is never overwritten");
+        let explicit = r#"{"name":"radio","kinds":["source"],"contracts":{}}"#;
+        let kept: serde_json::Value = serde_json::from_str(&of_today(explicit)).unwrap();
+        assert_eq!(kept["contracts"], serde_json::json!({}), "named contracts are never completed");
+        assert_eq!(of_today("this is not json"), "this is not json");
     }
 
     fn no_deaths() -> impl futures::Stream<Item = String> + Unpin {
@@ -563,79 +615,90 @@ mod tests {
         assert!(!g.announcements.contains_key("intruder"));
     }
 
-    #[tokio::test]
-    async fn a_plugin_announcing_another_protocol_is_refused_and_named() {
-        // Driven from the announcement as it arrives on the socket, never by
-        // calling the comparison directly: a test that called the predicate
-        // would prove the predicate works, not that anything calls it.
+    /// Gathers what one announcement line leads to, with the deadline out
+    /// of reach: returning proves the announcement was handled, not that the
+    /// clock ran out. A short deadline would make these tests arbitrate on
+    /// machine load instead of on behaviour.
+    async fn gather_one(line: String) -> Gathered {
         let dir = tempfile::tempdir().unwrap();
         let register = dir.path().join("register.sock");
         let listener = UnixListener::bind(&register).unwrap();
         let r = register.clone();
-        let foreign = ritornello_proto::PROTOCOL_VERSION + 1;
-        tokio::spawn(async move {
-            announcement(
-                &r,
-                &format!(r#"{{"name":"radio","kinds":["source"],"protocol":{foreign}}}"#),
-            )
-            .await;
-        });
+        tokio::spawn(async move { announcement(&r, &line).await });
 
         let (tx, mut rx) = channel();
-        let g = gather(
-            &listener,
-            &["radio".to_string()],
-            no_deaths(),
-            // An hour, like the neighbouring tests: the deadline must be out
-            // of reach so that returning proves the announcement was handled,
-            // not that the clock ran out. A short deadline would make this
-            // test arbitrate on machine load instead of on behaviour.
-            Duration::from_secs(3600),
-            &tx,
-            &mut rx,
-        )
+        gather(&listener, &["radio".to_string()], no_deaths(), Duration::from_secs(3600), &tx, &mut rx).await
+    }
+
+    #[tokio::test]
+    async fn a_plugin_announcing_another_contract_major_is_refused_and_named() {
+        // Driven from the announcement as it arrives on the socket, never by
+        // calling the judge directly: a test that called the predicate would
+        // prove the predicate works, not that anything calls it.
+        let g = gather_one(format!(
+            r#"{{"name":"radio","kinds":["source"],"protocol":{},"contracts":{{"source":{{"major":2,"minor":0}}}}}}"#,
+            ritornello_proto::PROTOCOL_VERSION
+        ))
         .await;
 
         assert!(
             !g.announcements.contains_key("radio"),
-            "a plugin speaking another protocol must not be wired"
+            "a plugin speaking another major must not be wired"
         );
         assert_eq!(
             g.incompatible.get("radio"),
-            Some(&foreign),
-            "the refusal must carry the number, otherwise the screen cannot say why"
+            Some(&Refusal::Major {
+                gaps: vec![compat::ContractGap {
+                    contract: ritornello_proto::Contract::Source,
+                    plugin: ritornello_proto::ContractVersion::new(2, 0),
+                    core: ritornello_proto::Contract::Source.current(),
+                }]
+            }),
+            "the refusal must carry the gap, otherwise the screen cannot say why"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pre_contract_binary_is_refused_as_legacy_at_the_rendezvous() {
+        // What a binary built before contract versions writes: protocol 1,
+        // and no `contracts` at all. It must be named as what it is — not
+        // mistaken for a plugin of today that forgot a contract.
+        let g = gather_one(r#"{"name":"radio","kinds":["source"],"protocol":1}"#.to_string()).await;
+
+        assert!(!g.announcements.contains_key("radio"), "a legacy binary must not be wired");
+        assert_eq!(g.incompatible.get("radio"), Some(&Refusal::Legacy { found: 1 }));
+    }
+
+    #[tokio::test]
+    async fn a_plugin_a_minor_ahead_is_wired_at_the_rendezvous() {
+        // The other side of the major refusal: a newer minor is not a
+        // reason to refuse, the plugin is wired and limited.
+        let g = gather_one(format!(
+            r#"{{"name":"radio","kinds":["source"],"protocol":{},"contracts":{{"source":{{"major":1,"minor":7}}}}}}"#,
+            ritornello_proto::PROTOCOL_VERSION
+        ))
+        .await;
+
+        assert!(g.announcements.contains_key("radio"), "a newer minor must still be wired");
+        assert!(g.incompatible.is_empty());
     }
 
     #[tokio::test]
     async fn a_refused_plugin_is_not_also_reported_stalled() {
         // Two accusations for one fact would put the same name on two lines of
         // the page, and "stalled" would be a lie: the plugin spoke, on time.
-        // Same rig as the test above.
-        let dir = tempfile::tempdir().unwrap();
-        let register = dir.path().join("register.sock");
-        let listener = UnixListener::bind(&register).unwrap();
-        let r = register.clone();
-        let foreign = ritornello_proto::PROTOCOL_VERSION + 1;
-        tokio::spawn(async move {
-            announcement(
-                &r,
-                &format!(r#"{{"name":"radio","kinds":["source"],"protocol":{foreign}}}"#),
-            )
-            .await;
-        });
-
-        let (tx, mut rx) = channel();
-        let g = gather(
-            &listener,
-            &["radio".to_string()],
-            no_deaths(),
-            Duration::from_secs(3600),
-            &tx,
-            &mut rx,
-        )
+        // Refused for another major, the refusal a plugin of today meets.
+        let g = gather_one(format!(
+            r#"{{"name":"radio","kinds":["source"],"protocol":{},"contracts":{{"source":{{"major":2,"minor":0}}}}}}"#,
+            ritornello_proto::PROTOCOL_VERSION
+        ))
         .await;
 
+        assert!(
+            matches!(g.incompatible.get("radio"), Some(Refusal::Major { .. })),
+            "bench precondition: refused for its major, {:?}",
+            g.incompatible
+        );
         assert!(!g.stalled.contains(&"radio".to_string()));
     }
 
@@ -842,7 +905,11 @@ mod tests {
             tokio::spawn(async move {
                 let mut s = UnixStream::connect(&r).await.unwrap();
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                s.write_all(b"{\"name\":\"radio\",\"kinds\":[\"source\"]}\n").await.unwrap();
+                // A plugin of today: refused, it would leave the gathering
+                // without being wired nor queued, and the path taken through
+                // `gather` would fail for a reason that is not this test's.
+                let line = of_today(r#"{"name":"radio","kinds":["source"]}"#);
+                s.write_all(format!("{line}\n").as_bytes()).await.unwrap();
                 s.shutdown().await.unwrap();
             });
 
