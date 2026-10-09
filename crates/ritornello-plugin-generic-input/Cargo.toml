@@ -16,6 +16,7 @@ repository.workspace = true
 [package.metadata.ritornello]
 kinds = ["input"]
 description = "Physical buttons and remotes, with learnable bindings and presets."
+admin = true
 
 [[bin]]
 name = "ritornello-plugin-generic-input"

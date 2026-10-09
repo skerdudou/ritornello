@@ -10,7 +10,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use ritornello_i18n::Chain;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use ritornello_proto::{Contract, ContractVersion};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -42,14 +43,21 @@ pub use settings_validation::validate_settings;
 pub struct StatusState {
     pub plugins: Vec<PluginStatus>,
     pub active_source: String,
-    /// Protocol this core speaks.
+    /// The contract versions this core speaks, one per contract (see
+    /// `core_contracts`).
     ///
-    /// The other half of what the configuration page needs to explain a
-    /// refused plugin: the line carries what the binary claims, this carries
-    /// what the core expects. Here rather than on the system metadata because
-    /// the configuration page already fetches this payload and never fetches
-    /// that one — the fact lives where its only reader reads.
-    pub protocol: u32,
+    /// Informational: the versions this core speaks. The configuration page
+    /// does not need it to explain a refused or limited plugin — each gap on
+    /// a line already carries both sides (`ContractGap::core`) — so this is
+    /// for a reader who wants the core's versions without any plugin to
+    /// compare them with.
+    pub contracts: BTreeMap<Contract, ContractVersion>,
+}
+
+/// Every contract, at the version this build speaks: what
+/// `StatusState.contracts` carries.
+pub fn core_contracts() -> BTreeMap<Contract, ContractVersion> {
+    Contract::ALL.iter().map(|c| (*c, c.current())).collect()
 }
 
 #[derive(Clone)]
@@ -594,7 +602,7 @@ pub(crate) mod tests_support {
                 PluginStatus::kind("cd", "source", false, false),
             ],
             active_source: "radio".into(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: core_contracts(),
         }
     }
 
@@ -863,22 +871,26 @@ mod tests {
     use tower::util::ServiceExt;
 
     #[test]
-    fn the_status_payload_carries_the_core_s_own_protocol() {
-        // Once, on the payload, and not on every plugin line: the core's
-        // protocol is a property of the core. The page needs both numbers to
-        // write "built for 2, this core speaks 1", and this is the half that
-        // never varies from one line to the next.
-        //
-        // On `/api/status` rather than on the system metadata because the
-        // configuration page — the only reader — already fetches this one and
-        // never fetches that one.
-        let s = StatusState {
-            plugins: Vec::new(),
-            active_source: String::new(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
-        };
-        let j = serde_json::to_string(&s).unwrap();
-        assert!(j.contains(r#""protocol":1"#), "the page cannot explain a refusal without it: {j}");
+    fn the_status_payload_carries_the_core_s_contract_versions() {
+        // Once, on the payload, and not on every plugin line: the versions
+        // the core speaks are a property of the core. Informational — a
+        // refusal or a limit already carries the core's side in its gap.
+        let s = StatusState { plugins: Vec::new(), active_source: String::new(), contracts: core_contracts() };
+        let j = serde_json::to_value(&s).unwrap();
+        let expected: serde_json::Map<String, serde_json::Value> = Contract::ALL
+            .iter()
+            .map(|c| {
+                let v = c.current();
+                (
+                    serde_json::to_value(c).unwrap().as_str().unwrap().to_string(),
+                    serde_json::json!({"major": v.major, "minor": v.minor}),
+                )
+            })
+            .collect();
+        assert_eq!(j["contracts"], serde_json::Value::Object(expected), "every contract at the version this core speaks");
+        assert_eq!(j["contracts"]["source"], serde_json::json!({"major": 1, "minor": 0}), "{j}");
+        assert_eq!(j["contracts"].as_object().unwrap().len(), 5, "every contract, none forgotten: {j}");
+        assert!(j.get("protocol").is_none(), "the single protocol number is gone: {j}");
     }
 
     /// Variant with an observable `theme_tx`, for the `/api/theme` tests.

@@ -23,7 +23,8 @@ import { packSourceLabel } from '../composables/packSource'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
 import type {
-  AudioPayload, LanguageBusy, LanguagePackRow, LocalePayload, SettingsPayload, UpdatePayload,
+  AudioPayload, Contract, ContractGap, ContractVersion, LanguageBusy, LanguagePackRow, LocalePayload,
+  Refusal, SettingsPayload, UpdatePayload,
 } from '../types'
 
 const { t, reload } = useCatalog()
@@ -334,12 +335,11 @@ interface PluginRow {
   busy: boolean
   admin: boolean
   version?: string
-  incompatible?: number
-  /** This plugin's announcement carried no `catalog` field at all — a binary
-   * built before this core could ask for its embedded translation layers.
-   * Distinct from an announced, empty catalog, which has no text of its own
-   * and is not this. */
-  catalog_unknown: boolean
+  incompatible?: Refusal
+  /** Contracts on which this plugin is ahead of this core by a minor, merged
+   * across the plugin's lines (one entry per contract). Empty when nothing is
+   * limited. */
+  limited: ContractGap[]
   /** Declared in plugins.toml, and its binary is not on disk. */
   missing_binary: boolean
   /** A binary on disk that nothing declares — the twin of `missing_binary`. */
@@ -392,8 +392,8 @@ interface PluginAccumulator {
   busy: boolean
   admin: boolean
   version?: string
-  incompatible?: number
-  catalog_unknown: boolean
+  incompatible?: Refusal
+  limited: ContractGap[]
   missing_binary: boolean
   undeclared_binary: boolean
   binary_file?: string
@@ -425,7 +425,7 @@ const plugins = computed<PluginRow[]>(() => {
         admin: p.admin,
         version: p.version,
         incompatible: p.incompatible,
-        catalog_unknown: !!p.catalog_unknown,
+        limited: [...(p.limited ?? [])],
         missing_binary: !!p.missing_binary,
         undeclared_binary: !!p.undeclared_binary,
         binary_file: p.binary_file,
@@ -442,15 +442,17 @@ const plugins = computed<PluginRow[]>(() => {
     acc.busy = acc.busy || !!p.busy
     acc.admin = acc.admin || p.admin
     // All lines of a plugin carry the same version and the same refusal: the
-    // first one to define it suffices. `??`, not `||`, so a refusal at
-    // protocol 0 (were that ever to happen) is not mistaken for "none".
+    // first defined one suffices. `??`, not `||`: a refusal is an object,
+    // tested with `!== undefined`.
     acc.version = acc.version ?? p.version
     acc.incompatible = acc.incompatible ?? p.incompatible
-    // OR, like `stalled`/`busy`: every kind of a given plugin carries the
-    // same fact, derived from the same single announcement, so this is not
-    // really a choice between kinds — it only guards against a kind that
-    // renders no line at all leaving the flag stuck at its initial `false`.
-    acc.catalog_unknown = acc.catalog_unknown || !!p.catalog_unknown
+    // Every line of a plugin carries the plugin's whole list of limited
+    // contracts (the core stamps the same list on each of its kinds), so the
+    // lines are merged with a de-dup by contract: without it, mpd (display +
+    // input) limited on one contract would read that sentence twice.
+    for (const gap of p.limited ?? []) {
+      if (!acc.limited.some((g) => g.contract === gap.contract)) acc.limited.push(gap)
+    }
     acc.missing_binary = acc.missing_binary || !!p.missing_binary
     acc.undeclared_binary = acc.undeclared_binary || !!p.undeclared_binary
     acc.binary_file = acc.binary_file ?? p.binary_file
@@ -488,7 +490,7 @@ const plugins = computed<PluginRow[]>(() => {
       admin: acc.admin,
       version: acc.version,
       incompatible: acc.incompatible,
-      catalog_unknown: acc.catalog_unknown,
+      limited: acc.limited,
       missing_binary: acc.missing_binary,
       undeclared_binary: acc.undeclared_binary,
       // Only a name `plugins.toml` truly declares can be reordered.
@@ -563,11 +565,62 @@ const isFirstDeclared = (name: string) => declaredOrder.value[0] === name
 const isLastDeclared = (name: string) =>
   declaredOrder.value[declaredOrder.value.length - 1] === name
 
-/** The protocol this core speaks, as `/api/status` last reported it (loaded
- * alongside `status.value.plugins` — see `usePlugins`). The other half of the
- * sentence a refused plugin's badge writes: the line carries what its binary
- * announced, this carries what the core expects. */
-const protocol = computed(() => status.value.protocol)
+/** `1.1`: a contract version as the page writes it. */
+const fmt = (v: ContractVersion) => `${v.major}.${v.minor}`
+
+/** A contract's name in the reader's language, never its wire word: the
+ * same `plugin_kind_*` nouns the plugin table uses for a kind, plus
+ * `plugin_kind_admin`. One literal key per branch, so the check that every key
+ * the page uses exists sees all five. */
+function contractLabel(c: Contract): string {
+  switch (c) {
+    case 'source':
+      return t.value('plugin_kind_source')
+    case 'display':
+      return t.value('plugin_kind_display')
+    case 'input':
+      return t.value('plugin_kind_input')
+    case 'metadata':
+      return t.value('plugin_kind_metadata')
+    case 'admin':
+      return t.value('plugin_kind_admin')
+  }
+}
+
+/** The sentence a refused plugin's badge reads, one per cause. Each branch
+ * names its key literally: a computed key would escape the checks that every
+ * key the page uses exists in every language. Several gaps give several
+ * sentences, joined. */
+function refusalText(r: Refusal): string {
+  switch (r.reason) {
+    case 'legacy':
+      return t.value('plugin_incompatible_legacy', { found: r.found })
+    case 'missing_contract':
+      return t.value('plugin_incompatible_missing', { contract: contractLabel(r.contract) })
+    case 'unexpected_contract':
+      return t.value('plugin_incompatible_unexpected', { contract: contractLabel(r.contract) })
+    case 'major':
+      return r.gaps
+        .map((g) =>
+          t.value('plugin_incompatible_major', {
+            contract: contractLabel(g.contract),
+            found: fmt(g.plugin),
+            expected: fmt(g.core),
+          }),
+        )
+        .join(' · ')
+  }
+}
+
+/** The sentence a limited plugin's badge reads: one per limited contract,
+ * joined. */
+function limitedText(gaps: ContractGap[]): string {
+  return gaps
+    .map((g) =>
+      t.value('plugin_limited', { contract: contractLabel(g.contract), found: fmt(g.plugin), expected: fmt(g.core) }),
+    )
+    .join(' · ')
+}
 
 // Names of the plugins whose toggle is in flight: disabling the only source
 // can cost up to 15 s (stop + Deactivate + Activate, each capped at 5 s) when
@@ -1496,7 +1549,7 @@ function goTo(id: string) {
                                 ? 'outline'
                                 : p.busy
                                   ? 'outline'
-                                  : p.catalog_unknown && p.connected
+                                  : p.limited.length > 0 && p.connected
                                     ? 'outline'
                                     : p.connected
                                       ? 'secondary'
@@ -1518,39 +1571,32 @@ function goTo(id: string) {
                            opposite gestures. "Busy" comes **before**
                            "connected": a busy plugin is reachable, and that is
                            precisely why "connected" says nothing useful.
-                           `catalog_unknown` sits right after, but **paired
-                           with `p.connected`** — unlike every flag above it,
-                           this one is not exclusive with a connection
-                           outcome either way: the core sets it from the
-                           announcement alone, at the same site as
-                           `ui_version`/`version`/`repository`, whether or
-                           not the socket connect that follows succeeds (see
-                           `main.rs`'s per-kind `Ok`/`Err` branches). Without
-                           the `&& p.connected` guard a legacy plugin whose
-                           socket had failed read this sentence instead of
-                           "unavailable" below — the wrong cause, and the
-                           more urgent fact suppressed (a defect this repo's
-                           review caught with a probe test, not by reading
-                           the code). This only names a binary built before
-                           this core could ask it for its language packs
-                           (the accepted mitigation for `PROTOCOL_VERSION`
-                           staying at 1, see `Announcement.catalog`'s own
-                           doc) — so it must not outrank a real fault like
-                           "busy", but among **connected** plugins it must
-                           still outrank a bare "connected", which would say
-                           nothing about the missing translations.
+                           `limited` sits right after, but **paired with
+                           `p.connected`** — unlike every flag above it, this
+                           one is not exclusive with a connection outcome
+                           either way: the core sets it from the announcement
+                           alone, whether or not the socket connect that
+                           follows succeeds. Without the `&& p.connected`
+                           guard a limited plugin whose socket had failed read
+                           this sentence instead of "unavailable" below — the
+                           wrong cause, and the more urgent fact suppressed (a
+                           defect this repo's review caught with a probe test,
+                           not by reading the code). It names a plugin built
+                           for a newer minor of a contract than this core
+                           speaks: wired, but with some features inactive — so
+                           it must not outrank a real fault like "busy", but
+                           among **connected** plugins it must still outrank a
+                           bare "connected", which would say nothing about the
+                           inactive features.
                            "Starting" comes **before** "stalled": both say the
                            plugin has not spoken yet, and only the elapsed time
                            tells them apart. Showing "stalled" during a normal
                            startup wrongly accused a perfectly healthy binary.
 
                            `!== undefined` and not a truthiness test, in both
-                           chains: `"protocol":0` deserializes perfectly well
-                           and the serde default only applies when the key is
-                           *absent*, so a refusal at protocol 0 would read as
-                           "no refusal" and be shown as merely unavailable.
-                           The accumulator already takes that care with `??`;
-                           testing `p.incompatible` here would undo it.
+                           chains: the refusal is an object that is *absent*
+                           when there is none, and the accumulator keeps that
+                           care with `??`; a looser test here would undo it.
 
                            `update_binary_missing`/`update_undeclared` are the
                            same catalog keys `/api/update`'s own card would use
@@ -1560,7 +1606,7 @@ function goTo(id: string) {
                            call it. -->
                       {{
                         p.incompatible !== undefined
-                          ? t('plugin_incompatible', { found: p.incompatible, expected: protocol })
+                          ? refusalText(p.incompatible)
                           : p.missing_binary
                             ? t('update_binary_missing')
                             : p.undeclared_binary
@@ -1569,8 +1615,8 @@ function goTo(id: string) {
                                 ? t('disabled')
                                 : p.busy
                                   ? t('busy')
-                                  : p.catalog_unknown && p.connected
-                                    ? t('plugin_catalog_unknown')
+                                  : p.limited.length > 0 && p.connected
+                                    ? limitedText(p.limited)
                                     : p.connected
                                       ? t('connected')
                                     : p.starting

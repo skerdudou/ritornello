@@ -51,6 +51,10 @@ mod tests {
         kinds: Vec<String>,
         #[serde(default)]
         description: String,
+        /// The plugin serves an admin page. Not a kind: it is a contract of
+        /// its own, and what the release guard reads to know who speaks it.
+        #[serde(default)]
+        admin: bool,
     }
 
     #[derive(serde::Deserialize)]
@@ -104,16 +108,19 @@ mod tests {
         &after_start[..run_at + ".run(".len()]
     }
 
+    fn main_rs(name: &str) -> PathBuf {
+        repo_root()
+            .join("crates")
+            .join(format!("ritornello-plugin-{name}"))
+            .join("src")
+            .join("main.rs")
+    }
+
     /// The kinds the registration chain actually calls. `.admin(...)` is not
     /// one of the four needles below, so an admin half already falls out on
     /// its own — no special-casing needed.
     fn announced_kinds(name: &str) -> BTreeSet<String> {
-        let path = repo_root()
-            .join("crates")
-            .join(format!("ritornello-plugin-{name}"))
-            .join("src")
-            .join("main.rs");
-        let chain_source = read(&path);
+        let chain_source = read(&main_rs(name));
         let chain = registration_chain(&chain_source);
         [
             (".source(", "source"),
@@ -158,6 +165,21 @@ mod tests {
             assert_eq!(
                 declared, announced,
                 "{name} declares {declared:?} and announces {announced:?}"
+            );
+        }
+    }
+
+    /// The declared admin page is the one the binary registers. A plugin that
+    /// serves a page without declaring it would not be required to move when
+    /// the admin contract breaks, and would be refused on the device.
+    #[test]
+    fn the_declared_admin_page_is_the_one_the_binary_registers() {
+        for name in declared_plugins() {
+            let declared = declaration(&name).admin;
+            let registers = registration_chain(&read(&main_rs(&name))).contains(".admin(");
+            assert_eq!(
+                declared, registers,
+                "{name} declares admin = {declared} and registers an admin page: {registers}"
             );
         }
     }

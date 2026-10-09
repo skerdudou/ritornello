@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 // `StreamExt` for the `.next()` of `run()`'s `FuturesUnordered`.
 use futures::StreamExt;
 use ritornello_i18n::Layer;
-use ritornello_proto::{Announcement, PluginKind};
+use ritornello_proto::{Announcement, Contract, PluginKind};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -249,6 +249,16 @@ impl Runtime {
             covers: self.halves.iter().any(|m| m.covers),
             ui_version: self.ui_version.clone(),
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            // Derived like `kinds`: one contract per registered half, plus
+            // `admin` when an admin page is served. An author cannot claim a
+            // contract the binary does not serve, nor forget one it does.
+            contracts: self
+                .halves
+                .iter()
+                .map(|m| Contract::of_kind(m.kind))
+                .chain(self.admin.is_some().then_some(Contract::Admin))
+                .map(|c| (c, c.current()))
+                .collect(),
             version: Some(self.version.to_string()),
             // Derived like the rest of this line: the caller handed in what
             // its own manifest says, and nothing here can invent one.
@@ -352,7 +362,11 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ritornello_proto::{Announcement, PlayerState, PluginKind};
+    use ritornello_proto::{
+        Announcement, PlayerState, PluginKind, ADMIN_CONTRACT, DISPLAY_CONTRACT, INPUT_CONTRACT,
+        SOURCE_CONTRACT,
+    };
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
@@ -424,6 +438,70 @@ mod tests {
         assert_eq!(a.kinds, vec![PluginKind::Display, PluginKind::Input]);
         assert!(!a.admin, "no .admin() called");
         assert!(!a.covers, "no display overrode wants_covers");
+        assert_eq!(
+            a.contracts,
+            BTreeMap::from([(Contract::Display, DISPLAY_CONTRACT), (Contract::Input, INPUT_CONTRACT)]),
+            "one contract per registered kind, and no admin contract without .admin()"
+        );
+    }
+
+    /// The admin contract follows `.admin()`, not a kind: a source with an
+    /// admin page speaks exactly `source` and `admin`.
+    #[tokio::test]
+    async fn a_source_with_an_admin_page_announces_source_and_admin() {
+        struct NoopSource;
+        #[async_trait::async_trait]
+        impl crate::SourcePlugin for NoopSource {
+            async fn activate(&mut self) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+            }
+            async fn deactivate(&mut self) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+            }
+            async fn select(&mut self, _n: u8) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+            }
+            async fn next(&mut self) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+            }
+            async fn prev(&mut self) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+            }
+            async fn eject(&mut self) -> crate::SourceOutcome {
+                crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+            }
+        }
+        struct Ui;
+        #[async_trait::async_trait]
+        impl AdminPlugin for Ui {
+            fn asset(&self, _path: &str) -> Option<(String, String)> {
+                None
+            }
+            async fn get_data(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn set_data(&mut self, _: serde_json::Value) -> Result<(), ritornello_proto::Text> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let rt = Runtime::new(
+            "radio".into(),
+            dir.path().join("register.sock"),
+            dir.path().join("radio"),
+            "0.0.0-test",
+            None,
+        )
+        .source(NoopSource)
+        .unwrap()
+        .admin(Ui)
+        .unwrap();
+
+        assert_eq!(
+            rt.announcement().contracts,
+            BTreeMap::from([(Contract::Source, SOURCE_CONTRACT), (Contract::Admin, ADMIN_CONTRACT)])
+        );
     }
 
     /// The invariant the whole registration protocol rests on:

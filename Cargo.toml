@@ -33,8 +33,9 @@ members = [
 # major stays identical to this number everywhere (before 1.0 it is 0); the
 # rest is each component's own. `version_coherence.rs` asserts it.
 #
-# It is NOT the compatibility contract between a core and a plugin: that one
-# is ritornello_proto::PROTOCOL_VERSION, which moves only on a wire break.
+# It is NOT the compatibility between a core and a plugin: that is the wire
+# contracts' own versions (ritornello_proto::contract), plus the frozen
+# bootstrap ritornello_proto::PROTOCOL_VERSION.
 version = "0.2.0-beta.5"
 edition = "2024"
 license = "MIT OR Apache-2.0"

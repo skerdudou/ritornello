@@ -1,6 +1,7 @@
 //! The plugins as seen from the status page: one line per (name, kind), the order of the plugins.toml file, the enabled/disabled switch, and what a disconnection or a re-announcement changes.
 
 use super::*;
+use crate::compat::{ContractGap, Refusal};
 
 /// One line of the status page: a (name, kind) pair.
 ///
@@ -151,43 +152,30 @@ pub struct PluginStatus {
     /// Additive: absent from the JSON when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
-    /// Protocol this binary announced, present **only** when it differs from
-    /// the core's.
+    /// Why `compat::judge` refused this binary, present **only** when it did
+    /// (see `crate::compat::Refusal`: a legacy binary, a missing or
+    /// unexpected contract, or another major on some contracts).
     ///
     /// Its presence is the refusal — one field rather than a boolean beside a
-    /// number, so the two can never contradict each other. The screen turns it
-    /// into a sentence with the core's own protocol, which travels in the
-    /// `/api/status` payload rather than on every line.
+    /// reason, so the two can never contradict each other. The screen turns it
+    /// into a sentence with the core's own contract versions, which travel in
+    /// the `/api/status` payload rather than on every line.
     ///
     /// Deliberately **not** `disabled`: that one writes `enabled = false` into
     /// the manifest and would survive the fix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub incompatible: Option<u32>,
-    /// This plugin's announcement carried **no** `catalog` field at all — a
-    /// binary built before this core could ask a plugin for its embedded
-    /// translation layers (`ritornello_proto::Announcement::catalog`, whose
-    /// own doc this field is the twin of).
+    pub incompatible: Option<Refusal>,
+    /// The contracts on which this wired plugin speaks a newer minor than the
+    /// core: it works, but the features those minors added are inactive.
+    /// Empty for a plugin speaking the core's versions, or an older minor.
     ///
-    /// **Distinct from an announced, empty catalog** (`catalog: Some({})`),
-    /// which is a module that legitimately has no text of its own — three
-    /// plugins ship that way and it sets no flag here. This one names only
-    /// the plugin whose announcement predates the field entirely.
+    /// Set on every line of the plugin, from the verdict its announcement
+    /// received (`announced_plugin_line` in `main.rs`). Never set beside
+    /// `incompatible`: a refused plugin has no wired line to carry it.
     ///
-    /// This is the accepted mitigation for `PROTOCOL_VERSION` staying at 1
-    /// across the whole language-pack effort (see its own doc): nothing at
-    /// the wire level refuses such a plugin — `incompatible` above stays
-    /// `None` for it, since the protocol itself did not change — so without
-    /// this flag a device stuck with an old plugin binary would go on
-    /// missing its language packs in silence. With it, the cause is named
-    /// on the Système page instead of merely suffered.
-    ///
-    /// Deliberately **not** `disabled`: nothing here writes `enabled = false`
-    /// into the manifest, and this plugin is otherwise wired exactly as any
-    /// other — same idiom as `incompatible`.
-    ///
-    /// Additive like `stalled` and `busy`: absent from the JSON when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub catalog_unknown: bool,
+    /// Additive like `stalled` and `busy`: absent from the JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limited: Vec<ContractGap>,
     /// This plugin is one of `plugins::PRIVILEGED_PLUGINS`: its packaging
     /// places files a privileged install alone can place (a root binary
     /// outside the plugins directory, a systemd unit, a polkit rule), so
@@ -205,7 +193,7 @@ pub struct PluginStatus {
     /// different answer for the same plugin on the day one of them forgets
     /// to be updated.
     ///
-    /// Additive like `catalog_unknown`: absent from the JSON when false.
+    /// Additive like `busy`: absent from the JSON when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub privileged: bool,
 }
@@ -234,7 +222,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
-            catalog_unknown: false,
+            limited: Vec::new(),
             privileged: false,
         }
     }
@@ -262,7 +250,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
-            catalog_unknown: false,
+            limited: Vec::new(),
             privileged: false,
         }
     }
@@ -321,7 +309,7 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
-            catalog_unknown: false,
+            limited: Vec::new(),
             privileged: false,
         }
     }
@@ -346,17 +334,17 @@ impl PluginStatus {
             version: None,
             repository: None,
             incompatible: None,
-            catalog_unknown: false,
+            limited: Vec::new(),
             privileged: false,
         }
     }
 
-    /// Line of a plugin refused for speaking another protocol.
+    /// Line of a plugin refused by `compat::judge`.
     ///
     /// Neither kind nor admin page: nothing of it was wired. It is not
     /// `stalled` (it spoke, on time) and not `disabled` (nobody switched it
     /// off) — hence a line of its own.
-    pub fn incompatible_line(name: &str, found: u32) -> Self {
+    pub fn incompatible_line(name: &str, refusal: Refusal) -> Self {
         Self {
             name: name.to_string(),
             kind: "unknown".into(),
@@ -373,8 +361,8 @@ impl PluginStatus {
             ui_version: None,
             version: None,
             repository: None,
-            incompatible: Some(found),
-            catalog_unknown: false,
+            incompatible: Some(refusal),
+            limited: Vec::new(),
             privileged: false,
         }
     }
@@ -1928,7 +1916,7 @@ mod tests {
                 PluginStatus::kind("cd", "source", true, false),
             ],
             active_source: "radio".into(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: crate::status::core_contracts(),
         };
         mark_plugin_disconnected(&mut st, "cd");
         assert!(!st.plugins.iter().find(|p| p.name == "cd").unwrap().connected);
@@ -1951,7 +1939,7 @@ mod tests {
                 PluginStatus::kind("radio", "source", true, true),
             ],
             active_source: "files".into(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: crate::status::core_contracts(),
         };
         mark_plugin_disconnected(&mut st, "files");
         assert!(
@@ -1972,7 +1960,7 @@ mod tests {
         let mut st = StatusState {
             plugins: vec![PluginStatus::unknown_kind("files", true)],
             active_source: "radio".into(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: crate::status::core_contracts(),
         };
         mark_plugin_disconnected(&mut st, "files");
         let line = &st.plugins[0];
@@ -1991,7 +1979,7 @@ mod tests {
         let mut st = StatusState {
             plugins: vec![PluginStatus::startup("cd")],
             active_source: "radio".into(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: crate::status::core_contracts(),
         };
         mark_plugin_disconnected(&mut st, "cd");
         let line = &st.plugins[0];
@@ -2014,7 +2002,7 @@ mod tests {
                 PluginStatus::kind("radio", "source", true, true),
             ],
             active_source: "radio".into(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: crate::status::core_contracts(),
         };
         mark_plugin_disconnected(&mut st, "files");
         assert!(
@@ -2057,7 +2045,7 @@ mod tests {
                 PluginStatus::kind("radio", "source", true, true),
             ],
             active_source: "radio".into(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: crate::status::core_contracts(),
         };
         // First announcement: the stalled one becomes two kind lines.
         replace_plugin_lines(
@@ -2108,7 +2096,7 @@ mod tests {
                 PluginStatus::kind("cd", "source", true, false),
             ],
             active_source: "radio".into(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: crate::status::core_contracts(),
         };
         // The file now reads cd, files, radio — and says nothing of the
         // console, which is stalled and therefore absent from the order its
@@ -2146,7 +2134,7 @@ mod tests {
                 PluginStatus::kind("radio", "source", true, false),
             ],
             active_source: "radio".into(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: crate::status::core_contracts(),
         };
         replace_plugin_lines(&mut st, "files", vec![], false);
 
@@ -2169,7 +2157,7 @@ mod tests {
         let mut st = StatusState {
             plugins: vec![],
             active_source: String::new(),
-            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: crate::status::core_contracts(),
         };
         replace_plugin_lines(&mut st, "files", vec![], true);
 
@@ -2201,14 +2189,15 @@ mod tests {
     }
 
     #[test]
-    fn an_incompatible_line_carries_the_number_and_nothing_else_claims_it() {
-        // One field, not a boolean plus a number: its presence *is* the
+    fn an_incompatible_line_carries_the_refusal_and_nothing_else_claims_it() {
+        // One field, not a boolean plus a reason: its presence *is* the
         // refusal, so the two can never disagree.
-        let l = PluginStatus::incompatible_line("radio", 2);
-        assert_eq!(l.incompatible, Some(2));
+        let l = PluginStatus::incompatible_line("radio", Refusal::Legacy { found: 1 });
+        assert_eq!(l.incompatible, Some(Refusal::Legacy { found: 1 }));
         assert!(!l.connected);
         assert!(!l.disabled, "a refusal is not the operator's switch");
         assert!(!l.stalled, "the plugin spoke; accusing it of silence would be false");
+        assert!(l.limited.is_empty(), "nothing of a refused plugin is wired, so nothing is limited");
     }
 
     #[test]
@@ -2218,30 +2207,7 @@ mod tests {
         let l = PluginStatus::kind("radio", "source", true, false);
         let j = serde_json::to_string(&l).unwrap();
         assert!(!j.contains("incompatible"), "{j}");
+        assert!(!j.contains("limited"), "{j}");
         assert!(!j.contains("version"), "{j}");
-    }
-
-    /// Twin of `an_incompatible_line_carries_the_number_and_nothing_else_claims_it`:
-    /// a plugin's announcement carrying no `catalog` field at all is flagged
-    /// on its own line, and nothing else about that line lies about it — it
-    /// is not `disabled` (nobody switched it off) and not `incompatible`
-    /// (the protocol itself matched).
-    #[test]
-    fn catalog_unknown_marks_a_wired_line_without_disguising_it_as_something_else() {
-        let l = PluginStatus { catalog_unknown: true, ..PluginStatus::kind("cd", "source", true, false) };
-        assert!(l.catalog_unknown);
-        assert!(l.connected, "the plugin is wired: this is a name, not a refusal");
-        assert!(!l.disabled, "a legacy binary is not the operator's switch");
-        assert_eq!(l.incompatible, None, "the protocol itself matched: this is a different fact");
-    }
-
-    /// Additive idiom, same as `a_compatible_line_omits_the_field_entirely`:
-    /// a plugin whose announcement carried a catalog (whether populated or
-    /// merely `Some({})`) must not grow this field on the wire.
-    #[test]
-    fn a_known_catalog_omits_the_field_entirely() {
-        let l = PluginStatus::kind("radio", "source", true, false);
-        let j = serde_json::to_string(&l).unwrap();
-        assert!(!j.contains("catalog_unknown"), "{j}");
     }
 }

@@ -706,6 +706,10 @@ mod tests {
                     covers: false,
                     ui_version: None,
                     protocol: ritornello_proto::PROTOCOL_VERSION,
+                    contracts: std::collections::BTreeMap::from([(
+                        ritornello_proto::Contract::Metadata,
+                        ritornello_proto::METADATA_CONTRACT,
+                    )]),
                     version: None,
                     repository: None,
                     catalog: None,
