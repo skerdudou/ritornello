@@ -814,7 +814,7 @@ exec = \"/x\"
     }
 
     /// Same file, the other reported scenario: remove `radio`, then move `cd`
-    /// down. `cd`'s own three-line description must stay immediately above
+    /// down. `cd`'s own four-line description must stay immediately above
     /// `cd`, not drift onto `files` (which takes `cd`'s old spot) or onto
     /// whoever `cd` displaces.
     #[test]
@@ -822,7 +822,7 @@ exec = \"/x\"
         let doc = include_str!("../../../deploy/plugins.example.toml");
         let after_remove = remove_entry(doc, "radio").unwrap();
         let out = move_entry(&after_remove, "cd", 1).unwrap();
-        let comment_at = out.find("Its page carries one setting").unwrap();
+        let comment_at = out.find("Its page carries two settings").unwrap();
         let cd_at = out.find("name = \"cd\"").unwrap();
         assert!(
             comment_at < cd_at && cd_at - comment_at < 400,
