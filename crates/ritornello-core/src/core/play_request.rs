@@ -59,56 +59,109 @@ impl<P: Player> Core<P> {
     /// Publishes on the way out, even on error, like `handle_command`: the
     /// partial state reached is what the displays must show, and the channel
     /// deduplicates.
-    pub async fn handle_play_request(&mut self, name: &str, request: PlayRequest) -> Result<()> {
-        let outcome = self.act_on_play_request(name, request).await;
+    ///
+    /// **One journal line per request, whatever the decision** (final review,
+    /// F2): the owner who inserts a disc and hears nothing — or hears it
+    /// start — has `journalctl` to find out which rule answered. The decision
+    /// is taken first and written before it is carried out, so a switch that
+    /// then fails still says what was attempted; it is returned so that the
+    /// tests read it rather than scrape a log.
+    pub async fn handle_play_request(&mut self, name: &str, request: PlayRequest) -> Result<PlayRequestDecision> {
+        let decision = self.decide_play_request(name, request);
+        tracing::info!("{}", decision.journal_line(name, request));
+        let outcome = self.carry_out_play_request(name, &decision).await;
         self.publish_state();
-        outcome
+        outcome.map(|()| decision)
     }
 
-    async fn act_on_play_request(&mut self, name: &str, request: PlayRequest) -> Result<()> {
-        // One journal line per decision, whatever it is: the owner who
-        // inserts a disc and hears nothing (or hears it start) has
-        // `journalctl` to find out which rule answered.
+    /// The rules, in their order, reading the state and changing nothing.
+    fn decide_play_request(&self, name: &str, request: PlayRequest) -> PlayRequestDecision {
         if !self.source_order.iter().any(|n| n == name) {
-            tracing::info!("play request {request:?} from {name} ignored: not a wired source");
-            return Ok(());
+            return PlayRequestDecision::NotWired;
         }
-        let mut request = request;
-        if self.standby {
-            if request != PlayRequest::WakeAndSwitch {
-                tracing::info!("play request {request:?} from {name} ignored: the device is in standby");
-                return Ok(());
-            }
-            tracing::info!("play request {request:?} from {name}: leaving standby for {name}");
-            self.leave_standby();
-            self.prepare_player().await?;
-            request = PlayRequest::Switch;
+        let wake = self.standby;
+        if wake && request != PlayRequest::WakeAndSwitch {
+            return PlayRequestDecision::InStandby;
         }
         if name != self.active_source {
+            // After a wake the request is a switch, whatever it said.
             if request == PlayRequest::IfActive {
-                tracing::info!(
-                    "play request {request:?} from {name} ignored: not the active source ({})",
-                    self.active_source
-                );
-                return Ok(());
+                return PlayRequestDecision::NotActive { active: self.active_source.clone() };
             }
-            tracing::info!("play request {request:?} from {name}: switching to {name}");
-            return self.cycle_source(Some(name.to_string()), SourceReq::Play).await;
+            return PlayRequestDecision::Switch { wake };
         }
         if self.playback {
-            tracing::info!("play request {request:?} from {name} ignored: {name} already plays");
-            return Ok(());
+            return PlayRequestDecision::AlreadyPlays { wake };
         }
-        tracing::info!("play request {request:?} from {name}: asking {name} to play");
-        if let Some(action) = self.active_request(SourceReq::Play).await? {
-            self.apply(action).await?;
+        PlayRequestDecision::Play { wake }
+    }
+
+    async fn carry_out_play_request(&mut self, name: &str, decision: &PlayRequestDecision) -> Result<()> {
+        let wake = match decision {
+            PlayRequestDecision::NotWired | PlayRequestDecision::InStandby | PlayRequestDecision::NotActive { .. } => {
+                return Ok(());
+            }
+            PlayRequestDecision::AlreadyPlays { wake }
+            | PlayRequestDecision::Switch { wake }
+            | PlayRequestDecision::Play { wake } => *wake,
+        };
+        if wake {
+            self.leave_standby();
+            self.prepare_player().await?;
         }
-        Ok(())
+        match decision {
+            PlayRequestDecision::Switch { .. } => self.cycle_source(Some(name.to_string()), SourceReq::Play).await,
+            PlayRequestDecision::Play { .. } => {
+                if let Some(action) = self.active_request(SourceReq::Play).await? {
+                    self.apply(action).await?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// What the core made of a play request (see `Core::handle_play_request`).
+/// `wake`: standby is left first, as the Power key leaves it but without
+/// waking the old source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlayRequestDecision {
+    /// Not in the cycle order: unknown, switched off, or forgotten after its
+    /// plugin died.
+    NotWired,
+    /// The device is in standby and the request does not ask to wake it.
+    InStandby,
+    /// `IfActive` from a source that is not the active one.
+    NotActive { active: String },
+    /// The requesting source is the active one and already plays: nothing
+    /// restarts.
+    AlreadyPlays { wake: bool },
+    /// Switch to the requesting source, which is sent `Play`.
+    Switch { wake: bool },
+    /// The requesting source is the active one and idle: it is sent `Play`.
+    Play { wake: bool },
+}
+
+impl PlayRequestDecision {
+    /// The journal line, in English, naming the request and the source.
+    pub fn journal_line(&self, name: &str, request: PlayRequest) -> String {
+        let head = format!("play request {request:?} from {name}");
+        let wake = |wake: bool| if wake { format!("leaving standby for {name}, ") } else { String::new() };
+        match self {
+            Self::NotWired => format!("{head} ignored: not a wired source"),
+            Self::InStandby => format!("{head} ignored: the device is in standby"),
+            Self::NotActive { active } => format!("{head} ignored: not the active source ({active})"),
+            Self::AlreadyPlays { wake: w } => format!("{head}: {}nothing to do, {name} already plays", wake(*w)),
+            Self::Switch { wake: w } => format!("{head}: {}switching to {name}", wake(*w)),
+            Self::Play { wake: w } => format!("{head}: {}asking {name} to play", wake(*w)),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::PlayRequestDecision;
     use crate::core::test_support::*;
     use crate::core::*;
     use ritornello_proto::PlayRequest;
@@ -281,55 +334,62 @@ mod tests {
         assert!(!log.iter().any(|c| c.ends_with(":Play")), "{log:?}");
     }
 
-    /// Final review, F2: every decision leaves one line at `info`, the level
-    /// the device's journal keeps, naming the request and the source.
+    /// Final review, F2: each rule answers with its own decision, the one
+    /// `handle_play_request` writes to the journal. Read from the returned
+    /// value, not scraped from a captured log: a `tracing` subscriber set for
+    /// one test races with the parallel tests that hit the same call sites
+    /// (their cached interest), and that capture failed here once for no
+    /// reason in the code.
     #[tokio::test]
-    async fn every_decision_is_written_to_the_journal() {
-        use tracing_subscriber::fmt::MakeWriter;
-        #[derive(Clone, Default)]
-        struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Buffer {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for Buffer {
-            type Writer = Buffer;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-        let buffer = Buffer::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(buffer.clone())
-            .with_ansi(false)
-            .with_max_level(tracing::Level::INFO)
-            .finish();
-        // `#[tokio::test]` runs on one thread: the default holds across awaits.
-        let _guard = tracing::subscriber::set_default(subscriber);
-        let take = || String::from_utf8(std::mem::take(&mut *buffer.0.lock().unwrap())).unwrap();
-
+    async fn every_rule_answers_with_its_own_decision() {
         let (mut core, _pc, _sc, _rx, _d) = setup();
-        core.handle_play_request("ghost", PlayRequest::Switch).await.unwrap();
-        assert!(take().contains("play request Switch from ghost ignored: not a wired source"));
-        core.handle_play_request("cd", PlayRequest::IfActive).await.unwrap();
-        assert!(take().contains("play request IfActive from cd ignored: not the active source (radio)"));
-        core.handle_play_request("radio", PlayRequest::IfActive).await.unwrap();
-        assert!(take().contains("play request IfActive from radio: asking radio to play"));
-        core.handle_play_request("radio", PlayRequest::Switch).await.unwrap();
-        assert!(take().contains("play request Switch from radio ignored: radio already plays"));
+        let decision = core.handle_play_request("ghost", PlayRequest::Switch).await.unwrap();
+        assert_eq!(decision, PlayRequestDecision::NotWired);
+        let decision = core.handle_play_request("cd", PlayRequest::IfActive).await.unwrap();
+        assert_eq!(decision, PlayRequestDecision::NotActive { active: "radio".into() });
+        let decision = core.handle_play_request("radio", PlayRequest::IfActive).await.unwrap();
+        assert_eq!(decision, PlayRequestDecision::Play { wake: false });
+        let decision = core.handle_play_request("radio", PlayRequest::Switch).await.unwrap();
+        assert_eq!(decision, PlayRequestDecision::AlreadyPlays { wake: false });
         core.handle_command(Command::Power).await.unwrap();
-        take();
-        core.handle_play_request("cd", PlayRequest::Switch).await.unwrap();
-        assert!(take().contains("play request Switch from cd ignored: the device is in standby"));
-        core.handle_play_request("cd", PlayRequest::WakeAndSwitch).await.unwrap();
-        let log = take();
-        assert!(log.contains("play request WakeAndSwitch from cd: leaving standby for cd"), "{log}");
-        assert!(log.contains("play request Switch from cd: switching to cd"), "{log}");
+        let decision = core.handle_play_request("cd", PlayRequest::Switch).await.unwrap();
+        assert_eq!(decision, PlayRequestDecision::InStandby);
+        let decision = core.handle_play_request("cd", PlayRequest::WakeAndSwitch).await.unwrap();
+        assert_eq!(decision, PlayRequestDecision::Switch { wake: true });
+        core.handle_command(Command::Power).await.unwrap();
+        let decision = core.handle_play_request("cd", PlayRequest::WakeAndSwitch).await.unwrap();
+        assert_eq!(decision, PlayRequestDecision::Play { wake: true });
+    }
+
+    /// The lines themselves: in English, naming the request and the source,
+    /// and saying when standby was left.
+    #[test]
+    fn each_decision_has_its_journal_line() {
+        let line = |d: PlayRequestDecision, name: &str, r| d.journal_line(name, r);
+        assert_eq!(
+            line(PlayRequestDecision::NotWired, "ghost", PlayRequest::Switch),
+            "play request Switch from ghost ignored: not a wired source"
+        );
+        assert_eq!(
+            line(PlayRequestDecision::InStandby, "cd", PlayRequest::Switch),
+            "play request Switch from cd ignored: the device is in standby"
+        );
+        assert_eq!(
+            line(PlayRequestDecision::NotActive { active: "radio".into() }, "cd", PlayRequest::IfActive),
+            "play request IfActive from cd ignored: not the active source (radio)"
+        );
+        assert_eq!(
+            line(PlayRequestDecision::AlreadyPlays { wake: false }, "cd", PlayRequest::Switch),
+            "play request Switch from cd: nothing to do, cd already plays"
+        );
+        assert_eq!(
+            line(PlayRequestDecision::Switch { wake: true }, "cd", PlayRequest::WakeAndSwitch),
+            "play request WakeAndSwitch from cd: leaving standby for cd, switching to cd"
+        );
+        assert_eq!(
+            line(PlayRequestDecision::Play { wake: false }, "cd", PlayRequest::IfActive),
+            "play request IfActive from cd: asking cd to play"
+        );
     }
 
     /// The path the main loop takes: a frame carrying a request reaches
