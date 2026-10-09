@@ -11,11 +11,15 @@
 # The rule: a component is published when the version it declares differs from
 # the version it declared at <ref>. Bumping the number is therefore the only
 # gesture, and forgetting to bump publishes nothing — a loud failure rather
-# than a silent one. Two things republish everything instead: a change of
-# `PROTOCOL_VERSION` (a wire break: old binaries can no longer talk to the
-# core, so every core and plugin must have moved, and the script refuses the
-# release otherwise), and a change of the product's MAJOR. A COMPATIBLE change
-# to a shared crate republishes nothing by itself: see the block below.
+# than a silent one. Three things ask for more than a component's own
+# move: a change of `PROTOCOL_VERSION` (the bootstrap wire break: old binaries
+# can no longer talk to the core, so every core and plugin must have moved, and
+# the script refuses the release otherwise); a change of one wire contract's
+# MAJOR (crates/ritornello-proto/src/contract.rs: the core and the plugins
+# that speak that contract must have moved, and the script refuses the release
+# otherwise � a plugin that does not speak it is left alone); and a change of
+# the product's MAJOR, which republishes everything. A COMPATIBLE change to a
+# shared crate republishes nothing by itself: see the block below.
 #
 # Usage: changed-components.sh [--guard-baseline <tag>] [ref | --guard-only]
 #        changed-components.sh --self-test
@@ -78,12 +82,15 @@ fi
 # component whose current binary still works with the new core stays where it
 # is. A component is republished only when
 #   1. its own version moved (its code changed, as always);
-#   2. `PROTOCOL_VERSION` changed: a wire break, old binaries cannot talk to
-#      the core any more, so every shipped component that links
+#   2. `PROTOCOL_VERSION` changed (the bootstrap wire break): old binaries
+#      cannot talk to the core any more, so every shipped component that links
 #      `ritornello-proto` (the core and the plugins; NOT a companion, which
 #      depends on no shared crate, and NOT a language pack, which is data)
 #      MUST have moved its version, or the release is refused below;
-#   3. the product's major changed.
+#   3. one wire contract's major changed: the core and the plugins that speak
+#      that contract (their `kinds` and `admin` declaration) MUST have moved,
+#      or the release is refused below; the others are not asked to;
+#   4. the product's major changed.
 # A compatible shared-crate change prints a NOTE and nothing else: if the fix
 # must reach plugins, the developer bumps those plugins by hand, which is a
 # delivery choice and not a compatibility matter. The fingerprint test of
@@ -106,6 +113,28 @@ proto_version() {
   v=$(tr -d '\r' | sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9][0-9]*\);.*/\1/p' | head -1)
   [ -n "$v" ] || v=absent
   printf '%s\n' "$v"
+}
+
+# The version of one wire contract, "<major>.<minor>", from a contract.rs on
+# stdin, or `absent`. The constants keep a one-line shape on purpose (see
+# crates/ritornello-proto/src/contract.rs).
+contract_version() { # <CONST_NAME>
+  local v
+  v=$(tr -d '\r' | sed -n "s/^pub const $1: ContractVersion = ContractVersion::new(\([0-9][0-9]*\), *\([0-9][0-9]*\));.*/\1.\2/p" | head -1)
+  [ -n "$v" ] || v=absent
+  printf '%s\n' "$v"
+}
+CONTRACTS=(source:SOURCE_CONTRACT display:DISPLAY_CONTRACT input:INPUT_CONTRACT metadata:METADATA_CONTRACT admin:ADMIN_CONTRACT)
+
+# Does plugin crate <c> speak contract <name>? Read from its declaration, the
+# same one plugin_catalogue_declaration.rs holds to what the binary registers.
+speaks() { # <crate> <contract>
+  local toml="crates/$1/Cargo.toml"
+  if [ "$2" = admin ]; then
+    tr -d '\r' < "$toml" | grep -qx 'admin = true'
+  else
+    tr -d '\r' < "$toml" | grep '^kinds = ' | grep -q "\"$2\""
+  fi
 }
 
 # The product's major, from a workspace Cargo.toml on stdin: the first
@@ -593,6 +622,17 @@ if [ -n "$SELF_TEST" ]; then
   # commits a baseline tagged v0.1.0, changes things, commits, and runs the
   # whole script against v0.1.0 with no published baseline for the coupled
   # guard (--guard-baseline "").
+  # The declarations of the real plugin crates, read before any cd into a
+  # temporary repository. Companions and the core carry none.
+  CONTRACT_NAMES=(SOURCE DISPLAY INPUT METADATA ADMIN)
+  declare -A REAL_KINDS REAL_ADMIN
+  for c in "${CRATES[@]}"; do
+    k=$(tr -d '\r' < "crates/$c/Cargo.toml" | grep '^kinds = ' || true)
+    [ -n "$k" ] || continue
+    REAL_KINDS[$c]=$k
+    REAL_ADMIN[$c]=$(tr -d '\r' < "crates/$c/Cargo.toml" | grep -x 'admin = true' || true)
+    [ -z "${REAL_ADMIN[$c]}" ] || REAL_ADMIN[$c]+=$'\n'
+  done
   rel_repo() { # sets R
     R=$(mktemp -d)
     mkdir -p "$R/scripts" "$R/deploy" "$R/crates/ritornello-proto/src" "$R/crates/ritornello-i18n/src"
@@ -601,13 +641,34 @@ if [ -n "$SELF_TEST" ]; then
     printf '[workspace.package]\nversion = "0.1.0"\n' > "$R/Cargo.toml"
     printf 'pub const PROTOCOL_VERSION: u32 = 1;\n' > "$R/crates/ritornello-proto/src/lib.rs"
     printf 'pub fn t() {}\n' > "$R/crates/ritornello-i18n/src/lib.rs"
+    for k in "${CONTRACT_NAMES[@]}"; do
+      printf 'pub const %s_CONTRACT: ContractVersion = ContractVersion::new(1, 0);\n' "$k" >> "$R/crates/ritornello-proto/src/contract.rs"
+    done
     for c in "${CRATES[@]}"; do
       mkdir -p "$R/crates/$c"
       printf '[package]\nname = "%s"\nversion = "0.1.0"\n' "$c" > "$R/crates/$c/Cargo.toml"
+      # A plugin stub carries the REAL crate's declaration (kinds, admin), so
+      # the contract rule is exercised against what each plugin really speaks.
+      if [ -n "${REAL_KINDS[$c]:-}" ]; then
+        printf '\n[package.metadata.ritornello]\n%s\n%s' "${REAL_KINDS[$c]}" "${REAL_ADMIN[$c]}" >> "$R/crates/$c/Cargo.toml"
+      fi
     done
     guard_git init -q; guard_git add -A; guard_git commit -q -m baseline; guard_git tag v0.1.0
   }
   rel_bump() { guard_bump "$1" "${2:-0.1.1}"; }
+  # Sets one contract's version in the temporary repository: <NAME> <M, N>.
+  contract_set() {
+    local f="$R/crates/ritornello-proto/src/contract.rs"
+    sed "s/^\(pub const $1_CONTRACT: ContractVersion = ContractVersion::new(\)[0-9]*, [0-9]*/\1$2/" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  }
+  # Rewrites the baseline so that v0.1.0 holds no contract.rs, then restores
+  # the file for the case: contract.rs absent at PREV, present now.
+  git_rm_baseline_contract() {
+    cp "$R/crates/ritornello-proto/src/contract.rs" "$R/contract.keep"
+    rm "$R/crates/ritornello-proto/src/contract.rs"
+    guard_git add -A; guard_git commit -q -m "baseline without contracts"; guard_git tag -f v0.1.0 > /dev/null
+    mv "$R/contract.keep" "$R/crates/ritornello-proto/src/contract.rs"
+  }
   # Moves one language pack's version in the repository's own copy.
   pack_bump() { # <language>
     tr -d '\r' < "$R/deploy/language-packs.toml" \
@@ -669,6 +730,53 @@ if [ -n "$SELF_TEST" ]; then
   rel_repo
   printf '[workspace.package]\nversion = "1.0.0"\n' > "$R/Cargo.toml"
   expect_rel 0 "$all_non_companions" "major moved" "a new major republishes everything, whatever moved"
+
+  # One contract's major moved: the core and the plugins that speak it must
+  # move; a plugin that does not speak it is left alone. The expected lists
+  # are written out, not computed with speaks(): a speaks() that is wrong
+  # would otherwise compute the same wrong list on both sides.
+  rel_repo
+  contract_set DISPLAY "2, 0"
+  for c in ritornello-core ritornello-plugin-console ritornello-plugin-mpd; do rel_bump "$c"; done
+  expect_rel 0 "ritornello-core ritornello-plugin-console ritornello-plugin-mpd" "display contract major moved" "a display major with its speakers moved: passes, and radio (source only), not moved, is neither required nor printed"
+
+  rel_repo
+  contract_set DISPLAY "2, 0"
+  for c in ritornello-core ritornello-plugin-console; do rel_bump "$c"; done
+  expect_rel 1 "" "ritornello-plugin-mpd" "a display major with mpd (display + input + admin) not moved is refused, and names it"
+
+  rel_repo
+  contract_set DISPLAY "2, 0"
+  for c in ritornello-plugin-console ritornello-plugin-mpd; do rel_bump "$c"; done
+  expect_rel 1 "" "ritornello-core" "a display major with the core not moved is refused, and names it"
+
+  rel_repo
+  contract_set ADMIN "2, 0"
+  admin_plugins="ritornello-core ritornello-plugin-cd ritornello-plugin-files ritornello-plugin-generic-input ritornello-plugin-mpd ritornello-plugin-musicbrainz ritornello-plugin-radio"
+  for c in $admin_plugins; do rel_bump "$c"; done
+  expect_rel 0 "$admin_plugins" "admin contract major moved" "an admin major with the core and the six admin plugins moved: console and the metadata-only plugins are not asked to"
+
+  rel_repo
+  contract_set ADMIN "2, 0"
+  for c in ritornello-core ritornello-plugin-cd ritornello-plugin-files ritornello-plugin-generic-input ritornello-plugin-mpd ritornello-plugin-radio; do rel_bump "$c"; done
+  expect_rel 1 "" "ritornello-plugin-musicbrainz" "an admin major with musicbrainz (metadata + admin) not moved is refused, and names it"
+
+  rel_repo
+  contract_set SOURCE "1, 1"
+  for c in ritornello-core ritornello-plugin-cd; do rel_bump "$c"; done
+  expect_rel 0 "ritornello-core ritornello-plugin-cd" "" "a source MINOR move asks nothing of anyone: only what moved is printed"
+
+  rel_repo
+  printf 'pub fn nothing() {}\n' > "$R/crates/ritornello-proto/src/contract.rs"
+  expect_rel 1 "" "cannot read the source contract version" "a contract.rs this script cannot read is refused, not skipped"
+
+  # The first release with contracts: PREV has no contract.rs at all. The
+  # bootstrap (PROTOCOL_VERSION) already asks everything to move, so no
+  # contract rule applies; only the plugin that was bumped is printed.
+  rel_repo
+  git_rm_baseline_contract
+  rel_bump ritornello-plugin-cd
+  expect_rel 0 "ritornello-plugin-cd" "" "contract.rs absent at the previous release: no contract rule applies"
 
   # The language packs, kept in the output this time: they are data, and a
   # wire break must not republish them under their unchanged numbers.
@@ -740,6 +848,47 @@ if [ -n "$PROTO_BREAK" ]; then
     echo "a wire break needs every core and plugin republished under a new number; bump them in crates/<name>/Cargo.toml" >&2
     exit 1
   fi
+fi
+
+# A wire contract whose major moved: the core and the plugins that speak it
+# must have moved, or the release is refused. Only they: a plugin that does not
+# speak the contract keeps working with the new core and stays where it is, and
+# its archive is republished only if its own version moved (the loop below),
+# which is why ALL is not set here. A minor move is compatible: it says so and
+# asks nothing. A PREV without contract.rs is the first release with contracts;
+# the PROTOCOL_VERSION move that introduced them already asked everything.
+if [ -n "$PREV" ]; then
+  for entry in "${CONTRACTS[@]}"; do
+    cname=${entry%%:*} cconst=${entry#*:}
+    now_c=$(contract_version "$cconst" < crates/ritornello-proto/src/contract.rs 2>/dev/null || echo absent)
+    if [ "$now_c" = absent ]; then
+      echo "cannot read the $cname contract version from crates/ritornello-proto/src/contract.rs" >&2
+      exit 1
+    fi
+    # `|| true`, not `|| echo absent`: under pipefail a failing `git show`
+    # would append a second `absent` to the one contract_version prints.
+    then_c=$(git show "$PREV:crates/ritornello-proto/src/contract.rs" 2>/dev/null | contract_version "$cconst" || true)
+    [ "$then_c" != absent ] || continue
+    if [ "${now_c%%.*}" != "${then_c%%.*}" ]; then
+      unmoved=()
+      for c in "${CRATES[@]}"; do
+        is_companion "$c" && continue
+        [ "$c" = ritornello-core ] || speaks "$c" "$cname" || continue
+        now=$(version_in < "crates/$c/Cargo.toml")
+        then_=$(git show "$PREV:crates/$c/Cargo.toml" 2>/dev/null | version_in || echo absent)
+        [ "$now" != "$then_" ] || unmoved+=("$c")
+      done
+      if [ "${#unmoved[@]}" -gt 0 ]; then
+        echo "$cname contract major moved ($then_c -> $now_c) since $PREV, but these components that speak it did not move their version:" >&2
+        printf '  %s\n' "${unmoved[@]}" >&2
+        echo "a contract break needs the core and every plugin that speaks it republished under a new number; bump them in crates/<name>/Cargo.toml" >&2
+        exit 1
+      fi
+      echo "$cname contract major moved ($then_c -> $now_c) since $PREV � its speakers moved" >&2
+    elif [ "$now_c" != "$then_c" ]; then
+      echo "$cname contract minor moved ($then_c -> $now_c) since $PREV � compatible, nothing is required" >&2
+    fi
+  done
 fi
 
 changed=0

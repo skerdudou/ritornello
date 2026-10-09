@@ -16,6 +16,7 @@ repository.workspace = true
 [package.metadata.ritornello]
 kinds = ["source"]
 description = "Plays audio files from a local folder or a mounted network share."
+admin = true
 
 # What the plugin has in common with the root mount helper lives in
 # `ritornello-files-mount`, which ships as a component of its own.

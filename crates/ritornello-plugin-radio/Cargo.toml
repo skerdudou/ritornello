@@ -16,6 +16,7 @@ repository.workspace = true
 [package.metadata.ritornello]
 kinds = ["source"]
 description = "Internet radio stations, with a search over the community directory."
+admin = true
 
 [[bin]]
 name = "ritornello-plugin-radio"

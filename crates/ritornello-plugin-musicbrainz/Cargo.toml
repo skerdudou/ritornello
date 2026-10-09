@@ -17,6 +17,7 @@ build = "build.rs"
 [package.metadata.ritornello]
 kinds = ["metadata"]
 description = "Identifies CDs and finds cover art via the MusicBrainz database."
+admin = true
 
 [[bin]]
 name = "ritornello-plugin-musicbrainz"

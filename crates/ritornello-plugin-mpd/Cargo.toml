@@ -16,6 +16,7 @@ repository.workspace = true
 [package.metadata.ritornello]
 kinds = ["display", "input"]
 description = "Controls and displays playback through the MPD protocol, for any MPD client."
+admin = true
 
 [[bin]]
 name = "ritornello-plugin-mpd"
