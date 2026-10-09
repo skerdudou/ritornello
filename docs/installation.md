@@ -1247,8 +1247,8 @@ are unverified:
 **The CD insertion handling has never met a real drive.** The plugin reports
 an open tray, treats an open tray (seen by its two-second poll) or
 Ritornello's own Eject as a confirmed removal, and then forgets the resume
-point, in memory and in `state.json`, and the shuffle order. A disc read after
-a confirmed removal, or one with a different TOC, counts as an insertion; the
+point, in memory and in `state.json`, and the shuffle order. A readable disc
+read after a confirmed removal, or one with a different TOC, counts as an insertion; the
 same TOC with the tray closed is a presence flicker and changes nothing; the
 first disc seen after startup is not an insertion. All of it is proven only by
 tests that inject drive events, since the owner has no CD drive. The same holds

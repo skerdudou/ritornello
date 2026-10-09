@@ -787,8 +787,10 @@ in for stations.
 
 ### What it does on arrival
 
-The plugin serves an admin page carrying its one setting: what happens when
-this source is arrived at. Three values — play nothing (the default), start at
+The plugin serves an admin page carrying two settings. The first, described
+here, says what happens when this source is arrived at; the second, what
+happens when a disc is inserted (see
+[What it does on insertion](#what-it-does-on-insertion)). Three values — play nothing (the default), start at
 track 1, resume the track last played — stored in its own `state.json` (see
 [Where a plugin keeps its data](#where-a-plugin-keeps-its-data)).
 
@@ -827,16 +829,18 @@ been sitting in the drive, the everyday case, has had its TOC read long since.
 [What it does on insertion](#what-it-does-on-insertion); a boot has none.)
 
 **Ejecting forgets the track.** When the tray is seen open, or Ritornello's own
-Eject is used, the remembered resume point and the shuffle order are dropped,
-in memory and on disk: a disc put back afterwards, even the same one, starts at
+Eject is used, the remembered resume point is dropped, in memory and on disk,
+and so is the shuffle order, which only ever lived in memory: a disc put back afterwards, even the same one, starts at
 track 1 rather than resuming. A momentary loss of presence with the tray closed
 is only a flicker and forgets nothing.
 
 ### What it does on insertion
 
 A second setting on the same admin page says what happens when a disc is
-**inserted** — a disc read after a confirmed removal (tray seen open, or
-Eject), or one whose TOC differs from the last one. A disc already in the
+**inserted** — a disc whose TOC is read after a confirmed removal (tray seen
+open, or Eject), or one whose TOC differs from the last one. A read that fails
+is not an insertion, and does not use up the removal either: the first
+successful read after it is. A disc already in the
 drive when the device boots is not being inserted, and a presence flicker
 with the tray closed is not an insertion either. Four values:
 
@@ -860,8 +864,10 @@ resume point was forgotten when it was ejected. Under shuffle, the beginning
 is the first entry of the pass drawn for that disc. The next `Play` the core
 sends answers the request and consumes it. A request the core ignored does not
 linger: arriving on the source, navigating (a track number, next, previous),
-ejecting or leaving the source drops it, so a later Play obeys the arrival
-setting again.
+stopping, ejecting or leaving the source drops it, so a later Play obeys the
+arrival setting again. And a disc the user already started before its TOC was
+read carries a request the core ignores (it already plays) without the plugin
+waiting for it at all.
 
 Only one disc is remembered, the last one: swapping discs and coming back
 loses the position, which is the honest reading of "the last track played".
