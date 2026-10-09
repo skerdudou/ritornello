@@ -878,7 +878,8 @@ mod tests {
             protocol: ritornello_proto::PROTOCOL_VERSION,
         };
         let j = serde_json::to_string(&s).unwrap();
-        assert!(j.contains(r#""protocol":1"#), "the page cannot explain a refusal without it: {j}");
+        let expected = format!(r#""protocol":{}"#, ritornello_proto::PROTOCOL_VERSION);
+        assert!(j.contains(&expected), "the page cannot explain a refusal without it: {j}");
     }
 
     /// Variant with an observable `theme_tx`, for the `/api/theme` tests.

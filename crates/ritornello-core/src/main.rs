@@ -3333,7 +3333,8 @@ mod toggle_tests {
     use super::*;
     use crate::core::{Wiring, MetadataWiring};
     use crate::cover::CoverCache;
-    use ritornello_proto::{Announcement, PluginKind};
+    use ritornello_proto::{Announcement, Contract, PluginKind};
+    use std::collections::BTreeMap;
 
     /// A `Player` that does nothing: no test here looks at the player.
     /// `hot_unplug` only touches it through `remove_source`, and the sources
@@ -3499,6 +3500,10 @@ mod toggle_tests {
                 covers: false,
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,
+                contracts: [Contract::Display, Contract::Admin]
+                    .into_iter()
+                    .map(|c| (c, c.current()))
+                    .collect(),
                 version: None,
                 repository: None,
                 catalog: None,
@@ -3529,6 +3534,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::of_kind(kind), Contract::of_kind(kind).current())]),
             version: None,
             repository: None,
             catalog: None,
@@ -4438,6 +4444,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: foreign,
+            contracts: Default::default(),
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
@@ -4483,6 +4490,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
             version: Some("0.3.0".into()),
             repository: None,
             catalog: None,
@@ -4523,6 +4531,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: foreign,
+            contracts: Default::default(),
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
@@ -4568,6 +4577,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: foreign,
+            contracts: Default::default(),
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
@@ -4618,6 +4628,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION + 1,
+            contracts: Default::default(),
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
@@ -4645,6 +4656,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: foreign,
+            contracts: Default::default(),
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
@@ -4679,6 +4691,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
@@ -4711,6 +4724,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
             version: Some("0.2.0".into()),
             repository: None,
             catalog: Some(Default::default()),
@@ -4741,6 +4755,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
             version: None,
             repository: None,
             catalog: Some(catalog),
@@ -4769,6 +4784,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
             version: None,
             repository: None,
             catalog: None,
@@ -4796,6 +4812,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
             version: None,
             repository: None,
             catalog: Some(Default::default()),
@@ -4830,6 +4847,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
             version: None,
             repository: None,
             catalog: Some(catalog),
@@ -4876,6 +4894,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
             version: None,
             repository: None,
             catalog: Some(catalog),
@@ -4903,6 +4922,7 @@ mod toggle_tests {
             covers: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
             version: None,
             repository: None,
             catalog: None,
@@ -4934,6 +4954,10 @@ mod toggle_tests {
             covers: false,
             ui_version: Some("3".into()),
             protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([
+                (Contract::Source, Contract::Source.current()),
+                (Contract::Admin, Contract::Admin.current()),
+            ]),
             version: Some("0.2.0".into()),
             repository: Some("https://example.invalid/cd".into()),
             catalog: None,

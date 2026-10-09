@@ -169,6 +169,16 @@ fn kind_label(k: &PluginKind) -> &'static str {
     }
 }
 
+fn contract_label(c: &Contract) -> &'static str {
+    match c {
+        Contract::Source => "Source",
+        Contract::Display => "Display",
+        Contract::Input => "Input",
+        Contract::Metadata => "Metadata",
+        Contract::Admin => "Admin",
+    }
+}
+
 fn playback_label(p: &Playback) -> &'static str {
     match p {
         Playback::Stopped => "Stopped",
@@ -388,6 +398,10 @@ fn fingerprint() -> String {
     for k in [PluginKind::Source, PluginKind::Display, PluginKind::Input, PluginKind::Metadata] {
         l.add(&format!("PluginKind::{}", kind_label(&k)), &k);
     }
+    for c in Contract::ALL {
+        l.add(&format!("Contract::{}", contract_label(&c)), &c);
+    }
+    l.add("ContractVersion", &ContractVersion::new(1, 2));
     l.add(
         "Announcement::minimal",
         &Announcement {
@@ -397,6 +411,7 @@ fn fingerprint() -> String {
             covers: false,
             ui_version: None,
             protocol: PROTOCOL_VERSION,
+            contracts: BTreeMap::new(),
             version: None,
             repository: None,
             catalog: None,
@@ -411,6 +426,7 @@ fn fingerprint() -> String {
             covers: true,
             ui_version: Some("abc123".into()),
             protocol: PROTOCOL_VERSION,
+            contracts: Contract::ALL.into_iter().map(|c| (c, c.current())).collect(),
             version: Some("1.2.3".into()),
             repository: Some("https://example.invalid/r".into()),
             catalog: Some(HashMap::from([("en".to_string(), one("key", "text"))])),

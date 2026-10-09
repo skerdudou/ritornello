@@ -375,7 +375,18 @@ mod tests {
 
     /// Writes an announcement on the register socket, as a plugin would, then
     /// closes.
+    ///
+    /// A line that names no `protocol` is stamped with this core's own: an
+    /// absent `protocol` reads as 1, which is a binary predating contract
+    /// versions and is refused, and the tests that are not about that refusal
+    /// want a plugin of today. A line that carries a `protocol` is written
+    /// untouched.
     async fn announcement(register: &std::path::Path, line: &str) {
+        let line = if line.contains(r#""protocol""#) {
+            line.to_string()
+        } else {
+            format!(r#"{{"protocol":{},{}"#, ritornello_proto::PROTOCOL_VERSION, &line[1..])
+        };
         let mut s = UnixStream::connect(register).await.unwrap();
         s.write_all(format!("{line}\n").as_bytes()).await.unwrap();
         s.shutdown().await.unwrap();
@@ -1035,6 +1046,10 @@ mod tests {
                     covers: false,
                     ui_version: None,
                     protocol: ritornello_proto::PROTOCOL_VERSION,
+                    contracts: std::collections::BTreeMap::from([(
+                        ritornello_proto::Contract::Metadata,
+                        ritornello_proto::METADATA_CONTRACT,
+                    )]),
                     version: None,
                     repository: None,
                     catalog: None,
@@ -1050,6 +1065,10 @@ mod tests {
                 covers: false,
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,
+                contracts: std::collections::BTreeMap::from([
+                    (ritornello_proto::Contract::Source, ritornello_proto::SOURCE_CONTRACT),
+                    (ritornello_proto::Contract::Admin, ritornello_proto::ADMIN_CONTRACT),
+                ]),
                 version: None,
                 repository: None,
                 catalog: None,
