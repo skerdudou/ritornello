@@ -249,9 +249,13 @@ not, it is a break, so bump that contract's **major**; if it is compatible
 Regeneration is not a way round the rule: a contract's section cannot change
 unless its version went strictly up, and the test refuses otherwise, even
 under `UPDATE_WIRE_FINGERPRINT=1`. A version never goes down: to revert a
-bump, restore the fixture from git. A missing fixture is a panic. A
-brand-new contract is introduced by hand-adding its `[<name> 0.0]` header to
-the fixture, then bumping it. The announcement section regenerates freely for
+bump, restore the fixture from git. A missing fixture is a panic, and so is a
+section named twice. A brand-new contract **moves `PROTOCOL_VERSION`**: a
+contract name is a closed enum in the announcement, so an older core cannot
+read an announcement that names a new one (it logs it as unreadable and shows
+the plugin as silent, not as incompatible), and every component must be
+republished together. Then it is introduced by hand-adding its `[<name> 0.0]`
+header to the fixture, and regenerating. The announcement section regenerates freely for
 additions; a *break* of the announcement moves `PROTOCOL_VERSION` (and
 republishes everything). Read the diff of the fixture: it is the exact record
 of what moved.

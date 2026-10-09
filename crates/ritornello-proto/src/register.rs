@@ -135,9 +135,14 @@ pub struct Announcement {
     ///
     /// The keys are a closed enum, like `PluginKind`: a contract name this
     /// build does not know makes the whole announcement unreadable, not
-    /// ignored. That is acceptable because a new contract is a new build of
-    /// both sides, and the bootstrap number is what keeps a binary that speaks
-    /// one from being read by a core that cannot.
+    /// ignored. That is why **adding a contract moves `PROTOCOL_VERSION`**: a
+    /// new contract comes with a new kind or a new socket, which an older core
+    /// cannot serve either, so every component must be republished together,
+    /// and moving the bootstrap number is what makes the release script demand
+    /// it. It does not make an older core *say* "incompatible": that core
+    /// fails to parse the announcement before it reaches `protocol`, logs
+    /// "unreadable announcement ignored", and shows the plugin as silent. That
+    /// is accepted, deliberately, rather than reading unknown names leniently.
     #[serde(default)]
     pub contracts: BTreeMap<Contract, ContractVersion>,
     /// Version of the plugin binary itself.
@@ -196,9 +201,11 @@ pub struct Announcement {
     /// apart:
     /// - `None` — a binary **predating this field entirely**. It does not
     ///   mean "no text": it means the plugin never had the chance to say.
-    ///   Since the bootstrap number moved to 2, every accepted plugin is built
-    ///   with an SDK that sends `catalog`, so `None` now only comes from a
-    ///   binary that is refused anyway.
+    ///   Since the bootstrap number moved to 2, every accepted plugin built
+    ///   with the SDK sends `catalog`, so from an SDK-built plugin `None` only
+    ///   comes from a binary that is refused anyway. A plugin that writes its
+    ///   announcement by hand, without the SDK, can still send `None` with
+    ///   `protocol` 2; it then simply has no text of its own to offer.
     /// - `Some({})` — a module that genuinely **has no text of its own**.
     ///   Four plugins ship this way today (`console`, `nrj-metas`,
     ///   `ouifm-metas`, `radiofrance-metas`), and it is what a plugin built

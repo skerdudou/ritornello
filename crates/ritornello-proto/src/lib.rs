@@ -12,8 +12,13 @@
 /// older than them refuses every newer plugin (and the reverse) instead of
 /// reading an announcement without `protocol` as 1 and accepting it silently.
 ///
-/// It moves again only if the announcement's own format breaks. That
-/// republishes every component that links this crate
+/// It moves again only if the announcement's own format breaks, **or when a
+/// contract is added**: a new contract comes with a new kind or a new socket,
+/// and the announcement's closed enums (`PluginKind`, `Contract`) make an
+/// announcement naming it unreadable to an older core, so the two sides must
+/// be republished together. (Such an older core cannot even read `protocol`
+/// from it: it logs the announcement as unreadable and shows the plugin as
+/// silent, not as incompatible.) Either move republishes every component that links this crate
 /// (`scripts/changed-components.sh` refuses the release otherwise), and the
 /// core shows a plugin announcing another number as "incompatible". There is
 /// no backward compatibility to maintain: breaks stay free, they are only

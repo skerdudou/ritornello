@@ -9,6 +9,15 @@
 //! The rule for each version: the **major** moves on a break of that
 //! contract's API, the **minor** on a compatible addition, and the minor
 //! resets to 0 when the major moves.
+//!
+//! **Adding a contract** is not a version of any contract: it moves
+//! `PROTOCOL_VERSION` (in `lib.rs`). A contract name is a closed enum on the
+//! wire, so an older core cannot read an announcement that names a new one,
+//! and a new contract comes with a new kind or socket: every component must
+//! be republished together, which the bootstrap move makes the release script
+//! demand. (The older core reports such a plugin as silent, since it cannot
+//! parse the announcement at all; reading unknown names leniently was
+//! considered and refused.)
 
 use crate::register::PluginKind;
 use serde::{Deserialize, Serialize};

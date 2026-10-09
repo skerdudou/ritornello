@@ -35,8 +35,10 @@ shipped component — the core and each plugin — declares **its own** version,
 and that is what its archive is named after. The third number is the wire
 between the core and a plugin: one `major.minor` per wire contract (`source`,
 `display`, `input`, `metadata`, `admin`; a major is a break of that contract,
-a minor a compatible addition), plus the frozen bootstrap `PROTOCOL_VERSION`,
-which guards only the announcement's own format. For the core, the
+a minor a compatible addition), plus the bootstrap `PROTOCOL_VERSION`,
+which guards only the announcement's own format and moves on a break of it
+or when a contract is added (an older core cannot read a contract name it
+does not know). For the core, the
 plugins and the language packs only the major must match the product's (before
 1.0 it stays 0, so nothing forces republishing everything); the rest is each
 component's own, and never a number from a release that does not exist yet.

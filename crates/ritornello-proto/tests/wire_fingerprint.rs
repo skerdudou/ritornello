@@ -27,11 +27,14 @@
 //! fixture: it is the exact record of what moved.
 //!
 //! The fixture itself is guarded: one that cannot be read, a header that
-//! names no section, lines before the first header, or a contract section
-//! missing from it are refused, never regenerated from. The one deliberate
-//! way to add a contract: put an empty `[<name> 0.0]` header in the fixture
-//! by hand, then regenerate. The samples of the announcement use fixed
-//! contract versions, so that a contract bump does not rewrite it.
+//! names no section, a section named twice, lines before the first header, or
+//! a contract section missing from it are refused, never regenerated from.
+//! The one deliberate way to add a contract: move `PROTOCOL_VERSION` in
+//! `src/lib.rs` (a contract name is a closed enum, so an older core cannot
+//! read an announcement naming a new one, and everything is republished),
+//! put an empty `[<name> 0.0]` header in the fixture by hand, then
+//! regenerate. The samples of the announcement use fixed contract versions,
+//! so that a contract bump does not rewrite it.
 //!
 //! **The announcement differs.** It is the bootstrap, read before any
 //! contract is known, and it has no version of its own to bump: an addition
@@ -636,6 +639,9 @@ fn fingerprint() -> String {
     text
 }
 
+/// The command that regenerates the fixture, quoted in every refusal.
+const REGENERATE: &str = "UPDATE_WIRE_FINGERPRINT=1 cargo test -p ritornello-proto --test wire_fingerprint";
+
 fn fixture_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("wire-fingerprint.txt")
 }
@@ -744,6 +750,14 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
             refusals.push(
                 "the fixture has lines before its first section header; restore it from git".to_string(),
             );
+        } else if recorded.iter().filter(|o| same_section(&o.header, &r.header)).count() > 1 {
+            // Only the first of two same-named sections would be compared, so a
+            // lower header slipped above the real one would let any change of
+            // the contract through: a fixture names each section once.
+            refusals.push(format!(
+                "{}: the fixture names the section `{name}` more than once; restore it from git.",
+                r.header
+            ));
         } else if !current.iter().any(|s| same_section(&s.header, &r.header)) {
             refusals.push(format!(
                 "{}: the fixture holds a section named `{name}` that this test does not produce \
@@ -761,8 +775,10 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
             if is_contract(&s.header) {
                 refusals.push(format!(
                     "{}: this contract has no section in the fixture. Adding a contract is a deliberate, \
-                     rare change: first add an empty header `[{} 0.0]` to the fixture by hand, then \
-                     regenerate. (If the fixture was damaged, restore it from git instead.)",
+                     rare change: it moves PROTOCOL_VERSION in crates/ritornello-proto/src/lib.rs (an older \
+                     core cannot read an announcement naming a new contract), then add an empty header \
+                     `[{} 0.0]` to the fixture by hand, then regenerate with: {REGENERATE}. \
+                     (If the fixture was damaged, restore it from git instead.)",
                     s.header,
                     section_name(&s.header)
                 ));
@@ -794,7 +810,7 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
                      or its version moved down (recorded: {}). A version never goes down: restore the \
                      fixture from git.\n  A break (an old peer would misread it): bump the MAJOR of \
                      {} in crates/ritornello-proto/src/contract.rs.\n  A compatible addition: bump its \
-                     MINOR.\n  Then regenerate. First difference:\n{}",
+                     MINOR.\n  Then regenerate with: {REGENERATE}\n  First difference:\n{}",
                     s.header,
                     r.header,
                     contract_constant(&s.header),
@@ -814,7 +830,7 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
         "the wire fingerprint is out of date (a version moved, or the announcement changed).\n\
          The announcement is the bootstrap: an addition is compatible (regenerate and say why in the commit); \
          a break moves PROTOCOL_VERSION, which republishes everything.\n\
-         Regenerate with: UPDATE_WIRE_FINGERPRINT=1 cargo test -p ritornello-proto --test wire_fingerprint\n\
+         Regenerate with: {REGENERATE}\n\
          First difference:\n{}",
         first_difference_text(&recorded_text, &now)
     );
