@@ -199,10 +199,17 @@ function warningFor(c: ComponentOffer): string | null {
     return refusedNote(t.value, c)
   }
   // A major update without this plugin's own: the core that will run
-  // refuses the binary that stays. Before the third-party note: being
-  // refused is what the operator must act on, and the row's label already
-  // reads as a third party's.
-  if (leftRefused(c)) return t.value('update_row_refused_until_updated')
+  // refuses the binary that stays. First, because being refused is what the
+  // operator must act on — but a third-party row keeps its source note
+  // after it: the label is the bare plugin name, and the note is the only
+  // place on the row that names the repository it comes from.
+  if (leftRefused(c)) {
+    const refused = t.value('update_row_refused_until_updated')
+    if (c.kind === 'third_party' || c.third_party_repo) {
+      return `${refused} ${t.value('update_row_third_party', { repo: c.third_party_repo ?? '?' })}`
+    }
+    return refused
+  }
   // A third-party pack: its label already names the source.
   if (c.kind === 'language_pack' && c.third_party_repo) return t.value('update_row_third_party_pack')
   if (c.kind === 'third_party' || c.third_party_repo) {

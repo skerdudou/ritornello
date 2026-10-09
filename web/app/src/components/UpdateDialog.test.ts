@@ -863,7 +863,14 @@ describe('UpdateDialog', () => {
       expect(banner()?.querySelector('[data-update-major-refused]')?.textContent?.trim()).toBe(
         'Refused by the new core until updated: zed',
       )
-      expect(warning('zed')).toBe('Left as it is, it will be refused by the new core until it is updated.')
+      // The refusal first, then the source: the row's label is the bare
+      // name, and this note is the only place naming the repository.
+      // **[MUTATION]** drop the source note from the refused third-party
+      // warning: red.
+      expect(warning('zed')).toBe(
+        'Left as it is, it will be refused by the new core until it is updated. '
+        + 'Third-party plugin from z/zed. Never selected automatically.',
+      )
       // The warning speaks of the binary kept; the offered version's line
       // would contradict it, so it is not shown.
       expect(fit('zed')).toBeNull()
