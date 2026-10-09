@@ -309,11 +309,14 @@ fn carries(published: &Published, name: &str) -> bool {
 ///
 /// - **a break is never installed unattended** (the owner's rule): when the
 ///   offered core breaks the wire against the running one
-///   (`RowContracts::breaking`), the core is left out, and so is every plugin
-///   the **running** core refuses (`with_running_core` refused). Such a
-///   plugin may only travel in the same request as the core
-///   (`Worker::install_group`): installed alone tonight, it would be refused
-///   by the core that keeps running until someone presses Install.
+///   (`RowContracts::breaking`), the core is left out.
+///
+/// - **a plugin the running core refuses is never installed unattended,
+///   breaking or not** (`with_running_core` refused). Such a plugin may only
+///   travel in the same request as the core (`Worker::install_group`):
+///   installed alone tonight, it would be refused by the core that keeps
+///   running until someone presses Install. This holds even when the offered
+///   core does not break -- the running core is what judges tonight.
 ///
 ///   A plugin the running core accepts **stays in**, even when the offered
 ///   core would refuse it: the core is not installed at night, so that
@@ -328,7 +331,7 @@ fn automatic_install_list(
     let breaking = core_breaks(components);
     components
         .iter()
-        .filter(|c| !(breaking && (c.kind == ComponentKind::Core || refused_by_running_core(c))))
+        .filter(|c| !(breaking && c.kind == ComponentKind::Core) && !refused_by_running_core(c))
         .filter(|c| c.availability == Availability::UpdateAvailable)
         // Keyed on the repository and not on the kind, so a third-party
         // language pack (Task 7) follows the same rule as a third-party
@@ -2408,6 +2411,19 @@ impl Worker {
         names: &[String],
         consented: &[(String, String)],
     ) {
+        // **Each name once, in the order asked.** A name repeated in the
+        // request would otherwise be staged and placed twice in the group's
+        // one request, and the updater backs a target up before each write:
+        // the second backup would hold the bytes the first write just put
+        // there, and a rollback would restore the new plugin beside the old
+        // core.
+        let mut unique: Vec<String> = Vec::with_capacity(names.len());
+        for name in names {
+            if !unique.contains(name) {
+                unique.push(name.clone());
+            }
+        }
+        let names = unique.as_slice();
         let mut first_failure: Option<String> = None;
         // `(component, version)` per plugin actually placed. The core is never
         // in here: it exits at the end of its own install and this function
@@ -2554,7 +2570,11 @@ impl Worker {
                     let catalog = self.catalog.read().await;
                     let message = refusal_message(&catalog, CORE, &why);
                     drop(catalog);
-                    first_failure.get_or_insert(message);
+                    // **The group's outcome is the page's**, whatever failed
+                    // before it: the core not installing is what matters
+                    // most, and a compatible plugin's own failure stays in
+                    // the log above.
+                    first_failure = Some(message);
                 }
             }
         }
@@ -2699,7 +2719,9 @@ impl Worker {
         let total: u64 = members.iter().map(|(_, offered, _, _)| offered.size).sum();
         let root = self.root.to_string_lossy().to_string();
         if !enough_room(crate::system::disk_usage(&root), total as usize) {
-            return Err(Refusal::NoRoom);
+            // Postponed like a staging failure, so the page says the rest
+            // waits: no member was prepared, and none moved.
+            return Err(postponed(CORE, Refusal::NoRoom));
         }
         let mut staged = Vec::new();
         for (name, offered, repo, provenance) in &members {
@@ -8887,7 +8909,121 @@ mod tests {
         assert!(seen_requests().is_empty(), "nothing asked of root");
         assert!(rig.exits.lock().unwrap().is_empty());
         assert!(!rig.worker.staging.join("staged-core").exists() && !rig.worker.staging.join("staged-plugin-mpd").exists());
-        let expected = refusal_message(&*rig.worker.catalog.read().await, CORE, &Refusal::NoRoom);
+        // Postponed, like a staging failure: the page says the rest waits,
+        // not a bare "not enough free space" under the core's name.
+        let postponed = Refusal::GroupPostponed { failed: CORE.to_string(), reason: Box::new(Refusal::NoRoom) };
+        let expected = refusal_message(&*rig.worker.catalog.read().await, CORE, &postponed);
+        let english = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+        assert_eq!(expected, ritornello_i18n::interpolate(english.get("update_group_postponed"), [("component", CORE)]));
+        assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
+    }
+
+    /// **A name asked twice is placed once.** The updater backs a target up
+    /// before each write, so a second `PlacePlugin mpd` in the same request
+    /// would back up the bytes the first one just wrote, and a rollback
+    /// would put the new `mpd` back beside the old core.
+    ///
+    /// **[MUTATION]** drop the deduplication in `install_consented`: red.
+    #[tokio::test]
+    async fn a_dependent_asked_twice_is_placed_once() {
+        let rig = group_rig(break_rows(true)).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = group_release(served("mpd", &plugin_archive("mpd")).await).await;
+
+        run_install(&rig.worker, &checked, &["mpd", "mpd", CORE]).await;
+
+        assert_eq!(
+            seen_requests(),
+            vec![vec!["ritornello-plugin-mpd".to_string(), CORE.to_string()]],
+            "one PlacePlugin for mpd, then the core, in one request"
+        );
+        assert_eq!(rig.exits.lock().unwrap().len(), 1);
+    }
+
+    /// **The group's outcome is the page's**, even when a compatible plugin
+    /// failed first: `radio`'s digest does not match, then `mpd`'s does not
+    /// either and the group is postponed. The page says the group waits;
+    /// `radio`'s failure is in the log.
+    ///
+    /// **[MUTATION]** keep the first failure (`get_or_insert`) for the
+    /// group: red.
+    #[tokio::test]
+    async fn a_postponed_group_wins_over_an_earlier_plugin_failure() {
+        let rig = group_rig(break_rows(true)).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let checked = ours(vec![
+            served_core(&core_archive()).await,
+            served_with_wrong_digest("mpd", &plugin_archive("mpd")).await,
+            served_with_wrong_digest("radio", &plugin_archive("radio")).await,
+        ]);
+
+        run_install(&rig.worker, &checked, &[CORE, "radio", "mpd"]).await;
+
+        assert!(seen_requests().is_empty(), "nothing asked of root");
+        let english = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
+        let expected = ritornello_i18n::interpolate(english.get("update_group_postponed"), [("component", "mpd")]);
+        assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
+    }
+
+    /// **The core failing to stage clears what the group already staged.**
+    /// `mpd` stages, then the core's digest does not match: `mpd`'s staged
+    /// binary is removed, no request is written, the process stays.
+    ///
+    /// **[MUTATION]** delete the cleanup loop in `install_group`: red on
+    /// `staged-plugin-mpd`.
+    #[tokio::test]
+    async fn the_core_failing_to_stage_clears_the_staged_dependent() {
+        let rig = group_rig(break_rows(true)).await;
+        let _privileged = Privileged::answers(Ok(()));
+        let core_file = format!("ritornello-core-2.0.0-{ARCH}.tar.gz");
+        let wrong_sums = format!("{}  {core_file}
+", digest_hex(b"not the archive's real bytes"));
+        let core = Published {
+            checksums_url: Some(serve_once(wrong_sums.into_bytes(), "SHA256SUMS").await),
+            ..served_core(&core_archive()).await
+        };
+        let checked = ours(vec![core, served("mpd", &plugin_archive("mpd")).await]);
+
+        run_install(&rig.worker, &checked, &[CORE, "mpd"]).await;
+
+        assert!(seen_requests().is_empty(), "no request carries the group");
+        assert!(!rig.worker.staging.join("request.json").exists(), "no request was written");
+        assert!(!rig.worker.staging.join("staged-plugin-mpd").exists(), "the staged dependent was cleared");
+        assert!(!rig.worker.staging.join("staged-core").exists());
+        assert!(rig.exits.lock().unwrap().is_empty(), "the core did not leave");
+        let postponed = Refusal::GroupPostponed { failed: CORE.to_string(), reason: Box::new(Refusal::DigestMismatch) };
+        let expected = refusal_message(&*rig.worker.catalog.read().await, CORE, &postponed);
+        assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
+    }
+
+    /// **Root refusing the group's request**: the request was written and
+    /// handed over once, root answered an error. The page reports the
+    /// privileged failure, nothing is restarted, the process does not
+    /// leave, and the placement memory holds none of the group's members —
+    /// `place` writes it only after root succeeded.
+    #[tokio::test]
+    async fn a_privileged_failure_of_the_group_places_nothing_in_memory() {
+        let rig = group_rig(break_rows(true)).await;
+        let _privileged = Privileged::answers(Err("Access denied".to_string()));
+        let checked = group_release(served("mpd", &plugin_archive("mpd")).await).await;
+
+        run_install(&rig.worker, &checked, &[CORE, "mpd"]).await;
+
+        assert_eq!(
+            seen_requests(),
+            vec![vec!["ritornello-plugin-mpd".to_string(), CORE.to_string()]],
+            "the group's one request was handed to root"
+        );
+        assert!(rig.exits.lock().unwrap().is_empty(), "no restart");
+        assert!(rig.orders.lock().unwrap().is_empty(), "no plugin restarted");
+        let memory = placed::read(&rig.worker.staging);
+        assert_eq!(placed::version_of(&memory, CORE), None);
+        assert_eq!(placed::version_of(&memory, "mpd"), None);
+        let expected = refusal_message(
+            &*rig.worker.catalog.read().await,
+            CORE,
+            &Refusal::Privileged("Access denied".to_string()),
+        );
         assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
     }
 
@@ -8972,9 +9108,14 @@ mod tests {
     /// be refused until someone installs the core); `radio`, which the
     /// running core accepts, still updates even though the offered core
     /// would refuse it, because the running core is the one it will meet
-    /// tonight; `cd` too. The same rows without a break install everything.
+    /// tonight; `cd` too.
     ///
-    /// **[MUTATION]** drop the break filter: red.
+    /// Without a break the core installs, but `mpd` **still** does not: the
+    /// running core refuses it, breaking or not, and installed alone it
+    /// would be refused by the core that keeps running (the owner's ruling).
+    ///
+    /// **[MUTATION]** drop the break filter: red. Condition the running-core
+    /// filter on `breaking` again: red on the non-breaking case.
     #[test]
     fn the_nightly_run_never_installs_a_break() {
         let rows = |breaking: bool| {
@@ -8987,7 +9128,12 @@ mod tests {
         };
         let list = |breaking| automatic_install_list(&rows(breaking), &nothing_placed(), schedule::InstallScope::Official);
         assert_eq!(list(true), names(&["radio", "cd"]));
-        assert_eq!(list(false), names(&[CORE, "mpd", "radio", "cd"]), "without a break, everything as before");
+        assert_eq!(
+            list(false),
+            names(&[CORE, "radio", "cd"]),
+            "without a break the core installs, and a plugin the running core refuses still waits"
+        );
+        assert!(!list(false).contains(&"mpd".to_string()), "refused by the running core, breaking or not");
     }
 
     /// **The page learns that a major update waits, from the check that
