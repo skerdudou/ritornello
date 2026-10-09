@@ -17,7 +17,7 @@
 # the script refuses the release otherwise); a change of one wire contract's
 # MAJOR (crates/ritornello-proto/src/contract.rs: the core and the plugins
 # that speak that contract must have moved, and the script refuses the release
-# otherwise � a plugin that does not speak it is left alone); and a change of
+# otherwise — a plugin that does not speak it is left alone); and a change of
 # the product's MAJOR, which republishes everything. A COMPATIBLE change to a
 # shared crate republishes nothing by itself: see the block below.
 #
@@ -126,15 +126,16 @@ contract_version() { # <CONST_NAME>
 }
 CONTRACTS=(source:SOURCE_CONTRACT display:DISPLAY_CONTRACT input:INPUT_CONTRACT metadata:METADATA_CONTRACT admin:ADMIN_CONTRACT)
 
-# Does plugin crate <c> speak contract <name>? Read from its declaration, the
-# same one plugin_catalogue_declaration.rs holds to what the binary registers.
+# Does plugin crate <c> speak contract <name>? Read, parsed, from its
+# declaration (the same one plugin_catalogue_declaration.rs holds to what the
+# binary registers) by packaging.py, so that no TOML is read with sed. Status
+# 0 speaks, 1 does not; anything else is a manifest nobody could read, and the
+# release is refused rather than the plugin taken for silent.
 speaks() { # <crate> <contract>
-  local toml="crates/$1/Cargo.toml"
-  if [ "$2" = admin ]; then
-    tr -d '\r' < "$toml" | grep -qx 'admin = true'
-  else
-    tr -d '\r' < "$toml" | grep '^kinds = ' | grep -q "\"$2\""
-  fi
+  local rc=0
+  python3 scripts/packaging.py speaks "$1" "$2" || rc=$?
+  [ "$rc" -le 1 ] || exit 1
+  return "$rc"
 }
 
 # The product's major, from a workspace Cargo.toml on stdin: the first
@@ -663,9 +664,12 @@ if [ -n "$SELF_TEST" ]; then
   }
   # Rewrites the baseline so that v0.1.0 holds no contract.rs, then restores
   # the file for the case: contract.rs absent at PREV, present now.
-  git_rm_baseline_contract() {
+  # With an argument, the baseline holds that text instead: a contract.rs
+  # that exists at PREV and cannot be read.
+  git_rm_baseline_contract() { # [baseline text]
     cp "$R/crates/ritornello-proto/src/contract.rs" "$R/contract.keep"
-    rm "$R/crates/ritornello-proto/src/contract.rs"
+    if [ "$#" -gt 0 ]; then printf '%s
+' "$1" > "$R/crates/ritornello-proto/src/contract.rs"; else rm "$R/crates/ritornello-proto/src/contract.rs"; fi
     guard_git add -A; guard_git commit -q -m "baseline without contracts"; guard_git tag -f v0.1.0 > /dev/null
     mv "$R/contract.keep" "$R/crates/ritornello-proto/src/contract.rs"
   }
@@ -778,6 +782,45 @@ if [ -n "$SELF_TEST" ]; then
   rel_bump ritornello-plugin-cd
   expect_rel 0 "ritornello-plugin-cd" "" "contract.rs absent at the previous release: no contract rule applies"
 
+  rel_repo
+  git_rm_baseline_contract 'pub fn nothing() {}'
+  rel_bump ritornello-plugin-cd
+  expect_rel 1 "" "cannot read any contract version" "a contract.rs that exists at the previous release but no longer parses is refused, not taken for a first release"
+
+  # Layouts a line match would miss but a TOML parser reads: every one of them
+  # must still count as speaking, so the unmoved plugin is refused.
+  rel_repo
+  contract_set INPUT "2, 0"
+  for c in ritornello-core ritornello-plugin-generic-input; do rel_bump "$c"; done
+  expect_rel 1 "" "ritornello-plugin-mpd" "an input major with mpd (whose SECOND kind is input) not moved is refused"
+
+  rel_repo
+  contract_set ADMIN "2, 0"
+  printf '[package]
+name = "ritornello-plugin-musicbrainz"
+version = "0.1.0"
+
+[package.metadata.ritornello]
+kinds = ["metadata"]
+admin=true # served by a page
+' > "$R/crates/ritornello-plugin-musicbrainz/Cargo.toml"
+  for c in ritornello-core ritornello-plugin-cd ritornello-plugin-files ritornello-plugin-generic-input ritornello-plugin-mpd ritornello-plugin-radio; do rel_bump "$c"; done
+  expect_rel 1 "" "ritornello-plugin-musicbrainz" "admin=true with a trailing comment still speaks admin"
+
+  rel_repo
+  contract_set DISPLAY "2, 0"
+  printf '[package]
+name = "ritornello-plugin-console"
+version = "0.1.0"
+
+[package.metadata.ritornello]
+kinds = [
+  "display",
+]
+' > "$R/crates/ritornello-plugin-console/Cargo.toml"
+  for c in ritornello-core ritornello-plugin-mpd; do rel_bump "$c"; done
+  expect_rel 1 "" "ritornello-plugin-console" "a multi-line kinds array still speaks display"
+
   # The language packs, kept in the output this time: they are data, and a
   # wire break must not republish them under their unchanged numbers.
   rel_repo
@@ -858,6 +901,13 @@ fi
 # asks nothing. A PREV without contract.rs is the first release with contracts;
 # the PROTOCOL_VERSION move that introduced them already asked everything.
 if [ -n "$PREV" ]; then
+  # A contract.rs that exists at PREV but that no constant can be read from is
+  # not "a first release with contracts": it is a file this script no longer
+  # understands, and skipping it would let a contract break through unchecked.
+  # A single constant missing at PREV (a contract added since) is still a skip.
+  prev_has_contract_file=
+  git cat-file -e "$PREV:crates/ritornello-proto/src/contract.rs" 2>/dev/null && prev_has_contract_file=1
+  prev_parsed=0
   for entry in "${CONTRACTS[@]}"; do
     cname=${entry%%:*} cconst=${entry#*:}
     now_c=$(contract_version "$cconst" < crates/ritornello-proto/src/contract.rs 2>/dev/null || echo absent)
@@ -869,6 +919,7 @@ if [ -n "$PREV" ]; then
     # would append a second `absent` to the one contract_version prints.
     then_c=$(git show "$PREV:crates/ritornello-proto/src/contract.rs" 2>/dev/null | contract_version "$cconst" || true)
     [ "$then_c" != absent ] || continue
+    prev_parsed=$((prev_parsed + 1))
     if [ "${now_c%%.*}" != "${then_c%%.*}" ]; then
       unmoved=()
       for c in "${CRATES[@]}"; do
@@ -884,11 +935,15 @@ if [ -n "$PREV" ]; then
         echo "a contract break needs the core and every plugin that speaks it republished under a new number; bump them in crates/<name>/Cargo.toml" >&2
         exit 1
       fi
-      echo "$cname contract major moved ($then_c -> $now_c) since $PREV � its speakers moved" >&2
+      echo "$cname contract major moved ($then_c -> $now_c) since $PREV — its speakers moved" >&2
     elif [ "$now_c" != "$then_c" ]; then
-      echo "$cname contract minor moved ($then_c -> $now_c) since $PREV � compatible, nothing is required" >&2
+      echo "$cname contract minor moved ($then_c -> $now_c) since $PREV — compatible, nothing is required" >&2
     fi
   done
+  if [ -n "$prev_has_contract_file" ] && [ "$prev_parsed" -eq 0 ]; then
+    echo "cannot read any contract version from crates/ritornello-proto/src/contract.rs at $PREV" >&2
+    exit 1
+  fi
 fi
 
 changed=0

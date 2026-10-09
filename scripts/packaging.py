@@ -113,6 +113,26 @@ def plugin_block(name: str) -> str:
     return out
 
 
+def speaks(crate: str, contract: str) -> int:
+    """Whether a plugin crate speaks a wire contract, from the
+    `[package.metadata.ritornello]` table of its Cargo.toml: `admin = true`
+    for the admin contract, the name among `kinds` for the others. Parsed,
+    not matched line by line, so that a trailing comment, a missing space or
+    a multi-line `kinds` array cannot make a speaker look silent (and be left
+    out of a release that had to include it). Exit status: 0 it speaks, 1 it
+    does not, 2 the manifest cannot be read.
+    """
+    try:
+        manifest = tomllib.loads((ROOT / "crates" / crate / "Cargo.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"cannot read the declaration of {crate}: {e}", file=sys.stderr)
+        return 2
+    declared = manifest.get("package", {}).get("metadata", {}).get("ritornello", {})
+    if contract == "admin":
+        return 0 if declared.get("admin") is True else 1
+    return 0 if contract in declared.get("kinds", []) else 1
+
+
 def main() -> int:
     cmd = sys.argv[1]
     if cmd == "stage-core":
@@ -151,6 +171,8 @@ def main() -> int:
             return 2
         for entry in section.get("tree", []):
             sys.stdout.buffer.write(f"{entry['from']}\n".encode("utf-8"))
+    elif cmd == "speaks":
+        return speaks(sys.argv[2], sys.argv[3])
     elif cmd == "fragment":
         # Written to stdout as bytes: a text-mode stdout on Windows would
         # turn every "\n" back into the CRLF this function just removed.
