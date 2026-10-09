@@ -227,6 +227,7 @@ impl SourceClient {
                     has_finite_list: update.has_finite_list,
                     ..Default::default()
                 };
+                let play_request = update.play_request;
                 if update != inert && update_tx.try_send((name.clone(), update)).is_err() {
                     // A lost status or preset is repaired by the next frame, a
                     // lost **identity** never is — the Source only re-emits it
@@ -242,12 +243,11 @@ impl SourceClient {
                     // deadlock until `request`'s 5 s timeout. Losing a frame
                     // while flagging it loudly beats a second of frozen
                     // device.
-                    if carries_identity {
-                        tracing::error!(
-                            "identity update for {name} lost (channel full): display and metadata possibly stale until next change"
-                        );
+                    let (serious, line) = lost_update_message(&name, carries_identity, play_request);
+                    if serious {
+                        tracing::error!("{line}");
                     } else {
-                        tracing::warn!("source update for {name} lost (channel full)");
+                        tracing::warn!("{line}");
                     }
                 }
             }
@@ -612,10 +612,44 @@ pub async fn run_input_client(socket_path: &Path, cmd_tx: mpsc::Sender<InputMess
     bail!("input plugin connection closed")
 }
 
+/// The journal line for a Source frame dropped on a full channel, and whether
+/// it is serious enough for `error`. A lost identity is (nothing re-emits it);
+/// so is a lost play request — an inserted disc that should have started and
+/// stays silent, with this line as the only trace of why.
+fn lost_update_message(name: &str, carries_identity: bool, play_request: Option<PlayRequest>) -> (bool, String) {
+    match (play_request, carries_identity) {
+        (Some(request), _) => (
+            true,
+            format!("source update for {name} lost (channel full): play request {request:?} lost"),
+        ),
+        (None, true) => (
+            true,
+            format!(
+                "identity update for {name} lost (channel full): display and metadata possibly stale until next change"
+            ),
+        ),
+        (None, false) => (false, format!("source update for {name} lost (channel full)")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ritornello_proto::SourceAction;
+
+    #[test]
+    fn a_lost_frame_names_the_play_request_it_carried() {
+        let (serious, line) = lost_update_message("cd", true, Some(PlayRequest::WakeAndSwitch));
+        assert!(serious);
+        assert!(line.contains("play request WakeAndSwitch lost"), "{line}");
+        let (serious, line) = lost_update_message("cd", true, None);
+        assert!(serious);
+        assert!(line.contains("identity update for cd lost"), "{line}");
+        assert!(!line.contains("play request"), "{line}");
+        let (serious, line) = lost_update_message("cd", false, None);
+        assert!(!serious);
+        assert!(!line.contains("play request"), "{line}");
+    }
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
