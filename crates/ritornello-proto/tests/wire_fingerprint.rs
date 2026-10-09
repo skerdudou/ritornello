@@ -2,19 +2,32 @@
 //! serialized from a deterministic sample and compared, whole, with a
 //! committed fixture (`wire-fingerprint.txt`).
 //!
+//! **Sections.** The fixture has one section per contract (`source`,
+//! `display`, `input`, `metadata`, `admin`), each introduced by a header that
+//! carries that contract's version (`[source 1.0]`), preceded by the
+//! announcement (`[announcement protocol=2]`). A type that travels in several
+//! contracts (`Repeat`, `Preset`, `Text`, `CoverRef`, `Link`) is sampled
+//! again in each of them, on purpose: changing it changes every section it
+//! travels in, and each of those contracts demands its own decision.
+//!
 //! **What this is for.** A device installs a component only when its version
 //! differs, so a change to the wire that an old plugin cannot understand must
-//! be a conscious decision: `PROTOCOL_VERSION` moves, every component that
-//! links this crate moves with it, and the release script refuses to publish
-//! otherwise. Without this test, renaming a field would compile, pass every
-//! unit test of both ends, and ship a core that silently cannot talk to the
-//! plugins already on the device.
+//! be a conscious decision. Without this test, renaming a field would
+//! compile, pass every unit test of both ends, and ship a core that silently
+//! cannot talk to the plugins already on the device.
 //!
-//! **What a red test means.** Either the wire changed (read the message the
-//! failure prints) or `PROTOCOL_VERSION` changed without the fixture being
-//! regenerated. Regenerate with `UPDATE_WIRE_FINGERPRINT=1 cargo test -p
-//! ritornello-proto --test wire_fingerprint`, then read the diff of the
-//! fixture: it is the exact record of what moved.
+//! **The rule.** A contract section's content cannot change unless its
+//! version moves: the MAJOR for a break, the MINOR for a compatible addition.
+//! The test refuses that change even when the fixture is being regenerated
+//! (`UPDATE_WIRE_FINGERPRINT=1`), since regenerating must not be a way
+//! around the decision. Bump the version in `src/contract.rs` first, then
+//! regenerate and read the diff of the fixture: it is the exact record of
+//! what moved.
+//!
+//! **The announcement differs.** It is the bootstrap, read before any
+//! contract is known, and it has no version of its own to bump: an addition
+//! is compatible (regenerate and say why in the commit), a break moves
+//! `PROTOCOL_VERSION`, which republishes everything.
 //!
 //! **What is covered, and what is not.** Both directions of every sample:
 //! the serialized form (compared with the fixture) and the read side (the
@@ -272,78 +285,20 @@ fn state_full() -> PlayerState {
     }
 }
 
-fn fingerprint() -> String {
-    let mut l = Lines(Vec::new());
+// Shared types: each helper records the samples of one type, and is called
+// once in every section the type travels in.
 
-    // Commands and input.
-    let commands = [
-        Command::Select(3),
-        Command::Next,
-        Command::Prev,
-        Command::VolumeUp,
-        Command::VolumeDown,
-        Command::Mute,
-        Command::SourceCycle,
-        Command::PlayPause,
-        Command::Stop,
-        Command::Eject,
-        Command::Power,
-        Command::Plus10,
-        Command::SeekForward,
-        Command::SeekBackward,
-        Command::SeekTo(90),
-        Command::SetVolume(55),
-        Command::SelectSource("cd".into()),
-        Command::ToggleRandom,
-        Command::CycleRepeat,
-        Command::SetRandom(true),
-        Command::SetRepeat(Repeat::All),
-    ];
-    for c in &commands {
-        l.add(&format!("Command::{}", command_label(c)), c);
-    }
-    l.add("InputMessage", &InputMessage::from(Command::Next));
-    l.add("InputMessage::held", &InputMessage { cmd: Command::VolumeUp, held: true });
+fn add_repeat(l: &mut Lines) {
     for r in [Repeat::Off, Repeat::All, Repeat::One] {
         l.add(&format!("Repeat::{}", repeat_label(&r)), &r);
     }
+}
 
-    // Source requests and answers.
-    let requests = [
-        SourceReq::Activate,
-        SourceReq::Wake,
-        SourceReq::Play,
-        SourceReq::Deactivate,
-        SourceReq::Select(2),
-        SourceReq::Next,
-        SourceReq::Prev,
-        SourceReq::Eject,
-        SourceReq::ListPresets,
-        SourceReq::Stop,
-        SourceReq::PlayerTrack(4),
-        SourceReq::EndOfContent,
-        SourceReq::SetPlayMode { random: true, repeat: Repeat::All },
-        SourceReq::ArchiveCover { identity: json!({"k": "v"}), file: "/tmp/c.jpg".into() },
-    ];
-    for r in &requests {
-        l.add(&format!("SourceReq::{}", source_req_label(r)), r);
-    }
-    l.add("SourceRequest", &SourceRequest { id: 7, req: SourceReq::Next });
+fn add_preset(l: &mut Lines) {
     l.add("Preset", &Preset { index: 1, name: "One".into() });
+}
 
-    let actions = [
-        SourceAction::Noop,
-        SourceAction::play("http://example.invalid/stream"),
-        SourceAction::play("file:///a.mp3").starting_at(3).playlist().finite().loopable(),
-        SourceAction::Stop,
-        SourceAction::PlayerNext,
-        SourceAction::PlayerPrev,
-        SourceAction::PlayerChapter(2),
-    ];
-    for (i, a) in actions.iter().enumerate() {
-        l.add(&format!("SourceAction::{}#{i}", source_action_label(a)), a);
-    }
-
+fn add_texts(l: &mut Lines) {
     let texts = [
         Text::Keyed { key: "k".into(), params: HashMap::new() },
         Text::Keyed { key: "k".into(), params: one("name", "x") },
@@ -352,11 +307,9 @@ fn fingerprint() -> String {
     for (i, t) in texts.iter().enumerate() {
         l.add(&format!("Text::{}#{i}", text_label(t)), t);
     }
+}
 
-    let identities = [IdentityUpdate::Playing(json!({"id": 1})), IdentityUpdate::Nothing];
-    for i in &identities {
-        l.add(&format!("IdentityUpdate::{}", identity_label(i)), i);
-    }
+fn add_cover_refs(l: &mut Lines) {
     let covers = [
         CoverRef::Url { url: "https://example.invalid/c.jpg".into() },
         CoverRef::Path { path: "/cache/c.jpg".into() },
@@ -364,6 +317,9 @@ fn fingerprint() -> String {
     for c in &covers {
         l.add(&format!("CoverRef::{}", cover_ref_label(c)), c);
     }
+}
+
+fn add_links(l: &mut Lines) {
     let links = [
         Link::Youtube { url: "https://example.invalid/y".into() },
         Link::Deezer { url: "https://example.invalid/d".into() },
@@ -372,29 +328,10 @@ fn fingerprint() -> String {
     for k in &links {
         l.add(&format!("Link::{}", link_label(k)), k);
     }
+}
 
-    l.add("SourceMessage::default", &SourceMessage::default());
-    l.add(
-        "SourceMessage::full",
-        &SourceMessage {
-            id: Some(9),
-            action: Some(SourceAction::Stop),
-            identity: Some(IdentityUpdate::Nothing),
-            transient: true,
-            preset: Some(2),
-            preset_count: Some(10),
-            preset_name: Some("Name".into()),
-            status_text: Some(Text::Verbatim("s".into())),
-            can_eject: Some(true),
-            has_finite_list: Some(true),
-            presets: Some(vec![Preset { index: 1, name: "One".into() }]),
-            cover: Some(CoverRef::Path { path: "/c".into() }),
-            cover_thumb: Some(CoverRef::Url { url: "https://example.invalid/t".into() }),
-            cover_archivable: Some(true),
-        },
-    );
-
-    // Registration.
+fn announcement_section() -> Vec<String> {
+    let mut l = Lines(Vec::new());
     for k in [PluginKind::Source, PluginKind::Display, PluginKind::Input, PluginKind::Metadata] {
         l.add(&format!("PluginKind::{}", kind_label(&k)), &k);
     }
@@ -432,8 +369,196 @@ fn fingerprint() -> String {
             catalog: Some(HashMap::from([("en".to_string(), one("key", "text"))])),
         },
     );
+    l.0
+}
 
-    // Admin.
+fn source_section() -> Vec<String> {
+    let mut l = Lines(Vec::new());
+    let requests = [
+        SourceReq::Activate,
+        SourceReq::Wake,
+        SourceReq::Play,
+        SourceReq::Deactivate,
+        SourceReq::Select(2),
+        SourceReq::Next,
+        SourceReq::Prev,
+        SourceReq::Eject,
+        SourceReq::ListPresets,
+        SourceReq::Stop,
+        SourceReq::PlayerTrack(4),
+        SourceReq::EndOfContent,
+        SourceReq::SetPlayMode { random: true, repeat: Repeat::All },
+        SourceReq::ArchiveCover { identity: json!({"k": "v"}), file: "/tmp/c.jpg".into() },
+    ];
+    for r in &requests {
+        l.add(&format!("SourceReq::{}", source_req_label(r)), r);
+    }
+    l.add("SourceRequest", &SourceRequest { id: 7, req: SourceReq::Next });
+    add_preset(&mut l);
+
+    let actions = [
+        SourceAction::Noop,
+        SourceAction::play("http://example.invalid/stream"),
+        SourceAction::play("file:///a.mp3").starting_at(3).playlist().finite().loopable(),
+        SourceAction::Stop,
+        SourceAction::PlayerNext,
+        SourceAction::PlayerPrev,
+        SourceAction::PlayerChapter(2),
+    ];
+    for (i, a) in actions.iter().enumerate() {
+        l.add(&format!("SourceAction::{}#{i}", source_action_label(a)), a);
+    }
+
+    add_texts(&mut l);
+    let identities = [IdentityUpdate::Playing(json!({"id": 1})), IdentityUpdate::Nothing];
+    for i in &identities {
+        l.add(&format!("IdentityUpdate::{}", identity_label(i)), i);
+    }
+    add_cover_refs(&mut l);
+    add_repeat(&mut l);
+
+    l.add("SourceMessage::default", &SourceMessage::default());
+    l.add(
+        "SourceMessage::full",
+        &SourceMessage {
+            id: Some(9),
+            action: Some(SourceAction::Stop),
+            identity: Some(IdentityUpdate::Nothing),
+            transient: true,
+            preset: Some(2),
+            preset_count: Some(10),
+            preset_name: Some("Name".into()),
+            status_text: Some(Text::Verbatim("s".into())),
+            can_eject: Some(true),
+            has_finite_list: Some(true),
+            presets: Some(vec![Preset { index: 1, name: "One".into() }]),
+            cover: Some(CoverRef::Path { path: "/c".into() }),
+            cover_thumb: Some(CoverRef::Url { url: "https://example.invalid/t".into() }),
+            cover_archivable: Some(true),
+        },
+    );
+    l.0
+}
+
+fn display_section() -> Vec<String> {
+    let mut l = Lines(Vec::new());
+    let overlays = [
+        Overlay::Volume { level: 30, muted: false, text: "30".into(), remaining_ms: 800 },
+        Overlay::Tens { offset: 10, text: "+10".into(), remaining_ms: 800 },
+        Overlay::Message { text: "m".into(), remaining_ms: 800 },
+    ];
+    for o in &overlays {
+        l.add(&format!("Overlay::{}", overlay_label(o)), o);
+    }
+    for p in [Playback::Stopped, Playback::Playing, Playback::Paused] {
+        l.add(&format!("Playback::{}", playback_label(&p)), &p);
+    }
+    for d in [DateFormat::DayMonthYear, DateFormat::YearMonthDay, DateFormat::MonthDayYear] {
+        l.add(&format!("DateFormat::{}", date_label(&d)), &d);
+    }
+    l.add("Clock", &Clock { date: DateFormat::MonthDayYear, twelve_hour: true });
+    add_links(&mut l);
+    add_repeat(&mut l);
+    add_preset(&mut l);
+    l.add("Track::full", &track_full());
+    l.add("Track::default", &Track::default());
+    l.add("PlayerState::default", &PlayerState::default());
+    l.add("PlayerState::full", &state_full());
+    let frames = [
+        DisplayFrame::State(state_full()),
+        DisplayFrame::Catalog(SourcesCatalog {
+            sources: vec![
+                SourceCatalog { name: "radio".into(), presets: vec![Preset { index: 1, name: "One".into() }] },
+                SourceCatalog { name: "cd".into(), presets: vec![] },
+            ],
+        }),
+        DisplayFrame::Cover(Cover { href: "/cover/1".into(), mime: "image/jpeg".into(), bytes: vec![1, 2, 3] }),
+    ];
+    for f in &frames {
+        l.add(&format!("DisplayFrame::{}", frame_label(f)), f);
+    }
+    l.0
+}
+
+fn input_section() -> Vec<String> {
+    let mut l = Lines(Vec::new());
+    let commands = [
+        Command::Select(3),
+        Command::Next,
+        Command::Prev,
+        Command::VolumeUp,
+        Command::VolumeDown,
+        Command::Mute,
+        Command::SourceCycle,
+        Command::PlayPause,
+        Command::Stop,
+        Command::Eject,
+        Command::Power,
+        Command::Plus10,
+        Command::SeekForward,
+        Command::SeekBackward,
+        Command::SeekTo(90),
+        Command::SetVolume(55),
+        Command::SelectSource("cd".into()),
+        Command::ToggleRandom,
+        Command::CycleRepeat,
+        Command::SetRandom(true),
+        Command::SetRepeat(Repeat::All),
+    ];
+    for c in &commands {
+        l.add(&format!("Command::{}", command_label(c)), c);
+    }
+    l.add("InputMessage", &InputMessage::from(Command::Next));
+    l.add("InputMessage::held", &InputMessage { cmd: Command::VolumeUp, held: true });
+    add_repeat(&mut l);
+    l.0
+}
+
+fn metadata_section() -> Vec<String> {
+    let mut l = Lines(Vec::new());
+    l.add("NowPlaying::default", &NowPlaying::default());
+    l.add(
+        "NowPlaying::full",
+        &NowPlaying {
+            source: "radio".into(),
+            identity: Some(json!({"station": "x"})),
+            known: Known {
+                artist: Some("A".into()),
+                title: Some("T".into()),
+                album: Some("Al".into()),
+                duration_s: Some(10),
+                year: Some(2001),
+                cover: true,
+                stream_title: Some("A - T".into()),
+            },
+        },
+    );
+    add_cover_refs(&mut l);
+    add_links(&mut l);
+    l.add("Enrichment::default", &Enrichment::default());
+    l.add(
+        "Enrichment::full",
+        &Enrichment {
+            identity: json!({"station": "x"}),
+            artist: Some("A".into()),
+            title: Some("T".into()),
+            album: Some("Al".into()),
+            duration_s: Some(10),
+            year: Some(2001),
+            links: vec![Link::Deezer { url: "https://example.invalid/d".into() }],
+            position_s: Some(5),
+            cover: Some(CoverRef::Url { url: "https://example.invalid/c".into() }),
+            cover_thumb: Some(CoverRef::Path { path: "/t".into() }),
+            fill_only: true,
+            searched: true,
+            derived_from: Some("title".into()),
+        },
+    );
+    l.0
+}
+
+fn admin_section() -> Vec<String> {
+    let mut l = Lines(Vec::new());
     let admin_reqs = [
         AdminReq::GetAsset("ui.js".into()),
         AdminReq::GetData,
@@ -458,81 +583,43 @@ fn fingerprint() -> String {
         l.add(&format!("AdminResult::{}#{i}", admin_result_label(r)), r);
     }
     l.add("AdminResponse", &AdminResponse { id: 1, result: AdminResult::Pong });
+    add_texts(&mut l);
+    l.0
+}
 
-    // Display, player state and metadata.
-    let overlays = [
-        Overlay::Volume { level: 30, muted: false, text: "30".into(), remaining_ms: 800 },
-        Overlay::Tens { offset: 10, text: "+10".into(), remaining_ms: 800 },
-        Overlay::Message { text: "m".into(), remaining_ms: 800 },
-    ];
-    for o in &overlays {
-        l.add(&format!("Overlay::{}", overlay_label(o)), o);
+/// The wire name of a contract, as it appears in a section header.
+fn contract_name(c: Contract) -> &'static str {
+    match c {
+        Contract::Source => "source",
+        Contract::Display => "display",
+        Contract::Input => "input",
+        Contract::Metadata => "metadata",
+        Contract::Admin => "admin",
     }
-    for p in [Playback::Stopped, Playback::Playing, Playback::Paused] {
-        l.add(&format!("Playback::{}", playback_label(&p)), &p);
-    }
-    for d in [DateFormat::DayMonthYear, DateFormat::YearMonthDay, DateFormat::MonthDayYear] {
-        l.add(&format!("DateFormat::{}", date_label(&d)), &d);
-    }
-    l.add("Clock", &Clock { date: DateFormat::MonthDayYear, twelve_hour: true });
-    l.add("Track::full", &track_full());
-    l.add("Track::default", &Track::default());
-    l.add("PlayerState::default", &PlayerState::default());
-    l.add("PlayerState::full", &state_full());
-    let frames = [
-        DisplayFrame::State(state_full()),
-        DisplayFrame::Catalog(SourcesCatalog {
-            sources: vec![
-                SourceCatalog { name: "radio".into(), presets: vec![Preset { index: 1, name: "One".into() }] },
-                SourceCatalog { name: "cd".into(), presets: vec![] },
-            ],
-        }),
-        DisplayFrame::Cover(Cover { href: "/cover/1".into(), mime: "image/jpeg".into(), bytes: vec![1, 2, 3] }),
-    ];
-    for f in &frames {
-        l.add(&format!("DisplayFrame::{}", frame_label(f)), f);
-    }
-    l.add("NowPlaying::default", &NowPlaying::default());
-    l.add(
-        "NowPlaying::full",
-        &NowPlaying {
-            source: "radio".into(),
-            identity: Some(json!({"station": "x"})),
-            known: Known {
-                artist: Some("A".into()),
-                title: Some("T".into()),
-                album: Some("Al".into()),
-                duration_s: Some(10),
-                year: Some(2001),
-                cover: true,
-                stream_title: Some("A - T".into()),
-            },
-        },
-    );
-    l.add("Enrichment::default", &Enrichment::default());
-    l.add(
-        "Enrichment::full",
-        &Enrichment {
-            identity: json!({"station": "x"}),
-            artist: Some("A".into()),
-            title: Some("T".into()),
-            album: Some("Al".into()),
-            duration_s: Some(10),
-            year: Some(2001),
-            links: vec![Link::Deezer { url: "https://example.invalid/d".into() }],
-            position_s: Some(5),
-            cover: Some(CoverRef::Url { url: "https://example.invalid/c".into() }),
-            cover_thumb: Some(CoverRef::Path { path: "/t".into() }),
-            fill_only: true,
-            searched: true,
-            derived_from: Some("title".into()),
-        },
-    );
+}
 
-    let mut text = format!("PROTOCOL_VERSION={PROTOCOL_VERSION}\n");
-    for line in l.0 {
-        text.push_str(&line);
+/// The whole fixture: the announcement first, then one section per contract,
+/// each introduced by its header line.
+fn fingerprint() -> String {
+    let mut text = String::new();
+    let mut push = |header: String, lines: Vec<String>| {
+        text.push_str(&header);
         text.push('\n');
+        for line in lines {
+            text.push_str(&line);
+            text.push('\n');
+        }
+    };
+    push(format!("[announcement protocol={PROTOCOL_VERSION}]"), announcement_section());
+    let contract_sections: [(Contract, fn() -> Vec<String>); 5] = [
+        (Contract::Source, source_section),
+        (Contract::Display, display_section),
+        (Contract::Input, input_section),
+        (Contract::Metadata, metadata_section),
+        (Contract::Admin, admin_section),
+    ];
+    for (contract, section) in contract_sections {
+        push(format!("[{} {}]", contract_name(contract), contract.current()), section());
     }
     text
 }
@@ -541,49 +628,108 @@ fn fixture_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("wire-fingerprint.txt")
 }
 
+/// One section of the fixture: its header line and its sample lines.
+struct Section {
+    header: String,
+    lines: Vec<String>,
+}
+
+/// Splits a fixture into its sections. A line starting with `[` opens one.
+/// A line before the first header (an old-format fixture) opens a section
+/// with an empty header, which matches no current section.
+fn sections(text: &str) -> Vec<Section> {
+    let mut out: Vec<Section> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with('[') {
+            out.push(Section { header: line.to_string(), lines: Vec::new() });
+        } else {
+            if out.is_empty() {
+                out.push(Section { header: String::new(), lines: Vec::new() });
+            }
+            out.last_mut().expect("a section was just pushed").lines.push(line.to_string());
+        }
+    }
+    out
+}
+
+/// The section's name: `[source 1.0]` is `source`, `[announcement protocol=2]`
+/// is `announcement`. The version is what a header adds to the name.
+fn section_name(header: &str) -> &str {
+    header.trim_start_matches('[').trim_end_matches(']').split(' ').next().unwrap_or("")
+}
+
+/// Two headers name the same section, whatever their versions.
+fn same_section(a: &str, b: &str) -> bool {
+    !section_name(a).is_empty() && section_name(a) == section_name(b)
+}
+
+/// A contract section, as opposed to the announcement.
+fn is_contract(header: &str) -> bool {
+    Contract::ALL.iter().any(|c| contract_name(*c) == section_name(header))
+}
+
+fn first_difference(recorded: &[String], now: &[String]) -> String {
+    for (i, (a, b)) in now.iter().zip(recorded.iter()).enumerate() {
+        if a != b {
+            return format!("  line {}\n  now:      {a}\n  recorded: {b}", i + 1);
+        }
+    }
+    match now.len().cmp(&recorded.len()) {
+        std::cmp::Ordering::Greater => format!("  a sample was added: {}", now[recorded.len()]),
+        std::cmp::Ordering::Less => format!("  a sample was removed: {}", recorded[now.len()]),
+        std::cmp::Ordering::Equal => "  (none)".to_string(),
+    }
+}
+
+fn first_difference_text(recorded: &str, now: &str) -> String {
+    let r: Vec<String> = recorded.lines().map(String::from).collect();
+    let n: Vec<String> = now.lines().map(String::from).collect();
+    first_difference(&r, &n)
+}
+
 #[test]
 fn the_wire_fingerprint_matches_the_committed_fixture() {
     let now = fingerprint();
     let path = fixture_path();
-    if std::env::var_os("UPDATE_WIRE_FINGERPRINT").is_some() {
+    // Compared with line endings normalized: a Windows checkout may hand the
+    // fixture back with CRLF, which says nothing about the wire.
+    let recorded_text = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+    let update = std::env::var_os("UPDATE_WIRE_FINGERPRINT").is_some();
+    let recorded = sections(&recorded_text);
+
+    let mut refusals = Vec::new();
+    for s in sections(&now) {
+        let before = recorded.iter().find(|r| same_section(&r.header, &s.header));
+        match before {
+            // A section whose content moved while its header (the contract's
+            // version) did not: a decision was skipped. Refused even under
+            // UPDATE_WIRE_FINGERPRINT, so that regenerating is no way around it.
+            Some(r) if r.header == s.header && r.lines != s.lines && is_contract(&s.header) => {
+                refusals.push(format!(
+                    "{}: the messages of this contract changed but its version did not.\n  \
+                     A break (an old peer would misread it): bump the MAJOR of this contract in \
+                     crates/ritornello-proto/src/contract.rs.\n  A compatible addition: bump its MINOR.\n  \
+                     Then regenerate. First difference:\n{}",
+                    s.header,
+                    first_difference(&r.lines, &s.lines)
+                ));
+            }
+            _ => {}
+        }
+    }
+    assert!(refusals.is_empty(), "{}", refusals.join("\n\n"));
+
+    if update {
         std::fs::write(&path, &now).expect("the fixture is writable");
         return;
     }
-    // Compared with line endings normalized: a Windows checkout may hand the
-    // fixture back with CRLF, which says nothing about the wire.
-    let fixture = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
-        .replace("\r\n", "\n");
-
-    let recorded = fixture
-        .lines()
-        .next()
-        .and_then(|l| l.strip_prefix("PROTOCOL_VERSION="))
-        .and_then(|n| n.parse::<u32>().ok())
-        .expect("the fixture's first line is PROTOCOL_VERSION=<n>");
-    assert_eq!(
-        recorded, PROTOCOL_VERSION,
-        "PROTOCOL_VERSION is {PROTOCOL_VERSION} but the wire fingerprint was taken under {recorded}. \
-         Regenerate it on purpose with UPDATE_WIRE_FINGERPRINT=1 \
-         cargo test -p ritornello-proto --test wire_fingerprint, and read the diff of \
-         tests/wire-fingerprint.txt: a bump of PROTOCOL_VERSION must go with a wire break, \
-         and a wire break must go with a bump."
+    assert!(
+        now == recorded_text,
+        "the wire fingerprint is out of date (a version moved, or the announcement changed).\n\
+         The announcement is the bootstrap: an addition is compatible (regenerate and say why in the commit); \
+         a break moves PROTOCOL_VERSION, which republishes everything.\n\
+         Regenerate with: UPDATE_WIRE_FINGERPRINT=1 cargo test -p ritornello-proto --test wire_fingerprint\n\
+         First difference:\n{}",
+        first_difference_text(&recorded_text, &now)
     );
-
-    if now != fixture {
-        let first = now
-            .lines()
-            .zip(fixture.lines())
-            .find(|(a, b)| a != b)
-            .map(|(a, b)| format!("now:      {a}\nrecorded: {b}"))
-            .unwrap_or_else(|| "a sample was added or removed".to_string());
-        panic!(
-            "The wire format changed.\n{first}\n\n\
-             If an old plugin can no longer understand it (renamed/removed field or variant, \
-             changed type), this is a BREAK: bump PROTOCOL_VERSION in src/lib.rs and update this \
-             fingerprint. If it is compatible (an added optional field, an added variant nobody \
-             old receives), update the fingerprint only, and say why in the commit.\n\
-             Regenerate with: UPDATE_WIRE_FINGERPRINT=1 cargo test -p ritornello-proto --test wire_fingerprint"
-        );
-    }
 }
