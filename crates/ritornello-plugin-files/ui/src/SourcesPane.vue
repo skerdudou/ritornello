@@ -54,6 +54,10 @@ function toggleArchive(name: string, archive: boolean): void {
   void props.send({ op: 'set_archive_covers', name, archive })
 }
 
+function chooseCoverName(coverName: string): void {
+  void props.send({ op: 'set_cover_name', cover_name: coverName })
+}
+
 function goUp(): void {
   void props.send({ op: 'mount' })
 }
@@ -147,6 +151,32 @@ function goUp(): void {
       >
         ✕
       </Button>
+    </div>
+
+    <!-- One name for every source, hence outside the rows: which folders may
+         receive a cover is a question about each library, what the file is
+         called is a question about the players reading them all. A native
+         select, like the checkboxes above: the option texts are file names,
+         never translated, and the list comes from the plugin, which refuses
+         any name it would not read back. -->
+    <div
+      v-if="data.roots.length && data.coverNames.length"
+      class="flex flex-wrap items-center gap-2 text-sm"
+    >
+      <label for="cover-name">{{ t('cover_name_label') }}</label>
+      <select
+        id="cover-name"
+        data-cover-name
+        class="rounded-md border border-border bg-background px-2 py-1"
+        :value="data.coverName"
+        :disabled="frozen"
+        @change="chooseCoverName(($event.target as HTMLSelectElement).value)"
+      >
+        <option v-for="n in data.coverNames" :key="n" :value="n">{{ n }}</option>
+      </select>
+      <span class="text-xs text-muted-foreground" data-cover-name-help>
+        {{ t('cover_name_help') }}
+      </span>
     </div>
 
     <!-- Mounting follows the declaration, with no button for the user to

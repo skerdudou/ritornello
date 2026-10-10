@@ -161,6 +161,15 @@ describe('full payload normalization', () => {
     expect(d.playlist).toEqual([])
     expect(d.scan).toEqual({ running: false, found: 0, dir: '', error: null })
     expect(d.unresolved).toEqual([])
+    // The plugin's default name, and no list to offer: the control stays hidden.
+    expect(d.coverName).toBe('cover')
+    expect(d.coverNames).toEqual([])
+  })
+
+  it('carries the cover name and the names on offer', () => {
+    const d = normalizeData({ cover_name: 'folder', cover_names: ['cover', 'folder', 7, ''] })
+    expect(d.coverName).toBe('folder')
+    expect(d.coverNames).toEqual(['cover', 'folder'])
   })
 
   it('carries over the last scan incident, which survives its own end, unresolved', () => {

@@ -6,10 +6,56 @@
 //! over the channel.
 
 use ritornello_proto::CoverRef;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// A name this module recognises as a folder's front face — and therefore the
+/// only names the archiver may be told to write under.
+///
+/// **A closed set, and that is the point.** The owner picks the name the
+/// appliance writes a found cover under, and a name outside this list would be
+/// written and then never read back: the next track of the album would announce
+/// no cover, and the core would fetch the same image from the network again,
+/// for ever. Making the setting this type rather than a string is what keeps the
+/// writer and the reader from drifting apart — [`PREFERENCES`] is built from it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CoverName {
+    /// The default, and what Kodi and MPD look for first.
+    #[default]
+    Cover,
+    /// What Windows writes, and what many other players look for first.
+    Folder,
+    Front,
+    Albumart,
+    Album,
+}
+
+impl CoverName {
+    /// The file stem, without an extension: the extension is chosen by the
+    /// bytes at write time, never by the setting.
+    pub fn stem(self) -> &'static str {
+        match self {
+            CoverName::Cover => "cover",
+            CoverName::Folder => "folder",
+            CoverName::Front => "front",
+            CoverName::Albumart => "albumart",
+            CoverName::Album => "album",
+        }
+    }
+}
+
 /// By order of preference. `cover` first: it is the most explicit name.
-const PREFERENCES: [&str; 5] = ["cover", "folder", "front", "albumart", "album"];
+///
+/// Every variant of [`CoverName`] appears here, and a test holds it: one
+/// missing would be a name the archiver writes and this module never reads.
+pub(crate) const PREFERENCES: [CoverName; 5] = [
+    CoverName::Cover,
+    CoverName::Folder,
+    CoverName::Front,
+    CoverName::Albumart,
+    CoverName::Album,
+];
 
 /// Recognized extensions.
 ///
@@ -70,9 +116,29 @@ fn by_preference(directory: &Path) -> Option<PathBuf> {
         images
             .iter()
             .find(|p| {
-                p.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(preferred))
+                p.file_stem()
+                    .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(preferred.stem()))
             })
             .cloned()
+    })
+}
+
+/// Does this path name an image `by_preference` would pick up — any of the
+/// [`PREFERENCES`], in any case, with any of the [`EXTENSIONS`]?
+///
+/// The archiver's "never overwrite" check, and the reason it lives here: once
+/// the owner may choose `folder`, a folder already holding a `cover.jpg` of the
+/// owner's own scanning must refuse the write too, or it would end up with two
+/// front faces — settled by preference order rather than by the owner. A check on the chosen
+/// name alone would let exactly that through.
+pub(crate) fn names_a_cover(path: &Path) -> bool {
+    let Some(stem) = path.file_stem() else { return false };
+    let stem = stem.to_string_lossy();
+    if !PREFERENCES.iter().any(|p| stem.eq_ignore_ascii_case(p.stem())) {
+        return false;
+    }
+    path.extension().is_some_and(|e| {
+        EXTENSIONS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str())
     })
 }
 
@@ -183,5 +249,60 @@ mod tests {
     fn the_directory_comes_before_the_subdirectory() {
         let dir = tree(&["01 - piste.flac", "folder.jpg", "Artwork/cover.jpg"]);
         assert_eq!(found(&dir).as_deref(), Some("folder.jpg"));
+    }
+
+    /// Every name the archiver can be told to write under. The `match` is what
+    /// makes this list honest: a variant added to `CoverName` does not compile
+    /// here until it is listed, and the test below then asks the reader about it.
+    fn every_cover_name() -> Vec<CoverName> {
+        let all = vec![
+            CoverName::Cover,
+            CoverName::Folder,
+            CoverName::Front,
+            CoverName::Albumart,
+            CoverName::Album,
+        ];
+        for n in &all {
+            match n {
+                CoverName::Cover
+                | CoverName::Folder
+                | CoverName::Front
+                | CoverName::Albumart
+                | CoverName::Album => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn every_name_the_archiver_may_write_is_read_back() {
+        // The writer and the reader must agree, or the archived cover is never
+        // found and the network is asked again on every track. A second,
+        // unrecognised image sits beside it, so that the single-image rule
+        // cannot be what finds it: only the preference list may.
+        for name in every_cover_name() {
+            let written = format!("{}.webp", name.stem());
+            let dir = tree(&["01 - piste.flac", &written, "scan001.png"]);
+            assert_eq!(found(&dir).as_deref(), Some(written.as_str()), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_cover_name_travels_as_its_stem() {
+        // The page and the state file both carry the stem, lowercase.
+        for name in every_cover_name() {
+            assert_eq!(serde_json::to_value(name).unwrap(), name.stem());
+        }
+    }
+
+    #[test]
+    fn any_recognised_name_counts_as_a_cover_whatever_its_case() {
+        for present in ["cover.jpg", "Folder.JPG", "FRONT.png", "albumart.Webp", "album.jpeg"] {
+            assert!(names_a_cover(Path::new(present)), "{present}");
+        }
+        // Not a preference name, not an image, or a temporary left by a crash.
+        for absent in ["scan001.jpg", "cover.txt", "cover", ".cover.jpg.1-2-3.tmp", "back.jpg"] {
+            assert!(!names_a_cover(Path::new(absent)), "{absent}");
+        }
     }
 }

@@ -8,6 +8,7 @@
 //! why the scan is an asynchronous task whose progress the page polls,
 //! rather than a stream of events.
 
+use crate::cover::CoverName;
 use crate::state;
 use anyhow::Result;
 use ritornello_plugin_files::m3u::Entry;
@@ -119,6 +120,10 @@ pub struct FilesAdmin {
     /// Running probe. Launching a new one **abandons** the previous one:
     /// after loading a list, probing the old one is useless.
     pub durations_task: Option<tokio::task::JoinHandle<()>>,
+    /// The name a found cover is archived under, on every root. Shared with
+    /// the Source half, which reads it at each write; this half is the only
+    /// writer, and persists it in the state file before publishing it.
+    pub cover_name: Arc<Mutex<CoverName>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +169,14 @@ pub enum Op {
     SetArchiveCovers {
         name: String,
         archive: bool,
+    },
+    /// One setting for every root, unlike `SetArchiveCovers`: where a cover
+    /// may be written is a question about each library, what it is called is
+    /// a question about the players that read them all. A name outside
+    /// `CoverName` fails to parse, so nothing this module would not read back
+    /// can be chosen.
+    SetCoverName {
+        cover_name: CoverName,
     },
     ExploreOpen {
         kind: ritornello_plugin_files::explore::Kind,
@@ -627,8 +640,13 @@ impl AdminPlugin for FilesAdmin {
         let mount_error = self.mount_error.lock().unwrap().clone();
         let can_browse_smb = self.smb_ok.load(std::sync::atomic::Ordering::Relaxed);
         let explore = self.explore.view();
+        let cover_name = *self.cover_name.lock().unwrap();
         serde_json::json!({
             "roots": root_values,
+            // The choice, and the names it may take: the page lists what the
+            // plugin accepts rather than a copy of it that could drift.
+            "cover_name": cover_name,
+            "cover_names": crate::cover::PREFERENCES,
             "volumes": volumes,
             "can_browse_smb": can_browse_smb,
             // What the page does with it: decide whether clearing the list
@@ -843,6 +861,21 @@ impl AdminPlugin for FilesAdmin {
                 // at every write. Remounting would restart a unit and could
                 // raise a polkit prompt for nothing.
                 *self.roots.write().await = table;
+                Ok(())
+            }
+            Op::SetCoverName { cover_name } => {
+                // Persisted **before** being published, and refused if it was
+                // not: a setting the page shows as taken but that the next
+                // restart forgets is worse than a refusal the owner can read.
+                if let Err(e) = state::update(&self.state_path, |s| s.cover_name = cover_name) {
+                    tracing::warn!("persisting the cover name: {e}");
+                    return Err(self.text_with(
+                        "store_io_error",
+                        "path",
+                        &self.state_path.display().to_string(),
+                    ));
+                }
+                *self.cover_name.lock().unwrap() = cover_name;
                 Ok(())
             }
 
@@ -1247,6 +1280,7 @@ mod tests {
             mount_error: Arc::new(Mutex::new(None)),
             smb_ok,
             health,
+            cover_name: Arc::new(Mutex::new(CoverName::default())),
         };
         (admin, root_dir)
     }
@@ -1586,6 +1620,62 @@ mod tests {
         // does not survive a restart.
         let reread = Roots::load(&admin.roots_path).unwrap();
         assert!(reread.by_name("musique").unwrap().archive_covers);
+    }
+
+    #[tokio::test]
+    async fn the_cover_name_is_published_persisted_and_shown() {
+        let (mut admin, _root_dir) = test_admin();
+        // Shown before anything is chosen: the default, and the names on offer
+        // in the reader's own order.
+        let d = admin.get_data().await;
+        assert_eq!(d["cover_name"], "cover");
+        assert_eq!(
+            d["cover_names"],
+            serde_json::json!(["cover", "folder", "front", "albumart", "album"])
+        );
+
+        admin
+            .set_data(serde_json::json!({"op": "set_cover_name", "cover_name": "folder"}))
+            .await
+            .unwrap();
+        // Published to the Source half, which reads it at its next write…
+        assert_eq!(*admin.cover_name.lock().unwrap(), CoverName::Folder);
+        // …shown to the page…
+        assert_eq!(admin.get_data().await["cover_name"], "folder");
+        // …and re-read from disk, not only from memory: a setting is worthless
+        // if it does not survive a restart.
+        assert_eq!(state::load(&admin.state_path).cover_name, CoverName::Folder);
+    }
+
+    #[tokio::test]
+    async fn a_cover_name_the_reader_does_not_know_is_refused() {
+        // A name `cover::search` would not read back would be written once and
+        // fetched from the network again on every track.
+        let (mut admin, _root_dir) = test_admin();
+        let refused = admin
+            .set_data(serde_json::json!({"op": "set_cover_name", "cover_name": "pochette"}))
+            .await;
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(*admin.cover_name.lock().unwrap(), CoverName::Cover);
+        assert_eq!(state::load(&admin.state_path).cover_name, CoverName::Cover);
+    }
+
+    #[tokio::test]
+    async fn a_cover_name_that_cannot_be_saved_is_refused_and_not_published() {
+        // The page must not show as taken a choice the next restart forgets.
+        let (mut admin, root_dir) = test_admin();
+        // A directory where the state file should be: the write fails.
+        admin.state_path = root_dir.join("occupied");
+        std::fs::create_dir_all(admin.state_path.join("plugin-files.json.tmp")).unwrap();
+        admin.state_path = admin.state_path.join("plugin-files.json");
+        let refused = admin
+            .set_data(serde_json::json!({"op": "set_cover_name", "cover_name": "folder"}))
+            .await;
+        match refused {
+            Err(Text::Keyed { key, .. }) => assert_eq!(key, "store_io_error"),
+            other => panic!("expected a keyed refusal: {other:?}"),
+        }
+        assert_eq!(*admin.cover_name.lock().unwrap(), CoverName::Cover);
     }
 
     #[tokio::test]

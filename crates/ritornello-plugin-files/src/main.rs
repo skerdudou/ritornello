@@ -301,6 +301,11 @@ struct FilesSource {
     /// `path` local of the probe itself lives only inside the spawned task,
     /// and is gone by the time its result reaches us.
     current_file: Option<PathBuf>,
+    /// The name a found cover is archived under, shared with the Admin half,
+    /// which is the only writer. Read when the write happens, not when the
+    /// plugin starts: a change on the page applies to the very next cover,
+    /// like `archive_covers`.
+    cover_name: Arc<Mutex<cover::CoverName>>,
 }
 
 impl FilesSource {
@@ -891,6 +896,7 @@ impl SourcePlugin for FilesSource {
         let roots = self.roots.clone();
         let health = self.health.clone();
         let cover_by_dir = self.cover_by_dir.clone();
+        let name = *self.cover_name.lock().unwrap();
         tokio::spawn(async move {
             let staged = PathBuf::from(&file);
             let table = roots.read().await.clone();
@@ -927,7 +933,7 @@ impl SourcePlugin for FilesSource {
             // successes included — with no line at all, which is precisely
             // the silence this feature is not allowed to produce.
             let work = move || {
-                let outcome = archive::store(&table, &identity, &target, &archive::album_from_tags);
+                let outcome = archive::store(&table, &identity, &target, name, &archive::album_from_tags);
                 // After `store`, never before: the next probe must see the
                 // folder as the attempt left it.
                 forget_archived_folder(&cover_by_dir, &identity);
@@ -1240,6 +1246,9 @@ async fn main() -> Result<()> {
     // The page returns the same information, under the circuit breaker,
     // through the `missing` field of `get_data`.
     let index = if state.index < entries.len() { state.index } else { 0 };
+    // Shared by the two halves: the page sets it, the Source reads it at each
+    // archived cover.
+    let cover_name = Arc::new(Mutex::new(state.cover_name));
 
     let roots = Roots::load(&roots_path).unwrap_or_else(|e| {
         tracing::warn!("no usable media-roots.toml ({e}): starting with no root");
@@ -1291,6 +1300,7 @@ async fn main() -> Result<()> {
         // Source only ever reads it (see the field's doc).
         roots: roots.clone(),
         current_file: None,
+        cover_name: cover_name.clone(),
     };
 
     // Probed at startup rather than on use: the page must be able to grey out
@@ -1329,6 +1339,7 @@ async fn main() -> Result<()> {
         unresolved: Arc::new(Mutex::new(Vec::new())),
         browse: Arc::new(Mutex::new(serde_json::json!({}))),
         preset_count_tx,
+        cover_name,
     };
     ritornello_plugin_sdk::declare_runtime!()?
         .texts([("en", FILES_EN)])?
@@ -1512,6 +1523,7 @@ mod tests {
             health: Arc::new(ritornello_plugin_files::health::Health::new()),
             roots: Arc::new(AsyncRwLock::new(Roots::default())),
             current_file: None,
+            cover_name: Arc::new(Mutex::new(cover::CoverName::default())),
         }
     }
 

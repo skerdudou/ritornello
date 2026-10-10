@@ -5,8 +5,9 @@
 //! write into this same file, and a `save` rebuilt by the Source half would
 //! erase it.
 
+use crate::cover::CoverName;
 use ritornello_plugin_files::m3u::Entry;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -15,6 +16,24 @@ pub struct State {
     pub playlist: Vec<StoredEntry>,
     #[serde(default)]
     pub index: usize,
+    /// The name a found cover is archived under, on every root. Lives here and
+    /// not in the roots table: that table is read by the root mount helper,
+    /// and a setting the helper has no use for must not make it change.
+    #[serde(default, deserialize_with = "cover_name_or_default")]
+    pub cover_name: CoverName,
+}
+
+/// Reads `cover_name`, falling back on the default for a value it does not
+/// know rather than failing.
+///
+/// **The playlist shares this file.** `load` is all-or-nothing: one value that
+/// does not parse discards the whole state, and `#[serde(default)]` does not
+/// help — it fills a *missing* field, never one whose value is not understood.
+/// A plugin rolled back past a release that added a name would then lose the
+/// owner's playlist over a cover setting. Unknown, the setting reverts alone.
+fn cover_name_or_default<'de, D: Deserializer<'de>>(d: D) -> Result<CoverName, D::Error> {
+    let raw = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(raw).unwrap_or_default())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -92,7 +111,7 @@ mod tests {
     fn the_playlist_and_the_index_survive_a_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("plugin-files.json");
-        save(&f, &State { playlist: vec![test_entry()], index: 0 }).unwrap();
+        save(&f, &State { playlist: vec![test_entry()], index: 0, ..Default::default() }).unwrap();
         let reread = load(&f);
         assert_eq!(reread.index, 0);
         assert_eq!(reread.playlist, vec![test_entry()]);
@@ -104,11 +123,51 @@ mod tests {
         // rebuilt by the Source half would erase it.
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("plugin-files.json");
-        save(&f, &State { playlist: vec![test_entry()], index: 0 }).unwrap();
+        save(&f, &State { playlist: vec![test_entry()], index: 0, ..Default::default() }).unwrap();
         update(&f, |s| s.index = 1).unwrap();
         let reread = load(&f);
         assert_eq!(reread.index, 1);
         assert_eq!(reread.playlist.len(), 1, "the playlist was erased by the update");
+    }
+
+    #[test]
+    fn the_cover_name_survives_an_update_of_the_playlist() {
+        // The Admin half writes the setting, then rewrites the playlist and the
+        // Source half the index, all into this one file.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("plugin-files.json");
+        update(&f, |s| s.cover_name = CoverName::Folder).unwrap();
+        update(&f, |s| s.playlist = vec![test_entry()]).unwrap();
+        update(&f, |s| s.index = 0).unwrap();
+        assert_eq!(load(&f).cover_name, CoverName::Folder);
+    }
+
+    #[test]
+    fn an_older_state_file_reads_with_the_default_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("plugin-files.json");
+        std::fs::write(&f, br#"{"playlist":[],"index":0}"#).unwrap();
+        assert_eq!(load(&f).cover_name, CoverName::Cover);
+    }
+
+    #[test]
+    fn an_unknown_cover_name_does_not_cost_the_playlist() {
+        // What a rollback past a release that added a name would read. Without
+        // the tolerant reader, `load` would discard the whole file — playlist
+        // included — over a cover setting.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("plugin-files.json");
+        let mut written = serde_json::to_value(State {
+            playlist: vec![test_entry()],
+            index: 0,
+            cover_name: CoverName::Folder,
+        })
+        .unwrap();
+        written["cover_name"] = serde_json::json!("pochette");
+        std::fs::write(&f, serde_json::to_vec(&written).unwrap()).unwrap();
+        let reread = load(&f);
+        assert_eq!(reread.playlist, vec![test_entry()], "the playlist was lost");
+        assert_eq!(reread.cover_name, CoverName::Cover);
     }
 
     #[test]
