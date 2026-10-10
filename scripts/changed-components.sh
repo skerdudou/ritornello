@@ -380,6 +380,42 @@ coupled_problems() { # <baseline> <companion> <plugin> <companion tree source>..
   return 0
 }
 
+# The privileged updater's own number (the sixth). `ritornello-update` runs as
+# root and only `ritornello-install` places it; the core decides whether its
+# own update may proceed from the page by comparing the updater's number the
+# release declares with the one the installer recorded, for equality. A change
+# to the crate that left its number alone would therefore reach no device: the
+# core would see the same number and update itself beside the old updater.
+# Any change to the crate counts, its tests included: what this cannot tell
+# apart is cheaper to bump than to miss. Its Cargo.toml counts only outside the
+# [package] version line, as for a companion. Prints `ritornello-updater: <why>`
+# when it should have moved and did not, nothing when it is fine, and a
+# GUARD-ERROR line on a git failure.
+updater_problems() { # <baseline>
+  local base="$1" dir="crates/ritornello-updater" f changed touched=no now then_
+  if ! changed=$(git diff --name-only "$base" -- "$dir"); then
+    echo "GUARD-ERROR: git diff $base -- $dir failed"
+    return 0
+  fi
+  for f in $changed; do
+    case "$f" in
+      "$dir"/Cargo.toml)
+        if [ "$(git show "$base:$f" 2>/dev/null | manifest_minus_version)" != "$(manifest_minus_version < "$f")" ]; then
+          touched=yes
+        fi
+        ;;
+      *) touched=yes ;;
+    esac
+  done
+  [ "$touched" = yes ] || return 0
+  now=$(version_in < "$dir/Cargo.toml")
+  then_=$(git show "$base:$dir/Cargo.toml" 2>/dev/null | version_in || true)
+  if [ "$now" = "$then_" ]; then
+    echo "ritornello-updater: its crate changed, and the root binary it builds would reach devices under its old number, which the core compares for equality"
+  fi
+  return 0
+}
+
 # Returns 1, after naming every problem, when a pair did not move as it must,
 # or when no baseline can be trusted.
 run_guard() {
@@ -397,6 +433,8 @@ run_guard() {
     problems+=$(coupled_problems "$GUARD_BASE" "$name" "$with" $srcs)
     problems+=$'\n'
   done
+  problems+=$(updater_problems "$GUARD_BASE")
+  problems+=$'\n'
   problems=$(printf '%s' "$problems" | sed '/^$/d')
   # A `case`, not `printf | grep -q`: under pipefail, grep leaving early can
   # SIGPIPE the printf and turn a match into a miss.
@@ -411,7 +449,7 @@ run_guard() {
     done <<< "$problems"
     return 1
   fi
-  echo "coupled-change guard: every companion and its plugin moved as their changes require, since $GUARD_BASE" >&2
+  echo "coupled-change guard: every companion and its plugin, and the updater, moved as their changes require, since $GUARD_BASE" >&2
   return 0
 }
 
@@ -618,6 +656,9 @@ if [ -n "$SELF_TEST" ]; then
     printf 'fn main() {}\n' > "$R/crates/ritornello-files-mount/src/bin/media-mount.rs"
     printf '[package]\nname = "ritornello-plugin-files"\nversion = "0.1.0"\n' > "$R/crates/ritornello-plugin-files/Cargo.toml"
     printf 'fn main() {}\n' > "$R/crates/ritornello-plugin-files/src/main.rs"
+    mkdir -p "$R/crates/ritornello-updater/src"
+    printf '[package]\nname = "ritornello-updater"\nversion = "1.0.0"\n' > "$R/crates/ritornello-updater/Cargo.toml"
+    printf 'pub fn place() {}\n' > "$R/crates/ritornello-updater/src/lib.rs"
     guard_git init -q
     guard_git add -A
     guard_git commit -q -m baseline
@@ -681,6 +722,25 @@ if [ -n "$SELF_TEST" ]; then
   sed 's/^version = "1.1"$/version = "1.2"/' "$R/crates/ritornello-files-mount/Cargo.toml" > "$R/m" && mv "$R/m" "$R/crates/ritornello-files-mount/Cargo.toml"
   guard_bump ritornello-files-mount; guard_release
   expect_guard 1 "ritornello-plugin-files" "" "a table-form dependency's version moved: a library change, not the [package] version line"
+
+  guard_repo
+  printf 'pub fn place() { /* v2 */ }\n' > "$R/crates/ritornello-updater/src/lib.rs"
+  guard_release
+  expect_guard 1 "ritornello-updater" "compares for equality" "the updater changed without its number"
+
+  guard_repo
+  printf 'pub fn place() { /* v2 */ }\n' > "$R/crates/ritornello-updater/src/lib.rs"
+  guard_bump ritornello-updater 1.0.1; guard_release
+  expect_guard 0 "" "" "the updater changed and its number moved"
+
+  guard_repo
+  guard_bump ritornello-updater 1.1.0; guard_release
+  expect_guard 0 "" "" "only the updater's number moved"
+
+  guard_repo
+  printf '[package]\nname = "ritornello-updater"\nversion = "1.0.0"\n\n[dependencies]\nserde = "1"\n' > "$R/crates/ritornello-updater/Cargo.toml"
+  guard_release
+  expect_guard 1 "ritornello-updater" "" "a dependency of the updater changed without its number"
 
   # Repo D of the re-review: v0.1.1 is refused and never published, then an
   # unrelated commit is tagged v0.1.2. Passed the newest PUBLISHED release
