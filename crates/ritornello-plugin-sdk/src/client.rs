@@ -553,6 +553,10 @@ impl AdminClient {
 /// growing does not resend the same "nothing" to a plugin that may not see it.
 /// Every other frame goes out exactly as it always did, equal to the previous
 /// one or not.
+///
+/// For the same plugin, an enrichment that arrives while a track is armed is
+/// dropped rather than relayed: the plugin was told "nothing", so a line it
+/// still writes can only answer the stream that was just stopped.
 pub async fn run_metadata_client(
     socket_path: &Path,
     name: String,
@@ -581,6 +585,13 @@ pub async fn run_metadata_client(
                     bail!("metadata plugin {name} connection closed");
                 };
                 match serde_json::from_str::<Enrichment>(&line) {
+                    // Not while armed for a plugin that did not opt in: it is
+                    // shown "nothing" then (see `visible_to`), so whatever it
+                    // sends is a late answer about a stream that is stopped,
+                    // and relaying it would put the song back on screen.
+                    Ok(_) if !enriches_armed && np_rx.borrow().armed => {
+                        tracing::debug!("enrichment from {name} dropped: a track is armed and the plugin did not opt in");
+                    }
                     // `cleaned` here, as close to the input as possible: the
                     // core then has only one shape to handle (see `is_empty`,
                     // which decides the arbitration).
@@ -1600,6 +1611,69 @@ mod tests {
             let received = seen.lock().await.clone();
             assert_eq!(received, vec![np.clone(), np], "enriches_armed={enriches_armed}");
         }
+    }
+
+    /// What reaches the core when the plugin writes an enrichment while a track
+    /// is armed, then another one once it plays. Returns the titles received, in
+    /// order, after both have had time to arrive.
+    async fn enrichments_relayed(enriches_armed: bool) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("meta.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<NowPlaying>::new()));
+        let seen_srv = seen.clone();
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<String>(4);
+        tokio::spawn(async move {
+            let _keep = dir;
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            tokio::spawn(async move {
+                while let Ok(Some(line)) = lines.next_line().await {
+                    seen_srv.lock().await.push(serde_json::from_str(&line).unwrap());
+                }
+            });
+            while let Some(title) = write_rx.recv().await {
+                let e = Enrichment { identity: serde_json::json!({"disc": "x"}), title: Some(title), ..Default::default() };
+                write.write_all(format!("{}\n", serde_json::to_string(&e).unwrap()).as_bytes()).await.unwrap();
+            }
+        });
+        let (np_tx, np_rx) = tokio::sync::watch::channel(armed_np(Known::default(), true));
+        let (enrich_tx, mut enrich_rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = run_metadata_client(&socket, "probe".into(), enrich_tx, np_rx, enriches_armed).await;
+        });
+        settle().await;
+        write_tx.send("while armed".into()).await.unwrap();
+        settle().await;
+        // The plugin plays: the relay has handled this frame once the plugin
+        // has read it, and only then is the second enrichment written.
+        np_tx.send(armed_np(Known::default(), false)).unwrap();
+        settle().await;
+        assert!(seen.lock().await.len() >= 2, "the playing frame must have reached the plugin");
+        write_tx.send("while playing".into()).await.unwrap();
+        settle().await;
+        let mut titles = Vec::new();
+        while let Ok(Some((_, e))) = tokio::time::timeout(std::time::Duration::from_millis(100), enrich_rx.recv()).await {
+            titles.push(e.title.unwrap());
+        }
+        titles
+    }
+
+    /// A plugin that did not opt in is shown "nothing" while a track is armed,
+    /// so an enrichment it writes then is a late answer about a stopped stream:
+    /// it is dropped, and only the one written once playing reaches the core.
+    /// A plugin that opted in has its enrichment relayed while armed. Both
+    /// operands of the guard have their own case.
+    ///
+    /// **[MUTATION]** dropping the `!enriches_armed` operand of the guard in
+    /// `run_metadata_client` fails the opted-in case (the enrichment while armed
+    /// is lost); dropping the `np_rx.borrow().armed` operand fails the
+    /// not-opted-in case (the enrichment while playing is lost too).
+    #[tokio::test]
+    async fn metadata_client_drops_an_enrichment_written_while_armed_unless_opted_in() {
+        assert_eq!(enrichments_relayed(false).await, vec!["while playing".to_string()]);
+        assert_eq!(enrichments_relayed(true).await, vec!["while armed".to_string(), "while playing".to_string()]);
     }
 
     #[tokio::test]
