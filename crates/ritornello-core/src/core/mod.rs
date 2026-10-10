@@ -1797,7 +1797,9 @@ mod tests {
     async fn arming_the_same_identity_keeps_the_slate() {
         let id = serde_json::json!({"url": "one"});
         let (mut core, np_rx, _state_rx, tmp) = setup_metadata(vec!["p".into()]);
-        core.handle_command(Command::PlayPause).await.unwrap();
+        // A finite play, a file: a stopped stream drops its song on purpose
+        // (`stopping_a_stream_keeps_the_station_but_drops_the_song`).
+        core.apply(SourceAction::play("/music/a.flac").finite()).await.unwrap();
         core.handle_source_update("radio", plays(id.clone()));
         core.handle_enrichment("p", enrichment(id.clone(), "A", "T"));
         let image = tmp.path().join("folder.jpg");
@@ -1825,6 +1827,97 @@ mod tests {
         let np = np_rx.borrow().clone();
         assert_eq!(np.identity, Some(id));
         assert!(np.armed);
+    }
+
+    /// A stopped radio shows the station — its number and name — and nothing
+    /// of the song that was on air (spec §1): the stream's identity stays
+    /// armed, since Play starts it again, while the ICY title, the plugin's
+    /// enrichment and the cover it brought go, and the plugins are told so
+    /// (`known` empty). The radio's own answer, arming the same station,
+    /// brings none of it back.
+    ///
+    /// **[MUTATION]** the `forget_the_moment()` call removed from
+    /// `Command::Stop` → the title assertion fires. Its `if was_stream` guard
+    /// replaced by `if true` → `stop_keeps_the_title_armed_until_the_source_answers`
+    /// fires (a file's slate is kept).
+    #[tokio::test]
+    async fn stopping_a_stream_keeps_the_station_but_drops_the_song() {
+        let id = serde_json::json!({"kind": "stream", "url": "http://fip"});
+        let (mut core, np_rx, _d) = stopped_after_a_titled_stream(&id).await;
+        let state = core.player_state();
+        assert_eq!(state.track.title, None, "the song that was on air must not outlive the stop");
+        assert_eq!(state.preset, Some(2), "the station's number stays");
+        let np = np_rx.borrow().clone();
+        assert_eq!(np.identity, Some(id.clone()), "the station stays armed");
+        assert!(np.armed);
+        assert_eq!(np.known, ritornello_proto::Known::default(), "the plugins must not be told the song is still known");
+
+        let mut answer = arms(id.clone());
+        answer.preset = Some(2);
+        answer.preset_name = Some("FIP".into());
+        core.handle_source_update("radio", answer);
+        let state = core.player_state();
+        assert_eq!(state.track.title, None);
+        assert_eq!(state.preset_name.as_deref(), Some("FIP"));
+    }
+
+    /// The ICY layer goes too, not only the plugins': on a station no plugin
+    /// knows, the ICY title is the whole slate.
+    ///
+    /// **[MUTATION]** `self.icy = None` removed from `Metadata::clear_moment`
+    /// (and `set_identity` given its own copy) → the title assertion fires.
+    #[tokio::test]
+    async fn stopping_a_stream_drops_its_icy_title() {
+        let id = serde_json::json!({"kind": "stream", "url": "http://fip"});
+        let (mut core, _np_rx, _state_rx, _d) = setup_metadata(vec![]);
+        core.apply(SourceAction::play("http://fip")).await.unwrap();
+        core.handle_source_update("radio", plays(id));
+        core.handle_icy_title("Artist - Song".into());
+        assert!(core.player_state().track.title.is_some(), "otherwise the ICY half proves nothing");
+        core.handle_command(Command::Stop).await.unwrap();
+        assert_eq!(core.player_state().track.title, None);
+    }
+
+    /// A Source stopping its own stream (`SourceAction::Stop`): the same fate
+    /// as the Stop key — the station armed, the song gone.
+    ///
+    /// **[MUTATION]** the block removed from `apply`'s `Stop` → the title
+    /// assertion fires; its `was_stream` operand replaced by `true` →
+    /// `a_source_stopping_a_finite_play_keeps_its_slate` fires.
+    /// `Metadata::clear_moment` returning `false` (so `publish_fresh_slate`
+    /// never runs) → the anchor assertion fires: this path, unlike the Stop
+    /// key, forgets no position of its own.
+    #[tokio::test]
+    async fn a_source_stopping_its_stream_drops_the_song() {
+        let id = serde_json::json!({"kind": "stream", "url": "http://fip"});
+        let (mut core, np_rx, _state_rx, _d) = setup_metadata(vec!["p".into()]);
+        core.apply(SourceAction::play("http://fip")).await.unwrap();
+        core.handle_source_update("radio", plays(id.clone()));
+        let mut e = enrichment(id.clone(), "A", "T");
+        e.cover = Some(ritornello_proto::CoverRef::Url { url: "https://example.org/song.jpg".into() });
+        e.position_s = Some(30);
+        core.handle_enrichment("p", e);
+        assert!(core.metadata.selected_cover().is_some(), "otherwise the cover half proves nothing");
+        assert!(core.position_anchor.is_some(), "otherwise the anchor half proves nothing");
+        core.apply(SourceAction::Stop).await.unwrap();
+        assert_eq!(core.player_state().track.title, None);
+        assert!(core.metadata.selected_cover().is_none(), "the song's cover goes with it");
+        assert!(core.position_anchor.is_none(), "the song's position must not resume under the next Play");
+        let np = np_rx.borrow().clone();
+        assert_eq!(np.identity, Some(id));
+        assert!(np.armed, "nothing sounds: the station is armed, not playing");
+    }
+
+    /// The counterpart: a Source stopping a file keeps its slate, as before.
+    #[tokio::test]
+    async fn a_source_stopping_a_finite_play_keeps_its_slate() {
+        let id = serde_json::json!({"path": "/music/a.flac"});
+        let (mut core, _np_rx, _state_rx, _d) = setup_metadata(vec!["p".into()]);
+        core.apply(SourceAction::play("/music/a.flac").finite()).await.unwrap();
+        core.handle_source_update("radio", plays(id.clone()));
+        core.handle_enrichment("p", enrichment(id, "A", "T"));
+        core.apply(SourceAction::Stop).await.unwrap();
+        assert_eq!(core.player_state().track.title.as_deref(), Some("T"));
     }
 
     /// The Source keeps another track than the one that stopped (the cd

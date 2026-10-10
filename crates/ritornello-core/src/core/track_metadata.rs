@@ -236,6 +236,34 @@ impl<P: Player> Core<P> {
         // A different identity: the location described the previous one. The
         // frame's own declaration, if any, is applied after this call.
         self.location = None;
+        self.publish_fresh_slate();
+    }
+
+    /// A stopped **stream** keeps its station and drops its song: the
+    /// identity (the stream) stays as it is — armed, since Play starts it
+    /// again — while everything that described the moment it was stopped
+    /// (the ICY title, every plugin's enrichment, the covers those produced,
+    /// the `known` the plugins were told) goes, exactly as on a freshly armed
+    /// identity. A stream has no "stopped track": the song on air when the
+    /// user pressed Stop is over by the time anyone reads the screen, and
+    /// kept, it stayed there for the whole stop.
+    ///
+    /// Files and the cd never come here: a stopped track *is* the track Play
+    /// starts again, and its slate is exactly what the screen must keep.
+    ///
+    /// The location stays: it names where the stream comes from, not what it
+    /// was playing.
+    pub(super) fn forget_the_moment(&mut self) {
+        if self.metadata.clear_moment() {
+            self.publish_fresh_slate();
+        }
+    }
+
+    /// What follows a slate that was just emptied — another identity, or the
+    /// same one with its moment forgotten (`forget_the_moment`): the offer
+    /// to archive, the position and the published `NowPlaying` all described
+    /// what is gone.
+    fn publish_fresh_slate(&mut self) {
         // The offer to keep an original describes the **folder** the Source is
         // playing out of, not the session: another track may well sit
         // elsewhere, under a root the Source will not write into. It is

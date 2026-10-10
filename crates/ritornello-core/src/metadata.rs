@@ -170,6 +170,30 @@ impl Metadata {
             return false;
         }
         self.identity = identity;
+        self.clear_moment();
+        true
+    }
+
+    /// Forgets everything that described **the moment**, and keeps the
+    /// identity: the ICY title, the file's tags, every enrichment, the covers
+    /// and what was known of their fetch. Returns `true` if anything was
+    /// actually there to forget.
+    ///
+    /// What `set_identity` does on a change, without the change. A stopped
+    /// stream needs exactly that: the station stays armed (Play starts it
+    /// again), but the song that was on air when it stopped describes nothing
+    /// anymore — kept, it stayed on screen for the whole stop. Going through
+    /// `set_identity(None)` then re-arming would publish an identity-less
+    /// `NowPlaying` in between, which the opted-in plugins would read as
+    /// "nothing armed".
+    pub fn clear_moment(&mut self) -> bool {
+        let had = self.icy.is_some()
+            || self.tags.is_some()
+            || !self.enrichments.is_empty()
+            || self.cover_source.is_some()
+            || self.cover_tags.is_some()
+            || self.cover_cle.is_some()
+            || !self.failed_covers.is_empty();
         self.icy = None;
         self.tags = None;
         self.enrichments.clear();
@@ -181,7 +205,7 @@ impl Metadata {
         // for the next track — a CDN that woke up — and a list surviving the
         // identity would prevent asking for it again.
         self.failed_covers.clear();
-        true
+        had
     }
 
     /// Retains the tags carried by the played file. Returns `true` if they

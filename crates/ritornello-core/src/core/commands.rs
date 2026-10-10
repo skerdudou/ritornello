@@ -311,6 +311,8 @@ impl<P: Player> Core<P> {
                 }
             }
             Command::Stop => {
+                // Read before it falls: only a stream drops its song below.
+                let was_stream = self.expecting_stream;
                 self.expecting_stream = false;
                 self.playback = false;
                 self.player.stop().await?;
@@ -334,6 +336,11 @@ impl<P: Player> Core<P> {
                 match self.metadata.identity().cloned() {
                     Some(id) => self.set_identity_state(Some(id), true),
                     None => self.set_identity(None),
+                }
+                // A stopped stream keeps its station, not the song that was
+                // on air (see `forget_the_moment`).
+                if was_stream {
+                    self.forget_the_moment();
                 }
                 // The Source was not consulted for this stop: tell it,
                 // otherwise one that keeps its own playback state (the cd)

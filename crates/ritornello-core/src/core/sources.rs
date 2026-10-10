@@ -506,9 +506,22 @@ impl<P: Player> Core<P> {
                 }
             }
             SourceAction::Stop => {
+                let was_stream = self.expecting_stream;
                 self.expecting_stream = false;
                 self.playback = false;
                 self.player.stop().await?;
+                // A Source stopping its own stream: the same fate as
+                // `Command::Stop` gives it — the station stays, armed, and
+                // the song that was on air goes (`forget_the_moment`). Armed
+                // here rather than left to the frame that comes with this
+                // reply: the reply's action is applied first, and until the
+                // frame lands the plugins would otherwise be told a "playing"
+                // stream had nothing known, and go and look again. A frame
+                // that arms nothing (`plays_nothing`) still clears the rest.
+                if was_stream && let Some(id) = self.metadata.identity().cloned() {
+                    self.set_identity_state(Some(id), true);
+                    self.forget_the_moment();
+                }
             }
             SourceAction::PlayerNext => self.player.next().await?,
             SourceAction::PlayerPrev => self.player.prev().await?,

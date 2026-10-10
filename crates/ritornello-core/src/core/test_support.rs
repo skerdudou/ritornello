@@ -248,15 +248,34 @@ pub(super) fn arms(identity: serde_json::Value) -> SourceUpdate {
     }
 }
 
-/// The radio plays `id` on preset 2, a declared plugin `p` titled it "T"
-/// and anchored a position, then the user stops. The Source's answer to the
-/// stop is left to each test: the fake never sends one on its own, which is
-/// also what an unreachable Source does.
+/// The active source plays `id` on preset 2 — a **finite** play, a file —
+/// a declared plugin `p` titled it "T" and anchored a position, then the
+/// user stops. The Source's answer to the stop is left to each test: the
+/// fake never sends one on its own, which is also what an unreachable Source
+/// does.
+///
+/// Finite on purpose: a stopped stream drops its song (see
+/// `stopped_after_a_titled_stream`), a stopped track keeps its slate, and it
+/// is the slate these tests are about.
 pub(super) async fn stopped_after_a_titled_track(
     id: &serde_json::Value,
 ) -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, tempfile::TempDir) {
+    stopped_after_a_titled_play(id, SourceAction::play("/music/a.flac").finite()).await
+}
+
+/// The same rig on a live stream: the radio's own Play, never finite.
+pub(super) async fn stopped_after_a_titled_stream(
+    id: &serde_json::Value,
+) -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, tempfile::TempDir) {
+    stopped_after_a_titled_play(id, SourceAction::play("http://fip")).await
+}
+
+async fn stopped_after_a_titled_play(
+    id: &serde_json::Value,
+    play: SourceAction,
+) -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, tempfile::TempDir) {
     let (mut core, np_rx, _state_rx, dir) = setup_metadata(vec!["p".into()]);
-    core.handle_command(Command::PlayPause).await.unwrap();
+    core.apply(play).await.unwrap();
     let mut update = plays(id.clone());
     update.preset = Some(2);
     core.handle_source_update("radio", update);
