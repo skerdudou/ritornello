@@ -237,6 +237,38 @@ pub(super) fn plays(identity: serde_json::Value) -> SourceUpdate {
     }
 }
 
+/// Update a stopped Source sends when it keeps a track armed: nothing
+/// plays, and `identity` is what Play would start. The shape the SDK's
+/// `armed()` builder produces, without a file to read.
+pub(super) fn arms(identity: serde_json::Value) -> SourceUpdate {
+    SourceUpdate {
+        identity: Some(IdentityUpdate::Nothing),
+        armed: Some(ritornello_proto::Armed { identity, media_path: None }),
+        ..Default::default()
+    }
+}
+
+/// The radio plays `id` on preset 2, a declared plugin `p` titled it "T"
+/// and anchored a position, then the user stops. The Source's answer to the
+/// stop is left to each test: the fake never sends one on its own, which is
+/// also what an unreachable Source does.
+pub(super) async fn stopped_after_a_titled_track(
+    id: &serde_json::Value,
+) -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, tempfile::TempDir) {
+    let (mut core, np_rx, _state_rx, dir) = setup_metadata(vec!["p".into()]);
+    core.handle_command(Command::PlayPause).await.unwrap();
+    let mut update = plays(id.clone());
+    update.preset = Some(2);
+    core.handle_source_update("radio", update);
+    let mut e = enrichment(id.clone(), "A", "T");
+    e.position_s = Some(30);
+    core.handle_enrichment("p", e);
+    assert_eq!(core.player_state().track.title.as_deref(), Some("T"));
+    assert!(core.position_anchor.is_some(), "otherwise an anchor assertion after the stop proves nothing");
+    core.handle_command(Command::Stop).await.unwrap();
+    (core, np_rx, dir)
+}
+
 /// A named preset, short form for the tests.
 pub(super) fn preset_of(index: u8, name: &str) -> Preset {
     Preset { index, name: name.into() }

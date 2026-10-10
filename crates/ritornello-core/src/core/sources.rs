@@ -462,6 +462,17 @@ impl<P: Player> Core<P> {
                 // confirms it (a sleeping share, a file gone) must not be
                 // read as "the list ran out".
                 self.played_since_play = false;
+                // A track that is about to sound is no longer armed. The
+                // Source normally says so itself by re-declaring the identity
+                // (`set_identity_state` then flips the flag), but nothing
+                // obliges it to: one that answers Play with this action alone
+                // would otherwise leave `armed: true` published, and the
+                // opted-in `metadata` plugins would go on treating a playing
+                // track as a stopped one. The identity itself stays.
+                if self.armed {
+                    self.armed = false;
+                    self.publish_armed_flag();
+                }
                 // Armed **before** the load: `loop-file` is a player setting
                 // read at the file's end, and setting it first leaves no
                 // window where a non-loopable load runs under a stale loop.

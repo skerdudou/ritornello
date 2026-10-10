@@ -94,10 +94,43 @@ impl<P: Player> Core<P> {
     ///
     /// `None` = nothing is playing anymore. The core never looks **inside**
     /// the identity: it compares it by equality and relays it as-is.
+    ///
+    /// Always "playing", never armed: see `set_identity_state` for the
+    /// armed half.
     pub(super) fn set_identity(&mut self, identity: Option<serde_json::Value>) {
+        self.set_identity_state(identity, false)
+    }
+
+    /// Arms what a Source frame declared: nothing plays, and `armed.identity`
+    /// is what Play would start (see `SourceMessage::armed`). The slate
+    /// follows the usual rule — kept for the identity already shown, reset
+    /// for another one.
+    pub(super) fn arm(&mut self, armed: ritornello_proto::Armed) {
+        self.set_identity_state(Some(armed.identity), true);
+        // Already published by `set_identity_state` on every path that
+        // changed something; repeated so this function's contract does not
+        // hang on which branch ran. Deduplicated by the channel.
+        self.publish_state();
+    }
+
+    /// Changes what is playing **or armed**. `armed` is meaningful only with
+    /// `Some`: "nothing armed" is `None`, not an armed absence.
+    ///
+    /// **Same identity, different `armed`: the slate is kept, only the
+    /// `NowPlaying` flag moves.** Armed → playing is Play on the track the
+    /// screen already shows; resetting there would blink the title and the
+    /// cover off and send every `metadata` plugin back to the network for
+    /// a track it has just described. Playing → armed is Stop keeping the
+    /// track on screen, for the same reason in the other direction.
+    pub(super) fn set_identity_state(&mut self, identity: Option<serde_json::Value>, armed: bool) {
+        let armed = armed && identity.is_some();
+        let was = self.armed;
+        self.armed = armed;
         // "Nothing is playing anymore" takes the current selection with it:
         // the highlighted key designates **what is playing**, not the last
-        // press. Done before the equality guard: an identity already at
+        // press. An armed identity keeps it: the key then designates what
+        // Play would start, which is still the track on screen. Done before
+        // the equality guard: an identity already at
         // `None` (repeated stop, source switch after a stop) must still
         // leave the selection cleared.
         if identity.is_none() {
@@ -106,6 +139,9 @@ impl<P: Player> Core<P> {
             self.location = None;
         }
         if !self.metadata.set_identity(identity) {
+            if was != armed {
+                self.publish_armed_flag();
+            }
             return;
         }
         // A different identity: the location described the previous one. The
@@ -134,7 +170,7 @@ impl<P: Player> Core<P> {
             // correct if the reset were ever to change, and `publish_state`
             // republishes this same field as soon as it stops being empty.
             known: self.metadata.known(),
-            armed: false,
+            armed: self.armed,
         };
         // Failure impossible in practice: a `watch::Sender::send` only fails
         // when no receiver is alive anymore, and `main` keeps its own to
@@ -150,6 +186,28 @@ impl<P: Player> Core<P> {
         // `self.metadata.state()` on every call, so this single
         // `publish_state` is enough: no more need for the second conditional
         // call to the overlay that the old composed-views channel required.
+        self.publish_state();
+    }
+
+    /// Carries `self.armed` into the published `NowPlaying` without touching
+    /// anything else it holds, then refreshes the state.
+    ///
+    /// The one way the flag moves on its own, shared by the two places that
+    /// need it: `set_identity_state` when the identity stays (armed ↔ playing
+    /// on the track already shown), and `apply`'s `Play` when a Source starts
+    /// playback without re-declaring its identity — without it, `armed: true`
+    /// would stay published over a track that sounds. `publish_state` would
+    /// not carry it: it republishes `known` only.
+    pub(super) fn publish_armed_flag(&mut self) {
+        let armed = self.armed;
+        self.now_playing_tx.send_if_modified(|np| {
+            if np.armed == armed {
+                false
+            } else {
+                np.armed = armed;
+                true
+            }
+        });
         self.publish_state();
     }
 
@@ -789,6 +847,10 @@ mod tests {
         // The preset name follows exactly the same rule: that is the point
         // of the spec that matters (the lifecycle of `preset_name` is that
         // of `preset`, locked in here).
+        //
+        // "Stop" is the stop **and** the Source's answer keeping nothing (the
+        // default SDK `stop()`): Stop alone now keeps the track armed, and
+        // the selection with it, since it still designates what is shown.
         let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
         let mut update = plays(serde_json::json!({"kind": "stream", "url": "http://inter"}));
         update.preset = Some(2);
@@ -797,6 +859,7 @@ mod tests {
         assert_eq!(state_rx.borrow().preset, Some(2));
         assert_eq!(state_rx.borrow().preset_name.as_deref(), Some("France Inter"));
         core.handle_command(Command::Stop).await.unwrap();
+        core.handle_source_update("radio", SourceUpdate { identity: Some(IdentityUpdate::Nothing), ..Default::default() });
         assert_eq!(state_rx.borrow().preset, None);
         assert_eq!(state_rx.borrow().preset_name, None);
     }
@@ -808,7 +871,10 @@ mod tests {
         update.location = Some("http://inter".into());
         core.handle_source_update("radio", update);
         assert_eq!(state_rx.borrow().location.as_deref(), Some("http://inter"));
+        // Stop then the Source keeping nothing: see the test above. Armed, the
+        // location still describes the track on screen.
         core.handle_command(Command::Stop).await.unwrap();
+        core.handle_source_update("radio", SourceUpdate { identity: Some(IdentityUpdate::Nothing), ..Default::default() });
         assert_eq!(state_rx.borrow().location, None, "nothing plays: nothing to locate");
     }
 
@@ -988,6 +1054,12 @@ mod tests {
         // action — all night long on a device turned off in the evening.
         // The old test only asserted the `now_playing` channel: it passed
         // just as well against the wrong code.
+        //
+        // Stop alone now keeps the track armed (see
+        // `stop_keeps_the_title_armed_until_the_source_answers`); it is the
+        // Source answering `Nothing` without `armed` — the default SDK
+        // `stop()` — that clears, and the display must follow that frame the
+        // same way.
         let (mut core, np_rx, state_rx, _d) = setup_metadata(vec!["ouifm".into()]);
         let id = serde_json::json!({"url": "one"});
         core.handle_source_update("radio", plays(id.clone()));
@@ -995,6 +1067,7 @@ mod tests {
         assert_eq!(state_rx.borrow().track.title.as_deref(), Some("So What"));
 
         core.handle_command(Command::Stop).await.unwrap();
+        core.handle_source_update("radio", SourceUpdate { identity: Some(IdentityUpdate::Nothing), ..Default::default() });
         assert_eq!(np_rx.borrow().identity, None, "the plugins must stop their work");
         assert!(state_rx.borrow().track.is_empty(), "the title must not stay displayed");
     }
