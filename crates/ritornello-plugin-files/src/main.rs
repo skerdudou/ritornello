@@ -797,6 +797,11 @@ impl SourcePlugin for FilesSource {
         true
     }
 
+    /// The icon the web UI shows this source under.
+    fn icon(&self) -> Option<&'static str> {
+        Some("folder")
+    }
+
     /// Learns the two play modes together (see `SourcePlugin::set_play_mode`
     /// for why they travel as one call).
     ///
@@ -1474,6 +1479,12 @@ mod tests {
         // And no matching by mere substring: a target that starts with the
         // same phrase without being `lofty` stays logged.
         assert!(frame_to_log(&frame("my_crate::lofty_helper", tracing::Level::WARN)));
+    }
+
+    /// The icon the web UI shows this source under.
+    #[test]
+    fn it_announces_its_icon() {
+        assert_eq!(test_source(Playlist::default()).icon(), Some("folder"));
     }
 
     /// A Source with no shuffle involved: `test_source(p)` used to be the

@@ -1117,6 +1117,11 @@ impl SourcePlugin for CdSource {
         true
     }
 
+    /// The icon the web UI shows this source under.
+    fn icon(&self) -> Option<&'static str> {
+        Some("disc")
+    }
+
     async fn eject(&mut self) -> SourceOutcome {
         let cd_dev = self.cd_dev.clone();
         // `spawn_blocking` alone is enough: the `eject` command blocks while
@@ -1438,7 +1443,13 @@ mod tests {
         assert_eq!(state.file_name().unwrap(), "state.json");
     }
 
-    fn source_with_channels() -> (CdSource, mpsc::Sender<cd::Drive>, mpsc::Sender<ReadToc>) {
+    /// The icon the web UI shows this source under.
+    #[test]
+    fn it_announces_its_icon() {
+        assert_eq!(playing_source().icon(), Some("disc"));
+    }
+
+    fn source_with_channels() -> (CdSource,mpsc::Sender<cd::Drive>, mpsc::Sender<ReadToc>) {
         let (presence_tx, presence_rx) = mpsc::channel(8);
         let (toc_tx, toc_rx) = mpsc::channel(4);
         let source = CdSource {
