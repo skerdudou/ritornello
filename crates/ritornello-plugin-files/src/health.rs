@@ -123,6 +123,23 @@ impl Health {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
+        self.bounded_within(path, self.timeout, f).await
+    }
+
+    /// [`bounded`](Self::bounded), under a bound the caller chooses rather
+    /// than [`TIMEOUT`].
+    ///
+    /// For detached work that is **legitimately** long — the cover archive
+    /// reads up to two dozen neighbours' tags and copies megabytes over SMB.
+    /// [`TIMEOUT`] exists for the Admin half's five-second ceiling, which such
+    /// work never answers to; held to it, a share that was merely slow got
+    /// marked unresponsive for everyone. An expiry still marks the mount
+    /// point: past this bound, the share is silent.
+    pub async fn bounded_within<T, F>(&self, path: &Path, timeout: Duration, f: F) -> Option<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
         let key = Self::key(&(self.mounts)(), path);
         if self.unreachable.lock().unwrap().contains(&key) {
             return None;
@@ -133,7 +150,7 @@ impl Health {
         let mut task = tokio::task::spawn_blocking(f);
         // `&mut task`: the `JoinHandle` stays ours after expiry, which lets us
         // hand it over to the watcher below.
-        match tokio::time::timeout(self.timeout, &mut task).await {
+        match tokio::time::timeout(timeout, &mut task).await {
             Ok(Ok(v)) => Some(v),
             Ok(Err(e)) => {
                 tracing::warn!("probe of {} failed: {e}", path.display());
@@ -143,7 +160,7 @@ impl Health {
                 tracing::warn!(
                     "{} did not answer within {:?}: treating its mount point {} as unresponsive",
                     path.display(),
-                    self.timeout,
+                    timeout,
                     key.display()
                 );
                 self.unreachable.lock().unwrap().insert(key.clone());
@@ -263,6 +280,27 @@ mod tests {
         assert_eq!(s.silent(), vec![PathBuf::from("/mnt/ritornello/nas")]);
         // Release the blocking thread, otherwise the runtime shutdown would wait for it.
         let _ = release.send(());
+    }
+
+    /// The cover archive's case: a share that answers slowly is not a silent
+    /// one. Held to the default bound, a 2.3 MB cover copied onto the NAS
+    /// marked `/mnt/ritornello/music` unresponsive on the device, although the
+    /// copy succeeded.
+    ///
+    /// A `sleep` is safe here, unlike in the test above: it only has to
+    /// **exceed** the 50 ms default, which a sleep cannot fail to do, and the
+    /// ten seconds granted leave any load far behind.
+    #[tokio::test]
+    async fn a_call_slower_than_the_default_bound_is_held_to_its_own() {
+        let s = health();
+        let r = s
+            .bounded_within(Path::new("/mnt/ritornello/nas/a.mp3"), Duration::from_secs(10), || {
+                std::thread::sleep(Duration::from_millis(200));
+                7
+            })
+            .await;
+        assert_eq!(r, Some(7), "the call answered within the bound it was given");
+        assert!(s.silent().is_empty(), "a share that answered must not be marked");
     }
 
     #[tokio::test]

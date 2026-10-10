@@ -51,12 +51,25 @@ pub enum Outcome {
 /// the network — and the one other players read too.
 const NAME: &str = "cover";
 
+/// Time granted to the whole of [`store`] before its share is declared silent.
+///
+/// **Not `health::TIMEOUT`.** That bound serves the Admin half's five-second
+/// ceiling, and this work answers to no one: the core was replied to before it
+/// started. What it does is long by nature — a listing, up to
+/// [`HOMOGENEITY_SAMPLE`] tag reads and a copy of megabytes, all over SMB — and
+/// held to 1.5 s it marked a perfectly healthy share unresponsive on the device
+/// (a 2.3 MB cover, written a moment later), which every other health-gated
+/// operation then read as "the share went away". Twenty seconds also covers a
+/// NAS whose disks have to spin up again. Past it, the share is silent, and is
+/// marked as such once.
+pub const BOUND: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// How many neighbours the homogeneity check reads before it stops asking.
 ///
 /// **A bound, and it is not about speed.** Each neighbour costs one
 /// `lofty::Probe::open(...).read()` over SMB, and the whole of `store` runs
-/// inside a single `Health::bounded` whose expiry marks the **mount point**
-/// unreachable — not this call. A hundred-track box set would therefore let a
+/// inside a single `Health::bounded_within` (see [`BOUND`]) whose expiry marks
+/// the **mount point** unreachable — not this call. A hundred-track box set would therefore let a
 /// background convenience take the plugin's health down with it: every other
 /// health-gated operation would answer "unknown" until the abandoned thread
 /// came back, which the owner reads as "the share went away" and as "this

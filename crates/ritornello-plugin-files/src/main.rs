@@ -99,6 +99,30 @@ enum FolderState {
     Image,
 }
 
+/// Forgets `arm_cover`'s memo of the folder an archive attempt was about.
+///
+/// **Stale whatever came of the attempt.** The memo said "no image" — the only
+/// answer that lets the core ask for one — and a written cover makes it wrong,
+/// and so does the refusal that found one already there. Kept, it made the
+/// plugin announce no cover for the rest of the album, and the core went on
+/// crediting MusicBrainz for an image sitting beside the tracks. Forgetting
+/// costs one `readdir`, once per album. Another folder's memo is left alone:
+/// playback may have moved on while the attempt ran.
+///
+/// A free function so that this last sentence is provable without waiting on
+/// a detached task — see its test.
+#[allow(clippy::type_complexity)] // the field's own type; see `cover_by_dir`
+fn forget_archived_folder(
+    memo: &Mutex<Option<(PathBuf, Option<ritornello_proto::CoverRef>)>>,
+    identity: &serde_json::Value,
+) {
+    let folder = archive::echoed_file(identity).and_then(|f| f.parent().map(Path::to_path_buf));
+    let mut memo = memo.lock().unwrap();
+    if memo.as_ref().is_some_and(|(dir, _)| Some(dir) == folder.as_ref()) {
+        *memo = None;
+    }
+}
+
 /// Should this Source offer to keep a network cover for `file`?
 ///
 /// A free function, and not a method: it is a decision over three values, so
@@ -855,6 +879,7 @@ impl SourcePlugin for FilesSource {
     async fn archive_cover(&mut self, identity: serde_json::Value, file: String) {
         let roots = self.roots.clone();
         let health = self.health.clone();
+        let cover_by_dir = self.cover_by_dir.clone();
         tokio::spawn(async move {
             let staged = PathBuf::from(&file);
             let table = roots.read().await.clone();
@@ -891,7 +916,11 @@ impl SourcePlugin for FilesSource {
             // successes included — with no line at all, which is precisely
             // the silence this feature is not allowed to produce.
             let work = move || {
-                match archive::store(&table, &identity, &target, &archive::album_from_tags) {
+                let outcome = archive::store(&table, &identity, &target, &archive::album_from_tags);
+                // After `store`, never before: the next probe must see the
+                // folder as the attempt left it.
+                forget_archived_folder(&cover_by_dir, &identity);
+                match outcome {
                     archive::Outcome::Written(p) => {
                         tracing::info!("cover archived at {}", p.display())
                     }
@@ -901,7 +930,7 @@ impl SourcePlugin for FilesSource {
                     archive::Outcome::Failed(e) => tracing::warn!("cover not archived: {e}"),
                 }
             };
-            if health.bounded(&guarded, work).await.is_none() {
+            if health.bounded_within(&guarded, archive::BOUND, work).await.is_none() {
                 if already_silent {
                     // Nothing ran, so nothing said anything and nothing reaped
                     // the staged file. Both are owed here: the file is ours
@@ -2279,5 +2308,66 @@ mod tests {
             "a mount already known silent must have its staged file reaped, \
              since nothing else ever will"
         );
+    }
+
+    #[tokio::test]
+    async fn an_archive_attempt_forgets_that_its_folder_had_no_image() {
+        // Met on the device: the folder was remembered as imageless, the
+        // archive wrote `cover.jpg` into it, and every following track of the
+        // album went on announcing no cover — the core kept crediting
+        // MusicBrainz for an image sitting beside the tracks. The folder here
+        // already holds a cover, so `store` refuses ("already there") without
+        // needing a tagged file: that refusal proves the memory stale just as
+        // a write does.
+        let mut s = test_source(playlist_of(1));
+        let music = tempfile::tempdir().unwrap();
+        let album = music.path().join("Album");
+        std::fs::create_dir(&album).unwrap();
+        let track = album.join("01.flac");
+        std::fs::write(&track, b"").unwrap();
+        std::fs::write(album.join("cover.jpg"), b"\xFF\xD8\xFF").unwrap();
+        s.roots = Arc::new(AsyncRwLock::new(Roots {
+            root: vec![Root {
+                name: "usb".into(),
+                kind: RootKind::Local,
+                path: Some(music.path().to_string_lossy().into_owned()),
+                archive_covers: true,
+                ..smb_root("unused")
+            }],
+        }));
+        *s.cover_by_dir.lock().unwrap() = Some((album.clone(), None));
+        let staged = music.path().join("staged.jpg");
+        std::fs::write(&staged, b"\xFF\xD8\xFF").unwrap();
+        let identity = serde_json::json!({"kind": "file", "path": track.to_string_lossy()});
+
+        s.archive_cover(identity, staged.to_string_lossy().into_owned()).await;
+
+        // `archive_cover` detaches its work: poll for the memo to go.
+        for _ in 0..250 {
+            if s.cover_by_dir.lock().unwrap().is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            *s.cover_by_dir.lock().unwrap(),
+            None,
+            "the folder's \"no image\" must be forgotten once an attempt was made on it"
+        );
+    }
+
+    #[test]
+    fn an_archive_attempt_leaves_another_folders_memo_alone() {
+        // Playback may have moved to another album while the attempt ran: that
+        // album's memo is fresh, and forgetting it would re-probe for nothing.
+        let memo = Mutex::new(Some((PathBuf::from("/mnt/ritornello/music/B"), None)));
+        let identity = serde_json::json!({"kind": "file", "path": "/mnt/ritornello/music/A/01.flac"});
+        forget_archived_folder(&memo, &identity);
+        assert_eq!(*memo.lock().unwrap(), Some((PathBuf::from("/mnt/ritornello/music/B"), None)));
+
+        // The same memo, about the folder the echo designates: forgotten.
+        let identity = serde_json::json!({"kind": "file", "path": "/mnt/ritornello/music/B/01.flac"});
+        forget_archived_folder(&memo, &identity);
+        assert_eq!(*memo.lock().unwrap(), None);
     }
 }
