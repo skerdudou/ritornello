@@ -2072,6 +2072,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reply_relays_the_location_declared_with_the_identity() {
+        // The builder test proves `plays_at` fills the outcome; this one proves
+        // the outcome's location reaches the wire, in the same frame as the
+        // identity it describes.
+        struct LocatedSource;
+        #[async_trait::async_trait]
+        impl SourcePlugin for LocatedSource {
+            async fn activate(&mut self) -> SourceOutcome {
+                SourceOutcome::new(SourceAction::Noop).plays_at(serde_json::json!({"k": "v"}), "http://x/stream")
+            }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(LocatedSource, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"Activate\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, Some(1));
+        assert_eq!(msg.identity, Some(IdentityUpdate::Playing(serde_json::json!({"k": "v"}))), "{line}");
+        assert_eq!(msg.location.as_deref(), Some("http://x/stream"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn a_spontaneous_notification_relays_the_location_declared_with_the_identity() {
+        struct LocatedNotifier {
+            emitted: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for LocatedNotifier {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.emitted {
+                    std::future::pending::<()>().await;
+                }
+                self.emitted = true;
+                Some(Notification::new().plays_at(serde_json::json!({"k": "v"}), "/media/a.flac"))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(LocatedNotifier { emitted: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, _write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, None, "a notification is correlated to no request: {line}");
+        assert_eq!(msg.identity, Some(IdentityUpdate::Playing(serde_json::json!({"k": "v"}))), "{line}");
+        assert_eq!(msg.location.as_deref(), Some("/media/a.flac"), "{line}");
+    }
+
+    #[tokio::test]
     async fn a_notification_carries_its_play_request_and_a_reply_never_does() {
         struct AskingSource {
             emitted: bool,

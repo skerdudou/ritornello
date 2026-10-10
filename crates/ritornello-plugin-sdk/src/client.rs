@@ -714,6 +714,7 @@ mod tests {
                 )),
                 preset: Some(1),
                 preset_name: Some("FIP".into()),
+                location: Some("http://fip".into()),
                 ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
@@ -738,6 +739,8 @@ mod tests {
         // The preset name travels in the same update as the rest.
         assert_eq!(update.preset, Some(1));
         assert_eq!(update.preset_name.as_deref(), Some("FIP"));
+        // As does the location, which describes that same identity.
+        assert_eq!(update.location.as_deref(), Some("http://fip"));
     }
 
     #[tokio::test]
