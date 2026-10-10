@@ -675,6 +675,8 @@ impl<P: Player> Core<P> {
             preset,
             preset_count,
             preset_name,
+            // Applied by the core in the next change.
+            location: _,
             status_text,
             can_eject,
             has_finite_list,

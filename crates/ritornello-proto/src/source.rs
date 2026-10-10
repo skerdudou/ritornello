@@ -384,6 +384,21 @@ pub struct SourceMessage {
     /// is cleared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_name: Option<String>,
+    /// What is playing, in words a person reads: the stream URL for the
+    /// radio, the `smb://` address or the local path of a file. Shown by the
+    /// web UI in the provenance popover; nobody else interprets it.
+    ///
+    /// Declared by the Source because only it knows: the identity is opaque,
+    /// and a file's identity is its mount path on the device, which only the
+    /// files plugin can turn back into the address of the share.
+    ///
+    /// Lives and dies with the identity: absent = keep, as long as the
+    /// identity does not change; the core forgets it when the identity changes
+    /// or is cleared, then applies what the same frame declares. Always sent
+    /// in the frame that declares the identity (the SDK's `plays_at`). Plain
+    /// text, never translated: an address is not a sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
     /// The source's own word about its state, **unresolved**: a key into
     /// this module's own catalog and its parameters, or explicit verbatim
     /// text (see [`Text`]).
@@ -537,6 +552,7 @@ mod tests {
             preset: None,
             preset_count: None,
             preset_name: None,
+            location: None,
             status_text: None,
             can_eject: None,
             has_finite_list: None,

@@ -107,6 +107,8 @@ impl<P: Player> Core<P> {
             standby: self.standby,
             preset: self.preset,
             preset_name: self.preset_name.clone(),
+            // Published from the core's own state in the next change.
+            location: None,
             preset_count: self.preset_count,
             // Standby wins over the source status: the device sleeps, what
             // the source says no longer applies.

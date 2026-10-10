@@ -25,6 +25,8 @@ pub struct SourceOutcome {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
+    /// See `SourceMessage::location`. Set through `plays_at` only.
+    pub location: Option<String>,
     /// See `SourceMessage::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
@@ -41,6 +43,7 @@ impl SourceOutcome {
             preset: None,
             preset_count: None,
             preset_name: None,
+            location: None,
             status_text: None,
             presets: None,
         }
@@ -108,6 +111,16 @@ impl SourceOutcome {
         self
     }
 
+    /// Declares the **opaque** identity of what is playing from now on, and
+    /// how a person would name where it comes from (see
+    /// `SourceMessage::location`). The pair in one call: a location is never
+    /// declared without the identity it describes.
+    pub fn plays_at(mut self, identity: serde_json::Value, location: impl Into<String>) -> Self {
+        self.identity = Some(IdentityUpdate::Playing(identity));
+        self.location = Some(location.into());
+        self
+    }
+
     /// Declares that nothing is playing anymore.
     pub fn plays_nothing(mut self) -> Self {
         self.identity = Some(IdentityUpdate::Nothing);
@@ -132,6 +145,8 @@ pub struct Notification {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
+    /// See `SourceMessage::location`. Set through `plays_at` only.
+    pub location: Option<String>,
     /// See `SourceOutcome::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
@@ -174,6 +189,13 @@ impl Notification {
     /// See `SourceOutcome::preset_name`.
     pub fn preset_name(mut self, name: impl Into<String>) -> Self {
         self.preset_name = Some(name.into());
+        self
+    }
+
+    /// See `SourceOutcome::plays_at`.
+    pub fn plays_at(mut self, identity: serde_json::Value, location: impl Into<String>) -> Self {
+        self.identity = Some(IdentityUpdate::Playing(identity));
+        self.location = Some(location.into());
         self
     }
 
@@ -476,6 +498,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     preset: outcome.preset,
                     preset_count: outcome.preset_count,
                     preset_name: outcome.preset_name,
+                    location: outcome.location,
                     status_text: outcome.status_text,
                     // Stamped here, once, rather than by a constructor call on
                     // each of a plugin's ten declaration paths: a capability
@@ -514,6 +537,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             preset: n.preset,
                             preset_count: n.preset_count,
                             preset_name: n.preset_name,
+                            location: n.location,
                             status_text: n.status_text,
                             can_eject: Some(plugin.can_eject()),
                             // Same reason as the reply path above: stamped on
@@ -1271,6 +1295,19 @@ mod tests {
         let o = SourceOutcome::new(SourceAction::Noop).preset(4).preset_name("FIP");
         assert_eq!(o.preset, Some(4));
         assert_eq!(o.preset_name.as_deref(), Some("FIP"));
+    }
+
+    #[test]
+    fn the_location_is_declared_with_the_identity_never_alone() {
+        // `plays_at` is the only builder: a location describes what is playing,
+        // so it travels in the frame that declares the identity.
+        let o = SourceOutcome::new(SourceAction::Noop).plays_at(serde_json::json!({"k": "v"}), "http://x/stream");
+        assert_eq!(o.identity, Some(IdentityUpdate::Playing(serde_json::json!({"k": "v"}))));
+        assert_eq!(o.location.as_deref(), Some("http://x/stream"));
+        let n = Notification::new().plays_at(serde_json::json!({"k": "v"}), "/media/a.flac");
+        assert_eq!(n.location.as_deref(), Some("/media/a.flac"));
+        // `plays` alone declares none.
+        assert_eq!(SourceOutcome::new(SourceAction::Noop).plays(serde_json::json!(1)).location, None);
     }
 
     #[test]

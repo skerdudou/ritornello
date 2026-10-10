@@ -36,6 +36,8 @@ pub struct SourceUpdate {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
+    /// See `SourceMessage::location`.
+    pub location: Option<String>,
     /// See `SourceMessage::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::can_eject`. Absent = nothing declared, keep the
@@ -178,6 +180,7 @@ impl SourceClient {
                     preset: msg.preset,
                     preset_count: msg.preset_count,
                     preset_name: msg.preset_name,
+                    location: msg.location,
                     status_text: msg.status_text,
                     can_eject: msg.can_eject,
                     has_finite_list: msg.has_finite_list,
