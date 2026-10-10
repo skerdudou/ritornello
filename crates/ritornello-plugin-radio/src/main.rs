@@ -62,6 +62,42 @@ impl RadioSource {
         serde_json::json!({ "kind": "stream", "url": url })
     }
 
+    /// What the source says while nothing plays: the station Play would
+    /// start is kept **armed**, so its number and name stay on screen.
+    ///
+    /// The armed identity is exactly the one `play_preset` declares for the
+    /// same station: the core keeps the slate of the stream that was playing
+    /// when the two are equal. With no station at that number there is
+    /// nothing to arm.
+    async fn armed_outcome(&self) -> SourceOutcome {
+        let stations = self.stations.read().await;
+        let count = stations.preset_count();
+        match stations.by_preset(self.preset) {
+            Some(st) => SourceOutcome::new(SourceAction::Noop)
+                .armed(Self::stream_identity(&st.url))
+                .preset(self.preset)
+                .preset_name(st.name.clone())
+                .preset_count(count),
+            None => SourceOutcome::new(SourceAction::Noop).plays_nothing().preset_count(count),
+        }
+    }
+
+    /// Whether a stream is playing: `current_url` is set by `play_preset` and
+    /// cleared by `stop` and `deactivate`, so it is exactly "playing".
+    fn is_playing(&self) -> bool {
+        self.current_url.is_some()
+    }
+
+    /// Moves the armed station to `n` without launching it, and persists it
+    /// as `play_preset` does.
+    async fn arm_preset(&mut self, n: u8) -> SourceOutcome {
+        self.preset = n;
+        if let Err(e) = state::update(&self.state_path, |s| s.preset = n) {
+            tracing::warn!("failed to persist preset: {e}");
+        }
+        self.armed_outcome().await
+    }
+
     async fn play_preset(&mut self, n: u8) -> SourceOutcome {
         let stations = self.stations.read().await;
         // How many numbered presets exist right now, for the web grid — see
@@ -122,6 +158,14 @@ impl SourcePlugin for RadioSource {
         self.current_url = None;
         SourceOutcome::new(SourceAction::Stop).plays_nothing()
     }
+    /// Stopped: the station stays on screen, armed. Play starts it again
+    /// (`activate` plays `self.preset`).
+    async fn stop(&mut self) -> SourceOutcome {
+        // Same reason as `deactivate`: a reshuffle must not correct the
+        // preset of a stream that is no longer playing.
+        self.current_url = None;
+        self.armed_outcome().await
+    }
     async fn select(&mut self, n: u8) -> SourceOutcome {
         self.play_preset(n).await
     }
@@ -135,6 +179,8 @@ impl SourcePlugin for RadioSource {
             // above all say nothing about the identity, which has not
             // changed.
             Some(n) if n == self.preset => SourceOutcome::new(SourceAction::Noop),
+            // Stopped: move the armed station, launch nothing.
+            Some(n) if !self.is_playing() => self.arm_preset(n).await,
             Some(n) => self.play_preset(n).await,
             None => SourceOutcome::new(SourceAction::Noop),
         }
@@ -145,6 +191,8 @@ impl SourcePlugin for RadioSource {
             // See the comment in next(): same guard against the audible
             // reconnection when only one station is configured.
             Some(n) if n == self.preset => SourceOutcome::new(SourceAction::Noop),
+            // Stopped: move the armed station, launch nothing.
+            Some(n) if !self.is_playing() => self.arm_preset(n).await,
             Some(n) => self.play_preset(n).await,
             None => SourceOutcome::new(SourceAction::Noop),
         }
@@ -484,11 +532,15 @@ mod tests {
 
     #[tokio::test]
     async fn with_two_stations_next_and_prev_always_wrap_to_the_other() {
+        // Playing, as in use: next and previous only launch while something
+        // plays (stopped, they arm: see the `*_while_stopped_*` tests).
         let mut source = make_source(two_stations(), 1);
+        source.activate().await;
         let outcome = source.next().await;
         assert!(matches!(outcome.action, SourceAction::Play { .. }));
 
         let mut source = make_source(two_stations(), 1);
+        source.activate().await;
         let outcome = source.prev().await;
         assert!(matches!(outcome.action, SourceAction::Play { .. }));
     }
@@ -667,5 +719,106 @@ mod tests {
 
         let n = source.poll_notification().await.expect("notification expected");
         assert_eq!(n.presets, Some(vec![Preset { index: 1, name: "FIP renommée".into() }]));
+    }
+
+    const FIP: &str = "http://icecast.radiofrance.fr/fip-midfi.mp3";
+    const INTER: &str = "http://icecast.radiofrance.fr/franceinter-midfi.mp3";
+
+    /// A source on station 1 of two, with a state file the test can read
+    /// back, that has been playing since `activate`.
+    async fn playing_source() -> (RadioSource, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = make_source(two_stations(), 1);
+        source.state_path = dir.path().join("plugin-radio.json");
+        assert!(matches!(source.activate().await.action, SourceAction::Play { .. }));
+        (source, dir)
+    }
+
+    fn armed_identity(outcome: &SourceOutcome) -> Option<serde_json::Value> {
+        outcome.armed.as_ref().map(|a| a.identity.clone())
+    }
+
+    #[tokio::test]
+    async fn stop_arms_the_current_station() {
+        let (mut source, _dir) = playing_source().await;
+        let outcome = source.stop().await;
+        assert!(matches!(outcome.action, SourceAction::Noop));
+        // The identity is exactly the one `play_preset` declared, so the core
+        // keeps the slate (title, cover) of the stream that was playing.
+        assert_eq!(armed_identity(&outcome), Some(RadioSource::stream_identity(FIP)));
+        assert_eq!(outcome.preset, Some(1));
+        assert_eq!(outcome.preset_name.as_deref(), Some("FIP"));
+        assert_eq!(outcome.preset_count, Some(2));
+        assert!(source.current_url.is_none(), "stopped: a reshuffle must not correct a stream");
+    }
+
+    #[tokio::test]
+    async fn stop_without_a_station_plays_nothing_and_arms_nothing() {
+        let mut source = make_source(Stations::default(), 1);
+        let outcome = source.stop().await;
+        assert!(matches!(outcome.action, SourceAction::Noop));
+        assert!(outcome.armed.is_none());
+        assert_eq!(outcome.identity, Some(ritornello_proto::IdentityUpdate::Nothing));
+        assert_eq!(outcome.preset_count, Some(0));
+    }
+
+    /// While stopped, next moves the armed station and launches nothing.
+    ///
+    /// **[MUTATION]** dropping the `playing` test in `next()` turns this
+    /// into a `Play` and fails the `Noop` assertion; the same for `prev()`
+    /// in `prev_while_stopped_arms_the_previous_station_without_playing`.
+    #[tokio::test]
+    async fn next_while_stopped_arms_the_next_station_without_playing() {
+        let (mut source, dir) = playing_source().await;
+        source.stop().await;
+        let outcome = source.next().await;
+        assert!(matches!(outcome.action, SourceAction::Noop), "nothing must start");
+        assert_eq!(armed_identity(&outcome), Some(RadioSource::stream_identity(INTER)));
+        assert_eq!(outcome.preset, Some(2));
+        assert_eq!(outcome.preset_name.as_deref(), Some("France Inter"));
+        assert_eq!(source.preset, 2);
+        assert_eq!(state::load(&dir.path().join("plugin-radio.json")).preset, 2);
+        assert!(source.current_url.is_none(), "still nothing playing");
+    }
+
+    #[tokio::test]
+    async fn prev_while_stopped_arms_the_previous_station_without_playing() {
+        let (mut source, dir) = playing_source().await;
+        source.stop().await;
+        let outcome = source.prev().await;
+        assert!(matches!(outcome.action, SourceAction::Noop), "nothing must start");
+        assert_eq!(armed_identity(&outcome), Some(RadioSource::stream_identity(INTER)));
+        assert_eq!(source.preset, 2);
+        assert_eq!(state::load(&dir.path().join("plugin-radio.json")).preset, 2);
+    }
+
+    #[tokio::test]
+    async fn next_while_stopped_with_a_single_station_changes_nothing() {
+        let mut source = make_source(one_station(), 1);
+        source.activate().await;
+        source.stop().await;
+        let outcome = source.next().await;
+        assert!(matches!(outcome.action, SourceAction::Noop));
+        assert!(outcome.armed.is_none() && outcome.identity.is_none());
+    }
+
+    #[tokio::test]
+    async fn play_after_next_while_stopped_starts_the_armed_station() {
+        let (mut source, _dir) = playing_source().await;
+        source.stop().await;
+        source.next().await;
+        match source.activate().await.action {
+            SourceAction::Play { uri, .. } => assert_eq!(uri, INTER),
+            other => panic!("expected a Play, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn next_while_playing_still_plays() {
+        let (mut source, _dir) = playing_source().await;
+        match source.next().await.action {
+            SourceAction::Play { uri, .. } => assert_eq!(uri, INTER),
+            other => panic!("expected a Play, got {other:?}"),
+        }
     }
 }
