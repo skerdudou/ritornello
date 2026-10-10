@@ -298,6 +298,16 @@ describe('PlayerCard', () => {
     w.unmount()
   })
 
+  it('does not offer the button for an empty location', () => {
+    // The row is there for the duration, so the `(?)` could be: an empty
+    // string is no address, and a popover holding only its title and hint
+    // is the empty popover this button must never open.
+    const w = mountWith({ title: 'So What', duration_s: 545, location: '' })
+    expect(w.find('[data-duration]').exists()).toBe(true)
+    expect(w.find('[data-provenance-open]').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('has no location row when the source declares none', async () => {
     const w = mountWith({ title: 'So What', provenance: { fields: { title: 'tags' } } })
     await w.get('[data-provenance-open]').trigger('click')

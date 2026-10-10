@@ -207,6 +207,7 @@ test('the player state arrives as a pushed stream as soon as the connection open
     standby: boolean
     preset: number | null
     title: string | null
+    location: string | undefined
   }
   expect(state.source).toBe('radio')
   expect(state.volume).toBeGreaterThan(0)
@@ -217,10 +218,25 @@ test('the player state arrives as a pushed stream as soon as the connection open
   // plugin to the SPA. FIP emits no ICY, hence no title.
   expect(state.preset).toBe(1)
   expect(state.title).toBeNull()
+  // The station's stream URL, as the harness's stations.toml declares it for
+  // preset 1: the end-to-end proof that the location travels from the radio
+  // plugin, through the core, to the SPA. Nothing else covers it through the
+  // real binary.
+  const fip = 'http://icecast.radiofrance.fr/fip-midfi.mp3'
+  expect(state.location).toBe(fip)
   // And the player panel shows them.
   await expect(page.locator('[data-source]')).toHaveText('radio')
   await expect(page.locator('[data-volume]')).toHaveText(`${state.volume} %`)
-  await expect(page.locator('[data-now-playing]')).toHaveCount(0)
+  // No title, yet the track block exists: the location alone is something to
+  // say (a radio that identifies nothing still says where it plays from), so
+  // the block holds the `(?)` row and nothing else, and the `(?)` opens on
+  // the stream URL.
+  await expect(page.locator('[data-now-playing]')).toHaveCount(1)
+  await expect(page.locator('[data-title]')).toHaveCount(0)
+  await expect(page.locator('[data-provenance-open]')).toBeVisible()
+  await page.locator('[data-provenance-open]').click()
+  await expect(page.locator('[data-provenance-location]')).toHaveText(fip)
+  await page.keyboard.press('Escape')
   // The key of the playing preset is highlighted, and only that one.
   await expect(page.locator('[data-preset-button="1"]')).toHaveAttribute('data-preset-active', 'true')
   await expect(page.locator('[data-preset-active]')).toHaveCount(1)

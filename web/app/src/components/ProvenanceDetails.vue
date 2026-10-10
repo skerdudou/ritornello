@@ -70,8 +70,12 @@ const misses = computed(() => props.state?.provenance?.misses ?? [])
 /**
  * Where what is playing comes from, as its source worded it (a stream URL, an
  * `smb://` address, a path), or `null` when it declares none — the cd.
+ *
+ * Truthiness and not `?? null`: an empty string says nothing either, and it
+ * must not open the popin on its title alone. The card (`hasOrigins`) and the
+ * row below read it the same way.
  */
-const location = computed(() => props.state?.location ?? null)
+const location = computed(() => props.state?.location || null)
 
 /**
  * The button only exists if there is something to say.
