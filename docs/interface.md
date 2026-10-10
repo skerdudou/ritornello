@@ -60,19 +60,29 @@ track with where the information came from) is fed by a pushed stream from
 infrared remote as well as other browser tabs and, per the paragraph
 above, the web remote's own commands.
 
-### Layout: one page, two arrangements
+### Layout: one page, three widths
 
-A single `HomeView` renders both arrangements; the breakpoint is Tailwind's
-`md`, not a separate mobile view or a fork in the code.
+A single `HomeView` renders every arrangement; the breakpoints are
+Tailwind's `md` and `lg`, not a separate mobile view or a fork in the code.
 
 - **Below `md` (phone).** One column: the cover, the track block, the
   progress bar, the transport, the volume slider and the preset tiles
   stack in that order, then a fixed bottom tab bar (see "Navigation") sits
   under everything, clear of the phone's own gesture bar.
 - **From `md` (desktop/tablet).** Two cards side by side, inside a
-  `max-w-5xl` column: the Player card on the left (cover, track block,
-  progress bar, transport, volume), the Presets card on the right. The
-  navigation stays at the top of the page, as before this refonte.
+  `max-w-7xl` column (1280 px; every page shares it): the Player card on
+  the left (cover, track block, progress bar, transport, volume), the
+  Presets card on the right. The navigation stays at the top of the page,
+  as before this refonte.
+- **From `lg` (desktop).** A bar of one key per source spans both cards,
+  above them — the input selector of an amplifier. The keys come from
+  `GET /api/presets`, in the order of the `SourceCycle` key, with the
+  active source pressed; a click posts `SelectSource` with the name. The
+  cycle key in the Player card's corner steps aside there, but only for a
+  bar that exists: a single source, or a catalog that failed to load,
+  leaves the cycle key on every width. Like the preset names, the list is
+  reloaded on each source change, so a plugin switched on while the page
+  is open shows at the next change.
 
 ![The home page in light mode, at desktop width: the Player card on the left, the preset tiles on the right](captures/home-light.png)
 
@@ -94,8 +104,8 @@ badge's blue — two saturated, neighbouring hues, reported unreadable by the
 owner. The colour carries no meaning anyway: it is the dot's **presence** that
 says something is playing, since it is only drawn then. Same idiom as the active
 preset tile's dot. The corner of the card carries the two commands that act on the
-whole appliance rather than on what's playing — source switch and
-standby — deliberately apart from the transport below it, which only ever
+whole appliance rather than on what's playing — source switch (below `lg`,
+see the source bar above) and standby — deliberately apart from the transport below it, which only ever
 acts on the current source.
 
 The cover is a fixed square — 224 px on the phone, 176 px on desktop, next
