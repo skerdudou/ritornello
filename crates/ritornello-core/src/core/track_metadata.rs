@@ -717,6 +717,7 @@ mod tests {
                     version: None,
                     repository: None,
                     catalog: None,
+                    icon: None,
                 },
             );
         }

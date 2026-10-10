@@ -74,15 +74,28 @@ Tailwind's `md` and `lg`, not a separate mobile view or a fork in the code.
   the left (cover, track block, progress bar, transport, volume), the
   Presets card on the right. The navigation stays at the top of the page,
   as before this refonte.
-- **From `lg` (desktop).** A bar of one key per source spans both cards,
-  above them — the input selector of an amplifier. The keys come from
-  `GET /api/presets`, in the order of the `SourceCycle` key, with the
-  active source pressed; a click posts `SelectSource` with the name. The
-  cycle key in the Player card's corner steps aside there, but only for a
-  bar that exists: a single source, or a catalog that failed to load,
-  leaves the cycle key on every width. Like the preset names, the list is
-  reloaded on each source change, so a plugin switched on while the page
-  is open shows at the next change.
+- **At every width.** The Player card's header changes source in one of
+  three ways, chosen by how much room its row has (`headerMode.ts`: the keys,
+  the gaps, and the standby key and badge that share the row). With at least
+  two sources, and when they fit, **one icon key per source** — the input
+  selector of an amplifier: one click reaches the wanted source, the active
+  one is pressed (`aria-pressed`), and each key is named by the source's
+  name (`aria-label`). The icon is the one the source plugin announced (see
+  "A source's icon" in [plugins.md](plugins.md)), or the source's initial
+  when it announced none. When the keys do not fit, the **cycle key**
+  (`SourceCycle`) comes back, with the source pill beside it. Before the
+  source list has been read, or when `GET /api/presets` failed, the cycle key
+  is also what shows, so a failed catalog never leaves the page without a way
+  to change source. So does an active source that is not in the list (the core
+  keeps it while mpv plays after its plugin died, which a page reload shows):
+  no icon key could be pressed, so the narrow mode's pill names it. With a
+  single source there is nothing to choose and no source key at all. A click
+  on an icon key posts `SelectSource` with the name; like the preset names,
+  the list is reloaded on each source change, so a plugin switched on while
+  the page is open shows at the next change. The
+  Player card is a landmark region (`role="region"` with an accessible name):
+  it has no visible title any more, the source keys or pill take that place.
+  There is no longer a source bar above the cards.
 
 ![The home page in light mode, at desktop width: the Player card on the left, the preset tiles on the right](captures/home-light.png)
 
@@ -93,9 +106,11 @@ Tailwind's `md` and `lg`, not a separate mobile view or a fork in the code.
 ### The Player card
 
 The cover and the current track are the subject: nothing above them
-competes for attention any more. A pastille badge in the card's header
-names the active source (`etat.source`, or "No source" before the first
-frame), with a small dot lit next to it while something is actually
+competes for attention any more. Unless the header shows one icon key
+per source (which say the source themselves), a pastille badge in the
+card's header names the active source (`etat.source`, or "No source"
+before the first frame), with a small dot lit next to it while something
+is actually
 playing (`playback === 'playing'`); a second badge reads "STANDBY" in
 standby. That dot is `bg-current` and not `bg-primary`: it inherits the badge's
 own text colour, so it contrasts with its own background **by construction**, in
@@ -104,8 +119,7 @@ badge's blue — two saturated, neighbouring hues, reported unreadable by the
 owner. The colour carries no meaning anyway: it is the dot's **presence** that
 says something is playing, since it is only drawn then. Same idiom as the active
 preset tile's dot. The corner of the card carries the two commands that act on the
-whole appliance rather than on what's playing — source switch (below `lg`,
-see the source bar above) and standby — deliberately apart from the transport below it, which only ever
+whole appliance rather than on what's playing — source switch (see the header modes above) and standby — deliberately apart from the transport below it, which only ever
 acts on the current source.
 
 The cover is a fixed square — 224 px on the phone, 176 px on desktop, next

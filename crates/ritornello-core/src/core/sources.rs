@@ -171,7 +171,8 @@ impl<P: Player> Core<P> {
     ///   ("radio", active, not reachable).
     ///
     /// What is forgotten anyway: the named presets (the sources_catalog must
-    /// not offer to act on a dead plugin) and, if it was the active one, the
+    /// not offer to act on a dead plugin), its announced icon (its successor
+    /// announces its own) and, if it was the active one, the
     /// three **capabilities** it had declared — `preset_count`, `can_eject`
     /// and `has_finite_list`. Those describe what a plugin can do, and it is
     /// no longer there to do it: leaving the Eject key lit or the preset grid
@@ -194,6 +195,7 @@ impl<P: Player> Core<P> {
         self.sources.remove(name);
         self.source_order.remove(pos);
         self.presets_par_source.remove(name);
+        self.icon_par_source.remove(name);
         if self.active_source == name {
             self.preset_count = None;
             self.can_eject = false;
@@ -273,8 +275,10 @@ impl<P: Player> Core<P> {
         // no longer cites this source; removing the table too prevents a
         // plugin relit under the same name from silently inheriting the
         // playlist of its previous life instead of waiting for its own
-        // `ListPresets` (see `hotplug_source`).
+        // `ListPresets` (see `hotplug_source`). The icon goes for the same
+        // reason: the plugin relit announces its own, or none.
         self.presets_par_source.remove(name);
+        self.icon_par_source.remove(name);
         self.publish_catalog();
         Ok(true)
     }

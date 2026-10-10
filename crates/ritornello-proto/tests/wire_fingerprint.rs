@@ -368,6 +368,7 @@ fn announcement_section() -> Vec<String> {
             admin: false,
             covers: false,
             ui_version: None,
+            icon: None,
             protocol: PROTOCOL_VERSION,
             contracts: BTreeMap::new(),
             version: None,
@@ -383,6 +384,7 @@ fn announcement_section() -> Vec<String> {
             admin: true,
             covers: true,
             ui_version: Some("abc123".into()),
+            icon: Some("radio".into()),
             protocol: PROTOCOL_VERSION,
             contracts: Contract::ALL.into_iter().map(|c| (c, ContractVersion::new(1, 0))).collect(),
             version: Some("1.2.3".into()),
@@ -495,8 +497,12 @@ fn display_section() -> Vec<String> {
         DisplayFrame::State(state_full()),
         DisplayFrame::Catalog(SourcesCatalog {
             sources: vec![
-                SourceCatalog { name: "radio".into(), presets: vec![Preset { index: 1, name: "One".into() }] },
-                SourceCatalog { name: "cd".into(), presets: vec![] },
+                SourceCatalog {
+                    name: "radio".into(),
+                    presets: vec![Preset { index: 1, name: "One".into() }],
+                    icon: Some("radio".into()),
+                },
+                SourceCatalog { name: "cd".into(), presets: vec![], icon: None },
             ],
         }),
         DisplayFrame::Cover(Cover { href: "/cover/1".into(), mime: "image/jpeg".into(), bytes: vec![1, 2, 3] }),

@@ -21,6 +21,16 @@ describe('usePresets', () => {
     expect(nameOf('radio', 9)).toBeNull()
   })
 
+  it('maps each announced icon by source, none for a source without one', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      sources: [{ name: 'radio', icon: 'radio' }, { name: 'cd' }],
+    }), { status: 200 })))
+    const { reload, icons } = usePresets()
+    await reload()
+    expect(icons.value.get('radio')).toBe('radio')
+    expect(icons.value.has('cd')).toBe(false)
+  })
+
   it('an unreachable core leaves the previous list', async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ sources: [{ name: 'radio', presets: [{ index: 1, name: 'FIP' }] }] }), { status: 200 }))

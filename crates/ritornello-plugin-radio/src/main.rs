@@ -107,6 +107,11 @@ impl RadioSource {
 
 #[async_trait::async_trait]
 impl SourcePlugin for RadioSource {
+    /// The icon the web UI shows this source under.
+    fn icon(&self) -> Option<&'static str> {
+        Some("radio")
+    }
+
     async fn activate(&mut self) -> SourceOutcome {
         let preset = self.preset;
         self.play_preset(preset).await
@@ -340,6 +345,12 @@ mod tests {
             Some(Text::Keyed { key: "empty_preset".into(), params: HashMap::new() }),
             "the frame must carry a key for the core to resolve, not a finished string"
         );
+    }
+
+    /// The icon the web UI shows this source under.
+    #[test]
+    fn it_announces_its_icon() {
+        assert_eq!(make_source(Stations::default(), 1).icon(), Some("radio"));
     }
 
     #[test]

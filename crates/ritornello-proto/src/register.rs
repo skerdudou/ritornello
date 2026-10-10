@@ -109,6 +109,17 @@ pub struct Announcement {
     /// shell then builds an unstamped URL and the old revalidation applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_version: Option<String>,
+    /// The icon a **source** plugin shows under, as a name from the fixed
+    /// list the web UI draws (`radio`, `disc`, `folder`, …): a name, never a
+    /// picture, so no plugin ever sends markup to the page, and each display
+    /// renders it its own way. Derived by the SDK from `SourcePlugin::icon`,
+    /// like `covers`: the announcement cannot claim one the plugin did not
+    /// register. `None` for a plugin with no source half, or none declared.
+    ///
+    /// An addition to the bootstrap, which has no version of its own: an
+    /// older core ignores it, a core reading an older plugin sees `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     /// Bootstrap number this binary was compiled against, compared by the core
     /// against its own `PROTOCOL_VERSION`.
     ///
@@ -256,12 +267,13 @@ mod tests {
             version: Some("0.2.0".into()),
             repository: Some("https://github.com/skerdudou/ritornello".into()),
             catalog: None,
+            icon: None,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(
             line,
             format!(
-                r#"{{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":{PROTOCOL_VERSION},"contracts":{{"display":{{"major":1,"minor":0}},"input":{{"major":1,"minor":0}},"admin":{{"major":1,"minor":0}}}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}}"#
+                r#"{{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":{PROTOCOL_VERSION},"contracts":{{"display":{{"major":1,"minor":1}},"input":{{"major":1,"minor":0}},"admin":{{"major":1,"minor":0}}}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}}"#
             )
         );
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
@@ -338,6 +350,7 @@ mod tests {
             version: None,
             repository: None,
             catalog: None,
+            icon: None,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert!(line.contains(r#""protocol":2"#), "the protocol must always travel: {line}");
@@ -368,6 +381,7 @@ mod tests {
             version: None,
             repository: None,
             catalog: None,
+            icon: None,
         };
         let back: Announcement =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
@@ -397,6 +411,7 @@ mod tests {
             version: None,
             repository: None,
             catalog: None,
+            icon: None,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
@@ -428,6 +443,7 @@ mod tests {
             version: None,
             repository: None,
             catalog: None,
+            icon: None,
         }
     }
 
@@ -449,6 +465,18 @@ mod tests {
         let back_e: Announcement = serde_json::from_str(&e).unwrap();
         assert_eq!(back_a.catalog, None);
         assert_eq!(back_e.catalog, Some(Default::default()));
+    }
+
+    /// The icon a source announces travels, and an announcement without one
+    /// writes no key at all: older cores read neither form wrongly.
+    #[test]
+    fn the_announcement_carries_the_source_icon_only_when_there_is_one() {
+        let mut a: Announcement = serde_json::from_str(r#"{"name":"radio","kinds":["source"]}"#).unwrap();
+        assert_eq!(a.icon, None);
+        assert!(!serde_json::to_string(&a).unwrap().contains("icon"));
+        a.icon = Some("radio".into());
+        let back: Announcement = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back.icon.as_deref(), Some("radio"));
     }
 
     /// A catalog carrying real text survives the round trip, nested map and

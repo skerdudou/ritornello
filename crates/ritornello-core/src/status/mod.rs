@@ -1014,7 +1014,7 @@ mod tests {
         assert_eq!(cmd_rx.recv().await.unwrap().cmd, ritornello_proto::Command::Select(3));
     }
 
-    /// The exact body the home page's source bar posts: a string argument.
+    /// The exact body the home page's source keys post: a string argument.
     #[tokio::test]
     async fn post_command_relays_a_source_name() {
         let (state, mut cmd_rx) = app_state_with_cmd();
@@ -1200,8 +1200,9 @@ mod tests {
                 SourceCatalog {
                     name: "radio".into(),
                     presets: vec![Preset { index: 1, name: "FIP".into() }],
+                    icon: Some("radio".into()),
                 },
-                SourceCatalog { name: "cd".into(), presets: vec![] },
+                SourceCatalog { name: "cd".into(), presets: vec![], icon: None },
             ],
         })
         .unwrap();
@@ -1213,6 +1214,8 @@ mod tests {
         assert_eq!(v["sources"][0]["presets"][0], serde_json::json!({ "index": 1, "name": "FIP" }));
         assert_eq!(v["sources"][1]["name"], "cd");
         assert_eq!(v["sources"][1].get("presets"), None, "a source that does not enumerate has no presets field");
+        assert_eq!(v["sources"][0]["icon"], "radio", "the icon the source announced is served");
+        assert_eq!(v["sources"][1].get("icon"), None, "a source that announced none has no icon field");
     }
 
     #[tokio::test]

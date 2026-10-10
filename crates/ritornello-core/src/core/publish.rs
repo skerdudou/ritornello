@@ -57,8 +57,31 @@ impl<P: Player> Core<P> {
                 .map(|name| SourceCatalog {
                     name: name.clone(),
                     presets: self.presets_par_source.get(name).cloned().unwrap_or_default(),
+                    icon: self.icon_par_source.get(name).cloned(),
                 })
                 .collect(),
+        }
+    }
+
+    /// Records the icon a source's plugin announced (`Announcement::icon`),
+    /// or forgets it for `None`, and republishes the catalog **only if the
+    /// value changed**: a plugin rewired with the same announcement must not
+    /// wake the displays.
+    ///
+    /// Called by `main` on both wiring paths — after `Core::new` for the
+    /// startup sources, and **before** `hotplug_source` for a late one, so
+    /// that the catalog `add_source` publishes already carries it. Accepted
+    /// for a name that is not wired yet for that very reason; the catalog
+    /// only lists the names in `source_order`, so an entry for a name that
+    /// never gets wired is never read. `remove_source` and
+    /// `forget_dead_source` forget the entry, like the presets.
+    pub fn set_source_icon(&mut self, name: &str, icon: Option<String>) {
+        let changed = match icon {
+            Some(icon) => self.icon_par_source.insert(name.to_string(), icon.clone()) != Some(icon),
+            None => self.icon_par_source.remove(name).is_some(),
+        };
+        if changed {
+            self.publish_catalog();
         }
     }
 
@@ -70,9 +93,10 @@ impl<P: Player> Core<P> {
     /// `add_source` (a hotplugged source appears in the list), at
     /// `remove_source` and `forget_dead_source` (a plugin that went off
     /// disappears from it, otherwise an MPD client would keep a stored list to
-    /// act upon), and at `set_source_order` (the list is re-sequenced: same
+    /// act upon), at `set_source_order` (the list is re-sequenced: same
     /// names, different order, and the order is half of what this payload
-    /// carries). Never from
+    /// carries), and at `set_source_icon` when the recorded icon changed (a
+    /// source's announced icon travels beside its presets). Never from
     /// `publish_state`, and `publish_state` never from here: the two
     /// channels are separated precisely so as not to trigger each other —
     /// otherwise the names of 51 stations would go out again on every frame
@@ -314,6 +338,73 @@ mod tests {
             vec!["cd".to_string(), "radio".into()],
             "the catalog must carry the startup sources from construction"
         );
+    }
+
+    /// The icon a source announced reaches the catalog the displays and the
+    /// page read, beside its presets; a source without one has none; a
+    /// forgotten source takes its icon with it.
+    ///
+    /// The forgetting is checked by wiring the name again, not by reading the
+    /// catalog right after the removal: a removed source is no longer listed
+    /// at all, so its icon would be absent whether or not it was forgotten.
+    /// What must not happen is a plugin relit under the same name inheriting
+    /// the icon of its previous life instead of the one it announces now.
+    #[tokio::test]
+    async fn the_sources_catalog_carries_each_source_s_announced_icon() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.add_source(
+            "files".into(),
+            Arc::new(FakeSource { name: "files", calls: source_calls.clone(), ..Default::default() }),
+        );
+        let cat_rx = core.sources_catalog_tx.subscribe();
+        core.set_source_icon("radio", Some("radio".into()));
+        core.set_source_icon("cd", Some("disc".into()));
+        let catalog = core.sources_catalog();
+        let icon = |catalog: &SourcesCatalog, n: &str| {
+            catalog.sources.iter().find(|s| s.name == n).unwrap().icon.clone()
+        };
+        assert_eq!(icon(&catalog, "radio").as_deref(), Some("radio"));
+        assert_eq!(icon(&catalog, "files"), None);
+        assert_eq!(
+            icon(&cat_rx.borrow(), "radio").as_deref(),
+            Some("radio"),
+            "the icon must reach the channel the displays and /api/presets read"
+        );
+
+        // The operator switches `radio` off, then on again: the plugin that
+        // comes back has announced nothing yet.
+        assert!(core.remove_source("radio").await.unwrap());
+        core.add_source(
+            "radio".into(),
+            Arc::new(FakeSource { name: "radio", calls: source_calls.clone(), ..Default::default() }),
+        );
+        assert_eq!(icon(&core.sources_catalog(), "radio"), None, "remove_source must forget the icon");
+
+        // The `cd` plugin dies on its own, then comes back.
+        assert!(core.forget_dead_source("cd"));
+        core.add_source(
+            "cd".into(),
+            Arc::new(FakeSource { name: "cd", calls: source_calls, ..Default::default() }),
+        );
+        assert_eq!(icon(&core.sources_catalog(), "cd"), None, "forget_dead_source must forget the icon");
+    }
+
+    #[tokio::test]
+    async fn setting_the_same_icon_again_does_not_wake_the_displays() {
+        // A plugin rewired with the same announcement sets the same icon:
+        // nothing the displays hold has changed. The observable property, not
+        // `set_source_icon`'s own `changed` test: `publish_catalog`'s
+        // deduplication by equality would hold it too, and this test falls
+        // only if both give way.
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        let mut cat_rx = core.sources_catalog_tx.subscribe();
+        core.set_source_icon("radio", Some("radio".into()));
+        assert!(cat_rx.has_changed().unwrap(), "a new icon is news");
+        let _ = cat_rx.borrow_and_update();
+        core.set_source_icon("radio", Some("radio".into()));
+        assert!(!cat_rx.has_changed().unwrap(), "the same icon must wake nothing");
+        core.set_source_icon("radio", None);
+        assert!(cat_rx.has_changed().unwrap(), "an icon withdrawn is news");
     }
 
     #[tokio::test]

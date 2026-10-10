@@ -10,7 +10,7 @@ Contract::Metadata = "metadata"
 Contract::Admin = "admin"
 ContractVersion = {"major":1,"minor":2}
 Announcement::minimal = {"name":"p","kinds":["source"],"admin":false,"covers":false,"protocol":2,"contracts":{}}
-Announcement::full = {"name":"p","kinds":["source","display","input","metadata"],"admin":true,"covers":true,"ui_version":"abc123","protocol":2,"contracts":{"source":{"major":1,"minor":0},"display":{"major":1,"minor":0},"input":{"major":1,"minor":0},"metadata":{"major":1,"minor":0},"admin":{"major":1,"minor":0}},"version":"1.2.3","repository":"https://example.invalid/r","catalog":{"en":{"key":"text"}}}
+Announcement::full = {"name":"p","kinds":["source","display","input","metadata"],"admin":true,"covers":true,"ui_version":"abc123","icon":"radio","protocol":2,"contracts":{"source":{"major":1,"minor":0},"display":{"major":1,"minor":0},"input":{"major":1,"minor":0},"metadata":{"major":1,"minor":0},"admin":{"major":1,"minor":0}},"version":"1.2.3","repository":"https://example.invalid/r","catalog":{"en":{"key":"text"}}}
 [source 1.1]
 SourceReq::Activate = {"req":"Activate"}
 SourceReq::Wake = {"req":"Wake"}
@@ -50,7 +50,7 @@ PlayRequest::Switch = "switch"
 PlayRequest::WakeAndSwitch = "wake_and_switch"
 SourceMessage::default = {"id":null,"action":null}
 SourceMessage::full = {"id":9,"action":{"action":"Stop"},"identity":{"state":"Nothing"},"transient":true,"preset":2,"preset_count":10,"preset_name":"Name","location":"loc","status_text":{"kind":"Verbatim","data":"s"},"can_eject":true,"has_finite_list":true,"presets":[{"index":1,"name":"One"}],"cover":{"kind":"path","path":"/c"},"cover_thumb":{"kind":"url","url":"https://example.invalid/t"},"cover_archivable":true,"play_request":"switch"}
-[display 1.0]
+[display 1.1 next]
 Overlay::Volume = {"kind":"volume","level":30,"muted":false,"text":"30","remaining_ms":800}
 Overlay::Tens = {"kind":"tens","offset":10,"text":"+10","remaining_ms":800}
 Overlay::Message = {"kind":"message","text":"m","remaining_ms":800}
@@ -73,7 +73,7 @@ Track::default = {"artist":null,"title":null,"album":null,"duration_s":null,"ori
 PlayerState::default = {"source":"","volume":0,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null,"artist":null,"title":null,"album":null,"duration_s":null,"origin":null}
 PlayerState::full = {"source":"radio","volume":42,"muted":true,"standby":true,"preset":3,"preset_count":10,"preset_name":"Jazz","location":"loc","status":"buffering","overlay":{"kind":"message","text":"hello","remaining_ms":1500},"position_s":12,"playback":"playing","seekable":true,"can_eject":true,"has_finite_list":true,"random":true,"repeat":"one","clock":{"date":"year_month_day","twelve_hour":true},"artist":"Artist","title":"Title","album":"Album","duration_s":215,"year":1999,"links":[{"platform":"youtube","url":"https://example.invalid/y"}],"origin":"musicbrainz","cover_href":"/cover/1","cover_origin":"deezer","provenance":{"fields":{"title":"musicbrainz"},"misses":["album"],"derived":{"year":"title"}}}
 DisplayFrame::State = {"frame":"state","data":{"source":"radio","volume":42,"muted":true,"standby":true,"preset":3,"preset_count":10,"preset_name":"Jazz","location":"loc","status":"buffering","overlay":{"kind":"message","text":"hello","remaining_ms":1500},"position_s":12,"playback":"playing","seekable":true,"can_eject":true,"has_finite_list":true,"random":true,"repeat":"one","clock":{"date":"year_month_day","twelve_hour":true},"artist":"Artist","title":"Title","album":"Album","duration_s":215,"year":1999,"links":[{"platform":"youtube","url":"https://example.invalid/y"}],"origin":"musicbrainz","cover_href":"/cover/1","cover_origin":"deezer","provenance":{"fields":{"title":"musicbrainz"},"misses":["album"],"derived":{"year":"title"}}}}
-DisplayFrame::Catalog = {"frame":"catalog","data":{"sources":[{"name":"radio","presets":[{"index":1,"name":"One"}]},{"name":"cd"}]}}
+DisplayFrame::Catalog = {"frame":"catalog","data":{"sources":[{"name":"radio","presets":[{"index":1,"name":"One"}],"icon":"radio"},{"name":"cd"}]}}
 DisplayFrame::Cover = {"frame":"cover","data":{"href":"/cover/1","mime":"image/jpeg","bytes":"AQID"}}
 [input 1.0]
 Command::Select = {"cmd":"Select","arg":3}

@@ -659,7 +659,7 @@ export type Playback = 'playing' | 'paused'
 /** A named preset as `GET /api/presets` serves it. */
 export interface NamedPreset { index: number; name: string }
 /** A source and its list; `presets` is absent when it does not enumerate. */
-export interface SourcePresets { name: string; presets?: NamedPreset[] }
+export interface SourcePresets { name: string; icon?: string; presets?: NamedPreset[] }
 /** The catalog of sources, as the core broadcasts it to the displays. */
 export interface PresetsPayload { sources: SourcePresets[] }
 export interface SystemUsage { total_kb: number; available_kb: number }

@@ -8,6 +8,7 @@ import {
   unavailable, hidden, REMOTE_COMMANDS, REMOTE_MUTE, REMOTE_POWER, REMOTE_SOURCE,
   REMOTE_TRANSPORT, REMOTE_TRANSPORT_SECONDARY,
 } from './remoteCommands'
+import { GAP, headerMode, KEY, STANDBY_BADGE } from './headerMode'
 
 /** Fake `EventSource`: jsdom does not provide one. */
 class FakeEventSource {
@@ -549,11 +550,72 @@ describe('HomeView — sliders and names', () => {
   })
 })
 
-describe('HomeView — one key per source on a wide screen', () => {
-  // jsdom applies no stylesheet: what is asserted below is the breakpoint
-  // class each element carries, which is the whole of the switch between
-  // the cycle key (narrow) and the bar (wide).
-  async function mountWith(sources: unknown, state: Partial<PlayerPayload> = {}) {
+describe('headerMode', () => {
+  // Three keys, the gaps between them, the gap before standby, standby.
+  const NEEDED = 3 * KEY + 2 * GAP + GAP + KEY
+
+  it('the measures are those of the kit: icon-sm is size-8, the row is gap-1', () => {
+    expect(KEY).toBe(32)
+    expect(GAP).toBe(4)
+  })
+
+  it('a single source, once the list is read: nothing to choose between', () => {
+    expect(headerMode({ sources: 1, listRead: true, available: 1000, standby: false, activeListed: true })).toBe('none')
+    expect(headerMode({ sources: 0, listRead: true, available: 1000, standby: false, activeListed: true })).toBe('none')
+  })
+
+  it('an unread list keeps the cycle key: a failed /api/presets must leave a way to change source', () => {
+    expect(headerMode({ sources: 0, listRead: false, available: 1000, standby: false, activeListed: true })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: false, available: 1000, standby: false, activeListed: true })).toBe('cycle')
+  })
+
+  it('an unknown width keeps the cycle key', () => {
+    expect(headerMode({ sources: 3, listRead: true, available: null, standby: false, activeListed: true })).toBe('cycle')
+  })
+
+  it('the icons from exactly the width they need, the cycle key one pixel below', () => {
+    expect(NEEDED).toBe(140)
+    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: false, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: NEEDED - 1, standby: false, activeListed: true })).toBe('cycle')
+  })
+
+  it('standby makes room for its badge', () => {
+    const withBadge = NEEDED + STANDBY_BADGE + GAP
+    expect(headerMode({ sources: 3, listRead: true, available: withBadge, standby: false, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: withBadge, standby: true, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: withBadge - 1, standby: true, activeListed: true })).toBe('cycle')
+    // The same width that holds the keys alone no longer does with the badge.
+    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: true, activeListed: true })).toBe('cycle')
+  })
+
+  it('an active source absent from the list is named by the pill, even with ample width', () => {
+    // The core keeps the active source while mpv plays after its plugin died.
+    expect(headerMode({ sources: 3, listRead: true, available: 1000, standby: false, activeListed: false })).toBe('cycle')
+    // Listed (or empty, which the caller reports as listed): unchanged.
+    expect(headerMode({ sources: 3, listRead: true, available: 1000, standby: false, activeListed: true })).toBe('icons')
+  })
+})
+
+describe('HomeView — the source keys in the Player card header', () => {
+  /**
+   * A `ResizeObserver` that reports `width` for the Player card's header, and
+   * nothing for anything else (the volume slider observes its own track).
+   * Without it the width stays unknown, which is the cycle key's case.
+   */
+  function headerWidth(width: number) {
+    return class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        if (!target.matches('[data-player-header]')) return
+        const entry = { target, contentRect: { width } } as unknown as ResizeObserverEntry
+        this.callback([entry], this as unknown as ResizeObserver)
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+
+  async function mountWith(sources: unknown, state: Partial<PlayerPayload> = {}, width: number | null = WIDE) {
     const posts: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (init?.method === 'POST') {
@@ -564,6 +626,7 @@ describe('HomeView — one key per source on a wide screen', () => {
       return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
     }))
     vi.stubGlobal('EventSource', FakeEventSource)
+    if (width !== null) vi.stubGlobal('ResizeObserver', headerWidth(width))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     await flushPromises()
@@ -572,32 +635,65 @@ describe('HomeView — one key per source on a wide screen', () => {
     return { w, posts }
   }
 
-  const THREE = { sources: [{ name: 'radio' }, { name: 'cd' }, { name: 'files' }] }
+  const WIDE = 1000
+  const NARROW = 100
+  const THREE = { sources: [{ name: 'radio', icon: 'radio' }, { name: 'cd', icon: 'disc' }, { name: 'files' }] }
 
   afterEach(() => {
     vi.unstubAllGlobals()
   })
 
-  it('one key per declared source, in the order of the cycle', async () => {
+  it('wide: one icon key per declared source, in the order of the cycle', async () => {
     const { w } = await mountWith(THREE, { source: 'cd' })
     const keys = w.findAll('[data-source-key]')
     expect(keys.map((k) => k.attributes('data-source-key'))).toEqual(['radio', 'cd', 'files'])
-    expect(keys.map((k) => k.text())).toEqual(['radio', 'cd', 'files'])
+    // The announced icon, or the initial of a source that announced none.
+    expect(w.find('[data-source-key="radio"] [data-source-icon="radio"]').exists()).toBe(true)
+    expect(w.find('[data-source-key="cd"] [data-source-icon="disc"]').exists()).toBe(true)
+    expect(w.get('[data-source-key="files"] [data-source-initial]').text()).toBe('F')
   })
 
-  it('the active source is the pressed key, and only it', async () => {
+  it('wide: every key carries its own name, the icon being hidden from assistive technology', async () => {
+    const { w } = await mountWith(THREE, { source: 'cd' })
+    for (const k of w.findAll('[data-source-key]')) {
+      const name = k.attributes('data-source-key')
+      expect(k.attributes('aria-label')).toBe(name)
+      expect(k.attributes('title')).toBe(name)
+    }
+  })
+
+  it('wide: the active source is the pressed key, and only it', async () => {
     const { w } = await mountWith(THREE, { source: 'cd' })
     const pressed = w.findAll('[data-source-key]').map((k) => k.attributes('aria-pressed'))
     expect(pressed).toEqual(['false', 'true', 'false'])
   })
 
-  it('a key posts SelectSource with the name, not a notch of the cycle', async () => {
+  it('wide: the playing dot sits on the active key while it plays, and only then', async () => {
+    const { w } = await mountWith(THREE, { source: 'cd', playback: 'playing' })
+    expect(w.findAll('[data-now-playing-line]')).toHaveLength(1)
+    expect(w.get('[data-source-key="cd"]').find('[data-now-playing-line]').exists()).toBe(true)
+    FakeEventSource.last!.push({ source: 'cd', playback: 'paused' })
+    await nextTick()
+    expect(w.find('[data-now-playing-line]').exists()).toBe(false)
+  })
+
+  it('wide: no cycle key, no source pill, no visible title; the card keeps its name', async () => {
+    const { w } = await mountWith(THREE, { source: 'cd' })
+    expect(w.find('[data-remote-source]').exists()).toBe(false)
+    expect(w.find('[data-source]').exists()).toBe(false)
+    const card = w.get('[data-player]')
+    const name = card.attributes('aria-label')
+    expect(name).toBeTruthy()
+    expect(w.get('[data-player-header]').text()).not.toContain(name)
+  })
+
+  it('wide: a key posts SelectSource with the name, not a notch of the cycle', async () => {
     const { w, posts } = await mountWith(THREE, { source: 'radio' })
     await w.get('[data-source-key="files"]').trigger('click')
     expect(posts).toEqual([JSON.stringify({ cmd: 'SelectSource', arg: 'files' })])
   })
 
-  it('in standby, every key is greyed, like the cycle key', async () => {
+  it('wide: in standby, every key is greyed, like the cycle key', async () => {
     // The core ignores everything but `Power` in standby (see `unavailable`).
     const { w } = await mountWith(THREE, { standby: true })
     const keys = w.findAll('[data-source-key]')
@@ -607,24 +703,47 @@ describe('HomeView — one key per source on a wide screen', () => {
     }
   })
 
-  it('the bar shows from lg up, and the cycle key steps aside there', async () => {
-    const { w } = await mountWith(THREE)
-    expect(w.get('[data-source-bar]').classes()).toEqual(expect.arrayContaining(['hidden', 'lg:grid']))
-    expect(w.get('[data-remote-source]').classes()).toContain('lg:hidden')
+  it('narrow: the cycle key and the source pill, no icon key', async () => {
+    const { w } = await mountWith(THREE, { source: 'cd' }, NARROW)
+    expect(w.find('[data-remote-source]').exists()).toBe(true)
+    expect(w.get('[data-source]').text()).toBe('cd')
+    expect(w.find('[data-source-key]').exists()).toBe(false)
   })
 
-  it('without a catalog, no bar, and the cycle key stays on every width', async () => {
+  it('wide, but the active source is not in the list: the pill names it', async () => {
+    // The core keeps the active source while mpv plays after its plugin died.
+    const { w } = await mountWith(THREE, { source: 'upnp' })
+    expect(w.find('[data-source-key]').exists()).toBe(false)
+    expect(w.find('[data-remote-source]').exists()).toBe(true)
+    expect(w.get('[data-source]').text()).toBe('upnp')
+  })
+
+  it('a width not measured yet keeps the cycle key', async () => {
+    const { w } = await mountWith(THREE, { source: 'cd' }, null)
+    expect(w.find('[data-remote-source]').exists()).toBe(true)
+    expect(w.find('[data-source-key]').exists()).toBe(false)
+  })
+
+  it('without a catalog, the cycle key stays, whatever the width', async () => {
     // A failed /api/presets must not leave a wide screen with no way at all
-    // to change source: the cycle key only steps aside for a bar that exists.
+    // to change source.
     const { w } = await mountWith({ seek_step_s: 10 })
-    expect(w.find('[data-source-bar]').exists()).toBe(false)
-    expect(w.get('[data-remote-source]').classes()).not.toContain('lg:hidden')
+    expect(w.find('[data-remote-source]').exists()).toBe(true)
+    expect(w.find('[data-source-key]').exists()).toBe(false)
   })
 
-  it('a single source gets no bar: there is nothing to choose between', async () => {
-    const { w } = await mountWith({ sources: [{ name: 'radio' }] })
-    expect(w.find('[data-source-bar]').exists()).toBe(false)
-    expect(w.get('[data-remote-source]').classes()).not.toContain('lg:hidden')
+  it('a single source: neither keys nor cycle key, only the pill naming it', async () => {
+    const { w } = await mountWith({ sources: [{ name: 'radio' }] }, { source: 'radio' })
+    expect(w.find('[data-source-key]').exists()).toBe(false)
+    expect(w.find('[data-remote-source]').exists()).toBe(false)
+    expect(w.get('[data-source]').text()).toBe('radio')
+  })
+
+  it('the bar above the cards is gone, at every width', async () => {
+    for (const width of [WIDE, NARROW]) {
+      const { w } = await mountWith(THREE, { source: 'cd' }, width)
+      expect(w.find('[data-source-bar]').exists()).toBe(false)
+    }
   })
 })
 

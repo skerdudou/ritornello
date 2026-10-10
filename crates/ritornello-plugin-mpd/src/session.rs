@@ -1605,6 +1605,7 @@ mod tests {
             sources: vec![ritornello_proto::SourceCatalog {
                 name: "radio".into(),
                 presets: vec![ritornello_proto::Preset { index: 1, name: "FIP".into() }],
+                icon: None,
             }],
         })
         .await;

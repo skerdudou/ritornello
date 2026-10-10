@@ -287,6 +287,14 @@ pub trait SourcePlugin: Send + 'static {
         false
     }
 
+    /// The icon this source shows under in the web UI, as a name from the
+    /// fixed list it draws: `radio`, `disc`, `folder`, `music`, `headphones`,
+    /// `podcast`, `tv`, `usb`. Any other name, or `None` (the default), shows
+    /// the source's initial. Read once, when the plugin registers.
+    fn icon(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Does this Source have a finite list to shuffle or repeat?
     ///
     /// A **capability of the Source**, not of what it has loaded — the same
@@ -2348,6 +2356,7 @@ mod display_tests {
             sources: vec![ritornello_proto::SourceCatalog {
                 name: "radio".into(),
                 presets: vec![Preset { index: 1, name: "FIP".into() }],
+                icon: None,
             }],
         });
         w.write_all(format!("{}\n", serde_json::to_string(&cat).unwrap()).as_bytes())
@@ -2410,6 +2419,7 @@ mod display_tests {
             sources: vec![ritornello_proto::SourceCatalog {
                 name: "radio".into(),
                 presets: vec![Preset { index: 99, name: "Nova".into() }],
+                icon: None,
             }],
         };
         let frame = DisplayFrame::Catalog(expected.clone());

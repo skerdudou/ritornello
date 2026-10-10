@@ -238,17 +238,15 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
 
   // --- The home page: the grid follows the active source ----------------------
   await page.goto('/')
-  await expect(page.locator('[data-source]')).toHaveText('radio')
   // The core starts on the source `state.json` memorized — `radio`. On this
-  // desktop viewport the cycle key has given way to the bar of one key per
-  // source (`lg` and up), so the journey names the source it wants: that
-  // exercises the bar end to end, `/api/presets` to `SelectSource` to the
-  // frame that lights the key.
+  // desktop viewport the Player card's header holds one icon key per source,
+  // and the cycle key has given way to them, so the journey names the source
+  // it wants: that exercises the keys end to end, `/api/presets` to
+  // `SelectSource` to the frame that lights the key.
   const sourceKey = (name: string) => page.locator(`[data-source-key="${name}"]`)
   await expect(page.getByRole('button', { name: 'Source', exact: true })).toBeHidden()
   await expect(sourceKey('radio')).toHaveAttribute('aria-pressed', 'true')
   await sourceKey('files').click()
-  await expect(page.locator('[data-source]')).toHaveText('files')
   await expect(sourceKey('files')).toHaveAttribute('aria-pressed', 'true')
   await expect(sourceKey('radio')).toHaveAttribute('aria-pressed', 'false')
   // Three tracks, three numbers: the count is declared by the Source half on
@@ -390,7 +388,7 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   // unpressed**. The core publishes the two modes masked by the capability,
   // so a greyed key can no longer claim to be on.
   await sourceKey('radio').click()
-  await expect(page.locator('[data-source]')).toHaveText('radio')
+  await expect(sourceKey('radio')).toHaveAttribute('aria-pressed', 'true')
   await expect(random).toBeDisabled()
   await expect(random).toHaveAttribute('aria-pressed', 'false')
   await expect(repeat).toBeDisabled()
@@ -401,7 +399,7 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   // again right away, because the journeys share one core and one
   // `state.json`.
   await sourceKey('files').click()
-  await expect(page.locator('[data-source]')).toHaveText('files')
+  await expect(sourceKey('files')).toHaveAttribute('aria-pressed', 'true')
   await expect(random).toHaveAttribute('aria-pressed', 'true')
   await random.click()
   await expect(random).toHaveAttribute('aria-pressed', 'false')
@@ -469,7 +467,7 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   // core and `files.spec.ts` runs **before** `journey.spec.ts`, which requires
   // the radio to be active. The restoration is verified, not hoped for.
   await sourceKey('radio').click()
-  await expect(page.locator('[data-source]')).toHaveText('radio')
+  await expect(sourceKey('radio')).toHaveAttribute('aria-pressed', 'true')
 
   // --- The network wizard, without a NAS --------------------------------------
   // Last, and deliberately: declaring a share requires a mount reconciliation

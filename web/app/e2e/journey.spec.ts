@@ -225,7 +225,7 @@ test('the player state arrives as a pushed stream as soon as the connection open
   const fip = 'http://icecast.radiofrance.fr/fip-midfi.mp3'
   expect(state.location).toBe(fip)
   // And the player panel shows them.
-  await expect(page.locator('[data-source]')).toHaveText('radio')
+  await expect(page.locator('[data-source-key="radio"]')).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('[data-volume]')).toHaveText(`${state.volume} %`)
   // No title, yet the track block exists: the location alone is something to
   // say (a radio that identifies nothing still says where it plays from), so
@@ -805,4 +805,44 @@ test('installing a language pack from the config page reaches the installed stat
   const afterRemove = await (await request.get('/api/locale')).json()
   const removedRow = afterRemove.packs.find((p: { language: string }) => p.language === 'es')
   expect(removedRow?.installed ?? null).toBeNull()
+})
+
+/**
+ * The Player card's header changes source in two ways, by width: one icon key
+ * per source when they fit, the cycle key (with the source pill) when they do
+ * not. The harness declares two sources (`radio`, `files`), the least that
+ * makes keys worth drawing. Fitting is a measure of the rendered header, so
+ * only a real browser can say which mode a width gets.
+ */
+test('the source keys follow the width of the Player card', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto('/')
+  const keys = page.locator('[data-source-key]')
+  await expect(keys).toHaveCount(2)
+  await expect(keys.first()).toBeVisible()
+  await expect(page.locator('[data-remote-source]')).toHaveCount(0)
+  // The card is a landmark, and no source bar sits above the cards any more.
+  await expect(page.locator('[data-player][role="region"]')).toBeVisible()
+  await expect(page.locator('[data-source-bar]')).toHaveCount(0)
+
+  // A click on a key changes the active source, and the pressed state moves.
+  const other = page.locator('[data-source-key][aria-pressed="false"]')
+  const name = await other.getAttribute('data-source-key')
+  expect(name).not.toBeNull()
+  await other.click()
+  await expect(page.locator(`[data-source-key="${name}"]`)).toHaveAttribute('aria-pressed', 'true')
+
+  // A phone's card still holds two keys: they need 104 px of a header about
+  // 290 px wide, so the cycle key stays away. It only comes back with enough
+  // sources to overflow the row (`headerMode.test.ts` covers that arithmetic,
+  // and the harness cannot declare that many plugins).
+  await page.setViewportSize({ width: 360, height: 800 })
+  await expect(keys).toHaveCount(2)
+  await expect(keys.first()).toBeVisible()
+  await expect(page.locator('[data-remote-source]')).toHaveCount(0)
+  await expect(page.locator(`[data-source-key="${name}"]`)).toHaveAttribute('aria-pressed', 'true')
+  // The journeys share one core: leave the radio active, as the next ones
+  // (the phone's) expect to find it.
+  await page.locator('[data-source-key="radio"]').click()
+  await expect(page.locator('[data-source-key="radio"]')).toHaveAttribute('aria-pressed', 'true')
 })

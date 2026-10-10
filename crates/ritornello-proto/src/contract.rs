@@ -57,7 +57,7 @@ impl fmt::Display for ContractVersion {
 // `scripts/changed-components.sh` reads these five lines with sed: keep each
 // one on a single line, in exactly this shape.
 pub const SOURCE_CONTRACT: ContractVersion = ContractVersion::new(1, 1);
-pub const DISPLAY_CONTRACT: ContractVersion = ContractVersion::new(1, 0);
+pub const DISPLAY_CONTRACT: ContractVersion = ContractVersion::new(1, 1);
 pub const INPUT_CONTRACT: ContractVersion = ContractVersion::new(1, 0);
 pub const METADATA_CONTRACT: ContractVersion = ContractVersion::new(1, 0);
 pub const ADMIN_CONTRACT: ContractVersion = ContractVersion::new(1, 0);
@@ -122,12 +122,13 @@ mod tests {
     }
 
     #[test]
-    fn every_contract_starts_at_one_zero_and_source_has_moved_once() {
+    fn every_contract_starts_at_one_zero_and_source_and_display_have_moved_once() {
         for c in Contract::ALL {
-            // The source contract went to 1.1 for `play_request`, the only
-            // compatible addition so far; every other one is still at 1.0.
+            // The source contract went to 1.1 for `play_request`, the display
+            // contract to 1.1 for the source catalog's `icon`; every other one
+            // is still at 1.0.
             let expected = match c {
-                Contract::Source => ContractVersion::new(1, 1),
+                Contract::Source | Contract::Display => ContractVersion::new(1, 1),
                 _ => ContractVersion::new(1, 0),
             };
             assert_eq!(c.current(), expected, "{c:?}");
