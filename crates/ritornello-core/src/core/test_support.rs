@@ -897,6 +897,15 @@ impl ArchivingRig {
         }
     }
 
+    /// Arms `path` without playing it — Next while stopped — with the offer
+    /// a folder-probe makes.
+    pub(super) async fn arm_file(&mut self, path: &str) {
+        self.core.handle_source_update(ARCHIVING_SOURCE, arms(serde_json::json!({"kind": "file", "path": path})));
+        if self.offers {
+            self.core.handle_source_update(ARCHIVING_SOURCE, offers_archive());
+        }
+    }
+
     /// Plays `path` without ever sending the offer notification — the shape
     /// of a folder-probe that found a cover already in place, and so never
     /// declares `cover_archivable(true)`. `poll_notification` never sends

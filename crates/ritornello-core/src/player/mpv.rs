@@ -447,6 +447,14 @@ pub fn read_armed_file(path: &str) -> Option<(Option<Track>, Option<crate::cover
     if path.contains("://") {
         return None;
     }
+    // Only a regular file is opened. A FIFO (or a device, a socket) blocks
+    // the open itself until a writer shows up, which no deadline here can
+    // cut: `Health::bounded` would time out and mark the **whole mount**
+    // unreachable for a path that merely names something unreadable.
+    // `metadata` follows a symlink, so a link to a real file still reads.
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
     let file = lofty::probe::Probe::open(path).ok()?.read().ok()?;
     let tag = tag_of(&file);
     let clean = |value: Option<std::borrow::Cow<'_, str>>| {
@@ -1104,6 +1112,34 @@ pub(crate) mod tests {
         std::fs::write(&text, b"not audio at all, only words").unwrap();
         assert!(read_armed_file(text.to_str().unwrap()).is_none(), "a file that is not audio has nothing to say");
         assert!(read_armed_file("/does/not/exist.flac").is_none());
+        assert!(read_armed_file(dir.path().to_str().unwrap()).is_none(), "a directory is not a track");
+    }
+
+    /// A FIFO named as the armed file: opening it would block until a writer
+    /// came, under `Health::bounded`, which would then mark the whole mount
+    /// unreachable. The read must refuse it at once.
+    ///
+    /// **[MUTATION]** the `is_file()` guard removed from `read_armed_file` →
+    /// the `recv_timeout` assertion fires (the open blocks).
+    #[cfg(unix)]
+    #[test]
+    fn an_armed_read_refuses_a_fifo_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("track.flac");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if !matches!(made, Ok(s) if s.success()) {
+            eprintln!("mkfifo unavailable: skipping test");
+            return;
+        }
+        let path = fifo.to_str().unwrap().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_armed_file(&path).is_none());
+        });
+        let refused = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("reading a FIFO must not block");
+        assert!(refused, "a FIFO is not a track");
     }
 
     #[test]

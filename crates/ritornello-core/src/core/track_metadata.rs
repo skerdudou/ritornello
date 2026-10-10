@@ -326,6 +326,13 @@ impl<P: Player> Core<P> {
             }
         });
         self.publish_state();
+        // Armed → playing on the track the screen already shows: its cover
+        // arrived while it was armed, when `start_cover_archive` declines,
+        // and no fetch will arrive again for it. Now that it plays, the
+        // archive it was owed.
+        if !armed && let Some(key) = self.metadata.published_cover().map(str::to_string) {
+            self.start_cover_archive(&key);
+        }
     }
 
     /// Title announced by the stream itself (ICY header seen by mpv).
@@ -748,6 +755,13 @@ impl<P: Player> Core<P> {
     /// for.
     fn start_cover_archive(&mut self, key: &str) {
         if !self.source_cover_archivable {
+            return;
+        }
+        // Not for an armed track: pressing Next while stopped walks through
+        // folders nobody played, and the share would collect a cover in
+        // each. The cover is handed over when Play starts the track
+        // (`publish_armed_flag`).
+        if self.armed {
             return;
         }
         // The slot, and the only bound: see `cover_archive_attempted`.
@@ -2065,6 +2079,27 @@ mod tests {
             core.declare_network_cover("https://coverartarchive.org/release/b/front").await;
         }
         assert_eq!(core.archive_requests().len(), 2, "a new album re-arms the slot");
+    }
+
+    /// Next while stopped walks through folders nobody played: none of them
+    /// may receive a cover. Play on the armed track then hands over the
+    /// cover it was owed, since no fetch will arrive again for it.
+    ///
+    /// **[MUTATION]** the `if self.armed { return; }` guard removed from
+    /// `start_cover_archive` → the "nobody played" assertion fires. The
+    /// archive call removed from `publish_armed_flag` → the "now it plays"
+    /// assertion fires.
+    #[tokio::test]
+    async fn an_armed_track_is_archived_only_once_it_plays() {
+        let mut core = archiving_core().await;
+        core.arm_file("/mnt/ritornello/nas/Armed/01.flac").await;
+        core.declare_network_cover("https://coverartarchive.org/release/armed/front").await;
+        core.settle_cover_archive().await;
+        assert!(core.archive_requests().is_empty(), "nobody played this folder: nothing may be written into it");
+
+        core.play_file("/mnt/ritornello/nas/Armed/01.flac").await;
+        core.settle_cover_archive().await;
+        assert_eq!(core.archive_requests().len(), 1, "now it plays, the cover goes to its folder");
     }
 
     #[tokio::test]
