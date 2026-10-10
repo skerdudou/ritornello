@@ -16,15 +16,22 @@
  * no wrapper element) and takes no decision. The decision — which config the
  * appliance needs and why — belongs to whoever also owns the stylesheet it has
  * to agree with, i.e. the shell's App.vue.
+ *
+ * "No decision" includes the defaults, hence `useForwardProps` rather than
+ * `v-bind="props"`. Vue casts an absent boolean prop to `false`, so binding
+ * the declared props whole handed reka-ui `scrollBody: false` when App.vue
+ * said nothing — overriding reka-ui's own `true`. Forwarding only what was
+ * actually passed leaves an omitted prop to reka-ui's default.
  */
 import type { ConfigProviderProps } from "reka-ui"
-import { ConfigProvider } from "reka-ui"
+import { ConfigProvider, useForwardProps } from "reka-ui"
 
 const props = defineProps<ConfigProviderProps>()
+const forwarded = useForwardProps(props)
 </script>
 
 <template>
-  <ConfigProvider v-bind="props">
+  <ConfigProvider v-bind="forwarded">
     <slot />
   </ConfigProvider>
 </template>
