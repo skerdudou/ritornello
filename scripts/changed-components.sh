@@ -606,7 +606,7 @@ if [ -n "$SELF_TEST" ]; then
   # the verdict: its exit code, which crates it names, and what it says.
   # git runs with no global or system configuration, so no hook, signing
   # rule or default of the machine can change what the test measures.
-  guard_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$R" -c user.name=self-test -c user.email=self-test@invalid -c init.defaultBranch=main "$@"; }
+  guard_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$R" -c user.name=self-test -c user.email=self-test@invalid -c init.defaultBranch=main -c gc.auto=0 -c maintenance.auto=false "$@"; }
   guard_repo() { # sets R to a fresh repository whose one commit is tagged v0.1.0
     R=$(mktemp -d)
     mkdir -p "$R/scripts" "$R/deploy" "$R/crates/ritornello-files-mount/src/bin" "$R/crates/ritornello-plugin-files/src"
@@ -989,6 +989,14 @@ if [ -n "$SELF_TEST" ]; then
   guard_git add -A; guard_git commit -q -m "core moved, source changed"
   lost=$(guard_git rev-parse v0.1.0:crates/ritornello-proto/tests)
   rm -f "$R/.git/objects/${lost:0:2}/${lost:2}"
+  # Measured, not assumed: the case proves nothing unless the tree is really
+  # gone. A background repack (git runs maintenance after a commit, which
+  # guard_git turns off) would have moved it into a pack, where `rm` cannot
+  # reach it, and the guard would then refuse for another reason.
+  if guard_git cat-file -e "$lost" 2>/dev/null; then
+    echo "self-test: the baseline tree $lost is still readable after its deletion; the git-failure case cannot be set up" >&2
+    fails=$((fails + 1))
+  fi
   expect_rel 1 "" "git ls-tree" "a baseline tree git cannot read is refused, not taken for one without a fixture" --guard-baseline v0.1.0 v0.1.0
 
   rel_repo

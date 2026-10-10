@@ -1,4 +1,23 @@
-**Nothing to do** — replace the binaries.
+**Action required** — wire break: install the core and every plugin
+together. The bootstrap `PROTOCOL_VERSION` moved from 1 to 2, so every
+component of this release carries a new number and none of the previous
+ones can talk to the new core (nor the new plugins to an old core).
+
+- **Before installing**, set *Automatic checks* to *Off* or
+  *Check only* (Settings → Updates). The core you are running now
+  predates grouped updates: left on *Check and install*, it would install
+  this release one component at a time during the night, and a failed
+  start of the new core would be rolled back alone — leaving every new
+  plugin refused by the old core, and the device silent.
+- Then install everything in one go, while you watch: the update dialog
+  with every component checked, or `ritornello-install` from a
+  workstation. From this release on, the core installs a break as one
+  group and rolls it back as one.
+- A rollback of the core leaves every plugin refused until the core is
+  reinstalled.
+
+The privileged updater's crate changed only in its tests: nothing to
+reinstall for it. No unit, polkit rule or mount helper changed.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -35,16 +54,36 @@
 
 ## Behaviour changes
 
-The update dialog says what it really shows: only the components that need
-updating are listed, and you choose which to install. It used to say that
-what is already up to date is left unchecked, but such rows never appear.
+**Where is this playing from?** The `(?)` next to the track on the player
+page now opens with a *Source* row: the stream URL of the station, or the
+address of the file — `smb://host/share/…` for a file on the NAS (never the
+user name), its path on the device otherwise. The CD shows none. The `(?)`
+now appears even when nothing else is known about what plays, such as a
+station that announces no title.
 
-Fewer downloads between betas: a beta now carries only what moved since the
-previous beta, not since the last finished release. This one carries the
-core and the four language packs. A device that offers prereleases finds
-every other component in the release that last carried it, and
-`ritornello-install` does the same. A finished release still carries
-everything that changed since the previous finished one.
+**A disc can start playing when it is inserted.** The CD plugin's page has a
+new setting, *When a disc is inserted*: nothing (the default), play if the CD is
+the source being listened to, switch to the CD and play, or also leave
+standby to do so.
+
+**Faster tracks from a folder with a cover.** mpv no longer opens the
+`cover.jpg` beside every track itself (4.5 s to start a track in such a
+folder on the Pi, against 1.8 s elsewhere). A cover archived onto the NAS is
+now credited to the folder for the rest of the album, and archiving a large
+cover no longer marks a healthy share as unresponsive.
+
+**Each wire contract has its own version.** A plugin now announces one
+version per contract it speaks (source, display, input, metadata, admin).
+The System page shows a plugin whose contract major differs from the core's
+as *incompatible*, naming the contract, and one whose minor is newer as
+*limited*: it runs, with some features inactive. A future break of one
+contract will only require the plugins that speak it to move.
+
+**A breaking core is installed with its dependents.** When an update changes
+a contract's major, the core and the plugins that depend on it are installed
+in one step and rolled back together if the new core does not start. The
+night-time update never installs a break; it waits for you. This applies to
+updates installed *by* this core — hence the action above for this one.
 
 ## Install
 
