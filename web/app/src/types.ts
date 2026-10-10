@@ -541,6 +541,12 @@ export interface PlayerPayload {
    */
   preset_name: string | null
   /**
+   * Where what is playing comes from, as the active source worded it: the
+   * stream URL of a station, the `smb://` address or the path of a file.
+   * Absent when nothing plays or the source declares none (the cd).
+   */
+  location?: string
+  /**
    * Already translated state sentence: the status declared by the source
    * ("NO DISC") or the standby word resolved by the core. `null` when there
    * is nothing to say.

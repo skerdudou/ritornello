@@ -277,6 +277,34 @@ describe('PlayerCard', () => {
     w.unmount()
   })
 
+  it('names where what is playing comes from, first in the popover', async () => {
+    const w = mountWith({
+      title: 'So What',
+      location: 'smb://192.168.1.20/musique/Kind of Blue/01.flac',
+      provenance: { fields: { title: 'tags' } },
+    })
+    await w.get('[data-provenance-open]').trigger('click')
+    const popover = document.body.querySelector('[data-provenance-popover]')
+    const row = popover?.querySelector('[data-provenance-location]')
+    expect(row?.textContent?.trim()).toBe('smb://192.168.1.20/musique/Kind of Blue/01.flac')
+    // Text to copy, not a link.
+    expect(row?.querySelector('a')).toBeNull()
+    w.unmount()
+  })
+
+  it('offers the button for the location alone, on a radio nothing identifies', async () => {
+    const w = mountWith({ location: 'http://icecast.radiofrance.fr/fip-midfi.mp3' })
+    expect(w.find('[data-provenance-open]').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('has no location row when the source declares none', async () => {
+    const w = mountWith({ title: 'So What', provenance: { fields: { title: 'tags' } } })
+    await w.get('[data-provenance-open]').trigger('click')
+    expect(document.body.querySelector('[data-provenance-location]')).toBeNull()
+    w.unmount()
+  })
+
   it('names the rework next to the source, never in its place', async () => {
     // **The defect reported by the owner**: on a radio without a metadata
     // plugin, ICY gave the information, `musicbrainz` split it, and the screen
