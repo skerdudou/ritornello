@@ -464,6 +464,7 @@ fn source_section() -> Vec<String> {
             cover_thumb: Some(CoverRef::Url { url: "https://example.invalid/t".into() }),
             cover_archivable: Some(true),
             play_request: Some(PlayRequest::Switch),
+            armed: Some(Armed { identity: serde_json::json!({"k": 1}), media_path: Some("/m/a".into()) }),
         },
     );
     l.0

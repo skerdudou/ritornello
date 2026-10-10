@@ -1369,6 +1369,7 @@ impl CdSource {
             // Nor does it offer to keep one: there is nothing on a disc to
             // write a cover file next to (see `SourceMessage::cover_archivable`).
             cover_archivable: None,
+            armed: None,
             // Only the TOC arm of `poll_notification` asks to be played, and
             // only on an insertion: every other frame describes a state.
             play_request: None,

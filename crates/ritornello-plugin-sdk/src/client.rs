@@ -106,6 +106,9 @@ pub struct SourceUpdate {
     /// `PartialEq` against an inert frame rather than enumerated: nothing to
     /// edit in the comparison itself.
     pub cover_archivable: Option<bool>,
+    /// See `SourceMessage::armed`. Read by the core only beside
+    /// `IdentityUpdate::Nothing`.
+    pub armed: Option<ritornello_proto::Armed>,
 }
 
 pub struct SourceClient {
@@ -188,6 +191,7 @@ impl SourceClient {
                     cover: msg.cover,
                     cover_thumb: msg.cover_thumb,
                     cover_archivable: msg.cover_archivable,
+                    armed: msg.armed,
                 };
                 // And here is the "the answer is forced too" half. The
                 // predicate deciding whether this frame is worth relaying is
@@ -1177,6 +1181,41 @@ mod tests {
         assert_eq!(
             update.cover_thumb,
             Some(CoverRef::Url { url: "https://example.org/front-500.jpg".into() })
+        );
+    }
+
+    #[tokio::test]
+    async fn an_armed_declaration_reaches_the_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                identity: Some(IdentityUpdate::Nothing),
+                armed: Some(ritornello_proto::Armed {
+                    identity: serde_json::json!({"k": 1}),
+                    media_path: Some("/m/a.mp3".into()),
+                }),
+                ..Default::default()
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "files".into(), update_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        let (_, update) = update_rx.recv().await.unwrap();
+        assert_eq!(
+            update.armed,
+            Some(ritornello_proto::Armed { identity: serde_json::json!({"k": 1}), media_path: Some("/m/a.mp3".into()) })
         );
     }
 

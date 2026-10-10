@@ -703,6 +703,8 @@ impl<P: Player> Core<P> {
             // which takes it out before calling here. Named so the
             // destructuring stays exhaustive.
             play_request: _,
+            // Applied by the armed-state task.
+            armed: _,
         } = update;
         // Read **before** the guard below, and this is intentional: the
         // sources_catalog describes every source, not the one that is
