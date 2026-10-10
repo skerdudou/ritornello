@@ -26,6 +26,15 @@ pub struct Recorded {
     /// trusting a stale or absent inventory to still describe a component
     /// it may have moved past.
     pub privileged: Vec<String>,
+    /// Which content each privileged file placed is, by destination: the
+    /// inventory's `identity`, recorded as placed. The core compares it with
+    /// what a release offers before updating itself from the page, so a
+    /// file placed by anything but this installer is never vouched for here.
+    /// A registry written before identities existed has none: read as empty,
+    /// it makes the next run place the component again (`plan::is_current`),
+    /// which records them. Omitted from the file when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub identity: BTreeMap<String, String>,
 }
 
 /// `/var/lib/ritornello-install/installed.toml`: everything the installer
@@ -66,7 +75,7 @@ mod tests {
         let mut components = BTreeMap::new();
         components.insert(
             "radio".to_string(),
-            Recorded { version: "0.2.0".to_string(), privileged: vec![] },
+            Recorded { version: "0.2.0".to_string(), privileged: vec![], identity: BTreeMap::new() },
         );
         components.insert(
             "files-mount".to_string(),
@@ -76,6 +85,11 @@ mod tests {
                     "/etc/systemd/system/ritornello-media-mount.service".to_string(),
                     "/etc/polkit-1/rules.d/51-ritornello-media.rules".to_string(),
                 ],
+                identity: [
+                    ("/etc/systemd/system/ritornello-media-mount.service".to_string(), "sha256:ab".to_string()),
+                    ("/etc/polkit-1/rules.d/51-ritornello-media.rules".to_string(), "sha256:cd".to_string()),
+                ]
+                .into(),
             },
         );
         Registry { format: 1, components }
@@ -97,7 +111,11 @@ mod tests {
     /// rendering changes, that copy must follow.
     #[test]
     fn the_rendering_of_every_component_is_the_text_the_core_is_tested_on() {
-        let rec = |v: &str, p: &[&str]| Recorded { version: v.into(), privileged: p.iter().map(|s| s.to_string()).collect() };
+        let rec = |v: &str, p: &[&str]| Recorded {
+            version: v.into(),
+            privileged: p.iter().map(|s| s.to_string()).collect(),
+            identity: BTreeMap::new(),
+        };
         let registry = Registry {
             format: 1,
             components: [

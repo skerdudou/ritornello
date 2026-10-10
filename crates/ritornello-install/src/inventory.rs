@@ -1,5 +1,5 @@
 //! The release's inventory: what each shipped component installs, read the
-//! way `scripts/install-inventory.py` writes it (format 1). A format this
+//! way `scripts/install-inventory.py` writes it (format 2). A format this
 //! installer does not understand is refused by name rather than read
 //! partway — a future format's fields would otherwise deserialize through
 //! whatever they happen to share with this one, and the installer would
@@ -53,6 +53,15 @@ pub struct FileEntry {
     pub mode: String,
     pub owner: String,
     pub privileged: bool,
+    /// Which content a privileged file is: `sha256:<hex>` of a unit or a
+    /// rule, `version:<number>` of a privileged binary (the number of the
+    /// crate that builds it). Compared only for equality, never read for
+    /// meaning. Present on every privileged file and on no other, which
+    /// `Inventory::parse` holds. The registry records it as placed, and the
+    /// core compares it with what a release offers before updating itself
+    /// from the page.
+    #[serde(default)]
+    pub identity: Option<String>,
 }
 
 /// One file a component writes only when its target is absent on the
@@ -147,7 +156,7 @@ pub struct Pack {
     pub archive: String,
 }
 
-/// The whole of `inventory.json`, format 1.
+/// The whole of `inventory.json`, format 2.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Inventory {
@@ -161,15 +170,40 @@ pub struct Inventory {
 }
 
 impl Inventory {
-    /// Parses `inventory.json`, refusing anything but format 1 by name.
+    /// Parses `inventory.json`, refusing anything but format 2 by name.
+    ///
+    /// The format is read first, on its own: another format's fields would
+    /// otherwise trip `deny_unknown_fields` and be reported as a file that
+    /// does not parse, rather than as a format this installer does not know.
     pub fn parse(text: &str) -> anyhow::Result<Inventory> {
-        let inventory: Inventory =
+        #[derive(Deserialize)]
+        struct Format {
+            format: u32,
+        }
+        let Format { format } =
             serde_json::from_str(text).context("inventory.json does not parse")?;
         anyhow::ensure!(
-            inventory.format == 1,
-            "inventory.json declares format {}, this installer only understands format 1",
-            inventory.format
+            format == 2,
+            "inventory.json declares format {format}, this installer only understands format 2"
         );
+        let inventory: Inventory =
+            serde_json::from_str(text).context("inventory.json does not parse")?;
+        let every = std::iter::once(&inventory.core)
+            .chain(&inventory.plugins)
+            .map(|c| (&c.name, &c.files))
+            .chain(inventory.companions.iter().map(|c| (&c.name, &c.files)));
+        for (name, files) in every {
+            for f in files {
+                match (f.privileged, f.identity.as_deref()) {
+                    (true, Some(id)) if !id.is_empty() => {}
+                    (true, _) => anyhow::bail!("{name}: the privileged {} carries no identity", f.dest),
+                    (false, Some(_)) => {
+                        anyhow::bail!("{name}: {} carries an identity, but is not privileged", f.dest)
+                    }
+                    (false, None) => {}
+                }
+            }
+        }
         Ok(inventory)
     }
 
@@ -234,7 +268,7 @@ pub(crate) mod tests {
     #[test]
     fn the_real_inventory_parses() {
         let inv = real_inventory();
-        assert_eq!(inv.format, 1);
+        assert_eq!(inv.format, 2);
         assert!(!inv.product.is_empty());
         assert!(!inv.reference_order.is_empty());
         assert_eq!(inv.reference_order.len(), inv.plugins.len());
@@ -295,15 +329,53 @@ pub(crate) mod tests {
         assert!(resolved.starts_with("ritornello-core-"), "{resolved}");
     }
 
-    /// **[MUTATION]**: relax `Inventory::parse`'s check to `format >= 1` —
-    /// this test fails, since the mutated format `2` would then be accepted.
+    /// **[MUTATION]**: relax `Inventory::parse`'s check to `format >= 2` —
+    /// this test fails on the `3`; to `format <= 2`, on the `1`. Both are
+    /// refused by name, the `1` included although its fields are not this
+    /// format's: the format is read before anything else.
     #[test]
-    fn a_format_other_than_one_is_refused_by_name() {
+    fn a_format_other_than_two_is_refused_by_name() {
         let real = run_install_inventory();
-        let mutated = real.replacen("\"format\": 1", "\"format\": 2", 1);
-        assert_ne!(mutated, real, "expected the literal \"format\": 1 in the real inventory.json");
-        let err = Inventory::parse(&mutated).unwrap_err();
-        assert!(err.to_string().contains('2'), "{err}");
+        for other in ["1", "3"] {
+            let mutated = real.replacen("\"format\": 2", &format!("\"format\": {other}"), 1);
+            assert_ne!(mutated, real, "expected the literal \"format\": 2 in the real inventory.json");
+            let err = Inventory::parse(&mutated).unwrap_err().to_string();
+            assert!(err.contains(&format!("declares format {other}")), "{err}");
+        }
+    }
+
+    /// The identity is what the core compares; a privileged file without
+    /// one would be recorded as unknown and refuse every update of the core
+    /// from the page, and one on a file nobody compares says something
+    /// false about the inventory. Both are refused when the inventory is
+    /// read, before anything is placed.
+    #[test]
+    fn an_identity_is_on_every_privileged_file_and_on_no_other() {
+        let real = run_install_inventory();
+        let parsed = Inventory::parse(&real).expect("the real inventory parses");
+        let unit = parsed
+            .core
+            .files
+            .iter()
+            .find(|f| f.dest == "/etc/systemd/system/ritornello.service")
+            .expect("the core places its unit");
+        let id = unit.identity.clone().expect("the unit carries an identity");
+        assert!(id.starts_with("sha256:"), "{id}");
+        let anchor = format!("\"identity\": \"{id}\"");
+        assert_eq!(real.matches(&anchor).count(), 1, "{anchor}");
+        let without = real.replacen(&format!(",\n        {anchor}"), "", 1);
+        assert_ne!(without, real, "the identity follows `privileged` on its own line");
+        let err = Inventory::parse(&without).unwrap_err().to_string();
+        assert!(err.contains("carries no identity"), "{err}");
+
+        let on_the_binary = real.replacen(
+            "\"privileged\": false\n      }",
+            "\"privileged\": false,\n        \"identity\": \"sha256:00\"\n      }",
+            1,
+        );
+        assert_ne!(on_the_binary, real, "the core's binary closes its entry on `privileged: false`");
+        let err = Inventory::parse(&on_the_binary).unwrap_err().to_string();
+        assert!(err.contains("is not privileged"), "{err}");
     }
 
     /// **[MUTATION]**: drop `#[serde(deny_unknown_fields)]` from `Inventory`
@@ -312,7 +384,7 @@ pub(crate) mod tests {
     #[test]
     fn an_unknown_top_level_field_is_refused_rather_than_silently_dropped() {
         let real = run_install_inventory();
-        let mutated = real.replacen("\"format\": 1,", "\"format\": 1,\n  \"a_future_field\": true,", 1);
+        let mutated = real.replacen("\"format\": 2,", "\"format\": 2,\n  \"a_future_field\": true,", 1);
         assert_ne!(mutated, real);
         assert!(Inventory::parse(&mutated).is_err());
     }
