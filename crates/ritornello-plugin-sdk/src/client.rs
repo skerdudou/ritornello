@@ -575,9 +575,14 @@ pub async fn run_metadata_client(
     let fold = |np: &NowPlaying| (visible_to(np, enriches_armed), np.armed && !enriches_armed);
     let mut to_send = Some(fold(&np_rx.borrow_and_update()));
     loop {
-        if let Some(np) = to_send.take().filter(|(np, folded)| !(*folded && last_sent.as_ref() == Some(np))).map(|(np, _)| np) {
-            write.write_all(format!("{}\n", serde_json::to_string(&np)?).as_bytes()).await?;
-            last_sent = Some(np);
+        if let Some((np, folded)) = to_send.take() {
+            // A folded frame equal to the last one sent is the same "nothing"
+            // again: the plugin would learn nothing from it.
+            let repeat = folded && last_sent.as_ref() == Some(&np);
+            if !repeat {
+                write.write_all(format!("{}\n", serde_json::to_string(&np)?).as_bytes()).await?;
+                last_sent = Some(np);
+            }
         }
         tokio::select! {
             line = lines.next_line() => {
@@ -590,7 +595,9 @@ pub async fn run_metadata_client(
                     // sends is a late answer about a stream that is stopped,
                     // and relaying it would put the song back on screen.
                     Ok(_) if !enriches_armed && np_rx.borrow().armed => {
-                        tracing::debug!("enrichment from {name} dropped: a track is armed and the plugin did not opt in");
+                        tracing::debug!(
+                            "enrichment from {name} dropped: a track is armed and the plugin did not opt in"
+                        );
                     }
                     // `cleaned` here, as close to the input as possible: the
                     // core then has only one shape to handle (see `is_empty`,
@@ -1489,8 +1496,13 @@ mod tests {
     /// identity again once it plays.
     ///
     /// The first sleep below guards against `watch` coalescing: without it the
-    /// two armed values could collapse into one and the test would pass
-    /// whether or not the dedupe exists.
+    /// second armed frame and the playing one sent right after could collapse
+    /// into the playing one alone, and the test would pass whether or not the
+    /// dedupe exists. A sleep cannot make this fail wrongly, only pass wrongly:
+    /// on a machine stalled for longer than it, the relay may still see the
+    /// two frames as one, and the mutation below goes undetected that run. The
+    /// sender of a `watch` has no way to know the relay has read a value, so
+    /// nothing short of a hook in `run_metadata_client` would close that.
     ///
     /// **[MUTATION]** removing the `last_sent` dedupe in `run_metadata_client`
     /// fails the line count (the second armed frame would resend `identity:

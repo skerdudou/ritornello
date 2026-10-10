@@ -369,9 +369,9 @@ impl CdSource {
     /// with nothing armed (the TOC not read yet) is the setting read here,
     /// on *where* to start — that part of it is a preference about the disc,
     /// not about arriving — but its "play nothing" answers a question nobody
-    /// asked here. "Nothing" describes
-    /// what an arrival should do; pressing Play is not arriving, and there
-    /// is no reading of that key under which playing nothing is right.
+    /// asked here. "Nothing" describes what an arrival should do; pressing
+    /// Play is not arriving, and there is no reading of that key under which
+    /// playing nothing is right.
     ///
     /// Falling back on the first track rather than on the resume: the two
     /// are the same when a resume point exists, and the first track is the
@@ -693,10 +693,10 @@ impl CdSource {
     /// track, stopping the disc the moment it ended.
     ///
     /// Only meaningful while something plays or is armed; with neither, the
-    /// next arming or `start` sets `cursor` and `track` itself. Leaves `order` untouched when
-    /// `track` is not in it (no draw yet, or a stale order — see
-    /// `forget_disc`): `cursor` still goes to 0, the only sound position on
-    /// an order that does not contain what plays.
+    /// next arming or `start` sets `cursor` and `track` itself. Leaves
+    /// `order` untouched when `track` is not in it (no draw yet, or a stale
+    /// order — see `forget_disc`): `cursor` still goes to 0, the only sound
+    /// position on an order that does not contain what plays.
     fn open_pass_on_current_track(&mut self) {
         self.cursor = 0;
         if let Some(position) = self.order.iter().position(|&t| t == self.track)
@@ -4191,7 +4191,8 @@ mod tests {
     /// **[MUTATION]** `set_play_mode` back to its `playback`-only condition
     /// fails "the armed track heads the draw" (`[2, 0, 3, 1]` left as drawn).
     /// `start_armed`'s own reopen is a guard no event reaches any more (every
-    /// way of arming keeps the invariant): removing it leaves this test green.
+    /// way of arming keeps the invariant): removing it leaves this test green,
+    /// and the next one, which breaks the invariant by hand, red.
     #[tokio::test]
     async fn engaging_shuffle_while_stopped_puts_the_armed_track_at_the_head_of_the_pass() {
         let mut s = source_with_disc_and_order(4, vec![2, 0, 3, 1]);
@@ -4208,6 +4209,31 @@ mod tests {
         s.play().await;
         assert_eq!(s.pending_chapter, Some(0), "Play starts the armed track");
         assert_eq!(s.order, vec![0, 2, 3, 1]);
+        assert_eq!(s.cursor, 0);
+    }
+
+    /// `start_armed`'s guard, reached by breaking its invariant by hand: no
+    /// event leaves the shuffled pass off the armed track today, so the only
+    /// way to prove the guard is to plant that state. Should a later change
+    /// break the invariant, Play must still start the armed track **and** open
+    /// the pass on it, so every other entry is still heard once — not resync
+    /// the cursor to wherever the armed track sits in the draw, which would
+    /// skip what comes before it.
+    ///
+    /// **[MUTATION]** without the guard, the pass stays `[2, 0, 3, 1]` with
+    /// the cursor on track 3 while track 4 plays: "the armed track heads the
+    /// pass" fails.
+    #[tokio::test]
+    async fn play_on_an_armed_track_off_the_pass_opens_the_pass_on_it() {
+        let mut s = disc_with(4);
+        s.random = true;
+        s.order = vec![2, 0, 3, 1]; // a pass already drawn
+        s.track = 3; // armed on track 4, drawn at position 3
+        s.cursor = 0; // the invariant broken: the pass stands on track 3
+        assert!(s.is_armed());
+        s.play().await;
+        assert_eq!(s.pending_chapter, Some(3), "Play starts the armed track");
+        assert_eq!(s.order, vec![3, 0, 2, 1], "the armed track heads the pass");
         assert_eq!(s.cursor, 0);
     }
 }

@@ -1430,8 +1430,7 @@ insertion, resume point kept). Ritornello's own Eject is unaffected.
 
 **Armed tracks (Stop keeps what Play would start) have never run on the
 device.** The behaviour is proven by tests with fake sources and a fake core
-loop; four things remain
-unobserved:
+loop; four things remain unobserved:
 
 - the cd on a real drive: a known disc arming its track at insertion, then the
   MusicBrainz lookup at insertion (a network round trip while nothing plays),

@@ -2522,6 +2522,16 @@ without anything being lost: the entries already there are not touched.
   — the latter is the form met in practice, long published, hence
   referenced by directories and copied around by users.
 
+  The position in the track is the time since the plugin saw it start on
+  the feed, so the first track heard after reaching a station has a
+  duration but no bar: its start was not witnessed. That includes **Play
+  after Stop on the same station**: stopped, the plugin is shown nothing
+  playing (it does not opt in to armed tracks) and closes the feed, so
+  whatever started meanwhile is unknown. Measured on 2026-10-11 against
+  the live feed: title and duration back 0.3 s after Play, the bar with
+  the next track; FIP, whose plugin reads each track's start from Radio
+  France, had its bar back in 1.3 s.
+
   The optional `ouifm-metas.toml` file, in the plugin's own data directory
   (example in `deploy/`), is there for the day OUI FM changes something:
   its entries are consulted **before** the embedded table, which allows
@@ -3050,10 +3060,11 @@ identity is what Play would start, not what sounds (`metadata` contract 1.1).
 A plugin receives it only if it overrides `MetadataPlugin::enriches_armed` to
 return `true`; the SDK reads that once, at registration, and announces it as
 `Announcement::enriches_armed`, so the announcement cannot disagree with the
-plugin. The default is `false`, and then the relay shows the plugin `identity:
-None` for the whole armed state (the same frame as "nothing plays", sent once,
-not again each time more becomes known), then the identity when Play really
-starts it: a plugin written before armed tracks behaves exactly as it did.
+plugin. The default is `false`, and then the relay shows the plugin, for the
+whole armed state, a frame with the source kept, `identity: None` and nothing
+known — what it would see if nothing were playing — sent once, not again each
+time more becomes known; then the identity when Play really starts it. A
+plugin written before armed tracks behaves exactly as it did.
 Opt in only when what you answer is true of a silent track too. `musicbrainz`
 does (a disc's title and an album's cover are static facts, and the disc path
 still queries once per disc); the three station plugins (`radiofrance-metas`,

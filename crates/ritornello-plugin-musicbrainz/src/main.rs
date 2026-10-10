@@ -1393,8 +1393,10 @@ mod tests {
     /// enrichment echoes the identity unchanged. The disc is already known, so
     /// no request is made.
     ///
-    /// **[MUTATION]** ignoring a frame with `armed: true` in `now_playing`
-    /// leaves nothing prepared and fails the `next_enrichment` assertions.
+    /// `now_playing` never reads `armed` today, so there is no branch here to
+    /// break: the test guards the day one is added. **[MUTATION]** an early
+    /// return on `armed: true` in `now_playing` leaves nothing prepared and
+    /// fails the `next_enrichment` assertions.
     #[tokio::test]
     async fn an_armed_disc_track_is_enriched_like_a_playing_one() {
         let mut p = plugin_with_known_disc();
