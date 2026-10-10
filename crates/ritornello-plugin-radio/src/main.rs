@@ -292,8 +292,8 @@ impl SourcePlugin for RadioSource {
                     let stations = self.stations.read().await;
                     // Station removed from the table: its number no longer
                     // designates anything reliable, and the protocol has no
-                    // "no presets left". We then refrain from lying further
-                    // by touching nothing.
+                    // "no presets left". Playing, we then refrain from lying
+                    // further by touching nothing: the stream goes on.
                     if let Some(st) = stations.by_url(&url) {
                         let (p, name) = (st.preset, st.name.clone());
                         drop(stations);
@@ -307,6 +307,27 @@ impl SourcePlugin for RadioSource {
                             }
                         }
                         notice = notice.preset(p).preset_name(name);
+                    } else if !self.is_playing() {
+                        // Stopped, and the armed station is gone: the screen
+                        // would keep naming a station Play can no longer
+                        // start, while Play starts whatever now sits at
+                        // `self.preset`. Re-arm from that number — the
+                        // station there, or nothing if the number is empty.
+                        // Nothing plays, so declaring an identity interrupts
+                        // nothing.
+                        match stations.by_preset(self.preset) {
+                            Some(st) => {
+                                self.armed_url = Some(st.url.clone());
+                                notice = notice
+                                    .armed(Self::stream_identity(&st.url))
+                                    .preset(self.preset)
+                                    .preset_name(st.name.clone());
+                            }
+                            None => {
+                                self.armed_url = None;
+                                notice = notice.plays_nothing();
+                            }
+                        }
                     }
                 }
                 Some(notice)
@@ -867,5 +888,62 @@ mod tests {
             SourceAction::Play { uri, .. } => assert_eq!(uri, INTER),
             other => panic!("expected a Play, got {other:?}"),
         }
+    }
+
+    /// The armed station deleted from the page while stopped: the screen
+    /// must re-arm what Play now starts — the station at the same number —
+    /// and arm nothing once that number is empty too.
+    ///
+    /// **[MUTATION]** the `else if !self.is_playing()` branch removed from
+    /// `poll_notification` → the `armed` assertion fires. Its
+    /// `!self.is_playing()` replaced by `true` →
+    /// `a_deleted_station_while_playing_redeclares_nothing` fires.
+    #[tokio::test]
+    async fn the_armed_station_deleted_while_stopped_re_arms_the_number() {
+        let (tx, rx) = tokio::sync::watch::channel(0u8);
+        let (mut source, _dir) = playing_source().await;
+        source.preset_count_rx = Some(rx);
+        source.stop().await;
+        source.next().await; // armed: France Inter, preset 2
+        let removed = {
+            let mut st = source.stations.write().await;
+            let fip = st.stations.iter().find(|s| s.url == FIP).cloned().expect("FIP is in the table");
+            // France Inter goes; FIP takes its number.
+            st.stations.retain(|s| s.url != INTER);
+            st.stations.iter_mut().for_each(|s| s.preset = 2);
+            fip
+        };
+        tx.send(1).unwrap();
+        let n = source.poll_notification().await.expect("notification expected");
+        let armed = n.armed.expect("the armed station is gone: what Play starts must be armed");
+        assert_eq!(armed.identity, RadioSource::stream_identity(&removed.url));
+        assert_eq!(n.preset, Some(2));
+        assert_eq!(n.preset_name.as_deref(), Some(removed.name.as_str()));
+        match source.activate().await.action {
+            SourceAction::Play { uri, .. } => assert_eq!(uri, FIP, "Play starts what the screen shows"),
+            other => panic!("expected a Play, got {other:?}"),
+        }
+
+        // Stopped again, armed on FIP at 2; then the table empties.
+        source.stop().await;
+        source.stations.write().await.stations.clear();
+        tx.send(0).unwrap();
+        let n = source.poll_notification().await.expect("notification expected");
+        assert!(n.armed.is_none(), "nothing left to arm");
+        assert_eq!(n.identity, Some(ritornello_proto::IdentityUpdate::Nothing));
+    }
+
+    /// Playing, a deleted station changes nothing: the stream goes on, and
+    /// redeclaring anything would interrupt or blank it.
+    #[tokio::test]
+    async fn a_deleted_station_while_playing_redeclares_nothing() {
+        let (tx, rx) = tokio::sync::watch::channel(0u8);
+        let (mut source, _dir) = playing_source().await;
+        source.preset_count_rx = Some(rx);
+        let playing = source.current_url.clone().expect("something plays");
+        source.stations.write().await.stations.retain(|s| s.url != playing);
+        tx.send(1).unwrap();
+        let n = source.poll_notification().await.expect("notification expected");
+        assert!(n.identity.is_none() && n.armed.is_none(), "the stream goes on");
     }
 }
