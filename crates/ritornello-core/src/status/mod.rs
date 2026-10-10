@@ -1014,7 +1014,7 @@ mod tests {
         assert_eq!(cmd_rx.recv().await.unwrap().cmd, ritornello_proto::Command::Select(3));
     }
 
-    /// The exact body the home page's source bar posts: a string argument.
+    /// The exact body the home page's source keys post: a string argument.
     #[tokio::test]
     async fn post_command_relays_a_source_name() {
         let (state, mut cmd_rx) = app_state_with_cmd();

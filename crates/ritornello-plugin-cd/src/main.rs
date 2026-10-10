@@ -1449,7 +1449,7 @@ mod tests {
         assert_eq!(playing_source().icon(), Some("disc"));
     }
 
-    fn source_with_channels() -> (CdSource,mpsc::Sender<cd::Drive>, mpsc::Sender<ReadToc>) {
+    fn source_with_channels() -> (CdSource, mpsc::Sender<cd::Drive>, mpsc::Sender<ReadToc>) {
         let (presence_tx, presence_rx) = mpsc::channel(8);
         let (toc_tx, toc_rx) = mpsc::channel(4);
         let source = CdSource {

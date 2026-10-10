@@ -248,7 +248,6 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   await expect(sourceKey('radio')).toHaveAttribute('aria-pressed', 'true')
   await sourceKey('files').click()
   await expect(sourceKey('files')).toHaveAttribute('aria-pressed', 'true')
-  await expect(sourceKey('files')).toHaveAttribute('aria-pressed', 'true')
   await expect(sourceKey('radio')).toHaveAttribute('aria-pressed', 'false')
   // Three tracks, three numbers: the count is declared by the Source half on
   // activation, and it is what arms the remote.

@@ -83,13 +83,16 @@ Tailwind's `md` and `lg`, not a separate mobile view or a fork in the code.
   name (`aria-label`). The icon is the one the source plugin announced (see
   "A source's icon" in [plugins.md](plugins.md)), or the source's initial
   when it announced none. When the keys do not fit, the **cycle key**
-  (`SourceCycle`) comes back, with the source pill beside it (a single source gets the pill alone). Before the
+  (`SourceCycle`) comes back, with the source pill beside it. Before the
   source list has been read, or when `GET /api/presets` failed, the cycle key
   is also what shows, so a failed catalog never leaves the page without a way
-  to change source. With a single source there is nothing to choose and no
-  source key at all. A click on an icon key posts `SelectSource` with the
-  name; like the preset names, the list is reloaded on each source change, so
-  a plugin switched on while the page is open shows at the next change. The
+  to change source. So does an active source that is not in the list (the core
+  keeps it while mpv plays after its plugin died, which a page reload shows):
+  no icon key could be pressed, so the narrow mode's pill names it. With a
+  single source there is nothing to choose and no source key at all. A click
+  on an icon key posts `SelectSource` with the name; like the preset names,
+  the list is reloaded on each source change, so a plugin switched on while
+  the page is open shows at the next change. The
   Player card is a landmark region (`role="region"` with an accessible name):
   it has no visible title any more, the source keys or pill take that place.
   There is no longer a source bar above the cards.
@@ -103,10 +106,11 @@ Tailwind's `md` and `lg`, not a separate mobile view or a fork in the code.
 ### The Player card
 
 The cover and the current track are the subject: nothing above them
-competes for attention any more. Unless the header shows one icon key per source (which say the source
-themselves), a pastille badge in the card's header
-names the active source (`etat.source`, or "No source" before the first
-frame), with a small dot lit next to it while something is actually
+competes for attention any more. Unless the header shows one icon key
+per source (which say the source themselves), a pastille badge in the
+card's header names the active source (`etat.source`, or "No source"
+before the first frame), with a small dot lit next to it while something
+is actually
 playing (`playback === 'playing'`); a second badge reads "STANDBY" in
 standby. That dot is `bg-current` and not `bg-primary`: it inherits the badge's
 own text colour, so it contrasts with its own background **by construction**, in

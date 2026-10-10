@@ -111,6 +111,7 @@ impl SourcePlugin for RadioSource {
     fn icon(&self) -> Option<&'static str> {
         Some("radio")
     }
+
     async fn activate(&mut self) -> SourceOutcome {
         let preset = self.preset;
         self.play_preset(preset).await
