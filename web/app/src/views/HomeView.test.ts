@@ -549,6 +549,85 @@ describe('HomeView — sliders and names', () => {
   })
 })
 
+describe('HomeView — one key per source on a wide screen', () => {
+  // jsdom applies no stylesheet: what is asserted below is the breakpoint
+  // class each element carries, which is the whole of the switch between
+  // the cycle key (narrow) and the bar (wide).
+  async function mountWith(sources: unknown, state: Partial<PlayerPayload> = {}) {
+    const posts: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posts.push(init.body as string)
+        return new Response(null, { status: 204 })
+      }
+      if (url === '/api/presets') return new Response(JSON.stringify(sources), { status: 200 })
+      return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
+    }))
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    await flushPromises()
+    FakeEventSource.last!.push(state)
+    await nextTick()
+    return { w, posts }
+  }
+
+  const THREE = { sources: [{ name: 'radio' }, { name: 'cd' }, { name: 'files' }] }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('one key per declared source, in the order of the cycle', async () => {
+    const { w } = await mountWith(THREE, { source: 'cd' })
+    const keys = w.findAll('[data-source-key]')
+    expect(keys.map((k) => k.attributes('data-source-key'))).toEqual(['radio', 'cd', 'files'])
+    expect(keys.map((k) => k.text())).toEqual(['radio', 'cd', 'files'])
+  })
+
+  it('the active source is the pressed key, and only it', async () => {
+    const { w } = await mountWith(THREE, { source: 'cd' })
+    const pressed = w.findAll('[data-source-key]').map((k) => k.attributes('aria-pressed'))
+    expect(pressed).toEqual(['false', 'true', 'false'])
+  })
+
+  it('a key posts SelectSource with the name, not a notch of the cycle', async () => {
+    const { w, posts } = await mountWith(THREE, { source: 'radio' })
+    await w.get('[data-source-key="files"]').trigger('click')
+    expect(posts).toEqual([JSON.stringify({ cmd: 'SelectSource', arg: 'files' })])
+  })
+
+  it('in standby, every key is greyed, like the cycle key', async () => {
+    // The core ignores everything but `Power` in standby (see `unavailable`).
+    const { w } = await mountWith(THREE, { standby: true })
+    const keys = w.findAll('[data-source-key]')
+    expect(keys).toHaveLength(3)
+    for (const k of keys) {
+      expect(k.attributes('disabled'), k.attributes('data-source-key')).toBeDefined()
+    }
+  })
+
+  it('the bar shows from lg up, and the cycle key steps aside there', async () => {
+    const { w } = await mountWith(THREE)
+    expect(w.get('[data-source-bar]').classes()).toEqual(expect.arrayContaining(['hidden', 'lg:grid']))
+    expect(w.get('[data-remote-source]').classes()).toContain('lg:hidden')
+  })
+
+  it('without a catalog, no bar, and the cycle key stays on every width', async () => {
+    // A failed /api/presets must not leave a wide screen with no way at all
+    // to change source: the cycle key only steps aside for a bar that exists.
+    const { w } = await mountWith({ seek_step_s: 10 })
+    expect(w.find('[data-source-bar]').exists()).toBe(false)
+    expect(w.get('[data-remote-source]').classes()).not.toContain('lg:hidden')
+  })
+
+  it('a single source gets no bar: there is nothing to choose between', async () => {
+    const { w } = await mountWith({ sources: [{ name: 'radio' }] })
+    expect(w.find('[data-source-bar]').exists()).toBe(false)
+    expect(w.get('[data-remote-source]').classes()).not.toContain('lg:hidden')
+  })
+})
+
 describe('unavailable / hidden', () => {
   const state = (e: Partial<PlayerPayload>): PlayerPayload => ({
     source: 'radio', volume: 60, muted: false, standby: false, preset: null, preset_count: null,

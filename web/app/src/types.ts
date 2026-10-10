@@ -647,8 +647,11 @@ export interface PlayerPayload {
    */
   playback?: Playback
 }
-/** `arg` also carries a boolean (`SetRandom`) or a repeat value (`SetRepeat`). */
-export type Command = { cmd: string; arg?: number | boolean | Repeat }
+/**
+ * `arg` also carries a boolean (`SetRandom`), a repeat value (`SetRepeat`) or
+ * a source name (`SelectSource`).
+ */
+export type Command = { cmd: string; arg?: number | boolean | Repeat | string }
 /** The repeat setting of the device. */
 export type Repeat = 'off' | 'all' | 'one'
 /** What the player is doing. Absent from the frame when it is stopped (`seekable` idiom). */

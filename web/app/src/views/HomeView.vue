@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { api, Button, Card, CardContent, CardHeader, CardTitle, toast } from '@ritornello/ui'
 import { LoopIcon } from '@radix-icons/vue'
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import PresetGrid from '../components/PresetGrid.vue'
+import SourceBar from '../components/SourceBar.vue'
 import StandbyIcon from '../components/icons/StandbyIcon.vue'
 import PlayerCard from '../components/PlayerCard.vue'
 import Transport from '../components/Transport.vue'
@@ -27,11 +28,17 @@ async function send(cmd: Command) {
 
 // The tile names: loaded on mount, reloaded when the active source changes —
 // it is the frame that says so, nothing is probed.
-const { reload, nameOf } = usePresets()
+const { reload, nameOf, sources } = usePresets()
 onMounted(reload)
 watch(() => state.value?.source, (after, before) => {
   if (after !== undefined && after !== before) reload()
 })
+
+// The bar of one key per source, from `lg` up. Only when there is a choice to
+// make, and only once the catalog has arrived: the cycle key steps aside for
+// the bar, so a failed /api/presets must leave it in place — otherwise a wide
+// screen would have no way at all to change source.
+const sourceBar = computed(() => sources.value.length > 1)
 
 // The keyboard seek step of the bar: that of the physical keys, served by
 // /api/settings. The default covers the duration of the GET and its failure.
@@ -63,21 +70,32 @@ onMounted(async () => {
 </script>
 
 <template>
-  <!-- One column on a phone; two cards side by side from `md` up. -->
+  <!-- One column on a phone; two cards side by side from `md` up, under the
+       source bar that spans both from `lg` up. -->
   <div class="grid gap-4 md:grid-cols-2 md:items-start">
+    <SourceBar
+      v-if="sourceBar"
+      class="md:col-span-2"
+      :sources="sources"
+      :active="state?.source ?? null"
+      :disabled="unavailable('SelectSource', state)"
+      @choose="(name: string) => send({ cmd: 'SelectSource', arg: name })"
+    />
     <PlayerCard
       :state="state"
       :seek-step="settings.seek_step_s"
       @seek="(s: number) => send({ cmd: 'SeekTo', arg: s })"
     >
       <!-- The two commands bearing on the whole device, in the corner of the
-           card: the source, then standby in the far corner. -->
+           card: the source, then standby in the far corner. The cycle key
+           gives way to the source bar where the bar shows. -->
       <template #actions>
         <div class="flex items-center gap-1">
           <Button
             variant="outline"
             size="sm"
             data-remote-source
+            :class="{ 'lg:hidden': sourceBar }"
             :disabled="unavailable(REMOTE_SOURCE.cmd.cmd, state)"
             @click="send(REMOTE_SOURCE.cmd)"
           >
