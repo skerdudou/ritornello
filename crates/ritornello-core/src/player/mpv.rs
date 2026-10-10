@@ -424,6 +424,14 @@ pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) 
     vec![
         "--idle=yes".to_string(),
         "--no-video".to_string(),
+        // `--no-video` does not stop mpv from opening a `cover.jpg` it finds
+        // beside the track: it still loads it as an external track, at every
+        // file, at a cost that grows with the image. Measured on the device
+        // (mpv 0.40, Pi, SMB share): a 2.3 MB `cover.jpg` delayed every track
+        // of its folder by 2.7 s, which this option removes; a 13 KB
+        // `Folder.jpg` cost nothing measurable. The cover is the files
+        // plugin's business, never mpv's.
+        "--cover-art-auto=no".to_string(),
         "--no-terminal".to_string(),
         format!("--input-ipc-server={}", socket.display()),
         format!("--cdda-device={cd_dev}"),
@@ -1027,6 +1035,9 @@ pub(crate) mod tests {
         // The pre-existing arguments must not have been lost along the way.
         assert!(args.contains(&"--idle=yes".to_string()));
         assert!(args.contains(&"--no-video".to_string()));
+        // Without it, every track of a folder holding a `cover.jpg` started
+        // 2.7 s late on the device: mpv loaded the image itself.
+        assert!(args.contains(&"--cover-art-auto=no".to_string()));
         assert!(args.contains(&"--no-terminal".to_string()));
         assert!(args.contains(&"--input-ipc-server=/run/rp/mpv.sock".to_string()));
         assert!(args.contains(&"--cdda-device=/dev/sr0".to_string()));

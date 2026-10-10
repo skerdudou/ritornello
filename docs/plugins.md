@@ -1516,7 +1516,14 @@ or the write onto the share itself fails — and that is reported the same way
 a refusal is, but it is not one: the share coming back turns a failure into a
 success next time, where none of the refusals above ever will. A cover
 written into the wrong folder would win over the network for good, so the
-module would rather say nothing at all than guess.
+module would rather say nothing at all than guess. The attempt runs under a
+bound of its own, twenty seconds (`archive::BOUND`), and not the circuit
+breaker's 1.5 s: it answers to no request, and reading two dozen neighbours'
+tags then copying megabytes onto a NAS is long by nature — held to 1.5 s, a
+2.3 MB cover marked a healthy share unresponsive on the device. And whatever
+its outcome, the attempt forgets that its folder was remembered as imageless,
+so the next track finds the new `cover.jpg` instead of announcing no cover for
+the rest of the album.
 
 **Updating an existing installation.** As for every other plugin,
 `ritornello-install` installs the binary and, on a device already in service,
