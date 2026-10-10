@@ -1,23 +1,23 @@
-**Action required** — wire break: install the core and every plugin
-together. The bootstrap `PROTOCOL_VERSION` moved from 1 to 2, so every
-component of this release carries a new number and none of the previous
-ones can talk to the new core (nor the new plugins to an old core).
+**Action required** — the core's systemd unit changed
+(`ritornello.service`): an update from the web UI replaces the binaries but
+never writes a unit, by design. Place the new unit once, either by running
+`ritornello-install` from a workstation, or by hand from this release's core
+archive:
 
-- **Before installing**, set *Automatic checks* to *Off* or
-  *Check only* (Settings → Updates). The core you are running now
-  predates grouped updates: left on *Check and install*, it would install
-  this release one component at a time during the night, and a failed
-  start of the new core would be rolled back alone — leaving every new
-  plugin refused by the old core, and the device silent.
-- Then install everything in one go, while you watch: the update dialog
-  with every component checked, or `ritornello-install` from a
-  workstation. From this release on, the core installs a break as one
-  group and rolls it back as one.
-- A rollback of the core leaves every plugin refused until the core is
-  reinstalled.
+```sh
+sudo tar --no-same-owner -C / -xzf ritornello-core-<version>-<arch>.tar.gz
+sudo systemctl daemon-reload && sudo systemctl restart ritornello
+```
 
-The privileged updater's crate changed only in its tests: nothing to
-reinstall for it. No unit, polkit rule or mount helper changed.
+The one change: `ReadWritePaths=/etc/ritornello -/mnt/ritornello`. Without
+it, a network share already mounted when the service starts — after every
+boot — is seen read-only by the core and its plugins, whatever it was
+mounted with, so archiving a cover onto the NAS fails with "Read-only file
+system". A device with no `files` plugin loses nothing by waiting.
+
+This is not a wire break: no contract version moved, and the components can
+be installed together or one at a time. The privileged updater and the mount
+helper did not change.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -51,39 +51,23 @@ reinstall for it. No unit, polkit rule or mount helper changed.
      together. A rollback of the core leaves every plugin refused until the
      core is reinstalled. -->
 
-
 ## Behaviour changes
 
-**Where is this playing from?** The `(?)` next to the track on the player
-page now opens with a *Source* row: the stream URL of the station, or the
-address of the file — `smb://host/share/…` for a file on the NAS (never the
-user name), its path on the device otherwise. The CD shows none. The `(?)`
-now appears even when nothing else is known about what plays, such as a
-station that announces no title.
+**One key per source on a wide screen.** From a desktop width up, the home
+page shows a bar with one key per source, the active one pressed: changing
+source is one click. Pages now use up to 1280 px, and every plugin page is a
+card with a title. Narrow screens and the remote are unchanged.
 
-**A disc can start playing when it is inserted.** The CD plugin's page has a
-new setting, *When a disc is inserted*: nothing (the default), play if the CD is
-the source being listened to, switch to the CD and play, or also leave
-standby to do so.
+**A progress bar on Oüi FM.** The Oüi FM plugin now gives the position in the
+track on air, as Radio France stations already did. The first track after
+switching to a station shows its duration but no bar: its start time is
+unknown. The bar may run a few seconds ahead of the speakers.
 
-**Faster tracks from a folder with a cover.** mpv no longer opens the
-`cover.jpg` beside every track itself (4.5 s to start a track in such a
-folder on the Pi, against 1.8 s elsewhere). A cover archived onto the NAS is
-now credited to the folder for the rest of the album, and archiving a large
-cover no longer marks a healthy share as unresponsive.
-
-**Each wire contract has its own version.** A plugin now announces one
-version per contract it speaks (source, display, input, metadata, admin).
-The System page shows a plugin whose contract major differs from the core's
-as *incompatible*, naming the contract, and one whose minor is newer as
-*limited*: it runs, with some features inactive. A future break of one
-contract will only require the plugins that speak it to move.
-
-**A breaking core is installed with its dependents.** When an update changes
-a contract's major, the core and the plugins that depend on it are installed
-in one step and rolled back together if the new core does not start. The
-night-time update never installs a break; it waits for you. This applies to
-updates installed *by* this core — hence the action above for this one.
+**A cut in a stream leaves a trace.** When a station stops sending data,
+the journal (and the System tab's log card) now says when playback stalled
+and, once it resumes, for how long — naming the stream. Until now such a cut
+left no line at all, and a station's silence could not be told from a fault
+of the device.
 
 ## Install
 
