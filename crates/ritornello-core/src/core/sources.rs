@@ -519,8 +519,8 @@ impl<P: Player> Core<P> {
                 // stream had nothing known, and go and look again. A frame
                 // that arms nothing (`plays_nothing`) still clears the rest.
                 if was_stream && let Some(id) = self.metadata.identity().cloned() {
-                    self.set_identity_state(Some(id), true);
                     self.forget_the_moment();
+                    self.set_identity_state(Some(id), true);
                 }
             }
             SourceAction::PlayerNext => self.player.next().await?,

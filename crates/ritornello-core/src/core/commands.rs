@@ -334,14 +334,17 @@ impl<P: Player> Core<P> {
                 // anchor would resume under the next Play of this same track,
                 // advanced by the whole time spent stopped.
                 self.forget_position();
+                // A stopped stream keeps its station, not the song that was
+                // on air (see `forget_the_moment`). The moment goes first and
+                // the arming follows, so that no published frame ever says
+                // "armed" while still carrying the `known` of the song that
+                // was on air.
+                if was_stream {
+                    self.forget_the_moment();
+                }
                 match self.metadata.identity().cloned() {
                     Some(id) => self.set_identity_state(Some(id), true),
                     None => self.set_identity(None),
-                }
-                // A stopped stream keeps its station, not the song that was
-                // on air (see `forget_the_moment`).
-                if was_stream {
-                    self.forget_the_moment();
                 }
                 // The Source was not consulted for this stop: tell it,
                 // otherwise one that keeps its own playback state (the cd)
