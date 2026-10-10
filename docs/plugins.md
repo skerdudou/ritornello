@@ -253,7 +253,7 @@ unaffected — the same tolerance a merely dead plugin already gets. A plugin
 refused at startup and re-announcing hot with a good announcement is wired:
 the refusal is lifted. The configuration page names the cause and the
 contract, for instance "Incompatible display contract: built for 2.0, this
-core speaks 1.0", or "Limited — display contract 1.1, this core speaks 1.0:
+core speaks 1.0", or "Limited — display contract 1.2, this core speaks 1.1:
 some features of this plugin are inactive; update the core". The versions and
 the contract's name are placed by the language rather than concatenated into
 the sentence, and the name is translated (the same words the page uses for a
@@ -668,6 +668,24 @@ plugin added after a device went into service — the `files` source,
 `radiofrance-metas`, the `metadata` plugins split out of `cd` — needed an
 entry written by hand on the device before it existed at all. That step
 is gone.
+
+### A source's icon
+
+A source plugin may name the icon it shows under in the web UI, by
+overriding `SourcePlugin::icon`, which returns an `Option<&'static str>`. The
+names the UI draws are exactly these eight: `radio`, `disc`, `folder`,
+`music`, `headphones`, `podcast`, `tv` and `usb`. Any other name, and `None`
+(the default), shows the source's **initial** instead, so a plugin that
+announces nothing, or something this version of the UI does not know, still
+gets a key. The bundled sources announce `radio` (radio), `disc` (cd) and
+`folder` (files).
+
+The name travels in the plugin's bootstrap announcement, which carries no
+version of its own, and the core reads it once, when the plugin registers.
+From display contract 1.1 the core also carries it to displays, as the
+`icon` of each entry of the sources catalog (`GET /api/presets`). It is a
+**name, not a picture**: each display renders it in its own way (the web UI
+draws a glyph; a character display is free to ignore it).
 
 ## `ritornello-plugin-radio` — internet radio
 

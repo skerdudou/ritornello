@@ -235,7 +235,7 @@ that is the only visibility the split introduced.
 `crates/ritornello-proto/tests/wire_fingerprint.rs` serializes a sample of
 every message that crosses the core/plugin wire and compares it with
 `tests/wire-fingerprint.txt`. The fixture has one section per wire contract,
-headed with that contract's version (`[display 1.0]`), plus an
+headed with that contract's version (`[display 1.1]`), plus an
 `[announcement protocol=2]` section for the announcement and the bootstrap
 number. When it fails, the wire changed or a version moved without the
 fixture: decide whether an old plugin can still understand the new shape. If
