@@ -293,8 +293,8 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   //
   // The sine-wave fixtures carry tags (`serve.mjs`), so stopped and armed
   // **can** be told apart: a stopped source has the core read the armed
-  // file's tags itself, so the title is on screen while no position is � a
-  // playing track would show both.
+  // file's tags itself, so the title is on screen while no position is:
+  // a playing track would show both.
   await page.getByRole('button', { name: 'Stop', exact: true }).click()
   await expect(page.locator('[data-player-preset]')).toHaveText('3')
   await expect(page.locator('[data-player-preset-name]')).toHaveText('03')
@@ -317,11 +317,9 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   // second, the SPA draws. No unit test covers this chain — there is no mpv in
   // there.
   //
-  // These fixtures are sine waves **without any metadata**: in passing they
-  // prove that the bar does not depend on a title. As long as it lived in the
-  // "now playing" block, guarded by the presence of metadata, it was invisible
-  // on a file without tags — that is, precisely when mpv knows the position
-  // best.
+  // These fixtures carry tags now, so this step no longer proves that the
+  // bar is independent of a title: the "now playing" block has a title to
+  // show here. It only proves the chain from mpv's frames to the drawn bar.
   const position = page.locator('[data-position]')
   await expect(position).toBeVisible({ timeout: 15_000 })
   const first = await position.textContent()
