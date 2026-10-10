@@ -418,7 +418,7 @@ run_guard() {
 # --- the wire guard -----------------------------------------------------------
 # The fingerprint test lets a contract section marked `next` change without
 # its version moving: the owner's rule, an unpublished version is completed,
-# not bumped. Two things only this script can check make that safe:
+# not bumped. Three things only this script can check make that safe:
 #
 # - the release publishes every section, so none may still carry the mark:
 #   after it, a change must bump;
@@ -426,18 +426,30 @@ run_guard() {
 #   coupled guard's baseline, prereleases included: devices on the beta channel
 #   run it) already carried is refused, mark or not. That is what makes the
 #   mark impossible to forge: written by hand over a published section, it
-#   passes the test and stops here.
+#   passes the test and stops here;
+# - a version lower than the one the baseline published is refused: a version
+#   never goes down, and the test, blind to git, cannot see it went down.
 #
 # A baseline without the fixture, or without that section (a release older
 # than the contracts), has nothing to compare. No baseline at all (nothing ever
 # published) checks the mark only.
 run_wire_guard() {
-  local entry cname now_h base_h base_text="" have_base="" problems=()
+  local entry cname now_h base_h now_v base_v listing="" base_text="" have_base="" problems=()
   if [ ! -f "$WIRE_FIXTURE" ]; then
     echo "wire guard: $WIRE_FIXTURE is missing; refusing" >&2
     return 1
   fi
-  if [ -n "$GUARD_BASE" ] && git cat-file -e "$GUARD_BASE:$WIRE_FIXTURE" 2>/dev/null; then
+  # Absent and unreadable are two answers: `git cat-file -e` gives the same
+  # status for both, and read as "absent" a failing git would wave every
+  # published section through. ls-tree fails on a git failure and prints
+  # nothing for a tree that lacks the file.
+  if [ -n "$GUARD_BASE" ]; then
+    if ! listing=$(git ls-tree --name-only "$GUARD_BASE" -- "$WIRE_FIXTURE"); then
+      echo "wire guard: git ls-tree $GUARD_BASE -- $WIRE_FIXTURE failed; refusing" >&2
+      return 1
+    fi
+  fi
+  if [ -n "$GUARD_BASE" ] && [ -n "$listing" ]; then
     if ! base_text=$(git show "$GUARD_BASE:$WIRE_FIXTURE"); then
       echo "wire guard: git show $GUARD_BASE:$WIRE_FIXTURE failed; refusing" >&2
       return 1
@@ -457,7 +469,20 @@ run_wire_guard() {
     [ -n "$have_base" ] || continue
     base_h=$(printf '%s\n' "$base_text" | wire_header "$cname")
     [ -n "$base_h" ] || continue
-    if [ "$(header_word "$now_h" 2)" = "$(header_word "$base_h" 2)" ] \
+    now_v=$(header_word "$now_h" 2) base_v=$(header_word "$base_h" 2)
+    if ! [[ "$now_v" =~ ^[0-9]+\.[0-9]+$ && "$base_v" =~ ^[0-9]+\.[0-9]+$ ]]; then
+      problems+=("$cname: cannot compare its version $now_v with $base_v published by $GUARD_BASE")
+      continue
+    fi
+    # A version never goes down (docs/development.md). The fingerprint test
+    # cannot see git, so it cannot tell a lowered version from a new one: the
+    # release is the one place that can.
+    if (( 10#${now_v%%.*} < 10#${base_v%%.*} \
+      || (10#${now_v%%.*} == 10#${base_v%%.*} && 10#${now_v#*.} < 10#${base_v#*.}) )); then
+      problems+=("$cname: its version $now_v is lower than $base_v published by $GUARD_BASE; a version never goes down")
+      continue
+    fi
+    if [ "$now_v" = "$base_v" ] \
       && [ "$(wire_lines "$cname" < "$WIRE_FIXTURE")" != "$(printf '%s\n' "$base_text" | wire_lines "$cname")" ]; then
       problems+=("$cname: its messages changed since $GUARD_BASE but its version $(header_word "$now_h" 2), which $GUARD_BASE published, did not move; bump ${entry#*:} in crates/ritornello-proto/src/contract.rs")
     fi
@@ -911,6 +936,60 @@ if [ -n "$SELF_TEST" ]; then
   rel_bump ritornello-core
   wire_set source "[source 1.0]" "Sample = CHANGED"
   expect_rel 0 "ritornello-core" "" "a baseline without a fixture (beta.5) has nothing to compare" --guard-baseline v0.1.0 v0.1.0
+
+  # The shape v0.2.0-beta.6 is measured against: a fixture from before the
+  # contracts, one PROTOCOL_VERSION line and no section at all. Its sections
+  # are found nowhere, so nothing is compared, even under an unmoved version.
+  rel_repo
+  printf 'PROTOCOL_VERSION=1\nCommand::Next = {"cmd":"Next"}\n' > "$R/crates/ritornello-proto/tests/wire-fingerprint.txt.old"
+  cp "$R/crates/ritornello-proto/tests/wire-fingerprint.txt" "$R/fixture.keep"
+  mv "$R/crates/ritornello-proto/tests/wire-fingerprint.txt.old" "$R/crates/ritornello-proto/tests/wire-fingerprint.txt"
+  guard_git add -A; guard_git commit -q -m "baseline with a sectionless fixture"; guard_git tag -f v0.1.0 > /dev/null
+  mv "$R/fixture.keep" "$R/crates/ritornello-proto/tests/wire-fingerprint.txt"
+  rel_bump ritornello-core
+  wire_set source "[source 1.0]" "Sample = CHANGED"
+  expect_rel 0 "ritornello-core" "" "a baseline whose fixture predates the sections (beta.5's) has no section to compare" --guard-baseline v0.1.0 v0.1.0
+
+  # A version lower than the published one is refused, whatever its lines.
+  rel_repo
+  contract_set SOURCE "1, 1"
+  wire_set source "[source 1.1]" "Sample = SOURCE"
+  guard_git add -A; guard_git commit -q -m "baseline publishing source 1.1"; guard_git tag -f v0.1.0 > /dev/null
+  contract_set SOURCE "1, 0"
+  wire_set source "[source 1.0]" "Sample = SOURCE"
+  rel_bump ritornello-core
+  expect_rel 1 "" "never goes down" "a section whose minor went below the published one is refused" --guard-baseline v0.1.0 v0.1.0
+
+  # The major decides before the minor: 1.1 is below 2.0 although 1 > 0.
+  rel_repo
+  contract_set SOURCE "2, 0"
+  wire_set source "[source 2.0]" "Sample = SOURCE"
+  guard_git add -A; guard_git commit -q -m "baseline publishing source 2.0"; guard_git tag -f v0.1.0 > /dev/null
+  contract_set SOURCE "1, 1"
+  wire_set source "[source 1.1]" "Sample = SOURCE"
+  rel_bump ritornello-core
+  expect_rel 1 "" "never goes down" "a section whose major went below the published one is refused" --guard-baseline v0.1.0 v0.1.0
+
+  # A published header this script cannot read is refused, not compared as text.
+  rel_repo
+  wire_set source "[source one]" "Sample = SOURCE"
+  guard_git add -A; guard_git commit -q -m "baseline with an unreadable header"; guard_git tag -f v0.1.0 > /dev/null
+  wire_set source "[source 1.0]" "Sample = SOURCE"
+  rel_bump ritornello-core
+  expect_rel 1 "" "cannot compare" "a published section whose version cannot be read is refused" --guard-baseline v0.1.0 v0.1.0
+
+  # A git that cannot read the baseline's tree is not a baseline without a
+  # fixture: the tree holding the fixture is deleted from the object store
+  # once the change is committed (a commit would write it back otherwise).
+  # Read as "absent", the section changed under its published version would
+  # pass.
+  rel_repo
+  rel_bump ritornello-core
+  wire_set source "[source 1.0]" "Sample = CHANGED"
+  guard_git add -A; guard_git commit -q -m "core moved, source changed"
+  lost=$(guard_git rev-parse v0.1.0:crates/ritornello-proto/tests)
+  rm -f "$R/.git/objects/${lost:0:2}/${lost:2}"
+  expect_rel 1 "" "git ls-tree" "a baseline tree git cannot read is refused, not taken for one without a fixture" --guard-baseline v0.1.0 v0.1.0
 
   rel_repo
   rel_bump ritornello-core
