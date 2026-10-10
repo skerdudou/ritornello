@@ -1,29 +1,14 @@
-**Action required** — install this release with **ritornello-install 0.3.0
-or later**, once, from a workstation (an older one fails on this release's
-inventory, saying it does not parse).
-Two reasons, and the page can handle neither:
+**Nothing to do** — replace the binaries.
 
-- **The core's systemd unit changed** (`ritornello.service`). An update from
-  the web UI replaces binaries and never writes a unit, by design. The one
-  change is `ReadWritePaths=/etc/ritornello -/mnt/ritornello`: without it, a
-  network share already mounted when the service starts — after every boot —
-  is seen read-only by the core and its plugins, so archiving a cover onto the
-  NAS fails with "Read-only file system".
-- **From this release on, the core refuses to update itself from the page
-  while a root file of its archive moved** (a unit, a polkit rule, the
-  updater): see Behaviour changes. It judges by what ritornello-install
-  recorded placing, and no installer recorded it before 0.3.0. That one run
-  records it; until then, the page refuses every later update of the core and
-  says to use ritornello-install.
+No systemd unit, polkit rule, privileged updater or mount helper changed
+since beta.7, so the page updates everything by itself. This assumes the
+device already went through ritornello-install 0.3.0 or later once, as
+beta.7 asked.
 
-Before installing, set *Automatic checks* to *Off* or *Check only*
-(Settings → Updates): the core you are running now predates this rule, and
-left on *Check and install* it would install this core's binary alone during
-the night, without the unit.
-
-This is not a wire break: no contract version moved. The privileged updater
-did not change in behaviour; it now carries a number of its own, `1.0.0`,
-which is what the core compares. The mount helper did not change.
+This is not a wire break: three contracts gained compatible additions
+(`source` 1.2, `display` 1.1, `metadata` 1.1) and the bootstrap
+`PROTOCOL_VERSION` did not move. Any mix of old and new components still
+talks: an older core ignores what it does not know.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -59,30 +44,49 @@ which is what the core compares. The mount helper did not change.
 
 ## Behaviour changes
 
-**The core no longer updates itself past its root files.** Its archive
-carries systemd units, polkit rules and the updater, which the page never
-places. The core's update is now offered from the page only while each of
-them is the one ritornello-install recorded placing; otherwise the update
-dialog names the files that changed and says to update with
-ritornello-install, before anything is pressed, and the night-time update
-leaves it alone. The card no longer says, after the fact, that "N files were
-not installed".
+**Stop keeps the track on screen, and Next and Previous move it.** While
+nothing plays, the source keeps one track *armed*: the one Play starts.
+- The screen (web page and physical display) keeps its title, artist and
+  cover.
+- Next and Previous move the armed track without any sound, and Play
+  starts it from its beginning.
+- **Files**: Stop arms the track that was playing. Next and Previous
+  follow the current order, shuffled or not, and wrap around. At the end
+  of the list (repeat off), the first track of the next pass is armed.
+- **CD**: a disc that is inserted and not played shows its armed track at
+  once, and MusicBrainz is asked for its titles then. Next and Previous
+  stop at both ends of the disc. Eject forgets the track. Play after Stop
+  restarts the track that is armed, whatever the "on insertion" setting
+  says: that setting governs arrival and insertion only.
+- **Radio**: Stop keeps the station's number and name, but not the song
+  that was on air. Next and Previous change station without tuning in.
+- A third-party source keeps today's behaviour until it learns to arm a
+  track: Stop empties the screen.
 
-**One key per source on a wide screen.** From a desktop width up, the home
-page shows a bar with one key per source, the active one pressed: changing
-source is one click. Pages now use up to 1280 px, and every plugin page is a
-card with a title. Narrow screens and the remote are unchanged.
+**The display shows whether it plays.** The first line of the console
+display now starts with ▶ (playing), ║ (paused) or ■ (stopped).
 
-**A progress bar on Oüi FM.** The Oüi FM plugin now gives the position in the
-track on air, as Radio France stations already did. The first track after
-switching to a station shows its duration but no bar: its start time is
-unknown. The bar may run a few seconds ahead of the speakers.
+**Choosing a source wakes the device.** In standby, a source key — on the
+page, the remote or from an MPD client — wakes the device on that source.
+The active source wakes where it was, and another one is switched to.
+Everything else still waits for Power.
 
-**A cut in a stream leaves a trace.** When a station stops sending data,
-the journal (and the System tab's log card) now says when playback stalled
-and, once it resumes, for how long — naming the stream. Until now such a cut
-left no line at all, and a station's silence could not be told from a fault
-of the device.
+**Source icons in the player card.** The home page chooses the source with
+one icon key per source in the player card's header, the active one
+pressed. When they do not fit, the single Source key cycles through them
+as before. A source without an icon shows its initial. The bar of named
+source keys above the cards is gone.
+
+**The presets card in standby, and its pages.** In standby, the presets
+grid keeps showing the active source's stations. With several pages, the
+pagination sits in the card header ("11–20 of 23"), and the lone count
+under the title is gone.
+
+**Choose the name of an archived cover.** The files plugin's Sources tab
+picks, once for every source, the name a found cover is saved under next
+to the music: `cover` (the default, as before), `folder`, `front`,
+`albumart` or `album`. A folder that already holds an image under any of
+those names, in any case, is never written to.
 
 ## Install
 
