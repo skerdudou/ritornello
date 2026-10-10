@@ -42,6 +42,8 @@ export const CATALOG: Record<string, string> = {
   mounted_no: 'not mounted',
   writable_label: 'allow writes',
   archive_covers_label: 'keep found covers here',
+  cover_name_label: 'Name of a kept cover',
+  cover_name_help: 'Same name on every source.',
   btn_add_share: 'Declare a share',
 
   sources_title: 'Sources',
@@ -147,6 +149,8 @@ export interface ServerState {
   explore?: Explore
   mount_error?: string | null
   unresponsive?: string[]
+  cover_name?: string
+  cover_names?: string[]
 }
 
 /**
@@ -202,6 +206,10 @@ export function state(partial: ServerState = {}): Required<ServerState> {
     explore: EXPLORE_CLOSED,
     mount_error: null,
     unresponsive: [],
+    // What the plugin serves before anything is chosen: `CoverName::default`
+    // and `cover::PREFERENCES`, in that order.
+    cover_name: 'cover',
+    cover_names: ['cover', 'folder', 'front', 'albumart', 'album'],
     ...partial,
   }
 }

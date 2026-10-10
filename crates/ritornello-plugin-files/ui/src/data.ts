@@ -217,6 +217,17 @@ export interface Data {
    * indication of the cause.
    */
   unresponsive: string[]
+  /**
+   * The name a found cover is archived under, on every root — a file stem,
+   * the extension following the image itself.
+   */
+  coverName: string
+  /**
+   * The names the plugin accepts, in the order it reads them back. Served
+   * rather than written out here: the plugin refuses any other, and a copy of
+   * the list could drift from it.
+   */
+  coverNames: string[]
 }
 
 /** The plugin's "internal storage" destination, as opposed to a root name. */
@@ -490,6 +501,9 @@ export function normalizeData(raw: unknown): Data {
     explore: normalizeExploration(o.explore),
     mountError: typeof o.mount_error === 'string' && o.mount_error ? o.mount_error : null,
     unresponsive: array(o.unresponsive).map(string_).filter((s) => s !== ''),
+    // `cover` is `CoverName::default` on the plugin side.
+    coverName: string_(o.cover_name) || 'cover',
+    coverNames: array(o.cover_names).map(string_).filter((s) => s !== ''),
   }
 }
 

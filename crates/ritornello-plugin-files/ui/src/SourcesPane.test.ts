@@ -114,6 +114,40 @@ describe('sources pane', () => {
     })
   })
 
+  it('offers the cover names the plugin serves, showing the chosen one', async () => {
+    const { w } = await mountAdmin({ roots: [USB], cover_name: 'folder' })
+    const select = w.find('[data-cover-name]')
+    expect(select.findAll('option').map((o) => o.text())).toEqual([
+      'cover',
+      'folder',
+      'front',
+      'albumart',
+      'album',
+    ])
+    expect((select.element as HTMLSelectElement).value).toBe('folder')
+    expect(w.find('[data-cover-name-help]').text()).toBe('Same name on every source.')
+  })
+
+  it('sends the chosen cover name as one setting for every source', async () => {
+    const { w, s } = await mountAdmin({ roots: [USB, NAS] })
+    await w.find('[data-cover-name]').setValue('folder')
+    await flushPromises()
+    expect(s.putsOf('set_cover_name')).toEqual([{ op: 'set_cover_name', cover_name: 'folder' }])
+  })
+
+  it('names the cover name control for a screen reader', async () => {
+    const { w } = await mountAdmin({ roots: [USB] })
+    const id = w.find('[data-cover-name]').attributes('id')
+    expect(w.find(`label[for="${id}"]`).text()).toBe('Name of a kept cover')
+  })
+
+  it('offers no cover name while no source is declared', async () => {
+    // Nothing could be archived anywhere: the setting would be a question
+    // with no subject.
+    const { w } = await mountAdmin()
+    expect(w.find('[data-cover-name]').exists()).toBe(false)
+  })
+
   it('shows a mount failure and allows retrying it', async () => {
     // Mounting follows the declaration: without this report, a source
     // would stay "not mounted" with nothing saying why.

@@ -63,8 +63,9 @@ exists.
   authenticated SMB share mounted on demand; a file browser with search;
   playlists built by adding folders recursively, saved and loaded again.
   A root can also be armed to **keep the covers it finds**: the picture
-  fetched for an album is written as a `cover.jpg` beside the tracks —
-  never over an image already there — so any other player finds it too.
+  fetched for an album is written beside the tracks as a `cover.jpg`, or
+  under the name you pick for every source (`folder`, `front`…) — never
+  into a folder that already has a cover — so any other player finds it too.
 - **Shuffle, repeat all and repeat one** — on any source that has a
   finite list (a folder, a disc), driven from the web page, from a key on
   the remote or from an MPD client. Shuffle draws the list once and then

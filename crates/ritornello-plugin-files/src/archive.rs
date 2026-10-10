@@ -26,6 +26,7 @@
 //! this plugin's own `{"kind":"file","path":…}` shape is accepted, and a path
 //! carrying a `..` component is refused outright rather than resolved.
 
+use crate::cover::CoverName;
 use ritornello_plugin_files::roots::{RootKind, Roots};
 use std::path::{Component, Path, PathBuf};
 
@@ -46,10 +47,12 @@ pub enum Outcome {
     Failed(String),
 }
 
-/// The name the next listen will find. `cover` is the first entry of
-/// `cover::PREFERENCES`, so this is the file `cover::search` picks up without
-/// the network — and the one other players read too.
-const NAME: &str = "cover";
+/// The stem of the temporary an attempt writes before renaming it into place
+/// (see [`attempt_name`]). Fixed, and not the owner's chosen name: the
+/// temporary is hidden and never read, so nothing gains from it following the
+/// setting — and a leftover from a crash is then recognisable whatever the
+/// setting was when it was written.
+const TEMPORARY_STEM: &str = "cover";
 
 /// Time granted to the whole of [`store`] before its share is declared silent.
 ///
@@ -123,13 +126,18 @@ pub fn echoed_file(identity: &serde_json::Value) -> Option<PathBuf> {
 /// convenience: the homogeneity rule below is the delicate part of this module,
 /// and it deserves to be provable without writing a single tagged audio file.
 /// Production passes [`album_from_tags`].
+///
+/// `name` is the owner's choice, one for every root, and it is a
+/// [`CoverName`] rather than a string: only a name `cover::search` reads back
+/// can be written, so an archived cover is always found by the next track.
 pub fn store(
     roots: &Roots,
     identity: &serde_json::Value,
     staged: &Path,
+    name: CoverName,
     album_of: &dyn Fn(&Path) -> Option<String>,
 ) -> Outcome {
-    let outcome = decide(roots, identity, staged, album_of);
+    let outcome = decide(roots, identity, staged, name, album_of);
     let _ = std::fs::remove_file(staged);
     outcome
 }
@@ -140,6 +148,7 @@ fn decide(
     roots: &Roots,
     identity: &serde_json::Value,
     staged: &Path,
+    name: CoverName,
     album_of: &dyn Fn(&Path) -> Option<String>,
 ) -> Outcome {
     // 1. The echo, read and not trusted.
@@ -174,13 +183,17 @@ fn decide(
         Err(e) => return Outcome::Failed(format!("cannot list {}: {e}", dir.display())),
     };
 
-    // 4. Never overwrite. Any recognised extension counts, and the comparison
-    //    is case-insensitive because `cover::by_preference` is: a `Cover.JPG`
-    //    the owner scanned himself is already the answer to this folder, and
-    //    replacing it with a stranger's would be the one damage this feature
-    //    could do that nobody could undo.
-    if entries.iter().any(|p| is_target_image(p)) {
-        return Outcome::Refused("an image of that name is already there");
+    // 4. Never overwrite, and never add a second front face. **Any** name
+    //    `cover::search` recognises counts, not only the one about to be
+    //    written: with the owner free to choose `folder`, a check on that name
+    //    alone would drop a `folder.jpg` beside the `Cover.JPG` of the owner's
+    //    own scanning — two front faces, settled by preference order. Any
+    //    recognised extension counts, and the comparison is case-insensitive
+    //    because `cover::by_preference` is. Replacing the owner's image with a
+    //    stranger's would be the one damage this feature could do that nobody
+    //    could undo.
+    if entries.iter().any(|p| crate::cover::names_a_cover(p)) {
+        return Outcome::Refused("a cover image is already there");
     }
 
     // 5. Homogeneity. A cover dropped in a folder speaks for the whole folder,
@@ -251,7 +264,7 @@ fn decide(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let temporary = dir.join(attempt_name(extension, stamp));
-    let target = dir.join(format!("{NAME}.{extension}"));
+    let target = dir.join(format!("{}.{extension}", name.stem()));
     // The half-written file must not survive the failure that produced it, and
     // this branch is the one that actually half-writes: a share that goes away
     // mid-copy, a disk that fills. Leaving it would litter the owner's folder
@@ -287,8 +300,9 @@ fn decide(
 ///   filesystem, which is what makes it atomic;
 /// - **the leading dot and the `.tmp` extension survive** however long the
 ///   middle grows, so a leftover from a crash stays invisible to both
-///   `cover::search` and `is_target_image` — each judges on the extension, and
-///   `is_target_image` also on a stem that no longer reads as `cover`;
+///   `cover::search` and `cover::names_a_cover` — each judges on the
+///   extension, and `names_a_cover` also on a stem that no longer reads as
+///   one of its names;
 /// - **two attempts of the same process cannot collide.** That is the counter's
 ///   doing and not the clock's: a nanosecond stamp is only as fine as the
 ///   platform's clock, and the pid only separates processes. `nanos` is passed
@@ -302,23 +316,7 @@ fn attempt_name(extension: &str, nanos: u128) -> String {
     // The stamp separates this run from a leftover of an earlier one that
     // happened to be handed the same pid; the counter separates two attempts of
     // this run. A clock that refuses to answer costs neither.
-    format!(".{NAME}.{extension}.{}-{nanos}-{seq}.tmp", std::process::id())
-}
-
-/// Is this an image already occupying the name we would write? Case-insensitive
-/// on both halves, because `cover::by_preference` is: a `Cover.JPG` is already
-/// this folder's answer, whatever the shift key was doing when it was scanned.
-fn is_target_image(path: &Path) -> bool {
-    let Some(stem) = path.file_stem() else { return false };
-    if !stem.to_string_lossy().eq_ignore_ascii_case(NAME) {
-        return false;
-    }
-    // `cover::EXTENSIONS` itself, never a copy of it: an extension `cover::search`
-    // knows and this check does not would have us write a second front face into
-    // a folder that already has one. See that constant's own doc.
-    path.extension().is_some_and(|e| {
-        crate::cover::EXTENSIONS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str())
-    })
+    format!(".{TEMPORARY_STEM}.{extension}.{}-{nanos}-{seq}.tmp", std::process::id())
 }
 
 /// Two album names for the same album?
@@ -476,7 +474,7 @@ mod tests {
         // Read **before** the call: the staged file belongs to us once handed
         // over, and the last assertion of this test is that it no longer exists.
         let handed_over = std::fs::read(staged.path()).unwrap();
-        match store(&table, &identity(&dir.join("01.flac")), staged.path(), &albums) {
+        match store(&table, &identity(&dir.join("01.flac")), staged.path(), CoverName::Cover, &albums) {
             Outcome::Written(p) => {
                 assert_eq!(p.file_name().unwrap(), "cover.jpg");
                 assert_eq!(p.parent().unwrap(), dir.as_path());
@@ -497,7 +495,7 @@ mod tests {
         let (dir, table, albums) = local_root_with(&["01.flac"], "Album");
         let staged = staged_jpeg();
         let played = dir.join("01.flac");
-        let written = match store(&table, &identity(&played), staged.path(), &albums) {
+        let written = match store(&table, &identity(&played), staged.path(), CoverName::Cover, &albums) {
             Outcome::Written(p) => p,
             other => panic!("expected a write: {other:?}"),
         };
@@ -510,12 +508,69 @@ mod tests {
     }
 
     #[test]
+    fn the_chosen_name_is_the_one_written_and_the_one_found() {
+        // The owner's setting decides the stem; the bytes still decide the
+        // extension, and the next listen still finds it without the network.
+        let (dir, table, albums) = local_root_with(&["01.flac"], "Album");
+        let staged = staged_png_named("whatever.jpg");
+        let played = dir.join("01.flac");
+        let written = match store(&table, &identity(&played), staged.path(), CoverName::Folder, &albums)
+        {
+            Outcome::Written(p) => p,
+            other => panic!("expected a write: {other:?}"),
+        };
+        assert_eq!(written.file_name().unwrap(), "folder.png");
+        assert!(!dir.join("cover.png").exists(), "only the chosen name is written");
+        match crate::cover::search(&played) {
+            Some(ritornello_proto::CoverRef::Path { path }) => assert_eq!(PathBuf::from(path), written),
+            other => panic!("the archived cover must be the one the next listen finds: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cover_under_another_recognised_name_blocks_the_chosen_one() {
+        // The trap a choosable name opens: told to write `folder`, a check on
+        // that name alone would drop a `folder.jpg` beside the owner's own
+        // `Cover.JPG` — two front faces in one folder. Both directions, and a
+        // case that differs from the chosen name's, so neither the name nor
+        // the case can be what blocks.
+        for (existing, chosen) in [("Cover.JPG", CoverName::Folder), ("FOLDER.png", CoverName::Cover)] {
+            let (dir, table, albums) = local_root_with(&["01.flac"], "Album");
+            std::fs::write(dir.join(existing), b"the owner's own scan").unwrap();
+            let staged = staged_jpeg();
+            assert_eq!(
+                match store(&table, &identity(&dir.join("01.flac")), staged.path(), chosen, &albums) {
+                    Outcome::Refused(why) => why,
+                    other => panic!("{existing}: expected a refusal: {other:?}"),
+                },
+                "a cover image is already there",
+                "{existing} must block {chosen:?}"
+            );
+            assert!(!dir.join(format!("{}.jpg", chosen.stem())).exists());
+            assert!(!staged.path().exists(), "a refusal reaps the temp file too");
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_image_does_not_block_the_write() {
+        // The widened check is about names `cover::search` prefers, not about
+        // any image: a folder holding two scans the reader cannot choose between
+        // has no cover, and keeping one is exactly what the owner asked for.
+        let (dir, table, albums) = local_root_with(&["01.flac", "scan001.jpg", "scan002.jpg"], "Album");
+        let staged = staged_jpeg();
+        match store(&table, &identity(&dir.join("01.flac")), staged.path(), CoverName::Front, &albums) {
+            Outcome::Written(p) => assert_eq!(p.file_name().unwrap(), "front.jpg"),
+            other => panic!("expected a write: {other:?}"),
+        }
+    }
+
+    #[test]
     fn the_extension_follows_the_bytes_and_not_the_staged_name() {
         // A PNG written as `cover.jpg` would be read back by other players as
         // a broken file. The magic number decides.
         let (dir, table, albums) = local_root_with(&["01.flac"], "Album");
         let staged = staged_png_named("whatever.jpg");
-        match store(&table, &identity(&dir.join("01.flac")), staged.path(), &albums) {
+        match store(&table, &identity(&dir.join("01.flac")), staged.path(), CoverName::Cover, &albums) {
             Outcome::Written(p) => assert_eq!(p.file_name().unwrap(), "cover.png"),
             other => panic!("expected a write: {other:?}"),
         }
@@ -529,7 +584,7 @@ mod tests {
         let (dir, table, albums) = local_root_with(&["01.flac"], "Album");
         let staged = staged(b"<html>404</html>", "not-an-image-", ".jpg");
         assert_eq!(
-            match store(&table, &identity(&dir.join("01.flac")), staged.path(), &albums) {
+            match store(&table, &identity(&dir.join("01.flac")), staged.path(), CoverName::Cover, &albums) {
                 Outcome::Refused(why) => why,
                 other => panic!("expected a refusal: {other:?}"),
             },
@@ -545,11 +600,11 @@ mod tests {
         std::fs::write(dir.join("cover.jpg"), b"the owner's own scan").unwrap();
         let staged = staged_jpeg();
         assert_eq!(
-            match store(&table, &identity(&dir.join("01.flac")), staged.path(), &albums) {
+            match store(&table, &identity(&dir.join("01.flac")), staged.path(), CoverName::Cover, &albums) {
                 Outcome::Refused(why) => why,
                 other => panic!("expected a refusal: {other:?}"),
             },
-            "an image of that name is already there"
+            "a cover image is already there"
         );
         assert_eq!(std::fs::read(dir.join("cover.jpg")).unwrap(), b"the owner's own scan");
     }
@@ -571,11 +626,11 @@ mod tests {
             std::fs::write(dir.join(&existing), b"the owner's own scan").unwrap();
             let staged = staged_jpeg();
             assert_eq!(
-                match store(&table, &identity(&dir.join("01.flac")), staged.path(), &albums) {
+                match store(&table, &identity(&dir.join("01.flac")), staged.path(), CoverName::Cover, &albums) {
                     Outcome::Refused(why) => why,
                     other => panic!("{existing}: expected a refusal: {other:?}"),
                 },
-                "an image of that name is already there",
+                "a cover image is already there",
                 "{existing} must block the write"
             );
             assert!(!dir.join("cover.jpg").exists(), "{existing} must block the write");
@@ -593,7 +648,7 @@ mod tests {
         let staged = staged_jpeg();
         let reader = albums(&[("01.flac", "Kind of Blue"), ("02.flac", "A Love Supreme")]);
         assert_eq!(
-            match store(&table, &identity(&dir.path().join("01.flac")), staged.path(), &reader) {
+            match store(&table, &identity(&dir.path().join("01.flac")), staged.path(), CoverName::Cover, &reader) {
                 Outcome::Refused(why) => why,
                 other => panic!("expected a refusal: {other:?}"),
             },
@@ -618,7 +673,7 @@ mod tests {
         let (dir, table, albums) = local_root_with(&refs, "The Complete Recordings");
         let staged = staged_jpeg();
         assert!(matches!(
-            store(&table, &identity(&dir.join("01.flac")), staged.path(), &albums),
+            store(&table, &identity(&dir.join("01.flac")), staged.path(), CoverName::Cover, &albums),
             Outcome::Written(_)
         ));
     }
@@ -646,6 +701,7 @@ mod tests {
                 &table,
                 &identity(&dir.path().join("01.flac")),
                 staged.path(),
+                CoverName::Cover,
                 &albums(&pairs)
             ) {
                 Outcome::Refused(why) => why,
@@ -668,7 +724,7 @@ mod tests {
         let staged = staged_jpeg();
         let reader = albums(&[("01.flac", "Kind of Blue")]);
         assert!(matches!(
-            store(&table, &identity(&dir.path().join("01.flac")), staged.path(), &reader),
+            store(&table, &identity(&dir.path().join("01.flac")), staged.path(), CoverName::Cover, &reader),
             Outcome::Written(_)
         ));
     }
@@ -683,7 +739,7 @@ mod tests {
         let staged = staged_jpeg();
         let reader = albums(&[("02.flac", "Kind of Blue")]);
         assert_eq!(
-            match store(&table, &identity(&dir.path().join("01.flac")), staged.path(), &reader) {
+            match store(&table, &identity(&dir.path().join("01.flac")), staged.path(), CoverName::Cover, &reader) {
                 Outcome::Refused(why) => why,
                 other => panic!("expected a refusal: {other:?}"),
             },
@@ -700,7 +756,7 @@ mod tests {
         let staged = staged_jpeg();
         let reader = albums(&[("01.flac", "Kind of Blue"), ("02.flac", " Kind Of Blue ")]);
         assert!(matches!(
-            store(&table, &identity(&dir.path().join("01.flac")), staged.path(), &reader),
+            store(&table, &identity(&dir.path().join("01.flac")), staged.path(), CoverName::Cover, &reader),
             Outcome::Written(_)
         ));
     }
@@ -717,7 +773,7 @@ mod tests {
         let staged = staged_jpeg();
         let reader = albums(&[("01.flac", "Kind of Blue"), ("notes.txt", "A Love Supreme")]);
         assert!(matches!(
-            store(&table, &identity(&dir.path().join("01.flac")), staged.path(), &reader),
+            store(&table, &identity(&dir.path().join("01.flac")), staged.path(), CoverName::Cover, &reader),
             Outcome::Written(_)
         ));
     }
@@ -749,7 +805,7 @@ mod tests {
         let staged = staged_jpeg();
         let reader = albums(&[("01.flac", "Kind of Blue")]);
         assert_eq!(
-            match store(&table, &identity(played), staged.path(), &reader) {
+            match store(&table, &identity(played), staged.path(), CoverName::Cover, &reader) {
                 Outcome::Refused(why) => why,
                 other => panic!("expected a refusal: {other:?}"),
             },
@@ -764,7 +820,7 @@ mod tests {
         table.root[0].archive_covers = false;
         let staged = staged_jpeg();
         assert_eq!(
-            match store(&table, &identity(&dir.join("01.flac")), staged.path(), &albums) {
+            match store(&table, &identity(&dir.join("01.flac")), staged.path(), CoverName::Cover, &albums) {
                 Outcome::Refused(why) => why,
                 other => panic!("expected a refusal: {other:?}"),
             },
@@ -787,6 +843,7 @@ mod tests {
                 &Roots::default(),
                 &identity(&dir.path().join("01.flac")),
                 staged.path(),
+                CoverName::Cover,
                 &reader
             ) {
                 Outcome::Refused(why) => why,
@@ -809,7 +866,7 @@ mod tests {
         ] {
             let staged = staged_jpeg();
             assert_eq!(
-                match store(&table, &foreign, staged.path(), &albums) {
+                match store(&table, &foreign, staged.path(), CoverName::Cover, &albums) {
                     Outcome::Refused(why) => why,
                     other => panic!("{foreign}: expected a refusal: {other:?}"),
                 },
@@ -831,7 +888,7 @@ mod tests {
         let traversal = dir.join("sub").join("..").join("01.flac");
         let staged = staged_jpeg();
         assert_eq!(
-            match store(&table, &identity(&traversal), staged.path(), &albums) {
+            match store(&table, &identity(&traversal), staged.path(), CoverName::Cover, &albums) {
                 Outcome::Refused(why) => why,
                 other => panic!("expected a refusal: {other:?}"),
             },
@@ -858,7 +915,7 @@ mod tests {
         let staged = staged_jpeg();
 
         let reader = albums(&[("01.flac", "Kind of Blue")]);
-        match store(&table, &identity(&album.join("01.flac")), staged.path(), &reader) {
+        match store(&table, &identity(&album.join("01.flac")), staged.path(), CoverName::Cover, &reader) {
             Outcome::Written(p) => assert_eq!(p.parent().unwrap(), album.as_path()),
             other => panic!("expected a write: {other:?}"),
         }
@@ -925,7 +982,7 @@ mod tests {
             "a leftover temporary must not be served as the cover"
         );
         let staged = staged_jpeg();
-        match store(&table, &identity(&played), staged.path(), &albums) {
+        match store(&table, &identity(&played), staged.path(), CoverName::Cover, &albums) {
             Outcome::Written(p) => assert_eq!(p.file_name().unwrap(), "cover.jpg"),
             other => panic!("a leftover temporary must not block the write: {other:?}"),
         }
@@ -937,7 +994,7 @@ mod tests {
         let (dir, table, albums) = local_root_with(&["01.flac"], "Album");
         let staged = staged_jpeg();
         assert!(matches!(
-            store(&table, &identity(&dir.join("01.flac")), staged.path(), &albums),
+            store(&table, &identity(&dir.join("01.flac")), staged.path(), CoverName::Cover, &albums),
             Outcome::Written(_)
         ));
         let mut left: Vec<String> = std::fs::read_dir(dir.as_path())
@@ -960,7 +1017,7 @@ mod tests {
         // Named, not merely matched: `Failed` carries a formatted errno, so the
         // assertion is on the sentence this module wrote in front of it. A
         // `matches!` alone would be satisfied by a failure from any other step.
-        let why = match store(&table, &identity(&played), staged.path(), &albums) {
+        let why = match store(&table, &identity(&played), staged.path(), CoverName::Cover, &albums) {
             Outcome::Failed(why) => why,
             other => panic!("expected a failure: {other:?}"),
         };
