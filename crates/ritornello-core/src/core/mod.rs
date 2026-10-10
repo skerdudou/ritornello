@@ -217,6 +217,13 @@ pub struct Core<P: Player> {
     /// standby, source change and stop all call `set_identity(None)`, so
     /// this single point already covers them.
     preset_name: Option<String>,
+    /// Where what is playing comes from, as the active Source worded it (see
+    /// `SourceMessage::location`). Lives and dies with the identity:
+    /// `set_identity` forgets it whenever the identity changes or is cleared,
+    /// and the frame's own declaration is applied after (by
+    /// `apply_declared_facts`), so a restated identity keeps it and a new
+    /// track never inherits the previous one's.
+    location: Option<String>,
     /// Permanent status declared by the active Source, **not yet
     /// resolved** (see `SourceMessage::status_text`). Replaced by every
     /// non-transient frame, including by its absence — see the convention
@@ -541,6 +548,7 @@ impl<P: Player> Core<P> {
             overlay: None,
             preset: None,
             preset_name: None,
+            location: None,
             source_status: None,
             verbatim_status_counts: HashMap::new(),
             standby_status,
@@ -675,8 +683,7 @@ impl<P: Player> Core<P> {
             preset,
             preset_count,
             preset_name,
-            // Applied by the core in the next change.
-            location: _,
+            location,
             status_text,
             can_eject,
             has_finite_list,
@@ -772,7 +779,7 @@ impl<P: Player> Core<P> {
         // and `transient` joins them because a transient word is a
         // statement about what is playing (it must keep its overlay and
         // disarm a `+NN` in flight). `preset`, `preset_name`,
-        // `preset_count`, `can_eject`, `has_finite_list`, `presets`, `cover`,
+        // `location`, `preset_count`, `can_eject`, `has_finite_list`, `presets`, `cover`,
         // `cover_thumb` and `cover_archivable` attest nothing: all of them
         // follow the "absent = keep" convention, so none can prove the frame
         // describes the whole view.
@@ -791,6 +798,10 @@ impl<P: Player> Core<P> {
             || has_finite_list.is_some()
             || preset.is_some()
             || preset_name.is_some()
+            // A frame carrying only the location must reach an exit: left out
+            // of this disjunction it would fall through to the full path and
+            // erase the remembered status, which it never described.
+            || location.is_some()
             || cover.is_some()
             || cover_thumb.is_some()
             // The offer travels alone on `plugin-files`' probe notification.
@@ -807,7 +818,7 @@ impl<P: Player> Core<P> {
             // depending on someone remembering to copy it — that is
             // exactly the oversight that made every Source cover get lost
             // silently.
-            self.apply_declared_facts(preset, preset_name, cover, cover_thumb, cover_archivable, name);
+            self.apply_declared_facts(preset, preset_name, location, cover, cover_thumb, cover_archivable, name);
             // Publish anyway: count, drawer and selection are part of the
             // broadcast state, and the channel dedupes if nothing changed.
             self.publish_state();
@@ -878,7 +889,7 @@ impl<P: Player> Core<P> {
         // alongside `preset_count`; the early-return path, meanwhile,
         // cannot carry an identity by construction, so calling it there is
         // safe.
-        self.apply_declared_facts(preset, preset_name, cover, cover_thumb, cover_archivable, name);
+        self.apply_declared_facts(preset, preset_name, location, cover, cover_thumb, cover_archivable, name);
         // `preset_count` and `can_eject` are applied **at the top** of this
         // function, before the early return, for the same reason.
         //
@@ -1023,16 +1034,23 @@ impl<P: Player> Core<P> {
     /// field *next to* this call rather than inside it one day. What is
     /// guaranteed is that no field already routed through here can be
     /// missing on either path.
+    // One body for both exits is worth more than an artificial grouping of
+    // the declared facts into a struct.
+    #[allow(clippy::too_many_arguments)]
     fn apply_declared_facts(
         &mut self,
         preset: Option<u8>,
         preset_name: Option<String>,
+        location: Option<String>,
         cover: Option<ritornello_proto::CoverRef>,
         cover_thumb: Option<ritornello_proto::CoverRef>,
         cover_archivable: Option<bool>,
         name: &str,
     ) {
         self.apply_selection(preset, preset_name);
+        if let Some(l) = location {
+            self.location = Some(l);
+        }
         // Both halves of the pair through **one** call, so that neither exit
         // can carry one without the other — the same reason `cover` itself is
         // routed through here rather than written at the bottom of
@@ -1245,6 +1263,26 @@ mod tests {
         assert_eq!(state_rx.borrow().track, track_before, "the track must not move");
         assert!(!np_rx.has_changed().unwrap(), "the identity must not move");
         assert_eq!(np_rx.borrow().identity, Some(id));
+    }
+
+    #[tokio::test]
+    async fn an_update_of_location_alone_leaves_the_remembered_status_intact() {
+        // Same guarantee as for `preset_name` above: a frame carrying only
+        // the location is a fact, not a recomposition of the view. Were it
+        // not in `carries_a_fact` it would take the full path, where an
+        // absent `status_text` means "no status", and erase the status.
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        let mut permanent = bare_update();
+        permanent.status_text = Some(Text::Verbatim("FIP".into()));
+        core.handle_source_update("radio", permanent);
+        assert_eq!(state_rx.borrow().status.as_deref(), Some("FIP"));
+
+        let mut only = bare_update();
+        only.location = Some("http://fip".into());
+        core.handle_source_update("radio", only);
+
+        assert_eq!(state_rx.borrow().location.as_deref(), Some("http://fip"), "the location must be published");
+        assert_eq!(state_rx.borrow().status.as_deref(), Some("FIP"), "the status must survive");
     }
 
     #[tokio::test]
