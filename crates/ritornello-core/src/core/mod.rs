@@ -339,6 +339,12 @@ pub struct Core<P: Player> {
     /// "radio"` while the cd is playing. So nothing forgets it: neither
     /// switching source, nor standby.
     presets_par_source: HashMap<String, Vec<Preset>>,
+    /// The icon **each source's plugin announced** (`Announcement::icon`),
+    /// indexed by source name, set from `main` by `set_source_icon` and read
+    /// by `sources_catalog`. A source that announced none has no entry.
+    /// Forgotten with the source, like `presets_par_source`, so that a plugin
+    /// relit under the same name never inherits the icon of its previous life.
+    icon_par_source: HashMap<String, String>,
     /// Remote tens offset in flight: `Plus10` presses accumulate here until
     /// a digit key consumes them (`+10` then `4` selects 14). Cleared by the
     /// overlay's own deadline (`expire_overlay`) or by its consumption
@@ -563,6 +569,7 @@ impl<P: Player> Core<P> {
             update_sources: persisted.update_sources.clone(),
             pack_preferences: persisted.pack_preferences.clone(),
             presets_par_source: HashMap::new(),
+            icon_par_source: HashMap::new(),
             pending_tens: 0,
             state_path,
             catalog,

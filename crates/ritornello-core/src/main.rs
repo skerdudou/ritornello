@@ -865,6 +865,12 @@ async fn hotplug<P: player::Player>(
                         // (otherwise it is active and silent), and publishing
                         // the state.
                         //
+                        // The icon is recorded **before** it: `add_source`
+                        // publishes the catalog that lists this source, and
+                        // that publication must already carry its icon — or
+                        // none, which also clears what a previous life of the
+                        // same name announced.
+                        //
                         // It used to push the current locale as well, and a
                         // manually restarted `cd` on a device in French came
                         // back displaying its status in English when it did
@@ -877,6 +883,7 @@ async fn hotplug<P: player::Player>(
                         // First wiring or rewiring: that is precisely the
                         // event sought by whoever is debugging a flapping
                         // plugin, and the boolean knows it.
+                        core.set_source_icon(&name, announcement.icon.clone());
                         match core.hotplug_source(name.clone(), client).await {
                             Ok(true) => {
                                 tracing::info!("{name} source client replaced (plugin rewired)")
@@ -1881,6 +1888,12 @@ async fn main() -> Result<()> {
     // fails below, the flag is set back to `false` on every line for this
     // name, whatever their kind.
     let mut sources: HashMap<String, Arc<dyn core::Source>> = HashMap::new();
+    // The icon each **connected** source announced, set on the core right
+    // after `Core::new`: the core does not exist yet while the sources are
+    // gathered here. Kept beside `sources` rather than re-read from
+    // `gathered.announcements` later, so that only a source actually wired
+    // gets one.
+    let mut source_icons: Vec<(String, Option<String>)> = Vec::new();
     // The name travels with the client: it is what names the plugin in the
     // log when its relay stops.
     // The announcement's `covers` flag travels with the client: by the time
@@ -1944,6 +1957,7 @@ async fn main() -> Result<()> {
                     {
                         Ok(client) => {
                             sources.insert(name.clone(), client);
+                            source_icons.push((name.clone(), announcement.icon.clone()));
                             plugin_statuses.push(announced_plugin_line(name, "source", true, announcement, &limited));
                         }
                         Err(e) => {
@@ -2300,6 +2314,13 @@ async fn main() -> Result<()> {
             app_state_skeleton,
         );
         core = core_engine;
+        // The startup sources' icons, collected above while they were wired:
+        // `Core::new` has just published a catalog without them, and each
+        // call below republishes it with one more — before any display relay
+        // is spawned, so a display's first catalog already carries them.
+        for (name, icon) in source_icons {
+            core.set_source_icon(&name, icon);
+        }
         app_covers = app_state.covers.clone();
         let app = status::router(app_state);
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;

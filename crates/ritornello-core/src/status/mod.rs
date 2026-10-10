@@ -1200,7 +1200,7 @@ mod tests {
                 SourceCatalog {
                     name: "radio".into(),
                     presets: vec![Preset { index: 1, name: "FIP".into() }],
-                    icon: None,
+                    icon: Some("radio".into()),
                 },
                 SourceCatalog { name: "cd".into(), presets: vec![], icon: None },
             ],
@@ -1214,6 +1214,8 @@ mod tests {
         assert_eq!(v["sources"][0]["presets"][0], serde_json::json!({ "index": 1, "name": "FIP" }));
         assert_eq!(v["sources"][1]["name"], "cd");
         assert_eq!(v["sources"][1].get("presets"), None, "a source that does not enumerate has no presets field");
+        assert_eq!(v["sources"][0]["icon"], "radio", "the icon the source announced is served");
+        assert_eq!(v["sources"][1].get("icon"), None, "a source that announced none has no icon field");
     }
 
     #[tokio::test]
