@@ -426,10 +426,11 @@ pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) 
         "--no-video".to_string(),
         // `--no-video` does not stop mpv from opening a `cover.jpg` it finds
         // beside the track: it still loads it as an external track, at every
-        // file. Measured on the device (mpv 0.40, Pi, 2.3 MB `cover.jpg` on
-        // the SMB share): 4.5 s to open a track of that folder, 1.8 s with
-        // this option, 1.8 s either way in a folder without an image. The
-        // cover is the files plugin's business, never mpv's.
+        // file, at a cost that grows with the image. Measured on the device
+        // (mpv 0.40, Pi, SMB share): a 2.3 MB `cover.jpg` delayed every track
+        // of its folder by 2.7 s, which this option removes; a 13 KB
+        // `Folder.jpg` cost nothing measurable. The cover is the files
+        // plugin's business, never mpv's.
         "--cover-art-auto=no".to_string(),
         "--no-terminal".to_string(),
         format!("--input-ipc-server={}", socket.display()),
