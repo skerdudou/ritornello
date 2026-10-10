@@ -1430,7 +1430,7 @@ insertion, resume point kept). Ritornello's own Eject is unaffected.
 
 **Armed tracks (Stop keeps what Play would start) have never run on the
 device.** The behaviour is proven by tests with fake sources and a fake core
-loop; three things remain
+loop; four things remain
 unobserved:
 
 - the cd on a real drive: a known disc arming its track at insertion, then the
@@ -1441,7 +1441,10 @@ unobserved:
 - an armed file read on a **sleeping NAS**: the tags and the embedded cover are
   read from the share under a deadline, and what the owner sees while the share
   spins up, and the late answer being dropped, were exercised only with a read
-  made slow on purpose.
+  made slow on purpose;
+- what a real MPD client shows while stopped. Traced in the code only: `status`
+  answers `state: stop` without a song, and `currentsong` answers the armed
+  track; no client has been pointed at it in that state.
 
 **The rollback only recognises "does not start."** It watches the service
 failing to come up — systemd's start-limit plus `OnFailure=` on the unit —
