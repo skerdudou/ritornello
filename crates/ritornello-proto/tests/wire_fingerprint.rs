@@ -699,13 +699,67 @@ fn is_contract(header: &str) -> bool {
     Contract::ALL.iter().any(|c| contract_name(*c) == section_name(header))
 }
 
-/// The `(major, minor)` of a contract header such as `[source 1.0]`; `None`
-/// when the header carries no well-formed version.
+/// The mark a contract header carries while its version has been in no
+/// release: `[source 1.1 next]`. Such a section may still change in place —
+/// the owner's rule: an unpublished version is "next", completed rather than
+/// bumped. Whether a marked version was in fact published is checked at
+/// release time by `scripts/changed-components.sh`, which can see git.
+const UNPUBLISHED: &str = "next";
+
+#[test]
+fn a_header_reads_with_or_without_the_unpublished_mark() {
+    assert_eq!(header_version("[source 1.1]"), Some((1, 1)));
+    assert_eq!(header_version("[source 1.1 next]"), Some((1, 1)));
+    assert_eq!(header_version("[source 1.1 later]"), None, "only `next` is a mark");
+    assert_eq!(header_version("[source 1.1 next next]"), None, "one mark at most");
+    assert!(is_unpublished("[source 1.1 next]"));
+    assert!(!is_unpublished("[source 1.1]"));
+    assert!(!is_unpublished("[announcement protocol=2]"));
+}
+
+#[test]
+fn the_written_header_marks_what_no_release_carried() {
+    let rec = |h: &str, lines: &[&str]| Section { header: h.into(), lines: lines.iter().map(|l| l.to_string()).collect() };
+    // Raised: the new version is published nowhere.
+    assert_eq!(written_header("[source 1.2]", &rec("[source 1.1]", &["a"])), "[source 1.2 next]");
+    // Not raised: the recorded mark is kept, present or absent.
+    assert_eq!(written_header("[source 1.1]", &rec("[source 1.1 next]", &["a"])), "[source 1.1 next]");
+    assert_eq!(written_header("[source 1.1]", &rec("[source 1.1]", &["a"])), "[source 1.1]");
+}
+
+/// The `(major, minor)` of a contract header such as `[source 1.0]` or
+/// `[source 1.1 next]`; `None` when the header carries no well-formed version,
+/// or a third word other than the unpublished mark.
 fn header_version(header: &str) -> Option<(u32, u32)> {
     let inner = header.strip_prefix('[')?.strip_suffix(']')?;
-    let (_, version) = inner.split_once(' ')?;
-    let (major, minor) = version.split_once('.')?;
+    let mut words = inner.split(' ');
+    words.next()?;
+    let (major, minor) = words.next()?.split_once('.')?;
+    match (words.next(), words.next()) {
+        (None, None) | (Some(UNPUBLISHED), None) => {}
+        _ => return None,
+    }
     Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// The header carries the unpublished mark.
+fn is_unpublished(header: &str) -> bool {
+    header.trim_start_matches('[').trim_end_matches(']').split(' ').nth(2) == Some(UNPUBLISHED)
+}
+
+/// The header this run records for a contract section: the generated one
+/// (never marked), plus the mark when its version is unpublished — raised
+/// above the recorded one, or recorded as unpublished and not raised.
+fn written_header(generated: &str, recorded: &Section) -> String {
+    let raised = match (header_version(generated), header_version(&recorded.header)) {
+        (Some(now), Some(before)) => now > before,
+        _ => false,
+    };
+    if raised || is_unpublished(&recorded.header) {
+        format!("{} {UNPUBLISHED}]", generated.trim_end_matches(']'))
+    } else {
+        generated.to_string()
+    }
 }
 
 /// The constant to edit for a contract section, named in the refusals.
@@ -779,7 +833,7 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
                 r.header
             ));
         } else if is_contract(&r.header) && header_version(&r.header).is_none() {
-            refusals.push(format!("{}: the header of a contract section must read `[<name> <major>.<minor>]`.", r.header));
+            refusals.push(format!("{}: the header of a contract section must read `[<name> <major>.<minor>]` or `[<name> <major>.<minor> next]`.", r.header));
         }
     }
 
@@ -804,7 +858,9 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
             continue;
         };
         // A contract section whose content moved while its version did not
-        // move UP: a decision was skipped. Compared as (major, minor), so
+        // move UP: a decision was skipped, unless the recorded header carries
+        // the `next` mark: a version no release has carried may still change
+        // in place. Compared as (major, minor), so
         // bumping, regenerating, then putting the constant back and
         // regenerating again is refused too. A version that went DOWN is
         // refused even when the lines are identical: the test cannot see git,
@@ -814,7 +870,7 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
         // Refused even under UPDATE_WIRE_FINGERPRINT.
         if is_contract(&s.header) {
             let ok = match (header_version(&s.header), header_version(&r.header)) {
-                (Some(now_v), Some(before_v)) => now_v > before_v || (now_v == before_v && r.lines == s.lines),
+                (Some(now_v), Some(before_v)) => now_v > before_v || (now_v == before_v && (r.lines == s.lines || is_unpublished(&r.header))),
                 _ => false,
             };
             if !ok {
@@ -823,7 +879,10 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
                      or its version moved down (recorded: {}). A version never goes down: restore the \
                      fixture from git.\n  A break (an old peer would misread it): bump the MAJOR of \
                      {} in crates/ritornello-proto/src/contract.rs.\n  A compatible addition: bump its \
-                     MINOR.\n  Then regenerate with: {REGENERATE}\n  First difference:\n{}",
+                     MINOR.\n  A version no release has carried may change in place: its header in the \
+                     fixture reads `[<name> <major>.<minor> next]`, and `scripts/changed-components.sh` \
+                     refuses a release that still carries the mark or that changed a published section.\n  \
+                     Then regenerate with: {REGENERATE}\n  First difference:\n{}",
                     s.header,
                     r.header,
                     contract_constant(&s.header),
@@ -834,17 +893,34 @@ fn the_wire_fingerprint_matches_the_committed_fixture() {
     }
     assert!(refusals.is_empty(), "{}", refusals.join("\n\n"));
 
+    // The text to record: the generated one, with each contract header
+    // carrying the unpublished mark as `written_header` decides. The
+    // announcement section has no mark.
+    let mut expected = String::new();
+    for s in &current {
+        let header = match recorded.iter().find(|r| same_section(&r.header, &s.header)) {
+            Some(r) if is_contract(&s.header) => written_header(&s.header, r),
+            _ => s.header.clone(),
+        };
+        expected.push_str(&header);
+        expected.push('\n');
+        for line in &s.lines {
+            expected.push_str(line);
+            expected.push('\n');
+        }
+    }
+
     if update {
-        std::fs::write(&path, &now).expect("the fixture is writable");
+        std::fs::write(&path, &expected).expect("the fixture is writable");
         return;
     }
     assert!(
-        now == recorded_text,
+        expected == recorded_text,
         "the wire fingerprint is out of date (a version moved, or the announcement changed).\n\
          The announcement is the bootstrap: an addition is compatible (regenerate and say why in the commit); \
          a break moves PROTOCOL_VERSION, which republishes everything.\n\
          Regenerate with: {REGENERATE}\n\
          First difference:\n{}",
-        first_difference_text(&recorded_text, &now)
+        first_difference_text(&recorded_text, &expected)
     );
 }
