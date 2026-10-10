@@ -330,6 +330,20 @@ impl FilesSource {
     async fn resync_order_if_changed(&mut self) {
         if self.playlist_changed.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.draw_order().await;
+            // **Stopped, the armed entry heads the fresh draw** — as
+            // `set_play_mode` and `end_of_content` already put it. A draw
+            // lands it at a random position, and Play starts there: the
+            // right track, then only the tail of the pass, the entries drawn
+            // ahead of it never played. Playing, `reload_if_changed` steps
+            // on from wherever the current entry sits, so nothing moves.
+            if self.random && !self.plays.load(std::sync::atomic::Ordering::Relaxed) {
+                let current = self.playlist.read().await.index;
+                if let Some(position) = self.position_of(current)
+                    && position != 0
+                {
+                    self.order.swap(0, position);
+                }
+            }
         }
     }
 
@@ -2652,6 +2666,77 @@ mod tests {
         assert_eq!(armed_path(&s.next().await), "/musique/01.mp3");
         let out = s.activate().await;
         assert_eq!(started_entry(&out), 0, "Play starts the armed entry");
+    }
+
+    /// Shuffle on, stopped on entry 2, the page edits the list: the redraw
+    /// before Play must keep the armed entry at the head of the pass, or Play
+    /// starts the right track and then plays only the tail of the draw.
+    ///
+    /// **[MUTATION]** the stopped-redraw swap removed from
+    /// `resync_order_if_changed` → the `start` assertion fires (Play starts
+    /// at position 1).
+    #[tokio::test]
+    async fn an_edit_under_shuffle_while_stopped_keeps_the_armed_entry_at_the_head() {
+        let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![0, 1, 2, 3]]));
+        s.set_play_mode(true, Repeat::Off).await;
+        s.playlist.write().await.index = 1;
+        s.playlist.write().await.entries.push(Entry {
+            path: PathBuf::from("/musique/04.mp3"),
+            title: None,
+            duration_s: None,
+        });
+        s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
+        let out = s.activate().await;
+        match out.action {
+            SourceAction::Play { start, .. } => assert_eq!(start, Some(0), "the whole pass, from the armed entry"),
+            other => panic!("expected a Play, got {other:?}"),
+        }
+        assert_eq!(started_entry(&out), 1, "Play starts the armed entry");
+        assert_eq!(s.entry_at(0), Some(1), "at the head of the fresh draw");
+    }
+
+    /// The counterpart while playing: the redraw leaves the playing entry
+    /// where the draw put it, and Next steps on from there — moving it to the
+    /// head would make Next land on the draw's second entry instead.
+    ///
+    /// **[MUTATION]** the `!plays` operand of the stopped-redraw swap
+    /// replaced by `true` → the `started_entry` assertion fires. Its
+    /// `self.random` operand replaced by `true` →
+    /// `next_while_stopped_reads_the_edited_playlist` fires.
+    #[tokio::test]
+    async fn an_edit_under_shuffle_while_playing_leaves_the_draw_alone() {
+        let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![0, 1, 2, 3]]));
+        s.set_play_mode(true, Repeat::Off).await;
+        s.playlist.write().await.index = 2;
+        s.activate().await;
+        s.playlist.write().await.entries.push(Entry {
+            path: PathBuf::from("/musique/04.mp3"),
+            title: None,
+            duration_s: None,
+        });
+        s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
+        let out = s.next().await;
+        assert_eq!(started_entry(&out), 3, "the entry after the playing one in the fresh draw");
+        assert_eq!(s.drawn_order(), &[0, 1, 2, 3]);
+    }
+
+    /// The same edit while stopped, with Next before Play: the armed entry
+    /// heads the redraw, and Next walks on from there.
+    #[tokio::test]
+    async fn next_after_an_edit_under_shuffle_while_stopped_walks_from_the_armed_entry() {
+        let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![0, 1, 2, 3]]));
+        s.set_play_mode(true, Repeat::Off).await;
+        s.playlist.write().await.index = 1;
+        s.playlist.write().await.entries.push(Entry {
+            path: PathBuf::from("/musique/04.mp3"),
+            title: None,
+            duration_s: None,
+        });
+        s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Redrawn [0, 1, 2, 3], the armed entry 1 swapped to the head:
+        // [1, 0, 2, 3]. Next arms position 1, entry 0.
+        assert_eq!(armed_path(&s.next().await), "/musique/01.mp3");
+        assert_eq!(s.drawn_order(), &[1, 0, 2, 3]);
     }
 
     #[tokio::test]
