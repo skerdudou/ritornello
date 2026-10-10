@@ -148,10 +148,12 @@ impl<P: Player> Core<P> {
                 .bounded(std::path::Path::new(&path), move || mpv::read_armed_file(&to_read))
                 .await
             {
-                // The circuit breaker handed back control: a silent share,
-                // a real incident — `warn`, as for the embedded cover.
+                // The circuit breaker handed back control. `debug` only:
+                // `Health::bounded` already warns on a real timeout, and on a
+                // mount it already holds unreachable it answers at once —
+                // a `warn` here would repeat the one or misname the other.
                 None => {
-                    tracing::warn!("armed file: {path} did not answer in time");
+                    tracing::debug!("armed file: {path} not read (share unavailable or too slow)");
                     (None, None)
                 }
                 // The file could not be read (gone, not audio): the armed
@@ -2303,5 +2305,37 @@ mod tests {
             more += 1;
         }
         assert_eq!(more, 0, "the same track armed again must not be read again");
+    }
+
+    /// The Source's `cover.jpg`, already fetched and shown, then the armed
+    /// file's read arriving with its embedded picture: the screen must not
+    /// move. Taking the picture anyway is not merely a wasted fetch —
+    /// `set_cover_tags` drops the published cover key, so the state goes out
+    /// with no `cover_href` until a second fetch of the very same image
+    /// returns, and the cover blinks.
+    ///
+    /// **[MUTATION]** the `!known().cover` check removed from
+    /// `armed_read_arrived` → the `cover_href` assertion fires.
+    #[tokio::test]
+    async fn an_embedded_cover_read_after_the_source_cover_does_not_blink() {
+        let (mut core, _state_rx, mut cover_rx, tmp) = test_core_with_cover_channel();
+        let audio = "/music/a.mp3";
+        let image = tmp.path().join("cover.jpg");
+        std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let mut update = arms_file(serde_json::json!({"path": audio}), audio);
+        update.cover = Some(ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() });
+        core.handle_source_update("radio", update);
+        let (key, ok) = cover_rx.recv().await.expect("the Source's cover must be fetched");
+        assert!(ok, "the test image must be readable");
+        core.cover_arrived(key.clone(), ok).await;
+        let href = format!("/api/cover/{key}");
+        assert_eq!(core.player_state().track.cover_href.as_deref(), Some(&href[..]), "otherwise nothing could blink");
+
+        let mut read = read_of(audio, "Alpha");
+        read.cover = Some(CoverSource::Embedded { audio: audio.into(), content: "embedded".into() });
+        core.armed_read_arrived(read).await;
+        assert_eq!(core.player_state().track.title.as_deref(), Some("Alpha"), "otherwise the read was dropped and proves nothing");
+        assert_eq!(core.player_state().track.cover_href.as_deref(), Some(&href[..]), "the shown cover must not blink");
+        assert_eq!(core.cover_in_flight, None, "no second fetch of a cover already shown");
     }
 }

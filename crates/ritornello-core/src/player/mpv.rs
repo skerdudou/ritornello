@@ -435,7 +435,10 @@ fn cover_of(path: &str, file: &lofty::file::TaggedFile) -> Option<crate::cover::
 /// What `file_tags` reads from mpv once the file plays, read here with
 /// `lofty` because nothing plays: the same three fields, trimmed, empty →
 /// `None`, the year through the same `valid_year`, the same `ORIGIN_TAGS`
-/// — so Play replacing this layer with mpv's own changes nothing on screen.
+/// — so when Play replaces this layer with mpv's own, the text reads the
+/// same. Not guaranteed identical: `lofty` and FFmpeg are two readers, and
+/// a tag one of them reads differently (an odd encoding, a second artist
+/// frame) can still differ once the track plays.
 /// One parse of the container for both halves: on a share, every open is
 /// the expensive part.
 pub fn read_armed_file(path: &str) -> Option<(Option<Track>, Option<crate::cover::CoverSource>)> {
@@ -449,7 +452,10 @@ pub fn read_armed_file(path: &str) -> Option<(Option<Track>, Option<crate::cover
     let clean = |value: Option<std::borrow::Cow<'_, str>>| {
         value.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     };
-    let seconds = file.properties().duration().as_secs_f64().round() as u32;
+    // Truncated, as the core truncates mpv's measured duration
+    // (`refresh_position`): rounding would show 3:34 armed for a track
+    // that shows 3:33 once it plays.
+    let seconds = u32::try_from(file.properties().duration().as_secs()).unwrap_or(u32::MAX);
     let track = Track {
         artist: clean(tag.and_then(|t| t.artist())),
         title: clean(tag.and_then(|t| t.title())),

@@ -440,7 +440,10 @@ pub struct Core<P: Player> {
     /// The file behind the armed identity, as the Source declared it
     /// (`Armed::media_path`). What `armed_read_arrived` compares a read
     /// against: a late answer for a track the Source has since moved off must
-    /// not land on the next one. Cleared whenever nothing is armed.
+    /// not land on the next one. **Meaningful only while `armed`**:
+    /// `set_identity_state` clears it on unarming, but `apply`'s `Play`
+    /// unarms without touching it, so every reader checks `armed` first
+    /// (`armed_read_arrived`, and `arm`'s re-arm test).
     armed_path: Option<String>,
     /// Circuit breaker that bounds the `lofty` call, strictly blocking and
     /// potentially on a network share: see `health.rs` and the comment on
