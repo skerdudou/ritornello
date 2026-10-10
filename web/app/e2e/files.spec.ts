@@ -250,9 +250,10 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   await expect(sourceKey('files')).toHaveAttribute('aria-pressed', 'true')
   await expect(sourceKey('radio')).toHaveAttribute('aria-pressed', 'false')
   // Three tracks, three numbers: the count is declared by the Source half on
-  // activation, and it is what arms the remote.
+  // activation, and it is what arms the remote; it is not printed as a lone
+  // number any more.
   await expect(page.locator('[data-preset-button]')).toHaveCount(3)
-  await expect(page.locator('[data-preset-count]')).toContainText('3')
+  await expect(page.locator('[data-preset-count]')).toHaveCount(0)
   // No pagination under ten presets.
   await expect(page.locator('[data-preset-prev]')).toHaveCount(0)
   await expect(page.locator('[data-preset-next]')).toHaveCount(0)

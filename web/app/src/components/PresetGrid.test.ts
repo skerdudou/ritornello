@@ -1,5 +1,6 @@
 import { mount } from '@vue/test-utils'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { resetCatalog, useCatalog } from '../composables/useCatalog'
 import type { PlayerPayload } from '../types'
 import PresetGrid from './PresetGrid.vue'
 
@@ -10,6 +11,15 @@ const state = (e: Partial<PlayerPayload>): PlayerPayload => ({
   seekable: false, can_eject: false, has_finite_list: false, random: false, ...e,
 })
 const NAMES: Record<number, string> = { 1: 'FIP', 2: 'France Inter' }
+// The shell's catalog is module-level state: load the two keys the card
+// renders with params, as App.vue does, so the test reads the real text.
+const CATALOG = { presets_label: 'Presets', presets_window: '{first}–{last} of {total}' }
+beforeEach(async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(CATALOG), { status: 200 })))
+  await useCatalog().reload()
+})
+afterEach(() => resetCatalog())
+
 const mounted = (e: Partial<PlayerPayload>, nameOf = (n: number) => NAMES[n] ?? null, listedCount = 0) => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
   return mount(PresetGrid, { props: { state: state(e), nameOf, listedCount } })
@@ -56,14 +66,31 @@ describe('PresetGrid', () => {
     expect(w.emitted('choose')).toEqual([[3]])
   })
 
-  it('announces the count and the displayed window', () => {
-    // A page covers 10k+1..10k+10: preset 11 is therefore the first of page 1,
-    // which spans 11 to 12 on twelve stations.
+  it('shows no lone count, and the position in the header when there are pages', () => {
     const w = mounted({ preset_count: 12, preset: 11 })
-    expect(w.get('[data-preset-count]').text()).toContain('12')
-    expect(w.get('[data-preset-window]').text()).toBe('11–12')
+    expect(w.find('[data-preset-count]').exists()).toBe(false)
+    const header = w.get('[data-slot="card-header"]')
+    expect(header.text()).toContain('Presets')
+    expect(header.find('[data-preset-prev]').exists()).toBe(true)
+    expect(header.find('[data-preset-next]').exists()).toBe(true)
+    expect(header.get('[data-preset-window]').text()).toBe('11–12 of 12')
     expect(w.get('[data-preset-prev]').attributes('disabled')).toBeUndefined()
     expect(w.get('[data-preset-next]').attributes('disabled')).toBeDefined()
+  })
+
+  it('without pages, the header holds the title alone', () => {
+    const w = mounted({ preset_count: 3 })
+    const header = w.get('[data-slot="card-header"]')
+    expect(header.find('[data-preset-window]').exists()).toBe(false)
+    expect(header.find('[data-preset-prev]').exists()).toBe(false)
+  })
+
+  it('leaving standby, the announced count rules again', async () => {
+    const w = mounted({ standby: true, preset_count: null }, undefined, 2)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(2)
+    await w.setProps({ state: state({ standby: false, preset_count: 23, preset: 15 }) })
+    expect(w.findAll('[data-preset-button]')).toHaveLength(10)
+    expect(w.get('[data-preset-window]').text()).toBe('11–20 of 23')
   })
 
   it('the first page holds ten tiles, the second starts at 11', async () => {
@@ -74,12 +101,12 @@ describe('PresetGrid', () => {
     const w = mounted({ preset_count: 23 })
     expect(w.findAll('[data-preset-button]').map((b) => b.attributes('data-preset-button')))
       .toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
-    expect(w.get('[data-preset-window]').text()).toBe('1–10')
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
 
     await w.get('[data-preset-next]').trigger('click')
-    expect(w.get('[data-preset-window]').text()).toBe('11–20')
+    expect(w.get('[data-preset-window]').text()).toBe('11–20 of 23')
     await w.get('[data-preset-next]').trigger('click')
-    expect(w.get('[data-preset-window]').text()).toBe('21–23')
+    expect(w.get('[data-preset-window]').text()).toBe('21–23 of 23')
     // And it is the last one: 23 stations fit in three pages.
     expect(w.get('[data-preset-next]').attributes('disabled')).toBeDefined()
   })
@@ -87,16 +114,16 @@ describe('PresetGrid', () => {
   it('the page follows the playing preset, tenth included', async () => {
     // The trap of the new bound: 10 belongs to page 0, not to page 1.
     const w = mounted({ preset_count: 23, preset: 10 })
-    expect(w.get('[data-preset-window]').text()).toBe('1–10')
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
     await w.setProps({ state: state({ preset_count: 23, preset: 11 }) })
-    expect(w.get('[data-preset-window]').text()).toBe('11–20')
+    expect(w.get('[data-preset-window]').text()).toBe('11–20 of 23')
   })
 
   it('a count landing exactly on a decade does not fabricate an empty page', () => {
     // Twenty stations: two pages, not three. A third would name 21-30, where
     // there is nothing — same bound as the wrap-around of the `+10`.
     const w = mounted({ preset_count: 20 })
-    expect(w.get('[data-preset-window]').text()).toBe('1–10')
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 20')
     expect(w.get('[data-preset-prev]').attributes('disabled')).toBeDefined()
     expect(w.get('[data-preset-next]').attributes('disabled')).toBeUndefined()
   })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { api, Button, Card, CardContent, CardHeader, CardTitle, toast } from '@ritornello/ui'
+import { api, Button, toast } from '@ritornello/ui'
 import { LoopIcon } from '@radix-icons/vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import PresetGrid from '../components/PresetGrid.vue'
@@ -145,11 +145,6 @@ onMounted(async () => {
         />
       </template>
     </PlayerCard>
-    <Card>
-      <CardHeader><CardTitle>{{ t('presets_label') }}</CardTitle></CardHeader>
-      <CardContent>
-        <PresetGrid :state="state" :listed-count="state ? listedCount(state.source) : 0" :name-of="(n: number) => (state ? nameOf(state.source, n) : null)" @choose="(n: number) => send({ cmd: 'Select', arg: n })" />
-      </CardContent>
-    </Card>
+    <PresetGrid :state="state" :listed-count="state ? listedCount(state.source) : 0" :name-of="(n: number) => (state ? nameOf(state.source, n) : null)" @choose="(n: number) => send({ cmd: 'Select', arg: n })" />
   </div>
 </template>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Button } from '@ritornello/ui'
+import { Button, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import { ChevronLeftIcon, ChevronRightIcon } from '@radix-icons/vue'
 import { computed, ref, watch } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
@@ -49,7 +49,7 @@ const lastPage = computed(() => {
 
 const window = computed(() => {
   const p = presets.value
-  return p.length ? `${p[0]}–${p[p.length - 1]}` : ''
+  return p.length ? t.value('presets_window', { first: p[0]!, last: p[p.length - 1]!, total: count.value ?? 0 }) : ''
 })
 
 function previousPage() {
@@ -85,13 +85,13 @@ const dimmed = computed(() => unavailable('Select', props.state))
 </script>
 
 <template>
-  <div class="space-y-3" data-preset-grid>
-    <div v-if="count !== null" class="flex items-center gap-2">
-      <!-- The "Presets" label is already the card title (HomeView): here,
-           only the count. -->
-      <p data-preset-count class="text-xs text-muted-foreground">{{ count }}</p>
-      <span class="flex-1" />
-      <template v-if="paginationVisible">
+  <Card data-preset-grid>
+    <CardHeader>
+      <CardTitle>{{ t('presets_label') }}</CardTitle>
+      <!-- The position only when there are pages: a lone count read as a
+           stray number under the title. Same row as the title, as the
+           Player card holds its keys. -->
+      <CardAction v-if="paginationVisible" class="flex items-center gap-2">
         <Button data-preset-prev variant="outline" size="icon-sm" :disabled="page === 0" :aria-label="t('presets_prev_page')" @click="previousPage">
           <ChevronLeftIcon class="size-4" />
         </Button>
@@ -99,26 +99,28 @@ const dimmed = computed(() => unavailable('Select', props.state))
         <Button data-preset-next variant="outline" size="icon-sm" :disabled="page === lastPage" :aria-label="t('presets_next_page')" @click="nextPage">
           <ChevronRightIcon class="size-4" />
         </Button>
-      </template>
-    </div>
-    <!-- One tile = number + name. Two columns: enough for a station name,
-         and the same grid on the phone and in the half-width of the PC. -->
-    <div class="grid grid-cols-2 gap-2">
-      <Button
-        v-for="n in presets"
-        :key="n"
-        :data-preset-button="n"
-        :data-preset-active="state?.preset === n ? 'true' : undefined"
-        :aria-current="state?.preset === n ? 'true' : undefined"
-        :variant="state?.preset === n ? 'default' : 'outline'"
-        class="h-14 justify-start gap-3 px-3 md:h-12"
-        :disabled="dimmed"
-        @click="emit('choose', n)"
-      >
-        <span class="w-6 text-left text-base font-bold" :class="state?.preset === n ? '' : 'text-muted-foreground'">{{ n }}</span>
-        <span v-if="nameOf(n)" class="truncate font-medium" data-preset-name>{{ nameOf(n) }}</span>
-        <span v-if="state?.preset === n" class="ml-auto size-2 shrink-0 rounded-full bg-current" aria-hidden="true" />
-      </Button>
-    </div>
-  </div>
+      </CardAction>
+    </CardHeader>
+    <CardContent>
+      <!-- One tile = number + name. Two columns: enough for a station name,
+           and the same grid on the phone and in the half-width of the PC. -->
+      <div class="grid grid-cols-2 gap-2">
+        <Button
+          v-for="n in presets"
+          :key="n"
+          :data-preset-button="n"
+          :data-preset-active="state?.preset === n ? 'true' : undefined"
+          :aria-current="state?.preset === n ? 'true' : undefined"
+          :variant="state?.preset === n ? 'default' : 'outline'"
+          class="h-14 justify-start gap-3 px-3 md:h-12"
+          :disabled="dimmed"
+          @click="emit('choose', n)"
+        >
+          <span class="w-6 text-left text-base font-bold" :class="state?.preset === n ? '' : 'text-muted-foreground'">{{ n }}</span>
+          <span v-if="nameOf(n)" class="truncate font-medium" data-preset-name>{{ nameOf(n) }}</span>
+          <span v-if="state?.preset === n" class="ml-auto size-2 shrink-0 rounded-full bg-current" aria-hidden="true" />
+        </Button>
+      </div>
+    </CardContent>
+  </Card>
 </template>

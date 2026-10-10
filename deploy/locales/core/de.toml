@@ -273,6 +273,7 @@ system_unit_minute = "min"
 presets_label = "Favoriten"
 presets_prev_page = "Vorherige Favoriten"
 presets_next_page = "Nächste Favoriten"
+presets_window = "{first}–{last} von {total}"
 
 # HTTP refusals (422/502/500)
 audio_output_name_empty = "leerer Name des Audioausgangs"

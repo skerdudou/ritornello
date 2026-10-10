@@ -155,25 +155,26 @@ describe('HomeView', () => {
     expect(w.findAll('[data-preset-active]')).toHaveLength(0)
   })
 
-  it('announces the number of presets declared by the source', async () => {
+  it('the announced count shapes the grid, with no lone number', async () => {
     vi.stubGlobal('EventSource', FakeEventSource)
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     FakeEventSource.last!.push({ preset_count: 24 })
     await w.vm.$nextTick()
-    // The count reaches beyond the displayed window: that is precisely what
-    // it teaches, the grid only showing ten at a time.
-    expect(w.get('[data-preset-count]').text()).toContain('24')
+    // The count reaches beyond the displayed window: the grid shows ten at a
+    // time and the pages sit in the card's header. No lone number any more.
     expect(w.findAll('[data-preset-button]')).toHaveLength(10)
+    expect(w.find('[data-preset-count]').exists()).toBe(false)
+    expect(w.find('[data-preset-window]').exists()).toBe(true)
     // Zero is information, not an absence: it explains the empty grid of a
     // cd without a disc.
     FakeEventSource.last!.push({ preset_count: 0 })
     await w.vm.$nextTick()
-    expect(w.get('[data-preset-count]').text()).toContain('0')
+    expect(w.findAll('[data-preset-button]')).toHaveLength(0)
   })
 
-  it('announces no count when the source declares nothing', async () => {
+  it('shows no position when the source declares nothing', async () => {
     // Bare grid 1-10: it is a fallback, not an inventory — announcing "10"
     // would be a claim nobody made.
     vi.stubGlobal('EventSource', FakeEventSource)
@@ -182,7 +183,8 @@ describe('HomeView', () => {
     const w = mount(HomeView)
     FakeEventSource.last!.push({ preset_count: null })
     await w.vm.$nextTick()
-    expect(w.find('[data-preset-count]').exists()).toBe(false)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(10)
+    expect(w.find('[data-preset-window]').exists()).toBe(false)
   })
 
   it('relays the pushed state to the Player card', async () => {
