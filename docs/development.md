@@ -246,7 +246,18 @@ not, it is a break, so bump that contract's **major**; if it is compatible
 
     UPDATE_WIRE_FINGERPRINT=1 cargo test -p ritornello-proto --test wire_fingerprint
 
-Regeneration is not a way round the rule: a contract's section cannot change
+The rule has two times. A version that no release has carried yet is marked
+`next` in its header (`[source 1.1 next]`): it is still being written, so its
+section changes in place, without bumping again, and regeneration keeps the
+mark. A section without the mark has been published, and cannot change unless
+its version went strictly up; the bump writes the new version with `next`, and
+the cycle starts over. The test cannot see git, so it cannot tell whether a
+mark is honest: `scripts/changed-components.sh` does, at release. It refuses a
+release whose fixture still carries a `next` (remove the marks in the release
+preparation commit), and a section whose messages changed under the version
+the newest published release already carried, mark or not.
+
+Regeneration is not a way round the rule: an unmarked section cannot change
 unless its version went strictly up, and the test refuses otherwise, even
 under `UPDATE_WIRE_FINGERPRINT=1`. A version never goes down: to revert a
 bump, restore the fixture from git. A missing fixture is a panic, and so is a

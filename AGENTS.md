@@ -131,7 +131,9 @@ something.
   number, and a contract major change whose speakers did not move.
 - `crates/ritornello-proto/tests/wire_fingerprint.rs` — the wire against a
   committed fixture, one section per contract: a section cannot change unless
-  its contract's version goes up (regeneration refuses it too), and the
+  its contract's version goes up, or is marked `next` (a version no release
+  carried); regeneration refuses it too. `changed-components.sh` refuses a
+  release that still carries the mark or changed a published section. The
   announcement section regenerates freely for additions.
 - `scripts/changed-components.sh`'s coupled-change guard — refuses a change
   to a companion (`files-mount`) that did not move its version, and its
