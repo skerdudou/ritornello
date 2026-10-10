@@ -27,7 +27,7 @@ pub mod routes;
 use crate::plugins::PluginManifest;
 use crate::status::{PluginAction, PluginOrder, StatusState};
 use crate::update::archive::{
-    core_not_installed, installable_from_ui, only_its_own_binary, DECOMPRESSED_MAX,
+    installable_from_ui, only_its_own_binary, DECOMPRESSED_MAX,
 };
 use crate::update::download::{
     client, digest_hex, enough_room, fetch_capped, fetch_text, DownloadError, COMPRESSED_MAX,
@@ -708,25 +708,6 @@ fn deny_core_without_installer(components: &mut [ComponentOffer], verdict: &Opti
     for row in components.iter_mut().filter(|r| r.kind == ComponentKind::Core) {
         row.installable = Some(false);
         row.needs_installer = Some(files.clone());
-    }
-}
-
-/// Carries the core's own archive note across a check.
-///
-/// Unlike `installable`, this describes the **installed** core — the archive
-/// that put the currently running binary there — and not the offered one, so
-/// it must survive even a check that changes what is offered: only another
-/// core install ever produces a fresh value, never a check on its own. Keyed
-/// on `ComponentKind::Core` alone rather than name-plus-offered, because
-/// there is exactly one core row and its identity does not depend on what a
-/// release happens to offer next.
-fn carry_core_notes(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) {
-    let note = previous
-        .iter()
-        .find(|p| p.kind == ComponentKind::Core)
-        .and_then(|p| p.not_installed_files.clone());
-    if let Some(core) = fresh.iter_mut().find(|c| c.kind == ComponentKind::Core) {
-        core.not_installed_files = note;
     }
 }
 
@@ -1419,8 +1400,6 @@ struct Staged {
     /// The `[[plugin]]` block to write once the binary is placed: `Some` only
     /// for a plugin the device did not have.
     fragment: Option<String>,
-    /// For the core: what its archive carries that nothing here installs.
-    core_notes: Option<Vec<String>>,
 }
 
 impl Staged {
@@ -2314,7 +2293,6 @@ impl Worker {
         let companions = installed_companions(&self.root);
         let mut state = self.state.write().await;
         carry_installable(&state.components, &mut components);
-        carry_core_notes(&state.components, &mut components);
         deny_privileged_install(&mut components);
         deny_moved_companion(&mut components, &checked.ours, &companions);
         deny_core_without_installer(&mut components, &checked.core_privileged);
@@ -2429,7 +2407,6 @@ impl Worker {
         // too — and `deny_privileged_install` decides after it, as it does
         // in `settle_with_release`.
         carry_installable(&state.components, &mut components);
-        carry_core_notes(&state.components, &mut components);
         deny_privileged_install(&mut components);
         judge_rows(&mut components, &checked, &live);
         state.major_update_waiting = core_breaks(&components);
@@ -2894,7 +2871,6 @@ impl Worker {
             let live = self.live_speaks().await;
             let mut state = self.state.write().await;
             carry_installable(&state.components, &mut components);
-            carry_core_notes(&state.components, &mut components);
             deny_privileged_install(&mut components);
             deny_moved_companion(&mut components, &checked.ours, &companions);
             deny_core_without_installer(&mut components, &checked.core_privileged);
@@ -3150,11 +3126,6 @@ impl Worker {
 
         std::fs::create_dir_all(&self.staging)
             .map_err(|e| Refusal::Prepare(format!("creating {}: {e}", self.staging.display())))?;
-        // Read now, while `contents` still has its `entries`: a successful
-        // core placement ends with this process exiting a few lines below, so
-        // by the time anyone could read the note back from `self.state` the
-        // process that computed it is gone. See `write_core_archive_notes`.
-        let core_notes = is_core.then(|| core_not_installed(&contents.entries));
         let action = if is_core {
             let binary = contents.core_binary.ok_or_else(|| {
                 Refusal::Prepare(format!("the archive of {name} carries no core binary"))
@@ -3194,7 +3165,6 @@ impl Worker {
             action,
             staged_file: staged,
             fragment,
-            core_notes,
         })
     }
 
@@ -3257,14 +3227,10 @@ impl Worker {
             // its bare name: that name is a stranger's choice and may be one
             // of ours.
             match (member.third_party, member.repo.as_deref()) {
-                (false, _) => {
-                    self.remember_placed(&member.name, &member.version, member.core_notes.clone())
+                (false, _) => self.remember_placed(&member.name, &member.version),
+                (true, Some(repo)) => {
+                    self.remember_placed(&third_party_placed_key(repo, &member.name), &member.version)
                 }
-                (true, Some(repo)) => self.remember_placed(
-                    &third_party_placed_key(repo, &member.name),
-                    &member.version,
-                    member.core_notes.clone(),
-                ),
                 // No repository to namespace by: nothing is remembered, which
                 // fails open (the component is attempted again) as the module
                 // doc says it should.
@@ -3335,8 +3301,8 @@ impl Worker {
     /// which observes the real thing — and it **disarms silently** if a future
     /// test ever calls this method directly, so route new tests through
     /// `placed::record`.
-    fn remember_placed(&self, name: &str, version: &str, not_installed_files: Option<Vec<String>>) {
-        if let Err(e) = placed::record(&self.staging, name, version, not_installed_files) {
+    fn remember_placed(&self, name: &str, version: &str) {
+        if let Err(e) = placed::record(&self.staging, name, version) {
             tracing::warn!(
                 "update: writing {}: {e}",
                 placed::path(&self.staging).display()
@@ -4308,7 +4274,6 @@ mod tests {
             availability,
             installable: None,
             third_party_repo: None,
-            not_installed_files: None,
             needs_companion: None,
             needs_installer: None,
             conflict_repos: None,
@@ -4424,13 +4389,7 @@ mod tests {
         // What `install_one` writes the instant the privileged unit reports
         // the bytes are in place — before `install` calls the restart hook,
         // which on a device does not return.
-        placed::record(
-            &night_one.staging,
-            "core",
-            "0.4.1",
-            Some(vec!["etc/systemd/system/ritornello.service".to_string()]),
-        )
-        .unwrap();
+        placed::record(&night_one.staging, "core", "0.4.1").unwrap();
 
         // 0.4.1 never starts. The rollback unit puts 0.2.0 back and the
         // device comes up on it, in a new process.
@@ -4457,7 +4416,7 @@ mod tests {
     fn the_memory_never_stands_in_the_way_of_an_install_asked_for_by_hand() {
         let dir = tempfile::tempdir().unwrap();
         let worker = worker_at(dir.path(), stalled_line());
-        placed::record(&worker.staging, "core", "0.4.1", None).unwrap();
+        placed::record(&worker.staging, "core", "0.4.1").unwrap();
         let rows = core_offered("0.2.0", "0.4.1");
         let memory = placed::read(&worker.staging);
 
@@ -4483,7 +4442,7 @@ mod tests {
     fn a_release_newer_than_the_one_that_was_rolled_back_is_installed() {
         let dir = tempfile::tempdir().unwrap();
         let worker = worker_at(dir.path(), stalled_line());
-        placed::record(&worker.staging, "core", "0.4.1", None).unwrap();
+        placed::record(&worker.staging, "core", "0.4.1").unwrap();
         assert_eq!(
             automatic_install_list(&core_offered("0.2.0", "0.5.0"), &placed::read(&worker.staging), schedule::InstallScope::Official),
             names(&["core"]),
@@ -4504,7 +4463,7 @@ mod tests {
     fn a_plugin_this_updater_never_placed_stays_excluded_while_its_version_is_unknown() {
         let dir = tempfile::tempdir().unwrap();
         let worker = worker_at(dir.path(), stalled_line());
-        placed::record(&worker.staging, "radio", "1.7.3", None).unwrap();
+        placed::record(&worker.staging, "radio", "1.7.3").unwrap();
 
         let mut console = row("console", ComponentKind::Plugin, Availability::UpdateAvailable);
         console.installed = None;
@@ -4529,7 +4488,7 @@ mod tests {
     fn a_plugin_whose_placed_binary_never_spoke_is_repaired_by_the_next_release() {
         let dir = tempfile::tempdir().unwrap();
         let worker = worker_at(dir.path(), stalled_line());
-        placed::record(&worker.staging, "console", "0.4.1", None).unwrap();
+        placed::record(&worker.staging, "console", "0.4.1").unwrap();
 
         let mut console = row("console", ComponentKind::Plugin, Availability::UpdateAvailable);
         console.installed = None;
@@ -4698,7 +4657,7 @@ mod tests {
             .map(|(key, version)| {
                 (
                     key.to_string(),
-                    placed::PlacedComponent { version: version.to_string(), not_installed_files: None },
+                    placed::PlacedComponent { version: version.to_string() },
                 )
             })
             .collect()
@@ -4877,39 +4836,6 @@ mod tests {
         let mut fresh = vec![row("files", ComponentKind::Plugin, Availability::UpdateAvailable)];
         carry_installable(&[previous], &mut fresh);
         assert_eq!(fresh[0].installable, Some(false));
-    }
-
-    /// The counterpart of `a_check_remembers_that_a_component_needs_a_manual_step`
-    /// for the core's own note: a plain check must not erase it, because only
-    /// another core install ever produces a fresh one.
-    #[test]
-    fn a_check_remembers_the_core_archive_note() {
-        let mut previous = row("core", ComponentKind::Core, Availability::Aligned);
-        previous.not_installed_files = Some(vec!["etc/systemd/system/ritornello.service".to_string()]);
-        let mut fresh = vec![row("core", ComponentKind::Core, Availability::UpdateAvailable)];
-        carry_core_notes(&[previous], &mut fresh);
-        assert_eq!(
-            fresh[0].not_installed_files,
-            Some(vec!["etc/systemd/system/ritornello.service".to_string()])
-        );
-    }
-
-    /// The note is a fact about the **installed** core, not about what a
-    /// release offers next: unlike `installable`, a change of `offered` must
-    /// not reset it — the test that would catch a wrongly-keyed
-    /// implementation copying `carry_installable`'s pairing verbatim.
-    #[test]
-    fn the_core_note_survives_a_new_offered_version_unlike_installable() {
-        let mut previous = row("core", ComponentKind::Core, Availability::UpdateAvailable);
-        previous.offered = Some("0.3.0".to_string());
-        previous.not_installed_files = Some(vec!["usr/local/lib/ritornello/ritornello-update".to_string()]);
-        let mut fresh = vec![row("core", ComponentKind::Core, Availability::UpdateAvailable)];
-        fresh[0].offered = Some("0.4.0".to_string());
-        carry_core_notes(&[previous], &mut fresh);
-        assert_eq!(
-            fresh[0].not_installed_files,
-            Some(vec!["usr/local/lib/ritornello/ritornello-update".to_string()])
-        );
     }
 
     /// A new version is a new archive, and nothing is known about it yet.
@@ -5766,8 +5692,9 @@ mod tests {
         }
     }
 
-    /// A core archive: its binary, plus one file the installer never places —
-    /// which is what `archive::core_not_installed` puts in the note.
+    /// A core archive: its binary, plus one file only `ritornello-install`
+    /// places — which is what its release's inventory describes
+    /// (`test_core_identities`).
     fn core_archive() -> Vec<u8> {
         targz(&[
             (archive::CORE_BINARY, b"ELF, as far as this test is concerned"),
@@ -6098,7 +6025,6 @@ mod tests {
             availability: Availability::NotInstalled,
             installable: Some(true),
             third_party_repo: None,
-            not_installed_files: None,
             needs_companion: None,
             needs_installer: None,
             conflict_repos: None,
@@ -6655,11 +6581,6 @@ mod tests {
             Some("2.0.0"),
             "the placed version must already be on disk when the restart hook fires: written after it, it would be written by a process that no longer exists"
         );
-        assert_eq!(
-            memory[CORE].not_installed_files.as_deref(),
-            Some(["etc/systemd/system/ritornello-rollback.service".to_string()].as_slice()),
-            "and so must the note of what the archive carried and nobody installed"
-        );
     }
 
     /// **The way out, driven through the real install pass.**
@@ -6677,7 +6598,7 @@ mod tests {
     async fn an_install_asked_for_by_hand_goes_through_a_version_the_memory_has_given_up_on() {
         let dir = tempfile::tempdir().unwrap();
         let mut worker = worker_at(dir.path(), stalled_line());
-        placed::record(&worker.staging, CORE, "2.0.0", None).unwrap();
+        placed::record(&worker.staging, CORE, "2.0.0").unwrap();
         let _privileged = Privileged::answers(Ok(()));
         let checked = Checked {
             ours: vec![served_core(&core_archive()).await],
@@ -9051,11 +8972,6 @@ mod tests {
         let memory = exits.first().expect("the install never reached the restart");
         assert_eq!(placed::version_of(memory, "mpd"), Some("2.0.0"));
         assert_eq!(placed::version_of(memory, CORE), Some("2.0.0"));
-        assert_eq!(
-            memory[CORE].not_installed_files.as_deref(),
-            Some(["etc/systemd/system/ritornello-rollback.service".to_string()].as_slice()),
-            "and the core's note too"
-        );
     }
 
     /// **A dependent that cannot be prepared keeps the core out.** `mpd`'s

@@ -160,6 +160,9 @@ pub struct Pack {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Inventory {
+    /// Judged by `parse` before this struct is read at all; declared so that
+    /// `deny_unknown_fields` knows the key, and read only by tests.
+    #[allow(dead_code)]
     pub format: u32,
     pub product: String,
     pub reference_order: Vec<String>,

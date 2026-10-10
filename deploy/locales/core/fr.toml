@@ -343,7 +343,6 @@ update_rolled_back = "La mise à jour n'a pas démarré et la version précéden
 update_rollback_failed = "La mise à jour n'a pas démarré, et la remise en place de la version précédente n'a pas entièrement abouti — voir le journal"
 update_removal_failed = "{component} : son binaire n'a pas pu être effacé et se trouve toujours sur l'appareil — {detail}"
 update_removal_skipped = "{component} : son binaire n'a pas été effacé, car un greffon le déclare désormais"
-update_archive_notes = "La version actuellement installée embarquait aussi {count} fichiers qui n'ont pas été installés — voir ses notes de version"
 update_partial_failure_note = "Si plusieurs composants étaient concernés, seul le premier échec est montré ici — voir le journal pour le reste"
 update_out_of_step = "{count} composants à mettre à jour vers {version}"
 update_out_of_step_one = "{name} : {installed} → {offered}"

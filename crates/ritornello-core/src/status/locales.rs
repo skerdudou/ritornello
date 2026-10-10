@@ -844,7 +844,6 @@ mod tests {
             availability: crate::update::state::Availability::NotInstalled,
             installable: None,
             third_party_repo: None,
-            not_installed_files: None,
             needs_companion: None,
             needs_installer: None,
             conflict_repos: None,

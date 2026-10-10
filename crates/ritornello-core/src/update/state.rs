@@ -110,14 +110,6 @@ pub struct ComponentOffer {
     pub installable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub third_party_repo: Option<String>,
-    /// The core's own row only: what its last-installed archive carried
-    /// outside what `install_one` ever places (the privileged installer, the
-    /// systemd units, the polkit rules — see `archive::core_not_installed`).
-    /// Absent until a core install has actually happened; `None` is never
-    /// "nothing was left out" — the core's archive always carries something
-    /// here, by design (see `installable_from_ui`'s own doc comment).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub not_installed_files: Option<Vec<String>>,
     /// A plugin that ships with a companion (`plugins::COMPANIONS`) only:
     /// the companion's name when this release's companion version differs
     /// from, or cannot be compared with, the one `ritornello-install`
@@ -366,7 +358,6 @@ pub fn component_offers(
         third_party_repo: None,
         // Only ever filled in by `Worker::install_one`, once a core install
         // has actually read an archive — `component_offers` never sees one.
-        not_installed_files: None,
         needs_companion: None,
         needs_installer: None,
         conflict_repos: None,
@@ -442,7 +433,6 @@ pub fn component_offers(
             third_party_repo: from.third_party_repo(),
             // A plugin's own row, never the core's: this field is a fact
             // about the core's archive alone.
-            not_installed_files: None,
             needs_companion: None,
             needs_installer: None,
             conflict_repos: None,
@@ -464,7 +454,6 @@ pub fn component_offers(
             availability: Availability::NotInstalled,
             installable: None,
             third_party_repo: None,
-            not_installed_files: None,
             needs_companion: None,
             needs_installer: None,
             conflict_repos: None,
@@ -502,7 +491,6 @@ pub fn component_offers(
             // policy's scope and the placement key read (`update::
             // automatic_install_list`), and what the page names.
             third_party_repo: offer.repo.clone(),
-            not_installed_files: None,
             needs_companion: None,
             needs_installer: None,
             conflict_repos: None,
@@ -529,7 +517,6 @@ pub fn component_offers(
             availability: Availability::NotInstalled,
             installable: None,
             third_party_repo: Some(offer.repo.clone()),
-            not_installed_files: None,
             needs_companion: None,
             needs_installer: None,
             conflict_repos: None,
@@ -552,7 +539,6 @@ pub fn component_offers(
             availability: Availability::NotInstalled,
             installable: Some(false),
             third_party_repo: None,
-            not_installed_files: None,
             needs_companion: None,
             needs_installer: None,
             conflict_repos: Some(conflict.repos.clone()),
@@ -936,9 +922,6 @@ mod tests {
         // No release means nothing to say about alignment. `Aligned` would be
         // a claim, and `UpdateAvailable` would be a lie.
         assert_eq!(core.availability, Availability::Unknown);
-        // Only `Worker::install_one` ever learns this, from an archive it
-        // just read; this pure function never sees one.
-        assert_eq!(core.not_installed_files, None);
     }
 
     #[test]

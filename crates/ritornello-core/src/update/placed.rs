@@ -41,17 +41,6 @@ pub struct PlacedComponent {
     /// point: a binary that dies before announcing has no version of its own,
     /// and this is the only record that it was ever tried.
     pub version: String,
-    /// The core's entry only: what its archive carried that `install_one`
-    /// never places (the privileged installer, the systemd units, the polkit
-    /// rules — see `archive::core_not_installed`).
-    ///
-    /// It lives here rather than in a file of its own so that the note and the
-    /// version it describes are **one fact**: two files would be two records
-    /// of "the core version the updater placed", free to disagree. And it is
-    /// what lets the note be shown only while it still describes the core that
-    /// is actually running — see `main::core_archive_note`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub not_installed_files: Option<Vec<String>>,
 }
 
 /// Component name to what was placed for it. At most one entry per component:
@@ -101,17 +90,9 @@ pub fn read(staging: &Path) -> Placed {
 ///
 /// Through a temporary and a `rename`, like every other file this product
 /// writes: this is a device one unplugs.
-pub fn record(
-    staging: &Path,
-    component: &str,
-    version: &str,
-    not_installed_files: Option<Vec<String>>,
-) -> std::io::Result<()> {
+pub fn record(staging: &Path, component: &str, version: &str) -> std::io::Result<()> {
     let mut placed = read(staging);
-    placed.insert(
-        component.to_string(),
-        PlacedComponent { version: version.to_string(), not_installed_files },
-    );
+    placed.insert(component.to_string(), PlacedComponent { version: version.to_string() });
     let text = serde_json::to_string(&placed)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::create_dir_all(staging)?;
@@ -133,19 +114,12 @@ mod tests {
     fn what_was_placed_is_read_back_by_another_process() {
         let dir = tempfile::tempdir().unwrap();
         let staging = dir.path().join("staging");
-        record(&staging, "core", "0.3.0", Some(vec!["etc/systemd/system/ritornello.service".into()]))
-            .unwrap();
-        record(&staging, "mpd", "0.4.1", None).unwrap();
+        record(&staging, "core", "0.3.0").unwrap();
+        record(&staging, "mpd", "0.4.1").unwrap();
 
         let placed = read(&staging);
         assert_eq!(version_of(&placed, "core"), Some("0.3.0"));
         assert_eq!(version_of(&placed, "mpd"), Some("0.4.1"));
-        assert_eq!(
-            placed["core"].not_installed_files.as_deref(),
-            Some(["etc/systemd/system/ritornello.service".to_string()].as_slice()),
-            "the core's note travels with the version it describes"
-        );
-        assert_eq!(placed["mpd"].not_installed_files, None, "a plugin's archive has no such note");
         assert_eq!(version_of(&placed, "radio"), None, "a component nothing ever placed");
     }
 
@@ -156,16 +130,30 @@ mod tests {
     fn a_later_placement_of_the_same_component_replaces_the_earlier_one() {
         let dir = tempfile::tempdir().unwrap();
         let staging = dir.path().join("staging");
-        record(&staging, "core", "0.3.0", Some(vec!["a".into()])).unwrap();
-        record(&staging, "core", "0.4.0", Some(vec!["b".into()])).unwrap();
+        record(&staging, "core", "0.3.0").unwrap();
+        record(&staging, "core", "0.4.0").unwrap();
         let placed = read(&staging);
         assert_eq!(placed.len(), 1);
         assert_eq!(version_of(&placed, "core"), Some("0.4.0"));
-        assert_eq!(
-            placed["core"].not_installed_files.as_deref(),
-            Some(["b".to_string()].as_slice()),
-            "the note is replaced along with the version, never merged with the old one"
-        );
+    }
+
+    /// A memory written by an earlier core carries, for the core, the list of
+    /// files its archive held and nothing installed. Nothing reads it any
+    /// more; it must not make the whole memory unreadable, which would make
+    /// the night retry every version it already gave up on.
+    #[test]
+    fn a_memory_written_with_the_old_archive_note_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(
+            path(&staging),
+            br#"{"core":{"version":"0.2.0-beta.6","not_installed_files":["etc/systemd/system/ritornello.service"]},"radio":{"version":"0.2.0-beta.6"}}"#,
+        )
+        .unwrap();
+        let placed = read(&staging);
+        assert_eq!(version_of(&placed, "core"), Some("0.2.0-beta.6"));
+        assert_eq!(version_of(&placed, "radio"), Some("0.2.0-beta.6"));
     }
 
     /// Absent, and corrupt, both answer an empty memory — and the second is
