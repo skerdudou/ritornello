@@ -176,6 +176,7 @@ mod tests {
             sources: vec![ritornello_proto::SourceCatalog {
                 name: "radio".into(),
                 presets: vec![ritornello_proto::Preset { index: 5, name: "Nova".into() }],
+                icon: None,
             }],
         };
 
@@ -193,7 +194,7 @@ mod tests {
         let state = Arc::new(SharedState::default());
         let mut display = MpdDisplay { state: state.clone() };
         let sources_catalog = SourcesCatalog {
-            sources: vec![ritornello_proto::SourceCatalog { name: "radio".into(), presets: vec![] }],
+            sources: vec![ritornello_proto::SourceCatalog { name: "radio".into(), presets: vec![], icon: None }],
         };
         display.sources_catalog(sources_catalog.clone()).await.unwrap();
 

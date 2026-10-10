@@ -3386,6 +3386,7 @@ mod toggle_tests {
                 version: None,
                 repository: None,
                 catalog: None,
+                icon: None,
             },
         );
 
@@ -3417,6 +3418,7 @@ mod toggle_tests {
             version: None,
             repository: None,
             catalog: None,
+            icon: None,
         }
     }
 
@@ -4327,6 +4329,7 @@ mod toggle_tests {
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
+            icon: None,
         };
 
         hotplug(
@@ -4376,6 +4379,7 @@ mod toggle_tests {
             version: Some("0.3.0".into()),
             repository: None,
             catalog: None,
+            icon: None,
         };
 
         hotplug(
@@ -4417,6 +4421,7 @@ mod toggle_tests {
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
+            icon: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
@@ -4463,6 +4468,7 @@ mod toggle_tests {
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
+            icon: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
@@ -4519,6 +4525,7 @@ mod toggle_tests {
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
+            icon: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1)
@@ -4558,6 +4565,7 @@ mod toggle_tests {
             version: Some("0.2.0".into()),
             repository: None,
             catalog: None,
+            icon: None,
         }
     }
 
@@ -4583,7 +4591,7 @@ mod toggle_tests {
             json["incompatible"],
             serde_json::json!({
                 "reason": "major",
-                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 0}}],
+                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 1}}],
             }),
             "{json}"
         );
@@ -4643,7 +4651,7 @@ mod toggle_tests {
         // reason that is not this test's.
         let socket = ritornello_plugin_sdk::socket_kind(&b.children.sockets_dir.join("mpd"), PluginKind::Display);
         let _display = tokio::net::UnixListener::bind(&socket).unwrap();
-        let a = mpd_like(ContractVersion::new(1, 1));
+        let a = mpd_like(ContractVersion::new(1, 2));
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
 
@@ -4661,7 +4669,7 @@ mod toggle_tests {
             assert_eq!(line.incompatible, None);
             assert_eq!(
                 line.limited,
-                vec![display_gap(ContractVersion::new(1, 1))],
+                vec![display_gap(ContractVersion::new(1, 2))],
                 "the {} line must name the display contract, and only it",
                 line.kind
             );
@@ -4689,6 +4697,7 @@ mod toggle_tests {
             version: None,
             repository: None,
             catalog: Some(catalog),
+            icon: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
@@ -4718,6 +4727,7 @@ mod toggle_tests {
             version: None,
             repository: None,
             catalog: None,
+            icon: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
@@ -4746,6 +4756,7 @@ mod toggle_tests {
             version: None,
             repository: None,
             catalog: Some(Default::default()),
+            icon: None,
         };
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
@@ -4781,6 +4792,7 @@ mod toggle_tests {
             version: None,
             repository: None,
             catalog: Some(catalog),
+            icon: None,
         };
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
         assert_eq!(
@@ -4828,6 +4840,7 @@ mod toggle_tests {
             version: None,
             repository: None,
             catalog: Some(catalog),
+            icon: None,
         };
 
         wire_announced_catalog(&registry, "mpd", &a).await;
@@ -4856,6 +4869,7 @@ mod toggle_tests {
             version: None,
             repository: None,
             catalog: None,
+            icon: None,
         };
 
         wire_announced_catalog(&registry, "mpd", &a).await;
@@ -4890,6 +4904,7 @@ mod toggle_tests {
             version: Some("0.2.0".into()),
             repository: Some("https://example.invalid/cd".into()),
             catalog: None,
+            icon: None,
         };
 
         let limited = vec![ContractGap {

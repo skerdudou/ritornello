@@ -1431,6 +1431,7 @@ mod tests {
             sources: vec![ritornello_proto::SourceCatalog {
                 name: "radio".into(),
                 presets: vec![Preset { index: 5, name: "FIP".into() }],
+                icon: None,
             }],
         };
         let expected_srv = expected.clone();

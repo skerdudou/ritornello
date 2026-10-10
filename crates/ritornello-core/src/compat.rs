@@ -203,6 +203,7 @@ mod tests {
             repository: None,
             catalog: None,
             contracts: contracts.iter().map(|(c, (ma, mi))| (*c, ContractVersion::new(*ma, *mi))).collect(),
+            icon: None,
         }
     }
 
@@ -247,7 +248,7 @@ mod tests {
         assert_eq!(
             judge(&a),
             Verdict::Refused(Refusal::Major {
-                gaps: vec![gap(Contract::Display, (2, 0), (1, 0)), gap(Contract::Input, (0, 3), (1, 0))]
+                gaps: vec![gap(Contract::Display, (2, 0), (1, 1)), gap(Contract::Input, (0, 3), (1, 0))]
             })
         );
     }
@@ -257,9 +258,9 @@ mod tests {
         let a = ann(
             &[PluginKind::Display, PluginKind::Input],
             true,
-            &[(Contract::Display, (1, 1)), (Contract::Input, (1, 0)), (Contract::Admin, (1, 0))],
+            &[(Contract::Display, (1, 2)), (Contract::Input, (1, 0)), (Contract::Admin, (1, 0))],
         );
-        assert_eq!(judge(&a), Verdict::Accepted { limited: vec![gap(Contract::Display, (1, 1), (1, 0))] });
+        assert_eq!(judge(&a), Verdict::Accepted { limited: vec![gap(Contract::Display, (1, 2), (1, 1))] });
     }
 
     #[test]
@@ -324,7 +325,7 @@ mod tests {
     #[test]
     fn a_major_gap_outranks_a_minor_gap() {
         let a = ann(&[PluginKind::Display, PluginKind::Input], false, &[(Contract::Display, (2, 0)), (Contract::Input, (1, 1))]);
-        assert_eq!(judge(&a), Verdict::Refused(Refusal::Major { gaps: vec![gap(Contract::Display, (2, 0), (1, 0))] }));
+        assert_eq!(judge(&a), Verdict::Refused(Refusal::Major { gaps: vec![gap(Contract::Display, (2, 0), (1, 1))] }));
     }
 
     #[test]

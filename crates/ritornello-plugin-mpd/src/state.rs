@@ -816,6 +816,7 @@ mod tests {
                         .iter()
                         .map(|(index, name)| Preset { index: *index, name: (*name).to_string() })
                         .collect(),
+                    icon: None,
                 })
                 .collect(),
         }

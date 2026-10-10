@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(
             stamped["contracts"],
             serde_json::json!({
-                "display": {"major": 1, "minor": 0},
+                "display": {"major": 1, "minor": 1},
                 "input": {"major": 1, "minor": 0},
                 "admin": {"major": 1, "minor": 0},
             })
@@ -1120,6 +1120,7 @@ mod tests {
                     version: None,
                     repository: None,
                     catalog: None,
+                    icon: None,
                 },
             );
         }
@@ -1139,6 +1140,7 @@ mod tests {
                 version: None,
                 repository: None,
                 catalog: None,
+                icon: None,
             },
         );
         let g = Gathered { announcements, ..Default::default() };

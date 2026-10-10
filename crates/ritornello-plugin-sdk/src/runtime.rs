@@ -37,6 +37,12 @@ struct Half {
     /// the plugin is moved into its loop: after that, it can no longer be
     /// queried.
     covers: bool,
+    /// The icon this half shows under. Always `None` outside of a source.
+    ///
+    /// Kept here for the same reason as `covers`: `announcement()` derives
+    /// `Announcement.icon` from this register alone, and the value is read by
+    /// `source()` before the plugin is moved into its loop.
+    icon: Option<&'static str>,
     serve: Pin<Box<dyn Future<Output = Result<()>> + Send>>,
 }
 
@@ -182,9 +188,13 @@ impl Runtime {
 
     pub fn source(mut self, plugin: impl SourcePlugin) -> Result<Self> {
         let l = bind_source(&crate::socket_kind(&self.prefix, PluginKind::Source))?;
+        // Read **before** the move into `serve_source`, as `covers` is in
+        // `display()`: afterwards the plugin belongs to its loop.
+        let icon = plugin.icon();
         self.halves.push(Half {
             kind: PluginKind::Source,
             covers: false,
+            icon,
             serve: Box::pin(serve_source(l, plugin)),
         });
         Ok(self)
@@ -201,6 +211,7 @@ impl Runtime {
         self.halves.push(Half {
             kind: PluginKind::Display,
             covers,
+            icon: None,
             serve: Box::pin(serve_display(l, plugin)),
         });
         Ok(self)
@@ -211,6 +222,7 @@ impl Runtime {
         self.halves.push(Half {
             kind: PluginKind::Input,
             covers: false,
+            icon: None,
             serve: Box::pin(serve_input(l, plugin)),
         });
         Ok(self)
@@ -221,6 +233,7 @@ impl Runtime {
         self.halves.push(Half {
             kind: PluginKind::Metadata,
             covers: false,
+            icon: None,
             serve: Box::pin(serve_metadata(l, plugin)),
         });
         Ok(self)
@@ -248,6 +261,9 @@ impl Runtime {
             // for a display that doesn't want any, nor the reverse.
             covers: self.halves.iter().any(|m| m.covers),
             ui_version: self.ui_version.clone(),
+            // Derived like `covers`: only a registered source half carries
+            // one, read from its own `SourcePlugin::icon`.
+            icon: self.halves.iter().find_map(|h| h.icon).map(str::to_string),
             protocol: ritornello_proto::PROTOCOL_VERSION,
             // Derived like `kinds`: one contract per registered half, plus
             // `admin` when an admin page is served. An author cannot claim a
@@ -443,6 +459,95 @@ mod tests {
             BTreeMap::from([(Contract::Display, DISPLAY_CONTRACT), (Contract::Input, INPUT_CONTRACT)]),
             "one contract per registered kind, and no admin contract without .admin()"
         );
+    }
+
+    /// A source that does nothing but declare the icon it was built with:
+    /// the only thing two of these differ by is what `icon()` returns.
+    struct IconSource(Option<&'static str>);
+
+    #[async_trait::async_trait]
+    impl crate::SourcePlugin for IconSource {
+        async fn activate(&mut self) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        async fn deactivate(&mut self) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        async fn select(&mut self, _n: u8) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        async fn next(&mut self) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        async fn prev(&mut self) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        async fn eject(&mut self) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        fn icon(&self) -> Option<&'static str> {
+            self.0
+        }
+    }
+
+    /// A plain source that overrides nothing: `icon()` keeps its default.
+    struct DefaultIconSource;
+
+    #[async_trait::async_trait]
+    impl crate::SourcePlugin for DefaultIconSource {
+        async fn activate(&mut self) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        async fn deactivate(&mut self) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        async fn select(&mut self, _n: u8) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        async fn next(&mut self) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        async fn prev(&mut self) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+        async fn eject(&mut self) -> crate::SourceOutcome {
+            crate::SourceOutcome::new(ritornello_proto::SourceAction::Noop)
+        }
+    }
+
+    /// The icon is **derived** from the registered source, like `covers`:
+    /// the announcement carries exactly what `SourcePlugin::icon` returned,
+    /// read before the plugin was moved into its loop.
+    #[tokio::test]
+    async fn the_announced_icon_is_the_registered_source_s_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let register = dir.path().join("register.sock");
+        let listener = UnixListener::bind(&register).unwrap();
+        let rt = Runtime::new("cd".into(), register.clone(), dir.path().join("cd"), "0.0.0-test", None)
+            .source(IconSource(Some("disc")))
+            .unwrap();
+        tokio::spawn(async move { rt.run().await.unwrap() });
+
+        let a = read_announcement(&listener).await;
+        assert_eq!(a.kinds, vec![PluginKind::Source]);
+        assert_eq!(a.icon.as_deref(), Some("disc"));
+    }
+
+    /// A source that declares nothing announces no icon: the default body
+    /// of `icon()` decides, and the field stays absent.
+    #[tokio::test]
+    async fn a_source_that_declares_no_icon_announces_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let register = dir.path().join("register.sock");
+        let listener = UnixListener::bind(&register).unwrap();
+        let rt = Runtime::new("files".into(), register.clone(), dir.path().join("files"), "0.0.0-test", None)
+            .source(DefaultIconSource)
+            .unwrap();
+        tokio::spawn(async move { rt.run().await.unwrap() });
+
+        let a = read_announcement(&listener).await;
+        assert_eq!(a.kinds, vec![PluginKind::Source]);
+        assert_eq!(a.icon, None);
     }
 
     /// The admin contract follows `.admin()`, not a kind: a source with an

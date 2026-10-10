@@ -57,6 +57,7 @@ impl<P: Player> Core<P> {
                 .map(|name| SourceCatalog {
                     name: name.clone(),
                     presets: self.presets_par_source.get(name).cloned().unwrap_or_default(),
+                    icon: None,
                 })
                 .collect(),
         }

@@ -1200,8 +1200,9 @@ mod tests {
                 SourceCatalog {
                     name: "radio".into(),
                     presets: vec![Preset { index: 1, name: "FIP".into() }],
+                    icon: None,
                 },
-                SourceCatalog { name: "cd".into(), presets: vec![] },
+                SourceCatalog { name: "cd".into(), presets: vec![], icon: None },
             ],
         })
         .unwrap();

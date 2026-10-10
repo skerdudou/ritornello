@@ -154,6 +154,11 @@ pub struct SourceCatalog {
     /// back to `preset_count`, which remains the source of truth for the count.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presets: Vec<Preset>,
+    /// The icon the source's plugin announced (`Announcement::icon`): a name
+    /// each display renders its own way, or not at all. Added in display
+    /// contract 1.1; absent when the plugin declared none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 #[cfg(test)]
@@ -177,6 +182,7 @@ mod tests {
             sources: vec![SourceCatalog {
                 name: "radio".into(),
                 presets: vec![Preset { index: 1, name: "FIP".into() }],
+                icon: None,
             }],
         });
         let json = serde_json::to_string(&frame).unwrap();
@@ -208,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_source_without_named_presets_serializes_no_list() {
-        let c = SourceCatalog { name: "cd".into(), presets: Vec::new() };
+        let c = SourceCatalog { name: "cd".into(), presets: Vec::new(), icon: None };
         assert!(!serde_json::to_string(&c).unwrap().contains("presets"));
     }
 
@@ -219,6 +225,16 @@ mod tests {
         // would be unreadable by the display.
         let c: SourceCatalog = serde_json::from_str(r#"{"name":"cd"}"#).unwrap();
         assert_eq!(c.presets, Vec::new());
+    }
+
+    #[test]
+    fn a_source_catalog_carries_its_icon_and_reads_without_one() {
+        let old: SourceCatalog = serde_json::from_str(r#"{"name":"cd"}"#).unwrap();
+        assert_eq!(old.icon, None);
+        let with = SourceCatalog { name: "radio".into(), presets: vec![], icon: Some("radio".into()) };
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(json.contains(r#""icon":"radio""#), "{json}");
+        assert!(!serde_json::to_string(&old).unwrap().contains("icon"));
     }
 
     // What becomes of a frame of an unknown kind is checked where it's
