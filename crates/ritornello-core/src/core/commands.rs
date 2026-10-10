@@ -325,7 +325,8 @@ impl<P: Player> Core<P> {
                 // source). This used to forget the identity here, so that an
                 // unreachable Source (up to 5 s, the timeout of
                 // `SourceClient::request`) would not leave the stopped title
-                // up; that title is now exactly the one we want kept.
+                // up; that title is now exactly the one we want kept during
+                // the wait — and cleared once the request has failed, below.
                 //
                 // The position goes, though: it measured a playback that
                 // ended, and only an identity change drops the anchor — which
@@ -361,6 +362,10 @@ impl<P: Player> Core<P> {
                 // neither of which ever lived in this file.
                 if let Err(e) = self.active_request(SourceReq::Stop).await {
                     tracing::debug!("stop notification to source: {e}");
+                    // Nobody will confirm the arm: an unreachable Source
+                    // (timed out, dead) cannot say what Play would start, so
+                    // the screen must not keep promising it.
+                    self.set_identity(None);
                 }
             }
             Command::Power => {
@@ -1604,6 +1609,35 @@ mod tests {
         let state = core.player_state();
         assert_eq!(state.track.title, None, "a source that keeps nothing must clear the screen");
         assert_eq!(state.preset, None);
+        let np = np_rx.borrow().clone();
+        assert_eq!(np.identity, None);
+        assert!(!np.armed);
+    }
+
+    /// A Source that cannot be reached on Stop (timed out, dead) will never
+    /// confirm the arm: the screen clears instead of promising a track Play
+    /// may not start. A Source that answers keeps it — that half is
+    /// `stop_keeps_the_title_armed_until_the_source_answers`.
+    ///
+    /// **[MUTATION]** the `set_identity(None)` removed from the `Err` branch
+    /// of the Stop arm → the title assertion fires.
+    #[tokio::test]
+    async fn stop_with_an_unreachable_source_clears_the_screen() {
+        let id = serde_json::json!({"path": "/music/a.flac"});
+        let (mut core, np_rx, _state_rx, _d) = setup_metadata(vec!["p".into()]);
+        // "broken" is the fake's reserved name for a source whose every
+        // request fails, as `SourceClient::request` does after its timeout.
+        core.sources.insert(
+            "broken".into(),
+            Arc::new(FakeSource { name: "broken", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }),
+        );
+        core.active_source = "broken".into();
+        core.apply(SourceAction::play("/music/a.flac").finite()).await.unwrap();
+        core.handle_source_update("broken", plays(id.clone()));
+        core.handle_enrichment("p", enrichment(id, "A", "T"));
+        assert_eq!(core.player_state().track.title.as_deref(), Some("T"), "otherwise the clearing proves nothing");
+        core.handle_command(Command::Stop).await.unwrap();
+        assert_eq!(core.player_state().track.title, None, "nobody will confirm the arm");
         let np = np_rx.borrow().clone();
         assert_eq!(np.identity, None);
         assert!(!np.armed);

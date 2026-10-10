@@ -2460,8 +2460,14 @@ beside them). The core keeps that track's title, artist and cover on screen
 until the source clears it (`Nothing` without `armed`) or Play starts it. **A
 source that never arms keeps the old behaviour with no change at all**: the
 SDK's default `stop()` still answers `plays_nothing()`, so a third-party source
-written before 1.2 empties the screen on Stop exactly as it did, and a core
-older than 1.2 reads an armed frame as a plain `Nothing`. The bundled sources
+written before 1.2 whose `stop()` declares `Nothing` (that default, or an
+override that says the same) empties the screen on Stop exactly as it did, and
+a core older than 1.2 reads an armed frame as a plain `Nothing`. Between the
+Stop and the source's answer the stopped track stays up, armed; a source that
+does not answer at all (the request times out, the plugin is dead) cannot
+confirm it, and the core then clears the screen itself. Stopping a live stream
+keeps only its identity: the song that was on air, and everything the plugins
+said about it, goes at once. The bundled sources
 that arm are `files`, `radio` and `cd`; what each does is described in
 [interface.md](interface.md#what-stop-leaves-on-screen).
 
