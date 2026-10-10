@@ -2020,8 +2020,14 @@ mod tests {
         // wrongly redraws on every call would still pass this test by
         // accident — the second draw would just repeat the first. Only two
         // different permutations can tell "redrawn again" from "left alone"
-        // apart.
-        let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![1, 0, 2]]));
+        // apart — and the second must stay distinct **after** `set_play_mode`
+        // moves the current entry to the head of the draw: [1, 0, 2] became
+        // [2, 0, 1] again under that swap, and the test passed against the
+        // very bug it guards. [1, 2, 0] swaps to [2, 1, 0].
+        //
+        // **[MUTATION]** dropping the `if !random_changed { return; }` guard
+        // fires "no random transition: no redraw".
+        let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![1, 2, 0]]));
         // Stopped on the draw's own first entry, so turning shuffle on keeps
         // the draw as it is (the armed entry goes to its head, see
         // `set_play_mode`).
