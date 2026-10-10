@@ -89,11 +89,14 @@ async function save(): Promise<void> {
 </script>
 
 <template>
-  <Card class="max-w-md">
+  <!-- The card spans the page, like the core's cards and every other plugin
+       page; the cap is on its content, so the address and port fields keep
+       the width of a sentence instead of stretching across a desktop screen. -->
+  <Card>
     <CardHeader>
       <CardTitle>{{ t('title') }}</CardTitle>
     </CardHeader>
-    <CardContent class="space-y-4">
+    <CardContent class="max-w-md space-y-4">
       <p data-restart-notice class="text-sm text-muted-foreground">{{ t('restart_notice') }}</p>
       <div class="space-y-1">
         <Label for="mpd-listen">{{ t('listen_label') }}</Label>

@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import {
   api,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
   createT,
   onPlayer,
   Skeleton,
@@ -307,7 +311,16 @@ const scan = computed(
 </script>
 
 <template>
-  <div class="space-y-8">
+  <!-- One card spanning the page, like the core's pages and every other
+       plugin page; the three tabs live inside it. Not even the card frame
+       shows before the placeholder does: a short wait must leave the page
+       blank, not an empty card. `loaded` also covers a failed first answer,
+       whose message lives in the card. -->
+  <Card v-if="skeleton || loaded">
+    <CardHeader>
+      <CardTitle>{{ t('title') }}</CardTitle>
+    </CardHeader>
+    <CardContent class="space-y-8">
     <!-- The message is rendered in a `<pre>`: the failure of a mount carries
          the raw output of `systemctl`, over several lines. A `<p>` would fold
          it into an unreadable paragraph, and yet it is the only actionable
@@ -416,5 +429,6 @@ const scan = computed(
         />
       </TabsContent>
     </Tabs>
-  </div>
+    </CardContent>
+  </Card>
 </template>

@@ -10,9 +10,16 @@ import type { PresetsPayload } from '../types'
  * reloads when the active source changes (see `HomeView`). A failure keeps
  * the previous list: a transient outage must not strip the tiles of their
  * names.
+ *
+ * The same catalog also gives the **list** of sources, in the order of the
+ * `SourceCycle` key (`sources_catalog` on the core side): the home page draws
+ * one key per source from it on a wide screen. It is only as fresh as the
+ * last reload — a plugin switched on while the page is open shows at the next
+ * source change, like its preset names.
  */
 export function usePresets() {
   const names = ref<Map<string, Map<number, string>>>(new Map())
+  const sources = ref<string[]>([])
 
   async function reload(): Promise<void> {
     const load = await api.get<PresetsPayload>('/api/presets').catch((e: unknown) => {
@@ -24,6 +31,7 @@ export function usePresets() {
     // `/api/presets`. Without it, `.sources.map` blows up and the reload fails
     // silently — better to keep the previous list.
     if (!load || !Array.isArray(load.sources)) return
+    sources.value = load.sources.map((s) => s.name)
     names.value = new Map(
       load.sources.map((s) => [s.name, new Map((s.presets ?? []).map((p) => [p.index, p.name]))]),
     )
@@ -33,5 +41,5 @@ export function usePresets() {
     return names.value.get(source)?.get(n) ?? null
   }
 
-  return { reload, nameOf }
+  return { reload, nameOf, sources }
 }

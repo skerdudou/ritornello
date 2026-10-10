@@ -131,7 +131,7 @@ function reloadPage() {
         </Button>
       </div>
       <header class="border-b border-border">
-        <nav class="mx-auto flex max-w-5xl items-center gap-4 px-4 py-3">
+        <nav class="mx-auto flex max-w-7xl items-center gap-4 px-4 py-3">
           <!-- The brand is the home link, so it carries the same marker:
                without it, the home page would be the only one with nothing
                underlined. -->
@@ -179,7 +179,11 @@ function reloadPage() {
           <ThemeToggle />
         </nav>
       </header>
-      <main class="mx-auto max-w-5xl px-4 py-6 pb-24 md:pb-6">
+      <!-- `max-w-7xl` (1280 px), and the header above follows it: a desktop
+           screen used to leave most of its width empty around a 1024 px
+           column. What must not stretch — a form field, a help sentence —
+           caps itself where it stands, not through the page. -->
+      <main class="mx-auto max-w-7xl px-4 py-6 pb-24 md:pb-6">
         <!-- `role="status"` carries the only text: the blocks themselves are
              `aria-hidden`, so a screen reader hears the wait announced once
              rather than a run of empty boxes. Same shape as the placeholder

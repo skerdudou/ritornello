@@ -12,7 +12,7 @@ conflict_dup = "code {code} is entered twice"
 save_conflicts = "Resolve the duplicate key codes before saving"
 
 # admin page
-admin_title = "input bindings"
+title = "Key bindings"
 device_label = "Device"
 btn_refresh = "Refresh"
 col_action = "Action"

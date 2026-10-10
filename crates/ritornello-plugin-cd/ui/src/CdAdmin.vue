@@ -129,11 +129,14 @@ async function save(): Promise<void> {
 </script>
 
 <template>
-  <Card class="max-w-md">
+  <!-- The card spans the page, like the core's cards and every other plugin
+       page; the cap is on its content, so the two selects keep the width of
+       a sentence instead of stretching across a desktop screen. -->
+  <Card>
     <CardHeader>
       <CardTitle>{{ t('title') }}</CardTitle>
     </CardHeader>
-    <CardContent class="space-y-4">
+    <CardContent class="max-w-md space-y-4">
       <div class="space-y-1">
         <!-- The neighbouring <label> is not associated with the trigger (no
              for/id through the Select component): the aria-label carries the

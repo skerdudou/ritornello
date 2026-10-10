@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  api, Button, createT, Input, type Catalog,
+  api, Button, Card, CardContent, CardHeader, CardTitle, createT, Input, type Catalog,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@ritornello/ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -448,7 +448,13 @@ function export_() {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <!-- One card spanning the page, like the core's pages and every other
+       plugin page. -->
+  <Card>
+    <CardHeader>
+      <CardTitle>{{ t('title') }}</CardTitle>
+    </CardHeader>
+    <CardContent class="space-y-4">
     <div class="flex flex-wrap items-center gap-2">
       <!-- The neighboring <label> is not associated with the trigger (no
            for/id through the Select component): the aria-label provides the
@@ -522,5 +528,6 @@ function export_() {
       v-model:add="add"
       @cancel="cancelLearn"
     />
-  </div>
+    </CardContent>
+  </Card>
 </template>

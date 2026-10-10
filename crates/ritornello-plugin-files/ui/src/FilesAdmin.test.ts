@@ -442,6 +442,9 @@ describe('FilesAdmin, the page', () => {
       vi.advanceTimersByTime(SKELETON_DELAY_MS - 1)
       await flushPromises()
 
+      // Nothing at all, the card's title included: a frame that showed
+      // before the placeholder would be the very flash this rhythm avoids.
+      expect(w.text()).toBe('')
       expect(w.find('[data-slot="skeleton"]').exists()).toBe(false)
       expect(w.find('[data-tab="playlist"]').exists()).toBe(false)
     })
