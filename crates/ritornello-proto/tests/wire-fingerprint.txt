@@ -11,7 +11,7 @@ Contract::Admin = "admin"
 ContractVersion = {"major":1,"minor":2}
 Announcement::minimal = {"name":"p","kinds":["source"],"admin":false,"covers":false,"protocol":2,"contracts":{}}
 Announcement::full = {"name":"p","kinds":["source","display","input","metadata"],"admin":true,"covers":true,"ui_version":"abc123","icon":"radio","enriches_armed":true,"protocol":2,"contracts":{"source":{"major":1,"minor":0},"display":{"major":1,"minor":0},"input":{"major":1,"minor":0},"metadata":{"major":1,"minor":0},"admin":{"major":1,"minor":0}},"version":"1.2.3","repository":"https://example.invalid/r","catalog":{"en":{"key":"text"}}}
-[source 1.2 next]
+[source 1.2]
 SourceReq::Activate = {"req":"Activate"}
 SourceReq::Wake = {"req":"Wake"}
 SourceReq::Play = {"req":"Play"}
@@ -50,7 +50,7 @@ PlayRequest::Switch = "switch"
 PlayRequest::WakeAndSwitch = "wake_and_switch"
 SourceMessage::default = {"id":null,"action":null}
 SourceMessage::full = {"id":9,"action":{"action":"Stop"},"identity":{"state":"Nothing"},"transient":true,"preset":2,"preset_count":10,"preset_name":"Name","location":"loc","status_text":{"kind":"Verbatim","data":"s"},"can_eject":true,"has_finite_list":true,"presets":[{"index":1,"name":"One"}],"cover":{"kind":"path","path":"/c"},"cover_thumb":{"kind":"url","url":"https://example.invalid/t"},"cover_archivable":true,"play_request":"switch","armed":{"identity":{"k":1},"media_path":"/m/a"}}
-[display 1.1 next]
+[display 1.1]
 Overlay::Volume = {"kind":"volume","level":30,"muted":false,"text":"30","remaining_ms":800}
 Overlay::Tens = {"kind":"tens","offset":10,"text":"+10","remaining_ms":800}
 Overlay::Message = {"kind":"message","text":"m","remaining_ms":800}
@@ -102,7 +102,7 @@ InputMessage::held = {"cmd":"VolumeUp","held":true}
 Repeat::Off = "off"
 Repeat::All = "all"
 Repeat::One = "one"
-[metadata 1.1 next]
+[metadata 1.1]
 NowPlaying::default = {"source":"","identity":null}
 NowPlaying::full = {"source":"radio","identity":{"station":"x"},"known":{"artist":"A","title":"T","album":"Al","duration_s":10,"year":2001,"cover":true,"stream_title":"A - T"}}
 NowPlaying::armed = {"source":"cd","identity":{"disc":"x"},"armed":true}

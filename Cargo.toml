@@ -36,7 +36,7 @@ members = [
 # It is NOT the compatibility between a core and a plugin: that is the wire
 # contracts' own versions (ritornello_proto::contract), plus the frozen
 # bootstrap ritornello_proto::PROTOCOL_VERSION.
-version = "0.2.0-beta.7"
+version = "0.2.0-beta.8"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/skerdudou/ritornello"
