@@ -339,7 +339,7 @@ pub fn handle(
         //
         // **In standby, this still answers `OK` and has no effect** — the
         // core acts only on `Power` and a source choice (`SelectSource`, hence
-        // a `load` or an `add` of another source's entry) while standing by
+        // a `load` — never an `add`, see `add`) while standing by
         // and ignores everything else (see `Core::handle_command`), and this
         // module has no guard against it
         // anywhere else either (`next`, `stop`… all emit unconditionally).
@@ -1045,13 +1045,22 @@ fn add(inst: &Snapshot, index: usize, cmd: &str, args: &[String]) -> Outcome {
         return missing();
     }
     let mut cmds = Vec::new();
-    if source != inst.state.source {
-        // The **sources-catalog** name and not the raw argument, like
-        // `load`: the two are equal by construction, and emitting the one
-        // the core gave us keeps the plugin unable to invent a source name.
-        cmds.push(Command::SelectSource(sources_catalog.name.clone()));
+    // **In standby, nothing**: adding an entry never wakes the device, the
+    // owner's rule. Without this guard an entry of another source woke it
+    // (the core wakes on any `SelectSource`) while one of the active source
+    // left it asleep (`Select` is ignored in standby): the same gesture, two
+    // outcomes. The answer stays `OK`, like every other command the device
+    // ignores while off.
+    if !inst.state.standby {
+        if source != inst.state.source {
+            // The **sources-catalog** name and not the raw argument, like
+            // `load`: the two are equal by construction, and emitting the
+            // one the core gave us keeps the plugin unable to invent a
+            // source name.
+            cmds.push(Command::SelectSource(sources_catalog.name.clone()));
+        }
+        cmds.push(Command::Select(index));
     }
-    cmds.push(Command::Select(index));
     let mut lines = Vec::new();
     if cmd == "addid" {
         // The only difference between the two commands, and it is MPD's
@@ -3273,6 +3282,23 @@ mod tests {
             cmds(&inst, &["add", "ritornello://cd/2"]),
             vec![Command::SelectSource("cd".into()), Command::Select(2)]
         );
+    }
+
+    #[test]
+    fn add_in_standby_wakes_nothing_whatever_the_source() {
+        // **The owner's rule**: adding an entry never wakes the device. An
+        // entry of another source used to emit `SelectSource`, which the core
+        // wakes on; one of the active source left it asleep.
+        let mut inst = snapshot_active_on("radio", &[("radio", &[(1, "FIP")]), ("cd", &[(2, "Track 2")])]);
+        inst.state.standby = true;
+        assert_eq!(cmds(&inst, &["add", "ritornello://cd/2"]), vec![]);
+        assert_eq!(cmds(&inst, &["add", "ritornello://radio/1"]), vec![]);
+        // Still the `OK` of a command the device ignores, and `addid` still
+        // names its id: the client's request was well-formed.
+        assert_eq!(handle_ok(&inst, &["addid", "ritornello://cd/2"]), vec!["Id: 2"]);
+        // And an entry that designates nothing is still refused, standby or
+        // not: the client must re-read its library.
+        assert!(matches!(handle_words(&inst, 0, &["add", "ritornello://cd/9"]), Outcome::Reject(_)));
     }
 
     #[test]
