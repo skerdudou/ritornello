@@ -5,7 +5,7 @@ name = "ritornello-install"
 # publication channel of its own (a tag `installer-vX.Y.Z`, see
 # docs/installation.md) and this number moves only when the installer itself
 # does. A finished X.Y.Z always: its releases are never prereleases.
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 description = "Installs, updates and removes Ritornello on a device over ssh, from a workstation."

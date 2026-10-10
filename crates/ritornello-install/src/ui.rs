@@ -114,21 +114,43 @@ pub fn summary_lines(plan: &Plan) -> Vec<String> {
     lines
 }
 
+/// Printed before the address is asked: a bare "Device address" left the
+/// operator guessing at the expected form.
+const HOST_HINT: &str = "Where is the device? Give its IP address on your network (your router lists it), \
+or its name if your network resolves it. You may also write account@address, \
+and the account will not be asked.";
+
+/// The address question, with the shape of an answer in it.
+const HOST_PROMPT: &str = "Device address (for example 192.168.1.20 or dietpi.local)";
+
+/// What a refused address is told: what is expected, not only that it was
+/// not that.
+const HOST_REFUSED: &str =
+    "an IP address or a host name, without spaces and not starting with '-' (for example 192.168.1.20)";
+
+/// The examples `HOST_PROMPT` and `HOST_REFUSED` give, which must themselves
+/// be accepted.
+#[cfg(test)]
+const HOST_EXAMPLES: &[&str] = &["192.168.1.20", "dietpi.local", "dietpi@192.168.1.20"];
+
 /// Step 1: the address, then the ssh account. An address typed as
 /// `account@host` skips the second question.
 pub fn ask_host() -> anyhow::Result<String> {
+    eprintln!("{HOST_HINT}");
     let address: String = Input::new()
-        .with_prompt("Device address")
-        .validate_with(|s: &String| if crate::ssh::valid_host(s) { Ok(()) } else { Err("not a host name") })
+        .with_prompt(HOST_PROMPT)
+        .validate_with(|s: &String| if crate::ssh::valid_host(s) { Ok(()) } else { Err(HOST_REFUSED) })
         .interact_text()
         .context("asking for the device address")?;
     if address.contains('@') {
         return Ok(address);
     }
     let account: String = Input::new()
-        .with_prompt("ssh account")
+        .with_prompt("ssh account on the device (dietpi on DietPi)")
         .default("dietpi".to_string())
-        .validate_with(|s: &String| if crate::ssh::valid_host(s) { Ok(()) } else { Err("not an account name") })
+        .validate_with(|s: &String| {
+            if crate::ssh::valid_host(s) { Ok(()) } else { Err("an account name, without spaces and not starting with '-'") }
+        })
         .interact_text()
         .context("asking for the ssh account")?;
     Ok(format!("{account}@{address}"))
@@ -214,9 +236,7 @@ pub fn ask_packs(choices: &[Choice], checked: &BTreeSet<String>) -> anyhow::Resu
 pub fn ask_erase(candidates: &[String]) -> anyhow::Result<BTreeSet<String>> {
     let mut erase = BTreeSet::new();
     for name in candidates {
-        let yes = Confirm::new()
-            .with_prompt(format!("Also erase the data of {name}?"))
-            .default(false)
+        let yes = explicit(format!("Also erase the data of {name}?"))
             .interact()
             .context("asking about a plugin's data")?;
         if yes {
@@ -228,9 +248,7 @@ pub fn ask_erase(candidates: &[String]) -> anyhow::Result<BTreeSet<String>> {
 
 /// The one question of a total removal (spec §8).
 pub fn ask_erase_all() -> anyhow::Result<bool> {
-    Confirm::new()
-        .with_prompt("Also erase the data (/var/lib/ritornello) and the ritornello account?")
-        .default(false)
+    explicit("Also erase the data (/var/lib/ritornello) and the ritornello account?")
         .interact()
         .context("asking about the data")
 }
@@ -249,9 +267,20 @@ pub fn up_to_date_line(host: &str, product: &str, source: &str) -> String {
     format!("{host} is already up to date with Ritornello {product} from {source}: nothing was changed.")
 }
 
-/// Step 8's confirmation.
+/// Step 8's confirmation. No answer is given in advance: Enter alone is
+/// ignored and only `y` or `n` answers (`explicit`). A default of "no" made
+/// Enter after the summary end the run, and a window opened by a double
+/// click closed before anyone read why.
 pub fn confirm() -> anyhow::Result<bool> {
-    Confirm::new().with_prompt("Go ahead?").default(false).interact().context("asking for confirmation")
+    explicit("Go ahead?").interact().context("asking for confirmation")
+}
+
+/// A yes-or-no question with no default: `dialoguer` then ignores Enter until
+/// `y` or `n` is typed, and shows `[y/n]` rather than `[y/N]`. Every
+/// confirmation of this installer is asked this way: each one changes the
+/// device or its data, and none may be answered by a key that says neither.
+fn explicit(prompt: impl Into<String>) -> Confirm<'static> {
+    Confirm::new().with_prompt(prompt)
 }
 
 /// The sudo password, never echoed.
@@ -267,6 +296,34 @@ pub fn ask_sudo_password(host: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
     use crate::plan::tests::{RADIO_EXEC, THEIRS_EXEC, dev, inv, set};
+
+    /// What the address question shows as an example is itself an answer it
+    /// accepts, and appears where the operator reads it.
+    #[test]
+    fn the_address_examples_are_accepted_and_shown() {
+        for example in HOST_EXAMPLES {
+            assert!(crate::ssh::valid_host(example), "{example}");
+        }
+        assert!(HOST_PROMPT.contains(HOST_EXAMPLES[0]) && HOST_PROMPT.contains(HOST_EXAMPLES[1]));
+        assert!(HOST_REFUSED.contains(HOST_EXAMPLES[0]));
+        assert!(HOST_HINT.contains("account@address"));
+    }
+
+    /// Enter alone must answer no confirmation: the owner asked for an
+    /// explicit `y` or `n` (a default of "no" ended the run on Enter). Every
+    /// confirmation goes through `explicit`, which sets no default.
+    ///
+    /// **[MUTATION]**: add `.default(false)` in `explicit`, or a second
+    /// confirmation built apart — red.
+    #[test]
+    fn every_confirmation_waits_for_an_explicit_answer() {
+        let source = include_str!("ui.rs");
+        let constructor = concat!("Confirm", "::new()");
+        assert_eq!(source.matches(constructor).count(), 1, "every confirmation is built by `explicit`");
+        let start = source.find(concat!("fn ", "explicit(")).expect("`explicit` exists");
+        let body = &source[start..start + source[start..].find("\n}").unwrap()];
+        assert!(!body.contains(".default("), "{body}");
+    }
     use crate::plan::{Intent, Summary, compute};
 
     fn names(choices: &[Choice]) -> Vec<&str> {
