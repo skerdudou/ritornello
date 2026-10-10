@@ -1198,6 +1198,36 @@ impl SourcePlugin for FilesSource {
                 if let Some(p) = playlist.preset() {
                     notice = notice.preset(p);
                 }
+                // **Stopped, the notice re-arms.** Loading another playlist
+                // (or an m3u) from the page moves the index to its first
+                // entry, and what Play will start is then that entry: a
+                // notice carrying only the number left the old track's title
+                // and cover on screen under the new list's number. While
+                // playing, no identity, as said above; while stopped, the
+                // armed entry is not "what plays", so declaring it interrupts
+                // nothing — and re-arming the entry already armed (a mere
+                // reorder) changes nothing in the core.
+                let armed = (!self.plays.load(std::sync::atomic::Ordering::Relaxed))
+                    .then(|| playlist.current().map(|e| e.path.clone()));                drop(playlist);
+                match armed {
+                    Some(Some(file)) => {
+                        // After `playlist` is released: the Admin half takes
+                        // `roots` before `playlist`.
+                        let location = location_of(&*self.roots.read().await, &file);
+                        self.arm_cover(&file);
+                        // The status rides along: a frame that declares an
+                        // identity has its status *replaced* by the core,
+                        // absence included (see above), so leaving it out
+                        // would blank it.
+                        notice = notice
+                            .armed_file_at(Self::identity(&file), location, file.to_string_lossy())
+                            .status_text(self.status_text());
+                    }
+                    // An empty list: nothing Play could start, and the same
+                    // "why" as `armed_outcome` gives.
+                    Some(None) => notice = notice.plays_nothing().status_text(self.keyed("no_playlist")),
+                    None => {}
+                }
                 Some(notice)
             }
             // The sender is gone (Admin half terminated): nothing more to
@@ -1811,6 +1841,45 @@ mod tests {
             Some(3),
             "the named presets must accompany the count"
         );
+    }
+
+    /// Stopped on entry 3 of list A, the page loads list B (`LoadPlaylist`,
+    /// `LoadM3u`: index back to 0). Play will start B's first entry, so the
+    /// change notice must arm it — with its file, for the core to read its
+    /// tags — and keep the status, which a frame declaring an identity
+    /// replaces. An empty list arms nothing.
+    ///
+    /// **[MUTATION]** the `match armed` block dropped (the notice back to the
+    /// number alone) → the `armed` assertion fires. Its `!plays` operand
+    /// replaced by `true` → `the_admin_half_announces_the_count_without_disturbing_playback`
+    /// fires ("what is playing must not be redeclared").
+    #[tokio::test]
+    async fn loading_a_playlist_while_stopped_arms_its_first_entry() {
+        let (tx, rx) = tokio::sync::watch::channel(0u8);
+        let mut s = test_source(Playlist { index: 2, ..playlist_of(3) });
+        s.preset_count_rx = Some(rx);
+        let b0 = PathBuf::from("/autre/01.mp3");
+        *s.playlist.write().await = Playlist {
+            entries: vec![
+                Entry { path: b0.clone(), title: None, duration_s: None },
+                Entry { path: PathBuf::from("/autre/02.mp3"), title: None, duration_s: None },
+            ],
+            index: 0,
+        };
+        tx.send(2).unwrap();
+        let n = s.poll_notification().await.expect("a notification expected");
+        assert_eq!(n.preset, Some(1));
+        let armed = n.armed.expect("stopped: the notice must arm what Play will start");
+        assert_eq!(armed.identity, FilesSource::identity(&b0));
+        assert_eq!(armed.media_path.as_deref(), Some("/autre/01.mp3"));
+        assert_eq!(n.identity, Some(IdentityUpdate::Nothing));
+        assert!(n.status_text.is_some(), "a frame with an identity must carry the status, or the core blanks it");
+
+        *s.playlist.write().await = Playlist::default();
+        tx.send(0).unwrap();
+        let n = s.poll_notification().await.expect("a notification expected");
+        assert!(n.armed.is_none(), "an empty list arms nothing");
+        assert_eq!(n.identity, Some(IdentityUpdate::Nothing));
     }
 
     #[tokio::test]
