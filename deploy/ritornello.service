@@ -63,10 +63,21 @@ Environment=RITORNELLO_STATE=/var/lib/ritornello/state.json
 # system`, an ERROR line in the journal at every start of a device that plays
 # through ALSA and never needed pulse at all. A private /tmp gives that probe
 # somewhere to write, and keeps the isolation rather than opening the real one.
+#
+# /mnt/ritornello is writable here so that a network share keeps the mode it
+# was mounted with. `strict` builds the service's view of the disk once, at
+# start: a share already mounted then is frozen read-only inside it, whatever
+# its own options, while one mounted later arrives with them. Measured on the
+# Pi: the files plugin's cover archive failed with EROFS on a share mounted
+# `rw`, after a restart found it already mounted (every boot does the same),
+# and a transient unit with this one line wrote to it. A share declared not
+# writable stays protected where it should be: mount.cifs mounts it `ro`.
+# The `-` keeps the unit starting on a device that has no /mnt/ritornello
+# (no `files` plugin installed).
 NoNewPrivileges=true
 ProtectSystem=strict
 PrivateTmp=true
-ReadWritePaths=/etc/ritornello
+ReadWritePaths=/etc/ritornello -/mnt/ritornello
 ProtectHome=true
 RestrictSUIDSGID=true
 

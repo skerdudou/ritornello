@@ -1176,19 +1176,35 @@ which mentions neither authentication nor the missing package. Observed on
 DietPi bookworm; if you meet that line on an older build, install
 `cifs-utils` and start the unit again.
 
-**One point to verify on the target machine.** The mount unit itself is
-deliberately left unhardened, so that it mounts in the host's own
-namespace. `ritornello.service`, on the other hand, *is* hardened
-(`ProtectSystem=strict`, `ProtectHome=true`) and therefore runs in a mount
-namespace of its own. systemd mounts that namespace `rslave`, which
-*should* make mounts made later by the host visible inside it — expected
-behaviour, not something measured on this hardware yet. If a share mounts
-(the unit's log says so) while the plugin keeps seeing an empty
-`/mnt/ritornello/<name>`, that propagation is the suspect, and the recourse
-is a `BindPaths=/mnt/ritornello` in `ritornello.service`. A second point to
-confirm against the NAS in use: no SMB dialect is forced (`vers=` is
-deliberately left out, the kernel's negotiation ageing better than a
-pinned version).
+**The service sees the shares through a namespace of its own.** The mount
+unit itself is deliberately left unhardened, so that it mounts in the
+host's own namespace. `ritornello.service`, on the other hand, *is*
+hardened (`ProtectSystem=strict`, `ProtectHome=true`) and runs in a mount
+namespace that systemd builds once, at start, with everything read-only
+but the paths it lists as writable. Measured on the Pi:
+
+- a share mounted **after** the service started reaches it with its own
+  options (the namespace is `rslave`), so a `rw` share is writable;
+- a share **already mounted** when the service starts — after every boot,
+  and after every restart of the service, an update's included — was
+  frozen read-only inside it: the cover archive failed with `Read-only file
+  system` on a share `/proc/mounts` showed `rw`.
+
+So `ritornello.service` lists `-/mnt/ritornello` in `ReadWritePaths=`: the
+service then sees each share with the mode it was mounted with, and a share
+declared not writable stays read-only because `mount.cifs` mounts it `ro`.
+The `-` lets the unit start on a device without that directory. A device
+installed before this line needs the unit installed again
+(`ritornello-install`): an update never writes a unit.
+
+To tell the two apart on a device, compare the share's line in
+`/proc/mounts` with the same line in `/proc/<pid>/mountinfo` of the core.
+The first column of options is the namespace's view; a `ro` there over a
+`rw` mount is this case.
+
+A point still to confirm against the NAS in use: no SMB dialect is forced
+(`vers=` is deliberately left out, the kernel's negotiation ageing better
+than a pinned version).
 
 ## Audio dropouts
 
