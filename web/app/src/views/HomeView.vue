@@ -103,23 +103,24 @@ onMounted(async () => {
       :seek-step="settings.seek_step_s"
       @seek="(s: number) => send({ cmd: 'SeekTo', arg: s })"
     >
-      <!-- The two commands bearing on the whole device, in the corner of the
-           card: the source, then standby in the far corner. The source is
-           one key per source when they fit, the cycle key otherwise, nothing
-           when there is only one. -->
+      <!-- The two commands bearing on the whole device: the source, and
+           standby in the far corner. The source is one key per source when
+           they fit, at the header's left edge, clear of standby; the cycle
+           key otherwise, beside standby; nothing when there is only one. -->
+      <template v-if="mode === 'icons'" #sources>
+        <SourceKeys
+          :sources="sources"
+          :icons="icons"
+          :active="state?.source ?? null"
+          :playing="state?.playback === 'playing'"
+          :disabled="unavailable('SelectSource', state)"
+          @choose="(name: string) => send({ cmd: 'SelectSource', arg: name })"
+        />
+      </template>
       <template #actions>
         <div class="flex items-center gap-1">
-          <SourceKeys
-            v-if="mode === 'icons'"
-            :sources="sources"
-            :icons="icons"
-            :active="state?.source ?? null"
-            :playing="state?.playback === 'playing'"
-            :disabled="unavailable('SelectSource', state)"
-            @choose="(name: string) => send({ cmd: 'SelectSource', arg: name })"
-          />
           <Button
-            v-else-if="mode === 'cycle'"
+            v-if="mode === 'cycle'"
             variant="outline"
             size="sm"
             data-remote-source

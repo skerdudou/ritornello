@@ -234,36 +234,45 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
   <!-- No visible title: the header is the room the source keys need, and the
        card says what it is to assistive technology through its name. -->
   <Card data-player role="region" :aria-label="t('player_title')">
-    <!-- `gap-x-0` and the title's `mr-1`: the gap before the corner's keys
-         only exists when the title does. The kit's grid would keep its
-         column gap beside an empty title, a width `headerMode` does not
-         count (see its `GAP`). -->
-    <CardHeader ref="header" class="gap-x-0 pb-2" data-player-header>
-      <CardTitle v-if="showSource || state?.standby" class="mr-1 flex items-center gap-2 text-base">
-        <!-- The source as a pill: a kit badge, `data-source` kept for the
-             journeys. The dot says "it's playing" (playback), where the old
-             text line said nothing.
+    <!-- `gap-x-0` and the start column's `mr-1`: the gap before the corner's
+         keys only exists when that column does. The kit's grid would keep
+         its column gap beside an empty title, a width `headerMode` does not
+         count (see its `GAP`).
 
-             `bg-current` and not `bg-primary`: the dot inherits the badge's
-             text color, so it contrasts **by construction** with its own
-             background, in every theme. With `bg-primary` it painted the
-             theme's green over the secondary badge's blue — two saturated,
-             close hues, reported unreadable by the owner. It is also the
-             idiom already chosen for the active preset pill (see
-             `PresetGrid.vue`). The color carries no meaning here anyway: it
-             is the **presence** of the dot that says it is playing, it is
-             only rendered at that moment. -->
-        <Badge v-if="showSource" variant="secondary" class="gap-1.5 font-normal">
-          <span
-            v-if="state?.playback === 'playing'"
-            class="size-1.5 rounded-full bg-current"
-            aria-hidden="true"
-            data-now-playing-line
-          />
-          <span data-source>{{ state ? state.source || t('no_source') : '' }}</span>
-        </Badge>
-        <Badge v-if="state?.standby" variant="secondary" data-standby>{{ t('standby') }}</Badge>
-      </CardTitle>
+         The `sources` slot opens the start column, so the source keys sit
+         at the left edge, away from standby in the far corner: side by side
+         in the corner, a key for a source and the key putting the device to
+         sleep were one slip apart, reported by the owner. `gap-1` between
+         them and the standby badge is the `GAP` `headerMode` counts. -->
+    <CardHeader ref="header" class="gap-x-0 pb-2" data-player-header>
+      <div v-if="showSource || state?.standby || $slots.sources" class="mr-1 flex items-center gap-1" data-player-header-start>
+        <slot name="sources" />
+        <CardTitle v-if="showSource || state?.standby" class="flex items-center gap-2 text-base">
+          <!-- The source as a pill: a kit badge, `data-source` kept for the
+               journeys. The dot says "it's playing" (playback), where the old
+               text line said nothing.
+
+               `bg-current` and not `bg-primary`: the dot inherits the badge's
+               text color, so it contrasts **by construction** with its own
+               background, in every theme. With `bg-primary` it painted the
+               theme's green over the secondary badge's blue — two saturated,
+               close hues, reported unreadable by the owner. It is also the
+               idiom already chosen for the active preset pill (see
+               `PresetGrid.vue`). The color carries no meaning here anyway: it
+               is the **presence** of the dot that says it is playing, it is
+               only rendered at that moment. -->
+          <Badge v-if="showSource" variant="secondary" class="gap-1.5 font-normal">
+            <span
+              v-if="state?.playback === 'playing'"
+              class="size-1.5 rounded-full bg-current"
+              aria-hidden="true"
+              data-now-playing-line
+            />
+            <span data-source>{{ state ? state.source || t('no_source') : '' }}</span>
+          </Badge>
+          <Badge v-if="state?.standby" variant="secondary" data-standby>{{ t('standby') }}</Badge>
+        </CardTitle>
+      </div>
       <CardAction v-if="$slots.actions">
         <slot name="actions" />
       </CardAction>

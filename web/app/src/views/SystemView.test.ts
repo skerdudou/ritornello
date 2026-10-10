@@ -150,7 +150,10 @@ function stub(
 
 describe('SystemView', () => {
   beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    // Plain fake timers: under `shouldAdvanceTime` simulated time also follows
+    // the wall clock, so what a test measures would depend on how fast the
+    // machine runs it (see the same change in `ConfigView.test.ts`).
+    vi.useFakeTimers()
     // The metrics state lives at module level: without a reset, a test
     // inherits the history, the period and the timer of the previous one.
     resetMetrics()
@@ -278,9 +281,10 @@ describe('SystemView', () => {
     const gaps = xs.slice(1).map((x, i) => x - (xs[i] ?? 0))
     const first = gaps[0] ?? 0
     const last = gaps.at(-1) ?? 0
-    // Theoretical ratio 5 (5 s against 1 s); we require 3 to allow for the
-    // real time that also elapses under `shouldAdvanceTime`.
-    expect(first).toBeGreaterThan(last * 3)
+    // 5 s against 1 s: with time moving only when the test says, the ratio is
+    // 5 up to the path's two-decimal rounding, where it used to be "more
+    // than 3" to absorb the wall clock. Rank-based placement would give 1.
+    expect(first / last).toBeCloseTo(5, 1)
     w.unmount()
   })
 
