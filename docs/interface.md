@@ -433,6 +433,11 @@ Play then starts what the screen shows.
 A `metadata` plugin sees the armed track only if it asked for it; one that did
 not sees nothing playing until Play.
 
+On the console display, line 1 starts with the playback state as one glyph
+followed by a space: ▶ playing, ║ paused, ■ stopped (the overlay and
+standby screens show none); these are glyphs the console font (Lat15-Fixed16)
+actually contains.
+
 ### Volume
 
 A horizontal slider, 0-100, the speaker icon on its left and the value in

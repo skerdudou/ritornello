@@ -71,8 +71,9 @@ impl RadioSource {
     /// start is kept **armed**, so its number and name stay on screen.
     ///
     /// The armed identity is exactly the one `play_preset` declares for the
-    /// same station: the core keeps the slate of the stream that was playing
-    /// when the two are equal. With no station at that number there is
+    /// same station, so the core sees the stream that was playing as the same
+    /// one and keeps it armed (the song on air goes at Stop, the station
+    /// stays). With no station at that number there is
     /// nothing to arm.
     async fn armed_outcome(&mut self) -> SourceOutcome {
         let stations = self.stations.read().await;
@@ -782,7 +783,9 @@ mod tests {
         let outcome = source.stop().await;
         assert!(matches!(outcome.action, SourceAction::Noop));
         // The identity is exactly the one `play_preset` declared, so the core
-        // keeps the slate (title, cover) of the stream that was playing.
+        // sees the same station as the one that was playing and keeps it
+        // armed; what was on air (title, cover) is dropped by the core at
+        // Stop, not kept.
         assert_eq!(armed_identity(&outcome), Some(RadioSource::stream_identity(FIP)));
         assert_eq!(outcome.preset, Some(1));
         assert_eq!(outcome.preset_name.as_deref(), Some("FIP"));

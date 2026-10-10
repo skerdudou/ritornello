@@ -1222,7 +1222,8 @@ impl SourcePlugin for FilesSource {
                 // nothing — and re-arming the entry already armed (a mere
                 // reorder) changes nothing in the core.
                 let armed = (!self.plays.load(std::sync::atomic::Ordering::Relaxed))
-                    .then(|| playlist.current().map(|e| e.path.clone()));                drop(playlist);
+                    .then(|| playlist.current().map(|e| e.path.clone()));
+                drop(playlist);
                 match armed {
                     Some(Some(file)) => {
                         // After `playlist` is released: the Admin half takes
