@@ -46,6 +46,9 @@ impl MpvIpc {
             // the start. A stream would go back through the restart and
             // mask the defect.
             let mut first_idle = true;
+            // Journal only, never an event: see `Stall`.
+            let mut stall = Stall::default();
+            let mut path = String::new();
             while let Ok(Some(line)) = lines.next_line().await {
                 let v = match serde_json::from_str::<Value>(&line) {
                     Ok(v) => v,
@@ -54,6 +57,24 @@ impl MpvIpc {
                         continue;
                     }
                 };
+                if v["event"] == json!("property-change") {
+                    match (v["name"].as_str(), &v["data"]) {
+                        (Some("path"), Value::String(p)) => path.clone_from(p),
+                        (Some("paused-for-cache"), data) => {
+                            match stall.change(data, std::time::Instant::now()) {
+                                Some(StallNote::Began) => {
+                                    tracing::warn!("playback stalled: no data from {path}")
+                                }
+                                Some(StallNote::Ended(lasted)) => tracing::warn!(
+                                    "playback stall over after {:.1} s without data from {path}",
+                                    lasted.as_secs_f64()
+                                ),
+                                None => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(id) = v.get("request_id").and_then(Value::as_u64) {
                     if let Some(tx) = pending.lock().await.remove(&id) {
                         let res = if v["error"] == json!("success") {
@@ -211,6 +232,57 @@ impl MpvIpc {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         self.command(&[json!("observe_property"), json!(id), json!(name)]).await?;
         Ok(())
+    }
+}
+
+/// What a change of mpv's `paused-for-cache` means for the journal.
+#[derive(Debug, PartialEq)]
+enum StallNote {
+    Began,
+    Ended(std::time::Duration),
+}
+
+/// Follows mpv's `paused-for-cache`, so that a silence on the speakers
+/// leaves a dated line with its duration in the journal.
+///
+/// Born from a cut of nearly a minute on Oüi FM (2026-10-10) that left no
+/// trace at all: mpv runs with `--no-terminal`, and the core did not watch
+/// this property. The cause could only be rebuilt afterwards by comparing
+/// the bytes the TCP connection had received with the playback position —
+/// one connection, never reopened, every byte received played, about 57 s
+/// during which the server sent nothing. It was not possible to tell one
+/// long cut from several short ones, nor to say when it happened.
+///
+/// Measured on mpv 0.37 against a server that goes silent without closing:
+/// `true` 0.25 s into the silence, `false` 1.25 s after data resumes (the
+/// read-ahead refilling). When the server closes during the silence, it is
+/// `false` too, followed by an `end-file`. When idle, the property is
+/// unavailable and the change carries no `data` at all — so anything other
+/// than `true` ends a stall in progress, a station change or a stop
+/// included.
+///
+/// The journal only, no `Event`: nothing in the core acts on it, and an
+/// event would hand the loop a state to keep consistent for the sake of a
+/// log line.
+#[derive(Debug, Default)]
+struct Stall {
+    since: Option<std::time::Instant>,
+}
+
+impl Stall {
+    fn change(&mut self, data: &Value, now: std::time::Instant) -> Option<StallNote> {
+        match (data, self.since) {
+            (Value::Bool(true), None) => {
+                self.since = Some(now);
+                Some(StallNote::Began)
+            }
+            (Value::Bool(true), Some(_)) => None,
+            (_, Some(since)) => {
+                self.since = None;
+                Some(StallNote::Ended(now.saturating_duration_since(since)))
+            }
+            (_, None) => None,
+        }
     }
 }
 
@@ -446,9 +518,16 @@ pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) 
 /// only way the core learns which file is playing: it made a principle of
 /// **never** interpreting the opaque identity produced by the Source to
 /// derive a path from it — it is mpv, which actually opened the file, that
-/// says so.
-const OBSERVED: [&str; 6] =
-    ["media-title", "metadata", "idle-active", "playlist-pos", "chapter", "path"];
+/// says so. `paused-for-cache` only feeds the journal (see `Stall`).
+const OBSERVED: [&str; 7] = [
+    "media-title",
+    "metadata",
+    "idle-active",
+    "playlist-pos",
+    "chapter",
+    "path",
+    "paused-for-cache",
+];
 
 /// Launches mpv as an idle daemon and connects to it. The Child is handed
 /// back to the caller: if it dies, main exits and systemd restarts the
@@ -984,6 +1063,52 @@ pub(crate) mod tests {
         assert!(OBSERVED.contains(&"idle-active"), "without it, no more restart after a drop");
         assert!(OBSERVED.contains(&"media-title"));
         assert!(OBSERVED.contains(&"playlist-pos"));
+        assert!(OBSERVED.contains(&"paused-for-cache"), "without it, a cut leaves no trace");
+    }
+
+    /// The sequence mpv 0.37 produced against a server that went silent for
+    /// 8 s without closing, the payloads as captured: the unavailable
+    /// property at load (no `data`), `false` once playing, `true` into the
+    /// silence, `false` when data is back.
+    #[test]
+    fn a_silence_gives_one_line_when_it_begins_and_its_duration_when_it_ends() {
+        let t0 = std::time::Instant::now();
+        let at = |s: f64| t0 + std::time::Duration::from_secs_f64(s);
+        let mut stall = Stall::default();
+        assert_eq!(stall.change(&Value::Null, at(0.10)), None);
+        assert_eq!(stall.change(&json!(false), at(0.71)), None);
+        assert_eq!(stall.change(&json!(true), at(5.37)), Some(StallNote::Began));
+        // A repeated `true` is the same silence, not a second one: its
+        // start must not move.
+        assert_eq!(stall.change(&json!(true), at(9.0)), None);
+        assert_eq!(
+            stall.change(&json!(false), at(14.37)),
+            Some(StallNote::Ended(std::time::Duration::from_secs(9)))
+        );
+        assert_eq!(stall.change(&json!(false), at(15.0)), None);
+    }
+
+    /// Two ways a silence ends without data coming back, both measured or
+    /// documented: the server closes (`false`, then `end-file`), or the
+    /// listener stops or changes station while mpv waits (the property
+    /// becomes unavailable, a change with no `data`). Either way the stall
+    /// is over and its duration is known; leaving it open would date the
+    /// next one from the wrong instant.
+    #[test]
+    fn a_silence_ended_by_a_close_or_a_stop_still_gives_its_duration() {
+        let t0 = std::time::Instant::now();
+        let at = |s: u64| t0 + std::time::Duration::from_secs(s);
+        let mut stall = Stall::default();
+        assert_eq!(stall.change(&json!(true), at(5)), Some(StallNote::Began));
+        assert_eq!(
+            stall.change(&Value::Null, at(11)),
+            Some(StallNote::Ended(std::time::Duration::from_secs(6)))
+        );
+        assert_eq!(stall.change(&json!(true), at(20)), Some(StallNote::Began));
+        assert_eq!(
+            stall.change(&json!(false), at(23)),
+            Some(StallNote::Ended(std::time::Duration::from_secs(3)))
+        );
     }
 
     #[test]

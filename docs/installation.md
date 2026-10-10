@@ -1244,8 +1244,22 @@ load, at the cost of the same amount of latency on volume or mute taking
 effect. **Reducing it makes dropouts worse**: it is the direction of the
 change that matters, not its magnitude.
 
-To tell the two causes apart, run `journalctl -u ritornello -f` during a
-dropout: mpv logs the network cache draining, not ALSA underruns.
+mpv itself writes nothing to the journal: it runs with `--no-terminal`. The
+core watches its `paused-for-cache` instead, and a silence on the **input**
+leaves two lines in `journalctl -u ritornello` (and in the System tab's log
+card):
+
+    WARN playback stalled: no data from https://…/station.mp3
+    WARN playback stall over after 57.3 s without data from https://…/station.mp3
+
+Their timestamps date the silence, and the second line gives its length. A
+silence of a second or two is the read-ahead running dry: that is what
+`RITORNELLO_NETWORK_READAHEAD` absorbs. A silence of tens of seconds is the
+station or the path to it sending nothing at all, and no buffer covers that.
+A dropout with **no** such line is not the input: look at the output buffer.
+Measured against mpv 0.37 with a server that goes silent without closing:
+the first line comes about 0.25 s into the silence, the second about 1.25 s
+after data is back, while the read-ahead refills.
 
 ## What has not been verified
 
@@ -1659,6 +1673,13 @@ unplugged and plugged back in and the remote answering again within a tick
 without a click on "Refresh", nor the single `warn` of a node that opens but
 whose event stream cannot be started: no test reaches that path, since it
 needs a real evdev device.
+
+The two "playback stalled" lines (see [Audio dropouts](#audio-dropouts))
+have been observed from the real core driving a real mpv 0.37, against a
+local server that goes silent for 8 s, but not yet on the Pi, whose mpv is
+0.40, nor against a real station cutting out. The pure logic behind them is
+covered by tests that fail when it is broken; their timings in that
+section are mpv 0.37's.
 
 Not something left unverified, but worth recording here for whoever meets
 its traces in the history: `plugin_action_refusal`, the scaffold that made
