@@ -928,6 +928,17 @@ pub trait MetadataPlugin: Send + 'static {
     /// queue, cache) must live in the plugin, never in the future's local
     /// variables.
     async fn next_enrichment(&mut self) -> Enrichment;
+
+    /// Does this plugin work on an **armed** track too, one that would start
+    /// on Play but is not sounding (static facts: a disc's titles, an album
+    /// cover)? Default `false`: the relay then shows the plugin `identity: None`
+    /// for the whole armed state, exactly as before armed tracks existed.
+    ///
+    /// Read a single time, at registration, and announced as
+    /// `Announcement::enriches_armed`: derived, so it cannot lie.
+    fn enriches_armed(&self) -> bool {
+        false
+    }
 }
 
 /// Binds a metadata plugin's socket, without serving yet.

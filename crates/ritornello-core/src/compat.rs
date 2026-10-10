@@ -197,6 +197,7 @@ mod tests {
             kinds: kinds.to_vec(),
             admin,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: PROTOCOL_VERSION,
             version: None,

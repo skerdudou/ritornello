@@ -888,7 +888,8 @@ mod tests {
             })
             .collect();
         assert_eq!(j["contracts"], serde_json::Value::Object(expected), "every contract at the version this core speaks");
-        assert_eq!(j["contracts"]["source"], serde_json::json!({"major": 1, "minor": 1}), "{j}");
+        assert_eq!(j["contracts"]["source"], serde_json::json!({"major": 1, "minor": 2}), "{j}");
+        assert_eq!(j["contracts"]["metadata"], serde_json::json!({"major": 1, "minor": 1}), "{j}");
         assert_eq!(j["contracts"].as_object().unwrap().len(), 5, "every contract, none forgotten: {j}");
         assert!(j.get("protocol").is_none(), "the single protocol number is gone: {j}");
     }

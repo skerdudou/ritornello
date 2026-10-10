@@ -369,6 +369,7 @@ fn announcement_section() -> Vec<String> {
             covers: false,
             ui_version: None,
             icon: None,
+            enriches_armed: false,
             protocol: PROTOCOL_VERSION,
             contracts: BTreeMap::new(),
             version: None,
@@ -385,6 +386,7 @@ fn announcement_section() -> Vec<String> {
             covers: true,
             ui_version: Some("abc123".into()),
             icon: Some("radio".into()),
+            enriches_armed: true,
             protocol: PROTOCOL_VERSION,
             contracts: Contract::ALL.into_iter().map(|c| (c, ContractVersion::new(1, 0))).collect(),
             version: Some("1.2.3".into()),
@@ -565,7 +567,12 @@ fn metadata_section() -> Vec<String> {
                 cover: true,
                 stream_title: Some("A - T".into()),
             },
+            armed: false,
         },
+    );
+    l.add(
+        "NowPlaying::armed",
+        &NowPlaying { source: "cd".into(), identity: Some(json!({"disc": "x"})), armed: true, ..Default::default() },
     );
     add_cover_refs(&mut l);
     add_links(&mut l);

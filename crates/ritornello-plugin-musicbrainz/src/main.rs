@@ -2124,6 +2124,7 @@ mod tests {
                 stream_title: Some("Miles Davis - So What".into()),
                 ..Default::default()
             },
+            armed: false,
         })
         .await;
 

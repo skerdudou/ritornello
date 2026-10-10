@@ -1111,6 +1111,7 @@ mod tests {
                     kinds: vec![PluginKind::Metadata],
                     admin: false,
                     covers: false,
+                    enriches_armed: false,
                     ui_version: None,
                     protocol: ritornello_proto::PROTOCOL_VERSION,
                     contracts: std::collections::BTreeMap::from([(
@@ -1131,6 +1132,7 @@ mod tests {
                 kinds: vec![PluginKind::Source],
                 admin: true,
                 covers: false,
+                enriches_armed: false,
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,
                 contracts: std::collections::BTreeMap::from([

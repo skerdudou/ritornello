@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use ritornello_proto::{
     AdminReq, AdminRequest, AdminResponse, AdminResult, SourcesCatalog, Cover, CoverRef, DisplayFrame,
-    Enrichment, IdentityUpdate, InputMessage, NowPlaying, PlayRequest, PlayerState, Preset, SourceAction,
+    Enrichment, IdentityUpdate, InputMessage, Known, NowPlaying, PlayRequest, PlayerState, Preset, SourceAction,
     SourceMessage, SourceReq, SourceRequest, Text,
 };
 use std::collections::HashMap;
@@ -546,11 +546,17 @@ impl AdminClient {
 /// track is playing does not have to wait for the next one to get to work.
 ///
 /// Only returns on error; to be spawned in a dedicated task by the caller.
+///
+/// `enriches_armed` is the plugin's announced opt-in: without it, an armed
+/// track is shown as "nothing" (see `visible_to`), and a frame identical to
+/// the last one sent is skipped, so an armed track whose `known` keeps growing
+/// does not resend the same "nothing" to a plugin that may not see it.
 pub async fn run_metadata_client(
     socket_path: &Path,
     name: String,
     enrich_tx: mpsc::Sender<(String, Enrichment)>,
     mut np_rx: tokio::sync::watch::Receiver<NowPlaying>,
+    enriches_armed: bool,
 ) -> Result<()> {
     let stream = UnixStream::connect(socket_path)
         .await
@@ -558,10 +564,12 @@ pub async fn run_metadata_client(
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
 
-    let mut to_send = Some(np_rx.borrow_and_update().clone());
+    let mut last_sent: Option<NowPlaying> = None;
+    let mut to_send = Some(visible_to(&np_rx.borrow_and_update(), enriches_armed));
     loop {
-        if let Some(np) = to_send.take() {
+        if let Some(np) = to_send.take().filter(|np| last_sent.as_ref() != Some(np)) {
             write.write_all(format!("{}\n", serde_json::to_string(&np)?).as_bytes()).await?;
+            last_sent = Some(np);
         }
         tokio::select! {
             line = lines.next_line() => {
@@ -584,9 +592,21 @@ pub async fn run_metadata_client(
                 if change.is_err() {
                     bail!("now-playing channel closed, stopping metadata relay {name}");
                 }
-                to_send = Some(np_rx.borrow_and_update().clone());
+                to_send = Some(visible_to(&np_rx.borrow_and_update(), enriches_armed));
             }
         }
+    }
+}
+
+/// What a `metadata` plugin is allowed to see of `np`: an armed track is
+/// hidden (as "nothing", with the source kept) from a plugin that did not
+/// announce `enriches_armed`, so an older plugin behaves as if nothing were
+/// armed. Anything else goes through unchanged.
+pub fn visible_to(np: &NowPlaying, enriches_armed: bool) -> NowPlaying {
+    if np.armed && !enriches_armed {
+        NowPlaying { source: np.source.clone(), identity: None, known: Known::default(), armed: false }
+    } else {
+        np.clone()
     }
 }
 
@@ -1351,7 +1371,7 @@ mod tests {
         });
         let (enrich_tx, mut enrich_rx) = tokio::sync::mpsc::channel(8);
         tokio::spawn(async move {
-            let _ = run_metadata_client(&socket, "ouifm".into(), enrich_tx, np_rx).await;
+            let _ = run_metadata_client(&socket, "ouifm".into(), enrich_tx, np_rx, false).await;
         });
 
         let (name, e) = enrich_rx.recv().await.unwrap();
@@ -1385,7 +1405,7 @@ mod tests {
         });
         let (enrich_tx, _enrich_rx) = tokio::sync::mpsc::channel(8);
         tokio::spawn(async move {
-            let _ = run_metadata_client(&socket, "ouifm".into(), enrich_tx, np_rx).await;
+            let _ = run_metadata_client(&socket, "ouifm".into(), enrich_tx, np_rx, false).await;
         });
 
         // Each send is awaited before the next one. This is not test caution:
@@ -1424,6 +1444,89 @@ mod tests {
         let received = wait_for(&seen, 3).await;
         assert_eq!(received.len(), 3, "{received:?}");
         assert_eq!(received[2].identity, None);
+    }
+
+    fn armed_np(known: Known, armed: bool) -> NowPlaying {
+        NowPlaying { source: "cd".into(), identity: Some(serde_json::json!({"disc": "x"})), known, armed }
+    }
+
+    /// What a plugin may see of an armed track. Both operands of the predicate
+    /// have their own case.
+    ///
+    /// **[MUTATION]** dropping the `!enriches_armed` operand fails the
+    /// opted-in case (the identity would be hidden from a plugin that asked for
+    /// it); dropping the `np.armed` operand fails the not-armed case (a playing
+    /// track would be hidden from a plugin that did not opt in).
+    #[test]
+    fn visible_to_hides_an_armed_track_only_from_a_plugin_that_did_not_opt_in() {
+        let known = Known { title: Some("A".into()), ..Default::default() };
+        let armed = armed_np(known.clone(), true);
+        let hidden = visible_to(&armed, false);
+        assert_eq!(hidden, NowPlaying { source: "cd".into(), identity: None, known: Known::default(), armed: false });
+        assert_eq!(visible_to(&armed, true), armed, "opted in: unchanged");
+        let playing = armed_np(known, false);
+        assert_eq!(visible_to(&playing, false), playing, "not armed: unchanged without the opt-in");
+        assert_eq!(visible_to(&playing, true), playing, "not armed: unchanged with the opt-in");
+    }
+
+    /// Through a real socket: a plugin that did not opt in sees exactly one
+    /// "nothing" while a track is armed, however much `known` grows, then the
+    /// identity again once it plays.
+    ///
+    /// **[MUTATION]** removing the `last_sent` dedupe in `run_metadata_client`
+    /// fails the line count (the second armed frame would resend `identity:
+    /// null`); removing the `!enriches_armed` operand of `visible_to` leaks the
+    /// armed identity and fails the first line's `identity: null` assertion.
+    #[tokio::test]
+    async fn metadata_client_hides_an_armed_track_once_from_a_plugin_that_did_not_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("meta.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<NowPlaying>::new()));
+        let seen_srv = seen.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, _write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                seen_srv.lock().await.push(serde_json::from_str(&line).unwrap());
+            }
+        });
+
+        let a = Known { title: Some("A".into()), ..Default::default() };
+        let (np_tx, np_rx) = tokio::sync::watch::channel(armed_np(a.clone(), true));
+        let (enrich_tx, _enrich_rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = run_metadata_client(&socket, "old".into(), enrich_tx, np_rx, false).await;
+        });
+
+        async fn wait_for(seen: &Arc<Mutex<Vec<NowPlaying>>>, count: usize) -> Vec<NowPlaying> {
+            for _ in 0..100 {
+                if seen.lock().await.len() >= count {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            seen.lock().await.clone()
+        }
+
+        let received = wait_for(&seen, 1).await;
+        assert_eq!(received.len(), 1, "{received:?}");
+        assert_eq!(received[0].identity, None, "the armed identity must not reach the plugin");
+        assert!(!received[0].armed);
+
+        // The armed track learns more: the plugin still sees the same nothing,
+        // so nothing is sent. The playing frame that follows is awaited, which
+        // also proves the armed one in between produced no line.
+        np_tx.send(armed_np(Known { artist: Some("B".into()), ..a.clone() }, true)).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        np_tx.send(armed_np(a, false)).unwrap();
+        let received = wait_for(&seen, 2).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let received_after = seen.lock().await.clone();
+        assert_eq!(received_after.len(), 2, "{received_after:?}");
+        assert_eq!(received[1].identity, Some(serde_json::json!({"disc": "x"})));
+        assert!(!received[1].armed);
     }
 
     #[tokio::test]

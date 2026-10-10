@@ -10,7 +10,7 @@ Contract::Metadata = "metadata"
 Contract::Admin = "admin"
 ContractVersion = {"major":1,"minor":2}
 Announcement::minimal = {"name":"p","kinds":["source"],"admin":false,"covers":false,"protocol":2,"contracts":{}}
-Announcement::full = {"name":"p","kinds":["source","display","input","metadata"],"admin":true,"covers":true,"ui_version":"abc123","icon":"radio","protocol":2,"contracts":{"source":{"major":1,"minor":0},"display":{"major":1,"minor":0},"input":{"major":1,"minor":0},"metadata":{"major":1,"minor":0},"admin":{"major":1,"minor":0}},"version":"1.2.3","repository":"https://example.invalid/r","catalog":{"en":{"key":"text"}}}
+Announcement::full = {"name":"p","kinds":["source","display","input","metadata"],"admin":true,"covers":true,"ui_version":"abc123","icon":"radio","enriches_armed":true,"protocol":2,"contracts":{"source":{"major":1,"minor":0},"display":{"major":1,"minor":0},"input":{"major":1,"minor":0},"metadata":{"major":1,"minor":0},"admin":{"major":1,"minor":0}},"version":"1.2.3","repository":"https://example.invalid/r","catalog":{"en":{"key":"text"}}}
 [source 1.2 next]
 SourceReq::Activate = {"req":"Activate"}
 SourceReq::Wake = {"req":"Wake"}
@@ -102,9 +102,10 @@ InputMessage::held = {"cmd":"VolumeUp","held":true}
 Repeat::Off = "off"
 Repeat::All = "all"
 Repeat::One = "one"
-[metadata 1.0]
+[metadata 1.1 next]
 NowPlaying::default = {"source":"","identity":null}
 NowPlaying::full = {"source":"radio","identity":{"station":"x"},"known":{"artist":"A","title":"T","album":"Al","duration_s":10,"year":2001,"cover":true,"stream_title":"A - T"}}
+NowPlaying::armed = {"source":"cd","identity":{"disc":"x"},"armed":true}
 CoverRef::Url = {"kind":"url","url":"https://example.invalid/c.jpg"}
 CoverRef::Path = {"kind":"path","path":"/cache/c.jpg"}
 Link::Youtube = {"platform":"youtube","url":"https://example.invalid/y"}

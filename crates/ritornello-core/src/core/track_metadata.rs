@@ -134,6 +134,7 @@ impl<P: Player> Core<P> {
             // correct if the reset were ever to change, and `publish_state`
             // republishes this same field as soon as it stops being empty.
             known: self.metadata.known(),
+            armed: false,
         };
         // Failure impossible in practice: a `watch::Sender::send` only fails
         // when no receiver is alive anymore, and `main` keeps its own to
@@ -708,6 +709,7 @@ mod tests {
                     kinds: vec![ritornello_proto::PluginKind::Metadata],
                     admin: false,
                     covers: false,
+                    enriches_armed: false,
                     ui_version: None,
                     protocol: ritornello_proto::PROTOCOL_VERSION,
                     contracts: std::collections::BTreeMap::from([(

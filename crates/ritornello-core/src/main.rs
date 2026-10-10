@@ -980,9 +980,10 @@ async fn hotplug<P: player::Player>(
                 let socket_for_task = socket.clone();
                 let task_name = name.clone();
                 let unreachable = children.unreachable_tx.clone();
+                let enriches_armed = announcement.enriches_armed;
                 tokio::spawn(async move {
                     if let Err(e) =
-                        run_metadata_client(&socket_for_task, task_name.clone(), tx, np_rx).await
+                        run_metadata_client(&socket_for_task, task_name.clone(), tx, np_rx, enriches_armed).await
                     {
                         tracing::warn!("metadata plugin {task_name} disconnected: {e}");
                     }
@@ -1648,6 +1649,7 @@ async fn main() -> Result<()> {
         source: persisted.active_source.clone(),
         identity: None,
         known: Known::default(),
+        armed: false,
     });
     // Structured player state: towards the SPA (SSE route) and towards
     // Display plugins, which compose their own layout from this same frame
@@ -2004,9 +2006,10 @@ async fn main() -> Result<()> {
                     let socket_for_task = socket.clone();
                     let task_name = name.clone();
                     let unreachable = unreachable_tx.clone();
+                    let enriches_armed = announcement.enriches_armed;
                     tokio::spawn(async move {
                         if let Err(e) =
-                            run_metadata_client(&socket_for_task, task_name.clone(), tx, np_rx).await
+                            run_metadata_client(&socket_for_task, task_name.clone(), tx, np_rx, enriches_armed).await
                         {
                             tracing::warn!("metadata plugin {task_name} disconnected: {e}");
                         }
@@ -3398,6 +3401,7 @@ mod toggle_tests {
                 kinds: vec![PluginKind::Display],
                 admin: true,
                 covers: false,
+                enriches_armed: false,
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,
                 contracts: [Contract::Display, Contract::Admin]
@@ -3433,6 +3437,7 @@ mod toggle_tests {
             kinds: vec![kind],
             admin: false,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::of_kind(kind), Contract::of_kind(kind).current())]),
@@ -4344,6 +4349,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: foreign,
             contracts: Default::default(),
@@ -4394,6 +4400,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -4436,6 +4443,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: foreign,
             contracts: Default::default(),
@@ -4483,6 +4491,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Source],
             admin: true,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: foreign,
             contracts: Default::default(),
@@ -4540,6 +4549,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: true,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION + 1,
             contracts: Default::default(),
@@ -4576,6 +4586,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display, PluginKind::Input],
             admin: true,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([
@@ -4712,6 +4723,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -4742,6 +4754,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -4771,6 +4784,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -4807,6 +4821,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -4855,6 +4870,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -4884,6 +4900,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -4916,6 +4933,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Source],
             admin: true,
             covers: false,
+            enriches_armed: false,
             ui_version: Some("3".into()),
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([
