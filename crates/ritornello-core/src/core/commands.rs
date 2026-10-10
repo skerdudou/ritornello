@@ -311,15 +311,41 @@ impl<P: Player> Core<P> {
                 }
             }
             Command::Stop => {
+                // Read before it falls: only a stream drops its song below.
+                let was_stream = self.expecting_stream;
                 self.expecting_stream = false;
                 self.playback = false;
                 self.player.stop().await?;
-                // Forget the identity **before** notifying the Source: this
-                // call clears the display's title, and an unreachable Source
-                // would make us wait up to 5 s (timeout of
-                // `SourceClient::request`) with the stopped track still on
-                // screen.
-                self.set_identity(None);
+                // The stopped track stays on screen, **armed**, until the
+                // Source answers — done before notifying it, so the published
+                // flag already says "nothing sounds" during that wait. A
+                // Source that arms the same identity then changes nothing on
+                // screen; one that answers `Nothing` without `armed` clears
+                // it (the default SDK `stop()`, hence every third-party
+                // source). This used to forget the identity here, so that an
+                // unreachable Source (up to 5 s, the timeout of
+                // `SourceClient::request`) would not leave the stopped title
+                // up; that title is now exactly the one we want kept during
+                // the wait — and cleared once the request has failed, below.
+                //
+                // The position goes, though: it measured a playback that
+                // ended, and only an identity change drops the anchor — which
+                // a same-identity arming is not. Left in place, a stream's
+                // anchor would resume under the next Play of this same track,
+                // advanced by the whole time spent stopped.
+                self.forget_position();
+                // A stopped stream keeps its station, not the song that was
+                // on air (see `forget_the_moment`). The moment goes first and
+                // the arming follows, so that no published frame ever says
+                // "armed" while still carrying the `known` of the song that
+                // was on air.
+                if was_stream {
+                    self.forget_the_moment();
+                }
+                match self.metadata.identity().cloned() {
+                    Some(id) => self.set_identity_state(Some(id), true),
+                    None => self.set_identity(None),
+                }
                 // The Source was not consulted for this stop: tell it,
                 // otherwise one that keeps its own playback state (the cd)
                 // would keep it wrong and later announce metadata for a
@@ -339,6 +365,10 @@ impl<P: Player> Core<P> {
                 // neither of which ever lived in this file.
                 if let Err(e) = self.active_request(SourceReq::Stop).await {
                     tracing::debug!("stop notification to source: {e}");
+                    // Nobody will confirm the arm: an unreachable Source
+                    // (timed out, dead) cannot say what Play would start, so
+                    // the screen must not keep promising it.
+                    self.set_identity(None);
                 }
             }
             Command::Power => {
@@ -1539,5 +1569,80 @@ mod tests {
         core.player.loop_fails.store(false, std::sync::atomic::Ordering::SeqCst);
         core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
         assert_eq!(loop_calls(&player), vec!["loop_track true", "loop_track false"]);
+    }
+
+    /// Stop no longer blanks the screen: the stopped track stays, **armed**,
+    /// until the Source says what it keeps. A Source that never answers (5 s
+    /// of timeout) leaves up exactly the title we want kept.
+    ///
+    /// **[MUTATION]** the Stop arm back to `self.set_identity(None)` → the
+    /// title assertion fires. Its `Some` arm passing `false` → the `armed`
+    /// assertion fires. `forget_position()` removed from the arm → the anchor
+    /// assertion fires (the anchor is otherwise only dropped by an identity
+    /// change, which a same-identity arming is not).
+    #[tokio::test]
+    async fn stop_keeps_the_title_armed_until_the_source_answers() {
+        let id = serde_json::json!({"url": "one"});
+        let (core, np_rx, _d) = stopped_after_a_titled_track(&id).await;
+        let state = core.player_state();
+        assert_eq!(state.track.title.as_deref(), Some("T"), "the stopped track must stay on screen");
+        assert_eq!(state.playback, Playback::Stopped);
+        assert_eq!(state.position_s, None);
+        assert!(core.position_anchor.is_none(), "a position of the stopped playback must not resume under a new one");
+        let np = np_rx.borrow().clone();
+        assert_eq!(np.identity, Some(id));
+        assert!(np.armed, "the plugins must learn the track is armed, not playing");
+    }
+
+    /// The default SDK `stop()` (`plays_nothing()`) — every third-party
+    /// source, and any of ours that keeps nothing: the screen clears exactly
+    /// as it did before the armed state existed.
+    ///
+    /// **[MUTATION]** the `None` arm of `handle_source_update`'s match calling
+    /// `arm` with the current identity → the title assertion fires.
+    #[tokio::test]
+    async fn stop_with_a_source_that_does_not_arm_clears_the_screen() {
+        let id = serde_json::json!({"url": "one"});
+        let (mut core, np_rx, _d) = stopped_after_a_titled_track(&id).await;
+        assert_eq!(core.player_state().preset, Some(2), "armed, the selection still designates the track");
+        core.handle_source_update(
+            "radio",
+            SourceUpdate { identity: Some(IdentityUpdate::Nothing), ..Default::default() },
+        );
+        let state = core.player_state();
+        assert_eq!(state.track.title, None, "a source that keeps nothing must clear the screen");
+        assert_eq!(state.preset, None);
+        let np = np_rx.borrow().clone();
+        assert_eq!(np.identity, None);
+        assert!(!np.armed);
+    }
+
+    /// A Source that cannot be reached on Stop (timed out, dead) will never
+    /// confirm the arm: the screen clears instead of promising a track Play
+    /// may not start. A Source that answers keeps it — that half is
+    /// `stop_keeps_the_title_armed_until_the_source_answers`.
+    ///
+    /// **[MUTATION]** the `set_identity(None)` removed from the `Err` branch
+    /// of the Stop arm → the title assertion fires.
+    #[tokio::test]
+    async fn stop_with_an_unreachable_source_clears_the_screen() {
+        let id = serde_json::json!({"path": "/music/a.flac"});
+        let (mut core, np_rx, _state_rx, _d) = setup_metadata(vec!["p".into()]);
+        // "broken" is the fake's reserved name for a source whose every
+        // request fails, as `SourceClient::request` does after its timeout.
+        core.sources.insert(
+            "broken".into(),
+            Arc::new(FakeSource { name: "broken", calls: Arc::new(Mutex::new(Vec::new())), ..Default::default() }),
+        );
+        core.active_source = "broken".into();
+        core.apply(SourceAction::play("/music/a.flac").finite()).await.unwrap();
+        core.handle_source_update("broken", plays(id.clone()));
+        core.handle_enrichment("p", enrichment(id, "A", "T"));
+        assert_eq!(core.player_state().track.title.as_deref(), Some("T"), "otherwise the clearing proves nothing");
+        core.handle_command(Command::Stop).await.unwrap();
+        assert_eq!(core.player_state().track.title, None, "nobody will confirm the arm");
+        let np = np_rx.borrow().clone();
+        assert_eq!(np.identity, None);
+        assert!(!np.armed);
     }
 }

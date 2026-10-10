@@ -324,6 +324,10 @@ pub struct NowPlaying {
     /// byte-for-byte identical to what it was before this field.
     #[serde(default, skip_serializing_if = "Known::is_empty")]
     pub known: Known,
+    /// The identity is **armed**, not playing: nothing sounds. Only sent to a
+    /// plugin that announced `enriches_armed`; the others see `identity: None`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub armed: bool,
 }
 
 /// Plugin → core. Emitted when the plugin learns something.
@@ -865,14 +869,31 @@ mod tests {
             source: "radio".into(),
             identity: Some(json!({"kind": "stream", "url": "https://ouifm/ouifm-high.mp3"})),
             known: Known::default(),
+            armed: false,
         };
         let back: NowPlaying = serde_json::from_str(&serde_json::to_string(&np).unwrap()).unwrap();
         assert_eq!(back, np);
     }
 
+    /// `armed` is a compatible addition: a frame without it reads `false`, a
+    /// `false` writes no key (the frame stays byte-for-byte what it was), and
+    /// `true` survives the round trip.
+    #[test]
+    fn now_playing_armed_is_optional_and_silent_when_false() {
+        let old: NowPlaying = serde_json::from_str(r#"{"source":"cd","identity":null}"#).unwrap();
+        assert!(!old.armed);
+        let line = serde_json::to_string(&old).unwrap();
+        assert!(!line.contains("armed"), "{line}");
+        let armed = NowPlaying { source: "cd".into(), identity: Some(json!({"disc": 1})), armed: true, ..Default::default() };
+        let line = serde_json::to_string(&armed).unwrap();
+        assert!(line.contains(r#""armed":true"#), "{line}");
+        let back: NowPlaying = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, armed);
+    }
+
     #[test]
     fn now_playing_roundtrip_without_identity() {
-        let np = NowPlaying { source: "cd".into(), identity: None, known: Known::default() };
+        let np = NowPlaying { source: "cd".into(), identity: None, known: Known::default(), armed: false };
         let json = serde_json::to_string(&np).unwrap();
         let back: NowPlaying = serde_json::from_str(&json).unwrap();
         assert_eq!(back.identity, None);
@@ -1319,6 +1340,7 @@ mod tests {
                 // implementation.
                 stream_title: Some("Lou Reed - Oooh Baby".into()),
             },
+            armed: false,
         };
         let back: NowPlaying = serde_json::from_str(&serde_json::to_string(&np).unwrap()).unwrap();
         assert_eq!(back, np);
@@ -1336,7 +1358,7 @@ mod tests {
         // Hard constraint of this work: a frame that says nothing known must
         // stay byte-for-byte identical to what it was before this field was
         // added, otherwise every frame would grow for nothing.
-        let silent = NowPlaying { source: "radio".into(), identity: None, known: Known::default() };
+        let silent = NowPlaying { source: "radio".into(), identity: None, known: Known::default(), armed: false };
         let json = serde_json::to_string(&silent).unwrap();
         assert!(!json.contains("known"), "{json}");
 
@@ -1344,6 +1366,7 @@ mod tests {
             source: "files".into(),
             identity: None,
             known: Known { artist: Some("Lou Reed".into()), ..Default::default() },
+            armed: false,
         };
         let json = serde_json::to_string(&talkative).unwrap();
         assert!(json.contains("known"), "{json}");

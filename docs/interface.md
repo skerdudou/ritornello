@@ -400,6 +400,44 @@ left to advance. A transient `overlay` in flight (ignored by the SPA, see
 above, but relevant to the physical display and to the timings on the
 config page) rides along untouched by this ticking.
 
+### What Stop leaves on screen
+
+Stop used to empty the Player card. It now keeps the track that **Play would
+start**, shown as it was (title, artist, cover) but with nothing playing and no
+progress, so the screen answers "what will I hear?". What that is depends on
+the source, and Next and Previous follow the same idea while stopped: they
+**move that choice without starting anything** (no mpv action, no sound), and
+Play then starts what the screen shows.
+
+- **files**: Stop arms the entry that was playing; the end of a pass (repeat
+  off) draws the next pass at once and arms its first entry. Next and Previous
+  walk the current order (the shuffled one if random is on) and wrap around.
+  Turning random on while stopped, or editing the list under random, keeps the
+  armed entry at the head of the pass. Loading another playlist while stopped
+  arms its first entry. The tags and an embedded cover are read from the file
+  itself; a folder cover, when the source has one, comes first. On a share, that
+  read can be slow, and a late answer never lands on a track that has moved on.
+- **radio**: Stop arms the station, and the screen shows its number and name
+  only: the song that was on air, its cover and whatever the plugins said
+  about it go at Stop. Next and Previous move to the neighbouring station
+  without tuning in. A reshuffle of the station table while stopped follows
+  the armed station by its URL, not its number; deleting the armed station
+  arms the one now at its number, or nothing.
+- **cd**: a known disc that is not playing arms its track (on insertion, on
+  Stop, and at the end of the disc, where it is the first track of the pass).
+  Next and Previous move it, bounded by the disc, and Eject disarms. The
+  MusicBrainz title and cover are looked up while it is armed.
+- **any other source** (every third-party one, until it opts in): Stop clears
+  the screen, as before. See [plugins.md](plugins.md) for the contract.
+
+A `metadata` plugin sees the armed track only if it asked for it; one that did
+not sees nothing playing until Play.
+
+On the console display, line 1 starts with the playback state as one glyph
+followed by a space: ▶ playing, ║ paused, ■ stopped (the overlay and
+standby screens show none); these are glyphs the console font (Lat15-Fixed16)
+actually contains.
+
 ### Volume
 
 A horizontal slider, 0-100, the speaker icon on its left and the value in

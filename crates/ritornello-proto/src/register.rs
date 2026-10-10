@@ -120,6 +120,12 @@ pub struct Announcement {
     /// older core ignores it, a core reading an older plugin sees `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// A `metadata` plugin that works on an armed track too (static facts: a
+    /// disc's titles, an album cover). Derived by the SDK from
+    /// `MetadataPlugin::enriches_armed`. Absent = false: an older plugin is never
+    /// sent an armed identity. A bootstrap addition, like `icon`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enriches_armed: bool,
     /// Bootstrap number this binary was compiled against, compared by the core
     /// against its own `PROTOCOL_VERSION`.
     ///
@@ -268,6 +274,7 @@ mod tests {
             repository: Some("https://github.com/skerdudou/ritornello".into()),
             catalog: None,
             icon: None,
+            enriches_armed: false,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(
@@ -351,6 +358,7 @@ mod tests {
             repository: None,
             catalog: None,
             icon: None,
+            enriches_armed: false,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert!(line.contains(r#""protocol":2"#), "the protocol must always travel: {line}");
@@ -382,6 +390,7 @@ mod tests {
             repository: None,
             catalog: None,
             icon: None,
+            enriches_armed: false,
         };
         let back: Announcement =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
@@ -412,6 +421,7 @@ mod tests {
             repository: None,
             catalog: None,
             icon: None,
+            enriches_armed: false,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
@@ -444,6 +454,7 @@ mod tests {
             repository: None,
             catalog: None,
             icon: None,
+            enriches_armed: false,
         }
     }
 
@@ -477,6 +488,20 @@ mod tests {
         a.icon = Some("radio".into());
         let back: Announcement = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.icon.as_deref(), Some("radio"));
+    }
+
+    /// `enriches_armed` is a bootstrap addition: absent reads false, and false
+    /// writes no key, so an older core and an older plugin both stay exact.
+    #[test]
+    fn the_announcement_carries_enriches_armed_only_when_true() {
+        let mut a: Announcement = serde_json::from_str(r#"{"name":"musicbrainz","kinds":["metadata"]}"#).unwrap();
+        assert!(!a.enriches_armed);
+        assert!(!serde_json::to_string(&a).unwrap().contains("enriches_armed"));
+        a.enriches_armed = true;
+        let line = serde_json::to_string(&a).unwrap();
+        assert!(line.contains(r#""enriches_armed":true"#), "{line}");
+        let back: Announcement = serde_json::from_str(&line).unwrap();
+        assert!(back.enriches_armed);
     }
 
     /// A catalog carrying real text survives the round trip, nested map and

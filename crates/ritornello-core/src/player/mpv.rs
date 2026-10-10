@@ -408,14 +408,81 @@ pub fn embedded_cover(path: &str) -> Option<crate::cover::CoverSource> {
         return None;
     }
     let file = lofty::probe::Probe::open(path).ok()?.read().ok()?;
-    let image = lofty::file::TaggedFileExt::primary_tag(&file)
-        .or_else(|| lofty::file::TaggedFileExt::first_tag(&file))?
-        .pictures()
-        .first()?;
+    cover_of(path, &file)
+}
+
+/// The tag a reader of `file` consults: the format's primary one, or the
+/// first it carries. One choice for the cover and the text alike.
+fn tag_of(file: &lofty::file::TaggedFile) -> Option<&lofty::tag::Tag> {
+    lofty::file::TaggedFileExt::primary_tag(file).or_else(|| lofty::file::TaggedFileExt::first_tag(file))
+}
+
+/// The picture lookup itself, shared by `embedded_cover` and
+/// `read_armed_file`: one function, so the cover shown while a track is
+/// armed can never be another picture than the one shown once it plays.
+fn cover_of(path: &str, file: &lofty::file::TaggedFile) -> Option<crate::cover::CoverSource> {
+    let image = tag_of(file)?.pictures().first()?;
     Some(crate::cover::CoverSource::Embedded {
         audio: std::path::PathBuf::from(path),
         content: crate::cover::content_key(image.data()),
     })
+}
+
+/// Tags and embedded cover of a file mpv has not opened (an armed track).
+/// **Strictly blocking**: only under `Health::bounded`. `None` when the
+/// path has a scheme or the file cannot be read.
+///
+/// What `file_tags` reads from mpv once the file plays, read here with
+/// `lofty` because nothing plays: the same three fields, trimmed, empty →
+/// `None`, the year through the same `valid_year`, the same `ORIGIN_TAGS`
+/// — so when Play replaces this layer with mpv's own, the text reads the
+/// same. Not guaranteed identical: `lofty` and FFmpeg are two readers, and
+/// a tag one of them reads differently (an odd encoding, a second artist
+/// frame) can still differ once the track plays.
+/// One parse of the container for both halves: on a share, every open is
+/// the expensive part.
+pub fn read_armed_file(path: &str) -> Option<(Option<Track>, Option<crate::cover::CoverSource>)> {
+    use lofty::file::AudioFile;
+    use lofty::tag::Accessor;
+    if path.contains("://") {
+        return None;
+    }
+    // Only a regular file is opened. A FIFO (or a device, a socket) blocks
+    // the open itself until a writer shows up, which no deadline here can
+    // cut: `Health::bounded` would time out and mark the **whole mount**
+    // unreachable for a path that merely names something unreadable.
+    // `metadata` follows a symlink, so a link to a real file still reads.
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = lofty::probe::Probe::open(path).ok()?.read().ok()?;
+    let tag = tag_of(&file);
+    let clean = |value: Option<std::borrow::Cow<'_, str>>| {
+        value.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    };
+    // Truncated, as the core truncates mpv's measured duration
+    // (`refresh_position`): rounding would show 3:34 armed for a track
+    // that shows 3:33 once it plays.
+    let seconds = u32::try_from(file.properties().duration().as_secs()).unwrap_or(u32::MAX);
+    let track = Track {
+        artist: clean(tag.and_then(|t| t.artist())),
+        title: clean(tag.and_then(|t| t.title())),
+        album: clean(tag.and_then(|t| t.album())),
+        duration_s: (seconds > 0).then_some(seconds),
+        // The raw text, as FFmpeg hands `date` to `file_tags`: the same
+        // `valid_year` then judges `"1971"` and `"1971-08-17"` alike.
+        year: tag
+            .and_then(|t| {
+                t.get_string(lofty::tag::ItemKey::RecordingDate).or_else(|| t.get_string(lofty::tag::ItemKey::Year))
+            })
+            .and_then(ritornello_proto::valid_year),
+        links: Vec::new(),
+        origin: Some(crate::metadata::ORIGIN_TAGS.to_string()),
+        cover_href: None,
+        cover_origin: None,
+        provenance: Default::default(),
+    };
+    Some(((!track.is_empty()).then_some(track), cover_of(path, &file)))
 }
 
 pub struct MpvPlayer {
@@ -985,6 +1052,94 @@ pub(crate) mod tests {
     /// This module's image.
     fn mp3_with_cover(dir: &Path) -> Option<std::path::PathBuf> {
         mp3_with_cover_from(dir, "color=c=red:s=16x16:d=1")
+    }
+
+    /// A real mp3 carrying the three text tags and a date, via ffmpeg, or
+    /// `None` where ffmpeg is missing. `pub(crate)` so the core's armed-track
+    /// tests read the very file this module's test reads.
+    pub(crate) fn tagged_mp3(dir: &Path) -> Option<std::path::PathBuf> {
+        let output = dir.join("tagged.mp3");
+        std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+            .args(["-c:a", "libmp3lame", "-id3v2_version", "3"])
+            .args(["-metadata", "title=Alpha", "-metadata", "artist=Beta", "-metadata", "album=Gamma"])
+            .args(["-metadata", "date=1971"])
+            .arg(&output)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+            .then_some(output)
+    }
+
+    #[test]
+    fn an_armed_file_yields_the_tags_mpv_would_have_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(f) = tagged_mp3(dir.path()) else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let (tags, cover) = read_armed_file(f.to_str().unwrap()).expect("a readable file must answer");
+        let tags = tags.expect("the file carries tags");
+        assert_eq!(tags.title.as_deref(), Some("Alpha"));
+        assert_eq!(tags.artist.as_deref(), Some("Beta"));
+        assert_eq!(tags.album.as_deref(), Some("Gamma"));
+        assert_eq!(tags.year, Some(1971));
+        assert!(tags.duration_s.is_some(), "the container's duration is known without playing it");
+        assert_eq!(tags.origin.as_deref(), Some(crate::metadata::ORIGIN_TAGS));
+        assert_eq!(cover, None, "no picture in this file");
+    }
+
+    /// The armed read and the playing read pick the same picture: Play must
+    /// not swap the cover the stopped track showed.
+    #[test]
+    fn an_armed_file_yields_the_cover_embedded_cover_yields() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(f) = mp3_with_cover(dir.path()) else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let path = f.to_str().unwrap();
+        let (_, cover) = read_armed_file(path).expect("a readable file must answer");
+        assert!(cover.is_some(), "the file carries a picture");
+        assert_eq!(cover, embedded_cover(path));
+    }
+
+    #[test]
+    fn an_armed_read_refuses_what_lofty_cannot_open() {
+        assert!(read_armed_file("http://x/y.mp3").is_none(), "a URL is not a file to read");
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("notes.mp3");
+        std::fs::write(&text, b"not audio at all, only words").unwrap();
+        assert!(read_armed_file(text.to_str().unwrap()).is_none(), "a file that is not audio has nothing to say");
+        assert!(read_armed_file("/does/not/exist.flac").is_none());
+        assert!(read_armed_file(dir.path().to_str().unwrap()).is_none(), "a directory is not a track");
+    }
+
+    /// A FIFO named as the armed file: opening it would block until a writer
+    /// came, under `Health::bounded`, which would then mark the whole mount
+    /// unreachable. The read must refuse it at once.
+    ///
+    /// **[MUTATION]** the `is_file()` guard removed from `read_armed_file` →
+    /// the `recv_timeout` assertion fires (the open blocks).
+    #[cfg(unix)]
+    #[test]
+    fn an_armed_read_refuses_a_fifo_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("track.flac");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if !matches!(made, Ok(s) if s.success()) {
+            eprintln!("mkfifo unavailable: skipping test");
+            return;
+        }
+        let path = fifo.to_str().unwrap().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_armed_file(&path).is_none());
+        });
+        let refused = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("reading a FIFO must not block");
+        assert!(refused, "a FIFO is not a track");
     }
 
     #[test]

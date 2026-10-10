@@ -43,6 +43,10 @@ struct Half {
     /// `Announcement.icon` from this register alone, and the value is read by
     /// `source()` before the plugin is moved into its loop.
     icon: Option<&'static str>,
+    /// Does this half want armed identities? Always `false` outside of a
+    /// metadata plugin. Kept here for the same reason as `covers`: read from
+    /// `MetadataPlugin::enriches_armed` before the plugin is moved.
+    enriches_armed: bool,
     serve: Pin<Box<dyn Future<Output = Result<()>> + Send>>,
 }
 
@@ -195,6 +199,7 @@ impl Runtime {
             kind: PluginKind::Source,
             covers: false,
             icon,
+            enriches_armed: false,
             serve: Box::pin(serve_source(l, plugin)),
         });
         Ok(self)
@@ -212,6 +217,7 @@ impl Runtime {
             kind: PluginKind::Display,
             covers,
             icon: None,
+            enriches_armed: false,
             serve: Box::pin(serve_display(l, plugin)),
         });
         Ok(self)
@@ -223,6 +229,7 @@ impl Runtime {
             kind: PluginKind::Input,
             covers: false,
             icon: None,
+            enriches_armed: false,
             serve: Box::pin(serve_input(l, plugin)),
         });
         Ok(self)
@@ -230,10 +237,13 @@ impl Runtime {
 
     pub fn metadata(mut self, plugin: impl MetadataPlugin) -> Result<Self> {
         let l = bind_metadata(&crate::socket_kind(&self.prefix, PluginKind::Metadata))?;
+        // Read **before** the move, like `covers` in `display()`.
+        let enriches_armed = plugin.enriches_armed();
         self.halves.push(Half {
             kind: PluginKind::Metadata,
             covers: false,
             icon: None,
+            enriches_armed,
             serve: Box::pin(serve_metadata(l, plugin)),
         });
         Ok(self)
@@ -264,6 +274,9 @@ impl Runtime {
             // Derived like `covers`: only a registered source half carries
             // one, read from its own `SourcePlugin::icon`.
             icon: self.halves.iter().find_map(|h| h.icon).map(str::to_string),
+            // Derived like `covers`: from the registered metadata half's own
+            // `MetadataPlugin::enriches_armed`.
+            enriches_armed: self.halves.iter().any(|h| h.enriches_armed),
             protocol: ritornello_proto::PROTOCOL_VERSION,
             // Derived like `kinds`: one contract per registered half, plus
             // `admin` when an admin page is served. An author cannot claim a
@@ -411,6 +424,43 @@ mod tests {
         }
         fn wants_covers(&self) -> bool {
             true
+        }
+    }
+
+    /// A metadata plugin that does nothing but declare whether it wants armed
+    /// tracks: the only difference between two of these is `enriches_armed()`.
+    struct MetadataPluginThatIs(bool);
+
+    #[async_trait::async_trait]
+    impl crate::MetadataPlugin for MetadataPluginThatIs {
+        async fn now_playing(&mut self, _np: ritornello_proto::NowPlaying) {}
+        async fn next_enrichment(&mut self) -> ritornello_proto::Enrichment {
+            std::future::pending().await
+        }
+        fn enriches_armed(&self) -> bool {
+            self.0
+        }
+    }
+
+    /// `enriches_armed` is **derived** from the registered metadata half, in
+    /// both directions, with two plugins that differ only by that method.
+    ///
+    /// **[MUTATION]** announcing a constant `false` fails the opted-in case;
+    /// announcing a constant `true` fails the default case.
+    #[tokio::test]
+    async fn the_enriches_armed_flag_is_derived_from_the_registered_metadata_plugin() {
+        for wants in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let register = dir.path().join("register.sock");
+            let listener = UnixListener::bind(&register).unwrap();
+            let prefix = dir.path().join("meta");
+            let rt = Runtime::new("meta".into(), register.clone(), prefix.clone(), "0.0.0-test", None)
+                .metadata(MetadataPluginThatIs(wants))
+                .unwrap();
+            tokio::spawn(async move { rt.run().await.unwrap() });
+            let a = read_announcement(&listener).await;
+            assert_eq!(a.kinds, vec![PluginKind::Metadata]);
+            assert_eq!(a.enriches_armed, wants);
         }
     }
 

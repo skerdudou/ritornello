@@ -462,6 +462,17 @@ impl<P: Player> Core<P> {
                 // confirms it (a sleeping share, a file gone) must not be
                 // read as "the list ran out".
                 self.played_since_play = false;
+                // A track that is about to sound is no longer armed. The
+                // Source normally says so itself by re-declaring the identity
+                // (`set_identity_state` then flips the flag), but nothing
+                // obliges it to: one that answers Play with this action alone
+                // would otherwise leave `armed: true` published, and the
+                // opted-in `metadata` plugins would go on treating a playing
+                // track as a stopped one. The identity itself stays.
+                if self.armed {
+                    self.armed = false;
+                    self.publish_armed_flag();
+                }
                 // Armed **before** the load: `loop-file` is a player setting
                 // read at the file's end, and setting it first leaves no
                 // window where a non-loopable load runs under a stale loop.
@@ -495,9 +506,22 @@ impl<P: Player> Core<P> {
                 }
             }
             SourceAction::Stop => {
+                let was_stream = self.expecting_stream;
                 self.expecting_stream = false;
                 self.playback = false;
                 self.player.stop().await?;
+                // A Source stopping its own stream: the same fate as
+                // `Command::Stop` gives it — the station stays, armed, and
+                // the song that was on air goes (`forget_the_moment`). Armed
+                // here rather than left to the frame that comes with this
+                // reply: the reply's action is applied first, and until the
+                // frame lands the plugins would otherwise be told a "playing"
+                // stream had nothing known, and go and look again. A frame
+                // that arms nothing (`plays_nothing`) still clears the rest.
+                if was_stream && let Some(id) = self.metadata.identity().cloned() {
+                    self.forget_the_moment();
+                    self.set_identity_state(Some(id), true);
+                }
             }
             SourceAction::PlayerNext => self.player.next().await?,
             SourceAction::PlayerPrev => self.player.prev().await?,
@@ -573,6 +597,7 @@ mod tests {
             },
             covers,
             cover_tx,
+            mpsc::channel(4).0,
             mpsc::channel(4).0,
         );
         (core, dir)
@@ -1290,7 +1315,7 @@ mod tests {
         };
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::SourceCycle).await.unwrap();
         // It is the core that stopped mpv, without depending on the plugins.
@@ -1317,7 +1342,7 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(core.handle_command(Command::SourceCycle).await.is_err());
         // The state is consistent: new source everywhere, and nothing plays.

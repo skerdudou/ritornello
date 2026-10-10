@@ -315,7 +315,20 @@ pub enum PlayRequest {
     WakeAndSwitch,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// What a source would start if Play were pressed now, declared while nothing
+/// plays. See `SourceMessage::armed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Armed {
+    /// Opaque identity, the very value the Source will declare in
+    /// `IdentityUpdate::Playing` when Play starts it. Compared by equality.
+    pub identity: serde_json::Value,
+    /// Absolute local path of the file, for a Source playing files: the core
+    /// reads its tags and embedded cover, since mpv has not opened it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SourceMessage {
     /// `Some(id)` = reply correlated to a request; `None` = spontaneous notification.
     #[serde(default)]
@@ -528,6 +541,16 @@ pub struct SourceMessage {
     /// Absent = no request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_request: Option<PlayRequest>,
+    /// What Play would start, declared while nothing plays, so the screen can
+    /// keep showing it.
+    ///
+    /// Read **only** beside `identity: Nothing`; ignored beside `Playing` and
+    /// when `identity` is absent. `Nothing` without `armed` means nothing is
+    /// armed (the screen empties, as before contract 1.2). A core older than
+    /// 1.2 ignores the field: the frame reads as a plain `Nothing`, which is
+    /// exactly the pre-1.2 behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armed: Option<Armed>,
 }
 
 #[cfg(test)]
@@ -561,7 +584,28 @@ mod tests {
             cover_thumb: None,
             cover_archivable: None,
             play_request: None,
+            armed: None,
         }
+    }
+
+    #[test]
+    fn armed_travels_beside_nothing_and_an_older_frame_reads_without_it() {
+        let old: SourceMessage = serde_json::from_str(r#"{"identity":{"state":"Nothing"}}"#).unwrap();
+        assert_eq!(old.armed, None);
+        let mut m = old.clone();
+        m.armed = Some(Armed {
+            identity: serde_json::json!({"kind":"file","path":"/m/a.mp3"}),
+            media_path: Some("/m/a.mp3".into()),
+        });
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            json.contains(r#""armed":{"identity":{"kind":"file","path":"/m/a.mp3"},"media_path":"/m/a.mp3"}"#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<SourceMessage>(&json).unwrap(), m);
+        assert!(!serde_json::to_string(&old).unwrap().contains("armed"), "absent stays absent on the wire");
+        let no_path = Armed { identity: serde_json::json!(1), media_path: None };
+        assert!(!serde_json::to_string(&no_path).unwrap().contains("media_path"));
     }
 
     #[test]

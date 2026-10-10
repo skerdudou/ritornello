@@ -31,6 +31,8 @@ pub struct SourceOutcome {
     pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
     pub presets: Option<Vec<Preset>>,
+    /// See `SourceMessage::armed`. Set through `armed` / `armed_file_at`.
+    pub armed: Option<ritornello_proto::Armed>,
 }
 
 impl SourceOutcome {
@@ -46,6 +48,7 @@ impl SourceOutcome {
             location: None,
             status_text: None,
             presets: None,
+            armed: None,
         }
     }
 
@@ -126,6 +129,29 @@ impl SourceOutcome {
         self.identity = Some(IdentityUpdate::Nothing);
         self
     }
+
+    /// Nothing plays; `identity` is what Play would start (see
+    /// `SourceMessage::armed`). Sets the identity to `IdentityUpdate::Nothing`
+    /// as well: `armed` is only read beside it.
+    pub fn armed(mut self, identity: serde_json::Value) -> Self {
+        self.identity = Some(IdentityUpdate::Nothing);
+        self.armed = Some(ritornello_proto::Armed { identity, media_path: None });
+        self
+    }
+
+    /// Same, with the location a person would name and the local file the
+    /// core reads tags and embedded cover from.
+    pub fn armed_file_at(
+        mut self,
+        identity: serde_json::Value,
+        location: impl Into<String>,
+        media_path: impl Into<String>,
+    ) -> Self {
+        self.identity = Some(IdentityUpdate::Nothing);
+        self.location = Some(location.into());
+        self.armed = Some(ritornello_proto::Armed { identity, media_path: Some(media_path.into()) });
+        self
+    }
 }
 
 /// Spontaneous notification from a Source: track change, delayed arrival of a
@@ -161,6 +187,8 @@ pub struct Notification {
     /// See `SourceMessage::play_request`. Written only on this spontaneous
     /// path; a reply never carries one.
     pub play_request: Option<PlayRequest>,
+    /// See `SourceMessage::armed`. Set through `armed` / `armed_file_at`.
+    pub armed: Option<ritornello_proto::Armed>,
 }
 
 impl Notification {
@@ -258,6 +286,29 @@ impl Notification {
     /// `SourceMessage::cover_archivable`.
     pub fn cover_archivable(mut self, yes: bool) -> Self {
         self.cover_archivable = Some(yes);
+        self
+    }
+
+    /// Nothing plays; `identity` is what Play would start (see
+    /// `SourceMessage::armed`). Sets the identity to `IdentityUpdate::Nothing`
+    /// as well: `armed` is only read beside it.
+    pub fn armed(mut self, identity: serde_json::Value) -> Self {
+        self.identity = Some(IdentityUpdate::Nothing);
+        self.armed = Some(ritornello_proto::Armed { identity, media_path: None });
+        self
+    }
+
+    /// Same, with the location a person would name and the local file the
+    /// core reads tags and embedded cover from.
+    pub fn armed_file_at(
+        mut self,
+        identity: serde_json::Value,
+        location: impl Into<String>,
+        media_path: impl Into<String>,
+    ) -> Self {
+        self.identity = Some(IdentityUpdate::Nothing);
+        self.location = Some(location.into());
+        self.armed = Some(ritornello_proto::Armed { identity, media_path: Some(media_path.into()) });
         self
     }
 }
@@ -531,6 +582,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     cover_archivable: None,
                     // A request exists only in a spontaneous notification.
                     play_request: None,
+                    armed: outcome.armed,
                 };
                 write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
             }
@@ -557,6 +609,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             cover_thumb: n.cover_thumb,
                             cover_archivable: n.cover_archivable,
                             play_request: n.play_request,
+                            armed: n.armed,
                         };
                         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
                     }
@@ -875,6 +928,17 @@ pub trait MetadataPlugin: Send + 'static {
     /// queue, cache) must live in the plugin, never in the future's local
     /// variables.
     async fn next_enrichment(&mut self) -> Enrichment;
+
+    /// Does this plugin work on an **armed** track too, one that would start
+    /// on Play but is not sounding (static facts: a disc's titles, an album
+    /// cover)? Default `false`: the relay then shows the plugin `identity: None`
+    /// for the whole armed state, exactly as before armed tracks existed.
+    ///
+    /// Read a single time, at registration, and announced as
+    /// `Announcement::enriches_armed`: derived, so it cannot lie.
+    fn enriches_armed(&self) -> bool {
+        false
+    }
 }
 
 /// Binds a metadata plugin's socket, without serving yet.
@@ -1256,6 +1320,103 @@ mod tests {
     use ritornello_proto::SourceAction;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
+
+    #[test]
+    fn the_armed_builders_declare_nothing_playing_beside_what_is_armed() {
+        // Both types, both builders: `armed` is only read beside `Nothing`, so
+        // the builder sets the identity itself rather than trusting the caller.
+        let id = serde_json::json!({"k": 1});
+        let o = SourceOutcome::new(SourceAction::Noop).armed(id.clone());
+        assert_eq!(o.identity, Some(IdentityUpdate::Nothing));
+        let a = o.armed.expect("armed");
+        assert_eq!((a.identity, a.media_path), (id.clone(), None));
+        let n = Notification::new().armed(id.clone());
+        assert_eq!(n.identity, Some(IdentityUpdate::Nothing));
+        assert_eq!(n.armed.expect("armed").media_path, None);
+
+        let o = SourceOutcome::new(SourceAction::Noop).armed_file_at(id.clone(), "smb://h/s/a.mp3", "/mnt/a.mp3");
+        assert_eq!(o.identity, Some(IdentityUpdate::Nothing));
+        assert_eq!(o.location.as_deref(), Some("smb://h/s/a.mp3"));
+        assert_eq!(o.armed.expect("armed").media_path.as_deref(), Some("/mnt/a.mp3"));
+        let n = Notification::new().armed_file_at(id, "smb://h/s/a.mp3", "/mnt/a.mp3");
+        assert_eq!(n.identity, Some(IdentityUpdate::Nothing));
+        assert_eq!(n.location.as_deref(), Some("smb://h/s/a.mp3"));
+        assert_eq!(n.armed.expect("armed").media_path.as_deref(), Some("/mnt/a.mp3"));
+    }
+
+    #[tokio::test]
+    async fn armed_is_written_on_both_frame_paths() {
+        // The reply path and the notification path are two separate literals in
+        // `serve_source`: each must copy `armed`, or a source that arms on one
+        // path silently reads as a plain `Nothing` on it.
+        struct ArmingSource {
+            announced: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for ArmingSource {
+            async fn activate(&mut self) -> SourceOutcome {
+                SourceOutcome::new(SourceAction::Noop).armed(serde_json::json!({"via": "reply"}))
+            }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.announced {
+                    std::future::pending().await
+                } else {
+                    self.announced = true;
+                    Some(Notification::new().armed_file_at(
+                        serde_json::json!({"via": "notification"}),
+                        "smb://h/s/a.mp3",
+                        "/mnt/a.mp3",
+                    ))
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(ArmingSource { announced: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"Activate\"}\n").await.unwrap();
+
+        let mut correlated = None;
+        let mut spontaneous = None;
+        for _ in 0..2 {
+            let line = lines.next_line().await.unwrap().expect("two frames");
+            let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+            if msg.id.is_some() { correlated = Some((msg, line)); } else { spontaneous = Some((msg, line)); }
+        }
+        let (c, line) = correlated.expect("the reply");
+        assert_eq!(c.identity, Some(IdentityUpdate::Nothing), "{line}");
+        assert_eq!(
+            c.armed,
+            Some(ritornello_proto::Armed { identity: serde_json::json!({"via": "reply"}), media_path: None }),
+            "reply path: {line}"
+        );
+        let (s, line) = spontaneous.expect("the notification");
+        assert_eq!(s.identity, Some(IdentityUpdate::Nothing), "{line}");
+        assert_eq!(
+            s.armed,
+            Some(ritornello_proto::Armed {
+                identity: serde_json::json!({"via": "notification"}),
+                media_path: Some("/mnt/a.mp3".into())
+            }),
+            "notification path: {line}"
+        );
+        assert_eq!(s.location.as_deref(), Some("smb://h/s/a.mp3"));
+    }
 
     #[test]
     fn an_empty_list_becomes_absence_on_both_constructors() {

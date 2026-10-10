@@ -110,7 +110,11 @@ const tracks = ['01', '02', '03']
           // before the journey had finished observing it, and the "playlist
           // finished" state got confused with "selection failed". A
           // realistic duration is what makes playback observable.
+          // Tagged since the armed-track journey: a stopped source reads the
+          // armed file's tags itself, so the title is what tells "stopped
+          // on track 3" from "playing track 3" in `files.spec.ts`.
           `ffmpeg -loglevel error -y -f lavfi -i 'sine=frequency=440:duration=30' ` +
+          `-metadata title='Track ${n}' -metadata artist=Ritornello ` +
           `'${mediaRoot}/Album/${n}.mp3' || exit 1`,
       )
       .join('\n') +

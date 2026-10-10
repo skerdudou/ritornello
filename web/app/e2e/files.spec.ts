@@ -291,25 +291,35 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   // playing, here is what will start again". That is what this step verifies
   // end to end.
   //
-  // What it **cannot** distinguish: stopped or playing, the display is the same
-  // on these fixtures (a sine wave has no metadata, hence no "now playing"
-  // block to observe). The real discrimination is carried by the unit tests of
-  // `stop()` and `PlayPause`.
+  // The sine-wave fixtures carry tags (`serve.mjs`), so stopped and armed
+  // **can** be told apart: a stopped source has the core read the armed
+  // file's tags itself, so the title is on screen while no position is:
+  // a playing track would show both.
   await page.getByRole('button', { name: 'Stop', exact: true }).click()
   await expect(page.locator('[data-player-preset]')).toHaveText('3')
   await expect(page.locator('[data-player-preset-name]')).toHaveText('03')
+  await expect(page.locator('[data-title]')).toHaveText('Track 03')
+  await expect(page.locator('[data-position]')).toHaveCount(0)
+  // Next while stopped moves the armed track without playing (three tracks:
+  // it wraps to the first). Nothing sounds, so no position may appear, and
+  // 3 s is longer than the one-second progress frames.
+  await page.getByRole('button', { name: 'Next', exact: true }).click()
+  await expect(page.locator('[data-player-preset]')).toHaveText('1')
+  await expect(page.locator('[data-title]')).toHaveText('Track 01')
+  await page.waitForTimeout(3_000)
+  await expect(page.locator('[data-position]')).toHaveCount(0)
+  // Play starts that very track.
   await page.getByRole('button', { name: 'Play/Pause', exact: true }).click()
-  await expect(page.locator('[data-player-preset]')).toHaveText('3')
+  await expect(page.locator('[data-player-preset]')).toHaveText('1')
+  await expect(page.locator('[data-title]')).toHaveText('Track 01')
 
   // Progress, end to end: mpv measures, the core publishes one frame per
   // second, the SPA draws. No unit test covers this chain — there is no mpv in
   // there.
   //
-  // These fixtures are sine waves **without any metadata**: in passing they
-  // prove that the bar does not depend on a title. As long as it lived in the
-  // "now playing" block, guarded by the presence of metadata, it was invisible
-  // on a file without tags — that is, precisely when mpv knows the position
-  // best.
+  // These fixtures carry tags now, so this step no longer proves that the
+  // bar is independent of a title: the "now playing" block has a title to
+  // show here. It only proves the chain from mpv's frames to the drawn bar.
   const position = page.locator('[data-position]')
   await expect(position).toBeVisible({ timeout: 15_000 })
   const first = await position.textContent()
