@@ -2994,11 +2994,16 @@ plugin need not track staleness for it separately — and only the plugin
 currently winning the arbitration gets to anchor it: one held in reserve
 answering with an unrelated correction (a fixed title, a late cover) must not
 be read as fresh progress, or the bar would jump backward the instant it
-spoke. `radiofrance-metas` is the only one of the four bundled plugins that
-fills it, computed from the same `startTime` it already reads for
-`duration_s`; the other three need no new logic for it — they already write
-out every field of `Enrichment` by name, so the addition is one more line
-reading `None`, not a decision to make.
+spoke. Two of the four bundled plugins fill it. `radiofrance-metas` computes
+it from the same `startTime` it already reads for `duration_s`.
+`ouifm-metas` has no date to read — its feed carries none — so it answers only
+from a start it witnessed: a frame pushed while its connection was already
+open announces a track starting now (`0`), and the frame a connection opens
+with is the track already on air, of unknown elapsed time (`None`), unless it
+is the very track the plugin saw start before a reconnection. Its bar
+therefore appears from the second track heard on a station, and runs a few
+seconds ahead of the speaker, the audio stream lagging the feed by its
+buffering. The other two leave it at `None`.
 
 `next_enrichment` must be **cancellable without loss**: its future is
 dropped as soon as a `NowPlaying` arrives, so any durable state (open

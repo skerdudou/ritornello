@@ -18,11 +18,12 @@ mod stream;
 mod table;
 
 use anyhow::Result;
-use stream::Meta;
+use stream::{Arrival, Meta};
 use ritornello_plugin_sdk::MetadataPlugin;
 use ritornello_proto::{CoverRef, Enrichment, NowPlaying};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::time::Instant;
 use table::Table;
 use tokio::sync::mpsc;
 
@@ -54,18 +55,34 @@ struct OuiFmMetas {
     /// future: that future is dropped as soon as a `NowPlaying` arrives,
     /// which would cut the HTTP stream at every core state change.
     tracked: Option<(String, tokio::task::JoinHandle<()>)>,
-    metas_tx: mpsc::Sender<(String, Meta)>,
-    metas_rx: mpsc::Receiver<(String, Meta)>,
+    /// The track seen **starting** on the followed station, and when.
+    ///
+    /// The feed carries no date, so the only start this plugin can know is
+    /// one it witnessed: a frame pushed live. Kept so that the frame a
+    /// reconnection opens with — the same track, re-announced — can still say
+    /// where it stands instead of making the bar vanish mid-track.
+    on_air: Option<OnAir>,
+    metas_tx: mpsc::Sender<(String, Meta, Arrival)>,
+    metas_rx: mpsc::Receiver<(String, Meta, Arrival)>,
+}
+
+/// A track seen starting: what it was, and the instant its frame arrived.
+struct OnAir {
+    artist: Option<String>,
+    title: Option<String>,
+    since: Instant,
 }
 
 impl OuiFmMetas {
     fn new(table: Table) -> Self {
         let (metas_tx, metas_rx) = mpsc::channel(8);
-        Self { table, identity: None, tracked: None, metas_tx, metas_rx }
+        Self { table, identity: None, tracked: None, on_air: None, metas_tx, metas_rx }
     }
 
     /// Stops the current tracking, if there is one.
     fn stop(&mut self) {
+        // A start witnessed on another station says nothing about this one.
+        self.on_air = None;
         if let Some((id, task)) = self.tracked.take() {
             tracing::debug!("stopping tracking of webradio {id}");
             task.abort();
@@ -86,6 +103,35 @@ impl OuiFmMetas {
         let task_id = id.to_string();
         let task = tokio::spawn(stream::follows(task_id, tx));
         self.tracked = Some((id.to_string(), task));
+    }
+
+    /// Where this frame's track stands at `now`, in seconds, when it can be
+    /// known.
+    ///
+    /// A live frame starts its track: zero. The frame a connection opens with
+    /// describes a track already playing for an unknown time — unknown, unless
+    /// it is the very track this plugin saw start, which is the case of a
+    /// reconnection in the middle of a track. Anything else is `None`: a guess
+    /// would draw a bar that lies, and no bar is the honest display.
+    ///
+    /// The position is the station's, not the speaker's: the audio stream
+    /// lags the feed by its buffering, so the bar runs a few seconds ahead of
+    /// what is heard. Accepted rather than corrected by a guessed constant.
+    fn position_of(&mut self, meta: &Meta, arrival: Arrival, now: Instant) -> Option<u32> {
+        match arrival {
+            Arrival::Live => {
+                self.on_air = Some(OnAir { artist: meta.artist.clone(), title: meta.title.clone(), since: now });
+                Some(0)
+            }
+            Arrival::OnOpen => {
+                let same = self.on_air.as_ref().is_some_and(|t| t.artist == meta.artist && t.title == meta.title);
+                if !same {
+                    self.on_air = None;
+                }
+                let since = self.on_air.as_ref()?.since;
+                u32::try_from(now.saturating_duration_since(since).as_secs()).ok()
+            }
+        }
     }
 }
 
@@ -135,7 +181,7 @@ impl MetadataPlugin for OuiFmMetas {
             // synchronous, hence out of reach of a cancellation — which is
             // what allows returning directly, with no intermediate holding
             // field.
-            let Some((id, meta)) = self.metas_rx.recv().await else {
+            let Some((id, meta, arrival)) = self.metas_rx.recv().await else {
                 // Impossible in practice (the plugin keeps a Sender).
                 std::future::pending().await
             };
@@ -146,9 +192,10 @@ impl MetadataPlugin for OuiFmMetas {
             if !still_followed {
                 continue;
             }
-            if let Some(identity) = &self.identity {
+            if let Some(identity) = self.identity.clone() {
+                let position_s = self.position_of(&meta, arrival, Instant::now());
                 return Enrichment {
-                    identity: identity.clone(),
+                    identity,
                     artist: meta.artist,
                     title: meta.title,
                     // The stream gives no album (these are webradios), nor a
@@ -157,9 +204,8 @@ impl MetadataPlugin for OuiFmMetas {
                     year: None,
                     links: meta.links.clone(),
                     duration_s: meta.duration_s,
-                    // This plugin does not know where playback stands: it
-                    // answers about a track's identity, not its progress.
-                    position_s: None,
+                    // See `position_of`: known from a start this plugin saw.
+                    position_s,
                     // **Both halves when the frame let us compose them.** The
                     // square gets the 400 px thumbnail and the core holds only
                     // that; the 600 px original — which is the true original,
@@ -263,6 +309,7 @@ mod tests {
                         url: "https://www.deezer.com/track/9956167".into(),
                     }],
                 },
+                Arrival::Live,
             ))
             .await
             .unwrap();
@@ -272,6 +319,64 @@ mod tests {
         assert_eq!(e.title.as_deref(), Some("Wanna Get Free"));
         assert_eq!(e.duration_s, Some(214));
         assert_eq!(e.album, None, "a webradio has no album");
+        assert_eq!(e.position_s, Some(0), "a live frame starts its track");
+    }
+
+    fn track(artist: &str, title: &str) -> Meta {
+        Meta { artist: Some(artist.into()), title: Some(title.into()), ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn the_frame_a_connection_opens_with_has_no_position() {
+        // Switching to a station: its first frame describes a track that has
+        // been playing for an unknown time. Claiming zero would draw a bar
+        // that starts over on every switch.
+        let mut p = following_plugin(METAS);
+        p.now_playing(NowPlaying { source: "radio".into(), identity: Some(stream_identity(URL)), ..Default::default() }).await;
+        p.metas_tx.send((METAS.into(), track("Shaka Ponk", "Wanna Get Free"), Arrival::OnOpen)).await.unwrap();
+        let e = p.next_enrichment().await;
+        assert_eq!(e.title.as_deref(), Some("Wanna Get Free"), "the title is still given");
+        assert_eq!(e.position_s, None);
+    }
+
+    #[tokio::test]
+    async fn a_reconnection_mid_track_keeps_the_position() {
+        // The feed dropped and came back: its opening frame re-announces the
+        // track seen starting 75 s earlier. The bar must carry on, not vanish.
+        let mut p = following_plugin(METAS);
+        let start = Instant::now();
+        let t = track("Shaka Ponk", "Wanna Get Free");
+        assert_eq!(p.position_of(&t, Arrival::Live, start), Some(0));
+        let later = start + std::time::Duration::from_secs(75);
+        assert_eq!(p.position_of(&t, Arrival::OnOpen, later), Some(75));
+    }
+
+    #[tokio::test]
+    async fn an_opening_frame_for_another_track_knows_nothing() {
+        let mut p = following_plugin(METAS);
+        let start = Instant::now();
+        let later = start + std::time::Duration::from_secs(75);
+        p.position_of(&track("Shaka Ponk", "Wanna Get Free"), Arrival::Live, start);
+        // Same artist, another title: the track changed while disconnected.
+        assert_eq!(p.position_of(&track("Shaka Ponk", "My Name Is Stain"), Arrival::OnOpen, later), None);
+        // Same title, another artist: a cover, not the same recording.
+        p.position_of(&track("Shaka Ponk", "Wanna Get Free"), Arrival::Live, start);
+        assert_eq!(p.position_of(&track("Someone Else", "Wanna Get Free"), Arrival::OnOpen, later), None);
+        // And the stale start is forgotten, not kept for a later match.
+        assert_eq!(p.position_of(&track("Shaka Ponk", "Wanna Get Free"), Arrival::OnOpen, later), None);
+    }
+
+    #[tokio::test]
+    async fn a_start_seen_on_one_station_is_forgotten_when_leaving_it() {
+        // Leaving then coming back: the track may well be the same, but
+        // nothing was witnessed in between — it may have been replayed.
+        let mut p = following_plugin(METAS);
+        let start = Instant::now();
+        let t = track("Shaka Ponk", "Wanna Get Free");
+        p.position_of(&t, Arrival::Live, start);
+        p.now_playing(NowPlaying { source: "radio".into(), identity: None, ..Default::default() }).await;
+        let later = start + std::time::Duration::from_secs(75);
+        assert_eq!(p.position_of(&t, Arrival::OnOpen, later), None);
     }
 
     #[tokio::test]
@@ -282,6 +387,7 @@ mod tests {
             .send((
                 METAS.into(),
                 Meta { title: Some("t".into()), cover: Some("https://www.lesindesradios.fr/x.jpg".into()), ..Default::default() },
+                Arrival::Live,
             ))
             .await
             .unwrap();
@@ -347,7 +453,7 @@ mod tests {
         p.now_playing(NowPlaying { source: "radio".into(), identity: Some(stream_identity(URL)), ..Default::default() }).await;
         // Frame queued at the moment of the station change.
         p.metas_tx
-            .send(("99".into(), Meta { title: Some("ancien".into()), ..Default::default() }))
+            .send(("99".into(), Meta { title: Some("ancien".into()), ..Default::default() }, Arrival::Live))
             .await
             .unwrap();
         let r = tokio::time::timeout(std::time::Duration::from_millis(200), p.next_enrichment()).await;
