@@ -1014,6 +1014,27 @@ mod tests {
         assert_eq!(cmd_rx.recv().await.unwrap().cmd, ritornello_proto::Command::Select(3));
     }
 
+    /// The exact body the home page's source bar posts: a string argument.
+    #[tokio::test]
+    async fn post_command_relays_a_source_name() {
+        let (state, mut cmd_rx) = app_state_with_cmd();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::post("/api/command")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"cmd":"SelectSource","arg":"files"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            cmd_rx.recv().await.unwrap().cmd,
+            ritornello_proto::Command::SelectSource("files".into())
+        );
+    }
+
     #[tokio::test]
     async fn post_command_accepts_the_held_flag() {
         let (state, mut cmd_rx) = app_state_with_cmd();

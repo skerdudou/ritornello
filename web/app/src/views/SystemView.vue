@@ -1180,7 +1180,7 @@ async function pollUntilBack(before: number | null, maxMs: number, successKey: s
            take the screen: 95 % of the window, capped at 1920 px so a very
            wide screen does not spread one line across two meters.
 
-           Wider than the page's own `max-w-5xl`, then, and deliberately so:
+           Wider than the page's own `max-w-7xl`, then, and deliberately so:
            the page is a document you read, this dialog is a diagnostic tool
            you scrutinize. -->
       <DialogContent class="sm:max-w-[min(95vw,120rem)]">
