@@ -16,6 +16,7 @@ mod state;
 
 use anyhow::Result;
 use rand::seq::SliceRandom;
+use ritornello_plugin_files::location::location_of;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::roots::{RootKind, Roots};
@@ -529,8 +530,13 @@ impl FilesSource {
             // in mpv itself (`loop-file`), seamlessly, with no round trip
             // through this plugin.
             .loopable();
+        // Read after `playlist` was dropped above, never while holding it: the
+        // Admin half takes `roots` before `playlist` (see `admin.rs`), so
+        // holding `playlist` while waiting for `roots` would be the opposite
+        // order. One lock at a time, from the cloned entry.
+        let location = location_of(&*self.roots.read().await, &entry.path);
         let mut outcome = SourceOutcome::new(action)
-            .plays(Self::identity(&entry.path))
+            .plays_at(Self::identity(&entry.path), location)
             .preset_name(entry.display_name())
             .preset_count(count)
             .status_text(self.status_text());
@@ -611,7 +617,7 @@ impl FilesSource {
             .status_text(self.status_text());
         let mut file = None;
         if let Some(entry) = playlist.current() {
-            outcome = outcome.plays(Self::identity(&entry.path)).preset_name(entry.display_name());
+            outcome = outcome.preset_name(entry.display_name());
             file = Some(entry.path.clone());
         }
         if let Some(n) = playlist.preset() {
@@ -619,6 +625,11 @@ impl FilesSource {
         }
         drop(playlist);
         if let Some(file) = file {
+            // After `playlist` is released: the Admin half takes `roots`
+            // before `playlist`, so the two are never held in the opposite
+            // order.
+            let location = location_of(&*self.roots.read().await, &file);
+            outcome = outcome.plays_at(Self::identity(&file), location);
             self.arm_cover(&file);
         }
         outcome
@@ -1661,6 +1672,7 @@ mod tests {
                 "kind": "file", "path": "/musique/03.mp3"
             })))
         );
+        assert_eq!(out.location.as_deref(), Some("/musique/03.mp3"));
     }
 
     #[tokio::test]
@@ -1766,6 +1778,7 @@ mod tests {
         });
         let out = s.activate().await;
         assert!(out.identity.is_some(), "the track must be declared as such");
+        assert!(out.location.is_some(), "and say where it comes from");
         let n = s.poll_notification().await.expect("a notification expected");
         assert_eq!(
             n.cover,
@@ -1806,6 +1819,7 @@ mod tests {
         // identity.
         let out = s.player_track(1).await;
         assert!(out.identity.is_some(), "a new identity is indeed declared");
+        assert!(out.location.is_some(), "and its location with it, or the core would clear it");
         assert_eq!(s.poll_notification().await.unwrap().cover, expected, "track 2");
 
         // And **without paying the `readdir` again**: the directory has not

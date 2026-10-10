@@ -151,6 +151,16 @@ directory built like a release (see [Deploying](#deploying) below); an
 archive is for putting a specific tagged version onto a device with no
 build toolchain at all.
 
+**Before tagging, whatever the tag — finished or prerelease: remove the
+`next` marks from the section headers of
+`crates/ritornello-proto/tests/wire-fingerprint.txt`**, in the commit that
+prepares the release. A mark says a contract version is still being written;
+the release publishes it, so `scripts/changed-components.sh` refuses the
+release while any mark remains (and refuses a published section changed under
+its published version). The refusal comes from the tag-gated `publish` job,
+after every build has run: the mark is cheaper to remove before the tag than
+after it.
+
 If one architecture leg of the `release` job fails on a tag (a runner hiccup), the
 draft is not created: use "Re-run failed jobs" on that workflow run
 rather than pushing the tag again.
@@ -255,7 +265,11 @@ compatibility matter. The decision between "break" and "compatible" for the
 wire is forced by a test, `crates/ritornello-proto/tests/wire_fingerprint.rs`,
 which compares a sample of every wire message, section by contract, with a
 committed fixture (see [development.md](development.md#the-wire-fingerprint)):
-a contract's content cannot change without that contract's version going up.
+a contract's content cannot change without that contract's version going up,
+unless its section is marked `next` (a version no release carried yet), which
+may still change in place. The release script refuses a release that still
+carries a `next` mark, or that changed a published section under its published
+version.
 A plugin whose contract major differs from the core's is shown "incompatible"
 on the System page, naming the contract; one whose minor is newer is shown
 "limited", wired and working with some features inactive.
@@ -550,6 +564,10 @@ core and the plugins; a companion has a number of its own, see above):
    `scripts/package-release.sh --self-test` to see its case table. A
    companion is exempt from all three.
 
+The preparation commit also removes the `next` marks from the wire
+fingerprint, as for any release (see
+[Installing from a release](#installing-from-a-release)).
+
 **What a prerelease carries.** Only what moved since the previous published
 release, prereleases included (`release-tags.sh base-for <tag>` decides, and
 `--self-test` holds its cases): a beta no longer republishes components
@@ -567,7 +585,8 @@ visible consequence is for someone assembling an install by hand from a
 beta's assets: it may need an archive from an older beta; the installer
 finds it by itself.
 
-The finished release then needs no special handling: its components differ
+The finished release then needs no special handling beyond the gesture every
+release asks for (the `next` marks, above): its components differ
 from the beta's, so every device installs them, testers included. That
 holds because the finished tag is measured against the last *finished*
 release and not against the last beta, so anything a beta shipped is shipped

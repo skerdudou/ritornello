@@ -103,10 +103,14 @@ impl<P: Player> Core<P> {
         if identity.is_none() {
             self.preset = None;
             self.preset_name = None;
+            self.location = None;
         }
         if !self.metadata.set_identity(identity) {
             return;
         }
+        // A different identity: the location described the previous one. The
+        // frame's own declaration, if any, is applied after this call.
+        self.location = None;
         // The offer to keep an original describes the **folder** the Source is
         // playing out of, not the session: another track may well sit
         // elsewhere, under a root the Source will not write into. It is
@@ -792,6 +796,86 @@ mod tests {
         core.handle_command(Command::Stop).await.unwrap();
         assert_eq!(state_rx.borrow().preset, None);
         assert_eq!(state_rx.borrow().preset_name, None);
+    }
+
+    #[tokio::test]
+    async fn the_location_is_published_then_forgotten_with_the_identity() {
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        let mut update = plays(serde_json::json!({"kind": "stream", "url": "http://inter"}));
+        update.location = Some("http://inter".into());
+        core.handle_source_update("radio", update);
+        assert_eq!(state_rx.borrow().location.as_deref(), Some("http://inter"));
+        core.handle_command(Command::Stop).await.unwrap();
+        assert_eq!(state_rx.borrow().location, None, "nothing plays: nothing to locate");
+    }
+
+    #[tokio::test]
+    async fn a_new_track_without_a_location_does_not_inherit_the_previous_one() {
+        // Stricter than `preset_name` on purpose: an address shown under the
+        // wrong track is a wrong answer to the very question the popover asks.
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        let mut first = plays(serde_json::json!({"kind": "file", "path": "/a.flac"}));
+        first.location = Some("smb://nas/music/a.flac".into());
+        core.handle_source_update("radio", first);
+        core.handle_source_update("radio", plays(serde_json::json!({"kind": "file", "path": "/b.flac"})));
+        assert_eq!(state_rx.borrow().location, None);
+    }
+
+    #[tokio::test]
+    async fn restating_the_same_identity_keeps_the_location() {
+        // The files plugin's resync restates the identity on every automatic
+        // advance check; the address must not blink.
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        let id = serde_json::json!({"kind": "file", "path": "/a.flac"});
+        let mut first = plays(id.clone());
+        first.location = Some("smb://nas/music/a.flac".into());
+        core.handle_source_update("radio", first);
+        core.handle_source_update("radio", plays(id));
+        assert_eq!(state_rx.borrow().location.as_deref(), Some("smb://nas/music/a.flac"));
+    }
+
+    #[tokio::test]
+    async fn stopping_while_nothing_plays_still_forgets_a_stray_location() {
+        // The equality guard of `set_identity` returns early when the identity
+        // is already `None`; the explicit clear before it is what keeps a
+        // location declared without an identity from outliving a stop.
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        let stray = SourceUpdate { location: Some("http://inter".into()), ..Default::default() };
+        core.handle_source_update("radio", stray);
+        assert_eq!(state_rx.borrow().location.as_deref(), Some("http://inter"));
+        core.handle_command(Command::Stop).await.unwrap();
+        assert_eq!(state_rx.borrow().location, None);
+    }
+
+    #[tokio::test]
+    async fn switching_source_forgets_the_location() {
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        let mut update = plays(serde_json::json!({"kind": "stream", "url": "http://inter"}));
+        update.location = Some("http://inter".into());
+        core.handle_source_update("radio", update);
+        assert_eq!(state_rx.borrow().location.as_deref(), Some("http://inter"));
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert_eq!(state_rx.borrow().location, None);
+    }
+
+    #[tokio::test]
+    async fn entering_standby_forgets_the_location() {
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        let mut update = plays(serde_json::json!({"kind": "stream", "url": "http://inter"}));
+        update.location = Some("http://inter".into());
+        core.handle_source_update("radio", update);
+        assert_eq!(state_rx.borrow().location.as_deref(), Some("http://inter"));
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(state_rx.borrow().location, None);
+    }
+
+    #[tokio::test]
+    async fn a_location_from_an_inactive_source_is_not_applied() {
+        let (mut core, _np_rx, state_rx, _d) = setup_metadata(vec![]);
+        let mut update_cd = plays(serde_json::json!({"kind": "disc"}));
+        update_cd.location = Some("/dev/sr0".into());
+        core.handle_source_update("cd", update_cd);
+        assert_eq!(state_rx.borrow().location, None, "the update from \"cd\" (inactive) was not applied");
     }
 
     #[tokio::test]

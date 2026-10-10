@@ -1473,11 +1473,19 @@ win, with no field it fills nothing; it only adds a line here. An outage is
 *not* declared this way — a plugin that could not reach its service emits
 nothing and retries.
 
+The first row, **Source**, says where what is playing comes from: the stream URL
+of a station, the `smb://` address of a file on a share, or its path on the
+device (the `location` the active source declares; the cd declares none). It is
+selectable text and not a link: an address to read or copy, and a stream URL
+opened in a browser tab would only start a download. It is also the one thing a
+radio that identifies nothing has to say, so the `(?)` is present for that row
+alone.
+
 There is no button when there is nothing to explain: a `(?)` opening an empty
 dialog promises an explanation and gives none, which is the ordinary case before
-a track is identified. `origin` and `cover_origin` stay in the protocol: they
-are what a three-line display can show, and dropping them would take that away
-for the sake of a dialog no display can open.
+a track is identified and has no address either. `origin` and `cover_origin`
+stay in the protocol: they are what a three-line display can show, and dropping
+them would take that away for the sake of a dialog no display can open.
 
 ### Date and time
 

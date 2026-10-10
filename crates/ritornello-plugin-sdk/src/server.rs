@@ -25,6 +25,8 @@ pub struct SourceOutcome {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
+    /// See `SourceMessage::location`. Set through `plays_at` only.
+    pub location: Option<String>,
     /// See `SourceMessage::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
@@ -41,6 +43,7 @@ impl SourceOutcome {
             preset: None,
             preset_count: None,
             preset_name: None,
+            location: None,
             status_text: None,
             presets: None,
         }
@@ -108,6 +111,16 @@ impl SourceOutcome {
         self
     }
 
+    /// Declares the **opaque** identity of what is playing from now on, and
+    /// how a person would name where it comes from (see
+    /// `SourceMessage::location`). The pair in one call: a location is never
+    /// declared without the identity it describes.
+    pub fn plays_at(mut self, identity: serde_json::Value, location: impl Into<String>) -> Self {
+        self.identity = Some(IdentityUpdate::Playing(identity));
+        self.location = Some(location.into());
+        self
+    }
+
     /// Declares that nothing is playing anymore.
     pub fn plays_nothing(mut self) -> Self {
         self.identity = Some(IdentityUpdate::Nothing);
@@ -132,6 +145,8 @@ pub struct Notification {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
+    /// See `SourceMessage::location`. Set through `plays_at` only.
+    pub location: Option<String>,
     /// See `SourceOutcome::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
@@ -174,6 +189,13 @@ impl Notification {
     /// See `SourceOutcome::preset_name`.
     pub fn preset_name(mut self, name: impl Into<String>) -> Self {
         self.preset_name = Some(name.into());
+        self
+    }
+
+    /// See `SourceOutcome::plays_at`.
+    pub fn plays_at(mut self, identity: serde_json::Value, location: impl Into<String>) -> Self {
+        self.identity = Some(IdentityUpdate::Playing(identity));
+        self.location = Some(location.into());
         self
     }
 
@@ -476,6 +498,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     preset: outcome.preset,
                     preset_count: outcome.preset_count,
                     preset_name: outcome.preset_name,
+                    location: outcome.location,
                     status_text: outcome.status_text,
                     // Stamped here, once, rather than by a constructor call on
                     // each of a plugin's ten declaration paths: a capability
@@ -514,6 +537,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             preset: n.preset,
                             preset_count: n.preset_count,
                             preset_name: n.preset_name,
+                            location: n.location,
                             status_text: n.status_text,
                             can_eject: Some(plugin.can_eject()),
                             // Same reason as the reply path above: stamped on
@@ -1271,6 +1295,19 @@ mod tests {
         let o = SourceOutcome::new(SourceAction::Noop).preset(4).preset_name("FIP");
         assert_eq!(o.preset, Some(4));
         assert_eq!(o.preset_name.as_deref(), Some("FIP"));
+    }
+
+    #[test]
+    fn the_location_is_declared_with_the_identity_never_alone() {
+        // `plays_at` is the only builder: a location describes what is playing,
+        // so it travels in the frame that declares the identity.
+        let o = SourceOutcome::new(SourceAction::Noop).plays_at(serde_json::json!({"k": "v"}), "http://x/stream");
+        assert_eq!(o.identity, Some(IdentityUpdate::Playing(serde_json::json!({"k": "v"}))));
+        assert_eq!(o.location.as_deref(), Some("http://x/stream"));
+        let n = Notification::new().plays_at(serde_json::json!({"k": "v"}), "/media/a.flac");
+        assert_eq!(n.location.as_deref(), Some("/media/a.flac"));
+        // `plays` alone declares none.
+        assert_eq!(SourceOutcome::new(SourceAction::Noop).plays(serde_json::json!(1)).location, None);
     }
 
     #[test]
@@ -2032,6 +2069,87 @@ mod tests {
             msg.identity,
             Some(IdentityUpdate::Playing(serde_json::json!({"kind": "disc", "track": 2})))
         );
+    }
+
+    #[tokio::test]
+    async fn a_reply_relays_the_location_declared_with_the_identity() {
+        // The builder test proves `plays_at` fills the outcome; this one proves
+        // the outcome's location reaches the wire, in the same frame as the
+        // identity it describes.
+        struct LocatedSource;
+        #[async_trait::async_trait]
+        impl SourcePlugin for LocatedSource {
+            async fn activate(&mut self) -> SourceOutcome {
+                SourceOutcome::new(SourceAction::Noop).plays_at(serde_json::json!({"k": "v"}), "http://x/stream")
+            }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(LocatedSource, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"Activate\"}\n").await.unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, Some(1));
+        assert_eq!(msg.identity, Some(IdentityUpdate::Playing(serde_json::json!({"k": "v"}))), "{line}");
+        assert_eq!(msg.location.as_deref(), Some("http://x/stream"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn a_spontaneous_notification_relays_the_location_declared_with_the_identity() {
+        struct LocatedNotifier {
+            emitted: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for LocatedNotifier {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.emitted {
+                    std::future::pending::<()>().await;
+                }
+                self.emitted = true;
+                Some(Notification::new().plays_at(serde_json::json!({"k": "v"}), "/media/a.flac"))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(LocatedNotifier { emitted: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, _write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, None, "a notification is correlated to no request: {line}");
+        assert_eq!(msg.identity, Some(IdentityUpdate::Playing(serde_json::json!({"k": "v"}))), "{line}");
+        assert_eq!(msg.location.as_deref(), Some("/media/a.flac"), "{line}");
     }
 
     #[tokio::test]

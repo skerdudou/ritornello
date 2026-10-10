@@ -1348,6 +1348,8 @@ impl CdSource {
             preset_count: issue.preset_count,
             // The cd plugin never names a preset (see `SourceMessage::preset_name`).
             preset_name: issue.preset_name,
+            // Nor a location: a disc has no address a person could read.
+            location: issue.location,
             // Same status logic as any other frame: presence flips it.
             status_text: issue.status_text,
             // The cd never enumerates named presets: a track has no name

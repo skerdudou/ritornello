@@ -36,6 +36,8 @@ pub struct SourceUpdate {
     pub preset_count: Option<u8>,
     /// See `SourceMessage::preset_name`.
     pub preset_name: Option<String>,
+    /// See `SourceMessage::location`.
+    pub location: Option<String>,
     /// See `SourceMessage::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::can_eject`. Absent = nothing declared, keep the
@@ -178,6 +180,7 @@ impl SourceClient {
                     preset: msg.preset,
                     preset_count: msg.preset_count,
                     preset_name: msg.preset_name,
+                    location: msg.location,
                     status_text: msg.status_text,
                     can_eject: msg.can_eject,
                     has_finite_list: msg.has_finite_list,
@@ -711,6 +714,7 @@ mod tests {
                 )),
                 preset: Some(1),
                 preset_name: Some("FIP".into()),
+                location: Some("http://fip".into()),
                 ..Default::default()
             };
             write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
@@ -735,6 +739,8 @@ mod tests {
         // The preset name travels in the same update as the rest.
         assert_eq!(update.preset, Some(1));
         assert_eq!(update.preset_name.as_deref(), Some("FIP"));
+        // As does the location, which describes that same identity.
+        assert_eq!(update.location.as_deref(), Some("http://fip"));
     }
 
     #[tokio::test]

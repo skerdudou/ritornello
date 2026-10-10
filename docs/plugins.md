@@ -716,6 +716,17 @@ show. `preset_name` is absent (not cleared) on the "empty preset" branch:
 nothing new is playing there, the previous station carries on, so its name —
 if any — must stay exactly as it was.
 
+It also declares its `location`: where what is playing comes from, as a string
+the web UI shows as is. A source sets it through `plays_at`, which takes the
+identity and the location together, so the two cannot drift apart. The radio
+puts the stream URL there; `files` puts the `smb://host/share/path` address of
+a file on a network share, or its path on the device. The cd declares none: a
+track on a disc has no address worth showing. Like `identity`, it lives and
+dies with what is playing — the core remembers it only for as long as that
+identity plays, and forgets it the moment something else starts or playback
+stops, so a stale address can never be shown against a new track. It is
+absent, not empty, when a source declares none.
+
 **It is also the only source that enumerates its presets by name.** The
 source protocol carries a request for it, `SourceReq::ListPresets`, served
 by `SourcePlugin::list_presets`; the radio answers its station table sorted

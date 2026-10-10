@@ -183,11 +183,16 @@ const links = computed(
   () => props.state?.links?.filter((link) => link.platform in LINK_LABEL) ?? [],
 )
 // Provenance has something to say as soon as the core has named a field or an
-// empty-handed contributor. This decides the presence of the `(?)`, hence that
-// of the row when nothing else occupies it.
+// empty-handed contributor, or the source has said where it plays from. This
+// decides the presence of the `(?)`, hence that of the row when nothing else
+// occupies it.
 const hasOrigins = computed(() => {
   const p = props.state?.provenance
-  return Object.keys(p?.fields ?? {}).length > 0 || (p?.misses?.length ?? 0) > 0
+  return (
+    Object.keys(p?.fields ?? {}).length > 0 ||
+    (p?.misses?.length ?? 0) > 0 ||
+    !!props.state?.location
+  )
 })
 // The bottom row of the track block (provenance, duration, links) only exists
 // if there is something to put in it: otherwise `min-h-11` would reserve 44
@@ -292,7 +297,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
         <p v-if="state?.status && !state.standby" class="text-sm text-muted-foreground" data-player-status>
           {{ state.status }}
         </p>
-        <div v-if="!nothingToShow(state)" class="flex min-w-0 flex-col items-center gap-0.5 md:items-start" data-now-playing>
+        <div v-if="!nothingToShow(state) || state?.location" class="flex min-w-0 flex-col items-center gap-0.5 md:items-start" data-now-playing>
           <p v-if="state?.title" class="text-xl font-semibold leading-tight text-foreground" data-title>{{ state.title }}</p>
           <p v-if="state?.artist" class="text-sm text-foreground" data-artist>{{ state.artist }}</p>
           <!-- The year sits next to the album, where a year is read. It also

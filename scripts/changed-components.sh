@@ -129,6 +129,26 @@ contract_version() { # <CONST_NAME>
 # be checked for its speakers.
 CONTRACTS=(source:SOURCE_CONTRACT display:DISPLAY_CONTRACT input:INPUT_CONTRACT metadata:METADATA_CONTRACT admin:ADMIN_CONTRACT)
 
+# The wire fingerprint fixture (crates/ritornello-proto/tests/wire_fingerprint.rs).
+# Its contract headers read `[<name> <major>.<minor>]`, or carry a trailing
+# `next` while that version has been in no release: the test lets such a
+# section change in place, since it cannot see git. This script can, so the
+# release is where the mark is held to the truth (run_wire_guard below).
+WIRE_FIXTURE=crates/ritornello-proto/tests/wire-fingerprint.txt
+
+# The header line of contract section <name>, from a fixture on stdin, or nothing.
+wire_header() { # <name>
+  tr -d '\r' | awk -v n="$1" '/^\[/ { split(substr($0, 2, length($0) - 2), w, " "); if (w[1] == n) { print; exit } }'
+}
+# The sample lines of contract section <name>, from a fixture on stdin.
+wire_lines() { # <name>
+  tr -d '\r' | awk -v n="$1" '/^\[/ { split(substr($0, 2, length($0) - 2), w, " "); on = (w[1] == n); next } on'
+}
+# Word <i> of a header: 2 is the version, 3 the mark.
+header_word() { # <header> <i>
+  printf '%s\n' "$1" | tr -d '[]' | awk -v i="$2" '{ print $i }'
+}
+
 # Does plugin crate <c> speak contract <name>? Read, parsed, from its
 # declaration (the same one plugin_catalogue_declaration.rs holds to what the
 # binary registers) by packaging.py, so that no TOML is read with sed. Status
@@ -395,6 +415,85 @@ run_guard() {
   return 0
 }
 
+# --- the wire guard -----------------------------------------------------------
+# The fingerprint test lets a contract section marked `next` change without
+# its version moving: the owner's rule, an unpublished version is completed,
+# not bumped. Three things only this script can check make that safe:
+#
+# - the release publishes every section, so none may still carry the mark:
+#   after it, a change must bump;
+# - a section changed under the version the newest published release (the
+#   coupled guard's baseline, prereleases included: devices on the beta channel
+#   run it) already carried is refused, mark or not. That is what makes the
+#   mark impossible to forge: written by hand over a published section, it
+#   passes the test and stops here;
+# - a version lower than the one the baseline published is refused: a version
+#   never goes down, and the test, blind to git, cannot see it went down.
+#
+# A baseline without the fixture, or without that section (a release older
+# than the contracts), has nothing to compare. No baseline at all (nothing ever
+# published) checks the mark only.
+run_wire_guard() {
+  local entry cname now_h base_h now_v base_v listing="" base_text="" have_base="" problems=()
+  if [ ! -f "$WIRE_FIXTURE" ]; then
+    echo "wire guard: $WIRE_FIXTURE is missing; refusing" >&2
+    return 1
+  fi
+  # Absent and unreadable are two answers: `git cat-file -e` gives the same
+  # status for both, and read as "absent" a failing git would wave every
+  # published section through. ls-tree fails on a git failure and prints
+  # nothing for a tree that lacks the file.
+  if [ -n "$GUARD_BASE" ]; then
+    if ! listing=$(git ls-tree --name-only "$GUARD_BASE" -- "$WIRE_FIXTURE"); then
+      echo "wire guard: git ls-tree $GUARD_BASE -- $WIRE_FIXTURE failed; refusing" >&2
+      return 1
+    fi
+  fi
+  if [ -n "$GUARD_BASE" ] && [ -n "$listing" ]; then
+    if ! base_text=$(git show "$GUARD_BASE:$WIRE_FIXTURE"); then
+      echo "wire guard: git show $GUARD_BASE:$WIRE_FIXTURE failed; refusing" >&2
+      return 1
+    fi
+    have_base=1
+  fi
+  for entry in "${CONTRACTS[@]}"; do
+    cname=${entry%%:*}
+    now_h=$(wire_header "$cname" < "$WIRE_FIXTURE")
+    if [ -z "$now_h" ]; then
+      problems+=("$cname: $WIRE_FIXTURE has no section for it")
+      continue
+    fi
+    if [ "$(header_word "$now_h" 3)" = next ]; then
+      problems+=("$cname: its section is still marked next ($now_h); this release publishes it, so remove the mark in the release preparation")
+    fi
+    [ -n "$have_base" ] || continue
+    base_h=$(printf '%s\n' "$base_text" | wire_header "$cname")
+    [ -n "$base_h" ] || continue
+    now_v=$(header_word "$now_h" 2) base_v=$(header_word "$base_h" 2)
+    if ! [[ "$now_v" =~ ^[0-9]+\.[0-9]+$ && "$base_v" =~ ^[0-9]+\.[0-9]+$ ]]; then
+      problems+=("$cname: cannot compare its version $now_v with $base_v published by $GUARD_BASE")
+      continue
+    fi
+    # A version never goes down (docs/development.md). The fingerprint test
+    # cannot see git, so it cannot tell a lowered version from a new one: the
+    # release is the one place that can.
+    if (( 10#${now_v%%.*} < 10#${base_v%%.*} \
+      || (10#${now_v%%.*} == 10#${base_v%%.*} && 10#${now_v#*.} < 10#${base_v#*.}) )); then
+      problems+=("$cname: its version $now_v is lower than $base_v published by $GUARD_BASE; a version never goes down")
+      continue
+    fi
+    if [ "$now_v" = "$base_v" ] \
+      && [ "$(wire_lines "$cname" < "$WIRE_FIXTURE")" != "$(printf '%s\n' "$base_text" | wire_lines "$cname")" ]; then
+      problems+=("$cname: its messages changed since $GUARD_BASE but its version $(header_word "$now_h" 2), which $GUARD_BASE published, did not move; bump ${entry#*:} in crates/ritornello-proto/src/contract.rs")
+    fi
+  done
+  if [ "${#problems[@]}" -gt 0 ]; then
+    printf 'wire guard: %s\n' "${problems[@]}" >&2
+    return 1
+  fi
+  return 0
+}
+
 if [ -n "$GUARD_ONLY" ]; then
   run_guard
   exit $?
@@ -652,6 +751,10 @@ if [ -n "$SELF_TEST" ]; then
     for k in "${CONTRACT_NAMES[@]}"; do
       printf 'pub const %s_CONTRACT: ContractVersion = ContractVersion::new(1, 0);\n' "$k" >> "$R/crates/ritornello-proto/src/contract.rs"
     done
+    mkdir -p "$R/crates/ritornello-proto/tests"
+    for k in "${CONTRACT_NAMES[@]}"; do
+      printf '[%s 1.0]\nSample = %s\n' "$(printf '%s' "$k" | tr 'A-Z' 'a-z')" "$k" >> "$R/crates/ritornello-proto/tests/wire-fingerprint.txt"
+    done
     for c in "${CRATES[@]}"; do
       mkdir -p "$R/crates/$c"
       printf '[package]\nname = "%s"\nversion = "0.1.0"\n' "$c" > "$R/crates/$c/Cargo.toml"
@@ -794,6 +897,105 @@ if [ -n "$SELF_TEST" ]; then
   rel_bump ritornello-plugin-cd
   expect_rel 1 "" "cannot read any contract version" "a contract.rs that exists at the previous release but no longer parses is refused, not taken for a first release"
 
+  # Rewrites one section of the repository's fixture: <name> <header> <sample line>.
+  wire_set() {
+    local f="$R/crates/ritornello-proto/tests/wire-fingerprint.txt"
+    tr -d '\r' < "$f" | awk -v n="$1" -v h="$2" -v l="$3" '
+      /^\[/ { split(substr($0, 2, length($0) - 2), w, " "); on = (w[1] == n); if (on) { print h; print l; next } }
+      !on { print }' > "$f.tmp" && mv "$f.tmp" "$f"
+  }
+
+  rel_repo
+  rel_bump ritornello-core
+  wire_set source "[source 1.0 next]" "Sample = SOURCE"
+  expect_rel 1 "" "still marked" "a section still marked next is refused at release: the release is what publishes it"
+
+  rel_repo
+  rel_bump ritornello-core
+  wire_set source "[source 1.0]" "Sample = CHANGED"
+  expect_rel 1 "" "did not move" "a section changed under a version the baseline published is refused" --guard-baseline v0.1.0 v0.1.0
+
+  rel_repo
+  rel_bump ritornello-core
+  contract_set SOURCE "1, 1"
+  wire_set source "[source 1.1]" "Sample = CHANGED"
+  expect_rel 0 "ritornello-core" "" "a section changed under a raised version passes" --guard-baseline v0.1.0 v0.1.0
+
+  rel_repo
+  rel_bump ritornello-core
+  wire_set source "[source 1.0]" "Sample = CHANGED"
+  expect_rel 0 "ritornello-core" "" "no published baseline: nothing to compare, only the mark is checked"
+
+  rel_repo
+  guard_git rm -q crates/ritornello-proto/tests/wire-fingerprint.txt
+  guard_git commit -q -m "baseline without a fixture"; guard_git tag -f v0.1.0 > /dev/null
+  guard_git checkout -q HEAD~1 -- crates/ritornello-proto/tests/wire-fingerprint.txt
+  if guard_git show v0.1.0:crates/ritornello-proto/tests/wire-fingerprint.txt > /dev/null 2>&1; then
+    echo "self-test: the baseline without a fixture still holds one" >&2; fails=$((fails + 1))
+  fi
+  rel_bump ritornello-core
+  wire_set source "[source 1.0]" "Sample = CHANGED"
+  expect_rel 0 "ritornello-core" "" "a baseline without a fixture (beta.5) has nothing to compare" --guard-baseline v0.1.0 v0.1.0
+
+  # The shape v0.2.0-beta.6 is measured against: a fixture from before the
+  # contracts, one PROTOCOL_VERSION line and no section at all. Its sections
+  # are found nowhere, so nothing is compared, even under an unmoved version.
+  rel_repo
+  printf 'PROTOCOL_VERSION=1\nCommand::Next = {"cmd":"Next"}\n' > "$R/crates/ritornello-proto/tests/wire-fingerprint.txt.old"
+  cp "$R/crates/ritornello-proto/tests/wire-fingerprint.txt" "$R/fixture.keep"
+  mv "$R/crates/ritornello-proto/tests/wire-fingerprint.txt.old" "$R/crates/ritornello-proto/tests/wire-fingerprint.txt"
+  guard_git add -A; guard_git commit -q -m "baseline with a sectionless fixture"; guard_git tag -f v0.1.0 > /dev/null
+  mv "$R/fixture.keep" "$R/crates/ritornello-proto/tests/wire-fingerprint.txt"
+  rel_bump ritornello-core
+  wire_set source "[source 1.0]" "Sample = CHANGED"
+  expect_rel 0 "ritornello-core" "" "a baseline whose fixture predates the sections (beta.5's) has no section to compare" --guard-baseline v0.1.0 v0.1.0
+
+  # A version lower than the published one is refused, whatever its lines.
+  rel_repo
+  contract_set SOURCE "1, 1"
+  wire_set source "[source 1.1]" "Sample = SOURCE"
+  guard_git add -A; guard_git commit -q -m "baseline publishing source 1.1"; guard_git tag -f v0.1.0 > /dev/null
+  contract_set SOURCE "1, 0"
+  wire_set source "[source 1.0]" "Sample = SOURCE"
+  rel_bump ritornello-core
+  expect_rel 1 "" "never goes down" "a section whose minor went below the published one is refused" --guard-baseline v0.1.0 v0.1.0
+
+  # The major decides before the minor: 1.1 is below 2.0 although 1 > 0.
+  rel_repo
+  contract_set SOURCE "2, 0"
+  wire_set source "[source 2.0]" "Sample = SOURCE"
+  guard_git add -A; guard_git commit -q -m "baseline publishing source 2.0"; guard_git tag -f v0.1.0 > /dev/null
+  contract_set SOURCE "1, 1"
+  wire_set source "[source 1.1]" "Sample = SOURCE"
+  rel_bump ritornello-core
+  expect_rel 1 "" "never goes down" "a section whose major went below the published one is refused" --guard-baseline v0.1.0 v0.1.0
+
+  # A published header this script cannot read is refused, not compared as text.
+  rel_repo
+  wire_set source "[source one]" "Sample = SOURCE"
+  guard_git add -A; guard_git commit -q -m "baseline with an unreadable header"; guard_git tag -f v0.1.0 > /dev/null
+  wire_set source "[source 1.0]" "Sample = SOURCE"
+  rel_bump ritornello-core
+  expect_rel 1 "" "cannot compare" "a published section whose version cannot be read is refused" --guard-baseline v0.1.0 v0.1.0
+
+  # A git that cannot read the baseline's tree is not a baseline without a
+  # fixture: the tree holding the fixture is deleted from the object store
+  # once the change is committed (a commit would write it back otherwise).
+  # Read as "absent", the section changed under its published version would
+  # pass.
+  rel_repo
+  rel_bump ritornello-core
+  wire_set source "[source 1.0]" "Sample = CHANGED"
+  guard_git add -A; guard_git commit -q -m "core moved, source changed"
+  lost=$(guard_git rev-parse v0.1.0:crates/ritornello-proto/tests)
+  rm -f "$R/.git/objects/${lost:0:2}/${lost:2}"
+  expect_rel 1 "" "git ls-tree" "a baseline tree git cannot read is refused, not taken for one without a fixture" --guard-baseline v0.1.0 v0.1.0
+
+  rel_repo
+  rel_bump ritornello-core
+  rm "$R/crates/ritornello-proto/tests/wire-fingerprint.txt"
+  expect_rel 1 "" "is missing" "a release without the fixture is refused, not taken for one with nothing to check"
+
   # Layouts a line match would miss but a TOML parser reads: every one of them
   # must still count as speaking, so the unmoved plugin is refused.
   rel_repo
@@ -911,6 +1113,7 @@ fi
 # Checked before anything is printed, so a refused release leaves no half
 # list on stdout.
 run_guard || exit 1
+run_wire_guard || exit 1
 
 # A wire break republishes nothing unless every component that links
 # ritornello-proto moved: an archive rebuilt under its old number is fetched

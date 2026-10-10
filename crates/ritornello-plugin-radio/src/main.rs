@@ -80,7 +80,7 @@ impl RadioSource {
                 tracing::warn!("failed to persist preset: {e}");
             }
             SourceOutcome::new(SourceAction::play(st.url.clone()))
-                .plays(Self::stream_identity(&st.url))
+                .plays_at(Self::stream_identity(&st.url), st.url.clone())
                 // The key the UI must highlight: only the Source knows which
                 // preset what is playing corresponds to.
                 .preset(n)
@@ -410,6 +410,11 @@ mod tests {
                 "url": "http://icecast.radiofrance.fr/franceinter-midfi.mp3"
             })))
         );
+        assert_eq!(
+            outcome.location.as_deref(),
+            Some("http://icecast.radiofrance.fr/franceinter-midfi.mp3"),
+            "the location is the station's configured stream URL"
+        );
     }
 
     #[tokio::test]
@@ -501,6 +506,7 @@ mod tests {
         let n = source.poll_notification().await.expect("notification expected");
         assert_eq!(n.preset_count, Some(5));
         assert!(n.identity.is_none(), "the current track must not move");
+        assert!(n.location.is_none(), "the current location must not move");
         assert!(n.preset.is_none(), "nothing is playing: no number to correct");
     }
 

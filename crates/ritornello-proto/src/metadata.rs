@@ -686,6 +686,12 @@ pub struct PlayerState {
     /// to do with a named preset), or nothing is playing. Lives and dies with
     /// `preset` — see `Core::set_identity`.
     pub preset_name: Option<String>,
+    /// Where what is playing comes from, as the active Source worded it (see
+    /// `SourceMessage::location`). `None`: nothing is playing, or the Source
+    /// declared none (the cd). Omitted from the frame when absent, so a frame
+    /// without it stays byte for byte what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
     /// The appliance's current state as a **resolved sentence**: the status a
     /// source declared ("NO DISC", "AUDIO CD") or the core's standby word.
     /// One slot, because there is never more than one status at a time.

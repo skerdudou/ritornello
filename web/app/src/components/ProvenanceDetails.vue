@@ -68,13 +68,26 @@ const fields = computed(() => {
 const misses = computed(() => props.state?.provenance?.misses ?? [])
 
 /**
+ * Where what is playing comes from, as its source worded it (a stream URL, an
+ * `smb://` address, a path), or `null` when it declares none — the cd.
+ *
+ * Truthiness and not `?? null`: an empty string says nothing either, and it
+ * must not open the popin on its title alone. The card (`hasOrigins`) and the
+ * row below read it the same way.
+ */
+const location = computed(() => props.state?.location || null)
+
+/**
  * The button only exists if there is something to say.
  *
  * A `(?)` opening an empty popin would be worse than no button: it promises an
  * explanation and gives none. This is the ordinary case before a track gets
- * identified.
+ * identified. Where it comes from is something to say too, and the only thing
+ * a radio that identifies nothing has: the stream URL.
  */
-const hasSomethingToSay = computed(() => fields.value.length > 0 || misses.value.length > 0)
+const hasSomethingToSay = computed(
+  () => fields.value.length > 0 || misses.value.length > 0 || location.value !== null,
+)
 </script>
 
 <template>
@@ -101,7 +114,15 @@ const hasSomethingToSay = computed(() => fields.value.length > 0 || misses.value
 
       <!-- A definition list and not a table: two columns, one of which fits in
            a single word, on a popin that must stay readable on the phone. -->
-      <dl v-if="fields.length" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+      <dl v-if="location || fields.length" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+        <template v-if="location">
+          <dt class="text-muted-foreground">{{ t('provenance_location') }}</dt>
+          <!-- Selectable text, not a link: an address to read or copy, and a
+               stream URL opened in a browser tab would only start a download.
+               `break-all`: a URL has no space to wrap at, and the popover must
+               stay inside a phone's width. -->
+          <dd class="select-text break-all font-medium" data-provenance-location>{{ location }}</dd>
+        </template>
         <template v-for="c in fields" :key="c.field">
           <dt class="text-muted-foreground">{{ t(LABEL[c.field]!) }}</dt>
           <dd class="font-medium" :data-provenance-field="c.field">
