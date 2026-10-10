@@ -859,39 +859,36 @@ impl SourcePlugin for FilesSource {
         // off.
         self.draw_order().await;
         if random {
-            if self.plays.load(std::sync::atomic::Ordering::Relaxed) {
-                // Regression #4b (whole-branch review): a mode toggled
-                // **while a file is already playing** must not jump the
-                // pass to a fresh, unrelated first entry — that track is
-                // already sounding under mpv's old m3u, and the eventual
-                // reload (armed below by `mode_changed`) reaches whatever
-                // entry it should land on through the exact `step`
-                // arithmetic a playlist edit already uses in
-                // `reload_if_changed`: it moves **on from** wherever
-                // `index` sits in `order`, by `step`. Pointing `index` at
-                // the drawn pass's own first entry (the branch below, kept
-                // for the case nothing was playing yet) only to have that
-                // same reload immediately step past it
-                // (`step == 1` for `next`/`player_track`) would skip that
-                // first entry outright — it was never actually played.
-                // Moving the entry **already playing** to the head of the
-                // draw instead needs no such correction: the reload's
-                // `step` of `1` then lands on the pass's real *second*
-                // entry, which is exactly what should follow it.
-                let current = self.playlist.read().await.index;
-                if let Some(position) = self.position_of(current)
-                    && position != 0
-                {
-                    self.order.swap(0, position);
-                }
-            } else if let Some(entry) = self.entry_at(0) {
-                // Nothing playing yet: start the freshly drawn pass at its
-                // own beginning. Without this, engaging shuffle over an
-                // idle playlist would leave the index wherever it had last
-                // been left — a position that means nothing in the new
-                // order, and could replay, later in this same pass, a
-                // track already heard before shuffle was even turned on.
-                self.playlist.write().await.index = entry;
+            // The current entry is moved to the head of the draw, playing or
+            // not, and `index` is kept.
+            //
+            // Regression #4b (whole-branch review): a mode toggled **while a
+            // file is already playing** must not jump the pass to a fresh,
+            // unrelated first entry — that track is already sounding under
+            // mpv's old m3u, and the eventual reload (armed below by
+            // `mode_changed`) reaches whatever entry it should land on
+            // through the exact `step` arithmetic a playlist edit already
+            // uses in `reload_if_changed`: it moves **on from** wherever
+            // `index` sits in `order`, by `step`. Pointing `index` at the
+            // drawn pass's own first entry only to have that same reload
+            // immediately step past it (`step == 1` for
+            // `next`/`player_track`) would skip that first entry outright —
+            // it was never actually played. With the entry already playing
+            // at the head of the draw, the reload's `step` of `1` lands on
+            // the pass's real *second* entry, which is what should follow it.
+            //
+            // **While stopped**, the current entry is the *armed* one, on
+            // screen — and this method returns no frame to redraw it. An
+            // earlier version moved `index` to the draw's first entry here:
+            // the screen kept the old armed entry while Play started
+            // another. Keeping `index` and putting it at the head of the
+            // draw leaves the screen true, and the pass still starts with
+            // it and covers every other entry exactly once.
+            let current = self.playlist.read().await.index;
+            if let Some(position) = self.position_of(current)
+                && position != 0
+            {
+                self.order.swap(0, position);
             }
         }
         // Regression #4 (whole-branch review): this method has no action to
@@ -1034,9 +1031,11 @@ impl SourcePlugin for FilesSource {
             // than the first one — `index` still names it.
             Repeat::One => self.play().await,
             Repeat::All => {
-                if self.random {
-                    self.draw_order().await;
-                }
+                // Same as the `Off` branch: drawn for the playlist as it is
+                // now, the flag consumed so that `play()` below does not draw
+                // a second order under the entry just set.
+                self.playlist_changed.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.draw_order().await;
                 if let Some(entry) = self.entry_at(0) {
                     self.playlist.write().await.index = entry;
                 }
@@ -1629,6 +1628,10 @@ mod tests {
         // entry index. With a drawn order they are two different spaces, and
         // the screen would name the wrong track.
         let mut s = source_with(playlist_of(3), Order::Fixed(vec![2, 0, 1]));
+        // Stopped on the draw's own first entry, so turning shuffle on keeps
+        // the draw as it is (the armed entry goes to its head, see
+        // `set_play_mode`).
+        s.playlist.write().await.index = 2;
         s.set_play_mode(true, Repeat::Off).await;
         s.activate().await;
         s.player_track(1).await; // second position of the drawn order
@@ -1642,6 +1645,10 @@ mod tests {
         // engaged. Reading the step through the drawn order instead lands on
         // entry 1 (preset 2).
         let mut s = source_with(playlist_of(3), Order::Fixed(vec![2, 1, 0]));
+        // Stopped on the draw's own first entry, so turning shuffle on keeps
+        // the draw as it is (the armed entry goes to its head, see
+        // `set_play_mode`).
+        s.playlist.write().await.index = 2;
         s.set_play_mode(true, Repeat::Off).await;
         s.activate().await;
         // Simulate a playlist edit from the admin page: the one channel that
@@ -2015,9 +2022,13 @@ mod tests {
         // different permutations can tell "redrawn again" from "left alone"
         // apart.
         let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![1, 0, 2]]));
+        // Stopped on the draw's own first entry, so turning shuffle on keeps
+        // the draw as it is (the armed entry goes to its head, see
+        // `set_play_mode`).
+        s.playlist.write().await.index = 2;
         s.set_play_mode(true, Repeat::Off).await; // engages shuffle: draws [2, 0, 1]
         assert_eq!(s.drawn_order(), &[2, 0, 1]);
-        assert_eq!(s.current_entry(), 2, "the pass starts on the first drawn entry");
+        assert_eq!(s.current_entry(), 2, "the pass starts on the armed entry");
         // `random` stays `true`; only `repeat` moves.
         s.set_play_mode(true, Repeat::All).await;
         assert_eq!(s.drawn_order(), &[2, 0, 1], "no random transition: no redraw");
@@ -2121,14 +2132,14 @@ mod tests {
 
     #[tokio::test]
     async fn play_after_a_finished_pass_draws_a_fresh_one() {
-        // Otherwise the documented behaviour ("Play replays the last track"
-        // after a list ran out) would give one track and then a stop: the tail
-        // of an exhausted order holds only the entry that was already the
-        // last one played.
+        // Replaying from the kept index after a list ran out would give one
+        // track and then a stop: the tail of an exhausted order holds only
+        // the entry that was already the last one played. The fresh pass is
+        // drawn by `end_of_content` (repeat off), and Play starts it.
         let mut s = source_with(playlist_of(3), Order::Sequence(vec![vec![2, 0, 1], vec![1, 2, 0]]));
         s.set_play_mode(true, Repeat::Off).await; // no repeat: a pass really ends
         s.activate().await; // opens the first pass, order = [2, 0, 1]
-        s.end_of_content().await; // the pass ends without opening another one
+        s.end_of_content().await; // the pass ends: the next one is drawn, armed, not played
         let out = s.activate().await; // Play key pressed again
         assert!(matches!(out.action, SourceAction::Play { .. }), "{:?}", out.action);
         assert_eq!(s.drawn_order(), &[1, 2, 0], "a fresh pass is drawn, not the exhausted one replayed");
@@ -2191,10 +2202,11 @@ mod tests {
         assert_eq!(outcome.preset, Some(2), "the armed track stays designated");
         assert!(outcome.preset_name.is_some(), "and named");
         assert_eq!(outcome.preset_count, Some(3));
-        // But nothing is playing: that is what `plays_nothing` declares, and
-        // that is what makes the "now playing" block disappear from the
-        // display.
-        assert!(outcome.identity.is_some(), "the stop must be declared, not silenced");
+        // But nothing is playing: `armed_file_at` declares the identity
+        // `Nothing` and arms the entry beside it, so the core shows the
+        // track as armed, not as playing.
+        assert_eq!(outcome.identity, Some(IdentityUpdate::Nothing), "the stop must be declared, not silenced");
+        assert!(outcome.armed.is_some(), "with the armed track beside it");
     }
 
     #[tokio::test]
@@ -2329,13 +2341,24 @@ mod tests {
         assert!(matches!(outcome.action, SourceAction::Noop), "{:?}", outcome.action);
     }
 
+    /// **[MUTATION]** returning `None` instead of `play()` from
+    /// `reload_if_changed`'s empty-list branch fires "nothing plays any
+    /// more" (`plays` stays true, and the outcome becomes a `PlayerNext`).
     #[tokio::test]
     async fn next_on_a_cleared_playlist_plays_nothing() {
         // Clearing during playback: the stop is requested by the page, but if a
         // command arrives anyway, it must not look for a nonexistent track.
-        let mut s = test_source(Playlist::default());
+        // Played first: a never-played source is stopped, and its `next`
+        // takes the armed path (see `an_empty_playlist_arms_nothing_while_stopped`).
+        let mut s = test_source(playlist_of(3));
+        s.activate().await;
+        s.playlist.write().await.entries.clear();
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
         let outcome = s.next().await;
+        assert!(
+            !s.plays.load(std::sync::atomic::Ordering::Relaxed),
+            "nothing plays any more: the next next/prev take the stopped path"
+        );
         assert_eq!(
             outcome.status_text,
             Some(Text::Keyed { key: "no_playlist".into(), params: HashMap::new() })
@@ -2408,7 +2431,8 @@ mod tests {
         // Shuffled, `index + 1` names entry 0 here (2 + 1 wraps), while the
         // next one in the drawn order [2, 1, 0] is entry 1.
         let mut s = source_with(playlist_of(3), Order::Fixed(vec![2, 1, 0]));
-        s.set_play_mode(true, Repeat::Off).await; // stopped: index = entry_at(0) = 2
+        s.playlist.write().await.index = 2;
+        s.set_play_mode(true, Repeat::Off).await; // stopped on 2, already the draw's head
         let out = s.next().await;
         assert_eq!(out.action, SourceAction::Noop);
         assert_eq!(armed_path(&out), "/musique/02.mp3", "position-space next, not entry-space +1");
@@ -2504,6 +2528,55 @@ mod tests {
         let out = s.activate().await;
         assert_eq!(started_entry(&out), 3, "Play starts what the screen shows");
         assert_eq!(s.drawn_order(), &[3, 1, 2, 0], "drawn once");
+    }
+
+    /// Same as `the_end_of_a_pass_after_an_edit_draws_once`, under
+    /// repeat-all: the new pass is drawn once, for the edited list, and
+    /// played from its first entry.
+    ///
+    /// **[MUTATION]** leaving `playlist_changed` set in the `All` branch
+    /// makes "the head of the new pass" fire: `play()` redraws [0, 1, 2, 3],
+    /// which starts entry 3 at position 3.
+    #[tokio::test]
+    async fn repeat_all_after_an_edit_draws_once() {
+        let mut s = source_with(
+            playlist_of(3),
+            Order::Sequence(vec![vec![2, 0, 1], vec![3, 1, 2, 0], vec![0, 1, 2, 3]]),
+        );
+        s.set_play_mode(true, Repeat::All).await;
+        s.activate().await;
+        s.playlist.write().await.entries.push(Entry {
+            path: PathBuf::from("/musique/04.mp3"),
+            title: None,
+            duration_s: None,
+        });
+        s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
+        let out = s.end_of_content().await;
+        match out.action {
+            SourceAction::Play { start, .. } => assert_eq!(start, Some(0), "the head of the new pass"),
+            other => panic!("expected a Play, got {other:?}"),
+        }
+        assert_eq!(started_entry(&out), 3, "the first entry of the one draw");
+        assert_eq!(s.drawn_order(), &[3, 1, 2, 0], "drawn once");
+    }
+
+    /// Turning shuffle on while stopped returns no frame: the screen keeps
+    /// the armed entry, so the armed entry must stay — at the head of the
+    /// draw — or Play would start a track the screen does not show.
+    ///
+    /// **[MUTATION]** restoring the old move (`index = entry_at(0)` while
+    /// stopped, order left as drawn) fires "the armed entry stays".
+    #[tokio::test]
+    async fn shuffle_on_while_stopped_keeps_the_armed_entry() {
+        let mut s = source_with(playlist_of(3), Order::Fixed(vec![1, 2, 0]));
+        s.playlist.write().await.index = 2;
+        s.set_play_mode(true, Repeat::Off).await;
+        assert_eq!(s.current_entry(), 2, "the armed entry stays");
+        assert_eq!(s.entry_at(0), Some(2), "at the head of the draw");
+        assert_eq!(armed_path(&s.next().await), "/musique/02.mp3", "then the draw, from there");
+        assert_eq!(armed_path(&s.next().await), "/musique/01.mp3");
+        let out = s.activate().await;
+        assert_eq!(started_entry(&out), 0, "Play starts the armed entry");
     }
 
     #[tokio::test]
