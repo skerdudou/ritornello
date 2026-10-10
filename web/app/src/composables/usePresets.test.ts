@@ -21,6 +21,20 @@ describe('usePresets', () => {
     expect(nameOf('radio', 9)).toBeNull()
   })
 
+  it('gives the highest preset index the catalog lists for a source', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      sources: [
+        { name: 'radio', presets: [{ index: 1, name: 'FIP' }, { index: 3, name: 'X' }] },
+        { name: 'cd', presets: [] },
+      ],
+    }), { status: 200 })))
+    const p = usePresets()
+    await p.reload()
+    expect(p.listedCount('radio')).toBe(3)
+    expect(p.listedCount('cd')).toBe(0)
+    expect(p.listedCount('ghost')).toBe(0)
+  })
+
   it('maps each announced icon by source, none for a source without one', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       sources: [{ name: 'radio', icon: 'radio' }, { name: 'cd' }],

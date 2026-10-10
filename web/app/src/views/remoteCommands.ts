@@ -30,9 +30,9 @@ export const REMOTE_POWER: RemoteCommand = { key: 'remote_power', cmd: { cmd: 'P
  * decision it represents, and leaves the grid to the commands of the current
  * playback only.
  *
- * It keeps its greying, unlike standby: in standby, the core returns without
- * doing anything on everything that is not `Power` (see `unavailable`). The
- * button would lie otherwise.
+ * It stays usable in standby, like standby itself: the core acts on a source
+ * choice there (see `unavailable`), and it wakes the device on the next
+ * source.
  */
 export const REMOTE_SOURCE: RemoteCommand = { key: 'remote_source', cmd: { cmd: 'SourceCycle' } }
 
@@ -114,8 +114,9 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [
  * A command the device would ignore in the current state: its button is
  * greyed rather than offered.
  *
- * In **standby**, the core returns without doing anything on everything that
- * is not `Power` (first line of `handle_command`), preset grid included.
+ * In **standby**, the core acts only on `Power` and on a source choice
+ * (`SelectSource`, `SourceCycle`), which wakes the device on that source;
+ * everything else is ignored, preset grid included.
  * Seeking no longer has a key (it is the bar that goes inert, on
  * `seekable`), and eject is **hidden** rather than greyed — see `hidden`.
  *
@@ -132,9 +133,11 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [
  * A state not yet received (`null`) greys nothing: the remote opens usable,
  * and the frame corrects at once.
  */
+const STANDBY_COMMANDS = ['Power', 'SelectSource', 'SourceCycle']
+
 export function unavailable(name: string, state: PlayerPayload | null): boolean {
   if (!state) return false
-  if (state.standby && name !== 'Power') return true
+  if (state.standby && !STANDBY_COMMANDS.includes(name)) return true
   if (name === 'SetRandom' || name === 'SetRepeat') return !state.has_finite_list
   return false
 }

@@ -29,7 +29,7 @@ async function send(cmd: Command) {
 
 // The tile names: loaded on mount, reloaded when the active source changes —
 // it is the frame that says so, nothing is probed.
-const { reload, nameOf, sources, icons, listRead } = usePresets()
+const { reload, nameOf, listedCount, sources, icons, listRead } = usePresets()
 onMounted(reload)
 watch(() => state.value?.source, (after, before) => {
   if (after !== undefined && after !== before) reload()
@@ -148,7 +148,7 @@ onMounted(async () => {
     <Card>
       <CardHeader><CardTitle>{{ t('presets_label') }}</CardTitle></CardHeader>
       <CardContent>
-        <PresetGrid :state="state" :name-of="(n: number) => (state ? nameOf(state.source, n) : null)" @choose="(n: number) => send({ cmd: 'Select', arg: n })" />
+        <PresetGrid :state="state" :listed-count="state ? listedCount(state.source) : 0" :name-of="(n: number) => (state ? nameOf(state.source, n) : null)" @choose="(n: number) => send({ cmd: 'Select', arg: n })" />
       </CardContent>
     </Card>
   </div>

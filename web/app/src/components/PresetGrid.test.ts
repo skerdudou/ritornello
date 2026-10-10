@@ -10,12 +10,32 @@ const state = (e: Partial<PlayerPayload>): PlayerPayload => ({
   seekable: false, can_eject: false, has_finite_list: false, random: false, ...e,
 })
 const NAMES: Record<number, string> = { 1: 'FIP', 2: 'France Inter' }
-const mounted = (e: Partial<PlayerPayload>, nameOf = (n: number) => NAMES[n] ?? null) => {
+const mounted = (e: Partial<PlayerPayload>, nameOf = (n: number) => NAMES[n] ?? null, listedCount = 0) => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })))
-  return mount(PresetGrid, { props: { state: state(e), nameOf } })
+  return mount(PresetGrid, { props: { state: state(e), nameOf, listedCount } })
 }
 
 describe('PresetGrid', () => {
+  it('in standby, shows the presets the catalog lists for the source', () => {
+    // Standby forgets the announced count on the core side; the catalog
+    // still knows the stations.
+    const w = mounted({ standby: true, preset_count: null }, undefined, 2)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(2)
+    expect(w.get('[data-preset-button="1"] [data-preset-name]').text()).toBe('FIP')
+    for (const b of w.findAll('[data-preset-button]')) expect(b.attributes('disabled')).toBeDefined()
+  })
+
+  it('in standby, a source the catalog lists nothing for shows an empty grid', () => {
+    // A cd: no fixed 1-10 grid of ten dead tiles.
+    const w = mounted({ standby: true, preset_count: null }, undefined, 0)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(0)
+  })
+
+  it('awake, the announced count rules, not the catalog', () => {
+    const w = mounted({ standby: false, preset_count: 3 }, undefined, 2)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(3)
+  })
+
   it('names the tiles the source names, bare number otherwise', () => {
     const w = mounted({ preset_count: 3, preset: 1 })
     expect(w.get('[data-preset-button="1"] [data-preset-name]').text()).toBe('FIP')

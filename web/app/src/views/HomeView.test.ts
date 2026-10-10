@@ -423,11 +423,10 @@ describe('HomeView — unavailable buttons', () => {
     vi.unstubAllGlobals()
   })
 
-  it('in standby, everything is greyed except standby itself', async () => {
-    // The core ignores everything that is not `Power` in standby: the buttons
-    // say so instead of sending a command with no effect. No count pushed
-    // here: standby clears it on the core side, so the grid falls back on
-    // 1-10 — disabled as well.
+  it('in standby, only standby and the source choice stay offered', async () => {
+    // The core ignores everything but `Power`, `SelectSource` and
+    // `SourceCycle` in standby: choosing a source wakes the device on it. The
+    // buttons say so instead of sending a command with no effect.
     const w = await mountWith({ standby: true })
     for (const b of w.findAll('[data-remote-command]')) {
       expect(b.attributes('disabled'), b.attributes('data-remote-command')).toBeDefined()
@@ -435,7 +434,7 @@ describe('HomeView — unavailable buttons', () => {
     for (const b of w.findAll('[data-preset-button]')) {
       expect(b.attributes('disabled')).toBeDefined()
     }
-    expect(w.get('[data-remote-source]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-remote-source]').attributes('disabled')).toBeUndefined()
     expect(w.get('[data-remote-power]').attributes('disabled')).toBeUndefined()
   })
 
@@ -693,13 +692,13 @@ describe('HomeView — the source keys in the Player card header', () => {
     expect(posts).toEqual([JSON.stringify({ cmd: 'SelectSource', arg: 'files' })])
   })
 
-  it('wide: in standby, every key is greyed, like the cycle key', async () => {
-    // The core ignores everything but `Power` in standby (see `unavailable`).
+  it('wide: in standby, every key stays offered, like the cycle key', async () => {
+    // Choosing a source wakes the device on it (see `unavailable`).
     const { w } = await mountWith(THREE, { standby: true })
     const keys = w.findAll('[data-source-key]')
     expect(keys).toHaveLength(3)
     for (const k of keys) {
-      expect(k.attributes('disabled'), k.attributes('data-source-key')).toBeDefined()
+      expect(k.attributes('disabled'), k.attributes('data-source-key')).toBeUndefined()
     }
   })
 
@@ -755,7 +754,16 @@ describe('unavailable / hidden', () => {
     seekable: false, can_eject: false, has_finite_list: false, random: false, ...e,
   })
 
-  it('standby only lets Power through', () => {
+  it('in standby, SelectSource and SourceCycle stay available', () => {
+    const s = state({ standby: true })
+    expect(unavailable('SelectSource', s)).toBe(false)
+    expect(unavailable('SourceCycle', s)).toBe(false)
+    expect(unavailable('Power', s)).toBe(false)
+    expect(unavailable('Select', s)).toBe(true)
+    expect(unavailable('Next', s)).toBe(true)
+  })
+
+  it('standby lets only Power and the source choice through', () => {
     expect(unavailable('Power', state({ standby: true }))).toBe(false)
     expect(unavailable('PlayPause', state({ standby: true }))).toBe(true)
     expect(unavailable('Select', state({ standby: true }))).toBe(true)

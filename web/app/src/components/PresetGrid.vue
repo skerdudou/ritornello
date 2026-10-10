@@ -7,14 +7,17 @@ import type { PlayerPayload } from '../types'
 import { unavailable } from '../views/remoteCommands'
 
 const { t } = useCatalog()
-const props = defineProps<{ state: PlayerPayload | null; nameOf: (n: number) => string | null }>()
+const props = defineProps<{ state: PlayerPayload | null; nameOf: (n: number) => string | null; listedCount: number }>()
 const emit = defineEmits<{ choose: [n: number] }>()
 
 const page = ref(0)
 
 // Count declared by the source (null = the source says nothing about it: grid
 // 1-10, so the remote is never disarmed).
-const count = computed(() => props.state?.preset_count ?? null)
+// In standby the core forgets the count the source announced: the catalog
+// (`/api/presets`, kept in standby) says which presets exist, 0 for a source
+// that lists none (a cd) — an empty grid rather than ten dead tiles.
+const count = computed(() => (props.state?.standby ? props.listedCount : props.state?.preset_count ?? null))
 
 // Numbers of the current page, only those that exist. Page k: 10k+1 to
 // 10k+10 — so 1-10, 11-20, 21-30. **Same bounds as the core's `+10`**, and
