@@ -688,6 +688,26 @@ describe('HomeView — the source keys in the Player card header', () => {
     expect(w.get('[data-player-header]').text()).not.toContain(name)
   })
 
+  it('wide: the keys open the header at its left edge, standby alone in the far corner', async () => {
+    // **The owner's request**: in the corner, the last source key sat right
+    // against standby, one slip from putting the device to sleep.
+    const { w } = await mountWith(THREE, { source: 'cd', standby: true })
+    const start = w.get('[data-player-header-start]')
+    expect(start.element.firstElementChild?.matches('[data-source-keys]')).toBe(true)
+    // The standby badge follows the keys, in the same column.
+    expect(start.find('[data-standby]').exists()).toBe(true)
+    const corner = w.get('[data-slot="card-action"]')
+    expect(corner.find('[data-source-keys]').exists()).toBe(false)
+    expect(corner.find('[data-remote-power]').exists()).toBe(true)
+  })
+
+  it('narrow: the cycle key stays in the corner, beside standby', async () => {
+    const { w } = await mountWith(THREE, { source: 'cd' }, NARROW)
+    const corner = w.get('[data-slot="card-action"]')
+    expect(corner.find('[data-remote-source]').exists()).toBe(true)
+    expect(w.find('[data-source-keys]').exists()).toBe(false)
+  })
+
   it('wide: a key posts SelectSource with the name, not a notch of the cycle', async () => {
     const { w, posts } = await mountWith(THREE, { source: 'radio' })
     await w.get('[data-source-key="files"]').trigger('click')
