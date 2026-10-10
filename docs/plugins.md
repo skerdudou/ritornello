@@ -1517,7 +1517,10 @@ journal says so in a sentence of its own rather than a bare errno. In order —
 the echo the core handed over is not this source's own file shape, or names a
 path with no parent directory to write into; no declared root owns the
 folder; the root was never armed to archive covers, or — for a share — is
-not mounted writable; an image already occupies the name a cover would take;
+not mounted writable; the folder already holds an image under **any** of the
+names the plugin reads as a cover, in any case — not only the one about to be
+written, or choosing `folder` would drop a second front face beside the
+owner's own `Cover.JPG`;
 the file being played names no album to compare against, or the folder's
 audio files disagree about which one they belong to; or the staged original
 the core handed over is not bytes this module recognises as an image.
@@ -1535,6 +1538,22 @@ tags then copying megabytes onto a NAS is long by nature — held to 1.5 s, a
 its outcome, the attempt forgets that its folder was remembered as imageless,
 so the next track finds the new `cover.jpg` instead of announcing no cover for
 the rest of the album.
+
+**What the archived file is called is one setting for every root**, not a
+per-root flag: where a cover may be written is a question about each library,
+what it is called is a question about the players that read them all. The
+admin op `set_cover_name` takes one of the names the plugin itself looks for
+when it reads a folder — `cover` (the default), `folder`, `front`, `albumart`,
+`album` — and refuses any other, because a name the reader did not know would
+be written once and then fetched from the network again on every track. The
+page is served that list by the plugin (`cover_names` in `get_data`) rather
+than holding a copy of it. Only the stem is chosen: the extension still
+follows the image's bytes. The setting lives in the plugin's state file, not
+in the roots table, which the root mount helper reads and which must not
+change for a setting that helper has no use for; and an unknown value there —
+what a plugin rolled back past a release that added a name would read —
+reverts the setting alone, never the playlist that shares the file. Like
+`archive_covers`, it is read at every write and needs no restart.
 
 **Updating an existing installation.** As for every other plugin,
 `ritornello-install` installs the binary and, on a device already in service,
