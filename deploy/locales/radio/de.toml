@@ -7,7 +7,7 @@ search_error = "Suche im Verzeichnis fehlgeschlagen: {detail}"
 save_failed = "Speichern fehlgeschlagen"
 
 # admin page
-admin_title = "Sender"
+title = "Radiosender"
 col_num = "Nr."
 col_name = "Name"
 col_url = "Stream-URL"

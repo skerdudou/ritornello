@@ -6,6 +6,9 @@
 # `every_refusal_names_a_key_that_exists_in_the_embedded_catalog` test:
 # without it, a typo would put the raw key on screen.
 
+# Title of the admin page.
+title = "Music files"
+
 # Statuses shown by the Source.
 status_files = "FILES"
 no_playlist = "NO PLAYLIST"

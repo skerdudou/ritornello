@@ -12,7 +12,7 @@ conflict_dup = "el código {code} está introducido dos veces"
 save_conflicts = "Resuelve los códigos de tecla duplicados antes de guardar"
 
 # admin page
-admin_title = "asignación de teclas"
+title = "Asignación de teclas"
 device_label = "Dispositivo"
 btn_refresh = "Actualizar"
 col_action = "Acción"

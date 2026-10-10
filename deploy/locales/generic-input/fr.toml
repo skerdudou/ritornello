@@ -10,7 +10,7 @@ conflict_code = "le code {code} est déjà affecté à {action}"
 conflict_dup = "le code {code} est saisi deux fois"
 save_conflicts = "Corrigez les codes en double avant d’enregistrer"
 
-admin_title = "touches"
+title = "Affectation des touches"
 device_label = "Périphérique"
 btn_refresh = "Rafraîchir"
 col_action = "Action"

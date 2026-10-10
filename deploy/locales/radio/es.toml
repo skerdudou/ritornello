@@ -7,7 +7,7 @@ search_error = "No se pudo buscar en el directorio: {detail}"
 save_failed = "no se pudo guardar"
 
 # admin page
-admin_title = "emisoras"
+title = "Emisoras de radio"
 col_num = "N.º"
 col_name = "Nombre"
 col_url = "URL del flujo"

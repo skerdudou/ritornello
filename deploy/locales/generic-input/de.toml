@@ -12,7 +12,7 @@ conflict_dup = "Code {code} ist doppelt eingetragen"
 save_conflicts = "Beheben Sie die doppelten Tastencodes vor dem Speichern"
 
 # admin page
-admin_title = "Tastenbelegung"
+title = "Tastenbelegung"
 device_label = "Gerät"
 btn_refresh = "Aktualisieren"
 col_action = "Aktion"

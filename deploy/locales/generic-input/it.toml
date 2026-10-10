@@ -12,7 +12,7 @@ conflict_dup = "il codice {code} è inserito due volte"
 save_conflicts = "Correggi i codici tasto duplicati prima di salvare"
 
 # admin page
-admin_title = "associazioni dei tasti"
+title = "Associazioni dei tasti"
 device_label = "Periferica"
 btn_refresh = "Aggiorna"
 col_action = "Azione"

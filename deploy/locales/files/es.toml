@@ -4,6 +4,9 @@
 # (`crates/ritornello-plugin-files/src/locales/en.toml`): a parity test checks
 # it, and a key missing here would show English without warning.
 
+# Title of the admin page.
+title = "Archivos de música"
+
 # Statuses shown by the Source.
 status_files = "ARCHIVOS"
 no_playlist = "SIN LISTA"

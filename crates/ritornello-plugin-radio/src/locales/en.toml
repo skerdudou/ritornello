@@ -7,7 +7,7 @@ search_error = "Directory search failed: {detail}"
 save_failed = "the save failed"
 
 # admin page
-admin_title = "stations"
+title = "Radio stations"
 col_num = "N°"
 col_name = "Name"
 col_url = "Stream URL"

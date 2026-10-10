@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
-  api, Button, createT, Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
-  Input, move, Skeleton, useSkeleton, type Catalog,
+  api, Button, Card, CardContent, CardHeader, CardTitle, createT, Dialog, DialogContent,
+  DialogHeader, DialogTitle, DialogTrigger, Input, move, Skeleton, useSkeleton, type Catalog,
 } from '@ritornello/ui'
 import { computed, onMounted, ref } from 'vue'
 import CountryPicker from './CountryPicker.vue'
@@ -273,23 +273,31 @@ function label(s: FoundStation): string {
 </script>
 
 <template>
+  <!-- Two cards, as the core's pages stack theirs: the stations, then the
+       directory that adds to them. Each part had its own heading already.
+       Not even the card frame shows before the placeholder does: a short wait
+       must leave the page blank, not an empty card. -->
   <div class="space-y-6">
+    <Card v-if="skeleton || loaded">
+      <CardHeader>
+        <CardTitle>{{ t('title') }}</CardTitle>
+      </CardHeader>
+      <CardContent class="space-y-4">
     <!-- The wait. `role="status"` carries the only text; the blocks are
          `aria-hidden`, so a screen reader hears it announced once instead of a
-         run of empty boxes. The shape is an approximation of the page — a few
-         station rows, the action bar, the search field — and it is honest
-         about being one: the real number of stations is exactly what is not
-         known yet. -->
+         run of empty boxes. The shape is an approximation of the card — a few
+         station rows, the action bar — and it is honest about being one: the
+         real number of stations is exactly what is not known yet. -->
     <div v-if="skeleton" role="status" class="space-y-6">
       <span class="sr-only">{{ t('loading') }}</span>
       <div class="space-y-2">
         <Skeleton v-for="i in 4" :key="i" class="h-10 w-full" />
       </div>
       <Skeleton class="h-9 w-56" />
-      <Skeleton class="h-9 w-full" />
     </div>
 
-    <!-- Everything below appears at once, or not at all: see `loaded`. -->
+    <!-- Everything below appears at once, or not at all: see `loaded`. The
+         directory card follows the same rule. -->
     <template v-else-if="loaded">
     <table class="w-full text-sm">
       <thead class="text-muted-foreground">
@@ -372,9 +380,15 @@ function label(s: FoundStation): string {
       <Button data-save :disabled="loadFailed" @click="save">{{ t('btn_save') }}</Button>
       <span class="text-sm text-muted-foreground">{{ message }}</span>
     </div>
+    </template>
+      </CardContent>
+    </Card>
 
-    <section class="space-y-2">
-      <h2 class="font-medium">{{ t('search_title') }}</h2>
+    <Card v-if="!skeleton && loaded" data-search-card>
+      <CardHeader>
+        <CardTitle>{{ t('search_title') }}</CardTitle>
+      </CardHeader>
+      <CardContent class="space-y-2">
       <div class="flex flex-wrap items-center gap-2">
         <Input
           v-model="query"
@@ -421,7 +435,7 @@ function label(s: FoundStation): string {
           </Button>
         </li>
       </ul>
-    </section>
-    </template>
+      </CardContent>
+    </Card>
   </div>
 </template>
