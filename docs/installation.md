@@ -182,7 +182,7 @@ pushed, a green workflow and 37 attached archives are not evidence a device
 can reach any of it. If a device says nothing is published, look first at
 whether the release is still a draft.
 
-Five different numbers are at play here, and they answer five different
+Six different numbers are at play here, and they answer six different
 questions. The **product number** — `vX.Y.Z`, the git tag — names the
 release and carries the generation: `0.2.7` is the seventh delivery of the
 `0.2` generation. Each shipped component (the core, each plugin) declares
@@ -220,6 +220,19 @@ a publication channel of its own, is always a finished `X.Y.Z`, is tied to
 neither the product's major nor its suffix, and moves only when the installer
 itself changes. No device ever fetches the installer, so nothing compares it
 for equality, and a person simply takes the newest.
+
+The **sixth number** is the privileged updater's, in
+`crates/ritornello-updater/Cargo.toml`: the crate that builds
+`ritornello-update`, the binary root runs to place what the page installs. It
+travels inside the core's archive, but only `ritornello-install` places it, and
+the core compares this number, for equality, with the one the installer
+recorded before updating itself from the page (see [The core updates itself
+only while its root files stay](#the-core-updates-itself-only-while-its-root-files-stay)).
+Its bytes could not serve: they differ at every build even when its code does
+not. It is a finished `X.Y.Z`, tied to neither the product's major nor its
+suffix, and moves only when that crate changes — `scripts/changed-components.sh`
+refuses a release that changed the crate, its tests included, without moving
+it.
 
 The release gesture, then: bump the version of whichever component you
 changed, and tag with the next product number. The workflow publishes
@@ -443,6 +456,32 @@ end-to-end target, exercised on every commit rather than merely
 cross-compiled) and `arm64` (Pi 3/4/5 class) — cross-compiled on every
 release but **never started on real hardware**, for lack of a device to try
 it on.
+
+### The core updates itself only while its root files stay
+
+The core's archive carries, besides its binary, what only root may place: its
+systemd units, its polkit rules and the updater. An update from the page places
+none of them. So the core updates itself from the page **only while each of
+them is the one `ritornello-install` recorded placing**; otherwise the row says
+which files changed and to update with `ritornello-install`, before anything is
+pressed, and the night-time update leaves it alone. A grouped break whose core
+is refused this way waits whole.
+
+How a file is recognised: the release's `inventory.json` (format 2) gives each
+privileged file an identity — `sha256:<hex>` of a unit or a rule,
+`version:<number>` of the updater (its own number, above) — and
+`ritornello-install` records the identity of every file it places in
+`/var/lib/ritornello-install/installed.toml`. The core compares the two for
+equality. At the gesture it asks again, and holds the downloaded archive to its
+inventory: a unit or a rule that hashes otherwise refuses the install.
+
+Every unknown refuses: a release without an inventory, a registry absent or
+written before identities existed, a file placed by hand rather than by the
+installer. **A device installed from the archives by hand therefore never
+updates its core from the page**; one run of `ritornello-install` records what
+it placed and lifts that. A device deployed before this rule existed is in the
+same case until its first run of an installer that records identities (0.3.0
+or later); that run places the core's root files again, once, to record them.
 
 ### A breaking core is installed with its dependents
 
@@ -1680,6 +1719,14 @@ local server that goes silent for 8 s, but not yet on the Pi, whose mpv is
 0.40, nor against a real station cutting out. The pure logic behind them is
 covered by tests that fail when it is broken; their timings in that
 section are mpv 0.37's.
+
+The core refusing to update itself while its root files moved (see [The core
+updates itself only while its root files
+stay](#the-core-updates-itself-only-while-its-root-files-stay)) has run against
+a fake release server and a registry written by the tests, never on a device:
+no `inventory.json` of format 2 has been published yet, no installer that
+records identities has run on the Pi, and the one run that places the core's
+root files again to record them has not been watched.
 
 Not something left unverified, but worth recording here for whoever meets
 its traces in the history: `plugin_action_refusal`, the scaffold that made

@@ -28,6 +28,11 @@ pub const REPO: &str = "skerdudou/ritornello";
 /// archive, and `classify_asset` must answer `None` for it.
 pub const CATALOGUE_ASSET: &str = "catalogue.json";
 
+/// The name the release-wide install inventory is published under, the one
+/// `ritornello-install` reads. Recognised the same way, and no archive
+/// either.
+pub const INVENTORY_ASSET: &str = "inventory.json";
+
 /// The architecture label this binary's archives carry.
 ///
 /// Chosen by the compiler rather than probed at runtime: a binary that
@@ -305,6 +310,11 @@ pub struct Published {
     /// per-release asset, recognised by name, and `None` is a normal state
     /// (every release published before this chantier has none).
     pub catalogue_url: Option<String>,
+    /// The `inventory.json` of that same release, when it has one: what the
+    /// core reads, for its own offer, to know which content each privileged
+    /// file of its archive is (`update::privileged`). `None` refuses that
+    /// offer from the page, it never waves it through.
+    pub inventory_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,6 +496,11 @@ pub fn fold(releases: &[Release], arch: &str) -> Vec<Published> {
             .iter()
             .find(|a| a.name == CATALOGUE_ASSET)
             .map(|a| a.url.clone());
+        let inventory = release
+            .assets
+            .iter()
+            .find(|a| a.name == INVENTORY_ASSET)
+            .map(|a| a.url.clone());
         for asset in &release.assets {
             let Some((offer, version)) = classify_asset(&asset.name, arch) else {
                 continue;
@@ -503,6 +518,7 @@ pub fn fold(releases: &[Release], arch: &str) -> Vec<Published> {
                 release_tag: release.tag.clone(),
                 checksums_url: checksums.clone(),
                 catalogue_url: catalogue.clone(),
+                inventory_url: inventory.clone(),
             });
         }
     }

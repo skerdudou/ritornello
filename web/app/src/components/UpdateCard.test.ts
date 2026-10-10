@@ -20,8 +20,6 @@ const CATALOG = {
   update_rolled_back: 'The update did not start and the previous version was put back',
   update_rollback_failed:
     'The update did not start, and putting the previous version back did not fully succeed — see the log',
-  update_archive_notes:
-    'The version now installed also carried {count} files that were not installed — see its release notes',
   update_partial_failure_note:
     'If several components were involved, only the first failure is shown here — see the log for the rest',
   // Read by `UpdateSummary.vue`, mounted inside this card since Task 5: the
@@ -280,40 +278,6 @@ describe('UpdateCard', () => {
     const w = mountCard(payload())
     await w.get('[data-update-install]').trigger('click')
     expect(w.emitted('install')).toHaveLength(1)
-  })
-
-  // Ruling 50-1: the core's own archive always exempts something (the
-  // privileged installer, the systemd units, the polkit rules), and the page
-  // must say so — a release that fixes the unit that runs self-update cannot
-  // be delivered by the mechanism it fixes, and nobody was told before this.
-  it('says how many files the last core install did not touch', () => {
-    const w = mountCard(
-      payload({
-        components: [
-          {
-            name: 'core',
-            kind: 'core',
-            declared: true,
-            binary_present: true,
-            installed: '0.3.0',
-            offered: '0.3.0',
-            availability: 'aligned',
-            not_installed_files: [
-              'etc/systemd/system/ritornello-update.service',
-              'usr/local/lib/ritornello/ritornello-update',
-            ],
-          },
-        ],
-      }),
-    )
-    expect(w.get('[data-update-core-notes]').text()).toBe(
-      'The version now installed also carried 2 files that were not installed — see its release notes',
-    )
-  })
-
-  it('says nothing about archive notes before any core install has happened', () => {
-    const w = mountCard(payload())
-    expect(w.find('[data-update-core-notes]').exists()).toBe(false)
   })
 
   // Ruling 50-2: this payload has one message field for a gesture that can

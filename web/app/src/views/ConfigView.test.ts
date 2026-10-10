@@ -86,7 +86,6 @@ const CATALOGUE = {
   update_aligned: 'À jour',
   update_unknown: 'Inconnu',
   update_rolled_back: 'Retour en arrière effectué',
-  update_archive_notes: '{count} fichiers non installés',
   update_partial_failure_note: 'Seule la première cause est montrée',
   update_release_notes: 'Notes de version',
   update_policy_label: 'Vérifications automatiques',

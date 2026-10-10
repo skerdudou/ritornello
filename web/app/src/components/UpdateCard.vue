@@ -76,18 +76,6 @@ const installedDetail = computed(() =>
 )
 
 /**
- * What the core's own last-installed archive did not touch — the privileged
- * installer, the systemd units, the polkit rules `install_one` never places.
- * `undefined` until a core install has actually happened, and never an empty
- * array once it has: the core's archive always carries something here (see
- * `archive::core_not_installed`'s own doc comment).
- */
-const coreArchiveNoteCount = computed(() => {
-  const core = props.update.components.find((c) => c.kind === 'core')
-  return core?.not_installed_files?.length ?? 0
-})
-
-/**
  * The rollback sentence, and **which** of the two it is.
  *
  * `update_rolled_back` says "the previous version was put back", and a
@@ -191,10 +179,6 @@ function onCadenceKindChange(kind: unknown) {
            number that did not move. -->
       <p v-if="rollbackNote" data-update-rollback class="text-sm text-muted-foreground">
         {{ rollbackNote }}
-      </p>
-
-      <p v-if="coreArchiveNoteCount > 0" data-update-core-notes class="text-xs text-muted-foreground">
-        {{ t('update_archive_notes', { count: coreArchiveNoteCount }) }}
       </p>
 
       <p v-if="update.busy" data-update-busy class="text-sm text-muted-foreground">{{ update.busy }}</p>

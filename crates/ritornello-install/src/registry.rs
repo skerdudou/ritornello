@@ -95,6 +95,48 @@ mod tests {
         Registry { format: 1, components }
     }
 
+    /// The exact text this installer writes for a core it placed with
+    /// identities. The core's reader is tested on this very text
+    /// (`install_registry::tests::RENDERED_WITH_IDENTITIES`); if this
+    /// rendering changes, that copy must follow.
+    #[test]
+    fn the_rendering_with_identities_is_the_text_the_core_is_tested_on() {
+        let core = Recorded {
+            version: "0.3.0".into(),
+            privileged: vec![
+                "/etc/systemd/system/ritornello.service".into(),
+                "/usr/local/lib/ritornello/ritornello-update".into(),
+            ],
+            identity: [
+                ("/etc/systemd/system/ritornello.service".to_string(), "sha256:6e6b".to_string()),
+                ("/usr/local/lib/ritornello/ritornello-update".to_string(), "version:1.0.0".to_string()),
+            ]
+            .into(),
+        };
+        let radio = Recorded { version: "0.3.2".into(), privileged: vec![], identity: BTreeMap::new() };
+        let registry =
+            Registry { format: 1, components: [("core".to_string(), core), ("radio".to_string(), radio)].into() };
+        let want = r#"format = 1
+
+[components.core]
+version = "0.3.0"
+privileged = [
+    "/etc/systemd/system/ritornello.service",
+    "/usr/local/lib/ritornello/ritornello-update",
+]
+
+[components.core.identity]
+"/etc/systemd/system/ritornello.service" = "sha256:6e6b"
+"/usr/local/lib/ritornello/ritornello-update" = "version:1.0.0"
+
+[components.radio]
+version = "0.3.2"
+privileged = []
+"#;
+        assert_eq!(registry.render(), want);
+        assert_eq!(Registry::parse(want).unwrap(), registry);
+    }
+
     #[test]
     fn a_registry_round_trips_through_render_and_parse() {
         let original = sample();

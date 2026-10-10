@@ -19,6 +19,7 @@ pub mod state;
 pub mod schedule;
 pub mod placed;
 pub mod install_registry;
+pub mod privileged;
 pub mod sources;
 
 pub mod routes;
@@ -593,6 +594,9 @@ fn carry_installable(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) 
             .iter()
             .find(|p| p.name == row.name && p.offered == row.offered)
             .filter(|p| p.needs_companion.is_none())
+            // Nor the core's refusal for its privileged files: the registry
+            // `ritornello-install` rewrites is read afresh at every check.
+            .filter(|p| p.needs_installer.is_none())
             // Nor contracts that were unpublished: a catalogue that failed
             // to read once, or one republished since, is seen afresh by
             // `judge_contracts` at every check.
@@ -688,6 +692,22 @@ fn deny_moved_companion(
             row.installable = Some(false);
             row.needs_companion = Some(companion.to_string());
         }
+    }
+}
+
+/// Marks, **at the check**, the core's row when its update changes a file only
+/// `ritornello-install` places (`privileged::files_needing_installer`):
+/// `installable: Some(false)` and `needs_installer` naming those files, so the
+/// page says so before anyone presses anything, the automatic policy never
+/// spends an attempt on it, and a grouped break waits with it. `None` — no
+/// update of ours offered for the core — marks nothing. Like
+/// `deny_moved_companion`, it only ever marks, and `stage` asks the same
+/// question again at the gesture.
+fn deny_core_without_installer(components: &mut [ComponentOffer], verdict: &Option<Result<(), Vec<String>>>) {
+    let Some(Err(files)) = verdict else { return };
+    for row in components.iter_mut().filter(|r| r.kind == ComponentKind::Core) {
+        row.installable = Some(false);
+        row.needs_installer = Some(files.clone());
     }
 }
 
@@ -788,6 +808,15 @@ enum Refusal {
     /// archive holds none of them, and that sentence would send the operator
     /// looking for something that is not there.
     NeedsCompanionStep(&'static str),
+    /// The core's own update, which this page may not install: a file of its
+    /// archive that only `ritornello-install` places — a unit, a polkit
+    /// rule, the privileged updater — changed, or cannot be shown not to
+    /// have (`privileged::files_needing_installer`). Carries those files,
+    /// sorted; empty when its release names none to judge them by.
+    ///
+    /// Its own variant for the reason `NeedsCompanionStep` has one: it names
+    /// what moved and the one program that places it.
+    NeedsInstaller(Vec<String>),
     /// A **third-party** archive carrying anything besides its own binary: a
     /// unit, a polkit rule, a nested path, an input preset, an initial
     /// configuration, a `[[plugin]]` block, a second binary.
@@ -891,6 +920,13 @@ impl std::fmt::Display for Refusal {
             Self::NeedsCompanionStep(companion) => {
                 write!(f, "it ships with {companion}, which only ritornello-install places")
             }
+            Self::NeedsInstaller(files) if files.is_empty() => write!(
+                f,
+                "its release does not say which content its privileged files are, and only ritornello-install places them"
+            ),
+            Self::NeedsInstaller(files) => {
+                write!(f, "it changes {}, which only ritornello-install places", files.join(", "))
+            }
             Self::ThirdPartyArchive => {
                 write!(f, "a third-party archive may carry nothing but its own binary")
             }
@@ -927,12 +963,18 @@ impl std::fmt::Display for Refusal {
 /// languages) applies to this path as much as to any other, and a `format!`
 /// here would reach a French screen in English.
 fn refusal_message(catalog: &Chain, component: &str, why: &Refusal) -> String {
+    let files = match why {
+        Refusal::NeedsInstaller(files) => files.join(", "),
+        _ => String::new(),
+    };
     let (key, param): (&str, Option<(&str, &str)>) = match why {
         Refusal::NoRoom => ("update_no_room", None),
         Refusal::NoDigest => ("update_no_digest", None),
         Refusal::DigestMismatch => ("update_digest_mismatch", None),
         Refusal::NeedsManualStep => ("update_needs_manual_step", None),
         Refusal::NeedsCompanionStep(c) => ("update_needs_companion_step", Some(("companion", *c))),
+        Refusal::NeedsInstaller(list) if list.is_empty() => ("update_needs_installer_unknown", None),
+        Refusal::NeedsInstaller(_) => ("update_needs_installer", Some(("files", files.as_str()))),
         Refusal::ThirdPartyArchive => ("update_third_party_archive", None),
         Refusal::NotItsOwnFile(d) => ("update_wrong_file", Some(("detail", d.as_str()))),
         Refusal::NotItsOwnName(d) => ("update_wrong_name", Some(("detail", d.as_str()))),
@@ -1444,6 +1486,11 @@ struct Checked {
     /// a URL absent here was not needed or failed, and either way no row it
     /// carries is vouched for (`judge_rows`).
     contracts: ContractsByUrl,
+    /// Whether the core's offered update changes a file only
+    /// `ritornello-install` places (`Worker::judge_core_privileged`): `None`
+    /// when no update of ours is offered for the core. Kept here so the rows
+    /// rebuilt after an install say what the check said.
+    core_privileged: Option<Result<(), Vec<String>>>,
 }
 
 /// Catalogue URL -> component name -> what that component's archive speaks.
@@ -2237,6 +2284,7 @@ impl Worker {
             conflicts: Vec::new(),
             plugins_unknown: known.is_none(),
             contracts: ContractsByUrl::new(),
+            core_privileged: None,
         };
         // Here and only here: `ours` is a fold that was actually read, so
         // which names are ours is known — and only when what the device has
@@ -2258,6 +2306,7 @@ impl Worker {
         // The catalogues of the releases carrying what is offered, read
         // before the state lock is taken, like every other I/O here.
         checked.contracts = fetch_contracts(client, contract_urls(&checked, &components)).await;
+        checked.core_privileged = self.judge_core_privileged(client, &checked, &components).await;
         let live = self.live_speaks().await;
         let core = checked.ours.iter().find(|p| p.offer == Offer::Core);
         // Read before the state lock is taken: a file read has no business
@@ -2268,6 +2317,7 @@ impl Worker {
         carry_core_notes(&state.components, &mut components);
         deny_privileged_install(&mut components);
         deny_moved_companion(&mut components, &checked.ours, &companions);
+        deny_core_without_installer(&mut components, &checked.core_privileged);
         judge_rows(&mut components, &checked, &live);
         state.major_update_waiting = core_breaks(&components);
         state.outcome = CheckOutcome::Ok;
@@ -2280,6 +2330,35 @@ impl Worker {
         state.source_catalogues = sources::source_catalogues(&checked.sources, &checked.fresh);
         drop(state);
         checked
+    }
+
+    /// The check's half of the rule `stage` applies again at the gesture:
+    /// whether the core's offered update changes a file only
+    /// `ritornello-install` places. `None` when no update of ours is offered
+    /// for the core. Its I/O — the inventory of the release carrying the
+    /// core's archive, bounded like a catalogue, and the installer's
+    /// registry — runs before the state lock, like every other I/O of a
+    /// check.
+    async fn judge_core_privileged(
+        &self,
+        client: &reqwest::Client,
+        checked: &Checked,
+        rows: &[ComponentOffer],
+    ) -> Option<Result<(), Vec<String>>> {
+        let row = rows.iter().find(|r| r.kind == ComponentKind::Core)?;
+        if !installs_something(row) {
+            return None;
+        }
+        let core = checked.ours.iter().find(|p| p.offer == Offer::Core)?;
+        let offered = match &core.inventory_url {
+            Some(url) => tokio::time::timeout(sources::SOURCES_DEADLINE, privileged::fetch_core_identities(client, url))
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        let recorded = install_registry::recorded_identities(&self.root, CORE);
+        Some(privileged::files_needing_installer(offered.as_ref(), recorded.as_ref()))
     }
 
     /// A check whose release list held nothing this device could be offered
@@ -2319,6 +2398,7 @@ impl Worker {
             conflicts: Vec::new(),
             plugins_unknown: known.is_none(),
             contracts: ContractsByUrl::new(),
+            core_privileged: None,
         };
         let installed_packs = self.installed_packs().await;
         // The rows are rebuilt against an empty offer rather than left as
@@ -2817,6 +2897,7 @@ impl Worker {
             carry_core_notes(&state.components, &mut components);
             deny_privileged_install(&mut components);
             deny_moved_companion(&mut components, &checked.ours, &companions);
+            deny_core_without_installer(&mut components, &checked.core_privileged);
             judge_rows(&mut components, checked, &live);
             state.major_update_waiting = core_breaks(&components);
             state.components = components;
@@ -2916,6 +2997,30 @@ impl Worker {
             self.remember_manual_step(name).await;
             return Err(Refusal::NeedsManualStep);
         }
+        // **The core's archive carries files only `ritornello-install`
+        // places** — its units, its polkit rules, the privileged updater —
+        // and this page places none of them. Its update is allowed only while
+        // each is, by its identity, the one the installer recorded placing
+        // (`privileged`). Asked again here although the check asked it: the
+        // registry may have been rewritten since, by an installer run.
+        let core_identities = if is_core {
+            let offered_ids = match &offered.inventory_url {
+                Some(url) => privileged::fetch_core_identities(client, url).await,
+                None => None,
+            };
+            let recorded = install_registry::recorded_identities(&self.root, CORE);
+            if let Err(files) = privileged::files_needing_installer(offered_ids.as_ref(), recorded.as_ref()) {
+                tracing::info!(
+                    "update: {name}: refused, ritornello-install places what its update changes ({})",
+                    if files.is_empty() { "its release names nothing to judge by".to_string() } else { files.join(", ") }
+                );
+                self.remember_installer_step(name, &files).await;
+                return Err(Refusal::NeedsInstaller(files));
+            }
+            offered_ids
+        } else {
+            None
+        };
         let root = self.root.to_string_lossy().to_string();
         if !enough_room(crate::system::disk_usage(&root), offered.size as usize) {
             return Err(Refusal::NoRoom);
@@ -2955,16 +3060,27 @@ impl Worker {
         // oversight.** `installable_from_ui` asks whether an archive holds
         // anything root would have to place outside the plugins directory —
         // the core's own archive always does, since it carries the core binary
-        // itself, two systemd units and a polkit rule. Root can form the core
-        // binary's path, and the units and the rule are read by nobody here:
-        // they are listed so the page can say the release changes them, and
-        // never written. A release that changes them says "Action required" in
-        // its notes, which is the mechanism the design gives that case.
+        // itself, its systemd units, its polkit rules and the updater. Root
+        // can form the core binary's path; the rest is never written here,
+        // and its update is allowed only while none of it moved
+        // (`privileged`, asked above and held to the archive just below).
         //
         // **A third-party archive is judged more strictly, and is never
         // exempt**: only its own binary, nothing for `/etc/ritornello` and no
         // `[[plugin]]` block. See `archive_allowed`, which holds all three
         // answers, and `only_its_own_binary` for what this refusal stops.
+        // The release's inventory vouched for the content of the units and
+        // the rules; its archive must bear it out, or the comparison above
+        // judged files this archive does not carry.
+        if let Some(ids) = &core_identities {
+            let wrong = privileged::archive_disagrees(ids, &contents.digests);
+            if !wrong.is_empty() {
+                return Err(Refusal::Prepare(format!(
+                    "the archive of {name} does not carry the {} its release's inventory describes",
+                    wrong.join(", ")
+                )));
+            }
+        }
         if !archive_allowed(is_core, third_party, &contents.entries) {
             self.remember_manual_step(name).await;
             return Err(if third_party {
@@ -3415,6 +3531,16 @@ impl Worker {
         for row in state.components.iter_mut().filter(|c| c.name == name) {
             row.installable = Some(false);
             row.needs_companion = Some(companion.to_string());
+        }
+    }
+
+    /// `remember_companion_step` for the core's privileged files: the row
+    /// names them, and the next check recomputes it rather than carrying it.
+    async fn remember_installer_step(&self, name: &str, files: &[String]) {
+        let mut state = self.state.write().await;
+        for row in state.components.iter_mut().filter(|c| c.name == name) {
+            row.installable = Some(false);
+            row.needs_installer = Some(files.to_vec());
         }
     }
 
@@ -4184,6 +4310,7 @@ mod tests {
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            needs_installer: None,
             conflict_repos: None,
             contracts: Default::default(),
         }
@@ -4495,6 +4622,7 @@ mod tests {
             packs: Vec::new(),
             plugins_unknown: false,
             contracts: ContractsByUrl::new(),
+            core_privileged: None,
         };
         assert_eq!(
             resolve(&unconsulted, "radio"),
@@ -4516,6 +4644,7 @@ mod tests {
             packs: Vec::new(),
             plugins_unknown: false,
             contracts: ContractsByUrl::new(),
+            core_privileged: None,
         };
         match resolve(&consulted, "radio") {
             Resolved::Theirs { published, repo } => {
@@ -4619,6 +4748,7 @@ mod tests {
             release_tag: "t".into(),
             checksums_url: None,
             catalogue_url: None,
+            inventory_url: None,
         };
         let answers = [sources::SourceAnswer { repo: "z/zed".into(), published: vec![pack("2.0.0")] }];
         let packs = sources::pack_offers(&[pack("0.3.0")], &answers);
@@ -4900,6 +5030,7 @@ mod tests {
             release_tag: "v0.2.0-beta.2".to_string(),
             checksums_url: None,
             catalogue_url: None,
+            inventory_url: None,
         };
         let ours = vec![companion("other-mount", "9.9.9"), companion("files-mount", "0.2.0-beta.2")];
         assert_eq!(companion_offered(&ours, "files"), Some("0.2.0-beta.2"));
@@ -4993,6 +5124,8 @@ mod tests {
             Refusal::DigestMismatch,
             Refusal::NeedsManualStep,
             Refusal::NeedsCompanionStep("files-mount"),
+            Refusal::NeedsInstaller(vec!["/etc/systemd/system/ritornello.service".to_string()]),
+            Refusal::NeedsInstaller(Vec::new()),
             Refusal::ThirdPartyArchive,
             Refusal::NotItsOwnFile("it is declared to run /a/b, and the archive carries c".to_string()),
             Refusal::NotItsOwnName("the archive carries zed, not ritornello-plugin-zed".to_string()),
@@ -5080,6 +5213,11 @@ mod tests {
             format!("[[plugin]]\nname = \"radio\"\nexec = {:?}\n", exec.to_string_lossy()),
         )
         .unwrap();
+        // A device `ritornello-install` deployed: its registry records the
+        // core's privileged files as `served_core`'s release describes them,
+        // so an update of the core is judged on its own merits. A test about
+        // that judgement rewrites it (`record_core_identities`).
+        record_core_identities(root, &test_core_identities());
         Worker {
             state: Arc::new(RwLock::new(UpdateState::initial("0.2.0", &[]))),
             catalog: Arc::new(RwLock::new(Chain::load_for_tests("core", "en", root, crate::i18n::EN))),
@@ -5280,7 +5418,7 @@ mod tests {
             ("plugins.toml.fragment", fragment.as_bytes()),
         ]);
         let published = served_with_wrong_digest("mpd", &archive).await;
-        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![], plugins_unknown: false, contracts: ContractsByUrl::new() };
+        let checked = Checked { ours: vec![published], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![], plugins_unknown: false, contracts: ContractsByUrl::new(), core_privileged: None };
         let client = client().unwrap();
 
         // The name **as the row itself reports it** — not hard-coded as
@@ -5397,7 +5535,7 @@ mod tests {
     /// A check that found only our own release, which is the ordinary shape.
     fn ours(published: Vec<Published>) -> Checked {
         let packs = sources::pack_offers(&published, &[]);
-        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new(), sources: Vec::new(), fresh: Vec::new(), conflicts: Vec::new(), packs, plugins_unknown: false, contracts: ContractsByUrl::new() }
+        Checked { ours: published, theirs: Vec::new(), third_party: Vec::new(), sources: Vec::new(), fresh: Vec::new(), conflicts: Vec::new(), packs, plugins_unknown: false, contracts: ContractsByUrl::new(), core_privileged: None }
     }
 
     // ---- The refusals AT THEIR CALL SITE --------------------------------
@@ -5482,6 +5620,7 @@ mod tests {
             release_tag: "v2.0.0".to_string(),
             checksums_url: Some(checksums_url),
             catalogue_url: None,
+            inventory_url: None,
         }
     }
 
@@ -5556,6 +5695,8 @@ mod tests {
         let url = serve_once(archive.to_vec(), &file).await;
         let sums = format!("{}  {file}\n", digest_hex(archive));
         let checksums_url = serve_once(sums.into_bytes(), "SHA256SUMS").await;
+        // Served to every reader: the check and the gesture both read it.
+        let (inventory_url, _) = serve_counting(core_inventory(&test_core_identities()).into_bytes(), "inventory.json").await;
         Published {
             offer: Offer::Core,
             version: "2.0.0".to_string(),
@@ -5564,7 +5705,42 @@ mod tests {
             release_tag: "v2.0.0".to_string(),
             checksums_url: Some(checksums_url),
             catalogue_url: None,
+            inventory_url: Some(inventory_url),
         }
+    }
+
+    /// The privileged file `core_archive` carries.
+    const TEST_CORE_UNIT: &str = "/etc/systemd/system/ritornello-rollback.service";
+
+    /// The identity `core_archive`'s inventory gives that file: the hash of
+    /// exactly the bytes the archive carries for it.
+    fn test_core_identities() -> privileged::Identities {
+        [(TEST_CORE_UNIT.to_string(), format!("sha256:{}", digest_hex(b"[Unit]\n")))].into()
+    }
+
+    /// An inventory in the shape `scripts/install-inventory.py` writes
+    /// (format 2), cut to what the core reads: its files, the privileged ones
+    /// with the identities given.
+    fn core_inventory(identities: &privileged::Identities) -> String {
+        let mut files = vec![serde_json::json!({ "dest": "/usr/local/bin/ritornello-core", "privileged": false })];
+        for (dest, identity) in identities {
+            files.push(serde_json::json!({ "dest": dest, "privileged": true, "identity": identity }));
+        }
+        serde_json::json!({ "format": 2, "core": { "name": "core", "files": files } }).to_string()
+    }
+
+    /// `ritornello-install`'s registry under `root`, recording the core with
+    /// these identities, in the shape the installer renders.
+    fn record_core_identities(root: &Path, identities: &privileged::Identities) {
+        let path = install_registry::path(root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut text = String::from("format = 1\n\n[components.core]\nversion = \"0.2.0\"\nprivileged = [");
+        text.push_str(&identities.keys().map(|p| format!("{p:?}")).collect::<Vec<_>>().join(", "));
+        text.push_str("]\n\n[components.core.identity]\n");
+        for (dest, identity) in identities {
+            text.push_str(&format!("{dest:?} = {identity:?}\n"));
+        }
+        std::fs::write(path, text).unwrap();
     }
 
     /// Holds the privileged unit's answer for one test, and puts the light out
@@ -5726,6 +5902,7 @@ mod tests {
             release_tag: format!("v{version}"),
             checksums_url: Some(checksums_url),
             catalogue_url: None,
+            inventory_url: None,
         }
     }
 
@@ -5774,6 +5951,7 @@ mod tests {
             release_tag: "v0.2.1".to_string(),
             checksums_url: Some(checksums_url),
             catalogue_url: None,
+            inventory_url: None,
         };
         let (worker, dir, locale_rx) = bare_pack_rig();
         finish_pack_rig(worker, dir, locale_rx, ours(vec![published]))
@@ -5922,6 +6100,7 @@ mod tests {
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            needs_installer: None,
             conflict_repos: None,
             contracts: Default::default(),
         });
@@ -6310,6 +6489,7 @@ mod tests {
             release_tag: "v2.0.0".into(),
             checksums_url: Some(checksums_url.clone()),
             catalogue_url: None,
+            inventory_url: None,
         };
         let answers = |version: &str| vec![sources::SourceAnswer { repo: "z/zed".into(), published: vec![offer(version)] }];
         let id = xlang("fr", "z/zed");
@@ -6463,6 +6643,7 @@ mod tests {
             packs: Vec::new(),
             plugins_unknown: false,
             contracts: ContractsByUrl::new(),
+            core_privileged: None,
         };
 
         let memory = memory_at_the_exit(&mut worker, &checked)
@@ -6508,6 +6689,7 @@ mod tests {
             packs: Vec::new(),
             plugins_unknown: false,
             contracts: ContractsByUrl::new(),
+            core_privileged: None,
         };
 
         assert!(
@@ -6565,6 +6747,7 @@ mod tests {
             release_tag: "v2.0.0".to_string(),
             checksums_url: Some(checksums_url),
             catalogue_url: None,
+            inventory_url: None,
         }
     }
 
@@ -6896,6 +7079,7 @@ mod tests {
                 release_tag: "v1".to_string(),
                 checksums_url: None,
                 catalogue_url: None,
+                inventory_url: None,
             }],
         };
         // An added source offers zed (and radio), and comes first.
@@ -6923,6 +7107,7 @@ mod tests {
             release_tag: "v1".to_string(),
             checksums_url: Some("https://x/SHA256SUMS".to_string()),
             catalogue_url: None,
+            inventory_url: None,
         }
     }
 
@@ -6948,6 +7133,7 @@ mod tests {
             packs: Vec::new(),
             plugins_unknown: false,
             contracts: ContractsByUrl::new(),
+            core_privileged: None,
         };
         checked.judge_strangers(&[]);
         checked
@@ -6995,6 +7181,7 @@ mod tests {
             packs: Vec::new(),
             plugins_unknown: false,
             contracts: ContractsByUrl::new(),
+            core_privileged: None,
         };
         assert_eq!(resolve(&checked, "zed"), Resolved::UncheckedThirdParty);
     }
@@ -7265,6 +7452,7 @@ mod tests {
             packs: Vec::new(),
             plugins_unknown: false,
             contracts: ContractsByUrl::new(),
+            core_privileged: None,
         }
     }
 
@@ -7730,6 +7918,7 @@ mod tests {
             release_tag: format!("v{version}"),
             checksums_url: None,
             catalogue_url: None,
+            inventory_url: None,
         }]
     }
 
@@ -8166,8 +8355,9 @@ mod tests {
             release_tag: "v0.2.0-beta.2".to_string(),
             checksums_url: None,
             catalogue_url: None,
+            inventory_url: None,
         };
-        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![], plugins_unknown: false, contracts: ContractsByUrl::new() };
+        let checked = Checked { ours: vec![companion, plugin], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![], plugins_unknown: false, contracts: ContractsByUrl::new(), core_privileged: None };
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
             worker.install(&client().unwrap(), &checked, &["files".to_string()]),
@@ -8195,6 +8385,7 @@ mod tests {
             release_tag: format!("v{version}"),
             checksums_url: None,
             catalogue_url: None,
+            inventory_url: None,
         }
     }
 
@@ -8404,6 +8595,7 @@ mod tests {
             packs: vec![],
             plugins_unknown: false,
             contracts: ContractsByUrl::new(),
+            core_privileged: None,
         };
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
@@ -8455,7 +8647,7 @@ mod tests {
     /// **[MUTATION]**: `Offer::Companion(c) => c == name` in `carries` — red.
     #[test]
     fn a_companion_s_name_resolves_to_nothing() {
-        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![], plugins_unknown: false, contracts: ContractsByUrl::new() };
+        let checked = Checked { ours: vec![companion_offer("0.3.0")], theirs: vec![], third_party: vec![], sources: vec![], fresh: vec![], conflicts: vec![], packs: vec![], plugins_unknown: false, contracts: ContractsByUrl::new(), core_privileged: None };
         assert_eq!(resolve(&checked, "files-mount"), Resolved::Nothing);
     }
 
@@ -8980,6 +9172,207 @@ mod tests {
         assert!(seen_requests().is_empty(), "nothing asked of root");
         let english = Chain::load_for_tests("core", "en", Path::new("/nonexistent"), crate::i18n::EN);
         let expected = ritornello_i18n::interpolate(english.get("update_group_postponed"), [("component", "mpd")]);
+        assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
+    }
+
+    // --- The core's privileged files ------------------------------------
+
+    /// The rows a check builds when `checked` offers the core at 2.0.0 over
+    /// the running 0.2.0.
+    fn core_offered_rows(checked: &Checked) -> Vec<ComponentOffer> {
+        component_offers("0.2.0", &checked.ours, &[], &[], &[], &[], &[], &[])
+    }
+
+    fn core_row(rows: &[ComponentOffer]) -> &ComponentOffer {
+        rows.iter().find(|r| r.kind == ComponentKind::Core).expect("a core row")
+    }
+
+    /// What the check decides, on the release `served_core` publishes, for a
+    /// device whose registry records `recorded` (none: no registry at all).
+    async fn judged(recorded: Option<&privileged::Identities>, core: Published) -> Vec<ComponentOffer> {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), stalled_line());
+        let registry = install_registry::path(dir.path());
+        match recorded {
+            Some(ids) => record_core_identities(dir.path(), ids),
+            None => std::fs::remove_file(&registry).unwrap(),
+        }
+        let checked = ours(vec![core]);
+        let mut rows = core_offered_rows(&checked);
+        let client = download::client().unwrap();
+        let verdict = worker.judge_core_privileged(&client, &checked, &rows).await;
+        deny_core_without_installer(&mut rows, &verdict);
+        rows
+    }
+
+    /// The device has what the release describes: the update goes ahead.
+    ///
+    /// **[MUTATION]**: make `files_needing_installer` always refuse — red.
+    #[tokio::test]
+    async fn the_core_is_offered_when_its_privileged_files_are_the_recorded_ones() {
+        let rows = judged(Some(&test_core_identities()), served_core(&core_archive()).await).await;
+        let core = core_row(&rows);
+        assert_eq!((core.installable, core.needs_installer.as_deref()), (None, None));
+    }
+
+    /// The beta.7 case, at the check: the release changes a unit. The row
+    /// is refused before anything is pressed, naming the file, and the
+    /// automatic policy leaves it alone.
+    ///
+    /// **[MUTATION]**: make `deny_core_without_installer` mark nothing —
+    /// red. Its call in `settle_with_release` is held by
+    /// `a_check_refuses_the_core_whose_unit_changed_end_to_end`.
+    #[tokio::test]
+    async fn a_changed_unit_refuses_the_core_at_the_check_and_names_it() {
+        let old: privileged::Identities = [(TEST_CORE_UNIT.to_string(), "sha256:the-unit-before".to_string())].into();
+        let rows = judged(Some(&old), served_core(&core_archive()).await).await;
+        let core = core_row(&rows);
+        assert_eq!(core.installable, Some(false));
+        assert_eq!(core.needs_installer.as_deref(), Some([TEST_CORE_UNIT.to_string()].as_slice()));
+        let placed = placed::Placed::default();
+        assert!(
+            !automatic_install_list(&rows, &placed, schedule::InstallScope::Official).contains(&CORE.to_string()),
+            "the night never tries it"
+        );
+    }
+
+    /// Every device deployed before identities existed: its registry has
+    /// none. Unknown refuses, naming every privileged file of the release.
+    #[tokio::test]
+    async fn a_registry_without_identities_or_none_at_all_refuses_the_core() {
+        for recorded in [Some(&privileged::Identities::new()), None] {
+            let rows = judged(recorded, served_core(&core_archive()).await).await;
+            let core = core_row(&rows);
+            assert_eq!(core.installable, Some(false), "{recorded:?}");
+            assert_eq!(core.needs_installer.as_deref(), Some([TEST_CORE_UNIT.to_string()].as_slice()), "{recorded:?}");
+        }
+    }
+
+    /// A release without an inventory, or one the device cannot read: the
+    /// refusal stands, with nothing to name.
+    #[tokio::test]
+    async fn a_release_without_inventory_refuses_the_core_without_naming() {
+        let core = Published { inventory_url: None, ..served_core(&core_archive()).await };
+        let rows = judged(Some(&test_core_identities()), core).await;
+        let core = core_row(&rows);
+        assert_eq!((core.installable, core.needs_installer.as_deref()), (Some(false), Some(&[][..])));
+        let unreadable = Published {
+            inventory_url: Some(serve_once(b"{\"format\":1}".to_vec(), "inventory.json").await),
+            ..served_core(&core_archive()).await
+        };
+        let rows = judged(Some(&test_core_identities()), unreadable).await;
+        assert_eq!(core_row(&rows).needs_installer.as_deref(), Some(&[][..]));
+    }
+
+    /// The same refusal through a whole check: the rows the page reads.
+    ///
+    /// **[MUTATION]**: drop the `deny_core_without_installer` call from
+    /// `settle_with_release` — red; drop the `judge_core_privileged` call —
+    /// red.
+    #[tokio::test]
+    async fn a_check_refuses_the_core_whose_unit_changed_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), stalled_line());
+        record_core_identities(dir.path(), &[(TEST_CORE_UNIT.to_string(), "sha256:the-unit-before".to_string())].into());
+        worker
+            .settle_with_release(&client().unwrap(), vec![served_core(&core_archive()).await], Some(&[][..]), &[], Vec::new())
+            .await;
+        let state = worker.state.read().await;
+        let core = core_row(&state.components);
+        assert_eq!(core.offered.as_deref(), Some("2.0.0"));
+        assert_eq!(core.installable, Some(false));
+        assert_eq!(core.needs_installer.as_deref(), Some([TEST_CORE_UNIT.to_string()].as_slice()));
+    }
+
+    /// A refusal for the core's privileged files is decided afresh at every
+    /// check: `ritornello-install` run in between rewrites the registry
+    /// within one offered version.
+    ///
+    /// **[MUTATION]**: drop `.filter(|p| p.needs_installer.is_none())` from
+    /// `carry_installable` — red.
+    #[test]
+    fn the_core_s_refusal_for_its_privileged_files_is_not_carried() {
+        let checked = ours(Vec::new());
+        let mut previous = component_offers("0.2.0", &checked.ours, &[], &[], &[], &[], &[], &[]);
+        previous[0].offered = Some("2.0.0".to_string());
+        previous[0].installable = Some(false);
+        previous[0].needs_installer = Some(vec![TEST_CORE_UNIT.to_string()]);
+        let mut fresh = previous.clone();
+        fresh[0].installable = None;
+        fresh[0].needs_installer = None;
+        carry_installable(&previous, &mut fresh);
+        assert_eq!((fresh[0].installable, fresh[0].needs_installer.as_deref()), (None, None));
+    }
+
+    /// The gesture asks again: the check may be hours old, and the registry
+    /// read then is not the one on the disk now. Nothing is placed, the
+    /// process stays, the row names the file.
+    ///
+    /// **[MUTATION]**: drop the core's judgement from `stage` — red on the
+    /// restart.
+    #[tokio::test]
+    async fn the_gesture_refuses_the_core_when_a_privileged_file_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = worker_at(dir.path(), stalled_line());
+        let _privileged = Privileged::answers(Ok(()));
+        record_core_identities(dir.path(), &[(TEST_CORE_UNIT.to_string(), "sha256:the-unit-before".to_string())].into());
+        let checked = ours(vec![served_core(&core_archive()).await]);
+        assert!(memory_at_the_exit(&mut worker, &checked).await.is_none(), "the core must not be placed");
+        assert!(seen_requests().is_empty(), "nothing asked of root");
+        let state = worker.state.read().await;
+        let core = core_row(&state.components);
+        assert_eq!(core.needs_installer.as_deref(), Some([TEST_CORE_UNIT.to_string()].as_slice()));
+        let expected = refusal_message(
+            &*worker.catalog.read().await,
+            CORE,
+            &Refusal::NeedsInstaller(vec![TEST_CORE_UNIT.to_string()]),
+        );
+        assert_eq!(state.outcome, CheckOutcome::Failed(expected));
+    }
+
+    /// The registry agrees with the inventory, but the archive does not
+    /// carry what the inventory describes: the judgement was made on files
+    /// this archive does not hold, so nothing is placed.
+    ///
+    /// **[MUTATION]**: drop the `archive_disagrees` check from `stage` — red
+    /// on the restart.
+    #[tokio::test]
+    async fn an_archive_that_does_not_bear_out_its_inventory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = worker_at(dir.path(), stalled_line());
+        let _privileged = Privileged::answers(Ok(()));
+        let claimed: privileged::Identities = [(TEST_CORE_UNIT.to_string(), "sha256:not-what-it-carries".to_string())].into();
+        record_core_identities(dir.path(), &claimed);
+        let (inventory_url, _) = serve_counting(core_inventory(&claimed).into_bytes(), "inventory.json").await;
+        let core = Published { inventory_url: Some(inventory_url), ..served_core(&core_archive()).await };
+        let checked = ours(vec![core]);
+        assert!(memory_at_the_exit(&mut worker, &checked).await.is_none(), "the core must not be placed");
+        assert!(seen_requests().is_empty(), "nothing asked of root");
+        match &worker.state.read().await.outcome {
+            CheckOutcome::Failed(message) => assert!(message.contains(TEST_CORE_UNIT), "{message}"),
+            other => panic!("the refusal must reach the page: {other:?}"),
+        }
+    }
+
+    /// A grouped break whose core needs the installer waits whole: the
+    /// dependents are not placed beside an old core.
+    #[tokio::test]
+    async fn a_group_whose_core_needs_the_installer_is_postponed_whole() {
+        let rig = group_rig(break_rows(true)).await;
+        let _privileged = Privileged::answers(Ok(()));
+        record_core_identities(&rig.worker.root, &[(TEST_CORE_UNIT.to_string(), "sha256:the-unit-before".to_string())].into());
+        let checked = ours(vec![served_core(&core_archive()).await, served("mpd", &plugin_archive("mpd")).await]);
+
+        run_install(&rig.worker, &checked, &[CORE, "mpd"]).await;
+
+        assert!(seen_requests().is_empty(), "no request carries the group");
+        assert!(!rig.worker.staging.join("staged-plugin-mpd").exists(), "the staged dependent was cleared");
+        assert!(rig.exits.lock().unwrap().is_empty(), "the core did not leave");
+        let postponed = Refusal::GroupPostponed {
+            failed: CORE.to_string(),
+            reason: Box::new(Refusal::NeedsInstaller(vec![TEST_CORE_UNIT.to_string()])),
+        };
+        let expected = refusal_message(&*rig.worker.catalog.read().await, CORE, &postponed);
         assert_eq!(rig.worker.state.read().await.outcome, CheckOutcome::Failed(expected));
     }
 

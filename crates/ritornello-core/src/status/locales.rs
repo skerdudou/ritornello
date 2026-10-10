@@ -846,6 +846,7 @@ mod tests {
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            needs_installer: None,
             conflict_repos: None,
             contracts: Default::default(),
         }

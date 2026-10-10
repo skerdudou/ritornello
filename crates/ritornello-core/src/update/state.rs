@@ -127,6 +127,15 @@ pub struct ComponentOffer {
     /// inferred by the page from the plugin's name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_companion: Option<String>,
+    /// The core's row only: the files its offered update changes that only
+    /// `ritornello-install` places — units, polkit rules, the privileged
+    /// updater — when they differ from, or cannot be compared with, what the
+    /// installer recorded (`update::privileged`). The row is then
+    /// `installable: Some(false)` and the page names them, before anyone
+    /// presses anything. Empty when the release names none to judge by: the
+    /// refusal stands, with nothing to name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_installer: Option<Vec<String>>,
     /// A name nobody on this device owns that two or more sources offer
     /// (`sources::fresh_offers`, clause 4): every one of those repositories,
     /// lowercased and sorted. The row is then `installable: Some(false)` with
@@ -359,6 +368,7 @@ pub fn component_offers(
         // has actually read an archive — `component_offers` never sees one.
         not_installed_files: None,
         needs_companion: None,
+        needs_installer: None,
         conflict_repos: None,
         contracts: RowContracts::default(),
     });
@@ -434,6 +444,7 @@ pub fn component_offers(
             // about the core's archive alone.
             not_installed_files: None,
             needs_companion: None,
+            needs_installer: None,
             conflict_repos: None,
             contracts: RowContracts::default(),
         });
@@ -455,6 +466,7 @@ pub fn component_offers(
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            needs_installer: None,
             conflict_repos: None,
             contracts: RowContracts::default(),
         });
@@ -492,6 +504,7 @@ pub fn component_offers(
             third_party_repo: offer.repo.clone(),
             not_installed_files: None,
             needs_companion: None,
+            needs_installer: None,
             conflict_repos: None,
             contracts: RowContracts::default(),
         });
@@ -518,6 +531,7 @@ pub fn component_offers(
             third_party_repo: Some(offer.repo.clone()),
             not_installed_files: None,
             needs_companion: None,
+            needs_installer: None,
             conflict_repos: None,
             contracts: RowContracts::default(),
         });
@@ -540,6 +554,7 @@ pub fn component_offers(
             third_party_repo: None,
             not_installed_files: None,
             needs_companion: None,
+            needs_installer: None,
             conflict_repos: Some(conflict.repos.clone()),
             contracts: RowContracts::default(),
         });
@@ -829,6 +844,7 @@ mod tests {
             release_tag: "v0.0.0".to_string(),
             checksums_url: None,
             catalogue_url: None,
+            inventory_url: None,
         }
     }
 

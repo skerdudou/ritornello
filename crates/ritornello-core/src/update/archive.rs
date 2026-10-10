@@ -42,6 +42,10 @@ pub const INITIAL_CONFIG_PREFIX: &str = "initial-config/";
 pub const FRAGMENT_NAME: &str = "plugins.toml.fragment";
 /// Where the core binary lives inside the core archive.
 pub const CORE_BINARY: &str = "usr/local/bin/ritornello-core";
+
+/// Where the archives carry systemd units and polkit rules: files the core
+/// never places, read only to hash them (`Contents::digests`).
+const HASHED_PREFIXES: &[&str] = &["etc/systemd/system/", "etc/polkit-1/rules.d/"];
 /// Reference files, shipped for reading and never written anywhere.
 const EXAMPLES_PREFIX: &str = "examples/";
 
@@ -127,6 +131,11 @@ pub struct Contents {
     /// `(bare name, bytes)`. Written **only if the target is absent**.
     pub initial_config: Vec<(String, Vec<u8>)>,
     pub fragment: Option<String>,
+    /// SHA-256 (hex) of each unit and polkit rule the archive carries, by
+    /// path: what the core holds against the identity its release's
+    /// inventory publishes for that file before updating itself
+    /// (`update::privileged::archive_disagrees`). Never written anywhere.
+    pub digests: std::collections::BTreeMap<String, String>,
 }
 
 /// True when everything the archive carries is something the core can install
@@ -443,7 +452,8 @@ pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
             || path.starts_with(PLUGINS_PREFIX)
             || ETC_PREFIXES.iter().any(|p| path.starts_with(p))
             || path.starts_with(INITIAL_CONFIG_PREFIX)
-            || path == FRAGMENT_NAME;
+            || path == FRAGMENT_NAME
+            || HASHED_PREFIXES.iter().any(|p| path.starts_with(p));
         if !want {
             continue;
         }
@@ -467,7 +477,9 @@ pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
             return Err(ArchiveError::TooLarge(cap));
         }
 
-        if path == CORE_BINARY {
+        if HASHED_PREFIXES.iter().any(|p| path.starts_with(p)) {
+            out.digests.insert(path, crate::update::download::digest_hex(&bytes));
+        } else if path == CORE_BINARY {
             out.core_binary = Some(bytes);
         } else if let Some(name) = path.strip_prefix(PLUGINS_PREFIX) {
             // A second binary, a nested one, or the shape a doubled
@@ -1240,6 +1252,32 @@ mod tests {
         .collect();
         expected.sort();
         assert_eq!(not_installed, expected);
+    }
+
+    /// The units and the rules of a core archive are hashed as read, and
+    /// nothing else is: their digests are what the core holds against its
+    /// release's inventory before updating itself.
+    ///
+    /// **[MUTATION]**: drop the hashed prefixes from `want` — red, nothing
+    /// read is hashed.
+    #[test]
+    fn the_units_and_the_rules_are_hashed_and_nothing_else() {
+        let gz = targz(&[
+            ("./etc/systemd/system/ritornello.service", b"[Unit]\n"),
+            ("./etc/polkit-1/rules.d/52-ritornello-update.rules", b"polkit.addRule();\n"),
+            ("./usr/local/lib/ritornello/ritornello-update", b"ELF"),
+            ("./usr/local/bin/ritornello-core", b"core"),
+        ]);
+        let c = read(&gz, DECOMPRESSED_MAX).unwrap();
+        let digest = crate::update::download::digest_hex;
+        assert_eq!(
+            c.digests,
+            std::collections::BTreeMap::from([
+                ("etc/polkit-1/rules.d/52-ritornello-update.rules".to_string(), digest(b"polkit.addRule();\n")),
+                ("etc/systemd/system/ritornello.service".to_string(), digest(b"[Unit]\n")),
+            ])
+        );
+        assert_eq!(c.core_binary.as_deref(), Some(&b"core"[..]), "the core binary is still read");
     }
 
     /// A plugin archive carries nothing outside its own prefix (the fixture
