@@ -137,12 +137,13 @@ closes it too: the next track's image appearing full screen is not something
 anyone asked for. There is no button when there is no image — the ♫ fallback is
 not a picture, and a button that opens nothing is worse than none. In standby only the cover
 itself dims, to half opacity (`PlayerCard.vue`'s own `opacity-50`) — not
-the rest of the card: the transport, mute and source-cycle buttons look
+the rest of the card: the transport and mute buttons look
 dimmed too, but that's the kit's standard `disabled:opacity-50`, a
 side-effect of being disabled (see "Buttons the appliance would ignore"
 below), not a deliberate standby style, and it is why the STANDBY badge,
-the header text and the Standby button itself — never disabled, standby
-being the one command that still works — stay at full opacity throughout.
+the header text, the source keys and the Standby button itself — never
+disabled, since standby and the choice of a source are the two things that
+still work — stay at full opacity throughout.
 
 Above the title, a small highlighted line reads `P1 · FIP` — the preset
 number in `primary` and, when the source declares one, its name after the
@@ -363,9 +364,13 @@ read back after a restart.
 offered as if they worked:
 
 - in **standby** the core returns without doing anything for everything
-  but `Power` (the first line of `handle_command`), preset tiles
-  included — those buttons used to lie: the request left, the server
-  answered `204`, and nothing happened;
+  but `Power` and the choice of a source (the first lines of
+  `handle_command`), preset tiles included — those buttons used to lie:
+  the request left, the server answered `204`, and nothing happened. The
+  choice of a source (an icon key, the Source key, the remote, MPD) wakes
+  the device on it: the active source gets `Wake`, another is switched to
+  without waking the one being left, an unknown one leaves the device
+  asleep;
 - `Eject` is **hidden outright** rather than merely disabled when the
   active source declares `can_eject: false` (`SourcePlugin::can_eject` —
   see [plugins.md](plugins.md)); the page never compares `source` to
@@ -462,10 +467,13 @@ which is the field doing exactly what it promises, not a bug. Absent
 means the source says nothing on the subject, so the page falls back to
 the historical 1-9 layout rather than being disarmed by a source that has
 not been updated; `Some(0)` is a distinct, meaningful answer ("nothing to
-number", an empty CD tray — the header still reads "Presets : 0", with no
-tile below it). The remembered count is forgotten on a source change and
+number", an empty CD tray — an empty grid under the title, no tile and no
+count). The remembered count is forgotten on a source change and
 on standby (the newly active source re-declares it on activate/wake) but
-**not** on stop — a stopped radio still has its stations.
+**not** on stop — a stopped radio still has its stations. In standby the
+grid takes its count from the catalog (`/api/presets`, kept in standby)
+for the active source — empty when it lists none — so the tiles stay
+visible, disabled.
 
 Past the ninth preset, bare digits cannot reach further: the physical
 remote's **`+10`** key, once bound, accumulates a tens offset held by the
@@ -498,8 +506,8 @@ than in the page alone. The last useful offset is therefore
 11-20, where the previous reading needed an offset of 20 to reach station 20.
 
 The web page mirrors the same decade window **locally**, through two
-`<`/`>` arrows next to the "Presets : N" count (shown once it exceeds
-ten) instead of a `+10` button: page k is `10k+1` to `10k+10` — the same
+`<`/`>` arrows in the card's header (shown once the count exceeds
+ten), around a "11–20 of 23" window, instead of a `+10` button: page k is `10k+1` to `10k+10` — the same
 boundaries as the core's offset, so both interfaces agree on what "the same
 page" means. Not six or twelve tiles for layout's sake, either: the keypad has
 ten digits, and that is what fixes the size of a page. Unlike the core, the page does **not** wrap:

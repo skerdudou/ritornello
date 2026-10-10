@@ -846,3 +846,26 @@ test('the source keys follow the width of the Player card', async ({ page }) => 
   await page.locator('[data-source-key="radio"]').click()
   await expect(page.locator('[data-source-key="radio"]')).toHaveAttribute('aria-pressed', 'true')
 })
+
+/**
+ * In standby, choosing a source wakes the device on it — the owner's
+ * decision; every other command stays ignored, preset tiles included.
+ */
+test('in standby, a source key wakes the device on that source', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto('/')
+  await expect(page.locator('[data-source-key="radio"]')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.locator('[data-standby]')).toHaveCount(0)
+  await page.locator('[data-remote-power]').click()
+  await expect(page.locator('[data-standby]')).toBeVisible()
+  await expect(page.locator('[data-preset-button]').first()).toBeDisabled()
+  await expect(page.locator('[data-source-key="files"]')).toBeEnabled()
+  await page.locator('[data-source-key="files"]').click()
+  await expect(page.locator('[data-source-key="files"]')).toHaveAttribute('aria-pressed', 'true')
+  // Awake again: the standby badge is gone and the tiles are offered.
+  await expect(page.locator('[data-standby]')).toHaveCount(0)
+  await expect(page.locator('[data-preset-button]').first()).toBeEnabled()
+  // Leave the radio active, as the following journeys expect.
+  await page.locator('[data-source-key="radio"]').click()
+  await expect(page.locator('[data-source-key="radio"]')).toHaveAttribute('aria-pressed', 'true')
+})
