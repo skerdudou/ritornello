@@ -548,9 +548,11 @@ impl AdminClient {
 /// Only returns on error; to be spawned in a dedicated task by the caller.
 ///
 /// `enriches_armed` is the plugin's announced opt-in: without it, an armed
-/// track is shown as "nothing" (see `visible_to`), and a frame identical to
-/// the last one sent is skipped, so an armed track whose `known` keeps growing
-/// does not resend the same "nothing" to a plugin that may not see it.
+/// track is shown as "nothing" (see `visible_to`), and such a folded frame
+/// equal to the last one sent is skipped, so an armed track whose `known` keeps
+/// growing does not resend the same "nothing" to a plugin that may not see it.
+/// Every other frame goes out exactly as it always did, equal to the previous
+/// one or not.
 pub async fn run_metadata_client(
     socket_path: &Path,
     name: String,
@@ -565,9 +567,11 @@ pub async fn run_metadata_client(
     let mut lines = BufReader::new(read).lines();
 
     let mut last_sent: Option<NowPlaying> = None;
-    let mut to_send = Some(visible_to(&np_rx.borrow_and_update(), enriches_armed));
+    // The frame to send and whether `visible_to` folded it into "nothing".
+    let fold = |np: &NowPlaying| (visible_to(np, enriches_armed), np.armed && !enriches_armed);
+    let mut to_send = Some(fold(&np_rx.borrow_and_update()));
     loop {
-        if let Some(np) = to_send.take().filter(|np| last_sent.as_ref() != Some(np)) {
+        if let Some(np) = to_send.take().filter(|(np, folded)| !(*folded && last_sent.as_ref() == Some(np))).map(|(np, _)| np) {
             write.write_all(format!("{}\n", serde_json::to_string(&np)?).as_bytes()).await?;
             last_sent = Some(np);
         }
@@ -592,7 +596,7 @@ pub async fn run_metadata_client(
                 if change.is_err() {
                     bail!("now-playing channel closed, stopping metadata relay {name}");
                 }
-                to_send = Some(visible_to(&np_rx.borrow_and_update(), enriches_armed));
+                to_send = Some(fold(&np_rx.borrow_and_update()));
             }
         }
     }
@@ -1473,6 +1477,10 @@ mod tests {
     /// "nothing" while a track is armed, however much `known` grows, then the
     /// identity again once it plays.
     ///
+    /// The first sleep below guards against `watch` coalescing: without it the
+    /// two armed values could collapse into one and the test would pass
+    /// whether or not the dedupe exists.
+    ///
     /// **[MUTATION]** removing the `last_sent` dedupe in `run_metadata_client`
     /// fails the line count (the second armed frame would resend `identity:
     /// null`); removing the `!enriches_armed` operand of `visible_to` leaks the
@@ -1527,6 +1535,71 @@ mod tests {
         assert_eq!(received_after.len(), 2, "{received_after:?}");
         assert_eq!(received[1].identity, Some(serde_json::json!({"disc": "x"})));
         assert!(!received[1].armed);
+    }
+
+    /// A relay with a recording plugin side; returns what the plugin read and
+    /// the sender feeding the relay.
+    async fn relay_probe(
+        enriches_armed: bool,
+        first: NowPlaying,
+    ) -> (Arc<Mutex<Vec<NowPlaying>>>, tokio::sync::watch::Sender<NowPlaying>) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("meta.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<NowPlaying>::new()));
+        let seen_srv = seen.clone();
+        tokio::spawn(async move {
+            let _keep = dir;
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, _write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                seen_srv.lock().await.push(serde_json::from_str(&line).unwrap());
+            }
+        });
+        let (np_tx, np_rx) = tokio::sync::watch::channel(first);
+        let (enrich_tx, _enrich_rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = run_metadata_client(&socket, "probe".into(), enrich_tx, np_rx, enriches_armed).await;
+        });
+        (seen, np_tx)
+    }
+
+    async fn settle() {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    /// A plugin that opted in receives the armed track as it is: identity,
+    /// known, and `armed: true`.
+    ///
+    /// **[MUTATION]** folding for everybody (dropping `!enriches_armed` from
+    /// `visible_to`) hides the identity and fails the identity assertion.
+    #[tokio::test]
+    async fn metadata_client_delivers_an_armed_track_to_a_plugin_that_opted_in() {
+        let known = Known { title: Some("A".into()), ..Default::default() };
+        let (seen, _np_tx) = relay_probe(true, armed_np(known.clone(), true)).await;
+        settle().await;
+        let received = seen.lock().await.clone();
+        assert_eq!(received, vec![armed_np(known, true)]);
+    }
+
+    /// The dedupe only concerns frames folded into "nothing". A non-armed frame
+    /// equal to the previous one (the core sends one on each identity change,
+    /// `watch` signals every `send` even for an equal value) still reaches the
+    /// plugin, opted in or not.
+    ///
+    /// **[MUTATION]** deduping every frame again fails the two-lines assertion.
+    #[tokio::test]
+    async fn metadata_client_still_delivers_a_repeated_playing_frame() {
+        for enriches_armed in [false, true] {
+            let np = armed_np(Known { title: Some("A".into()), ..Default::default() }, false);
+            let (seen, np_tx) = relay_probe(enriches_armed, np.clone()).await;
+            settle().await;
+            np_tx.send(np.clone()).unwrap();
+            settle().await;
+            let received = seen.lock().await.clone();
+            assert_eq!(received, vec![np.clone(), np], "enriches_armed={enriches_armed}");
+        }
     }
 
     #[tokio::test]
