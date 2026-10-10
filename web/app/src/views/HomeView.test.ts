@@ -560,32 +560,39 @@ describe('headerMode', () => {
   })
 
   it('a single source, once the list is read: nothing to choose between', () => {
-    expect(headerMode({ sources: 1, listRead: true, available: 1000, standby: false })).toBe('none')
-    expect(headerMode({ sources: 0, listRead: true, available: 1000, standby: false })).toBe('none')
+    expect(headerMode({ sources: 1, listRead: true, available: 1000, standby: false, activeListed: true })).toBe('none')
+    expect(headerMode({ sources: 0, listRead: true, available: 1000, standby: false, activeListed: true })).toBe('none')
   })
 
   it('an unread list keeps the cycle key: a failed /api/presets must leave a way to change source', () => {
-    expect(headerMode({ sources: 0, listRead: false, available: 1000, standby: false })).toBe('cycle')
-    expect(headerMode({ sources: 3, listRead: false, available: 1000, standby: false })).toBe('cycle')
+    expect(headerMode({ sources: 0, listRead: false, available: 1000, standby: false, activeListed: true })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: false, available: 1000, standby: false, activeListed: true })).toBe('cycle')
   })
 
   it('an unknown width keeps the cycle key', () => {
-    expect(headerMode({ sources: 3, listRead: true, available: null, standby: false })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: true, available: null, standby: false, activeListed: true })).toBe('cycle')
   })
 
   it('the icons from exactly the width they need, the cycle key one pixel below', () => {
     expect(NEEDED).toBe(140)
-    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: false })).toBe('icons')
-    expect(headerMode({ sources: 3, listRead: true, available: NEEDED - 1, standby: false })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: false, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: NEEDED - 1, standby: false, activeListed: true })).toBe('cycle')
   })
 
   it('standby makes room for its badge', () => {
     const withBadge = NEEDED + STANDBY_BADGE + GAP
-    expect(headerMode({ sources: 3, listRead: true, available: withBadge, standby: false })).toBe('icons')
-    expect(headerMode({ sources: 3, listRead: true, available: withBadge, standby: true })).toBe('icons')
-    expect(headerMode({ sources: 3, listRead: true, available: withBadge - 1, standby: true })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: true, available: withBadge, standby: false, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: withBadge, standby: true, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: withBadge - 1, standby: true, activeListed: true })).toBe('cycle')
     // The same width that holds the keys alone no longer does with the badge.
-    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: true })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: true, activeListed: true })).toBe('cycle')
+  })
+
+  it('an active source absent from the list is named by the pill, even with ample width', () => {
+    // The core keeps the active source while mpv plays after its plugin died.
+    expect(headerMode({ sources: 3, listRead: true, available: 1000, standby: false, activeListed: false })).toBe('cycle')
+    // Listed (or empty, which the caller reports as listed): unchanged.
+    expect(headerMode({ sources: 3, listRead: true, available: 1000, standby: false, activeListed: true })).toBe('icons')
   })
 })
 
@@ -701,6 +708,14 @@ describe('HomeView — the source keys in the Player card header', () => {
     expect(w.find('[data-remote-source]').exists()).toBe(true)
     expect(w.get('[data-source]').text()).toBe('cd')
     expect(w.find('[data-source-key]').exists()).toBe(false)
+  })
+
+  it('wide, but the active source is not in the list: the pill names it', async () => {
+    // The core keeps the active source while mpv plays after its plugin died.
+    const { w } = await mountWith(THREE, { source: 'upnp' })
+    expect(w.find('[data-source-key]').exists()).toBe(false)
+    expect(w.find('[data-remote-source]').exists()).toBe(true)
+    expect(w.get('[data-source]').text()).toBe('upnp')
   })
 
   it('a width not measured yet keeps the cycle key', async () => {

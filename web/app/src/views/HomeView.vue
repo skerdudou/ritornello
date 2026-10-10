@@ -60,6 +60,7 @@ const mode = computed(() =>
     listRead: listRead.value,
     available: available.value,
     standby: state.value?.standby ?? false,
+    activeListed: !state.value?.source || sources.value.includes(state.value.source),
   }),
 )
 
