@@ -4,7 +4,12 @@ use super::*;
 
 impl<P: Player> Core<P> {
     pub async fn handle_command(&mut self, cmd: Command) -> Result<()> {
-        if self.standby && cmd != Command::Power {
+        // In standby only the commands that wake the device act: the Power
+        // key, and choosing a source — the owner's decision, so that picking
+        // a source on the page, the remote or an MPD client turns the device
+        // on there instead of doing nothing. Everything else, presets and
+        // volume included, is still ignored.
+        if self.standby && !matches!(cmd, Command::Power | Command::SourceCycle | Command::SelectSource(_)) {
             return Ok(());
         }
         let outcome = self.apply_command(cmd).await;
@@ -124,14 +129,33 @@ impl<P: Player> Core<P> {
     /// caller wait up to 5 s, and `StartupPower::Previous` must find the
     /// intended state even if the power is cut during that wait.
     ///
-    /// Shared by the three ways out of standby — the Power key, startup, and
-    /// a source asking to be played (`handle_play_request`) — which differ
-    /// only in what they ask the sources afterwards. Leaving the standby view
+    /// Shared by the four ways out of standby — the Power key, startup, a
+    /// source asking to be played (`handle_play_request`) and a source chosen
+    /// in standby (`wake_on`) — which differ only in what they ask the
+    /// sources afterwards. Leaving the standby view
     /// needs nothing more: `player_state` derives it from this flag, and each
     /// caller publishes on its way out.
     pub(super) fn leave_standby(&mut self) {
         self.standby = false;
         self.persist();
+    }
+
+    /// A source chosen while in standby (`SelectSource`, `SourceCycle`):
+    /// the device wakes on it. The active source is woken where it was, as
+    /// the Power key wakes it (`resume`, `Wake`); another one is switched to
+    /// without waking the old one first — the rule `handle_play_request`
+    /// already applies to a disc that wakes the device, since waking the old
+    /// source would start it for an instant only to cut it off. `None` (no
+    /// source at all) leaves the device asleep: there is nothing to wake on.
+    async fn wake_on(&mut self, target: Option<String>) -> Result<()> {
+        let Some(name) = target else { return Ok(()) };
+        // The flag first, then the wake: see `leave_standby`.
+        self.leave_standby();
+        if name == self.active_source {
+            return self.resume().await;
+        }
+        self.prepare_player().await?;
+        self.cycle_source(Some(name), SourceReq::Activate).await
     }
 
     /// Startup in standby (`settings.startup_power`): mpv is configured
@@ -346,9 +370,10 @@ impl<P: Player> Core<P> {
                     // reappear on wake before the Source had spoken again.
                     self.preset_count = None;
                     self.source_status = None;
-                    // Same fate for the eject capability: in standby no
-                    // command gets through anyway (`handle_command`), and the
-                    // Source will redeclare it on wake.
+                    // Same fate for the eject capability: in standby only the
+                    // commands that wake the device get through
+                    // (`handle_command`), and the Source will redeclare it on
+                    // wake.
                     self.can_eject = false;
                     // Same fate again for the finite-list capability, for the
                     // same reason.
@@ -378,6 +403,9 @@ impl<P: Player> Core<P> {
                     Some(idx) => self.source_order.get((idx + 1) % self.source_order.len()).cloned(),
                     None => self.source_order.first().cloned(),
                 };
+                if self.standby {
+                    return self.wake_on(next).await;
+                }
                 self.cycle_source(next, SourceReq::Activate).await?;
             }
             Command::SelectSource(name) => {
@@ -389,6 +417,9 @@ impl<P: Player> Core<P> {
                 if !self.source_order.iter().any(|n| n == &name) {
                     tracing::debug!("unknown source {name} ignored");
                     return Ok(());
+                }
+                if self.standby {
+                    return self.wake_on(Some(name)).await;
                 }
                 // Already active: do nothing. A redundant `load` must not cut
                 // what plays, and that is exactly what a client sends when
@@ -519,6 +550,111 @@ mod tests {
         assert_eq!(player_calls.lock().unwrap().iter().filter(|c| c.starts_with("play")).count(), 1);
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(player_calls.lock().unwrap().iter().filter(|c| c.starts_with("play")).count(), 2);
+    }
+
+    /// The source requests recorded, play-mode broadcasts left out (every
+    /// wake hands the mode out, and that asks no source to play).
+    fn source_requests(log: &Mutex<Vec<String>>) -> Vec<String> {
+        log.lock().unwrap().iter().filter(|c| !c.contains(":SetPlayMode")).cloned().collect()
+    }
+
+    #[tokio::test]
+    async fn in_standby_choosing_another_source_wakes_on_it_without_waking_the_old_one() {
+        let (mut core, player_calls, source_calls, mut state_rx, dir) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::Power).await.unwrap();
+        source_calls.lock().unwrap().clear();
+        player_calls.lock().unwrap().clear();
+        core.handle_command(Command::SelectSource("cd".into())).await.unwrap();
+        let log = source_requests(&source_calls);
+        assert!(log.contains(&"cd:Activate".to_string()), "{log:?}");
+        assert!(!log.iter().any(|c| c.contains("Wake")), "no source woken: {log:?}");
+        assert!(!log.contains(&"radio:Activate".to_string()) && !log.contains(&"radio:Play".to_string()), "{log:?}");
+        // mpv prepared as every wake prepares it.
+        assert!(player_calls.lock().unwrap().iter().any(|c| c.starts_with("vol ")));
+        let state = state_rx.borrow_and_update().clone();
+        assert!(!state.standby);
+        assert_eq!(state.source, "cd");
+        let disk = crate::state::load(&dir.path().join("state.json"));
+        assert!(!disk.standby, "the wake is persisted");
+        assert_eq!(disk.active_source, "cd");
+    }
+
+    #[tokio::test]
+    async fn in_standby_choosing_the_active_source_wakes_it() {
+        // Awake, choosing the active source does nothing (a redundant MPD
+        // `load`); in standby it must not fall into that and stay asleep.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::Power).await.unwrap();
+        source_calls.lock().unwrap().clear();
+        core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
+        assert_eq!(source_requests(&source_calls), vec!["radio:Wake".to_string()]);
+        assert!(!core.player_state().standby);
+    }
+
+    #[tokio::test]
+    async fn in_standby_an_unknown_source_leaves_the_device_asleep() {
+        let (mut core, _pc, source_calls, _rx, dir) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::Power).await.unwrap();
+        source_calls.lock().unwrap().clear();
+        core.handle_command(Command::SelectSource("ghost".into())).await.unwrap();
+        assert!(core.player_state().standby);
+        assert!(source_requests(&source_calls).is_empty());
+        assert!(crate::state::load(&dir.path().join("state.json")).standby);
+    }
+
+    #[tokio::test]
+    async fn in_standby_the_source_key_wakes_on_the_next_source() {
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::Power).await.unwrap();
+        source_calls.lock().unwrap().clear();
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        let log = source_requests(&source_calls);
+        assert_eq!(core.active_source(), "cd");
+        assert!(log.contains(&"cd:Activate".to_string()), "{log:?}");
+        assert!(!log.iter().any(|c| c.contains("Wake")), "{log:?}");
+        assert!(!core.player_state().standby);
+    }
+
+    #[tokio::test]
+    async fn in_standby_the_source_key_with_one_source_wakes_it() {
+        // The cycle comes back to the active source: it is woken where it
+        // was, not activated again.
+        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        assert!(core.remove_source("cd").await.unwrap());
+        core.handle_command(Command::Power).await.unwrap();
+        source_calls.lock().unwrap().clear();
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert_eq!(source_requests(&source_calls), vec!["radio:Wake".to_string()]);
+        assert!(!core.player_state().standby);
+    }
+
+    #[tokio::test]
+    async fn in_standby_the_source_key_with_no_source_stays_asleep() {
+        let (mut core, _rx, dir) = setup_without_source();
+        core.handle_command(Command::Power).await.unwrap();
+        core.handle_command(Command::SourceCycle).await.unwrap();
+        assert!(core.player_state().standby);
+        assert!(crate::state::load(&dir.path().join("state.json")).standby);
+    }
+
+    #[tokio::test]
+    async fn in_standby_everything_else_stays_ignored() {
+        let (mut core, player_calls, source_calls, _rx, _d) = setup();
+        core.resume().await.unwrap();
+        core.handle_command(Command::Power).await.unwrap();
+        source_calls.lock().unwrap().clear();
+        player_calls.lock().unwrap().clear();
+        for cmd in [Command::VolumeUp, Command::SetVolume(10), Command::Select(2), Command::Next, Command::PlayPause, Command::Stop] {
+            core.handle_command(cmd).await.unwrap();
+        }
+        assert!(core.player_state().standby);
+        assert!(source_requests(&source_calls).is_empty(), "{:?}", source_requests(&source_calls));
+        assert!(player_calls.lock().unwrap().is_empty(), "{:?}", player_calls.lock().unwrap());
     }
 
     #[tokio::test]
@@ -1178,8 +1314,8 @@ mod tests {
 
     #[tokio::test]
     async fn standby_lets_no_mode_change_through() {
-        // `handle_command` returns at once on anything but Power while
-        // asleep: an MPD `random 1` is acknowledged without effect, and that
+        // `handle_command` returns at once on anything but Power or a source
+        // choice while asleep: an MPD `random 1` is acknowledged without effect, and that
         // is consistent with every other command in standby.
         let (mut core, _pc, _sc, state_rx, _d) = setup();
         declare_finite_list(&mut core, "radio");
