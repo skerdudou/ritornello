@@ -2,10 +2,12 @@
 //!
 //! `/var/lib/ritornello-install/installed.toml` is root's file (root:root
 //! 0644): the installer writes it, over ssh, as root. The core reads it for
-//! one question only — which version of a plugin's companion
-//! (`plugins::COMPANIONS`) is installed? — which is what lets the web UI
+//! two questions only — which version of a plugin's companion
+//! (`plugins::COMPANIONS`) is installed? which content is each privileged file
+//! of the core that the installer placed? — which is what lets the web UI
 //! update that plugin while the companion does not move (see
-//! `update::companion_allows`).
+//! `update::companion_allows`), and the core itself while none of those files
+//! moves (see `update::privileged`).
 //!
 //! A parser of its own, and deliberately not the installer's crate: the
 //! core is not linked with the program that runs as root on a device over
@@ -34,11 +36,15 @@ struct InstallRegistry {
     components: BTreeMap<String, Recorded>,
 }
 
-/// One component's record. `privileged`, the installer's other field, is
-/// not read: nothing here depends on which files were placed.
+/// One component's record. `privileged`, the list of paths, is not read:
+/// `identity` names them too, with what each one is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 struct Recorded {
     version: String,
+    /// Absent from a registry written before identities existed: read as
+    /// empty, which `recorded_identities` answers as unknown.
+    #[serde(default)]
+    identity: BTreeMap<String, String>,
 }
 
 /// The registry's path below `root` (`/` in service).
@@ -87,6 +93,33 @@ pub fn companion_version(root: &Path, companion: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// What `ritornello-install` recorded about the content of each privileged
+/// file it placed for `component`, by path (`update::privileged`). `None`
+/// when the registry is absent, unreadable, of another format, silent about
+/// the component, or records no identity for it — every one of which
+/// refuses. Read from the worker, never from a route, like
+/// `companion_version`.
+pub fn recorded_identities(root: &Path, component: &str) -> Option<BTreeMap<String, String>> {
+    let file = path(root);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) => {
+            tracing::info!("update: reading {}: {e}", file.display());
+            return None;
+        }
+    };
+    let Some(registry) = parse(&text) else {
+        tracing::warn!("update: {} does not parse as a format-1 registry", file.display());
+        return None;
+    };
+    let identities = registry.components.get(component).map(|r| r.identity.clone()).unwrap_or_default();
+    if identities.is_empty() {
+        tracing::info!("update: {} records no identity for {component}", file.display());
+        return None;
+    }
+    Some(identities)
 }
 
 #[cfg(test)]
@@ -185,6 +218,61 @@ privileged = []
         let format_2 = RENDERED.replace("format = 1", "format = 2");
         assert_eq!(version_in(&format_2, "files-mount"), None);
         assert_eq!(version_in("not toml at all [", "files-mount"), None);
+    }
+
+    /// The installer's rendering of a core it placed with identities
+    /// (`registry::tests::the_rendering_with_identities_is_the_text_the_core_is_tested_on`
+    /// in `ritornello-install`): if that rendering changes, this copy must
+    /// follow.
+    const RENDERED_WITH_IDENTITIES: &str = r#"format = 1
+
+[components.core]
+version = "0.3.0"
+privileged = [
+    "/etc/systemd/system/ritornello.service",
+    "/usr/local/lib/ritornello/ritornello-update",
+]
+
+[components.core.identity]
+"/etc/systemd/system/ritornello.service" = "sha256:6e6b"
+"/usr/local/lib/ritornello/ritornello-update" = "version:1.0.0"
+
+[components.radio]
+version = "0.3.2"
+privileged = []
+"#;
+
+    fn identities_in(text: &str) -> Option<BTreeMap<String, String>> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(path(dir.path()).parent().unwrap()).unwrap();
+        std::fs::write(path(dir.path()), text).unwrap();
+        recorded_identities(dir.path(), "core")
+    }
+
+    /// **[MUTATION]**: read another component's identities — red.
+    #[test]
+    fn the_core_s_identities_are_read_from_the_installer_s_rendering() {
+        let got = identities_in(RENDERED_WITH_IDENTITIES).expect("identities are recorded");
+        assert_eq!(
+            got,
+            BTreeMap::from([
+                ("/etc/systemd/system/ritornello.service".to_string(), "sha256:6e6b".to_string()),
+                ("/usr/local/lib/ritornello/ritornello-update".to_string(), "version:1.0.0".to_string()),
+            ])
+        );
+        // The companion question still reads the same file.
+        assert_eq!(version_in(RENDERED_WITH_IDENTITIES, "radio").as_deref(), Some("0.3.2"));
+    }
+
+    /// Every registry written before identities existed — the Pi's among
+    /// them — records none: unknown, never "nothing changed".
+    #[test]
+    fn a_registry_without_identities_reads_as_unknown() {
+        assert_eq!(identities_in(RENDERED), None);
+        assert_eq!(identities_in(RENDERED_EVERY_COMPONENT), None);
+        assert_eq!(identities_in(&RENDERED_WITH_IDENTITIES.replace("format = 1", "format = 2")), None);
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(recorded_identities(dir.path(), "core"), None, "no registry at all");
     }
 
     #[test]

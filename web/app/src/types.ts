@@ -123,7 +123,7 @@ export type Availability =
  *
  * `installed`, `offered`: `Option<T>` **without** `skip_serializing_if` on the
  * Rust side, so they serialize as `null` and are typed `T | null` here.
- * `installable`, `third_party_repo`, `not_installed_files` **do** carry that
+ * `installable`, `third_party_repo`, `needs_installer` **do** carry that
  * attribute, so they are typed `T?` (absent, not `null`) — a different
  * statement: "unknown yet" versus "known to be nothing".
  */
@@ -144,14 +144,6 @@ export interface ComponentOffer {
    * `unknown`. Absent on every other kind of row. */
   third_party_repo?: string
   /**
-   * The core's own row only: what its last-installed archive carried outside
-   * what the core ever places itself (the privileged installer, the systemd
-   * units, the polkit rules). Absent until a core install has actually
-   * happened — never an empty array, since the core's archive always carries
-   * something here by design.
-   */
-  not_installed_files?: string[]
-  /**
    * A plugin that ships with a companion only (`files` → `files-mount`): the
    * companion's name when this release moves it, or the device cannot tell
    * which version it has. The row is then `installable: false`, and the reason
@@ -159,6 +151,14 @@ export interface ComponentOffer {
    * ritornello-install.
    */
   needs_companion?: string
+  /**
+   * The core's row only: the files its update changes that only
+   * ritornello-install places (its systemd units, its polkit rules, its
+   * updater), when they differ from — or cannot be compared with — what the
+   * installer recorded. The row is then `installable: false`. Empty when the
+   * release names none to judge by: still refused, with nothing to name.
+   */
+  needs_installer?: string[]
   /** A plugin announced by two or more repositories that disagree: every one of them, lowercased and sorted. Absent on every other row. */
   conflict_repos?: string[]
   /** What the offered version speaks, from the catalogue of the release

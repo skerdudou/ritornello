@@ -909,6 +909,16 @@ decided again at every check, so the row comes back once
 not be read once does not keep it refused. The core asks the same question
 again at the press, before anything is downloaded, since the registry can
 change in between.
+**The core's own row follows the same rule for its root files.** Its
+archive carries its systemd units, its polkit rules and the updater, which
+this page never places. The core's update is offered only while each of them
+is, by the identity the release's `inventory.json` gives it, the one
+`ritornello-install` recorded placing; otherwise the row is disabled with a
+sentence naming the files that changed (or saying the device cannot tell,
+for a release or a registry with no identities) and to update with
+`ritornello-install`. Decided at every check, asked again at the press, and
+the downloaded archive is held to its inventory (see
+[installation.md](installation.md#the-core-updates-itself-only-while-its-root-files-stay)).
 Which plugins are privileged, and which companion each ships with, are two
 short lists the core carries and
 checks against `deploy/packaging.toml` (see

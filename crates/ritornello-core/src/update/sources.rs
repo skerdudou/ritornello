@@ -583,6 +583,7 @@ mod tests {
             release_tag: "t".into(),
             checksums_url: Some("https://x/SHA256SUMS".into()),
             catalogue_url: None,
+            inventory_url: None,
         }
     }
 
@@ -888,6 +889,7 @@ mod tests {
             release_tag: "v1.0.0".into(),
             checksums_url: None,
             catalogue_url: None,
+            inventory_url: None,
         }
     }
 

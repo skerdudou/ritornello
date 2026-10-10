@@ -17,6 +17,9 @@ const CATALOG = {
     'Privileged component: install or uninstall it with ritornello-install. An update that leaves its root-run companion unchanged can be made from here.',
   update_row_needs_companion:
     'This update also changes the mount helper ({companion}): update with ritornello-install.',
+  update_row_needs_installer: 'This update also changes {files}: update with ritornello-install.',
+  update_row_needs_installer_unknown:
+    'This update may change files only ritornello-install places: update with ritornello-install.',
   update_row_third_party_pack: 'From a third-party repository. Never selected automatically.',
   update_row_third_party_refused:
     'Its last archive was refused: a third-party plugin\'s archive may carry nothing but its own binary.',
@@ -292,6 +295,37 @@ describe('UpdateDialog', () => {
     expect(row('files')?.querySelector('[data-update-row-warning]')?.textContent?.trim()).toBe(
       CATALOG.plugin_privileged_note,
     )
+  })
+
+  // The core's own privileged files: the row names them, or says the device
+  // cannot tell, and the core cannot be ticked either way.
+  it('names the core files only ritornello-install places, or says it cannot tell', async () => {
+    const core: ComponentOffer = {
+      name: 'core',
+      kind: 'core',
+      declared: true,
+      binary_present: true,
+      installed: '0.2.0',
+      offered: '0.3.0',
+      availability: 'update_available',
+      installable: false,
+    }
+    const named = mountDialog([
+      { ...core, needs_installer: ['/etc/systemd/system/ritornello.service', '/usr/local/lib/ritornello/ritornello-update'] },
+    ])
+    await flushPromises()
+    expect(row('core')?.querySelector('[data-update-row-warning]')?.textContent?.trim()).toBe(
+      'This update also changes /etc/systemd/system/ritornello.service, /usr/local/lib/ritornello/ritornello-update: update with ritornello-install.',
+    )
+    expect(isChecked('core')).toBe('false')
+    named.unmount()
+
+    mountDialog([{ ...core, needs_installer: [] }])
+    await flushPromises()
+    expect(row('core')?.querySelector('[data-update-row-warning]')?.textContent?.trim()).toBe(
+      CATALOG.update_row_needs_installer_unknown,
+    )
+    expect(isChecked('core')).toBe('false')
   })
 
   // The other half of the test above: a privileged plugin the device

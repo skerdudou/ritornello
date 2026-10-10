@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-install"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1613,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-updater"
-version = "0.2.0-beta.7"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "serde",

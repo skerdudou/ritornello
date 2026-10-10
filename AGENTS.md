@@ -29,7 +29,7 @@ rather than quietly shrinking it.
 **Everything written into this repository is in English.** Code, comments,
 doc comments, test names, commit messages, documentation. No exceptions.
 
-**Five numbers, five questions.** The product number
+**Six numbers, six questions.** The product number
 (`[workspace.package] version`) names the release and the git tag. Each
 shipped component — the core and each plugin — declares **its own** version,
 and that is what its archive is named after. The third number is the wire
@@ -49,7 +49,11 @@ The fifth is the workstation installer's (`ritornello-install`): it names the
 tag `installer-vX.Y.Z` of a publication channel of its own, is a finished
 `X.Y.Z`, exempt from the product rules in the same way, and moves only when
 the installer does. The README links the installer by a permanent address that
-holds no number.
+holds no number. The sixth is the privileged updater's (`ritornello-updater`,
+which builds the root binary `ritornello-update`): a finished `X.Y.Z`, exempt
+from the product rules like the companion's, moving only when that crate
+changes (`changed-components.sh` refuses a change that left it alone). The core
+compares it, for equality, with the one `ritornello-install` recorded.
 
 **A device compares versions for equality, never for order.** This is what
 makes rollback and channel-switching work, and it is the reason every
@@ -60,9 +64,8 @@ move), when a contract's major changed (the core and every plugin that speaks
 it must move, as declared in `[package.metadata.ritornello]`;
 `changed-components.sh` refuses the release otherwise, and a minor requires
 nothing), or when the product's major changed. A compatible change to a shared
-crate (`ritornello-proto`, `ritornello-i18n`, `ritornello-plugin-sdk`,
-`ritornello-updater`) republishes nothing by itself; if a fix must reach
-plugins, bump them by hand. The core judges each announcement per contract:
+crate (`ritornello-proto`, `ritornello-i18n`, `ritornello-plugin-sdk`)
+republishes nothing by itself; if a fix must reach plugins, bump them by hand. The core judges each announcement per contract:
 refused (another major, a missing or unexpected contract, a pre-contract
 binary), limited (a newer minor: wired, some features inactive) or normal.
 The wire fingerprint test of `ritornello-proto` forces the decision. The first
@@ -86,6 +89,12 @@ can never write a systemd unit or a polkit rule: those are placed by
 `ritornello-install` or by hand. A plugin archive carrying a unit, a polkit
 rule, a nested path or a binary that is not the plugin's own is refused.
 **The core is exempt from that last rule; no third-party component ever is.**
+What the core's own archive carries for root — its units, its polkit rules,
+the updater — is never placed from the page either: the core updates itself
+only while each of those files is, by the identity its release's
+`inventory.json` publishes, the one `ritornello-install` recorded placing
+(`update/privileged.rs`). Any difference or unknown sends the operator to the
+installer.
 
 **No HTTP route may block.** The admin protocol is serial with a five-second
 ceiling, and an I/O left without a deadline has already made a page
@@ -113,15 +122,19 @@ Several tests exist only to refuse a mistake that has actually been made
 here. Do not "fix" one by relaxing it — if a guard fires, it has found
 something.
 
-- `version_coherence.rs` — the five numbers above, including what a
+- `version_coherence.rs` — the six numbers above, including what a
   prerelease may and may not declare (a component may keep an older suffix
-  of the same generation; a companion and the installer are exempt from the
-  product rules), and that a product release no longer carries the installer.
+  of the same generation; a companion, the installer and the updater are
+  exempt from the product rules), and that a product release no longer
+  carries the installer.
 - `scripts/release-tags.sh --self-test` — which release is "the previous
   one" once the installer's releases share the list, and that an installer tag
   names the number the installer declares.
 - `packaging_manifest.rs` — `deploy/packaging.toml` against reality, and
-  against the inventory `ritornello-install` reads. `deploy/deploy.sh` is only
+  against the inventory `ritornello-install` reads, an identity on each of
+  the core's privileged files included (`install-inventory.py --self-test`
+  refuses one with a carriage return: it would hash the checkout, not the
+  file). `deploy/deploy.sh` is only
   a wrapper around it, so there is no second installation path to agree with.
 - `scripts/package-release.sh --self-test` — the same version rules
   without cargo, since the release job runs without our toolchain.
@@ -139,7 +152,9 @@ something.
 - `scripts/changed-components.sh`'s coupled-change guard — refuses a change
   to a companion (`files-mount`) that did not move its version, and its
   plugin's too when their shared crate changed: the shared-crate trap above,
-  closed for that pair.
+  closed for that pair. It refuses, the same way, a change to
+  `crates/ritornello-updater` that did not move the updater's number: a
+  device would see the same number and keep its old updater.
 - `scripts/release-notes-guard.sh` (ignores a version-only bump of the
   mount helper's manifest) — refuses a release that changed a unit,
   a polkit rule, the updater or the mount helper while the notes still say

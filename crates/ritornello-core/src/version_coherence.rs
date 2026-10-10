@@ -1,7 +1,7 @@
 //! Guard over the versioning scheme: every shipped component declares its own
 //! version, and none of them drifts off the product's major.
 //!
-//! Five numbers exist in this repository and only the first two are mostly
+//! Six numbers exist in this repository and only the first two are mostly
 //! here. The product number lives in `[workspace.package] version` and names
 //! the release; each shipped component declares its own version so a fix in
 //! one plugin does not renumber the whole product — which would make every
@@ -16,6 +16,10 @@
 //! own number, which none of the product rules touch (`tied_to_product`). The
 //! fifth is the workstation installer's own, exempt in the same way: it has a
 //! publication channel of its own and moves only when the installer does.
+//! The sixth is the privileged updater's (`ritornello-updater`, which builds
+//! the root binary `ritornello-update`), exempt in the same way: the core
+//! compares it for equality with the number `ritornello-install` recorded, to
+//! know whether its own update may proceed from the page.
 //!
 //! What a red test here means: either a component started inheriting the
 //! product number again (so it can no longer be fixed on its own), or one
@@ -60,22 +64,31 @@ mod tests {
     /// mechanism rather than a second one.
     const THE_INSTALLER: &str = "ritornello-install";
 
+    /// The privileged updater: the sixth number. It travels inside the core's
+    /// archive, but only `ritornello-install` places it (it runs as root), so
+    /// the core compares its number, for equality, with the one the installer
+    /// recorded before updating itself from the page. Its bytes cannot serve:
+    /// they change at every build (measured, beta.6 against beta.7, its code
+    /// unchanged). It therefore moves only when it changes, never with the
+    /// product, and is exempt from the product rules like a companion
+    /// (`tied_to_product`); `scripts/changed-components.sh` refuses a change
+    /// to it that left its number alone.
+    const THE_UPDATER: &str = "ritornello-updater";
+
     /// Crates that legitimately keep inheriting the product number: no
-    /// archive is named after them. `ritornello-updater` is here because it
-    /// travels inside the core's archive rather than as its own component.
+    /// archive is named after them.
     const INTERNAL_CRATES: &[&str] = &[
         "ritornello-proto",
         "ritornello-i18n",
         "ritornello-plugin-sdk",
-        "ritornello-updater",
         // Shared plugins.toml editing: it inherits the product number and no
         // archive is named after it.
         "ritornello-manifest",
     ];
 
-    /// Every crate whose version names an archive or a tag: the core, the
-    /// plugins, the companions and the installer. One list, so a rule cannot
-    /// forget one of the four.
+    /// Every crate whose version names an archive or a tag, or is compared by
+    /// a device: the core, the plugins, the companions, the installer and the
+    /// updater. One list, so a rule cannot forget one of the five.
     fn shipped_crate_names() -> Vec<String> {
         let mut names = vec!["ritornello-core".to_string()];
         names.extend(
@@ -85,6 +98,7 @@ mod tests {
         );
         names.extend(SHIPPED_COMPANIONS.iter().map(|c| c.to_string()));
         names.push(THE_INSTALLER.to_string());
+        names.push(THE_UPDATER.to_string());
         names
     }
 
@@ -106,8 +120,12 @@ mod tests {
     /// The installer's number is its own for another reason: it is published
     /// on a channel of its own and moves only when the installer changes, so
     /// the product's generation and prerelease suffix say nothing about it.
+    ///
+    /// The updater's is its own because the core compares it for equality
+    /// (see `THE_UPDATER`): any move not caused by a change of the updater
+    /// would refuse every device's core update until an installer run.
     fn tied_to_product(name: &str) -> bool {
-        !SHIPPED_COMPANIONS.contains(&name) && name != THE_INSTALLER
+        !SHIPPED_COMPANIONS.contains(&name) && name != THE_INSTALLER && name != THE_UPDATER
     }
 
     /// The shipped crates whose number must follow the product rules
@@ -364,6 +382,23 @@ mod tests {
     }
 
     /// Every companion declares its own version, and it is valid semver.
+    /// The updater is exempt from the product rules exactly as a companion
+    /// is, and declares a finished `X.Y.Z` of its own: a number compared on a
+    /// device, never a prerelease of the product.
+    #[test]
+    fn the_updater_has_a_finished_number_of_its_own() {
+        assert!(!tied_to_product(THE_UPDATER));
+        for product in ["0.2.0-beta.7", "1.3.0"] {
+            assert_eq!(major_problem(product, THE_UPDATER, "1.0.0"), None, "{product}");
+        }
+        let version = declared_version(&crate_manifest(THE_UPDATER))
+            .unwrap_or_else(|| panic!("{THE_UPDATER} inherits the product version"));
+        assert!(
+            is_valid_semver(&version) && prerelease(&version).is_none(),
+            "{THE_UPDATER} declares {version}, which is not a finished major.minor.patch"
+        );
+    }
+
     #[test]
     fn every_companion_declares_a_valid_semver_of_its_own() {
         for name in SHIPPED_COMPANIONS {

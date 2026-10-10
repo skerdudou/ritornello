@@ -42,6 +42,10 @@ pub const INITIAL_CONFIG_PREFIX: &str = "initial-config/";
 pub const FRAGMENT_NAME: &str = "plugins.toml.fragment";
 /// Where the core binary lives inside the core archive.
 pub const CORE_BINARY: &str = "usr/local/bin/ritornello-core";
+
+/// Where the archives carry systemd units and polkit rules: files the core
+/// never places, read only to hash them (`Contents::digests`).
+const HASHED_PREFIXES: &[&str] = &["etc/systemd/system/", "etc/polkit-1/rules.d/"];
 /// Reference files, shipped for reading and never written anywhere.
 const EXAMPLES_PREFIX: &str = "examples/";
 
@@ -127,6 +131,11 @@ pub struct Contents {
     /// `(bare name, bytes)`. Written **only if the target is absent**.
     pub initial_config: Vec<(String, Vec<u8>)>,
     pub fragment: Option<String>,
+    /// SHA-256 (hex) of each unit and polkit rule the archive carries, by
+    /// path: what the core holds against the identity its release's
+    /// inventory publishes for that file before updating itself
+    /// (`update::privileged::archive_disagrees`). Never written anywhere.
+    pub digests: std::collections::BTreeMap<String, String>,
 }
 
 /// True when everything the archive carries is something the core can install
@@ -246,31 +255,6 @@ pub fn only_its_own_binary(entries: &[String]) -> bool {
     // Exactly one, not at least one: with two, the core would have to pick,
     // and picking silently is how a wrong binary gets installed.
     binaries == 1
-}
-
-/// What a **core** archive carries that `install_one` never places anywhere:
-/// everything outside the core binary and the two `etc/ritornello`
-/// subdirectories a release owns. In practice this is the privileged
-/// installer, the systemd units and the polkit rules — root could in
-/// principle place some of these, but nothing on this unprivileged side ever
-/// does, so this is exactly what a core update did not touch.
-///
-/// `PLUGINS_PREFIX` is excluded too, even though a core archive has never
-/// carried one: the rule this function states is "everything `install_one`
-/// places", and that prefix is one of the places it looks, whichever archive
-/// is asked about.
-///
-/// Directory entries are dropped: they describe no content, and the page has
-/// nothing to say about a directory a release "carries".
-pub fn core_not_installed(entries: &[String]) -> Vec<String> {
-    entries
-        .iter()
-        .filter(|e| !e.ends_with('/'))
-        .filter(|e| e.as_str() != CORE_BINARY)
-        .filter(|e| !e.starts_with(PLUGINS_PREFIX))
-        .filter(|e| !ETC_PREFIXES.iter().any(|p| e.starts_with(p)))
-        .cloned()
-        .collect()
 }
 
 /// Rejects an absolute path or any component that could climb out.
@@ -443,7 +427,8 @@ pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
             || path.starts_with(PLUGINS_PREFIX)
             || ETC_PREFIXES.iter().any(|p| path.starts_with(p))
             || path.starts_with(INITIAL_CONFIG_PREFIX)
-            || path == FRAGMENT_NAME;
+            || path == FRAGMENT_NAME
+            || HASHED_PREFIXES.iter().any(|p| path.starts_with(p));
         if !want {
             continue;
         }
@@ -467,7 +452,9 @@ pub fn read(gz: &[u8], cap: usize) -> Result<Contents, ArchiveError> {
             return Err(ArchiveError::TooLarge(cap));
         }
 
-        if path == CORE_BINARY {
+        if HASHED_PREFIXES.iter().any(|p| path.starts_with(p)) {
+            out.digests.insert(path, crate::update::download::digest_hex(&bytes));
+        } else if path == CORE_BINARY {
             out.core_binary = Some(bytes);
         } else if let Some(name) = path.strip_prefix(PLUGINS_PREFIX) {
             // A second binary, a nested one, or the shape a doubled
@@ -1195,77 +1182,29 @@ mod tests {
         assert!(matches!(err, ArchiveError::UnsafeEntry(_)), "{err:?}");
     }
 
-    /// The real entry list of the core archive `installable_from_ui`'s own
-    /// test pins (`the_core_archive_could_never_pass_the_rule_that_governs_a_plugin`
-    /// in `update::mod`), so a change to either list is caught by both tests
-    /// at once. What must come out: the privileged installer, the three
-    /// systemd units and the two polkit rules — the core binary is excluded
-    /// because `install_one` does place it.
+    /// The units and the rules of a core archive are hashed as read, and
+    /// nothing else is: their digests are what the core holds against its
+    /// release's inventory before updating itself.
+    ///
+    /// **[MUTATION]**: drop the hashed prefixes from `want` — red, nothing
+    /// read is hashed.
     #[test]
-    fn a_core_archive_names_the_installer_the_units_and_the_rules_as_not_installed() {
-        let entries: Vec<String> = [
-            "etc/",
-            "etc/polkit-1/",
-            "etc/polkit-1/rules.d/",
-            "etc/polkit-1/rules.d/52-ritornello-update.rules",
-            "etc/polkit-1/rules.d/50-ritornello-power.rules",
-            "etc/systemd/",
-            "etc/systemd/system/",
-            "etc/systemd/system/ritornello.service",
-            "etc/systemd/system/ritornello-update.service",
-            "etc/systemd/system/ritornello-rollback.service",
-            "usr/",
-            "usr/local/",
-            "usr/local/lib/",
-            "usr/local/lib/ritornello/",
-            "usr/local/lib/ritornello/ritornello-update",
-            "usr/local/bin/",
-            "usr/local/bin/ritornello-core",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        let mut not_installed = core_not_installed(&entries);
-        not_installed.sort();
-        let mut expected: Vec<String> = [
-            "etc/polkit-1/rules.d/52-ritornello-update.rules",
-            "etc/polkit-1/rules.d/50-ritornello-power.rules",
-            "etc/systemd/system/ritornello.service",
-            "etc/systemd/system/ritornello-update.service",
-            "etc/systemd/system/ritornello-rollback.service",
-            "usr/local/lib/ritornello/ritornello-update",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        expected.sort();
-        assert_eq!(not_installed, expected);
-    }
-
-    /// A plugin archive carries nothing outside its own prefix (the fixture
-    /// in `installable_from_ui`'s own test), so every entry that is not a
-    /// directory comes back — proving the function names what is left
-    /// **outside** the placed prefixes rather than an empty set by accident.
-    #[test]
-    fn a_plugin_archive_has_nothing_a_core_rule_would_exempt() {
-        let entries: Vec<String> = [
-            "etc/",
-            "etc/ritornello/",
-            "etc/ritornello/input-presets/",
-            "etc/ritornello/input-presets/radio/",
-            "etc/ritornello/input-presets/radio/default.toml",
-            "usr/",
-            "usr/local/",
-            "usr/local/lib/",
-            "usr/local/lib/ritornello/",
-            "usr/local/lib/ritornello/plugins/",
-            "usr/local/lib/ritornello/plugins/ritornello-plugin-radio",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        // Everything here is under an installed prefix (`ETC_PREFIXES` or
-        // `PLUGINS_PREFIX`) or is a directory, so nothing is left over.
-        assert!(core_not_installed(&entries).is_empty());
+    fn the_units_and_the_rules_are_hashed_and_nothing_else() {
+        let gz = targz(&[
+            ("./etc/systemd/system/ritornello.service", b"[Unit]\n"),
+            ("./etc/polkit-1/rules.d/52-ritornello-update.rules", b"polkit.addRule();\n"),
+            ("./usr/local/lib/ritornello/ritornello-update", b"ELF"),
+            ("./usr/local/bin/ritornello-core", b"core"),
+        ]);
+        let c = read(&gz, DECOMPRESSED_MAX).unwrap();
+        let digest = crate::update::download::digest_hex;
+        assert_eq!(
+            c.digests,
+            std::collections::BTreeMap::from([
+                ("etc/polkit-1/rules.d/52-ritornello-update.rules".to_string(), digest(b"polkit.addRule();\n")),
+                ("etc/systemd/system/ritornello.service".to_string(), digest(b"[Unit]\n")),
+            ])
+        );
+        assert_eq!(c.core_binary.as_deref(), Some(&b"core"[..]), "the core binary is still read");
     }
 }

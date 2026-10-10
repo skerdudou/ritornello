@@ -404,14 +404,18 @@ fn fresh_install() -> (Plan, BTreeMap<String, Vec<u8>>) {
             format: 1,
             components: [(
                 "core".to_string(),
-                Recorded { version: "0.2.0-beta.2".into(), privileged: privileged.clone() },
+                Recorded { version: "0.2.0-beta.2".into(), privileged: privileged.clone(), identity: Default::default() },
             )]
             .into(),
         }),
         // A fresh device recorded nothing: the union is the new record.
         provisional_registry: Some(Registry {
             format: 1,
-            components: [("core".to_string(), Recorded { version: "0.2.0-beta.2".into(), privileged })].into(),
+            components: [(
+                "core".to_string(),
+                Recorded { version: "0.2.0-beta.2".into(), privileged, identity: Default::default() },
+            )]
+            .into(),
         }),
         enable_units: vec!["ritornello.service".into()],
         start_service: true,

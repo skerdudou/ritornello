@@ -26,6 +26,15 @@ pub struct Recorded {
     /// trusting a stale or absent inventory to still describe a component
     /// it may have moved past.
     pub privileged: Vec<String>,
+    /// Which content each privileged file placed is, by destination: the
+    /// inventory's `identity`, recorded as placed. The core compares it with
+    /// what a release offers before updating itself from the page, so a
+    /// file placed by anything but this installer is never vouched for here.
+    /// A registry written before identities existed has none: read as empty,
+    /// it makes the next run place the component again (`plan::is_current`),
+    /// which records them. Omitted from the file when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub identity: BTreeMap<String, String>,
 }
 
 /// `/var/lib/ritornello-install/installed.toml`: everything the installer
@@ -66,7 +75,7 @@ mod tests {
         let mut components = BTreeMap::new();
         components.insert(
             "radio".to_string(),
-            Recorded { version: "0.2.0".to_string(), privileged: vec![] },
+            Recorded { version: "0.2.0".to_string(), privileged: vec![], identity: BTreeMap::new() },
         );
         components.insert(
             "files-mount".to_string(),
@@ -76,9 +85,56 @@ mod tests {
                     "/etc/systemd/system/ritornello-media-mount.service".to_string(),
                     "/etc/polkit-1/rules.d/51-ritornello-media.rules".to_string(),
                 ],
+                identity: [
+                    ("/etc/systemd/system/ritornello-media-mount.service".to_string(), "sha256:ab".to_string()),
+                    ("/etc/polkit-1/rules.d/51-ritornello-media.rules".to_string(), "sha256:cd".to_string()),
+                ]
+                .into(),
             },
         );
         Registry { format: 1, components }
+    }
+
+    /// The exact text this installer writes for a core it placed with
+    /// identities. The core's reader is tested on this very text
+    /// (`install_registry::tests::RENDERED_WITH_IDENTITIES`); if this
+    /// rendering changes, that copy must follow.
+    #[test]
+    fn the_rendering_with_identities_is_the_text_the_core_is_tested_on() {
+        let core = Recorded {
+            version: "0.3.0".into(),
+            privileged: vec![
+                "/etc/systemd/system/ritornello.service".into(),
+                "/usr/local/lib/ritornello/ritornello-update".into(),
+            ],
+            identity: [
+                ("/etc/systemd/system/ritornello.service".to_string(), "sha256:6e6b".to_string()),
+                ("/usr/local/lib/ritornello/ritornello-update".to_string(), "version:1.0.0".to_string()),
+            ]
+            .into(),
+        };
+        let radio = Recorded { version: "0.3.2".into(), privileged: vec![], identity: BTreeMap::new() };
+        let registry =
+            Registry { format: 1, components: [("core".to_string(), core), ("radio".to_string(), radio)].into() };
+        let want = r#"format = 1
+
+[components.core]
+version = "0.3.0"
+privileged = [
+    "/etc/systemd/system/ritornello.service",
+    "/usr/local/lib/ritornello/ritornello-update",
+]
+
+[components.core.identity]
+"/etc/systemd/system/ritornello.service" = "sha256:6e6b"
+"/usr/local/lib/ritornello/ritornello-update" = "version:1.0.0"
+
+[components.radio]
+version = "0.3.2"
+privileged = []
+"#;
+        assert_eq!(registry.render(), want);
+        assert_eq!(Registry::parse(want).unwrap(), registry);
     }
 
     #[test]
@@ -97,7 +153,11 @@ mod tests {
     /// rendering changes, that copy must follow.
     #[test]
     fn the_rendering_of_every_component_is_the_text_the_core_is_tested_on() {
-        let rec = |v: &str, p: &[&str]| Recorded { version: v.into(), privileged: p.iter().map(|s| s.to_string()).collect() };
+        let rec = |v: &str, p: &[&str]| Recorded {
+            version: v.into(),
+            privileged: p.iter().map(|s| s.to_string()).collect(),
+            identity: BTreeMap::new(),
+        };
         let registry = Registry {
             format: 1,
             components: [

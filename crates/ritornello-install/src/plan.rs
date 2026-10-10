@@ -448,8 +448,8 @@ fn finish(
 }
 
 /// Whether the device already has `name` at `offered`, with exactly the
-/// privileged files `privileged` names, so that placing it again would
-/// change nothing.
+/// privileged files `identity` names, each recorded as that same content, so
+/// that placing it again would change nothing.
 ///
 /// **The trust rule: only root-owned data may justify a skip.** Skipping is
 /// the one decision here that makes the installer do *less* as root, so it
@@ -461,8 +461,11 @@ fn finish(
 /// a version there would otherwise keep a stale or tampered root unit, rule
 /// or binary in place across every run meant to repair it. Concretely:
 ///
-/// - no record, another version recorded, or another set of privileged
-///   files recorded: not current, whatever anything else says;
+/// - no record, another version recorded, another set of privileged files
+///   recorded, or one recorded with another identity (none at all, for a
+///   registry written before identities existed): not current, whatever
+///   anything else says. Placing it again is what records the identities
+///   the core compares before updating itself from the page;
 /// - a record that matches, but an updater memory naming another version
 ///   for the same component (the updater moved its binary without telling
 ///   the registry): not current either;
@@ -476,29 +479,32 @@ fn is_current(
     untrusted: &BTreeMap<String, String>,
     name: &str,
     offered: &str,
-    privileged: &[String],
+    identity: &BTreeMap<String, String>,
 ) -> bool {
     let Some(rec) = recorded.get(name) else { return false };
     let same_files = {
         let a: BTreeSet<&String> = rec.privileged.iter().collect();
-        let b: BTreeSet<&String> = privileged.iter().collect();
+        let b: BTreeSet<&String> = identity.keys().collect();
         a == b
     };
-    if rec.version != offered || !same_files {
+    if rec.version != offered || !same_files || rec.identity != *identity {
         return false;
     }
     untrusted.get(name).is_none_or(|v| v == offered)
 }
 
 /// Two registries that record the same components at the same versions
-/// with the same privileged files, in whatever order: rewriting one with
-/// the other changes nothing the installer or the core ever reads.
+/// with the same privileged files and identities, in whatever order:
+/// rewriting one with the other changes nothing the installer or the core
+/// ever reads.
 fn same_registry(a: &Registry, b: &Registry) -> bool {
     let files = |r: &Recorded| r.privileged.iter().cloned().collect::<BTreeSet<String>>();
     a.format == b.format
         && a.components.len() == b.components.len()
         && a.components.iter().all(|(name, ra)| {
-            b.components.get(name).is_some_and(|rb| ra.version == rb.version && files(ra) == files(rb))
+            b.components.get(name).is_some_and(|rb| {
+                ra.version == rb.version && files(ra) == files(rb) && ra.identity == rb.identity
+            })
         })
 }
 
@@ -630,6 +636,13 @@ fn install_or_update(
         // version and what it places privileged (none, for most plugins):
         // the version is what lets the next run leave it alone.
         let privileged: Vec<String> = c.files.iter().filter(|f| f.privileged).map(|f| f.dest.clone()).collect();
+        // `Inventory::parse` refused a privileged file without one.
+        let identity: BTreeMap<String, String> = c
+            .files
+            .iter()
+            .filter(|f| f.privileged)
+            .filter_map(|f| Some((f.dest.clone(), f.identity.clone()?)))
+            .collect();
         // A companion was there with its plugin, or on its own record.
         let was_there = if c.name == inv.core.name {
             dev.core_present
@@ -639,7 +652,7 @@ fn install_or_update(
             declared.contains(c.name.as_str())
         };
         let current =
-            !reinstall && was_there && is_current(&recorded, &dev.updater_placed, &c.name, &c.version, &privileged);
+            !reinstall && was_there && is_current(&recorded, &dev.updater_placed, &c.name, &c.version, &identity);
         if !current {
             let archive = c.archive_for(arch);
             plan.archives.insert(archive.clone());
@@ -675,7 +688,7 @@ fn install_or_update(
                 }
             }
         }
-        new_registry.insert(c.name.clone(), Recorded { version: c.version.clone(), privileged });
+        new_registry.insert(c.name.clone(), Recorded { version: c.version.clone(), privileged, identity });
         if current {
             plan.summary.up_to_date.push(c.name.clone());
         } else if was_there {
@@ -748,7 +761,7 @@ fn install_or_update(
         if let Some(p) = shipped(l) {
             let current = !reinstall
                 && dev.packs.contains(&id)
-                && is_current(&recorded, &BTreeMap::new(), &id, &p.version, &[]);
+                && is_current(&recorded, &BTreeMap::new(), &id, &p.version, &BTreeMap::new());
             if current {
                 plan.summary.up_to_date.push(id.clone());
             } else {
@@ -756,7 +769,7 @@ fn install_or_update(
                 plan.packs.push((p.archive.clone(), id.clone()));
                 plan.summary.languages_placed.push(id.clone());
             }
-            new_registry.insert(id, Recorded { version: p.version.clone(), privileged: Vec::new() });
+            new_registry.insert(id, Recorded { version: p.version.clone(), privileged: Vec::new(), identity: BTreeMap::new() });
         } else if let Some(old) = recorded.get(&id) {
             // Kept as it is, not shipped by this release: so is its record.
             new_registry.insert(id, old.clone());
@@ -899,18 +912,26 @@ fn settle(mut plan: Plan, dev: &DeviceState) -> Plan {
 /// The union of what the device recorded and what this plan records: per
 /// component, the new version when there is one, and every privileged path
 /// either side names.
+///
+/// **Identities are the one thing it does not unite.** This record is
+/// written before anything is placed, and stays if the run stops halfway; the
+/// core reads identities as a promise of what is on the disk. So it keeps only
+/// an identity both sides agree on: one this plan would change is dropped —
+/// unknown, which makes the core refuse until a run completes — and one only
+/// the plan names is not recorded yet.
 fn provisional(old: &BTreeMap<String, Recorded>, new: &BTreeMap<String, Recorded>) -> Registry {
     let mut components = old.clone();
     for (name, rec) in new {
         let entry = components
             .entry(name.clone())
-            .or_insert_with(|| Recorded { version: rec.version.clone(), privileged: Vec::new() });
+            .or_insert_with(|| Recorded { version: rec.version.clone(), privileged: Vec::new(), identity: BTreeMap::new() });
         entry.version = rec.version.clone();
         for p in &rec.privileged {
             if !entry.privileged.contains(p) {
                 entry.privileged.push(p.clone());
             }
         }
+        entry.identity.retain(|path, id| rec.identity.get(path) == Some(id));
     }
     Registry { format: 1, components }
 }
@@ -1006,13 +1027,28 @@ pub(crate) mod tests {
 
     /// One `files` entry in `install-inventory.py`'s own shape.
     fn file(path: &str, mode: &str, owner: &str, privileged: bool) -> Value {
-        json!({
+        let mut entry = json!({
             "archive_path": path,
             "dest": format!("/{path}"),
             "mode": mode,
             "owner": owner,
             "privileged": privileged,
-        })
+        });
+        if privileged {
+            entry["identity"] = json!(test_identity(&format!("/{path}")));
+        }
+        entry
+    }
+
+    /// The identity `inv()` gives the privileged file placed at `dest`, and
+    /// the one a registry records for it once placed.
+    pub(crate) fn test_identity(dest: &str) -> String {
+        format!("sha256:fixture{dest}")
+    }
+
+    /// `paths` with the identity `inv()` gives each.
+    pub(crate) fn identities(paths: &[&str]) -> BTreeMap<String, String> {
+        paths.iter().map(|p| (p.to_string(), test_identity(p))).collect()
     }
 
     /// A plugin component in the real shape: its binary under the plugins
@@ -1041,12 +1077,12 @@ pub(crate) mod tests {
     }
 
     /// A trimmed inventory in the exact shape `scripts/install-inventory.py`
-    /// writes (format 1), parsed through `Inventory::parse` so its
+    /// writes (format 2), parsed through `Inventory::parse` so its
     /// `deny_unknown_fields` holds the shape to the real one.
     pub(crate) fn inv() -> Inventory {
         let simple = |n: &str| plugin(n, vec![], json!([]), json!([]), Value::Null);
         let doc = json!({
-            "format": 1,
+            "format": 2,
             "product": "0.2.0-beta.2",
             "reference_order": ["radio", "cd", "files", "nrj-metas", "musicbrainz"],
             "core": {
@@ -1143,6 +1179,7 @@ pub(crate) mod tests {
                         Recorded {
                             version: "0.2.0-beta.1".to_string(),
                             privileged: paths.iter().map(|p| p.to_string()).collect(),
+                            identity: identities(paths),
                         },
                     )
                 })
@@ -1215,7 +1252,7 @@ pub(crate) mod tests {
         assert_eq!(reg.components.get(CORE).map(|r| r.version.as_str()), Some("0.2.0-beta.2"));
         assert_eq!(
             reg.components.get("radio"),
-            Some(&Recorded { version: "0.2.0-beta.2".to_string(), privileged: vec![] }),
+            Some(&Recorded { version: "0.2.0-beta.2".to_string(), privileged: vec![], identity: BTreeMap::new() }),
             "radio places nothing privileged, and is recorded all the same, with its version"
         );
         assert_eq!(plan.summary.installed, vec!["core", "radio"]);
@@ -2443,6 +2480,7 @@ privileged = [
         let rec = |privileged: &[&str]| Recorded {
             version: OFFERED.to_string(),
             privileged: privileged.iter().map(|p| p.to_string()).collect(),
+            identity: identities(privileged),
         };
         Registry {
             format: 1,
@@ -2486,6 +2524,62 @@ privileged = [
             && plan.remove_trees.is_empty()
             && plan.disable_units.is_empty()
             && plan.unmount_roots.is_empty()
+    }
+
+    /// A registry written before identities existed records the core at the
+    /// offered version, with the same files, and nothing about their
+    /// content. The core reads that as unknown and refuses to update itself
+    /// from the page, so the run must not leave it as is: it places the core
+    /// again and records what it placed.
+    ///
+    /// **[MUTATION]**: drop `rec.identity != *identity` from `is_current` —
+    /// this test fails, the core being called up to date.
+    #[test]
+    fn a_record_without_identities_places_the_core_again_and_records_them() {
+        let mut device = current_device();
+        for rec in device.registry.as_mut().unwrap().components.values_mut() {
+            rec.identity.clear();
+        }
+        let plan = keep(&device);
+        assert!(plan.summary.updated.contains(&CORE.to_string()), "{:?}", plan.summary);
+        assert!(plan.summary.updated.contains(&MOUNT.to_string()), "{:?}", plan.summary);
+        assert!(plan.puts.iter().any(|p| p.dest == "/etc/systemd/system/ritornello.service"));
+        let core = &plan.registry.as_ref().expect("a run records").components[CORE];
+        assert_eq!(core.identity, identities(&["/etc/systemd/system/ritornello.service"]));
+    }
+
+    /// One identity that differs is enough: the file on the device is not
+    /// the one the release carries, whatever the version says.
+    #[test]
+    fn another_identity_recorded_places_the_core_again() {
+        let mut device = current_device();
+        let core = device.registry.as_mut().unwrap().components.get_mut(CORE).unwrap();
+        core.identity.insert("/etc/systemd/system/ritornello.service".into(), "sha256:something-else".into());
+        let plan = keep(&device);
+        assert!(plan.summary.updated.contains(&CORE.to_string()), "{:?}", plan.summary);
+        assert!(!plan.summary.updated.contains(&MOUNT.to_string()), "{:?}", plan.summary);
+    }
+
+    /// The provisional record is written before anything is placed and stays
+    /// if the run stops: it must never vouch for a content not yet on the
+    /// disk. An identity the run is about to change is dropped (unknown, so
+    /// the core refuses until a run completes); one it keeps stays.
+    ///
+    /// **[MUTATION]**: drop the `retain` from `provisional` — this test fails,
+    /// the old identity standing for a file about to be replaced.
+    #[test]
+    fn the_provisional_record_never_vouches_for_a_file_not_yet_placed() {
+        let mut device = current_device();
+        let core = device.registry.as_mut().unwrap().components.get_mut(CORE).unwrap();
+        core.identity.insert("/etc/systemd/system/ritornello.service".into(), "sha256:the-old-unit".into());
+        let plan = keep(&device);
+        let prov = plan.provisional_registry.as_ref().expect("a run that places writes a provisional record");
+        assert!(prov.components[CORE].identity.is_empty(), "{:?}", prov.components[CORE]);
+        assert_eq!(
+            prov.components[MOUNT].identity,
+            identities(&[MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER]),
+            "an identity the run does not change stays"
+        );
     }
 
     /// The owner's case: a re-run on a device already up to date downloads
@@ -2684,7 +2778,7 @@ privileged = [
         let mut device = current_device();
         device.registry.as_mut().unwrap().components.insert(
             "cd".to_string(),
-            Recorded { version: OFFERED.to_string(), privileged: vec![] },
+            Recorded { version: OFFERED.to_string(), privileged: vec![], identity: BTreeMap::new() },
         );
         let plan = keep(&device);
         assert_eq!(plan.summary.cleared, vec!["cd"]);

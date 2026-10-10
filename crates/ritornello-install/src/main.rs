@@ -534,7 +534,11 @@ mod tests {
     fn an_up_to_date_device_is_told_so_before_any_question_download_or_apply() {
         use crate::plan::tests::{RADIO_EXEC, THEIRS_EXEC, dev, inv};
         use crate::registry::{Recorded, Registry};
-        let rec = |v: &str, p: &[&str]| Recorded { version: v.into(), privileged: p.iter().map(|s| s.to_string()).collect() };
+        let rec = |v: &str, p: &[&str]| Recorded {
+            version: v.into(),
+            privileged: p.iter().map(|s| s.to_string()).collect(),
+            identity: crate::plan::tests::identities(p),
+        };
         let registry = Registry {
             format: 1,
             components: [

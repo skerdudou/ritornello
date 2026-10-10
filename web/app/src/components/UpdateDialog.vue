@@ -194,6 +194,13 @@ function warningFor(c: ComponentOffer): string | null {
     if (c.needs_companion) {
       return t.value('update_row_needs_companion', { companion: c.needs_companion })
     }
+    // The same rule for the core's own privileged files: the core names
+    // them, or says it cannot tell.
+    if (c.needs_installer) {
+      return c.needs_installer.length > 0
+        ? t.value('update_row_needs_installer', { files: c.needs_installer.join(', ') })
+        : t.value('update_row_needs_installer_unknown')
+    }
     // A stranger's plugin or a pack was refused for its archive, not for
     // being privileged (`refusedNote`).
     return refusedNote(t.value, c)

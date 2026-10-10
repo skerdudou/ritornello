@@ -13,10 +13,10 @@ scripts/packaging.py stages the archives from, and `block` is the very
 an archive and its description cannot disagree. `--self-test` stages every
 component and proves it; the Rust suite runs that (packaging_manifest.rs).
 
-Format 1:
+Format 2:
 
     {
-      "format": 1,
+      "format": 2,
       "product": "<[workspace.package] version>",
       "reference_order": [<plugin names, in plugins.example.toml's order>],
       "core": <component>,
@@ -29,7 +29,8 @@ Format 1:
       "name", "version",
       "archive": "<base>-<version>-{arch}.tar.gz"   ({arch} is literal: the
                   installer substitutes the device's architecture label),
-      "files": [{"archive_path", "dest", "mode", "owner", "privileged"}],
+      "files": [{"archive_path", "dest", "mode", "owner", "privileged",
+                 "identity" (privileged files only)}],
       "initial_config": [{"archive_path", "target"}],
       "enable": [<unit names>], "mount_root": <path or null>,
       "block": <the plugins.toml [[plugin]] block, or null for the core
@@ -48,12 +49,24 @@ built with `tar -C <dir> .` and so name their members `./usr/...`: the
 installer's tar reader strips a leading `./` before looking a member up, and
 the bare form is the one `dest` is derived from (`dest = "/" + archive_path`).
 
+`identity` says which content a privileged file is, as a string compared only
+for equality: `sha256:<hex>` of a file of the tree (a unit, a polkit rule),
+whose bytes are the repository's; `version:<number>` of a privileged binary,
+the number of the crate that builds it (`[[bin]] name`), since its bytes differ
+at every build even when its code does not. ritornello-install records it for
+each file it places, and the core compares the one a release offers with the
+recorded one before updating itself from the page: a difference, or an
+unknown, sends the operator to ritornello-install. Format 2 because of it: an
+installer that reads format 1 refuses this one by name rather than tripping
+over a field it does not know.
+
 `files` holds what lands on the device: the component's own binary (none for
 a companion), its tree and its extra binaries. Examples are never installed and are absent; so is
 plugins.toml.fragment, whose content is `block`. Initial configuration is
 listed apart, because it is written only when the target is absent, under
 the operating name `target` in the plugin's data directory.
 """
+import hashlib
 import json
 import re
 import subprocess
@@ -133,14 +146,46 @@ def owner(path: str) -> str:
     raise SystemExit(f"{path}: no ownership rule for this location")
 
 
-def file_entry(path: str, binary: bool, privileged: bool) -> dict:
-    return {
+def file_entry(path: str, binary: bool, privileged: bool, identity: str | None = None) -> dict:
+    entry = {
         "archive_path": path,
         "dest": "/" + path,
         "mode": "0755" if binary else "0644",
         "owner": owner(path),
         "privileged": privileged,
     }
+    if privileged:
+        if not identity:
+            raise SystemExit(f"{path}: a privileged file needs an identity")
+        entry["identity"] = identity
+    return entry
+
+
+def content_identity(source: Path) -> str:
+    """A tree file's identity: the hash of the very bytes the archive carries
+    (packaging.stage copies `source` unchanged)."""
+    return "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def binary_crates() -> dict:
+    """`[[bin]] name` -> the crate that builds it, read from every
+    crates/*/Cargo.toml: the crate knows which binaries it builds, and a
+    binary no crate declares is refused rather than guessed."""
+    found = {}
+    for manifest in sorted((ROOT / "crates").glob("*/Cargo.toml")):
+        for b in tomllib.loads(manifest.read_text(encoding="utf-8")).get("bin", []):
+            found[b["name"]] = manifest.parent.name
+    return found
+
+
+def binary_identity(name: str) -> str:
+    """A privileged binary's identity: the number of the crate that builds it.
+    Its bytes cannot serve: they differ at every build (measured on
+    ritornello-update, beta.6 against beta.7, its code unchanged)."""
+    crate = binary_crates().get(name)
+    if crate is None:
+        raise SystemExit(f"{name}: no crate declares this binary in a [[bin]] section")
+    return "version:" + first_version(ROOT / "crates" / crate / "Cargo.toml")
 
 
 def initial_config_target(name: str) -> str:
@@ -159,9 +204,11 @@ def component(name: str, section: dict, version: str, main_binary, block, base: 
         if e.kind == "tree":
             # Exactly the rule of packaging_manifest.rs's
             # `every_privileged_plugin_agrees_with_packaging_toml`.
-            files.append(file_entry(e.archive_path, False, privileged_tree_dest(e.archive_path)))
+            privileged = privileged_tree_dest(e.archive_path)
+            identity = content_identity(e.source) if privileged else None
+            files.append(file_entry(e.archive_path, False, privileged, identity))
         elif e.kind == "binary":
-            files.append(file_entry(e.archive_path, True, True))
+            files.append(file_entry(e.archive_path, True, True, binary_identity(e.source.name)))
         elif e.kind == "initial_config":
             # Not `base`: that name is the archive's, and reusing it here once
             # named generic-input's archive after its example file.
@@ -235,7 +282,7 @@ def build() -> dict:
         v = pack_version(lang, packs_toml)
         packs.append({"language": lang, "version": v, "archive": f"ritornello-lang-{lang}-{v}.tar.gz"})
     return {
-        "format": 1,
+        "format": 2,
         "product": first_version(ROOT / "Cargo.toml"),
         "reference_order": order,
         "core": core,
@@ -298,6 +345,25 @@ def self_test() -> int:
                 (bindir / e["name"]).write_text("fake\n")
             stage_it(out, bindir)
             staged = {p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()}
+            # The identity a device compares is the content the archive
+            # carries. A carriage return would make it a fact about the
+            # checkout that built the release (a Windows one writes CRLF where
+            # .gitattributes does not say eol=lf) rather than about the file.
+            for f in comp["files"]:
+                if not f["privileged"] or f["mode"] == "0755":
+                    continue
+                copy = out / f["archive_path"]
+                if not copy.is_file():
+                    continue
+                if f["identity"] != content_identity(copy):
+                    problems.append(f"{comp['name']}: the identity of {f['dest']} is not the hash of what the archive carries")
+                if b"\r" in copy.read_bytes():
+                    problems.append(f"{comp['name']}: {f['dest']} carries a carriage return; give its extension eol=lf in .gitattributes")
+        for f in comp["files"]:
+            if f["privileged"] and f["mode"] == "0755":
+                name = f["archive_path"].rsplit("/", 1)[-1]
+                if f["identity"] != binary_identity(name):
+                    problems.append(f"{comp['name']}: the identity of {f['dest']} is not the number of the crate that builds it")
         staged = {p for p in staged if not p.startswith("examples/")}
         own = comp["files"][1:] if has_main else comp["files"]
         described = {f["archive_path"] for f in own} | {c["archive_path"] for c in comp["initial_config"]}

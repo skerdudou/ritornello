@@ -1,6 +1,9 @@
 [package]
 name = "ritornello-updater"
-version.workspace = true
+# Its own number, the sixth: it moves only when this crate changes, and never
+# with the product. The core compares it for equality with the one
+# ritornello-install recorded placing; see scripts/changed-components.sh.
+version = "1.0.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

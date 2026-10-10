@@ -562,7 +562,33 @@ mod tests {
         let out = run_install_inventory(&[]);
         assert!(out.status.success(), "install-inventory.py failed:\n{}", String::from_utf8_lossy(&out.stderr));
         let inv: serde_json::Value = serde_json::from_slice(&out.stdout).expect("inventory.json is JSON");
-        assert_eq!(inv["format"], 1);
+        assert_eq!(inv["format"], 2);
+        // Every privileged file of the core says which content it is, in the
+        // two shapes the core compares: the hash of a unit or a rule as the
+        // repository holds it, the updater's own number for its binary.
+        for f in inv["core"]["files"].as_array().unwrap() {
+            let dest = f["dest"].as_str().unwrap();
+            let identity = f.get("identity").and_then(|i| i.as_str());
+            if f["privileged"] != true {
+                assert_eq!(identity, None, "{dest}: only a privileged file carries an identity");
+                continue;
+            }
+            let want = if dest == "/usr/local/lib/ritornello/ritornello-update" {
+                let cargo: toml::Value = toml::from_str(
+                    &std::fs::read_to_string(repo_root().join("crates/ritornello-updater/Cargo.toml")).unwrap(),
+                )
+                .unwrap();
+                format!("version:{}", cargo["package"]["version"].as_str().expect("the updater declares its own version"))
+            } else {
+                let source = deploy_dir().join(dest.rsplit('/').next().unwrap());
+                // As git stores it: the checkout of a Windows machine may
+                // write CRLF, the release is built from LF.
+                let bytes = std::fs::read(&source).unwrap_or_else(|e| panic!("{}: {e}", source.display()));
+                let lf: Vec<u8> = bytes.into_iter().filter(|b| *b != b'\r').collect();
+                format!("sha256:{}", crate::update::download::digest_hex(&lf))
+            };
+            assert_eq!(identity, Some(want.as_str()), "{dest}");
+        }
         let order: Vec<String> = inv["reference_order"]
             .as_array()
             .expect("reference_order is an array")
