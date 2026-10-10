@@ -1757,17 +1757,45 @@ mod tests {
     /// The Source confirms what Stop kept on screen: nothing moves — not the
     /// title, not the cover key, not anything else the slate held.
     ///
+    /// The cover is the Source's own, declared and arrived **before** the
+    /// stop: declared in the `arms` frame instead, `apply_declared_facts`
+    /// would re-apply it after any reset, and the test would prove nothing.
+    ///
     /// **[MUTATION]** the `Some(a)` arm of the `Nothing` match calling
     /// `set_identity(None)` instead of `arm` → the title assertion fires.
+    /// Same-identity arming resetting the whole slate (`Metadata` cleared then
+    /// re-set to the identity) → the title assertion fires; resetting only the
+    /// Source's cover there (`set_cover_source(None, ..)`) → the
+    /// `selected_cover` assertion fires.
     #[tokio::test]
     async fn arming_the_same_identity_keeps_the_slate() {
         let id = serde_json::json!({"url": "one"});
-        let (mut core, np_rx, _d) = stopped_after_a_titled_track(&id).await;
+        let (mut core, np_rx, _state_rx, tmp) = setup_metadata(vec!["p".into()]);
+        core.handle_command(Command::PlayPause).await.unwrap();
+        core.handle_source_update("radio", plays(id.clone()));
+        core.handle_enrichment("p", enrichment(id.clone(), "A", "T"));
+        let image = tmp.path().join("folder.jpg");
+        std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let r = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
+        let s = crate::cover::CoverSource::Ref(r.clone());
+        core.set_source_cover(Some(r), None, "radio");
+        let key = crate::cover::key(&s);
+        let p = crate::cover::fetch(&s, None, crate::cover::CoverSettings::default().download_max)
+            .await
+            .expect("the test image must be readable");
+        core.app_covers().insert(key.clone(), p).await;
+        core.cover_arrived(key.clone(), true).await;
+        let href = format!("/api/cover/{key}");
+        assert_eq!(core.player_state().track.cover_href.as_deref(), Some(&href[..]), "otherwise the cover half proves nothing");
+        core.handle_command(Command::Stop).await.unwrap();
+
         let before = core.player_state().track;
         core.handle_source_update("radio", arms(id.clone()));
         let after = core.player_state().track;
         assert_eq!(after.title.as_deref(), Some("T"));
-        assert_eq!(after, before, "the whole slate, cover key included, must be kept");
+        assert!(core.metadata.selected_cover().is_some(), "the cover of the track on screen must be kept");
+        assert_eq!(after.cover_href.as_deref(), Some(&href[..]));
+        assert_eq!(after, before, "the whole slate must be kept");
         let np = np_rx.borrow().clone();
         assert_eq!(np.identity, Some(id));
         assert!(np.armed);
@@ -1844,6 +1872,47 @@ mod tests {
             assert!(!np.armed, "{label} must not leave the flag up");
             assert_eq!(core.player_state().track.title, None, "{label}");
         }
+    }
+
+    /// "Nothing armed" is `None`: an armed absence must never be published,
+    /// whoever asks for it.
+    ///
+    /// **[MUTATION]** `&& identity.is_some()` dropped from
+    /// `set_identity_state` → the `NowPlaying` assertion fires.
+    #[tokio::test]
+    async fn nothing_cannot_be_armed() {
+        let id = serde_json::json!({"url": "one"});
+        let (mut core, np_rx, _d) = stopped_after_a_titled_track(&id).await;
+        core.set_identity_state(None, true);
+        assert!(!np_rx.borrow().armed, "an armed flag without an identity must not reach the plugins");
+        assert_eq!(np_rx.borrow().identity, None);
+        assert!(!core.armed);
+    }
+
+    /// A late answer for the stopped track — same identity, so `add` takes it
+    /// — must not anchor a position on a track that does not sound: the
+    /// anchor would advance through the whole stop and show, on the next Play,
+    /// a position minutes ahead of the music.
+    ///
+    /// **[MUTATION]** the `self.playback &&` guard removed from
+    /// `handle_enrichment`'s anchoring → the anchor assertion fires.
+    #[tokio::test]
+    async fn a_late_enrichment_for_the_armed_track_anchors_no_position() {
+        let id = serde_json::json!({"url": "one"});
+        let (mut core, _np_rx, _d) = stopped_after_a_titled_track(&id).await;
+        core.handle_source_update("radio", arms(id.clone()));
+        let mut late = enrichment(id.clone(), "A", "T2");
+        late.position_s = Some(40);
+        core.handle_enrichment("p", late);
+        assert_eq!(core.player_state().track.title.as_deref(), Some("T2"), "otherwise the enrichment never reached the anchoring");
+        assert!(core.position_anchor.is_none(), "nothing plays: there is no position to anchor");
+        assert_eq!(core.player_state().position_s, None);
+
+        // Play re-declares the armed identity: no stale position appears.
+        core.apply(SourceAction::play("http://fip")).await.unwrap();
+        core.handle_source_update("radio", plays(id));
+        core.refresh_position().await;
+        assert_eq!(core.player_state().position_s, None, "a position anchored while stopped must not surface on Play");
     }
 
     /// `armed` is read only beside `IdentityUpdate::Nothing` (field doc):

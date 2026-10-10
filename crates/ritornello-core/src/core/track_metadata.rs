@@ -396,7 +396,16 @@ impl<P: Player> Core<P> {
         // deduplicates and returns `false`. And a higher-priority plugin
         // answering for the first time **becomes** the winner, so its
         // announcement does anchor, which is intended.
-        if self.metadata.winner() == Some(plugin) {
+        //
+        // **And only while something plays.** An armed track keeps its
+        // identity, so a late answer for it — or one from a plugin that opted
+        // into armed tracks — passes `add` and would anchor a position on a
+        // track that does not sound: the anchor `Command::Stop` just forgot
+        // would come back, and advance through the whole stop until the next
+        // Play showed it, minutes ahead of the music. Nothing plays, so there
+        // is no position to anchor; the winner's next answer once playback
+        // has started anchors it, as on any fresh track.
+        if self.playback && self.metadata.winner() == Some(plugin) {
             self.position_anchor = self.metadata.position_s().map(|p| (p, Instant::now()));
         }
         // The enrichment just retained may have changed the cover that
