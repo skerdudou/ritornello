@@ -110,6 +110,9 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [
   ...REMOTE_MODES,
 ]
 
+/** The commands the core still acts on in standby (`handle_command`'s gate). */
+const STANDBY_COMMANDS = ['Power', 'SelectSource', 'SourceCycle']
+
 /**
  * A command the device would ignore in the current state: its button is
  * greyed rather than offered.
@@ -133,8 +136,6 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [
  * A state not yet received (`null`) greys nothing: the remote opens usable,
  * and the frame corrects at once.
  */
-const STANDBY_COMMANDS = ['Power', 'SelectSource', 'SourceCycle']
-
 export function unavailable(name: string, state: PlayerPayload | null): boolean {
   if (!state) return false
   if (state.standby && !STANDBY_COMMANDS.includes(name)) return true
