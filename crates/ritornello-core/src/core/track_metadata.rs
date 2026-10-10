@@ -2400,5 +2400,9 @@ mod tests {
         assert_eq!(core.player_state().track.title.as_deref(), Some("Alpha"), "otherwise the read was dropped and proves nothing");
         assert_eq!(core.player_state().track.cover_href.as_deref(), Some(&href[..]), "the shown cover must not blink");
         assert_eq!(core.cover_in_flight, None, "no second fetch of a cover already shown");
+        // The marker could be released by a fetch already finished; the
+        // channel holds every fetch's answer, so an empty one says none ran.
+        tokio::task::yield_now().await;
+        assert!(cover_rx.try_recv().is_err(), "no second fetch of a cover already shown");
     }
 }

@@ -572,15 +572,21 @@ mod tests {
     async fn with_two_stations_next_and_prev_always_wrap_to_the_other() {
         // Playing, as in use: next and previous only launch while something
         // plays (stopped, they arm: see the `*_while_stopped_*` tests).
+        // From station 1, both directions land on station 2: the URL says
+        // which, where the variant alone would accept any stream.
         let mut source = make_source(two_stations(), 1);
         source.activate().await;
-        let outcome = source.next().await;
-        assert!(matches!(outcome.action, SourceAction::Play { .. }));
+        match source.next().await.action {
+            SourceAction::Play { uri, .. } => assert_eq!(uri, INTER),
+            other => panic!("expected a Play, got {other:?}"),
+        }
 
         let mut source = make_source(two_stations(), 1);
         source.activate().await;
-        let outcome = source.prev().await;
-        assert!(matches!(outcome.action, SourceAction::Play { .. }));
+        match source.prev().await.action {
+            SourceAction::Play { uri, .. } => assert_eq!(uri, INTER, "previous wraps around to the last"),
+            other => panic!("expected a Play, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -887,6 +893,9 @@ mod tests {
         assert_eq!(n.preset, Some(1), "the number follows the armed station");
         assert_eq!(n.preset_name.as_deref(), Some("France Inter"));
         assert!(n.identity.is_none(), "the armed identity (the URL) has not changed");
+        // Persisted, as while playing: a reboot resumes the armed station, not
+        // whatever now sits at its old number.
+        assert_eq!(state::load(&source.state_path).preset, 1, "the corrected number must be persisted");
         match source.activate().await.action {
             SourceAction::Play { uri, .. } => assert_eq!(uri, INTER),
             other => panic!("expected a Play, got {other:?}"),

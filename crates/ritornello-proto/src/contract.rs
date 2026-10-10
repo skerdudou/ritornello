@@ -122,12 +122,13 @@ mod tests {
     }
 
     #[test]
-    fn every_contract_starts_at_one_zero_and_source_and_display_have_moved_once() {
+    fn every_contract_is_at_the_version_its_additions_brought() {
         for c in Contract::ALL {
-            // The source contract went to 1.1 for `play_request` and to 1.2 for
-            // `armed`; the display contract to 1.1 for the source catalog's
-            // `icon`; the metadata contract to 1.1 for `NowPlaying::armed`;
-            // every other one is still at 1.0.
+            // Every contract started at 1.0. Since then:
+            // - source: 1.1 for `play_request`, 1.2 for `armed`;
+            // - display: 1.1 for the source catalog's `icon`;
+            // - metadata: 1.1 for `NowPlaying::armed`;
+            // - every other one: still 1.0.
             let expected = match c {
                 Contract::Source => ContractVersion::new(1, 2),
                 Contract::Display | Contract::Metadata => ContractVersion::new(1, 1),
