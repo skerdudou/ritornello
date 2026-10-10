@@ -20,6 +20,9 @@ import type { PresetsPayload } from '../types'
 export function usePresets() {
   const names = ref<Map<string, Map<number, string>>>(new Map())
   const sources = ref<string[]>([])
+  // The icon each source announced, by source name; a source that announced
+  // none has no entry (the page then draws its initial).
+  const icons = ref<Map<string, string>>(new Map())
 
   async function reload(): Promise<void> {
     const load = await api.get<PresetsPayload>('/api/presets').catch((e: unknown) => {
@@ -32,6 +35,7 @@ export function usePresets() {
     // silently — better to keep the previous list.
     if (!load || !Array.isArray(load.sources)) return
     sources.value = load.sources.map((s) => s.name)
+    icons.value = new Map(load.sources.flatMap((s): [string, string][] => (s.icon ? [[s.name, s.icon]] : [])))
     names.value = new Map(
       load.sources.map((s) => [s.name, new Map((s.presets ?? []).map((p) => [p.index, p.name]))]),
     )
@@ -41,5 +45,5 @@ export function usePresets() {
     return names.value.get(source)?.get(n) ?? null
   }
 
-  return { reload, nameOf, sources }
+  return { reload, nameOf, sources, icons }
 }
