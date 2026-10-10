@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use ritornello_proto::{Overlay, PlayerState};
+use ritornello_proto::{Overlay, Playback, PlayerState};
 use std::io::Write;
 use std::path::Path;
 
@@ -136,6 +136,14 @@ pub fn compose(state: &PlayerState) -> [String; 3] {
         (Some(n), _) => format!("{name}  {n}"),
         (None, _) => name,
     };
+    // The playback state, as one glyph and one space at the head of the line
+    // (two columns). Owner's decision. Overlay and standby return earlier and
+    // show none. The glyphs are the ones the console font actually has:
+    // measured on the Pi, it is Lat15-Fixed16 (console-setup FONTFACE=Fixed,
+    // 8x16, C.UTF-8), whose unicode table contains U+25B6, U+2551 and U+25A0
+    // (and the em dash above) but neither U+23F8 (pause) nor U+25BA. A glyph
+    // missing from the font would render as a blank or a box.
+    let line1 = format!("{} {line1}", playback_glyph(state.playback));
     // The preset name first, then the album, then the status: from the most
     // specific to the most generic.
     let line2 = state
@@ -147,6 +155,15 @@ pub fn compose(state: &PlayerState) -> [String; 3] {
     let line3 = title_line(state.track.artist.as_deref(), state.track.title.as_deref())
         .unwrap_or_default();
     [line1, line2, line3]
+}
+
+/// One glyph per playback state; see the font note in `compose`.
+fn playback_glyph(playback: Playback) -> char {
+    match playback {
+        Playback::Playing => '\u{25B6}',
+        Playback::Paused => '\u{2551}',
+        Playback::Stopped => '\u{25A0}',
+    }
 }
 
 fn overlay_text(o: &Overlay) -> &str {
@@ -268,8 +285,40 @@ mod tests {
     #[test]
     fn composes_the_source_the_preset_and_the_total_on_the_first_line() {
         let l = compose(&radio_state());
-        assert_eq!(l[0], "RADIO  3/12");
+        assert_eq!(l[0], "■ RADIO  3/12");
         assert_eq!(l[1], "France Inter");
+    }
+
+    /// **[MUTATION]** mapping `Paused` to the stopped glyph makes the paused
+    /// assertion fire; mapping `Playing` to it makes the playing one fire.
+    #[test]
+    fn the_first_line_leads_with_one_glyph_per_playback_state() {
+        let mut e = radio_state();
+        e.playback = Playback::Playing;
+        assert_eq!(compose(&e)[0], "▶ RADIO  3/12");
+        e.playback = Playback::Paused;
+        assert_eq!(compose(&e)[0], "║ RADIO  3/12");
+        e.playback = Playback::Stopped;
+        assert_eq!(compose(&e)[0], "■ RADIO  3/12");
+    }
+
+    #[test]
+    fn the_glyphs_reach_the_tty_and_overlay_and_standby_show_none() {
+        // `sanitize` strips control characters only: the glyphs go through.
+        let mut e = radio_state();
+        e.playback = Playback::Playing;
+        assert!(render_console(&e).contains("▶ RADIO  3/12\r\n"));
+        // The overlay and standby branches are not the normal view.
+        e.overlay = Some(Overlay::Volume { level: 65, muted: false, text: "VOLUME 65 %".into(), remaining_ms: 4000 });
+        assert_eq!(compose(&e)[0], "VOLUME 65 %");
+        let st = PlayerState {
+            standby: true,
+            status: Some("VEILLE".into()),
+            playback: Playback::Paused,
+            ..Default::default()
+        };
+        assert_eq!(compose(&st)[0], "VEILLE");
+        assert_eq!(compose_at(&st, Some((13, 5))), ["VEILLE", "13:05", ""]);
     }
 
     #[test]
@@ -342,9 +391,9 @@ mod tests {
         // an accident.
         let mut e = radio_state();
         e.preset_count = None;
-        assert_eq!(compose(&e)[0], "RADIO  3");
+        assert_eq!(compose(&e)[0], "■ RADIO  3");
         e.preset_count = Some(0);
-        assert_eq!(compose(&e)[0], "RADIO  3");
+        assert_eq!(compose(&e)[0], "■ RADIO  3");
     }
 
     #[test]
@@ -354,7 +403,7 @@ mod tests {
         // screen was empty, indistinguishable from a dead display or a lost
         // tty.
         let e = PlayerState::default();
-        assert_eq!(compose(&e), ["—".to_string(), String::new(), String::new()]);
+        assert_eq!(compose(&e), ["■ —".to_string(), String::new(), String::new()]);
     }
 
     #[test]
@@ -367,7 +416,7 @@ mod tests {
             preset_count: Some(3),
             ..Default::default()
         };
-        assert_eq!(compose(&e)[0], "CD  1/3");
+        assert_eq!(compose(&e)[0], "■ CD  1/3");
     }
 
     #[test]
@@ -417,7 +466,7 @@ mod tests {
         e.track.title = Some("So What".into());
         let s = render_console(&e);
         assert!(s.starts_with("\x1b[2J\x1b[H"));
-        assert!(s.contains("RADIO  3/12\r\n"));
+        assert!(s.contains("■ RADIO  3/12\r\n"));
         assert!(s.contains("France Inter\r\n"));
         assert!(s.contains("Miles Davis — So What\r\n"));
         assert_eq!(s.matches("\r\n\r\n").count(), 2, "an empty line between each of the three");
