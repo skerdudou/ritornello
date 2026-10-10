@@ -1428,6 +1428,21 @@ known in advance: a slot-loading drive may never report `CDS_TRAY_OPEN`, so
 the same disc pulled and pushed back by hand would read there as a flicker (no
 insertion, resume point kept). Ritornello's own Eject is unaffected.
 
+**Armed tracks (Stop keeps what Play would start) have never run on the
+device.** The behaviour is proven by tests with fake sources and a fake core
+loop; three things remain
+unobserved:
+
+- the cd on a real drive: a known disc arming its track at insertion, then the
+  MusicBrainz lookup at insertion (a network round trip while nothing plays),
+  and Next and Previous moving the armed track without any mpv action;
+- the radio on the Pi: Next and Previous while stopped moving the armed station
+  without tuning it, and the table reshuffle following the armed station by URL;
+- an armed file read on a **sleeping NAS**: the tags and the embedded cover are
+  read from the share under a deadline, and what the owner sees while the share
+  spins up, and the late answer being dropped, were exercised only with a read
+  made slow on purpose.
+
 **The rollback only recognises "does not start."** It watches the service
 failing to come up — systemd's start-limit plus `OnFailure=` on the unit —
 which is what a marker-and-restart scheme can cheaply detect. A core that

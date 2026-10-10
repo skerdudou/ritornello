@@ -2447,6 +2447,24 @@ being torn down is ignored. The core answers by sending the source an
 ordinary `Play`, never `Activate`. The cd plugin uses it for its insertion
 setting.
 
+**A Source can arm what Play would start.** Stopping used to empty the
+screen, whatever the source. A source that knows what a Play would start while
+nothing plays (`source` contract 1.2) says so beside `identity: Nothing`, in
+`SourceMessage::armed`: an `Armed { identity, media_path }`, where `identity`
+is the very value the source will declare as playing when Play starts it (the
+core compares them, so an armed track that then plays is not a change), and
+`media_path` is, for a source of files, the absolute local path the core reads
+the tags and the embedded cover from while nothing plays (the SDK builders are
+`SourceOutcome::armed`, `SourceOutcome::armed_file_at` and `Notification::armed`
+beside them). The core keeps that track's title, artist and cover on screen
+until the source clears it (`Nothing` without `armed`) or Play starts it. **A
+source that never arms keeps the old behaviour with no change at all**: the
+SDK's default `stop()` still answers `plays_nothing()`, so a third-party source
+written before 1.2 empties the screen on Stop exactly as it did, and a core
+older than 1.2 reads an armed frame as a plain `Nothing`. The bundled sources
+that arm are `files`, `radio` and `cd`; what each does is described in
+[interface.md](interface.md#what-stop-leaves-on-screen).
+
 **Updating an existing installation.** `ritornello-install` installs the
 new binaries and appends the missing `metadata` plugin entries to an
 existing `/etc/ritornello/plugins.toml` (see [Declaring the
@@ -3020,6 +3038,22 @@ overwrites but carries nothing but a year or a link would otherwise have
 its answer dropped in silence: it is exempt from the "entirely empty"
 refusal at the door, yet it cannot become the retained text block (it would
 wipe the title the tags or the ICY were showing).
+
+**Armed tracks are opt-in.** `NowPlaying` carries `armed: true` when the
+identity is what Play would start, not what sounds (`metadata` contract 1.1).
+A plugin receives it only if it overrides `MetadataPlugin::enriches_armed` to
+return `true`; the SDK reads that once, at registration, and announces it as
+`Announcement::enriches_armed`, so the announcement cannot disagree with the
+plugin. The default is `false`, and then the relay shows the plugin `identity:
+None` for the whole armed state (the same frame as "nothing plays", sent once,
+not again each time more becomes known), then the identity when Play really
+starts it: a plugin written before armed tracks behaves exactly as it did.
+Opt in only when what you answer is true of a silent track too. `musicbrainz`
+does (a disc's title and an album's cover are static facts, and the disc path
+still queries once per disc); the three station plugins (`radiofrance-metas`,
+`nrj-metas`, `ouifm-metas`) do not, since they describe what is on air, and
+there is nothing on air while stopped. A plugin that opts in handles an armed
+identity like a playing one; it can read `armed` to tell them apart.
 
 One more field of `Enrichment` needs attention from a plugin only if it can
 answer it: `position_s`, an elapsed number of seconds **in the track, at the

@@ -274,6 +274,35 @@ button, then `▶|` — the order of a hi-fi remote and of VLC, previous/next
 either side of the frequent gesture. `Stop` and `Eject` sit apart, in
 retreat (to the right on desktop, at the end of the row on the phone).
 
+### What Stop leaves on screen
+
+Stop used to empty the Player card. It now keeps the track that **Play would
+start**, shown as it was (title, artist, cover) but with nothing playing and no
+progress, so the screen answers "what will I hear?". What that is depends on
+the source, and Next and Previous follow the same idea while stopped: they
+**move that choice without starting anything** (no mpv action, no sound), and
+Play then starts what the screen shows.
+
+- **files**: Stop, and the end of a pass, arm the entry that was playing. Next
+  and Previous walk the current order (the shuffled one if random is on) and
+  wrap around. At the end of a pass with repeat off, the next pass is drawn
+  at once and its first entry armed. Turning random on while stopped keeps
+  the armed entry. The tags and an embedded cover are read from the file
+  itself; a folder cover, when the source has one, comes first. On a share, that
+  read can be slow, and a late answer never lands on a track that has moved on.
+- **radio**: Stop arms the station; Next and Previous move to the neighbouring
+  station without tuning in. A reshuffle of the station table while stopped
+  follows the armed station by its URL, not its number.
+- **cd**: a known disc that is not playing arms its track (on insertion, on
+  Stop, and at the end of the disc, where it is the first track of the pass).
+  Next and Previous move it, bounded by the disc, and Eject disarms. The
+  MusicBrainz title and cover are looked up while it is armed.
+- **any other source** (every third-party one, until it opts in): Stop clears
+  the screen, as before. See [plugins.md](plugins.md) for the contract.
+
+A `metadata` plugin sees the armed track only if it asked for it; one that did
+not sees nothing playing until Play.
+
 **The trio is centred, not the whole row — and at every width.** All five
 buttons used to be direct children of one `justify-center`, so `Stop` — and
 `Eject` when the source has a drawer — counted towards the centring and pushed

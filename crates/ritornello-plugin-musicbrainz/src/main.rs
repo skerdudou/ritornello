@@ -631,6 +631,17 @@ impl MusicBrainzPlugin {
 
 #[async_trait::async_trait]
 impl MetadataPlugin for MusicBrainzPlugin {
+    /// Wants the armed track too (what Play would start while nothing plays).
+    /// A disc's title and an album's cover are static facts, as true while
+    /// silent as while playing, and the disc path still queries once per disc
+    /// (`known`), so an armed track and the playing one that follows cost one
+    /// request together. The plugin deliberately does not look at
+    /// `NowPlaying::armed`: an armed identity is handled exactly like a
+    /// playing one.
+    fn enriches_armed(&self) -> bool {
+        true
+    }
+
     async fn now_playing(&mut self, np: NowPlaying) {
         // Any announcement makes the prepared enrichment stale: it carried the
         // previous identity, and the core would throw it away anyway.
@@ -1367,6 +1378,39 @@ mod tests {
             Some(CoverRef::Url { url: musicbrainz::url_caa_thumb("e32a3f0b-1c19-3170-bb1c-650893774744") })
         );
         assert!(!e.fill_only, "the disc path knows the TOC, it overwrites");
+    }
+
+    /// The plugin opts in to armed tracks.
+    ///
+    /// **[MUTATION]** removing the `enriches_armed` override (the trait default
+    /// is `false`) fails this assertion.
+    #[test]
+    fn it_opts_in_to_armed_tracks() {
+        assert!(test_plugin().enriches_armed());
+    }
+
+    /// A disc track arriving armed is enriched like a playing one, and the
+    /// enrichment echoes the identity unchanged. The disc is already known, so
+    /// no request is made.
+    ///
+    /// **[MUTATION]** ignoring a frame with `armed: true` in `now_playing`
+    /// leaves nothing prepared and fails the `next_enrichment` assertions.
+    #[tokio::test]
+    async fn an_armed_disc_track_is_enriched_like_a_playing_one() {
+        let mut p = plugin_with_known_disc();
+        p.now_playing(NowPlaying {
+            source: "cd".into(),
+            identity: Some(disc_identity(1)),
+            armed: true,
+            ..Default::default()
+        })
+        .await;
+        assert!(p.in_flight.is_none(), "a known disc is not queried again");
+        let e = p.next_enrichment().await;
+        assert_eq!(e.identity, disc_identity(1));
+        assert_eq!(e.title.as_deref(), Some("Freddie Freeloader"));
+        assert_eq!(e.album.as_deref(), Some("Kind of Blue"));
+        assert!(e.cover.is_some() && e.cover_thumb.is_some());
     }
 
     #[tokio::test]
