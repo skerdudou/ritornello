@@ -16,7 +16,26 @@ import type { PlayerPayload } from '../types'
 // SSE connection: the remote needs it too (active key), and opening a second
 // connection here would double the streams for the same content.
 const { t } = useCatalog()
-const props = defineProps<{ state: PlayerPayload | null; seekStep: number }>()
+const props = withDefaults(
+  defineProps<{
+    state: PlayerPayload | null
+    seekStep: number
+    /**
+     * Whether the header names the source in its pill. `HomeView` turns it
+     * off when the header carries one key per source: the pressed key already
+     * names it, and saying it twice would cost the room the keys need.
+     */
+    showSource?: boolean
+  }>(),
+  { showSource: true },
+)
+/**
+ * The header's element, which `HomeView` measures to decide whether the
+ * source keys fit in it. Exposed rather than measured here: what goes in the
+ * header's corner is the page's business, the card only lends the room.
+ */
+const header = ref<{ $el: HTMLElement } | null>(null)
+defineExpose({ headerElement: () => header.value?.$el ?? null })
 // The device announced a cover, the browser could not load it.
 //
 // The case is not theoretical: the core's cache key is capped at a few
@@ -212,10 +231,15 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
     volume is the slider in the `commandes` slot. On a phone everything is
     centered in a column; from `md` up the cover moves to the left of the text.
   -->
-  <Card data-player>
-    <CardHeader class="pb-2">
-      <CardTitle class="flex items-center gap-2 text-base">
-        {{ t('player_title') }}
+  <!-- No visible title: the header is the room the source keys need, and the
+       card says what it is to assistive technology through its name. -->
+  <Card data-player role="region" :aria-label="t('player_title')">
+    <!-- `gap-x-0` and the title's `mr-1`: the gap before the corner's keys
+         only exists when the title does. The kit's grid would keep its
+         column gap beside an empty title, a width `headerMode` does not
+         count (see its `GAP`). -->
+    <CardHeader ref="header" class="gap-x-0 pb-2" data-player-header>
+      <CardTitle v-if="showSource || state?.standby" class="mr-1 flex items-center gap-2 text-base">
         <!-- The source as a pill: a kit badge, `data-source` kept for the
              journeys. The dot says "it's playing" (playback), where the old
              text line said nothing.
@@ -229,7 +253,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
              `PresetGrid.vue`). The color carries no meaning here anyway: it
              is the **presence** of the dot that says it is playing, it is
              only rendered at that moment. -->
-        <Badge variant="secondary" class="gap-1.5 font-normal">
+        <Badge v-if="showSource" variant="secondary" class="gap-1.5 font-normal">
           <span
             v-if="state?.playback === 'playing'"
             class="size-1.5 rounded-full bg-current"

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { api, Button, Card, CardContent, CardHeader, CardTitle, toast } from '@ritornello/ui'
 import { LoopIcon } from '@radix-icons/vue'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import PresetGrid from '../components/PresetGrid.vue'
-import SourceBar from '../components/SourceBar.vue'
+import SourceKeys from '../components/SourceKeys.vue'
 import StandbyIcon from '../components/icons/StandbyIcon.vue'
 import PlayerCard from '../components/PlayerCard.vue'
 import Transport from '../components/Transport.vue'
@@ -12,6 +12,7 @@ import { useCatalog } from '../composables/useCatalog'
 import { usePlayer } from '../composables/usePlayer'
 import { usePresets } from '../composables/usePresets'
 import type { Command, SettingsPayload } from '../types'
+import { headerMode } from './headerMode'
 import { unavailable, REMOTE_MUTE, REMOTE_POWER, REMOTE_SOURCE } from './remoteCommands'
 
 const { t } = useCatalog()
@@ -28,17 +29,39 @@ async function send(cmd: Command) {
 
 // The tile names: loaded on mount, reloaded when the active source changes —
 // it is the frame that says so, nothing is probed.
-const { reload, nameOf, sources } = usePresets()
+const { reload, nameOf, sources, icons, listRead } = usePresets()
 onMounted(reload)
 watch(() => state.value?.source, (after, before) => {
   if (after !== undefined && after !== before) reload()
 })
 
-// The bar of one key per source, from `lg` up. Only when there is a choice to
-// make, and only once the catalog has arrived: the cycle key steps aside for
-// the bar, so a failed /api/presets must leave it in place — otherwise a wide
-// screen would have no way at all to change source.
-const sourceBar = computed(() => sources.value.length > 1)
+// What the Player card's header offers to change source: one icon key per
+// source when they fit, the cycle key when they do not or when the page does
+// not know yet, nothing for a single source (see `headerMode`). The width is
+// the header's own, measured, not a breakpoint: what fits depends on how many
+// sources there are, which no breakpoint knows.
+const playerCard = ref<{ headerElement: () => HTMLElement | null } | null>(null)
+const available = ref<number | null>(null)
+let observer: ResizeObserver | null = null
+onMounted(() => {
+  const header = playerCard.value?.headerElement()
+  if (!header) return
+  // The content box: the header's padding is not room for the keys.
+  observer = new ResizeObserver((entries) => {
+    const entry = entries[entries.length - 1]
+    if (entry) available.value = entry.contentRect.width
+  })
+  observer.observe(header)
+})
+onUnmounted(() => observer?.disconnect())
+const mode = computed(() =>
+  headerMode({
+    sources: sources.value.length,
+    listRead: listRead.value,
+    available: available.value,
+    standby: state.value?.standby ?? false,
+  }),
+)
 
 // The keyboard seek step of the bar: that of the physical keys, served by
 // /api/settings. The default covers the duration of the GET and its failure.
@@ -70,32 +93,35 @@ onMounted(async () => {
 </script>
 
 <template>
-  <!-- One column on a phone; two cards side by side from `md` up, under the
-       source bar that spans both from `lg` up. -->
+  <!-- One column on a phone; two cards side by side from `md` up. -->
   <div class="grid gap-4 md:grid-cols-2 md:items-start">
-    <SourceBar
-      v-if="sourceBar"
-      class="md:col-span-2"
-      :sources="sources"
-      :active="state?.source ?? null"
-      :disabled="unavailable('SelectSource', state)"
-      @choose="(name: string) => send({ cmd: 'SelectSource', arg: name })"
-    />
     <PlayerCard
+      ref="playerCard"
       :state="state"
+      :show-source="mode !== 'icons'"
       :seek-step="settings.seek_step_s"
       @seek="(s: number) => send({ cmd: 'SeekTo', arg: s })"
     >
       <!-- The two commands bearing on the whole device, in the corner of the
-           card: the source, then standby in the far corner. The cycle key
-           gives way to the source bar where the bar shows. -->
+           card: the source, then standby in the far corner. The source is
+           one key per source when they fit, the cycle key otherwise, nothing
+           when there is only one. -->
       <template #actions>
         <div class="flex items-center gap-1">
+          <SourceKeys
+            v-if="mode === 'icons'"
+            :sources="sources"
+            :icons="icons"
+            :active="state?.source ?? null"
+            :playing="state?.playback === 'playing'"
+            :disabled="unavailable('SelectSource', state)"
+            @choose="(name: string) => send({ cmd: 'SelectSource', arg: name })"
+          />
           <Button
+            v-else-if="mode === 'cycle'"
             variant="outline"
             size="sm"
             data-remote-source
-            :class="{ 'lg:hidden': sourceBar }"
             :disabled="unavailable(REMOTE_SOURCE.cmd.cmd, state)"
             @click="send(REMOTE_SOURCE.cmd)"
           >
