@@ -1483,9 +1483,9 @@ alone.
 
 There is no button when there is nothing to explain: a `(?)` opening an empty
 dialog promises an explanation and gives none, which is the ordinary case before
-a track is identified and has no address either. `origin` and `cover_origin` stay in the protocol: they
-are what a three-line display can show, and dropping them would take that away
-for the sake of a dialog no display can open.
+a track is identified and has no address either. `origin` and `cover_origin`
+stay in the protocol: they are what a three-line display can show, and dropping
+them would take that away for the sake of a dialog no display can open.
 
 ### Date and time
 

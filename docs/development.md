@@ -249,9 +249,9 @@ not, it is a break, so bump that contract's **major**; if it is compatible
 The rule has two times. A version that no release has carried yet is marked
 `next` in its header (`[source 1.1 next]`): it is still being written, so its
 section changes in place, without bumping again, and regeneration keeps the
-mark. A section without the mark has been published, and cannot change unless
-its version went strictly up; the bump writes the new version with `next`, and
-the cycle starts over. The test cannot see git, so it cannot tell whether a
+mark. A section without the mark is published, or about to be, and cannot
+change unless its version went strictly up; the bump writes the new version
+with `next`, and the cycle starts over. The test cannot see git, so it cannot tell whether a
 mark is honest: `scripts/changed-components.sh` does, at release. It refuses a
 release whose fixture still carries a `next` (remove the marks in the release
 preparation commit), and a section whose messages changed under the version

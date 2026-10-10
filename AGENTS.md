@@ -132,9 +132,10 @@ something.
 - `crates/ritornello-proto/tests/wire_fingerprint.rs` — the wire against a
   committed fixture, one section per contract: a section cannot change unless
   its contract's version goes up, or is marked `next` (a version no release
-  carried); regeneration refuses it too. `changed-components.sh` refuses a
-  release that still carries the mark or changed a published section. The
-  announcement section regenerates freely for additions.
+  carried); regenerating the fixture refuses an unmarked section that changed
+  under its old version, just as the comparison does. `changed-components.sh`
+  refuses a release that still carries the mark or changed a published
+  section. The announcement section regenerates freely for additions.
 - `scripts/changed-components.sh`'s coupled-change guard — refuses a change
   to a companion (`files-mount`) that did not move its version, and its
   plugin's too when their shared crate changed: the shared-crate trap above,
