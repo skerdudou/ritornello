@@ -1,23 +1,29 @@
-**Action required** — the core's systemd unit changed
-(`ritornello.service`): an update from the web UI replaces the binaries but
-never writes a unit, by design. Place the new unit once, either by running
-`ritornello-install` from a workstation, or by hand from this release's core
-archive:
+**Action required** — install this release with **ritornello-install 0.3.0
+or later**, once, from a workstation (an older one fails on this release's
+inventory, saying it does not parse).
+Two reasons, and the page can handle neither:
 
-```sh
-sudo tar --no-same-owner -C / -xzf ritornello-core-<version>-<arch>.tar.gz
-sudo systemctl daemon-reload && sudo systemctl restart ritornello
-```
+- **The core's systemd unit changed** (`ritornello.service`). An update from
+  the web UI replaces binaries and never writes a unit, by design. The one
+  change is `ReadWritePaths=/etc/ritornello -/mnt/ritornello`: without it, a
+  network share already mounted when the service starts — after every boot —
+  is seen read-only by the core and its plugins, so archiving a cover onto the
+  NAS fails with "Read-only file system".
+- **From this release on, the core refuses to update itself from the page
+  while a root file of its archive moved** (a unit, a polkit rule, the
+  updater): see Behaviour changes. It judges by what ritornello-install
+  recorded placing, and no installer recorded it before 0.3.0. That one run
+  records it; until then, the page refuses every later update of the core and
+  says to use ritornello-install.
 
-The one change: `ReadWritePaths=/etc/ritornello -/mnt/ritornello`. Without
-it, a network share already mounted when the service starts — after every
-boot — is seen read-only by the core and its plugins, whatever it was
-mounted with, so archiving a cover onto the NAS fails with "Read-only file
-system". A device with no `files` plugin loses nothing by waiting.
+Before installing, set *Automatic checks* to *Off* or *Check only*
+(Settings → Updates): the core you are running now predates this rule, and
+left on *Check and install* it would install this core's binary alone during
+the night, without the unit.
 
-This is not a wire break: no contract version moved, and the components can
-be installed together or one at a time. The privileged updater and the mount
-helper did not change.
+This is not a wire break: no contract version moved. The privileged updater
+did not change in behaviour; it now carries a number of its own, `1.0.0`,
+which is what the core compares. The mount helper did not change.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -52,6 +58,15 @@ helper did not change.
      core is reinstalled. -->
 
 ## Behaviour changes
+
+**The core no longer updates itself past its root files.** Its archive
+carries systemd units, polkit rules and the updater, which the page never
+places. The core's update is now offered from the page only while each of
+them is the one ritornello-install recorded placing; otherwise the update
+dialog names the files that changed and says to update with
+ritornello-install, before anything is pressed, and the night-time update
+leaves it alone. The card no longer says, after the fact, that "N files were
+not installed".
 
 **One key per source on a wide screen.** From a desktop width up, the home
 page shows a bar with one key per source, the active one pressed: changing
