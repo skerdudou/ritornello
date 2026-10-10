@@ -14,6 +14,7 @@ pub mod mount;
 pub mod playlist;
 pub mod root_error;
 pub mod health;
+pub mod location;
 pub mod scan;
 pub mod smb;
 pub mod store;
