@@ -1760,7 +1760,7 @@ describe('ConfigView — language and display', () => {
   })
 
   it('does not queue a second check when the update card\'s Check is already running as a dialog opens', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const { w, posts, table } = await mountView()
       // The device is running the check the card's button just queued.
@@ -1780,7 +1780,7 @@ describe('ConfigView — language and display', () => {
   })
 
   it('runs one check when Add a language opens on a never-checked device, then re-reads the update state and the packs', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       // The default fixture: `never_checked`, no timestamp, no pack offered.
       const { w, spy, posts, table } = await mountView()
@@ -2420,7 +2420,7 @@ describe('ConfigView — update', () => {
   // against the version of `onUpdateCheck` this fix round replaces (that
   // version never armed the poll at all when this happened).
   it('keeps polling even when the read right after the POST still shows idle', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const { w, table } = await mountView()
       // `table['/api/update']` stays at its idle default through the click:
@@ -2440,7 +2440,13 @@ describe('ConfigView — update', () => {
   })
 
   it('polls every two seconds while busy, and stops on its own once busy clears', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    // Plain fake timers, not `shouldAdvanceTime`: with it, simulated time also
+    // follows the wall clock, so how much of it passes between two assertions
+    // depends on how fast the machine runs the test. CI on main failed this
+    // once, "expected 4 to be 3" — one GET more than the 6 s the test advances
+    // can explain — and the same commit passed on re-run. Here time moves only
+    // when the test says. The same change applies to every test of this file.
+    vi.useFakeTimers()
     try {
       const { w, spy, table } = await mountView()
       ;(table as Record<string, unknown>)['/api/update'] = updatePayload('Checking…')
@@ -2463,7 +2469,7 @@ describe('ConfigView — update', () => {
   })
 
   it('stops polling when the view unmounts', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const { w, spy, table } = await mountView()
       ;(table as Record<string, unknown>)['/api/update'] = updatePayload('Checking…')
@@ -2599,7 +2605,7 @@ describe('ConfigView — language pack polling', () => {
   beforeEach(resetMocks)
 
   it('keeps the row busy and disabled, then updates it once the pack has actually landed', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const { w, table } = await mountView({
         '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
@@ -2629,7 +2635,7 @@ describe('ConfigView — language pack polling', () => {
   })
 
   it('stops polling on its own once the row settles, proven by silence afterwards', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const { w, spy, table } = await mountView({
         '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
@@ -2666,7 +2672,7 @@ describe('ConfigView — language pack polling', () => {
   })
 
   it('gives up at its own ceiling if the pack never appears installed, releasing the row', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       // `table['/api/locale']` never changes: the job never lands, from
       // this page's point of view.
@@ -2702,7 +2708,7 @@ describe('ConfigView — language pack polling', () => {
   // **[MUTATION]** drop the busy ceiling (always 10 ticks): red on "still
   // busy at 30 s".
   it('keeps polling while the worker is busy, past the idle ceiling, and settles when the pack lands', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const { w, table } = await mountView({
         '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
@@ -2728,7 +2734,7 @@ describe('ConfigView — language pack polling', () => {
   })
 
   it('releases the row at the busy ceiling when the worker never stops being busy', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const { w, table, spy } = await mountView({
         '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
@@ -2762,7 +2768,7 @@ describe('ConfigView — language pack polling', () => {
   // this got through: the two fresh-install/remove tests above cannot see
   // a defect that only a row already installed can expose.
   it('polls after an Update too, not settling until the version actually moves', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const { w, table } = await mountView({
         '/api/locale': localeWithPacks([packRow('es', '0.2.0', '0.2.1')]),
@@ -2791,7 +2797,7 @@ describe('ConfigView — language pack polling', () => {
   })
 
   it('polls after a removal too, using the same busy-row contract', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const { w, table } = await mountView({
         '/api/locale': localeWithPacks([packRow('fr', '0.2.1', '0.2.1')]),
@@ -2816,7 +2822,7 @@ describe('ConfigView — language pack polling', () => {
   })
 
   it('stops polling when the view unmounts', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const { w, spy } = await mountView({
         '/api/locale': localeWithPacks([packRow('de', null, '0.2.1')]),
@@ -2959,7 +2965,7 @@ describe('ConfigView — a language from several packs', () => {
   })
 
   it('does not settle an Update because an offered-only pack appeared mid-poll', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const base = packRow('fr', '0.2.0', '0.2.1')
       const { w, table } = await mountView({ '/api/locale': localeWithPacks([base]) })
@@ -2978,7 +2984,7 @@ describe('ConfigView — a language from several packs', () => {
   })
 
   it("settles an Update on a third party's version moving, the official one staying put", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.useFakeTimers()
     try {
       const news = (third: string) => frTwoPacks({
         overlaps: [],
