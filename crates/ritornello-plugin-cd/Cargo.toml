@@ -3,7 +3,7 @@ name = "ritornello-plugin-cd"
 # Its own version, not the product's: this component can be fixed and
 # published alone. Only the major follows the product;
 # version_coherence.rs asserts it.
-version = "0.2.0-beta.3"
+version = "0.2.0-beta.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
