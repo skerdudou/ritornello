@@ -50,5 +50,13 @@ export function usePresets() {
     return names.value.get(source)?.get(n) ?? null
   }
 
-  return { reload, nameOf, sources, icons, listRead }
+  // The highest preset index the catalog lists for `source`, 0 when it lists
+  // none: the grid's count in standby, where the core has forgotten the
+  // count the source announced but the catalog still holds its presets.
+  function listedCount(source: string): number {
+    const m = names.value.get(source)
+    return m && m.size ? Math.max(...m.keys()) : 0
+  }
+
+  return { reload, nameOf, listedCount, sources, icons, listRead }
 }

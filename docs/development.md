@@ -412,7 +412,10 @@ documented at the top of `serve.mjs`.
   6600 is never touched) and six Radio France stations as presets. Radio
   France is what makes the shot speak: FIP broadcasts no ICY, so title,
   artist, year and cover all come from that plugin, and the provenance
-  `(?)` then has something to show.
+  `(?)` then has something to show. FIP also airs long programmes with no
+  track and no cover (an evening's "FIP 360"); then OUI FM's stream with
+  `ouifm-metas` declared does the same job — the October 2026 home shots
+  were taken that way.
 
 ## Build guardrails
 

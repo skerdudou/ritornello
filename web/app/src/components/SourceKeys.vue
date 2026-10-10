@@ -14,8 +14,9 @@ import { useCatalog } from '../composables/useCatalog'
  * hides its drawing or initial from assistive technology, so without them a
  * key would be announced as a nameless button.
  *
- * Clicking the key already lit is harmless: the core does nothing on a
- * `SelectSource` naming the active source (`Command::SelectSource`).
+ * Clicking the key already lit is harmless: awake, the core does nothing on a
+ * `SelectSource` naming the active source (`Command::SelectSource`); in
+ * standby the same click wakes the device on it.
  */
 defineProps<{
   sources: string[]

@@ -1973,7 +1973,10 @@ acknowledgement the following frame would undo. `single oneshot` and
 `consume` are refused. Neither command guards against
 standby specially: like every command here, it is accepted and has no
 effect while the device is off, the core swallowing it before this plugin
-ever sees the difference. There is one audio output, always
+ever sees the difference. (Only `Power` and a source choice act in standby:
+`load`, and `add` of another source's entry, wake the device on that source;
+an `add` of an entry of the active source emits only `Select(n)`, still
+ignored in standby.) There is one audio output, always
 enabled, and `enableoutput`/`disableoutput` are refused — a client that sees
 no output at all displays "muted" and stops trying.
 

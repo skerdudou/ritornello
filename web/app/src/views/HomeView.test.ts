@@ -155,25 +155,26 @@ describe('HomeView', () => {
     expect(w.findAll('[data-preset-active]')).toHaveLength(0)
   })
 
-  it('announces the number of presets declared by the source', async () => {
+  it('the announced count shapes the grid, with no lone number', async () => {
     vi.stubGlobal('EventSource', FakeEventSource)
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })))
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
     FakeEventSource.last!.push({ preset_count: 24 })
     await w.vm.$nextTick()
-    // The count reaches beyond the displayed window: that is precisely what
-    // it teaches, the grid only showing ten at a time.
-    expect(w.get('[data-preset-count]').text()).toContain('24')
+    // The count reaches beyond the displayed window: the grid shows ten at a
+    // time and the pages sit in the card's header. No lone number any more.
     expect(w.findAll('[data-preset-button]')).toHaveLength(10)
+    expect(w.find('[data-preset-count]').exists()).toBe(false)
+    expect(w.find('[data-preset-window]').exists()).toBe(true)
     // Zero is information, not an absence: it explains the empty grid of a
     // cd without a disc.
     FakeEventSource.last!.push({ preset_count: 0 })
     await w.vm.$nextTick()
-    expect(w.get('[data-preset-count]').text()).toContain('0')
+    expect(w.findAll('[data-preset-button]')).toHaveLength(0)
   })
 
-  it('announces no count when the source declares nothing', async () => {
+  it('shows no position when the source declares nothing', async () => {
     // Bare grid 1-10: it is a fallback, not an inventory — announcing "10"
     // would be a claim nobody made.
     vi.stubGlobal('EventSource', FakeEventSource)
@@ -182,7 +183,8 @@ describe('HomeView', () => {
     const w = mount(HomeView)
     FakeEventSource.last!.push({ preset_count: null })
     await w.vm.$nextTick()
-    expect(w.find('[data-preset-count]').exists()).toBe(false)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(10)
+    expect(w.find('[data-preset-window]').exists()).toBe(false)
   })
 
   it('relays the pushed state to the Player card', async () => {
@@ -423,11 +425,10 @@ describe('HomeView — unavailable buttons', () => {
     vi.unstubAllGlobals()
   })
 
-  it('in standby, everything is greyed except standby itself', async () => {
-    // The core ignores everything that is not `Power` in standby: the buttons
-    // say so instead of sending a command with no effect. No count pushed
-    // here: standby clears it on the core side, so the grid falls back on
-    // 1-10 — disabled as well.
+  it('in standby, only standby and the source choice stay offered', async () => {
+    // The core ignores everything but `Power`, `SelectSource` and
+    // `SourceCycle` in standby: choosing a source wakes the device on it. The
+    // buttons say so instead of sending a command with no effect.
     const w = await mountWith({ standby: true })
     for (const b of w.findAll('[data-remote-command]')) {
       expect(b.attributes('disabled'), b.attributes('data-remote-command')).toBeDefined()
@@ -435,7 +436,7 @@ describe('HomeView — unavailable buttons', () => {
     for (const b of w.findAll('[data-preset-button]')) {
       expect(b.attributes('disabled')).toBeDefined()
     }
-    expect(w.get('[data-remote-source]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-remote-source]').attributes('disabled')).toBeUndefined()
     expect(w.get('[data-remote-power]').attributes('disabled')).toBeUndefined()
   })
 
@@ -693,13 +694,13 @@ describe('HomeView — the source keys in the Player card header', () => {
     expect(posts).toEqual([JSON.stringify({ cmd: 'SelectSource', arg: 'files' })])
   })
 
-  it('wide: in standby, every key is greyed, like the cycle key', async () => {
-    // The core ignores everything but `Power` in standby (see `unavailable`).
+  it('wide: in standby, every key stays offered, like the cycle key', async () => {
+    // Choosing a source wakes the device on it (see `unavailable`).
     const { w } = await mountWith(THREE, { standby: true })
     const keys = w.findAll('[data-source-key]')
     expect(keys).toHaveLength(3)
     for (const k of keys) {
-      expect(k.attributes('disabled'), k.attributes('data-source-key')).toBeDefined()
+      expect(k.attributes('disabled'), k.attributes('data-source-key')).toBeUndefined()
     }
   })
 
@@ -755,7 +756,16 @@ describe('unavailable / hidden', () => {
     seekable: false, can_eject: false, has_finite_list: false, random: false, ...e,
   })
 
-  it('standby only lets Power through', () => {
+  it('in standby, SelectSource and SourceCycle stay available', () => {
+    const s = state({ standby: true })
+    expect(unavailable('SelectSource', s)).toBe(false)
+    expect(unavailable('SourceCycle', s)).toBe(false)
+    expect(unavailable('Power', s)).toBe(false)
+    expect(unavailable('Select', s)).toBe(true)
+    expect(unavailable('Next', s)).toBe(true)
+  })
+
+  it('standby lets only Power and the source choice through', () => {
     expect(unavailable('Power', state({ standby: true }))).toBe(false)
     expect(unavailable('PlayPause', state({ standby: true }))).toBe(true)
     expect(unavailable('Select', state({ standby: true }))).toBe(true)

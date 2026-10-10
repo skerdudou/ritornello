@@ -270,6 +270,7 @@ system_unit_minute = "min"
 presets_label = "Présélections"
 presets_prev_page = "Présélections précédentes"
 presets_next_page = "Présélections suivantes"
+presets_window = "{first}–{last} sur {total}"
 
 # HTTP refusals (422/502/500)
 audio_output_name_empty = "nom de sortie audio vide"

@@ -338,8 +338,10 @@ pub fn handle(
         // not whether to emit).
         //
         // **In standby, this still answers `OK` and has no effect** — the
-        // core ignores every command but `Power` while standing by (see
-        // `Core::handle_command`), and this module has no guard against it
+        // core acts only on `Power` and a source choice (`SelectSource`, hence
+        // a `load` or an `add` of another source's entry) while standing by
+        // and ignores everything else (see `Core::handle_command`), and this
+        // module has no guard against it
         // anywhere else either (`next`, `stop`… all emit unconditionally).
         // Nothing to special-case here: an MPD client that toggles shuffle
         // while the device is off gets a truthful acknowledgement of a
