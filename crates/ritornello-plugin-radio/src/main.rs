@@ -39,6 +39,11 @@ struct RadioSource {
     /// URL, on the other hand, durably identifies what is playing, and makes
     /// it possible to find the right number back in the reshuffled table.
     current_url: Option<String>,
+    /// URL of the station kept armed while stopped, the stopped counterpart
+    /// of `current_url`: a reshuffle of the table moves the armed station's
+    /// number too, and Play starts the station at `preset`, so the number
+    /// must follow the URL here as well or the screen and Play disagree.
+    armed_url: Option<String>,
     /// Receives the new `Stations::preset_count()` announced by the Admin
     /// half after a successful save (see `RadioAdmin::set_data`). `main()`
     /// always builds this field as `Some`: the admin page is registered
@@ -69,16 +74,22 @@ impl RadioSource {
     /// same station: the core keeps the slate of the stream that was playing
     /// when the two are equal. With no station at that number there is
     /// nothing to arm.
-    async fn armed_outcome(&self) -> SourceOutcome {
+    async fn armed_outcome(&mut self) -> SourceOutcome {
         let stations = self.stations.read().await;
         let count = stations.preset_count();
         match stations.by_preset(self.preset) {
-            Some(st) => SourceOutcome::new(SourceAction::Noop)
-                .armed(Self::stream_identity(&st.url))
-                .preset(self.preset)
-                .preset_name(st.name.clone())
-                .preset_count(count),
-            None => SourceOutcome::new(SourceAction::Noop).plays_nothing().preset_count(count),
+            Some(st) => {
+                self.armed_url = Some(st.url.clone());
+                SourceOutcome::new(SourceAction::Noop)
+                    .armed(Self::stream_identity(&st.url))
+                    .preset(self.preset)
+                    .preset_name(st.name.clone())
+                    .preset_count(count)
+            }
+            None => {
+                self.armed_url = None;
+                SourceOutcome::new(SourceAction::Noop).plays_nothing().preset_count(count)
+            }
         }
     }
 
@@ -107,6 +118,7 @@ impl RadioSource {
         if let Some(st) = stations.by_preset(n) {
             self.preset = n;
             self.current_url = Some(st.url.clone());
+            self.armed_url = None;
             // `update` and not `save`: the Admin half writes the chosen
             // country into this same file, and a `save` built here would
             // erase it. The failure is logged, as the Admin half already
@@ -156,6 +168,7 @@ impl SourcePlugin for RadioSource {
         // Nothing is playing anymore: forget the URL, otherwise a reshuffle
         // of the table would correct the preset of a stopped stream.
         self.current_url = None;
+        self.armed_url = None;
         SourceOutcome::new(SourceAction::Stop).plays_nothing()
     }
     /// Stopped: the station stays on screen, armed. Play starts it again
@@ -274,7 +287,8 @@ impl SourcePlugin for RadioSource {
                 // No action here, and rightly so: the radio plays a single
                 // stream, there is nothing to reload, only the record to set
                 // straight.
-                if let Some(url) = self.current_url.clone() {
+                // Playing: the stream; stopped: the armed station.
+                if let Some(url) = self.current_url.clone().or_else(|| self.armed_url.clone()) {
                     let stations = self.stations.read().await;
                     // Station removed from the table: its number no longer
                     // designates anything reliable, and the protocol has no
@@ -335,6 +349,7 @@ async fn main() -> Result<()> {
         preset,
         // Nothing is playing yet: filled in at the first `Play`.
         current_url: None,
+        armed_url: None,
         // The receiver only makes sense if an Admin half exists to emit on
         // it (see below): otherwise `poll_notification` must wait forever,
         // not fall back onto a dead channel.
@@ -413,6 +428,7 @@ mod tests {
             stations: Arc::new(AsyncRwLock::new(stations)),
             preset,
             current_url: None,
+            armed_url: None,
             preset_count_rx: None,
         }
     }
@@ -704,6 +720,7 @@ mod tests {
             stations: stations_shared,
             preset: 1,
             current_url: None,
+            armed_url: None,
             preset_count_rx: Some(rx),
         };
 
@@ -817,6 +834,36 @@ mod tests {
     async fn next_while_playing_still_plays() {
         let (mut source, _dir) = playing_source().await;
         match source.next().await.action {
+            SourceAction::Play { uri, .. } => assert_eq!(uri, INTER),
+            other => panic!("expected a Play, got {other:?}"),
+        }
+    }
+
+    /// A reshuffle while stopped moves the armed station's number: the
+    /// notification must follow it by URL, or the screen says "2 - FIP"
+    /// while Play starts whatever now sits at 2.
+    ///
+    /// **[MUTATION]** dropping `.or_else(|| self.armed_url.clone())` in
+    /// `poll_notification` fails the `Some(1)` assertion.
+    #[tokio::test]
+    async fn a_reshuffle_while_stopped_moves_the_armed_station_s_number() {
+        let (tx, rx) = tokio::sync::watch::channel(0u8);
+        let (mut source, _dir) = playing_source().await;
+        source.preset_count_rx = Some(rx);
+        source.stop().await;
+        source.next().await; // armed: France Inter, preset 2
+        {
+            let mut st = source.stations.write().await;
+            for s in st.stations.iter_mut() {
+                s.preset = if s.url == INTER { 1 } else { 2 };
+            }
+        }
+        tx.send(2).unwrap();
+        let n = source.poll_notification().await.expect("notification expected");
+        assert_eq!(n.preset, Some(1), "the number follows the armed station");
+        assert_eq!(n.preset_name.as_deref(), Some("France Inter"));
+        assert!(n.identity.is_none(), "the armed identity (the URL) has not changed");
+        match source.activate().await.action {
             SourceAction::Play { uri, .. } => assert_eq!(uri, INTER),
             other => panic!("expected a Play, got {other:?}"),
         }
