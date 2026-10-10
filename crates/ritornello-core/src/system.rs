@@ -776,16 +776,10 @@ mod tests {
     fn stub_vcgencmd(dir: &std::path::Path, reply: &str) -> (String, std::path::PathBuf) {
         let script = dir.join("vcgencmd");
         let counter = dir.join("calls");
-        std::fs::write(
+        crate::test_exec::write_executable(
             &script,
-            format!("#!/bin/sh\necho x >> '{}'\necho '{reply}'\n", counter.display()),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+            &format!("#!/bin/sh\necho x >> '{}'\necho '{reply}'\n", counter.display()),
+        );
         (script.to_string_lossy().to_string(), counter)
     }
 

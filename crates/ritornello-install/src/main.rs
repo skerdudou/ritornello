@@ -23,6 +23,8 @@ mod registry;
 mod script;
 mod source;
 mod ssh;
+#[cfg(all(test, unix))]
+mod test_exec;
 mod ui;
 
 use std::collections::{BTreeMap, BTreeSet};
