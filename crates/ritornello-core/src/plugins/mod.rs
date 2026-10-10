@@ -602,16 +602,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_launched_plugin_receives_its_data_directory() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("seen");
         let exec = dir.path().join("fake-plugin");
-        std::fs::write(
+        crate::test_exec::write_executable(
             &exec,
-            format!("#!/bin/sh\nprintf '%s' \"$RITORNELLO_PLUGIN_DATA_DIR\" > '{}'\n", out.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\nprintf '%s' \"$RITORNELLO_PLUGIN_DATA_DIR\" > '{}'\n", out.display()),
+        );
         let data = dir.path().join("plugins/radio");
         let mut child = spawn(
             exec.to_str().unwrap(),
@@ -644,19 +641,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_plugins_output_reaches_the_journal_tagged_with_its_name() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let exec = dir.path().join("fake-plugin");
-        std::fs::write(
+        crate::test_exec::write_executable(
             &exec,
             "#!/bin/sh\n\
              echo '2026-10-06T20:25:03.000000Z DEBUG probing /mnt/ritornello/music'\n\
              echo '2026-10-06T20:25:04.123456Z  INFO cover archived'\n\
              echo '2026-10-06T20:25:05.000001Z  WARN cover not archived: the share is read-only'\n\
              echo \"thread 'main' panicked at src/main.rs:1:1\" >&2\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let logs = std::sync::Arc::new(crate::status::LogBuffer::new(10));
         let mut child = spawn(
             exec.to_str().unwrap(),
@@ -704,22 +698,19 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_relay_keeps_draining_past_invalid_utf8_and_a_full_pipe() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let exec = dir.path().join("fake-plugin");
         // 2000 lines of 100 bytes (200 KB, three pipes' worth) after a line
         // that is not UTF-8, then a last line: the process can only exit, and
         // that last line can only be read, if every byte before was drained.
-        std::fs::write(
+        crate::test_exec::write_executable(
             &exec,
             "#!/bin/sh\n\
              printf 'bad \\377\\376 bytes\\n'\n\
              i=0; while [ $i -lt 2000 ]; do \
                printf '%099d\\n' $i; i=$((i+1)); done\n\
              echo last\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let logs = std::sync::Arc::new(crate::status::LogBuffer::new(10).with_journal(5000));
         let mut child = spawn(
             exec.to_str().unwrap(),

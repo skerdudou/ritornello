@@ -189,12 +189,10 @@ impl Rig {
         scripts.push(("timeout".into(), TIMEOUT.into()));
         for (name, text) in scripts {
             let p = shims.join(name);
-            fs::write(&p, text).unwrap();
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_exec::write_executable(&p, &text);
         }
         let hook = base.join("hook");
-        fs::write(&hook, HOOK).unwrap();
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_exec::write_executable(&hook, HOOK);
         let log = base.join("shim.log");
         Rig { _tmp: tmp, base, root, shims, log, outside, runs: std::cell::Cell::new(0) }
     }

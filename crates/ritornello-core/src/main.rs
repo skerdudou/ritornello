@@ -21,6 +21,8 @@ mod health;
 mod state;
 mod status;
 mod system;
+#[cfg(all(test, unix))]
+mod test_exec;
 mod theme;
 mod types;
 mod update;

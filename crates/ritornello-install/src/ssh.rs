@@ -625,7 +625,6 @@ mod tests {
     /// script says. Unix only.
     #[cfg(unix)]
     mod fake_ssh {
-        use std::os::unix::fs::PermissionsExt;
         use std::path::Path;
 
         use super::*;
@@ -641,8 +640,7 @@ cat > "$d/stdin.$n"
         fn target_with(dir: &Path, record: bool, body: &str) -> Target {
             let path = dir.join("ssh");
             let prologue = if record { RECORD } else { "" };
-            std::fs::write(&path, format!("#!/bin/sh\n{prologue}{body}\n")).expect("writing the fake ssh");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod the fake ssh");
+            crate::test_exec::write_executable(&path, &format!("#!/bin/sh\n{prologue}{body}\n"));
             let mut target = Target::new("pi@device");
             target.ssh_program = path;
             target
@@ -787,7 +785,6 @@ cat > "$d/stdin.$n"
     /// `sudo -S` does and then execs the rest stands in for the real one.
     #[cfg(unix)]
     mod through_a_shell {
-        use std::os::unix::fs::PermissionsExt;
         use std::path::Path;
         use std::process::Output;
 
@@ -893,8 +890,7 @@ exec "$@"
         fn the_sudo_variants_deliver_the_bundle_to_tar_and_the_password_line_to_sudo() {
             let tmp = tempfile::tempdir().unwrap();
             let sudo = tmp.path().join("fake-sudo");
-            std::fs::write(&sudo, FAKE_SUDO).unwrap();
-            std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_exec::write_executable(&sudo, FAKE_SUDO);
             for (variant, password) in [(Sudo::NoPassword, None), (Sudo::Password, Some("hunter2"))] {
                 let scratch = tempfile::tempdir().unwrap();
                 let command = remote_apply_command(variant).unwrap().replacen("sudo", sudo.to_str().unwrap(), 1);
