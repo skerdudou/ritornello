@@ -421,9 +421,9 @@ impl<P: Player> Core<P> {
                 if self.standby {
                     return self.wake_on(Some(name)).await;
                 }
-                // Already active: do nothing. A redundant `load` must not cut
-                // what plays, and that is exactly what a client sends when
-                // reopening its screen.
+                // Awake, choosing the already active source does nothing, so a
+                // redundant `load` never cuts what plays. In standby it is a
+                // source choice and wakes the device (handled above, `wake_on`).
                 if name != self.active_source {
                     // `Some(name)`: `cycle_source` accepts `None` — "no
                     // source at all" — but this path always designates a
@@ -607,7 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn in_standby_the_source_key_wakes_on_the_next_source() {
-        let (mut core, _pc, source_calls, _rx, _d) = setup();
+        let (mut core, _pc, source_calls, _rx, dir) = setup();
         core.resume().await.unwrap();
         core.handle_command(Command::Power).await.unwrap();
         source_calls.lock().unwrap().clear();
@@ -617,6 +617,7 @@ mod tests {
         assert!(log.contains(&"cd:Activate".to_string()), "{log:?}");
         assert!(!log.iter().any(|c| c.contains("Wake")), "{log:?}");
         assert!(!core.player_state().standby);
+        assert!(!crate::state::load(&dir.path().join("state.json")).standby, "the wake is persisted");
     }
 
     #[tokio::test]

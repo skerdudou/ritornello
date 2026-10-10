@@ -1249,8 +1249,7 @@ mod tests {
 
     #[tokio::test]
     async fn selecting_the_already_active_source_does_not_cut_what_plays() {
-        // This is exactly what an MPD client sends when reopening its screen:
-        // a redundant `load` must not stop playback.
+        // A redundant `load` of the active source must not stop playback.
         let (mut core, player_calls, _sc, _rx, _d) = setup();
         core.resume().await.unwrap();
         assert_eq!(core.player_state().playback, Playback::Playing);

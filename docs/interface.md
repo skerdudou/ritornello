@@ -368,7 +368,8 @@ offered as if they worked:
   `handle_command`), preset tiles included — those buttons used to lie:
   the request left, the server answered `204`, and nothing happened. The
   choice of a source (an icon key, the Source key, the remote, MPD) wakes
-  the device on it: the active source gets `Wake`, another is switched to
+  the device on it (the Source key, which cycles, on the **next** source): the
+  active source gets `Wake`, another is switched to
   without waking the one being left, an unknown one leaves the device
   asleep;
 - `Eject` is **hidden outright** rather than merely disabled when the
@@ -507,9 +508,9 @@ than in the page alone. The last useful offset is therefore
 
 The web page mirrors the same decade window **locally**, through two
 `<`/`>` arrows in the card's header (shown once the count exceeds
-ten), around a "11–20 of 23" window, instead of a `+10` button: page k is `10k+1` to `10k+10` — the same
-boundaries as the core's offset, so both interfaces agree on what "the same
-page" means. Not six or twelve tiles for layout's sake, either: the keypad has
+ten), around a "11–20 of 23" window, instead of a `+10` button: page k is `10k+1`
+to `10k+10` — the same boundaries as the core's offset, so both interfaces
+agree on what "the same page" means. Not six or twelve tiles for layout's sake, either: the keypad has
 ten digits, and that is what fixes the size of a page. Unlike the core, the page does **not** wrap:
 `<` is disabled on the first page and `>` on the last, and there is no
 auto-return to page 0. The physical remote wraps because it has a single

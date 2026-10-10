@@ -81,17 +81,19 @@ watch([count, activePreset], (_, [previousCount]) => {
   if (count.value !== previousCount) page.value = 0
 }, { immediate: true })
 
+// The page arrows stay usable in standby on purpose: paging is local to the
+// page and sends nothing.
 const dimmed = computed(() => unavailable('Select', props.state))
 </script>
 
 <template>
   <Card data-preset-grid>
-    <CardHeader>
+    <CardHeader class="items-center">
       <CardTitle>{{ t('presets_label') }}</CardTitle>
       <!-- The position only when there are pages: a lone count read as a
            stray number under the title. Same row as the title, as the
            Player card holds its keys. -->
-      <CardAction v-if="paginationVisible" class="flex items-center gap-2">
+      <CardAction v-if="paginationVisible" class="flex items-center gap-2 self-center">
         <Button data-preset-prev variant="outline" size="icon-sm" :disabled="page === 0" :aria-label="t('presets_prev_page')" @click="previousPage">
           <ChevronLeftIcon class="size-4" />
         </Button>
