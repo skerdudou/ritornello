@@ -85,6 +85,26 @@ pub struct Meta {
     pub links: Vec<Link>,
 }
 
+/// How a frame reached us — the only thing this feed says about *when* a
+/// track started, since its frames carry no date field at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    /// The frame the server pushes as soon as a connection opens: the track
+    /// already on air, started at a moment the feed does not tell.
+    OnOpen,
+    /// Pushed while the connection was already open: the station announces
+    /// each track as it starts, so this one starts now.
+    Live,
+}
+
+impl Arrival {
+    /// The arrival of the next usable frame of a connection that has already
+    /// yielded `received` of them.
+    pub fn after(received: usize) -> Self {
+        if received == 0 { Arrival::OnOpen } else { Arrival::Live }
+    }
+}
+
 /// Initial wait before reconnecting, then doubled on each failure.
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 
@@ -243,7 +263,7 @@ fn metas_url(id: &str) -> String {
 
 /// Opens the stream and pushes every received frame. Returns the number of
 /// frames read before the end (0 = the connection gave nothing).
-async fn listen(id: &str, tx: &mpsc::Sender<(String, Meta)>) -> Result<usize> {
+async fn listen(id: &str, tx: &mpsc::Sender<(String, Meta, Arrival)>) -> Result<usize> {
     let client = reqwest::Client::builder()
         .user_agent("ritornello/0.1 (https://github.com/skerdudou/ritornello)")
         // **Connection** timeout only: the stream itself must stay open
@@ -271,8 +291,9 @@ async fn listen(id: &str, tx: &mpsc::Sender<(String, Meta)>) -> Result<usize> {
         }
         for line in split_lines(&mut buffer) {
             if let Some(meta) = parse_data_line(&line) {
+                let arrival = Arrival::after(received);
                 received += 1;
-                if tx.send((id.to_string(), meta)).await.is_err() {
+                if tx.send((id.to_string(), meta, arrival)).await.is_err() {
                     // The plugin no longer listens to us: the station changed.
                     return Ok(received);
                 }
@@ -303,7 +324,7 @@ pub fn next_backoff(backoff: Duration, duration: Duration) -> Duration {
 /// Never returns. The caller stops this task (`abort`) when what is playing
 /// changes — hence the tagging of each frame with the `id`: a frame already
 /// queued at the moment of the stop must be discardable.
-pub async fn follows(id: String, tx: mpsc::Sender<(String, Meta)>) {
+pub async fn follows(id: String, tx: mpsc::Sender<(String, Meta, Arrival)>) {
     // Half the base, because the backoff is recomputed before each wait (see
     // below): the first immediate failure doubles this value and thus waits
     // exactly `BACKOFF_BASE`, as before.
@@ -550,6 +571,16 @@ mod tests {
         let titles: Vec<String> =
             lines.iter().filter_map(|l| parse_data_line(l)).filter_map(|m| m.title).collect();
         assert_eq!(titles, vec!["un".to_string(), "deux".to_string()]);
+    }
+
+    #[test]
+    fn only_the_first_frame_of_a_connection_arrives_on_open() {
+        // The first frame describes a track already playing, for an unknown
+        // time; marking it `Live` would claim it starts now, and the bar would
+        // restart from zero at every station switch and every reconnection.
+        assert_eq!(Arrival::after(0), Arrival::OnOpen);
+        assert_eq!(Arrival::after(1), Arrival::Live);
+        assert_eq!(Arrival::after(7), Arrival::Live);
     }
 
     #[test]

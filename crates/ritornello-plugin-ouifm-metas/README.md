@@ -40,6 +40,13 @@ feed and keeps it open: the station pushes each new track as it starts. That is
 why the title appears promptly without the device polling anyone, and why
 switching webradio is the only thing that reopens a connection.
 
+The same push gives the progress bar. The feed carries a track's duration but
+no start time, so the plugin counts from the moment it sees a track begin. The
+first track after switching to a station has been playing for an unknown time:
+it shows its duration and no bar. From the next track on, the bar runs — a few
+seconds ahead of what you hear, since the audio stream lags the feed by its
+buffering.
+
 A detail worth knowing, because it explains the table shipped with the plugin:
 the identifier in a stream's URL is **not** the one the metadata feed answers
 to. Each webradio therefore has two, and the plugin's table pairs them —
