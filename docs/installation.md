@@ -826,6 +826,15 @@ confirmation ("Go ahead?"), and last the sudo password when one is needed.
 When an answer is missing and no terminal is there to give it, the run
 stops and names it before anything is downloaded or sent.
 
+The address question shows the shape it expects (an IP address such as
+`192.168.1.20`, a name such as `dietpi.local`, or `account@address` to skip the
+account question). Right after the survey, the installer says which version of
+the core the device runs, asked of the running core itself on port 8080 (its
+`/api/update`); when it does not answer, the installer says so and names the
+versions its own registry and the web page last recorded, for what they are.
+Every yes-or-no question waits for an explicit `y` or `n`: Enter alone answers
+none of them.
+
 What to do with an installation that is already there has three answers:
 "Install or update", "Repair (reinstall everything)" — the same as
 `--reinstall` — and "Remove everything".

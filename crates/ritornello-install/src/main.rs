@@ -20,6 +20,7 @@ mod names;
 mod own_version;
 mod plan;
 mod registry;
+mod running;
 mod script;
 mod source;
 mod ssh;
@@ -238,6 +239,9 @@ fn run(args: &Args) -> anyhow::Result<()> {
     let output = ssh::probe(&target, &control, &device::probe_script(&nonce))?;
     let dev = device::parse(&output, &nonce).context("reading the device survey")?;
     check_device(&dev)?;
+    // Said, never decided on: the plan judges on root's registry alone.
+    let running = if dev.core_present { running::ask(&running::update_url(&host)) } else { None };
+    eprintln!("{}", running::describe(&dev, running.as_deref()));
     if dev.registry_ignored {
         eprintln!(
             "{} on {host} is not root's own (owner or mode): it is ignored, and everything is placed again",
