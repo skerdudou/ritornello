@@ -433,6 +433,15 @@ pub struct Core<P: Player> {
     /// `main`'s `select!` loop (see `extraction_arrived`). Symmetric to
     /// `cover_tx` above.
     extraction_tx: mpsc::Sender<(String, Option<crate::cover::CoverSource>)>,
+    /// Result of the detached read `arm` launches on an armed file, consumed
+    /// by `main`'s `select!` loop (see `armed_read_arrived`). Symmetric to
+    /// `extraction_tx` above.
+    armed_read_tx: mpsc::Sender<ArmedRead>,
+    /// The file behind the armed identity, as the Source declared it
+    /// (`Armed::media_path`). What `armed_read_arrived` compares a read
+    /// against: a late answer for a track the Source has since moved off must
+    /// not land on the next one. Cleared whenever nothing is armed.
+    armed_path: Option<String>,
     /// Circuit breaker that bounds the `lofty` call, strictly blocking and
     /// potentially on a network share: see `health.rs` and the comment on
     /// `handle_path`.
@@ -475,6 +484,16 @@ pub struct Core<P: Player> {
     cover_archive_task: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// What the detached read of an armed file (`Core::arm`) found: its tags
+/// and embedded cover, both `None` when the file could not be read or did not
+/// answer in time. `path` is the file read, compared on arrival.
+#[derive(Debug)]
+pub struct ArmedRead {
+    pub path: String,
+    pub tags: Option<ritornello_proto::Track>,
+    pub cover: Option<crate::cover::CoverSource>,
+}
+
 /// Resolves the standby label from a sources_catalog already in hand.
 ///
 /// A free function rather than a method: it serves both construction (the
@@ -492,6 +511,7 @@ impl<P: Player> Core<P> {
         covers: Arc<crate::cover::CoverCache>,
         cover_tx: mpsc::Sender<(String, bool)>,
         extraction_tx: mpsc::Sender<(String, Option<crate::cover::CoverSource>)>,
+        armed_read_tx: mpsc::Sender<ArmedRead>,
     ) -> Self {
         let Wiring {
             sources,
@@ -599,6 +619,8 @@ impl<P: Player> Core<P> {
             current_path: None,
             extraction_in_flight: None,
             extraction_tx,
+            armed_read_tx,
+            armed_path: None,
             health: Arc::new(crate::health::Health::new()),
             source_cover_archivable: false,
             cover_archive_attempted: Arc::new(std::sync::Mutex::new(None)),
@@ -1745,6 +1767,7 @@ mod tests {
             FakePlayer::default(),
             wiring,
             cover_tx,
+            mpsc::channel(4).0,
             mpsc::channel(4).0,
             crate::status::tests_support::app_state(),
         );

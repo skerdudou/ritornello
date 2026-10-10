@@ -105,12 +105,94 @@ impl<P: Player> Core<P> {
     /// is what Play would start (see `SourceMessage::armed`). The slate
     /// follows the usual rule — kept for the identity already shown, reset
     /// for another one.
+    ///
+    /// **A file mpv has not opened has its tags read here**, since nothing
+    /// else will: `media_path` names it, and a detached read under
+    /// `Health::bounded` brings back its tags and embedded cover (see
+    /// `armed_read_arrived`). Launched only when the slate knows no text yet
+    /// — a track Stop kept already shows what mpv read — and never twice for
+    /// the track already armed from the same file.
     pub(super) fn arm(&mut self, armed: ritornello_proto::Armed) {
+        // Judged before `set_identity_state` moves anything: the same file,
+        // armed again for the same identity, has its read already launched
+        // (or landed). Its slate is kept, so is its read.
+        let rearmed = self.armed
+            && self.metadata.identity() == Some(&armed.identity)
+            && self.armed_path == armed.media_path;
         self.set_identity_state(Some(armed.identity), true);
+        self.armed_path = armed.media_path.clone();
+        if let Some(path) = armed.media_path {
+            let known = self.metadata.known();
+            // A URL has nothing `lofty` can open, and a relative path names
+            // no file the core could find: the Source speaks absolute paths.
+            let readable = !path.contains("://") && std::path::Path::new(&path).is_absolute();
+            if readable && !rearmed && known.title.is_none() && known.artist.is_none() {
+                self.spawn_armed_read(path);
+            }
+        }
         // Already published by `set_identity_state` on every path that
         // changed something; repeated so this function's contract does not
         // hang on which branch ran. Deduplicated by the channel.
         self.publish_state();
+    }
+
+    /// The detached half of `arm`: `read_armed_file` is strictly blocking,
+    /// potentially on a share that never answers — the same reason, and the
+    /// same circuit breaker, as `handle_path`'s extraction.
+    fn spawn_armed_read(&self, path: String) {
+        let tx = self.armed_read_tx.clone();
+        let health = self.health.clone();
+        tokio::spawn(async move {
+            let to_read = path.clone();
+            let (tags, cover) = match health
+                .bounded(std::path::Path::new(&path), move || mpv::read_armed_file(&to_read))
+                .await
+            {
+                // The circuit breaker handed back control: a silent share,
+                // a real incident — `warn`, as for the embedded cover.
+                None => {
+                    tracing::warn!("armed file: {path} did not answer in time");
+                    (None, None)
+                }
+                // The file could not be read (gone, not audio): the armed
+                // track keeps whatever the slate already shows.
+                Some(None) => {
+                    tracing::info!("armed file: {path} could not be read");
+                    (None, None)
+                }
+                Some(Some(found)) => found,
+            };
+            let _ = tx.send(ArmedRead { path, tags, cover }).await;
+        });
+    }
+
+    /// The detached read of an armed file (`arm`) has finished.
+    ///
+    /// Judged on arrival, like `extraction_arrived`: kept only while that
+    /// very file is still the one armed. A slow share answering after the
+    /// Source moved to the next entry, after Play started it, or after
+    /// standby must not paint the old file's tags over what the screen now
+    /// describes. Play especially: mpv's own tags (`handle_file_tags`) are
+    /// then the layer, and a late read would only repeat or contradict them.
+    ///
+    /// The core completes, it does not overwrite: the embedded cover is
+    /// taken only when no cover is held — a Source's `folder.jpg` declared
+    /// with the armed frame keeps priority by construction.
+    pub async fn armed_read_arrived(&mut self, read: ArmedRead) {
+        if self.standby || !self.armed || self.armed_path.as_deref() != Some(read.path.as_str()) {
+            return;
+        }
+        let mut changed = false;
+        if let Some(tags) = read.tags {
+            changed |= self.metadata.set_tags(tags);
+        }
+        if !self.metadata.known().cover && read.cover.is_some() && self.metadata.set_cover_tags(read.cover) {
+            self.start_cover_fetch();
+            changed = true;
+        }
+        if changed {
+            self.publish_state();
+        }
     }
 
     /// Changes what is playing **or armed**. `armed` is meaningful only with
@@ -126,6 +208,11 @@ impl<P: Player> Core<P> {
         let armed = armed && identity.is_some();
         let was = self.armed;
         self.armed = armed;
+        // The armed file goes with the armed state; `arm` sets it again
+        // right after this call when the frame names one.
+        if !armed {
+            self.armed_path = None;
+        }
         // "Nothing is playing anymore" takes the current selection with it:
         // the highlighted key designates **what is playing**, not the last
         // press. An armed identity keeps it: the key then designates what
@@ -2099,5 +2186,122 @@ mod tests {
             1,
             "one download total: the enlargement found the memo `remember_full` wrote, and did not download again"
         );
+    }
+
+    /// The read of an armed file, as `arm` really sends it and as `main`
+    /// hands it back: a stopped files track shows its own tags, without mpv
+    /// ever opening it.
+    #[tokio::test]
+    async fn an_armed_file_shows_its_own_tags_while_stopped() {
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_armed_read();
+        let Some(f) = crate::player::mpv::tests::tagged_mp3(tmp.path()) else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let path = f.to_str().unwrap().to_string();
+        core.handle_source_update("radio", arms_file(serde_json::json!({"path": path}), &path));
+        let read = rx.recv().await.expect("arming a file must launch its read");
+        assert_eq!(read.path, path);
+        core.armed_read_arrived(read).await;
+        let state = core.player_state();
+        assert_eq!(state.track.title.as_deref(), Some("Alpha"));
+        assert_eq!(state.track.artist.as_deref(), Some("Beta"));
+        assert_eq!(state.track.year, Some(1971));
+        assert_eq!(state.playback, ritornello_proto::Playback::Stopped, "reading the tags plays nothing");
+    }
+
+    /// A read built by hand: the path is all `armed_read_arrived` judges, and
+    /// these tests need no ffmpeg to prove it.
+    fn read_of(path: &str, title: &str) -> ArmedRead {
+        ArmedRead {
+            path: path.to_string(),
+            tags: Some(ritornello_proto::Track { title: Some(title.to_string()), ..Default::default() }),
+            cover: None,
+        }
+    }
+
+    /// The slow NAS: the read of the file armed first answers after the
+    /// Source has moved on — to the next entry, to playing it, to standby.
+    /// Its tags must land on none of them.
+    ///
+    /// **[MUTATION]** the `armed_path` comparison removed from
+    /// `armed_read_arrived` → the "next entry" assertion fires. `!self.armed`
+    /// removed → the "Play" assertion fires (a `Play` action unarms without
+    /// re-declaring the identity, so the armed path is still the read's
+    /// own: only the armed flag tells the two apart).
+    #[tokio::test]
+    async fn a_late_armed_read_is_dropped() {
+        let a = "/music/a.mp3";
+        let b = "/music/b.mp3";
+
+        // The Source moved to the next entry.
+        let (mut core, _state_rx, _rx, _d) = test_core_with_armed_read();
+        core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
+        core.handle_source_update("radio", arms_file(serde_json::json!({"path": b}), b));
+        core.armed_read_arrived(read_of(a, "Alpha")).await;
+        assert_ne!(core.player_state().track.title.as_deref(), Some("Alpha"), "A's tags landed on B");
+        // The read of B itself is welcome: the guard is not a closed door.
+        core.armed_read_arrived(read_of(b, "Bravo")).await;
+        assert_eq!(core.player_state().track.title.as_deref(), Some("Bravo"));
+
+        // Play started the armed file before its read came back.
+        let (mut core, _state_rx, _rx, _d) = test_core_with_armed_read();
+        core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
+        core.apply(SourceAction::play(a).finite()).await.unwrap();
+        core.armed_read_arrived(read_of(a, "Alpha")).await;
+        assert_ne!(core.player_state().track.title.as_deref(), Some("Alpha"), "a read landed on a track that plays");
+
+        // Standby came first.
+        let (mut core, _state_rx, _rx, _d) = test_core_with_armed_read();
+        core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
+        core.handle_command(Command::Power).await.unwrap();
+        core.armed_read_arrived(read_of(a, "Alpha")).await;
+        assert_ne!(core.player_state().track.title.as_deref(), Some("Alpha"), "a read landed in standby");
+    }
+
+    /// files declares the folder's `cover.jpg` in the very frame that arms
+    /// the track: the picture embedded in the file must not displace it.
+    #[tokio::test]
+    async fn a_source_cover_keeps_priority_over_the_embedded_one_when_armed() {
+        let (mut core, _state_rx, _rx, tmp) = test_core_with_armed_read();
+        let audio = "/music/a.mp3";
+        let image = tmp.path().join("cover.jpg");
+        std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let declared = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
+        let mut update = arms_file(serde_json::json!({"path": audio}), audio);
+        update.cover = Some(declared.clone());
+        core.handle_source_update("radio", update);
+        let embedded = CoverSource::Embedded { audio: audio.into(), content: "embedded".into() };
+        let mut read = read_of(audio, "Alpha");
+        read.cover = Some(embedded);
+        core.armed_read_arrived(read).await;
+        assert_eq!(core.player_state().track.title.as_deref(), Some("Alpha"), "otherwise the read was dropped and proves nothing");
+        let (selected, _, _) = core.metadata.selected_cover().expect("a cover is held");
+        assert_eq!(selected, CoverSource::Ref(declared), "the Source's cover must stay the one shown");
+    }
+
+    /// The Source repeats its armed frame (a status refresh, the same entry
+    /// re-declared): the file's read is launched once, not once per frame.
+    ///
+    /// Counted to the end rather than sampled: once the core is dropped, the
+    /// channel closes when the last detached read has sent, so the count
+    /// does not hang on when a task happened to run.
+    ///
+    /// **[MUTATION]** the `rearmed` guard removed from `arm` → two reads, the
+    /// count assertion fires.
+    #[tokio::test]
+    async fn rearming_the_same_track_reads_nothing_again() {
+        let (mut core, _state_rx, mut rx, _d) = test_core_with_armed_read();
+        let a = "/music/a.mp3";
+        core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
+        core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
+        let first = rx.recv().await.expect("the first arming must launch a read");
+        assert_eq!(first.path, a);
+        drop(core);
+        let mut more = 0;
+        while rx.recv().await.is_some() {
+            more += 1;
+        }
+        assert_eq!(more, 0, "the same track armed again must not be read again");
     }
 }

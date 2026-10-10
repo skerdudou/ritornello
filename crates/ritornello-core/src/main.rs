@@ -1058,10 +1058,11 @@ pub(crate) fn assemble_covers_and_core<P: player::Player>(
     wiring: core::Wiring,
     cover_tx: mpsc::Sender<(String, bool)>,
     extraction_tx: mpsc::Sender<(String, Option<cover::CoverSource>)>,
+    armed_read_tx: mpsc::Sender<core::ArmedRead>,
     skeleton: AppState,
 ) -> (AppState, core::Core<P>) {
     let covers = Arc::new(cover::CoverCache::new());
-    let core_engine = core::Core::new(player, wiring, covers.clone(), cover_tx, extraction_tx);
+    let core_engine = core::Core::new(player, wiring, covers.clone(), cover_tx, extraction_tx, armed_read_tx);
     let app_state = AppState { covers, ..skeleton };
     (app_state, core_engine)
 }
@@ -2118,6 +2119,9 @@ async fn main() -> Result<()> {
     // other.
     let (extraction_tx, mut extraction_rx) =
         mpsc::channel::<(String, Option<cover::CoverSource>)>(4);
+    // Result of the detached read of an armed file's tags and cover (see
+    // `Core::arm`): same principle again, its own channel for its own payload.
+    let (armed_read_tx, mut armed_read_rx) = mpsc::channel::<core::ArmedRead>(4);
 
     // How this process leaves. Named here rather than built inline in the
     // `SystemInfo` literal below, because the update worker exits by the very
@@ -2314,6 +2318,7 @@ async fn main() -> Result<()> {
             },
             cover_tx,
             extraction_tx,
+            armed_read_tx,
             app_state_skeleton,
         );
         core = core_engine;
@@ -2667,6 +2672,11 @@ async fn main() -> Result<()> {
             // playing.
             Some((path, r)) = extraction_rx.recv() => {
                 core.extraction_arrived(path, r).await;
+            }
+            // The detached read `Core::arm` launched on an armed file (bounded
+            // the same way): kept only while that file is still the one armed.
+            Some(read) = armed_read_rx.recv() => {
+                core.armed_read_arrived(read).await;
             }
             Some(list) = update_sources_rx.recv() => {
                 core.set_update_sources(list);
@@ -3363,6 +3373,7 @@ mod toggle_tests {
                 },
             },
             covers.clone(),
+            mpsc::channel(4).0,
             mpsc::channel(4).0,
             mpsc::channel(4).0,
         );

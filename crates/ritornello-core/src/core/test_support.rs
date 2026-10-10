@@ -326,6 +326,7 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
         covers,
         cover_tx,
         mpsc::channel(4).0,
+        mpsc::channel(4).0,
     );
     (core, player_calls, source_calls, state_rx, dir)
 }
@@ -363,6 +364,7 @@ pub(super) fn setup_metadata(
         },
         covers,
         cover_tx,
+        mpsc::channel(4).0,
         mpsc::channel(4).0,
     );
     (core, np_rx, state_rx, dir)
@@ -423,8 +425,62 @@ pub(super) fn test_core_with_extraction() -> (
         covers,
         cover_tx,
         extraction_tx,
+        mpsc::channel(4).0,
     );
     (core, state_rx, extraction_rx, dir)
+}
+
+/// Like `test_core`, but **keeps** the receiver of the armed-file read
+/// channel: what `arm` really sends, drained from the real channel, is what
+/// a test hands to `armed_read_arrived`.
+#[allow(clippy::type_complexity)]
+pub(super) fn test_core_with_armed_read() -> (
+    Core<FakePlayer>,
+    watch::Receiver<PlayerState>,
+    mpsc::Receiver<super::ArmedRead>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
+    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone(), ..Default::default() }));
+    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls, ..Default::default() }));
+    let (np_tx, _np_rx) =
+        watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
+    let (state_tx, state_rx) = watch::channel(PlayerState::default());
+    let root = dir.path().to_path_buf();
+    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
+    let (covers, cover_tx) = test_covers();
+    let (armed_read_tx, armed_read_rx) = mpsc::channel(4);
+    let manifest_order = declared_order(&sources);
+    let core = Core::new(
+        FakePlayer::default(),
+        Wiring {
+            sources,
+            persisted: PersistedState::default(),
+            state_path: dir.path().join("state.json"),
+            catalog,
+            registry: test_registry(&root),
+            manifest_order,
+            sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
+        },
+        covers,
+        cover_tx,
+        mpsc::channel(4).0,
+        armed_read_tx,
+    );
+    (core, state_rx, armed_read_rx, dir)
+}
+
+/// Update a stopped Source sends when it keeps a **file** armed: `arms`,
+/// with the path the core reads the tags from.
+pub(super) fn arms_file(identity: serde_json::Value, path: &str) -> SourceUpdate {
+    SourceUpdate {
+        identity: Some(IdentityUpdate::Nothing),
+        armed: Some(ritornello_proto::Armed { identity, media_path: Some(path.to_string()) }),
+        ..Default::default()
+    }
 }
 
 impl Core<FakePlayer> {
@@ -486,6 +542,7 @@ pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<Playe
         },
         covers,
         cover_tx,
+        mpsc::channel(4).0,
         mpsc::channel(4).0,
     );
     (core, state_rx, dir)
@@ -709,6 +766,7 @@ pub(super) fn test_core_with_cover_channel() -> (
         },
         covers,
         cover_tx,
+        mpsc::channel(4).0,
         mpsc::channel(4).0,
     );
     (core, state_rx, cover_rx, dir)
@@ -968,6 +1026,7 @@ fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> Archivin
         },
         covers,
         cover_tx,
+        mpsc::channel(4).0,
         mpsc::channel(4).0,
     );
     ArchivingRig { core, archives, offers, _dir: dir }
