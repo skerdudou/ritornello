@@ -179,17 +179,11 @@ struct FilesSource {
     /// draw again rather than replay the same permutation.
     draw: Order,
     /// The two play modes, learned from `set_play_mode` and consulted by
-    /// `end_of_content`/`activate` to know whether a finished pass should
-    /// open another one (`All`), replay the same entry (`One`) or stay over
-    /// (`Off`).
+    /// `end_of_content` to know whether a finished pass should open another
+    /// one and play it (`All`), replay the same entry (`One`) or open it and
+    /// stop on its first entry, armed (`Off`).
     random: bool,
     repeat: Repeat,
-    /// Set by `end_of_content` when it was called with repeat off — which
-    /// only happens once mpv's list has run to its end. The next `Play` then
-    /// opens a fresh pass instead of replaying the single entry left at the
-    /// tail of the exhausted order — see `activate`'s doc for the defect this
-    /// avoids.
-    pass_finished: bool,
     /// `set_play_mode` engaged or disengaged shuffle since the last reload,
     /// while a file may already have been playing under mpv's own m3u.
     ///
@@ -477,11 +471,6 @@ impl FilesSource {
 
     /// Starts the playlist at the current index, after rewriting mpv's m3u.
     async fn play(&mut self) -> SourceOutcome {
-        // A pass that just ended is over and done with: whatever brought us
-        // here (a fresh activation, a selection) is a new listening session,
-        // and `pass_finished`'s only reader is `activate`, which reads it
-        // before calling here (see its doc).
-        self.pass_finished = false;
         // Whatever reload was owed for a mode change is fulfilled by this
         // very call, however it was reached — directly (`activate`,
         // `select`) or through `reload_if_changed`'s own check. Left set,
@@ -639,6 +628,68 @@ impl FilesSource {
         }
         outcome
     }
+
+    /// Frame of a stopped source: nothing plays, and here is the entry Play
+    /// will start — armed with its identity and its local file, so the core
+    /// keeps (or redraws) title, artist and cover while nothing sounds.
+    ///
+    /// The folder cover is re-armed like on any identity declaration (see
+    /// `arm_cover`): the armed entry changes with next/prev while stopped,
+    /// and its folder may not be the one last probed.
+    async fn armed_outcome(&mut self) -> SourceOutcome {
+        let playlist = self.playlist.read().await;
+        let count = playlist.preset_count();
+        let Some(entry) = playlist.current().cloned() else {
+            // Says *why* nothing will start: without a track mpv stays idle,
+            // and a generic status here would overwrite the "NO PLAYLIST"
+            // `play()` had just displayed — the user would never learn their
+            // playlist was empty.
+            return SourceOutcome::new(SourceAction::Noop)
+                .plays_nothing()
+                .status_text(self.keyed("no_playlist"))
+                .preset_count(0);
+        };
+        let preset = playlist.preset();
+        drop(playlist);
+        // After `playlist` is released: the Admin half takes `roots` before
+        // `playlist`, so the two are never held in the opposite order.
+        let location = location_of(&*self.roots.read().await, &entry.path);
+        self.arm_cover(&entry.path);
+        let mut outcome = SourceOutcome::new(SourceAction::Noop)
+            .armed_file_at(Self::identity(&entry.path), location, entry.path.to_string_lossy())
+            .preset_name(entry.display_name())
+            .preset_count(count)
+            .status_text(self.status_text());
+        if let Some(n) = preset {
+            outcome = outcome.preset(n);
+        }
+        outcome
+    }
+
+    /// Moves the armed entry by `step` while nothing plays: no action toward
+    /// mpv, which is idle and holds nothing worth walking.
+    ///
+    /// The step walks the drawn order, in position space, with the same
+    /// wrap-around as `reload_if_changed` — and in the **up-to-date**
+    /// playlist: a page edit made while stopped redraws `order` first. That
+    /// consumes `playlist_changed`, at no loss: Play is the only way out of
+    /// this state, and `play()` always writes a fresh m3u from the current
+    /// playlist. `mode_changed` is left to `play()` to clear for the same
+    /// reason — nothing reads it before a Play here.
+    async fn move_armed(&mut self, step: i64) -> SourceOutcome {
+        self.resync_order_if_changed().await;
+        {
+            let mut playlist = self.playlist.write().await;
+            let n = self.order.len() as i64;
+            if n > 0 {
+                let position = self.position_of(playlist.index).unwrap_or(0) as i64;
+                let next_position = (((position + step) % n + n) % n) as usize;
+                playlist.index = self.entry_at(next_position).unwrap_or(playlist.index);
+            }
+        }
+        self.persist().await;
+        self.armed_outcome().await
+    }
 }
 
 #[async_trait::async_trait]
@@ -651,24 +702,11 @@ impl SourcePlugin for FilesSource {
         // ended, trusting mpv's `playlist-pos = -1`. Measured: this -1
         // **also arrives transiently at every playlist reload**, hence at
         // every track change. The resume then fell back on track 1. The signal
-        // being unreliable, the distinction is abandoned rather than guessed —
-        // at the cost of one detail: after a playlist that ran to its end, the
-        // Play key replays the last track.
-        //
-        // **Except when the last pass genuinely ran out** (`pass_finished`,
-        // set by `end_of_content` with repeat off): the entry the kept
-        // index designates then sits at the very tail of the exhausted
-        // order, with nothing drawn after it. Replaying from there would
-        // give exactly one track before mpv goes idle again — a fresh pass
-        // is opened instead, drawn again under shuffle.
-        if self.pass_finished {
-            if self.random {
-                self.draw_order().await;
-            }
-            if let Some(entry) = self.entry_at(0) {
-                self.playlist.write().await.index = entry;
-            }
-        }
+        // being unreliable, the distinction is abandoned here rather than
+        // guessed. The real end of the list arrives through `end_of_content`
+        // instead, which opens the next pass itself and leaves the index on
+        // its first entry — the one the screen shows armed — so a Play after a
+        // finished list starts there with nothing to decide at this point.
         self.play().await
     }
 
@@ -694,6 +732,10 @@ impl SourcePlugin for FilesSource {
     }
 
     async fn next(&mut self) -> SourceOutcome {
+        // Stopped: mpv is idle, the armed entry moves on our side alone.
+        if !self.plays.load(std::sync::atomic::Ordering::Relaxed) {
+            return self.move_armed(1).await;
+        }
         // The playlist changed under mpv: hand it the new one, positioned on
         // the following track. This is the legitimate moment to do it — an
         // explicit command from the user, who expects a track change.
@@ -707,6 +749,9 @@ impl SourcePlugin for FilesSource {
     }
 
     async fn prev(&mut self) -> SourceOutcome {
+        if !self.plays.load(std::sync::atomic::Ordering::Relaxed) {
+            return self.move_armed(-1).await;
+        }
         if let Some(outcome) = self.reload_if_changed(-1).await {
             return outcome;
         }
@@ -759,38 +804,18 @@ impl SourcePlugin for FilesSource {
 
     async fn stop(&mut self) -> SourceOutcome {
         // The core stopped on its own initiative, or the playlist ended. Say
-        // so, otherwise the last track and its metadata would stay displayed
-        // indefinitely.
+        // so: nothing plays any more.
         //
-        // And **say which of the three**, which was not the case: this frame
-        // overwrote the "NO PLAYLIST" that `play()` had just displayed. Without
-        // a track, mpv stays idle, the core therefore sends `stop()` at once,
-        // and the user only saw a generic status without ever learning that
-        // their playlist was empty.
+        // **Stopped, but a track armed** — with its identity and its file
+        // this time. An older frame only announced a status, and the display
+        // lost number and name; a later one kept number and name, but
+        // declared no identity, so title, artist and cover went blank. Arming
+        // the current entry says exactly the real state — nothing is playing,
+        // and here is what will restart — and lets the core keep (or read
+        // from the file) what the screen shows. An empty playlist arms
+        // nothing and says so (see `armed_outcome`).
         self.plays.store(false, std::sync::atomic::Ordering::Relaxed);
-        let playlist = self.playlist.read().await;
-        if playlist.entries.is_empty() {
-            return SourceOutcome::new(SourceAction::Noop)
-                .plays_nothing()
-                .status_text(self.keyed("no_playlist"))
-                .preset_count(0);
-        }
-        // **Stopped, but a track armed.** The old frame only announced a
-        // status: the display lost number and name, and showed nothing more
-        // than "FILES" without any way to know where we were. Declaring the
-        // current track without a playback identity says exactly the real
-        // state — nothing is playing, and here is what will restart.
-        let mut outcome = SourceOutcome::new(SourceAction::Noop)
-            .plays_nothing()
-            .status_text(self.status_text())
-            .preset_count(playlist.preset_count());
-        if let Some(entry) = playlist.current() {
-            outcome = outcome.preset_name(entry.display_name());
-        }
-        if let Some(n) = playlist.preset() {
-            outcome = outcome.preset(n);
-        }
-        outcome
+        self.armed_outcome().await
     }
 
     /// A list of files is exactly the kind of finite list random/repeat
@@ -829,11 +854,6 @@ impl SourcePlugin for FilesSource {
         if !random_changed {
             return;
         }
-        // A mode change that actually (dis)engages shuffle opens a pass, in
-        // the sense that matters here: the "finished" state from a previous
-        // pass no longer describes anything once shuffle has just been
-        // toggled.
-        self.pass_finished = false;
         // Identity when `random` just turned false, so a mode change never
         // leaves a stale shuffled order behind once shuffle is turned back
         // off.
@@ -982,17 +1002,31 @@ impl SourcePlugin for FilesSource {
     /// declares — as opposed to a live stream cutting out, which has no
     /// equivalent here.
     ///
-    /// With repeat off, behaves like the default `stop()` fallback always
-    /// did — but remembers that the pass is over, for `activate` to read (see
-    /// its doc). With repeat-all, opens a new pass: drawn again under
-    /// shuffle, replayed identically otherwise, starting at that pass's
-    /// first entry either way. With repeat-one, `loop-file` should keep the
-    /// list from ending at all; if an end arrives anyway, the entry that was
-    /// playing starts over.
+    /// With repeat off, opens the next pass **now** — drawn again under
+    /// shuffle, starting at its first entry — and stops on it, armed: the
+    /// screen shows the entry Play will start, and Play starts exactly that.
+    /// Replaying from the kept index instead would start at the very tail of
+    /// the exhausted order, with nothing drawn after it: exactly one track
+    /// before mpv goes idle again. With repeat-all, opens the same new pass
+    /// and plays it. With repeat-one, `loop-file` should keep the list from
+    /// ending at all; if an end arrives anyway, the entry that was playing
+    /// starts over.
     async fn end_of_content(&mut self) -> SourceOutcome {
         match self.repeat {
             Repeat::Off => {
-                self.pass_finished = true;
+                // Drawn for the playlist as it is now (identity when not
+                // shuffling), a page edit included: the flag is consumed so
+                // that the Play that follows does not draw a second order
+                // under the armed entry. Nothing is lost — `play()` writes
+                // the m3u from the current playlist whatever the flag says.
+                self.playlist_changed.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.draw_order().await;
+                if let Some(entry) = self.entry_at(0) {
+                    self.playlist.write().await.index = entry;
+                }
+                // The screen shows this entry from now on; a reboot must
+                // resume on it, not on the last entry of the finished pass.
+                self.persist().await;
                 self.stop().await
             }
             // `loop-file` should keep this from ever arriving under
@@ -1293,7 +1327,6 @@ async fn main() -> Result<()> {
         draw: Order::Random,
         random: false,
         repeat: Repeat::Off,
-        pass_finished: false,
         mode_changed: false,
         state_path: state_path.clone(),
         mpv_playlist_path,
@@ -1524,7 +1557,6 @@ mod tests {
             draw,
             random: false,
             repeat: Repeat::Off,
-            pass_finished: false,
             mode_changed: false,
             state_path: root.join("plugin-files.json"),
             mpv_playlist_path: root.join("plugin-files.m3u"),
@@ -1720,7 +1752,10 @@ mod tests {
     async fn next_and_prev_delegate_to_mpv_without_resyncing_twice() {
         // Resyncing here on top of `player_track` would make two corrections
         // for a single change, and the second could contradict the first.
+        // While playing: stopped, the armed entry moves on our side (see
+        // `next_while_stopped_moves_the_armed_entry_without_mpv`).
         let mut s = test_source(playlist_of(3));
+        s.activate().await;
         assert_eq!(s.next().await.action, SourceAction::PlayerNext);
         assert_eq!(s.prev().await.action, SourceAction::PlayerPrev);
         assert_eq!(s.playlist.read().await.index, 0, "the index must not have moved by itself");
@@ -2221,6 +2256,7 @@ mod tests {
         // The ordinary case: mpv holds the same list as we do, it knows how to
         // advance by itself. Reloading here would cut the sound for nothing.
         let mut s = test_source(playlist_of(3));
+        s.activate().await;
         assert_eq!(s.next().await.action, SourceAction::PlayerNext);
     }
 
@@ -2247,8 +2283,11 @@ mod tests {
         // first track would make "previous" inoperative, whereas mpv wraps
         // from one end of its own list to the other.
         let mut s = test_source(playlist_of(3));
+        s.activate().await;
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(s.prev().await.preset, Some(3), "we come back to the last track");
+        let out = s.prev().await;
+        assert!(matches!(out.action, SourceAction::Play { .. }), "{:?}", out.action);
+        assert_eq!(out.preset, Some(3), "we come back to the last track");
     }
 
     #[tokio::test]
@@ -2302,6 +2341,182 @@ mod tests {
             Some(Text::Keyed { key: "no_playlist".into(), params: HashMap::new() })
         );
         assert!(matches!(outcome.action, SourceAction::Noop));
+    }
+
+    /// The file a stopped outcome keeps armed, read from the identity it
+    /// arms — the one the core compares with what it was playing.
+    fn armed_path(out: &SourceOutcome) -> String {
+        let armed = out.armed.as_ref().expect("a stopped outcome over a playlist arms its entry");
+        armed.identity["path"].as_str().expect("a file identity carries its path").to_string()
+    }
+
+    /// **[MUTATION]** `plays_nothing()` in place of `armed_file_at` fires
+    /// "the current entry is armed"; dropping `arm_cover` from
+    /// `armed_outcome` fires the `current_file` assertion.
+    #[tokio::test]
+    async fn stop_arms_the_current_entry_with_its_file() {
+        // Stopping used to declare a bare `plays_nothing()`: the screen kept
+        // the number and the name, and lost title, artist and cover. Arming
+        // the entry with its identity and its local file lets the core keep
+        // the slate and read the tags itself.
+        let mut s = test_source(playlist_of(3));
+        s.playlist.write().await.index = 1;
+        let out = s.stop().await;
+        assert_eq!(out.action, SourceAction::Noop, "a stop asks nothing of mpv");
+        assert_eq!(out.identity, Some(IdentityUpdate::Nothing), "nothing plays");
+        let armed = out.armed.clone().expect("the current entry is armed");
+        assert_eq!(armed.identity, serde_json::json!({ "kind": "file", "path": "/musique/02.mp3" }));
+        assert_eq!(armed.media_path.as_deref(), Some("/musique/02.mp3"));
+        assert_eq!(out.location.as_deref(), Some("/musique/02.mp3"));
+        assert_eq!(out.preset, Some(2));
+        assert_eq!(out.preset_count, Some(3));
+        assert!(out.preset_name.is_some(), "the screen must never be blank");
+        assert_eq!(out.status_text, Some(s.status_text()));
+        // The folder cover is re-announced on every identity change (see
+        // `arm_cover`): an armed entry declared without it loses its cover.
+        assert_eq!(s.current_file.as_deref(), Some(Path::new("/musique/02.mp3")));
+    }
+
+    /// **[MUTATION]** without the `plays` guard in `next`, "no action toward
+    /// mpv while stopped" fires (a `PlayerNext`); without it in `prev`,
+    /// the wrap assertion's `Noop` check fires; without `persist` in
+    /// `move_armed`, "the moved entry survives a reboot" fires.
+    #[tokio::test]
+    async fn next_while_stopped_moves_the_armed_entry_without_mpv() {
+        // mpv is idle and holds nothing worth walking: a `PlayerNext` here
+        // would move nothing, and the screen would never say where Play will
+        // start. The armed entry moves on our side alone.
+        let mut s = test_source(playlist_of(3));
+        s.activate().await;
+        s.stop().await;
+        let out = s.next().await;
+        assert_eq!(out.action, SourceAction::Noop, "no action toward mpv while stopped");
+        assert_eq!(armed_path(&out), "/musique/02.mp3");
+        assert_eq!(out.preset, Some(2));
+        assert_eq!(state::load(&s.state_path).index, 1, "the moved entry survives a reboot");
+        s.prev().await;
+        let out = s.prev().await;
+        assert_eq!(out.action, SourceAction::Noop);
+        assert_eq!(armed_path(&out), "/musique/03.mp3", "previous wraps from the first to the last");
+        assert_eq!(state::load(&s.state_path).index, 2);
+    }
+
+    /// **[MUTATION]** stepping `index` in entry space fires "position-space
+    /// next, not entry-space +1".
+    #[tokio::test]
+    async fn next_while_stopped_follows_the_drawn_order() {
+        // Shuffled, `index + 1` names entry 0 here (2 + 1 wraps), while the
+        // next one in the drawn order [2, 1, 0] is entry 1.
+        let mut s = source_with(playlist_of(3), Order::Fixed(vec![2, 1, 0]));
+        s.set_play_mode(true, Repeat::Off).await; // stopped: index = entry_at(0) = 2
+        let out = s.next().await;
+        assert_eq!(out.action, SourceAction::Noop);
+        assert_eq!(armed_path(&out), "/musique/02.mp3", "position-space next, not entry-space +1");
+        // The reload `set_play_mode` owed is fulfilled by the Play that
+        // follows: the first next after it is mpv's own, not a second reload.
+        let out = s.activate().await;
+        assert_eq!(started_entry(&out), 1, "Play starts the entry the screen showed");
+        assert_eq!(s.next().await.action, SourceAction::PlayerNext);
+    }
+
+    /// **[MUTATION]** without `resync_order_if_changed` in `move_armed`,
+    /// "the appended entry, not a wrap to the first" fires.
+    #[tokio::test]
+    async fn next_while_stopped_reads_the_edited_playlist() {
+        // The playlist is edited from the page while stopped: the armed
+        // entry is read in the up-to-date list — reaching the appended entry
+        // rather than wrapping to the first one — and Play starts that same
+        // entry from a freshly written m3u, although the stopped next already
+        // consumed `playlist_changed`.
+        let mut s = test_source(playlist_of(3));
+        s.playlist.write().await.index = 2;
+        s.activate().await;
+        s.stop().await;
+        s.playlist.write().await.entries.push(Entry {
+            path: PathBuf::from("/musique/04.mp3"),
+            title: None,
+            duration_s: None,
+        });
+        s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
+        let out = s.next().await;
+        assert_eq!(out.action, SourceAction::Noop);
+        assert_eq!(armed_path(&out), "/musique/04.mp3", "the appended entry, not a wrap to the first");
+        assert_eq!(out.preset_count, Some(4));
+        match s.activate().await.action {
+            SourceAction::Play { start, .. } => assert_eq!(start, Some(3), "Play starts the armed entry"),
+            other => panic!("expected a Play, got {other:?}"),
+        }
+        let m3u = std::fs::read_to_string(&s.mpv_playlist_path).unwrap();
+        assert!(m3u.contains("/musique/04.mp3"), "mpv receives the edited list: {m3u}");
+        assert_eq!(s.next().await.action, SourceAction::PlayerNext, "no second reload after Play");
+    }
+
+    /// **[MUTATION]** leaving the old redraw in `activate` (the next pass
+    /// drawn a second time at Play) makes "Play starts what the screen
+    /// shows" fire: a third draw [0, 1, 2] starts entry 0 instead of the
+    /// armed entry 1.
+    #[tokio::test]
+    async fn the_end_of_a_pass_arms_the_first_entry_of_the_next_one() {
+        let mut s = source_with(
+            playlist_of(3),
+            Order::Sequence(vec![vec![2, 0, 1], vec![1, 2, 0], vec![0, 1, 2]]),
+        );
+        s.set_play_mode(true, Repeat::Off).await; // first pass: [2, 0, 1]
+        s.activate().await;
+        let out = s.end_of_content().await; // the next pass, drawn now: [1, 2, 0]
+        assert_eq!(out.action, SourceAction::Noop, "repeat off: the list stays over");
+        assert_eq!(out.identity, Some(IdentityUpdate::Nothing));
+        assert_eq!(armed_path(&out), "/musique/02.mp3", "the first entry of the next pass");
+        assert_eq!(state::load(&s.state_path).index, 1, "a reboot resumes on the armed entry");
+        let out = s.activate().await;
+        assert_eq!(started_entry(&out), 1, "Play starts what the screen shows");
+        assert_eq!(s.drawn_order(), &[1, 2, 0], "no second draw at Play");
+
+        // Without shuffle, the next pass starts at the top of the list.
+        let mut s = test_source(playlist_of(3));
+        s.playlist.write().await.index = 2;
+        s.activate().await;
+        assert_eq!(armed_path(&s.end_of_content().await), "/musique/01.mp3");
+    }
+
+    /// A page edit during the last pass, then the end of it: the next pass
+    /// is drawn once, for the edited list, and Play does not draw another
+    /// one under the armed entry.
+    ///
+    /// **[MUTATION]** leaving `playlist_changed` set in `end_of_content`
+    /// makes "drawn once" fire: Play redraws [0, 1, 2, 3].
+    #[tokio::test]
+    async fn the_end_of_a_pass_after_an_edit_draws_once() {
+        let mut s = source_with(
+            playlist_of(3),
+            Order::Sequence(vec![vec![2, 0, 1], vec![3, 1, 2, 0], vec![0, 1, 2, 3]]),
+        );
+        s.set_play_mode(true, Repeat::Off).await;
+        s.activate().await;
+        s.playlist.write().await.entries.push(Entry {
+            path: PathBuf::from("/musique/04.mp3"),
+            title: None,
+            duration_s: None,
+        });
+        s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
+        let out = s.end_of_content().await;
+        assert_eq!(armed_path(&out), "/musique/04.mp3", "the next pass covers the edited list");
+        let out = s.activate().await;
+        assert_eq!(started_entry(&out), 3, "Play starts what the screen shows");
+        assert_eq!(s.drawn_order(), &[3, 1, 2, 0], "drawn once");
+    }
+
+    #[tokio::test]
+    async fn an_empty_playlist_arms_nothing_while_stopped() {
+        let no_playlist = Text::Keyed { key: "no_playlist".into(), params: HashMap::new() };
+        let mut s = test_source(Playlist::default());
+        for (name, out) in [("stop", s.stop().await), ("next", s.next().await), ("prev", s.prev().await)] {
+            assert_eq!(out.action, SourceAction::Noop, "{name}");
+            assert_eq!(out.identity, Some(IdentityUpdate::Nothing), "{name}");
+            assert!(out.armed.is_none(), "{name}: nothing to arm");
+            assert_eq!(out.status_text, Some(no_playlist.clone()), "{name}");
+            assert_eq!(out.preset_count, Some(0), "{name}");
+        }
     }
 
     #[test]
