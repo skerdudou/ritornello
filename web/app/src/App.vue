@@ -4,6 +4,7 @@ import { computed, onMounted } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import BottomNav from './components/BottomNav.vue'
 import ConnectionStatus from './components/ConnectionStatus.vue'
+import SystemAlertIcon from './components/SystemAlertIcon.vue'
 import ThemeToggle from './components/ThemeToggle.vue'
 import { useCatalog } from './composables/useCatalog'
 import { usePlugins } from './composables/usePlugins'
@@ -148,12 +149,16 @@ function reloadPage() {
             >
               {{ t('config_title') }}
             </RouterLink>
+            <!-- `inline-flex` for the triangle beside the label; the
+                 underline (`after:`) is absolutely placed, unaffected. -->
             <RouterLink
               to="/system"
-              :class="[LINK, 'text-sm text-muted-foreground']"
+              :class="[LINK, 'inline-flex items-center gap-1.5 text-sm text-muted-foreground']"
               :exact-active-class="LINK_ACTIVE"
+              data-top-nav-system
             >
               {{ t('system_title') }}
+              <SystemAlertIcon />
             </RouterLink>
             <!-- `first-letter:uppercase` in CSS, not in i18n: these names come
                  from plugins.toml (including third-party plugins), no catalog

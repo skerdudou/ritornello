@@ -3,6 +3,7 @@ import { ActivityLogIcon, CubeIcon, MixerHorizontalIcon, PlayIcon } from '@radix
 import { computed } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { useCatalog } from '../composables/useCatalog'
+import SystemAlertIcon from './SystemAlertIcon.vue'
 import { usePlugins } from '../composables/usePlugins'
 
 // Four fixed tabs: the variable part (one page per plugin) sits behind
@@ -41,8 +42,13 @@ const ACTIVE = 'text-primary'
     <RouterLink :to="pluginsTarget" :class="[TAB, pluginsActive ? ACTIVE : '']" data-nav-plugins>
       <CubeIcon class="size-5" />{{ t('nav_plugins') }}
     </RouterLink>
-    <RouterLink to="/system" :class="TAB" :exact-active-class="ACTIVE">
-      <ActivityLogIcon class="size-5" />{{ t('system_title') }}
+    <!-- The warning triangle sits on the icon's corner, like a badge: beside
+         the label it would push a 11px word off centre in a narrow tab. -->
+    <RouterLink to="/system" :class="TAB" :exact-active-class="ACTIVE" data-nav-system>
+      <span class="relative">
+        <ActivityLogIcon class="size-5" />
+        <SystemAlertIcon class="absolute -right-3 -top-1.5" />
+      </span>{{ t('system_title') }}
     </RouterLink>
     <RouterLink to="/config" :class="TAB" :exact-active-class="ACTIVE">
       <MixerHorizontalIcon class="size-5" />{{ t('nav_settings') }}

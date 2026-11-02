@@ -6,7 +6,9 @@ import {
   SelectTrigger, SelectValue, Table, TableBody, TableCell, TableHead, TableHeader,
   TableRow, toast,
 } from '@ritornello/ui'
+import { ExclamationTriangleIcon } from '@radix-icons/vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import type { Alert } from '../composables/systemAlerts'
 import { useCatalog } from '../composables/useCatalog'
 import { PERIODS_S, useMetrics } from '../composables/useMetrics'
 import { formatPosition } from '../composables/usePlayer'
@@ -19,9 +21,26 @@ import { xValues, sparklinePath, minuteTicks } from './sparkline'
 
 const { t } = useCatalog()
 const {
-  state, unavailable, history, currentCpuUsage,
+  state, unavailable, history, alerts, currentCpuUsage,
   periodMs, period, windowMinutes, pause, resume,
 } = useMetrics()
+
+/**
+ * Sentence of one raised alert. The figure is formatted as the cards format
+ * theirs: one decimal for °C (like `temperature`), none for a percentage.
+ * One literal `t.value` call per key, not a template literal: the guard of
+ * `i18nKeysUsed.test.ts` only sees literal keys.
+ */
+function alertText(a: Alert): string {
+  const percent = a.value?.toFixed(0) ?? ''
+  switch (a.kind) {
+    case 'temperature': return t.value('system_alert_temperature', { value: a.value?.toFixed(1) ?? '' })
+    case 'cpu': return t.value('system_alert_cpu', { value: percent })
+    case 'memory': return t.value('system_alert_memory', { value: percent })
+    case 'disk': return t.value('system_alert_disk', { value: percent })
+    case 'voltage': return t.value('system_under_voltage')
+  }
+}
 
 /**
  * The latest logged errors, fetched on mount and every time the popin opens
@@ -786,6 +805,23 @@ async function pollUntilBack(before: number | null, maxMs: number, successKey: s
       {{ t('system_unavailable') }}
     </p>
 
+    <!-- What the triangle of the navigation points at (`systemAlerts.ts`):
+         one sentence per raised alert, at the top so the page answers the
+         triangle before anything else. The under-voltage advice lives here
+         too — it used to sit below the system grid, where it would now
+         repeat the same sentence twice on one page. -->
+    <div
+      v-if="alerts.length > 0"
+      data-system-alerts
+      role="status"
+      class="flex gap-2 rounded-md border border-destructive/50 p-3 text-sm text-destructive"
+    >
+      <ExclamationTriangleIcon aria-hidden="true" class="mt-0.5 size-4 shrink-0" />
+      <ul class="space-y-1">
+        <li v-for="a in alerts" :key="a.kind" :data-system-alert="a.kind">{{ alertText(a) }}</li>
+      </ul>
+    </div>
+
     <!-- No CardTitle associated with the trigger here (no Card around it):
          aria-label required, same rationale as the Selects in ConfigView.vue. -->
     <div class="flex items-center gap-2">
@@ -1067,20 +1103,6 @@ async function pollUntilBack(before: number | null, maxMs: number, successKey: s
             <span data-system-service-uptime>{{ duration(state?.service_uptime_s) }}</span>
           </div>
         </div>
-        <!-- One single place for the state (the line above, short:
-             "Under-voltage" or "Nominal"), one for the advice that goes with
-             it — and that advice only exists when it applies. Before, the
-             full sentence lived in the grid itself: doubled colons ("Supply
-             voltage: Under-voltage detected: check the power supply.") and a
-             text overflowing its two-column cell. -->
-        <p
-          v-if="state?.under_voltage === true"
-          data-system-under-voltage-avis
-          role="status"
-          class="text-destructive"
-        >
-          {{ t('system_under_voltage') }}
-        </p>
       </CardContent>
     </Card>
 

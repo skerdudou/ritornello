@@ -1028,19 +1028,70 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('displays the advice sentence below the grid only when the alert is active', async () => {
+  it('shows no alert list on a quiet machine', async () => {
     stub(payload({ under_voltage: false }))
     const w = await mountView()
-    expect(w.find('[data-system-under-voltage-avis]').exists()).toBe(false)
+    expect(w.find('[data-system-alerts]').exists()).toBe(false)
     w.unmount()
   })
 
-  it('displays the advice sentence with role status on under-voltage', async () => {
+  it('carries the under-voltage advice in the alert list, with role status', async () => {
     stub(payload({ under_voltage: true }))
     const w = await mountView()
-    const notice = w.get('[data-system-under-voltage-avis]')
-    expect(notice.text()).toBe('system_under_voltage')
-    expect(notice.attributes('role')).toBe('status')
+    const list = w.get('[data-system-alerts]')
+    expect(list.attributes('role')).toBe('status')
+    expect(list.get('[data-system-alert="voltage"]').text()).toBe('system_under_voltage')
+    w.unmount()
+  })
+
+  it('names the temperature it judged, with one decimal like the card', async () => {
+    stub(payload({ temperature_c: 81.04 }), { ...CATALOGUE, system_alert_temperature: 'Hot: {value} °C' })
+    const w = await mountView()
+    expect(w.get('[data-system-alert="temperature"]').text()).toBe('Hot: 81.0 °C')
+    w.unmount()
+  })
+
+  // From the probe to the sentence, through the real CPU delta: one core of
+  // four saturated (25 % of the machine, see `nextJiffies`) — the runaway
+  // process this alert exists for. Nothing before three minutes of history.
+  it('raises the processor once one core has been busy for three minutes', async () => {
+    const jiffies = nextJiffies()
+    stub(() => payload(jiffies()), { ...CATALOGUE, system_alert_cpu: 'Busy: {value} %' })
+    const w = await mountView()
+    await vi.advanceTimersByTimeAsync(170_000)
+    expect(w.find('[data-system-alert="cpu"]').exists()).toBe(false)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(w.get('[data-system-alert="cpu"]').text()).toBe('Busy: 25 %')
+    w.unmount()
+  })
+
+  it('keeps the temperature raised from one probe to the next down to 75 °C', async () => {
+    // The probe hands the previous alerts back to the rule: without that, a
+    // sensor at 77 °C after 85 °C would drop the triangle and blink.
+    const temps = [85, 77, 74]
+    stub(() => payload({ temperature_c: temps.shift() ?? 74 }))
+    const w = await mountView()
+    expect(w.find('[data-system-alert="temperature"]').exists()).toBe(true)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(w.find('[data-system-alert="temperature"]').exists()).toBe(true)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(w.find('[data-system-alert="temperature"]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('drops the alerts when the core stops answering', async () => {
+    let fail = false
+    stub(() => {
+      if (fail) throw new Error('down')
+      return payload({ temperature_c: 85 })
+    })
+    const w = await mountView()
+    expect(useMetrics().alerts.value.map((a) => a.kind)).toEqual(['temperature'])
+    fail = true
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(useMetrics().unavailable.value).toBe(true)
+    expect(useMetrics().alerts.value).toEqual([])
+    expect(w.find('[data-system-alerts]').exists()).toBe(false)
     w.unmount()
   })
 

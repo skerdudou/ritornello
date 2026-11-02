@@ -212,6 +212,21 @@ describe('shell navigation', () => {
    * Asserted on `/config` rather than on the home page precisely to pin that:
    * a badge mounted inside a view would disappear here.
    */
+  it('puts a warning triangle on the System entry while an alert is raised', async () => {
+    const w = await mountAt('/config')
+    const entry = w.get('[data-top-nav] [data-top-nav-system]')
+    expect(entry.find('[data-system-alert-icon]').exists()).toBe(false)
+    useMetrics().alerts.value = [{ kind: 'temperature', value: 82 }]
+    await flushPromises()
+    // Named for a screen reader, not only painted: the link reads
+    // "System, needs attention".
+    expect(entry.get('[data-system-alert-icon]').attributes('aria-label')).toBe('system_alert_badge')
+    useMetrics().alerts.value = []
+    await flushPromises()
+    expect(entry.find('[data-system-alert-icon]').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('carries the connection badge in the header, on every page', async () => {
     const w = await mountAt('/config')
     expect(w.get('header [data-connection]').attributes('data-connection')).toBe('online')
