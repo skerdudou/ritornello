@@ -148,7 +148,9 @@ impl Client {
     /// itself (within about 2 s), one small answer instead of twenty. Its 404
     /// falls back to `/api/search`, which also serves an unknown duration.
     /// Whatever comes back still goes through [`matching::answer_for`]: the
-    /// server's match is looser than ours.
+    /// server's match is looser than ours. When it rejects the one record
+    /// `/api/get` gave, the search is asked too before concluding: an absence
+    /// is cached for 30 days, and one fuzzy server match must not settle it.
     pub async fn lookup(&self, q: &Query) -> Answer {
         let names = [("artist_name", q.artist.clone()), ("track_name", q.title.clone())];
         if let Some(duration) = q.duration_s {
@@ -158,12 +160,13 @@ impl Client {
             }
             params.push(("duration", duration.to_string()));
             match self.fetch("/api/get", &params).await {
-                Reply::Body(body) => {
-                    return match parse_record(&body) {
-                        Some(record) => matching::answer_for(q, std::slice::from_ref(&record)),
-                        None => unreadable("/api/get"),
-                    };
-                }
+                Reply::Body(body) => match parse_record(&body) {
+                    Some(record) => match matching::answer_for(q, std::slice::from_ref(&record)) {
+                        Answer::Absent => {}
+                        answer => return answer,
+                    },
+                    None => return unreadable("/api/get"),
+                },
                 Reply::NotFound => {}
                 Reply::Unavailable(retry_after) => return Answer::Unavailable { retry_after },
             }
@@ -200,11 +203,41 @@ impl Client {
             tracing::info!("LRCLIB {path}: HTTP {status}");
             return Reply::Unavailable(wait);
         }
-        match resp.text().await {
-            Ok(body) => Reply::Body(body),
+        read_bounded(path, resp).await
+    }
+}
+
+/// Ceiling on an answer's body. The largest real answer measured, a search
+/// returning twenty versions of "Get Lucky" with their lyrics
+/// (`tests/fixtures/search.json`), is 286 KB; 2 MiB leaves room for wordier
+/// songs. Without it only the 10 s timeout bounds a body — about 125 MB at
+/// 100 Mbit/s, on a Pi.
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Reads the body, at most [`MAX_BODY_BYTES`] of it. A declared length past
+/// the ceiling is refused before reading a byte; an undeclared one is read
+/// chunk by chunk and dropped as soon as it passes the ceiling. Too big is
+/// `Unavailable`, never an absence: the server did answer, but not with
+/// anything we can trust to mean "no lyrics".
+async fn read_bounded(path: &str, mut resp: reqwest::Response) -> Reply {
+    if resp.content_length().is_some_and(|n| n > MAX_BODY_BYTES as u64) {
+        tracing::info!("LRCLIB {path}: answer too large ({:?} bytes)", resp.content_length());
+        return Reply::Unavailable(None);
+    }
+    let mut body = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > MAX_BODY_BYTES {
+                    tracing::info!("LRCLIB {path}: answer too large, dropped past {MAX_BODY_BYTES} bytes");
+                    return Reply::Unavailable(None);
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => return Reply::Body(String::from_utf8_lossy(&body).into_owned()),
             Err(e) => {
                 tracing::info!("LRCLIB {path}: answer cut short: {e}");
-                Reply::Unavailable(None)
+                return Reply::Unavailable(None);
             }
         }
     }
@@ -287,10 +320,22 @@ mod tests {
         status: &'static str,
         headers: &'static str,
         body: String,
+        /// The declared `Content-Length`; `None` sends none (the body then
+        /// ends when the connection closes).
+        content_length: Option<usize>,
+        /// Keeps the connection open after the body instead of closing it,
+        /// so a client that waits for the end waits for its timeout.
+        hold_open: bool,
     }
 
     fn canned(status: &'static str, body: &str) -> Canned {
-        Canned { status, headers: "", body: body.to_string() }
+        Canned {
+            status,
+            headers: "",
+            body: body.to_string(),
+            content_length: Some(body.len()),
+            hold_open: false,
+        }
     }
 
     /// A local server answering one connection per canned answer, in order,
@@ -314,15 +359,27 @@ mod tests {
                 }
                 let text = String::from_utf8_lossy(&request);
                 log.lock().unwrap().push(text.lines().next().unwrap_or("").to_string());
+                let length = answer
+                    .content_length
+                    .map(|n| format!("Content-Length: {n}\r\n"))
+                    .unwrap_or_default();
                 let response = format!(
-                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    answer.status,
-                    answer.headers,
-                    answer.body.len(),
-                    answer.body
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}{length}Connection: close\r\n\r\n{}",
+                    answer.status, answer.headers, answer.body
                 );
-                sock.write_all(response.as_bytes()).await.unwrap();
-                sock.shutdown().await.ok();
+                // A client that gives up mid-body closes its end: not an
+                // error of the server's.
+                if sock.write_all(response.as_bytes()).await.is_err() {
+                    continue;
+                }
+                if answer.hold_open {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        drop(sock);
+                    });
+                } else {
+                    sock.shutdown().await.ok();
+                }
             }
         });
         (base, seen)
@@ -392,7 +449,7 @@ mod tests {
         let (base, _) = serve(vec![Canned {
             status: "429 Too Many Requests",
             headers: "Retry-After: 120\r\n",
-            body: "{}".into(),
+            ..canned("", "{}")
         }])
         .await;
         let client = Client::new(&base).unwrap();
@@ -407,6 +464,60 @@ mod tests {
         let (base, _) = serve(vec![canned("200 OK", "<html>maintenance</html>")]).await;
         let client = Client::new(&base).unwrap();
         assert_eq!(client.lookup(&lucky(None)).await, Answer::Unavailable { retry_after: None });
+    }
+
+    #[tokio::test]
+    async fn a_rejected_get_answer_falls_back_to_search() {
+        // `/api/get` matches loosely; here it hands back another artist's
+        // record. Concluding `Absent` from it would hide the song's lyrics
+        // for 30 days although the search has them.
+        let mut other: serde_json::Value = serde_json::from_str(GET_SYNCED).unwrap();
+        other["artistName"] = "Daft Punk Tribute Band".into();
+        other["duration"] = 254.0.into();
+        let (base, seen) = serve(vec![
+            canned("200 OK", &other.to_string()),
+            canned("200 OK", SEARCH),
+        ])
+        .await;
+        let client = Client::new(&base).unwrap();
+        match client.lookup(&lucky(Some(254))).await {
+            Answer::Found { duration_s, .. } => assert_eq!(duration_s, Some(254)),
+            other => panic!("expected the search's 254 s version, got {other:?}"),
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[1].starts_with("GET /api/search?"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_body_is_unavailable_and_read_no_further() {
+        // Both answers end in silence rather than a close: a client that
+        // kept reading would hang until its 10 s timeout, so finishing
+        // quickly is what proves it stopped.
+        //
+        // Declared: a length past the ceiling, refused before any byte.
+        let declared = Canned {
+            content_length: Some(MAX_BODY_BYTES + 1),
+            hold_open: true,
+            ..canned("200 OK", "")
+        };
+        // Undeclared: more than the ceiling, dropped once past it.
+        let undeclared = Canned {
+            content_length: None,
+            hold_open: true,
+            ..canned("200 OK", &"x".repeat(MAX_BODY_BYTES + 64 * 1024))
+        };
+        let (base, _) = serve(vec![declared, undeclared]).await;
+        let client = Client::new(&base).unwrap();
+        for case in ["declared length", "no length"] {
+            let start = std::time::Instant::now();
+            assert_eq!(
+                client.lookup(&lucky(None)).await,
+                Answer::Unavailable { retry_after: None },
+                "{case}"
+            );
+            assert!(start.elapsed() < Duration::from_secs(5), "{case}: took {:?}", start.elapsed());
+        }
     }
 
     #[tokio::test]

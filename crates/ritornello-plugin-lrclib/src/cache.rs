@@ -117,6 +117,8 @@ fn from_secs(secs: u64) -> SystemTime {
 impl Cache {
     /// Opens the cache in `dir`, created if missing. Never fails: a cache
     /// that cannot be read is an empty cache, and the plugin works without.
+    /// `dir` must be dedicated to this cache: files in it that are not
+    /// entries are deleted.
     pub fn open(dir: &Path) -> Self {
         Self::open_with_cap(dir, CACHE_MAX_BYTES)
     }
@@ -139,7 +141,9 @@ impl Cache {
                 // Unreadable, truncated, a leftover temporary file, or a
                 // name that does not match its key: this directory is ours,
                 // and keeping such a file would only make it count against
-                // the ceiling forever.
+                // the ceiling forever. Hence the caller must pass a
+                // subdirectory dedicated to this cache, never a shared one:
+                // `open` and `clear` delete what they do not recognize.
                 None => {
                     tracing::info!("lyrics cache: dropping {}", path.display());
                     let _ = std::fs::remove_file(&path);
@@ -243,12 +247,28 @@ impl Cache {
     }
 
     /// Empties the cache, on disk and in memory.
+    ///
+    /// Files go first and the index follows what actually remains, so an I/O
+    /// error part-way leaves memory describing the disk, not an empty cache
+    /// over files still counted nowhere. Subdirectories are left alone: this
+    /// code only ever writes files. The first error is returned once every
+    /// other file has been tried.
     pub fn clear(&mut self) -> std::io::Result<()> {
-        self.index.clear();
+        let mut first_error = None;
         for entry in std::fs::read_dir(&self.dir)? {
-            std::fs::remove_file(entry?.path())?;
+            let removed = entry.and_then(|entry| {
+                if entry.file_type()?.is_dir() {
+                    return Ok(());
+                }
+                std::fs::remove_file(entry.path())
+            });
+            if let Err(e) = removed {
+                first_error.get_or_insert(e);
+            }
         }
-        Ok(())
+        let dir = &self.dir;
+        self.index.retain(|key, _| dir.join(key.file_name()).exists());
+        first_error.map_or(Ok(()), Err)
     }
 
     pub fn stats(&self) -> Stats {
@@ -453,6 +473,36 @@ mod tests {
         // Still usable afterwards.
         cache.put(&key("Three"), Cached::Absent { since: at(2) }, at(2));
         assert_eq!(cache.stats().absent, 1);
+    }
+
+    #[test]
+    fn clear_leaves_a_subdirectory_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = Cache::open(dir.path());
+        cache.put(&key("One"), Cached::Found(real_lyrics()), at(0));
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        cache.clear().expect("a subdirectory is not an error");
+        assert_eq!(cache.stats(), Stats::default());
+        assert_eq!(files_in(dir.path()), vec!["nested".to_string()]);
+    }
+
+    /// Unix only: a read-only directory is how a removal is made to fail.
+    /// (Run as root, removals succeed and the scenario cannot be produced.)
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_clear_leaves_the_index_matching_the_disk() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cache = Cache::open(dir.path());
+        cache.put(&key("One"), Cached::Found(real_lyrics()), at(0));
+        cache.put(&key("Two"), Cached::Absent { since: at(0) }, at(0));
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = cache.clear();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err(), "the removals were meant to fail");
+        assert_eq!(files_in(dir.path()).len(), 2);
+        assert_eq!((cache.stats().found, cache.stats().absent), (1, 1), "memory still describes the disk");
+        assert!(cache.get(&key("One"), at(1)).is_some());
     }
 
     #[test]
