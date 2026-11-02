@@ -112,6 +112,8 @@ impl<P: Player> Core<P> {
         // it would let the core hand an original to a source that never
         // offered to receive one.
         self.source_cover_archivable = false;
+        self.source_lyrics_archivable = false;
+        self.lyrics_archive_attempted = None;
         self.retry_count = 0;
         // Persist **before** `Activate`: if the new source does not answer
         // (the SDK's 5 s timeout), the in-memory state, the on-disk state and
@@ -204,6 +206,7 @@ impl<P: Player> Core<P> {
             // hand an original to, and a successor wired under the same name
             // will make its own offer or none.
             self.source_cover_archivable = false;
+            self.source_lyrics_archivable = false;
         }
         self.publish_catalog();
         // Publish the state too: `can_eject`, `has_finite_list` and

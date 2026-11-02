@@ -503,7 +503,6 @@ impl Metadata {
     /// Validated here, through the one gate lyrics have: they crossed a
     /// socket, and the arbitration must never retain words the display would
     /// then refuse.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the Source channel is wired to it next"))]
     pub fn set_lyrics_source(&mut self, l: Option<Lyrics>, origin: &str) -> bool {
         let fresh = l.and_then(Lyrics::validated).map(|l| (l, origin.to_string()));
         if self.lyrics_source == fresh {
@@ -515,7 +514,6 @@ impl Metadata {
     }
 
     /// Retains the lyrics carried by the file's own tags. `true` if new.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the mpv tags are wired to it next"))]
     pub fn set_lyrics_tags(&mut self, l: Option<Lyrics>) -> bool {
         let fresh = l.and_then(Lyrics::validated);
         if self.lyrics_tags == fresh {
@@ -589,9 +587,18 @@ impl Metadata {
     }
 
     /// Content key of the retained lyrics, the one their `lyrics_href` names.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the lyrics route is wired to it next"))]
     pub fn lyrics_key(&self) -> Option<String> {
         self.lyrics_cle.clone()
+    }
+
+    /// The retained lyrics come from a `metadata` plugin — the only tier
+    /// worth handing to the Source to keep (see `Core::start_lyrics_archive`).
+    ///
+    /// Judged on the tiers, never on the origin's name: a plugin may be
+    /// both a source and a contributor under one name, and `selected_lyrics`
+    /// only reaches the plugins once both upper tiers are empty.
+    pub fn lyrics_from_a_plugin(&self) -> bool {
+        self.lyrics_source.is_none() && self.lyrics_tags.is_none() && self.lyrics_cle.is_some()
     }
 
     /// The cover that wins, and who supplied it.

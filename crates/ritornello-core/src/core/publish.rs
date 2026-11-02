@@ -6,7 +6,28 @@ impl<P: Player> Core<P> {
     /// Broadcasts the structured state of the player: to the SPA, and to
     /// the Display plugins (which compose their own layout from this same frame).
     pub(crate) fn publish_state(&self) {
+        // **Stored before the state that names them goes out**, and here,
+        // at the one checkpoint every path converges on, rather than beside
+        // each path that can change the lyrics: a page that receives a
+        // `lyrics_href` fetches it at once, and a key the route does not hold
+        // yet would answer 404 — the popin would say "no lyrics" for a song
+        // that has some. Once per frame, so the held key is checked first:
+        // `selected_lyrics` may compose the whole text to judge a plugin's
+        // words, and that is only worth doing when there is something to store.
+        if let Some(key) = self.metadata.lyrics_key()
+            && !self.lyrics.holds(&key)
+            && let Some((l, _)) = self.metadata.selected_lyrics()
+        {
+            self.lyrics.insert(key, l);
+        }
         let state = self.player_state();
+        // The ordering above, checked where it matters under test: moved
+        // after the send, the store would lag the state by one publication.
+        #[cfg(test)]
+        if let Some(href) = &state.track.lyrics_href {
+            let key = href.strip_prefix(crate::lyrics::HREF_PREFIX).expect("a lyrics_href the core built");
+            assert!(self.lyrics.get(key).is_some(), "about to publish {href}, which the route does not hold");
+        }
         // Published generously (at the end of every command, in addition to
         // the metadata paths), hence deduplicated: without this guard, every
         // connected browser and every display would receive a frame
@@ -29,7 +50,7 @@ impl<P: Player> Core<P> {
         // own `NowPlaying` (source and identity change too); this
         // `send_if_modified` then merely observes equality and republishes
         // nothing extra.
-        let known = self.metadata.known();
+        let known = self.known();
         self.now_playing_tx.send_if_modified(|np| {
             if np.known == known {
                 false

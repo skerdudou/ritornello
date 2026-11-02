@@ -485,6 +485,24 @@ pub struct Core<P: Player> {
     /// is spawned per `cover_arrived`, and the rig settles between two.
     #[cfg(test)]
     cover_archive_task: Option<tokio::task::JoinHandle<()>>,
+    /// The lyrics the core published, shared with the HTTP route and the
+    /// display relays (see `assemble_covers_and_core`). `publish_state`
+    /// fills it before the href naming them goes out.
+    lyrics: Arc<crate::lyrics::LyricsStore>,
+    /// The active Source declared it would keep lyrics found elsewhere (see
+    /// `SourceMessage::lyrics_archivable`). Forgotten exactly where
+    /// `source_cover_archivable` is, for the same reason.
+    source_lyrics_archivable: bool,
+    /// The lyrics key whose archive was last attempted: the cover's single
+    /// slot (see `cover_archive_attempted`), without its sharing. Nothing
+    /// here can fail to be had — the words are in memory — so the task never
+    /// gives the slot back, and a plain field is enough. Cleared with the
+    /// slate: the next identity may ask for the same words again.
+    lyrics_archive_attempted: Option<String>,
+    /// Handle of the last lyrics archive task, kept only under test, for
+    /// the reason `cover_archive_task` gives.
+    #[cfg(test)]
+    lyrics_archive_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// What the detached read of an armed file (`Core::arm`) found: its tags
@@ -629,6 +647,11 @@ impl<P: Player> Core<P> {
             cover_archive_attempted: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(test)]
             cover_archive_task: None,
+            lyrics: Arc::new(crate::lyrics::LyricsStore::new()),
+            source_lyrics_archivable: false,
+            lyrics_archive_attempted: None,
+            #[cfg(test)]
+            lyrics_archive_task: None,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank
@@ -729,12 +752,10 @@ impl<P: Player> Core<P> {
             cover,
             cover_thumb,
             cover_archivable,
-            // Source contract 1.3. Not applied yet: the core does not hold
-            // lyrics until the lyrics model lands, so a frame carrying only
-            // these is still treated as carrying nothing. Named here so the
-            // decision is forced when that model is wired, on both halves.
-            lyrics: _,
-            lyrics_archivable: _,
+            // Source contract 1.3: the cover's pair, routed like it — in
+            // `carries_a_fact` and through `apply_declared_facts`.
+            lyrics,
+            lyrics_archivable,
             // Belongs to neither half: it is not a fact about the source but
             // a wish, acted on after this frame by `handle_source_frame`,
             // which takes it out before calling here. Named so the
@@ -858,7 +879,12 @@ impl<P: Player> Core<P> {
             // Left out of this disjunction it would reach neither exit and be
             // dropped in silence — the very defect `cover` and `cover_thumb`
             // are guarded against just above.
-            || cover_archivable.is_some();
+            || cover_archivable.is_some()
+            // The `.lrc` and the offer to keep lyrics travel alone on the
+            // same probe notification as the cover's: the same defect awaits
+            // them outside this disjunction.
+            || lyrics.is_some()
+            || lyrics_archivable.is_some();
         if carries_a_fact && !recomposes_the_view {
             // A **single** call, and that is the point: the "absent =
             // keep" fields that must be applied after identity all live in
@@ -868,7 +894,17 @@ impl<P: Player> Core<P> {
             // depending on someone remembering to copy it — that is
             // exactly the oversight that made every Source cover get lost
             // silently.
-            self.apply_declared_facts(preset, preset_name, location, cover, cover_thumb, cover_archivable, name);
+            self.apply_declared_facts(
+                preset,
+                preset_name,
+                location,
+                cover,
+                cover_thumb,
+                cover_archivable,
+                lyrics,
+                lyrics_archivable,
+                name,
+            );
             // Publish anyway: count, drawer and selection are part of the
             // broadcast state, and the channel dedupes if nothing changed.
             self.publish_state();
@@ -945,7 +981,17 @@ impl<P: Player> Core<P> {
         // alongside `preset_count`; the early-return path, meanwhile,
         // cannot carry an identity by construction, so calling it there is
         // safe.
-        self.apply_declared_facts(preset, preset_name, location, cover, cover_thumb, cover_archivable, name);
+        self.apply_declared_facts(
+            preset,
+            preset_name,
+            location,
+            cover,
+            cover_thumb,
+            cover_archivable,
+            lyrics,
+            lyrics_archivable,
+            name,
+        );
         // `preset_count` and `can_eject` are applied **at the top** of this
         // function, before the early return, for the same reason.
         //
@@ -1101,6 +1147,8 @@ impl<P: Player> Core<P> {
         cover: Option<ritornello_proto::CoverRef>,
         cover_thumb: Option<ritornello_proto::CoverRef>,
         cover_archivable: Option<bool>,
+        lyrics: Option<ritornello_proto::Lyrics>,
+        lyrics_archivable: Option<bool>,
         name: &str,
     ) {
         self.apply_selection(preset, preset_name);
@@ -1126,6 +1174,21 @@ impl<P: Player> Core<P> {
         // construction rather than by comment.
         if let Some(a) = cover_archivable {
             self.source_cover_archivable = a;
+        }
+        // The cover's convention: absent = nothing new, and words refused by
+        // the one gate are nothing new either — never "no more lyrics", which
+        // would erase a valid `.lrc` a previous frame declared. After the
+        // identity, like the cover, so the slate's reset cannot erase them.
+        if let Some(l) = lyrics.and_then(ritornello_proto::Lyrics::validated) {
+            self.metadata.set_lyrics_source(Some(l), name);
+        }
+        // After the identity for the cover's offer's reason, just above.
+        if let Some(a) = lyrics_archivable {
+            self.source_lyrics_archivable = a;
+            // The offer may come after the words it would keep: a plugin
+            // answering from its cache beats a folder probe on a sleeping
+            // share. Nothing else would call for the archive again.
+            self.start_lyrics_archive();
         }
     }
 
@@ -1586,6 +1649,28 @@ mod tests {
             Some("NO DISC"),
             "a frame that only announces a fact must take the early return, not clear the status"
         );
+    }
+
+    /// The same guard for the lyrics pair, one frame per field: taking
+    /// either out of `carries_a_fact` sends its frame down the full path,
+    /// which blanks the status.
+    #[tokio::test]
+    async fn a_frame_carrying_only_lyrics_or_their_offer_does_not_erase_the_status() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        let mut permanent = bare_update();
+        permanent.status_text = Some(Text::Verbatim("NO DISC".into()));
+        core.handle_source_update("radio", permanent);
+
+        let mut lyrics_only = bare_update();
+        lyrics_only.lyrics = Some(ritornello_proto::Lyrics { plain: Some("Words".into()), synced: None });
+        core.handle_source_update("radio", lyrics_only);
+        assert_eq!(core.player_state().status.as_deref(), Some("NO DISC"), "lyrics alone");
+
+        let mut offer_only = bare_update();
+        offer_only.lyrics_archivable = Some(true);
+        core.handle_source_update("radio", offer_only);
+        assert_eq!(core.player_state().status.as_deref(), Some("NO DISC"), "the offer alone");
+        assert!(core.source_lyrics_archivable, "and the offer is applied");
     }
 
     #[tokio::test]

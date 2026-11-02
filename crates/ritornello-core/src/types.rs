@@ -19,7 +19,11 @@ pub enum Event {
     /// and its size far exceeds that of a string. Without the box, *every*
     /// player event — one per track, state or title change — would cost the
     /// size of the largest.
-    FileTags(Box<ritornello_proto::Track>),
+    ///
+    /// `lyrics` are the words embedded in those same tags (see
+    /// `mpv::file_lyrics`). Emitted when either half is present; `track`
+    /// may then be `None` for a file whose only tag is its lyrics.
+    FileTags { track: Option<Box<ritornello_proto::Track>>, lyrics: Option<ritornello_proto::Lyrics> },
     /// Path of the file mpv actually opened (`path` property).
     ///
     /// The only way the core learns this detail: it never extracts it from the
