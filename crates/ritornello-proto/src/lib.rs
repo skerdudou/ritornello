@@ -35,6 +35,7 @@ pub mod admin;
 pub mod command;
 pub mod contract;
 pub mod display;
+pub mod lyrics;
 pub mod metadata;
 pub mod register;
 pub mod source;
@@ -46,6 +47,10 @@ pub use contract::{
     SOURCE_CONTRACT,
 };
 pub use display::{SourcesCatalog, Cover, DisplayFrame, SourceCatalog, COVER_MAX_BYTES};
+pub use lyrics::{
+    normalize_for_match, parse_lrc, LyricLine, Lyrics, LyricsSubject, RenderedLyrics,
+    LYRICS_MAX_BYTES,
+};
 pub use metadata::{
     valid_year, CoverRef, Enrichment, DateFormat, Clock, IdentityUpdate, Known, Link, Track,
     NowPlaying, Overlay, Playback, PlayerState, Provenance,
