@@ -18,6 +18,7 @@ members = [
     "crates/ritornello-plugin-console",
     "crates/ritornello-plugin-generic-input",
     "crates/ritornello-plugin-mpd",
+    "crates/ritornello-plugin-lrclib",
     "crates/ritornello-install",
 ]
 

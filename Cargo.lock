@@ -1478,6 +1478,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ritornello-plugin-lrclib"
+version = "0.2.0-beta.8"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "ritornello-proto",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ritornello-plugin-mpd"
 version = "0.2.0-beta.7"
 dependencies = [
