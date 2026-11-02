@@ -56,10 +56,10 @@ impl fmt::Display for ContractVersion {
 
 // `scripts/changed-components.sh` reads these five lines with sed: keep each
 // one on a single line, in exactly this shape.
-pub const SOURCE_CONTRACT: ContractVersion = ContractVersion::new(1, 2);
-pub const DISPLAY_CONTRACT: ContractVersion = ContractVersion::new(1, 1);
+pub const SOURCE_CONTRACT: ContractVersion = ContractVersion::new(1, 3);
+pub const DISPLAY_CONTRACT: ContractVersion = ContractVersion::new(1, 2);
 pub const INPUT_CONTRACT: ContractVersion = ContractVersion::new(1, 0);
-pub const METADATA_CONTRACT: ContractVersion = ContractVersion::new(1, 1);
+pub const METADATA_CONTRACT: ContractVersion = ContractVersion::new(1, 2);
 pub const ADMIN_CONTRACT: ContractVersion = ContractVersion::new(1, 0);
 
 impl Contract {
@@ -125,13 +125,18 @@ mod tests {
     fn every_contract_is_at_the_version_its_additions_brought() {
         for c in Contract::ALL {
             // Every contract started at 1.0. Since then:
-            // - source: 1.1 for `play_request`, 1.2 for `armed`;
-            // - display: 1.1 for the source catalog's `icon`;
-            // - metadata: 1.1 for `NowPlaying::armed`;
+            // - source: 1.1 for `play_request`, 1.2 for `armed`, 1.3 for
+            //   lyrics (`SourceMessage::lyrics`, `lyrics_archivable`,
+            //   `SourceReq::ArchiveLyrics`);
+            // - display: 1.1 for the source catalog's `icon`, 1.2 for lyrics
+            //   (`DisplayFrame::Lyrics`, `Track::lyrics_href`…);
+            // - metadata: 1.1 for `NowPlaying::armed`, 1.2 for lyrics
+            //   (`Enrichment::lyrics`, `Known::lyrics`,
+            //   `Known::measured_duration_s`);
             // - every other one: still 1.0.
             let expected = match c {
-                Contract::Source => ContractVersion::new(1, 2),
-                Contract::Display | Contract::Metadata => ContractVersion::new(1, 1),
+                Contract::Source => ContractVersion::new(1, 3),
+                Contract::Display | Contract::Metadata => ContractVersion::new(1, 2),
                 _ => ContractVersion::new(1, 0),
             };
             assert_eq!(c.current(), expected, "{c:?}");

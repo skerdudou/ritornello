@@ -46,7 +46,7 @@ pub use contract::{
     Contract, ContractVersion, ADMIN_CONTRACT, DISPLAY_CONTRACT, INPUT_CONTRACT, METADATA_CONTRACT,
     SOURCE_CONTRACT,
 };
-pub use display::{SourcesCatalog, Cover, DisplayFrame, SourceCatalog, COVER_MAX_BYTES};
+pub use display::{SourcesCatalog, Cover, DisplayFrame, LyricsFrame, SourceCatalog, COVER_MAX_BYTES};
 pub use lyrics::{
     normalize_for_match, parse_lrc, LyricLine, Lyrics, LyricsSubject, RenderedLyrics,
     LYRICS_MAX_BYTES, MAX_LYRIC_LINES, MAX_LYRIC_TEXT_BYTES,

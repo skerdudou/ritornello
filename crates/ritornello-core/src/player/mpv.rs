@@ -356,6 +356,11 @@ pub fn file_tags(data: &Value) -> Option<Track> {
         origin: Some(crate::metadata::ORIGIN_TAGS.to_string()),
         cover_href: None,
         cover_origin: None,
+        // Like `cover_href`: a local URL the core builds once it holds
+        // lyrics, never something a tag carries.
+        lyrics_href: None,
+        lyrics_synced: false,
+        lyrics_origin: None,
         // Left empty here: it is `Metadata::text_block` that attributes
         // these fields to the tags, at composition time. Filling it in
         // here too would give two truths to keep in sync.
@@ -480,6 +485,10 @@ pub fn read_armed_file(path: &str) -> Option<(Option<Track>, Option<crate::cover
         origin: Some(crate::metadata::ORIGIN_TAGS.to_string()),
         cover_href: None,
         cover_origin: None,
+        // Same as in `file_tags`: built by the core, not read from tags.
+        lyrics_href: None,
+        lyrics_synced: false,
+        lyrics_origin: None,
         provenance: Default::default(),
     };
     Some(((!track.is_empty()).then_some(track), cover_of(path, &file)))

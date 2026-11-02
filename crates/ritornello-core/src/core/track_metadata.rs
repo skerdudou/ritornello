@@ -907,6 +907,7 @@ mod tests {
                     kinds: vec![ritornello_proto::PluginKind::Metadata],
                     admin: false,
                     covers: false,
+                    lyrics: false,
                     enriches_armed: false,
                     ui_version: None,
                     protocol: ritornello_proto::PROTOCOL_VERSION,

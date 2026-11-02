@@ -579,6 +579,11 @@ impl Metadata {
             duration_s: m.duration_s,
             year: m.year,
             cover: self.selected_cover().is_some(),
+            // Metadata contract 1.2. Not known yet: the core holds no lyrics
+            // and measures no duration until the lyrics model is wired, and
+            // `false`/`None` keep the frame exactly as it was before.
+            lyrics: false,
+            measured_duration_s: None,
             // Verbatim, and from `self.icy` and not from `m`: `m` is the
             // **composed** text, where the ICY only appears as a last resort.
             stream_title: self.icy.clone(),

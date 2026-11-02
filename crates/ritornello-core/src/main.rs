@@ -3412,6 +3412,7 @@ mod toggle_tests {
                 kinds: vec![PluginKind::Display],
                 admin: true,
                 covers: false,
+                lyrics: false,
                 enriches_armed: false,
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -3448,6 +3449,7 @@ mod toggle_tests {
             kinds: vec![kind],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4360,6 +4362,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: foreign,
@@ -4411,6 +4414,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4454,6 +4458,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: foreign,
@@ -4502,6 +4507,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Source],
             admin: true,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: foreign,
@@ -4560,6 +4566,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: true,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION + 1,
@@ -4597,6 +4604,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display, PluginKind::Input],
             admin: true,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4634,7 +4642,7 @@ mod toggle_tests {
             json["incompatible"],
             serde_json::json!({
                 "reason": "major",
-                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 1}}],
+                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 2}}],
             }),
             "{json}"
         );
@@ -4694,7 +4702,7 @@ mod toggle_tests {
         // reason that is not this test's.
         let socket = ritornello_plugin_sdk::socket_kind(&b.children.sockets_dir.join("mpd"), PluginKind::Display);
         let _display = tokio::net::UnixListener::bind(&socket).unwrap();
-        let a = mpd_like(ContractVersion::new(1, 2));
+        let a = mpd_like(ContractVersion::new(1, 3));
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
 
@@ -4712,7 +4720,7 @@ mod toggle_tests {
             assert_eq!(line.incompatible, None);
             assert_eq!(
                 line.limited,
-                vec![display_gap(ContractVersion::new(1, 2))],
+                vec![display_gap(ContractVersion::new(1, 3))],
                 "the {} line must name the display contract, and only it",
                 line.kind
             );
@@ -4734,6 +4742,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4765,6 +4774,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4795,6 +4805,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4832,6 +4843,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4881,6 +4893,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4911,6 +4924,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4944,6 +4958,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Source],
             admin: true,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: Some("3".into()),
             protocol: ritornello_proto::PROTOCOL_VERSION,

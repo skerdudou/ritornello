@@ -106,6 +106,13 @@ pub struct SourceUpdate {
     /// `PartialEq` against an inert frame rather than enumerated: nothing to
     /// edit in the comparison itself.
     pub cover_archivable: Option<bool>,
+    /// See `SourceMessage::lyrics`. Same convention as `cover`: absent =
+    /// nothing declared, keep what is held. Enters the relayable-frame
+    /// predicate by derivation, like every field here.
+    pub lyrics: Option<ritornello_proto::Lyrics>,
+    /// See `SourceMessage::lyrics_archivable`, the twin of
+    /// `cover_archivable`.
+    pub lyrics_archivable: Option<bool>,
     /// See `SourceMessage::armed`. Read by the core only beside
     /// `IdentityUpdate::Nothing`.
     pub armed: Option<ritornello_proto::Armed>,
@@ -191,6 +198,8 @@ impl SourceClient {
                     cover: msg.cover,
                     cover_thumb: msg.cover_thumb,
                     cover_archivable: msg.cover_archivable,
+                    lyrics: msg.lyrics,
+                    lyrics_archivable: msg.lyrics_archivable,
                     armed: msg.armed,
                 };
                 // And here is the "the answer is forced too" half. The

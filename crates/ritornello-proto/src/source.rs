@@ -102,6 +102,20 @@ pub enum SourceReq {
     /// Source that copies onto a share before answering will routinely be told
     /// it failed when it did not.
     ArchiveCover { identity: serde_json::Value, file: String },
+    /// The core holds lyrics for `identity`, found elsewhere, and the Source
+    /// offered to keep them (`SourceMessage::lyrics_archivable`). Answered by
+    /// `SourceAction::Noop`.
+    ///
+    /// **`identity` designates, it does not compare**, for the same reason as
+    /// in `ArchiveCover`: playback may have moved on by the time this arrives,
+    /// and it is the folder of *this* identity that receives the file.
+    ///
+    /// Unlike a cover, the lyrics travel **inline**: they are text, bounded by
+    /// `LYRICS_MAX_BYTES`, so a staged file and its ownership rules would buy
+    /// nothing. The Source decides where they land and never overwrites what
+    /// is already there; the same "reply at once" rule as `ArchiveCover`
+    /// holds for the slow part.
+    ArchiveLyrics { identity: serde_json::Value, lyrics: crate::Lyrics },
 }
 
 /// A named preset. `index` is **1-based**, the one `Command::Select` expects,
@@ -533,6 +547,18 @@ pub struct SourceMessage {
     /// the convention of `preset` and `cover` — not that of `status`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_archivable: Option<bool>,
+    /// Lyrics the Source found for what it is playing (a `.lrc` beside the
+    /// file), as raw text. Same channel and same reasoning as `cover`: a
+    /// Source declares what it has without becoming a `metadata` plugin, in a
+    /// notification, so playback never waits on a share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyrics: Option<crate::Lyrics>,
+    /// This Source would keep lyrics found elsewhere next to the files it is
+    /// playing. The twin of `cover_archivable`, answered by
+    /// `SourceReq::ArchiveLyrics`, and with the same convention: absent =
+    /// "this frame says nothing about it, keep the previous answer".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyrics_archivable: Option<bool>,
     /// A request for the core to start playing this source, sent **only in a
     /// spontaneous notification** (`id` absent) and ignored in a reply. A
     /// notification therefore carries a state, and at most one request the
@@ -583,6 +609,8 @@ mod tests {
             cover: None,
             cover_thumb: None,
             cover_archivable: None,
+            lyrics: None,
+            lyrics_archivable: None,
             play_request: None,
             armed: None,
         }
@@ -1062,6 +1090,41 @@ mod tests {
         let wire = serde_json::to_string(&req).unwrap();
         assert_eq!(serde_json::from_str::<SourceReq>(&wire).unwrap(), req);
         assert!(wire.contains(r#""req":"ArchiveCover""#), "{wire}");
+    }
+
+    #[test]
+    fn the_source_message_carries_lyrics_and_an_archive_offer() {
+        let m = SourceMessage {
+            lyrics: Some(crate::Lyrics { plain: None, synced: Some("[00:01.00]Hello".into()) }),
+            lyrics_archivable: Some(true),
+            ..empty_message()
+        };
+        let back: SourceMessage = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.lyrics, m.lyrics);
+        assert_eq!(back.lyrics_archivable, Some(true));
+        // Absent = "this frame says nothing about it", like `cover` and
+        // `cover_archivable`: a source that ignores lyrics emits the frame it
+        // emitted before, and an older frame reads back with neither.
+        assert!(!serde_json::to_string(&empty_message()).unwrap().contains("lyrics"));
+        let old: SourceMessage = serde_json::from_str(r#"{"id":1,"action":null}"#).unwrap();
+        assert_eq!(old.lyrics, None);
+        assert_eq!(old.lyrics_archivable, None);
+    }
+
+    #[test]
+    fn archive_lyrics_carries_the_echo_and_the_lyrics() {
+        // Unlike a cover, lyrics are text: they travel inline rather than
+        // through a staged file, and the echo designates the folder.
+        let req = SourceReq::ArchiveLyrics {
+            identity: serde_json::json!({ "kind": "file", "path": "/mnt/nas/Album/01.flac" }),
+            lyrics: crate::Lyrics { plain: Some("Hello".into()), synced: Some("[00:01.00]Hello".into()) },
+        };
+        let wire = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"req":"ArchiveLyrics","arg":{"identity":{"kind":"file","path":"/mnt/nas/Album/01.flac"},"lyrics":{"plain":"Hello","synced":"[00:01.00]Hello"}}}"#
+        );
+        assert_eq!(serde_json::from_str::<SourceReq>(&wire).unwrap(), req);
     }
 
     #[test]

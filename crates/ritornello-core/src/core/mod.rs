@@ -729,6 +729,12 @@ impl<P: Player> Core<P> {
             cover,
             cover_thumb,
             cover_archivable,
+            // Source contract 1.3. Not applied yet: the core does not hold
+            // lyrics until the lyrics model lands, so a frame carrying only
+            // these is still treated as carrying nothing. Named here so the
+            // decision is forced when that model is wired, on both halves.
+            lyrics: _,
+            lyrics_archivable: _,
             // Belongs to neither half: it is not a fact about the source but
             // a wish, acted on after this frame by `handle_source_frame`,
             // which takes it out before calling here. Named so the

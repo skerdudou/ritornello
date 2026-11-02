@@ -107,6 +107,7 @@ fn source_req_label(r: &SourceReq) -> &'static str {
         SourceReq::EndOfContent => "EndOfContent",
         SourceReq::SetPlayMode { .. } => "SetPlayMode",
         SourceReq::ArchiveCover { .. } => "ArchiveCover",
+        SourceReq::ArchiveLyrics { .. } => "ArchiveLyrics",
     }
 }
 
@@ -153,6 +154,7 @@ fn frame_label(f: &DisplayFrame) -> &'static str {
         DisplayFrame::State(_) => "State",
         DisplayFrame::Catalog(_) => "Catalog",
         DisplayFrame::Cover(_) => "Cover",
+        DisplayFrame::Lyrics(_) => "Lyrics",
     }
 }
 
@@ -274,6 +276,9 @@ fn track_full() -> Track {
         origin: Some("musicbrainz".into()),
         cover_href: Some("/cover/1".into()),
         cover_origin: Some("deezer".into()),
+        lyrics_href: Some("/api/lyrics/1".into()),
+        lyrics_synced: true,
+        lyrics_origin: Some("lrclib".into()),
         provenance: Provenance {
             fields: BTreeMap::from([("title".to_string(), "musicbrainz".to_string())]),
             misses: vec!["album".into()],
@@ -340,6 +345,17 @@ fn add_cover_refs(l: &mut Lines) {
     }
 }
 
+/// A synced and a plain-only set: `Lyrics` travels raw in `source` and
+/// `metadata` (the display contract only sees it rendered, as lines).
+fn add_lyrics(l: &mut Lines) {
+    l.add("Lyrics::full", &lyrics_full());
+    l.add("Lyrics::plain", &Lyrics { plain: Some("words".into()), synced: None });
+}
+
+fn lyrics_full() -> Lyrics {
+    Lyrics { plain: Some("words".into()), synced: Some("[00:01.00]words".into()) }
+}
+
 fn add_links(l: &mut Lines) {
     let links = [
         Link::Youtube { url: "https://example.invalid/y".into() },
@@ -367,6 +383,7 @@ fn announcement_section() -> Vec<String> {
             kinds: vec![PluginKind::Source],
             admin: false,
             covers: false,
+            lyrics: false,
             ui_version: None,
             icon: None,
             enriches_armed: false,
@@ -384,6 +401,7 @@ fn announcement_section() -> Vec<String> {
             kinds: vec![PluginKind::Source, PluginKind::Display, PluginKind::Input, PluginKind::Metadata],
             admin: true,
             covers: true,
+            lyrics: true,
             ui_version: Some("abc123".into()),
             icon: Some("radio".into()),
             enriches_armed: true,
@@ -414,6 +432,7 @@ fn source_section() -> Vec<String> {
         SourceReq::EndOfContent,
         SourceReq::SetPlayMode { random: true, repeat: Repeat::All },
         SourceReq::ArchiveCover { identity: json!({"k": "v"}), file: "/tmp/c.jpg".into() },
+        SourceReq::ArchiveLyrics { identity: json!({"k": "v"}), lyrics: lyrics_full() },
     ];
     for r in &requests {
         l.add(&format!("SourceReq::{}", source_req_label(r)), r);
@@ -440,6 +459,7 @@ fn source_section() -> Vec<String> {
         l.add(&format!("IdentityUpdate::{}", identity_label(i)), i);
     }
     add_cover_refs(&mut l);
+    add_lyrics(&mut l);
     add_repeat(&mut l);
 
     for r in [PlayRequest::IfActive, PlayRequest::Switch, PlayRequest::WakeAndSwitch] {
@@ -465,6 +485,8 @@ fn source_section() -> Vec<String> {
             cover: Some(CoverRef::Path { path: "/c".into() }),
             cover_thumb: Some(CoverRef::Url { url: "https://example.invalid/t".into() }),
             cover_archivable: Some(true),
+            lyrics: Some(lyrics_full()),
+            lyrics_archivable: Some(true),
             play_request: Some(PlayRequest::Switch),
             armed: Some(Armed { identity: serde_json::json!({"k": 1}), media_path: Some("/m/a".into()) }),
         },
@@ -509,10 +531,22 @@ fn display_section() -> Vec<String> {
             ],
         }),
         DisplayFrame::Cover(Cover { href: "/cover/1".into(), mime: "image/jpeg".into(), bytes: vec![1, 2, 3] }),
+        DisplayFrame::Lyrics(LyricsFrame {
+            href: "/api/lyrics/1".into(),
+            content: RenderedLyrics {
+                synced: Some(vec![LyricLine { t_ms: 1000, text: "words".into() }]),
+                plain: None,
+            },
+        }),
     ];
     for f in &frames {
         l.add(&format!("DisplayFrame::{}", frame_label(f)), f);
     }
+    // The other shape of the rendered lyrics: plain text, no lines.
+    l.add(
+        "LyricsFrame::plain",
+        &LyricsFrame { href: "/api/lyrics/2".into(), content: RenderedLyrics { synced: None, plain: Some("words".into()) } },
+    );
     l.0
 }
 
@@ -565,6 +599,8 @@ fn metadata_section() -> Vec<String> {
                 duration_s: Some(10),
                 year: Some(2001),
                 cover: true,
+                lyrics: true,
+                measured_duration_s: Some(11),
                 stream_title: Some("A - T".into()),
             },
             armed: false,
@@ -575,6 +611,7 @@ fn metadata_section() -> Vec<String> {
         &NowPlaying { source: "cd".into(), identity: Some(json!({"disc": "x"})), armed: true, ..Default::default() },
     );
     add_cover_refs(&mut l);
+    add_lyrics(&mut l);
     add_links(&mut l);
     l.add("Enrichment::default", &Enrichment::default());
     l.add(
@@ -590,6 +627,8 @@ fn metadata_section() -> Vec<String> {
             position_s: Some(5),
             cover: Some(CoverRef::Url { url: "https://example.invalid/c".into() }),
             cover_thumb: Some(CoverRef::Path { path: "/t".into() }),
+            lyrics: Some(lyrics_full()),
+            lyrics_subject: Some(LyricsSubject { artist: "A".into(), title: "T".into() }),
             fill_only: true,
             searched: true,
             derived_from: Some("title".into()),
