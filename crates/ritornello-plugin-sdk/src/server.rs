@@ -1548,6 +1548,62 @@ mod tests {
         assert!(!n.transient);
     }
 
+    /// End to end, from the builders to the line on the socket: the
+    /// constructors set the fields, **and** the notification path of
+    /// `serve_source` copies them into the frame. A copy left at `None` there
+    /// compiles — the literal only forces the field to be named.
+    #[tokio::test]
+    async fn the_notification_carries_lyrics_via_its_constructor() {
+        fn words() -> ritornello_proto::Lyrics {
+            ritornello_proto::Lyrics { plain: Some("Hello".into()), synced: None }
+        }
+        let n = Notification::new().lyrics(words()).lyrics_archivable(true);
+        assert_eq!(n.lyrics, Some(words()));
+        assert_eq!(n.lyrics_archivable, Some(true));
+        assert_eq!(n.cover, None, "the other fields do not move");
+
+        struct LyricsSource {
+            announced: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for LyricsSource {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.announced {
+                    // `pending`, not `None`: `None` is terminal.
+                    std::future::pending().await
+                } else {
+                    self.announced = true;
+                    Some(Notification::new().lyrics(words()).lyrics_archivable(true))
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(LyricsSource { announced: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, _write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines.next_line().await.unwrap().expect("the spontaneous notification");
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, None, "{line}");
+        assert_eq!(msg.lyrics, Some(words()), "{line}");
+        assert_eq!(msg.lyrics_archivable, Some(true), "{line}");
+    }
+
     #[test]
     fn the_builder_status_text_lands_in_the_frame() {
         let key = Text::Keyed { key: "no_disc".into(), params: HashMap::new() };
@@ -2825,6 +2881,61 @@ mod display_tests {
         };
         w.write_all(
             format!("{}\n", serde_json::to_string(&DisplayFrame::Cover(expected.clone())).unwrap())
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        for _ in 0..100 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(seen.lock().unwrap().as_slice(), &[expected]);
+    }
+
+    #[tokio::test]
+    async fn an_interested_display_receives_the_lyrics_frame() {
+        // The twin of the cover's dispatch: a lyrics frame reaches
+        // `DisplayPlugin::lyrics`, whole.
+        #[derive(Clone, Default)]
+        struct Interested {
+            frames: Arc<Mutex<Vec<LyricsFrame>>>,
+        }
+        #[async_trait::async_trait]
+        impl DisplayPlugin for Interested {
+            async fn show(&mut self, _state: PlayerState) -> Result<()> {
+                Ok(())
+            }
+            fn wants_lyrics(&self) -> bool {
+                true
+            }
+            async fn lyrics(&mut self, f: LyricsFrame) -> Result<()> {
+                self.frames.lock().unwrap().push(f);
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        let plugin = Interested::default();
+        let seen = plugin.frames.clone();
+        tokio::spawn(async move {
+            serve_display(listener, plugin).await.unwrap();
+        });
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (_r, mut w) = stream.into_split();
+        use tokio::io::AsyncWriteExt;
+        let expected = LyricsFrame {
+            href: "/api/lyrics/1a2b".into(),
+            content: ritornello_proto::RenderedLyrics {
+                synced: Some(vec![ritornello_proto::LyricLine { t_ms: 1000, text: "Hello".into() }]),
+                plain: None,
+            },
+        };
+        w.write_all(
+            format!("{}\n", serde_json::to_string(&DisplayFrame::Lyrics(expected.clone())).unwrap())
                 .as_bytes(),
         )
         .await

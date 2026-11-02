@@ -499,6 +499,12 @@ impl Enrichment {
         // Lyrics go through their one gate, and only with a subject: lyrics
         // that do not say which song they were found for cannot be told apart
         // from a late answer about the previous one (see `lyrics_subject`).
+        // A subject with a blank name says no more than no subject at all:
+        // it would never match the current track, so it and its lyrics go.
+        self.lyrics_subject = self.lyrics_subject.take().and_then(|s| {
+            let (artist, title) = (s.artist.trim().to_string(), s.title.trim().to_string());
+            (!artist.is_empty() && !title.is_empty()).then_some(LyricsSubject { artist, title })
+        });
         self.lyrics = match self.lyrics_subject {
             Some(_) => self.lyrics.take().and_then(Lyrics::validated),
             None => None,
@@ -1197,6 +1203,32 @@ mod tests {
         }
         .cleaned();
         assert_eq!(blank.lyrics, None);
+    }
+
+    #[test]
+    fn lyrics_with_a_blank_subject_are_dropped_by_cleaned() {
+        let words = crate::Lyrics { plain: Some("Like the legend of the phoenix".into()), synced: None };
+        for (artist, title) in [("  ", "Get Lucky"), ("Daft Punk", "\t"), ("", "")] {
+            let e = Enrichment {
+                identity: json!(1),
+                lyrics: Some(words.clone()),
+                lyrics_subject: Some(crate::LyricsSubject { artist: artist.into(), title: title.into() }),
+                ..Default::default()
+            }
+            .cleaned();
+            assert_eq!(e.lyrics_subject, None, "{artist:?} / {title:?}");
+            assert_eq!(e.lyrics, None, "{artist:?} / {title:?}");
+        }
+        // A subject that only needs trimming is kept, trimmed.
+        let e = Enrichment {
+            identity: json!(1),
+            lyrics: Some(words.clone()),
+            lyrics_subject: Some(crate::LyricsSubject { artist: " Daft Punk ".into(), title: "Get Lucky\n".into() }),
+            ..Default::default()
+        }
+        .cleaned();
+        assert_eq!(e.lyrics_subject, Some(lyrics_subject()));
+        assert_eq!(e.lyrics, Some(words));
     }
 
     #[test]

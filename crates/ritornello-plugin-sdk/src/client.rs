@@ -1302,6 +1302,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_frame_carrying_only_lyrics_is_relayed() {
+        // The shape lyrics arrive in for real: a later notification with
+        // nothing else, like the cover. Asserted by value, because the literal
+        // that builds `SourceUpdate` forces the field to be named, not to be
+        // given the right value — `cover` was lost that way twice.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                lyrics: Some(ritornello_proto::Lyrics { plain: None, synced: Some("[00:01.00]Hello".into()) }),
+                ..Default::default()
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "files".into(), update_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        // Bounded: a frame judged inert is never relayed, and an unbounded
+        // `recv` would hang on that regression instead of failing it.
+        let (name, update) = tokio::time::timeout(std::time::Duration::from_secs(5), update_rx.recv())
+            .await
+            .expect("a frame carrying only lyrics must be relayed")
+            .unwrap();
+        assert_eq!(name, "files");
+        assert_eq!(
+            update.lyrics,
+            Some(ritornello_proto::Lyrics { plain: None, synced: Some("[00:01.00]Hello".into()) })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frame_carrying_only_the_lyrics_archive_offer_is_relayed() {
+        // The twin of the cover's archive offer: a fact on its own.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                lyrics_archivable: Some(true),
+                ..Default::default()
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "files".into(), update_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        // Bounded, for the same reason as the lyrics test above.
+        let (name, update) = tokio::time::timeout(std::time::Duration::from_secs(5), update_rx.recv())
+            .await
+            .expect("a frame carrying only the lyrics archive offer must be relayed")
+            .unwrap();
+        assert_eq!(name, "files");
+        assert_eq!(update.lyrics_archivable, Some(true));
+    }
+
+    #[tokio::test]
     async fn a_frame_carrying_only_a_thumbnail_is_relayed() {
         // **The derived predicate, and what it buys.** A frame carrying
         // nothing but the new field must still be relayed — the core alone

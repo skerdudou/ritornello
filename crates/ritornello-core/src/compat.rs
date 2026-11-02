@@ -267,7 +267,9 @@ mod tests {
 
     #[test]
     fn an_older_minor_is_normal() {
-        // Every current minor is 0, so the rule is exercised against a core at 1.3.
+        // Judged against a fixed core at 1.3 rather than the current
+        // versions, so the test keeps an older plugin minor whatever the
+        // contracts move to.
         let a = ann(&[PluginKind::Display], false, &[(Contract::Display, (1, 1))]);
         assert_eq!(judge_against(&a, |_| ContractVersion::new(1, 3)), Verdict::Accepted { limited: vec![] });
     }
