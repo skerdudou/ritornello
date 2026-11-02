@@ -430,6 +430,23 @@ const connection = computed<'online' | 'offline' | 'unknown'>(() => {
 })
 
 /**
+ * Says "seen" to the under-voltage of this boot. Returns the core's error
+ * sentence, or `null` once recorded — the kit's `api.post` convention, which
+ * never throws. On success the line goes at once rather than at the next
+ * probe, up to 30 s away: the state is patched the way the core will now
+ * answer, and the alerts re-judged from it.
+ */
+async function acknowledgeUnderVoltage(): Promise<string | null> {
+  const err = await api.post('/api/system/under-voltage/acknowledge', {})
+  if (err !== null) return err
+  if (state.value) {
+    state.value = { ...state.value, under_voltage_acknowledged: true }
+    alerts.value = evaluateAlerts(new Set(alerts.value.map((a) => a.kind)), state.value, history.value)
+  }
+  return null
+}
+
+/**
  * Complete reset. **For tests only**: the state lives at module level, so
  * without this a test leaves its history, its period and its timer to the
  * next one. To be called in a `beforeEach`.
@@ -462,6 +479,7 @@ export function useMetrics() {
     period,
     windowMinutes,
     staleUi,
+    acknowledgeUnderVoltage,
     start,
     pause,
     resume,

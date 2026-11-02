@@ -1629,7 +1629,8 @@ set of keys stays stable:
   "os": "Debian GNU/Linux 12 (bookworm)", "kernel": "6.6.51+rpt-rpi-v7",
   "version": "0.2.0", "can_power_off": true, "can_reboot": true,
   "logind_reachable": true,
-  "cpu_total_jiffies": 9880976, "cpu_idle_jiffies": 9877777
+  "cpu_total_jiffies": 9880976, "cpu_idle_jiffies": 9877777,
+  "under_voltage_acknowledged": false
 }
 ```
 
@@ -1780,7 +1781,8 @@ matters most only exists as a duration.
 | Temperature | 80 °C | 75 °C |
 | Processor | an average of 90 % of **one core** over the last 3 minutes (22.5 % of a quad-core Pi) | 70 % of that |
 | Memory, disk | 90 % used | 85 % |
-| Under-voltage | `under_voltage` true (instantaneous, never the since-boot bit) | `false` |
+| Under-voltage, now | `under_voltage` true | `false` |
+| Under-voltage, since boot | `under_voltage_since_boot` true | acknowledged, or the next boot |
 
 Each alert falls back at a lower value than it rises, so that a sensor
 hovering around a threshold does not make the triangle blink. The processor
@@ -1790,10 +1792,30 @@ a loop — saturates a single core, a quarter of the machine, which a
 threshold on the whole machine never sees. The three-minute window keeps a
 short burst quiet: an `apt-get` run measured on the Pi holds about one core
 for a minute or two. The average is weighted by time (a hidden tab polls far
-less often), and nothing is judged before the history covers the window, so
-the processor alert cannot appear in the first three minutes after the page
-is opened. When the core stops answering, the alerts are cleared: the
-connection badge already says so, and the last figures are stale.
+less often). Until the page's own history covers the window — on arrival,
+above all — the kernel's 5-minute load average stands in, as a share of the
+machine (`load / cores × 100`, one runnable task on a quad-core reading
+25 %): a process already looping when the page opens is seen at the first
+poll. Only a stand-in, since a load also counts tasks waiting on a disk; the
+apt-get run above read 0.76, under the 0.9 of a quad-core's threshold. When
+the core stops answering, the alerts are cleared: the connection badge
+already says so, and the last figures are stale.
+
+The under-voltage that matters is the past one: an episode lasts
+milliseconds, a poll almost never lands on it, and the firmware's sticky bit
+(`under_voltage_since_boot`) is what actually shows it. That alert stays lit
+until the owner presses **Acknowledge** on its line —
+`POST /api/system/under-voltage/acknowledge`, `204` once recorded, `503` when
+the run has nowhere to record it, `500` when the write fails or takes more
+than two seconds. The core writes the kernel's `boot_id`
+(`/proc/sys/kernel/random/boot_id`) to `under-voltage-ack` beside
+`state.json`, reads it back once at startup, and reports
+`under_voltage_acknowledged` in `GET /api/system` only while the two match:
+a restart of the service keeps the acknowledgement, a reboot voids it with
+nothing to clean up — and the firmware clears its bit at the same moment.
+A file of its own rather than a field of `state.json`, so that an older core
+reached by a rollback never reads it. An acknowledgement never hides a live
+episode (`under_voltage` true), which has no button.
 
 The thresholds are constants, not settings.
 

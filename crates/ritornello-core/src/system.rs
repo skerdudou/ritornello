@@ -74,6 +74,10 @@ pub struct Metrics {
     /// successive polls instead.
     pub cpu_total_jiffies: Option<u64>,
     pub cpu_idle_jiffies: Option<u64>,
+    /// The owner said "seen" to the under-voltage of this boot (see
+    /// `AckFile`). Only qualifies `under_voltage_since_boot`: an
+    /// instantaneous `under_voltage` stays an alert whatever this says.
+    pub under_voltage_acknowledged: bool,
 }
 
 /// Called to restart the service. A field rather than a direct
@@ -144,6 +148,16 @@ pub struct SystemInfo {
     // the base — a documented quirk of the syntax, not a relaxation of intent.
     // Nothing outside the crate constructs a `SystemInfo` at all.
     pub(crate) under_voltage_latched: std::sync::atomic::AtomicBool,
+    /// Where an acknowledgement of a past under-voltage is recorded, and for
+    /// which boot. `None` (the default, a development run) offers no
+    /// acknowledgement at all: `POST` answers `503`.
+    pub under_voltage_ack: Option<AckFile>,
+    /// Has the owner acknowledged the under-voltage seen since this boot?
+    /// Read once from `under_voltage_ack` at startup (`load_under_voltage_ack`)
+    /// and set by the `POST`: the page polls every few seconds, and a disk
+    /// read per poll is precisely what this module's reads avoid (see the
+    /// module comment). `pub(crate)` for the same reason as the latch above.
+    pub(crate) under_voltage_acked: std::sync::atomic::AtomicBool,
     /// Delay between the `202` and the process exit, so the response
     /// reaches the browser before the socket dies.
     pub restart_delay: std::time::Duration,
@@ -164,10 +178,36 @@ impl Default for SystemInfo {
             systemctl: "systemctl".to_string(),
             vcgencmd: "vcgencmd".to_string(),
             under_voltage_latched: std::sync::atomic::AtomicBool::new(false),
+            under_voltage_ack: None,
+            under_voltage_acked: std::sync::atomic::AtomicBool::new(false),
             restart_delay: std::time::Duration::from_millis(300),
             restart: Arc::new(|| std::process::exit(0)),
         }
     }
+}
+
+/// The file that records an acknowledged under-voltage, and the boot it
+/// belongs to.
+///
+/// The firmware's sticky bit (`under_voltage_since_boot`) only clears at
+/// reboot, so the page's alert would stay lit for the whole boot with no way
+/// to say "seen". The acknowledgement is therefore scoped to exactly that
+/// lifetime: the file holds the kernel's `boot_id`
+/// (`/proc/sys/kernel/random/boot_id`, a new random value at every boot), and
+/// it counts only while that matches. A restart of the service keeps it — an
+/// update, "Restart Ritornello" — and a reboot voids it by itself, with
+/// nothing to clean up. A file of its own beside `state.json` rather than a
+/// field in it: an older core reached by a rollback never reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AckFile {
+    pub path: std::path::PathBuf,
+    pub boot_id: String,
+}
+
+/// Was the under-voltage of boot `boot_id` acknowledged? Read once at startup
+/// (`main.rs`). Missing or unreadable file: no.
+pub fn load_under_voltage_ack(path: &std::path::Path, boot_id: &str) -> bool {
+    !boot_id.is_empty() && std::fs::read_to_string(path).is_ok_and(|s| s.trim() == boot_id)
 }
 
 /// `/sys/class/thermal/thermal_zone0/temp` holds millidegrees Celsius:
@@ -430,6 +470,7 @@ pub fn collect(info: &SystemInfo) -> Metrics {
         logind_reachable: info.logind_reachable,
         cpu_total_jiffies: cpu_jiffies.map(|(total, _)| total),
         cpu_idle_jiffies: cpu_jiffies.map(|(_, idle)| idle),
+        under_voltage_acknowledged: info.under_voltage_acked.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
@@ -445,6 +486,33 @@ pub fn collect(info: &SystemInfo) -> Metrics {
 /// the fact the banner actually needs — see `useMetrics.ts`'s `staleUi`.
 pub async fn system_json(State(state): State<crate::status::AppState>) -> Json<Metrics> {
     Json(collect(&state.system))
+}
+
+/// `POST /api/system/under-voltage/acknowledge`: records that the owner has
+/// seen the under-voltage of this boot (see `AckFile`). `204` once written;
+/// `503` when this run has nowhere to record it (no state directory or no
+/// `boot_id`); `500` when the write fails or takes more than two seconds — a
+/// route must never block (the admin protocol is serial). The memory flag
+/// only moves after the file is written, so a failure leaves the alert lit
+/// rather than acknowledged until the next restart only.
+pub async fn under_voltage_ack_post(State(state): State<crate::status::AppState>) -> Response {
+    let Some(ack) = state.system.under_voltage_ack.as_ref().filter(|a| !a.boot_id.is_empty()) else {
+        let msg = state.catalog.read().await.get("system_ack_unavailable").to_string();
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "error": msg }))).into_response();
+    };
+    let write = tokio::fs::write(&ack.path, format!("{}\n", ack.boot_id));
+    let detail = match tokio::time::timeout(std::time::Duration::from_secs(2), write).await {
+        Ok(Ok(())) => {
+            state.system.under_voltage_acked.store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!("under-voltage of this boot acknowledged from the UI");
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        Ok(Err(e)) => e.to_string(),
+        Err(_) => "timed out".to_string(),
+    };
+    tracing::warn!("under-voltage acknowledgement not recorded in {}: {detail}", ack.path.display());
+    let msg = state.catalog.read().await.get("system_ack_failed").replace("{detail}", &detail).to_string();
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
 /// What `POST /api/system/power` accepts.
@@ -898,7 +966,7 @@ mod tests {
             "temperature_c", "cpu_mhz", "load", "cpus", "memory", "disk", "under_voltage",
             "under_voltage_since_boot", "uptime_s", "service_uptime_s", "hostname", "ip", "os",
             "kernel", "version", "can_power_off", "can_reboot", "logind_reachable",
-            "cpu_total_jiffies", "cpu_idle_jiffies",
+            "cpu_total_jiffies", "cpu_idle_jiffies", "under_voltage_acknowledged",
         ] {
             assert!(v.get(key).is_some(), "key {key} missing");
         }
@@ -1000,6 +1068,73 @@ mod tests {
         // can never satisfy: it is a no.
         assert!(!parse_can("s \"challenge\"\n"));
         assert!(!parse_can(""));
+    }
+
+    async fn post_ack(app: axum::Router) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(Request::post("/api/system/under-voltage/acknowledge").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v = if body.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&body).unwrap() };
+        (status, v)
+    }
+
+    #[test]
+    fn an_acknowledgement_holds_for_the_boot_it_was_given_in_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("under-voltage-ack");
+        assert!(!load_under_voltage_ack(&file, "boot-a"), "no file: nothing acknowledged");
+        std::fs::write(&file, "boot-a\n").unwrap();
+        assert!(load_under_voltage_ack(&file, "boot-a"));
+        // The Pi rebooted: the firmware cleared its sticky bit, and the
+        // acknowledgement of the previous boot must not hide a new episode.
+        assert!(!load_under_voltage_ack(&file, "boot-b"));
+        std::fs::write(&file, "").unwrap();
+        assert!(!load_under_voltage_ack(&file, ""), "an empty boot id matches nothing");
+    }
+
+    #[tokio::test]
+    async fn acknowledging_records_the_boot_and_shows_in_get_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("under-voltage-ack");
+        let info = Arc::new(SystemInfo {
+            under_voltage_ack: Some(AckFile { path: file.clone(), boot_id: "boot-a".into() }),
+            ..Default::default()
+        });
+        let rig = || router(AppState { system: info.clone(), ..crate::status::tests_support::app_state() });
+        assert_eq!(json_body(rig(), "/api/system").await["under_voltage_acknowledged"], false);
+        let (status, _) = post_ack(rig()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(json_body(rig(), "/api/system").await["under_voltage_acknowledged"], true);
+        // Persisted, so a restart of the service (an update, "Restart
+        // Ritornello") keeps it: the next core reads it back at startup.
+        assert!(load_under_voltage_ack(&file, "boot-a"));
+    }
+
+    #[tokio::test]
+    async fn acknowledging_without_a_place_to_record_it_is_refused() {
+        let (status, v) = post_ack(app(SystemInfo::default())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(v["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_leaves_the_alert_unacknowledged() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be: the write fails.
+        let file = dir.path().join("under-voltage-ack");
+        std::fs::create_dir(&file).unwrap();
+        let info = Arc::new(SystemInfo {
+            under_voltage_ack: Some(AckFile { path: file, boot_id: "boot-a".into() }),
+            ..Default::default()
+        });
+        let rig = || router(AppState { system: info.clone(), ..crate::status::tests_support::app_state() });
+        let (status, v) = post_ack(rig()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(v["error"].is_string());
+        assert_eq!(json_body(rig(), "/api/system").await["under_voltage_acknowledged"], false);
     }
 
     async fn post_power(app: axum::Router, body: &str) -> (StatusCode, serde_json::Value) {

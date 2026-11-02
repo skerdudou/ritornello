@@ -725,4 +725,8 @@ export interface SystemPayload {
    */
   cpu_total_jiffies: number | null
   cpu_idle_jiffies: number | null
+  /** The owner acknowledged the under-voltage of this boot
+   *  (`POST /api/system/under-voltage/acknowledge`): qualifies
+   *  `under_voltage_since_boot` only, never the live `under_voltage`. */
+  under_voltage_acknowledged: boolean
 }
