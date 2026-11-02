@@ -1,6 +1,7 @@
 import { api } from '@ritornello/ui'
 import { computed, ref } from 'vue'
 import type { SystemPayload } from '../types'
+import { evaluateAlerts, type Alert } from './systemAlerts'
 
 /**
  * Probing of the system metrics and their history, at **module** level — a
@@ -81,6 +82,14 @@ export const PERIODS_S = [1, 2, 5, 10, 30] as const
 const CAPACITY = 240
 
 const history = ref<Sample[]>([])
+/**
+ * Alerts raised by the latest probe (see `systemAlerts.ts`), read by the
+ * triangle of both navigations and by the System page. Emptied when the core
+ * stops answering: the last figures are then stale, and the header badge
+ * already says "offline" — a triangle on top would assert a state nobody is
+ * measuring any more.
+ */
+const alerts = ref<Alert[]>([])
 /**
  * In-flight probe, with a dual use: `probe()` uses it as a lock to refuse to
  * overlap itself, `stop()` to cancel it. Before the stateful CPU delta, a late
@@ -231,12 +240,14 @@ async function probe() {
       history.value.push(p)
       if (history.value.length > CAPACITY) history.value.shift()
     }
+    alerts.value = evaluateAlerts(new Set(alerts.value.map((a) => a.kind)), s, history.value)
   } catch (e) {
     // A cancellation by `stop()` (period change, suspension for a power
     // action) also rejects the `fetch`: this is not a core failure, just our
     // own request cut short, so no "unavailable" line for that.
     if (controller.signal.aborted) return
     unavailable.value = true
+    alerts.value = []
     // One line per outage, not one per probe: see `failureReported`.
     if (!failureReported) {
       failureReported = true
@@ -431,6 +442,7 @@ export function resetMetrics(): void {
   state.value = null
   unavailable.value = false
   history.value = []
+  alerts.value = []
   periodMs.value = 5000
   previousJiffies.value = null
   currentCpuUsage.value = null
@@ -444,6 +456,7 @@ export function useMetrics() {
     unavailable,
     connection,
     history,
+    alerts,
     currentCpuUsage,
     periodMs,
     period,

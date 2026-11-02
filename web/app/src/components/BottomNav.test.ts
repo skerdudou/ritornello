@@ -48,6 +48,18 @@ describe('BottomNav', () => {
     expect(w.get('[data-nav-plugins]').attributes('href')).toBe('/plugins/')
   })
 
+  it('puts the warning triangle on the System tab while an alert is raised', async () => {
+    const { w } = await mountWith({ plugins: [], active_source: '' })
+    // Imported after `mountWith`'s `resetModules`, so this is the instance
+    // the mounted bar reads.
+    const { useMetrics } = await import('../composables/useMetrics')
+    const tab = w.get('[data-nav-system]')
+    expect(tab.find('[data-system-alert-icon]').exists()).toBe(false)
+    useMetrics().alerts.value = [{ kind: 'cpu', value: 25 }]
+    await flushPromises()
+    expect(tab.find('[data-system-alert-icon]').exists()).toBe(true)
+  })
+
   it('the Plugins tab stays lit on a plugin page, sibling routes of /plugins/', async () => {
     const { w, router } = await mountWith({ plugins: [
       { name: 'radio', kind: 'source', connected: true, admin: true },

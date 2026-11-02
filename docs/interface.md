@@ -1765,6 +1765,38 @@ dialog opens, never with the page.
 - **What stays in journald only.** Lines older than the ring, and anything
   logged before a restart: the rings live in memory.
 
+### Alerts
+
+A warning triangle beside **System** — in the top nav, and on the corner of
+the System tab of the phone's bottom bar — says that something on the
+machine needs a look; the page itself then lists one sentence per alert, at
+the top. The alerts are judged **in the browser**
+(`web/app/src/composables/systemAlerts.ts`), from the polls the SPA already
+makes on every page: the core keeps no history, and the one alert that
+matters most only exists as a duration.
+
+| Alert | Rises at | Falls back below |
+|---|---|---|
+| Temperature | 80 °C | 75 °C |
+| Processor | an average of 90 % of **one core** over the last 3 minutes (22.5 % of a quad-core Pi) | 70 % of that |
+| Memory, disk | 90 % used | 85 % |
+| Under-voltage | `under_voltage` true (instantaneous, never the since-boot bit) | `false` |
+
+Each alert falls back at a lower value than it rises, so that a sensor
+hovering around a threshold does not make the triangle blink. The processor
+threshold is a share of one core because the case it was written for — an
+infrared receiver gone wrong, its process writing errors to the system log in
+a loop — saturates a single core, a quarter of the machine, which a
+threshold on the whole machine never sees. The three-minute window keeps a
+short burst quiet: an `apt-get` run measured on the Pi holds about one core
+for a minute or two. The average is weighted by time (a hidden tab polls far
+less often), and nothing is judged before the history covers the window, so
+the processor alert cannot appear in the first three minutes after the page
+is opened. When the core stops answering, the alerts are cleared: the
+connection badge already says so, and the last figures are stale.
+
+The thresholds are constants, not settings.
+
 ## Internationalization (i18n)
 
 The interface is multilingual. The base language is **English**, embedded
