@@ -2247,6 +2247,16 @@ async fn main() -> Result<()> {
         // OS buttons, and asking per request would mean spawning `busctl`
         // twice every five seconds.
         let probe = system::probe_capabilities().await;
+        // Beside `state.json`, in the unit's `StateDirectory`. No `boot_id`
+        // (not Linux): no acknowledgement offered, the route answers 503.
+        let under_voltage_ack = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .ok()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .map(|boot_id| system::AckFile {
+                path: state_path.parent().unwrap_or(Path::new("/var/lib/ritornello")).join("under-voltage-ack"),
+                boot_id,
+            });
         // `covers` below is only a skeleton: `assemble_covers_and_core`
         // overwrites it with the sole `Arc<CoverCache>` it builds, handed
         // back identical to the `Core` it returns — see its doc. Building
@@ -2282,6 +2292,10 @@ async fn main() -> Result<()> {
                 // binary has been replaced: see where it is built, above, for
                 // why mpv has to die with this process.
                 restart: restart_hook.clone(),
+                under_voltage_acked: std::sync::atomic::AtomicBool::new(
+                    under_voltage_ack.as_ref().is_some_and(|a| system::load_under_voltage_ack(&a.path, &a.boot_id)),
+                ),
+                under_voltage_ack: under_voltage_ack.clone(),
                 ..Default::default()
             }),
             covers: Arc::new(cover::CoverCache::default()),

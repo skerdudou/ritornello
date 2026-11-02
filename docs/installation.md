@@ -1605,6 +1605,15 @@ and unwritable everywhere else — the narrowed archive rule
 deployment never creating that directory at all — have run only in this
 repository's own test suite, never against a real deployment from scratch.
 
+**The System alerts have never been seen on the Pi.** The warning triangle,
+the processor alert and the under-voltage acknowledgement ([System
+page](interface.md#alerts)) were checked by unit and component tests and by
+screenshots of the built page served against a fake `/api`, nothing more:
+no runaway process has been watched raising the triangle on the device, and
+the acknowledgement file has never been written into the real
+`StateDirectory`, nor read back across a service restart, nor voided by a
+reboot.
+
 **The privileged-plugin refusal has never been seen on the Pi.** Refusing
 to install or uninstall `files` from the web UI — the route returning
 403 before it stops the plugin, the archive check refusing its download,

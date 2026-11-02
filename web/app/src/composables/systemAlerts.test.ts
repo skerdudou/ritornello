@@ -25,6 +25,7 @@ function payload(overrides: Partial<SystemPayload> = {}): SystemPayload {
     logind_reachable: true,
     cpu_total_jiffies: 0,
     cpu_idle_jiffies: 0,
+    under_voltage_acknowledged: false,
     ...overrides,
   }
 }
@@ -74,9 +75,17 @@ describe('evaluateAlerts', () => {
     expect(kinds([], payload({ memory: null, disk: { total_kb: 0, available_kb: 0 }, temperature_c: null }))).toEqual([])
   })
 
-  it('raises the instantaneous under-voltage, not the one since boot', () => {
-    expect(kinds([], payload({ under_voltage: true }))).toEqual(['voltage'])
-    expect(kinds([], payload({ under_voltage: false, under_voltage_since_boot: true }))).toEqual([])
+  it('keeps a past under-voltage raised until it is acknowledged', () => {
+    const past = { under_voltage: false, under_voltage_since_boot: true }
+    expect(kinds([], payload(past))).toEqual(['voltage_past'])
+    expect(kinds([], payload({ ...past, under_voltage_acknowledged: true }))).toEqual([])
+  })
+
+  it('raises a live under-voltage whatever was acknowledged, and only once', () => {
+    // Live wins over past: one sentence, not two saying the same thing.
+    const live = { under_voltage: true, under_voltage_since_boot: true }
+    expect(kinds([], payload(live))).toEqual(['voltage'])
+    expect(kinds([], payload({ ...live, under_voltage_acknowledged: true }))).toEqual(['voltage'])
   })
 
   // The case this alert was written for: an infrared receiver gone wrong, its
@@ -99,9 +108,29 @@ describe('evaluateAlerts', () => {
     expect(kinds([], payload({ cpus: 4 }), history(26, CPU_WINDOW_MS))).toEqual(['cpu'])
   })
 
-  it('does not judge the CPU before the history covers the window', () => {
-    // Arrival on the page: two minutes of saturation are not "several minutes".
-    expect(kinds([], payload({ cpus: 4 }), history(100, CPU_WINDOW_MS - 10_000))).toEqual([])
+  it('does not judge the CPU on a history shorter than the window', () => {
+    // Two minutes of saturation seen by the page are not "several minutes",
+    // and the kernel's average says the machine was quiet before.
+    expect(kinds([], payload({ cpus: 4, load: [2, 0.3, 0.2] }), history(100, CPU_WINDOW_MS - 10_000))).toEqual([])
+  })
+
+  // Arrival on the page while the process is already looping: the page has
+  // no history yet, but the kernel has been averaging all along. The 5-minute
+  // load, as a share of the machine, stands in until the history covers the
+  // window — the same one-core threshold.
+  it('judges the CPU on the kernel 5-minute load until the history covers the window', () => {
+    expect(kinds([], payload({ cpus: 4, load: [1.2, 1.0, 0.6] }))).toEqual(['cpu'])
+    const [alert] = evaluateAlerts(new Set(), payload({ cpus: 4, load: [1.2, 1.0, 0.6] }), [])
+    expect(alert).toEqual({ kind: 'cpu', value: 25 })
+    // Measured on the Pi during an apt-get run: 0.76 over 5 minutes.
+    expect(kinds([], payload({ cpus: 4, load: [0.89, 0.76, 0.56] }))).toEqual([])
+    expect(kinds([], payload({ cpus: 4, load: null }))).toEqual([])
+  })
+
+  it('prefers the measured history once it covers the window', () => {
+    // The load says busy, three minutes of real measurement say idle: the
+    // measurement wins (a load also counts tasks waiting on a disk).
+    expect(kinds([], payload({ cpus: 4, load: [1.5, 1.5, 1.5] }), history(2, CPU_WINDOW_MS))).toEqual([])
   })
 
   it('weights each sample by the time it covers, not by its count', () => {

@@ -39,7 +39,19 @@ function alertText(a: Alert): string {
     case 'memory': return t.value('system_alert_memory', { value: percent })
     case 'disk': return t.value('system_alert_disk', { value: percent })
     case 'voltage': return t.value('system_under_voltage')
+    case 'voltage_past': return t.value('system_under_voltage_past')
   }
+}
+
+const { acknowledgeUnderVoltage } = useMetrics()
+/** Disables the button while the request is in flight: a second click
+ *  would only write the same file again. */
+const acknowledging = ref(false)
+async function acknowledge() {
+  acknowledging.value = true
+  const err = await acknowledgeUnderVoltage()
+  acknowledging.value = false
+  if (err !== null) toast.error(err)
 }
 
 /**
@@ -818,7 +830,22 @@ async function pollUntilBack(before: number | null, maxMs: number, successKey: s
     >
       <ExclamationTriangleIcon aria-hidden="true" class="mt-0.5 size-4 shrink-0" />
       <ul class="space-y-1">
-        <li v-for="a in alerts" :key="a.kind" :data-system-alert="a.kind">{{ alertText(a) }}</li>
+        <li v-for="a in alerts" :key="a.kind" :data-system-alert="a.kind">
+          {{ alertText(a) }}
+          <!-- Only the past episode can be acknowledged: a live one is a
+               fact of right now, and goes when the supply recovers. -->
+          <Button
+            v-if="a.kind === 'voltage_past'"
+            size="xs"
+            variant="secondary"
+            class="ml-2"
+            data-system-alert-ack
+            :disabled="acknowledging"
+            @click="acknowledge"
+          >
+            {{ t('system_under_voltage_ack') }}
+          </Button>
+        </li>
       </ul>
     </div>
 

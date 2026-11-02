@@ -32,6 +32,7 @@ function payload(overrides: Record<string, unknown> = {}) {
     logind_reachable: true,
     cpu_total_jiffies: null,
     cpu_idle_jiffies: null,
+    under_voltage_acknowledged: false,
     ...overrides,
   }
 }
@@ -1041,6 +1042,36 @@ describe('SystemView', () => {
     const list = w.get('[data-system-alerts]')
     expect(list.attributes('role')).toBe('status')
     expect(list.get('[data-system-alert="voltage"]').text()).toBe('system_under_voltage')
+    w.unmount()
+  })
+
+  it('keeps a past under-voltage listed, with a button that acknowledges it', async () => {
+    const f = stub(payload({ under_voltage: false, under_voltage_since_boot: true }))
+    const w = await mountView()
+    const line = w.get('[data-system-alert="voltage_past"]')
+    expect(line.text()).toContain('system_under_voltage_past')
+    await line.get('[data-system-alert-ack]').trigger('click')
+    await flushPromises()
+    const posts = f.mock.calls.filter(([, init]) => init?.method === 'POST').map(([url]) => String(url))
+    expect(posts).toEqual(['/api/system/under-voltage/acknowledge'])
+    // Gone at once, not at the next probe.
+    expect(w.find('[data-system-alerts]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('offers no button on a live under-voltage', async () => {
+    stub(payload({ under_voltage: true, under_voltage_since_boot: true }))
+    const w = await mountView()
+    expect(w.find('[data-system-alert-ack]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('leaves the line in place when the core refuses the acknowledgement', async () => {
+    stub(payload({ under_voltage_since_boot: true }), CATALOGUE, { lines: [] }, 'nowhere to write')
+    const w = await mountView()
+    await w.get('[data-system-alert-ack]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-system-alert="voltage_past"]').exists()).toBe(true)
     w.unmount()
   })
 

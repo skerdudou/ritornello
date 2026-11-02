@@ -14,7 +14,7 @@ import type { Sample } from './useMetrics'
  * one. A value hovering around a single threshold would make the triangle
  * blink at every probe.
  */
-export type AlertKind = 'temperature' | 'cpu' | 'memory' | 'disk' | 'voltage'
+export type AlertKind = 'temperature' | 'cpu' | 'memory' | 'disk' | 'voltage' | 'voltage_past'
 
 /** One raised alert and the value that raised it (°C or %, one decimal), for
  *  the sentence. `null` for under-voltage, which is a yes or a no. */
@@ -83,6 +83,24 @@ function cpuAverage(history: Sample[]): number | null {
   return covered > 0 ? weighted / covered : null
 }
 
+/**
+ * The kernel's 5-minute load average as a share of the machine, in %:
+ * `load / cores × 100`, so one runnable task on a quad-core reads 25 %, like
+ * one saturated core does in `cpuAverage`.
+ *
+ * The stand-in while the page's own history is shorter than the window — on
+ * arrival, above all: the kernel has been averaging since boot, so a process
+ * already looping when the page opens is seen at the first probe instead of
+ * three minutes later. Only a stand-in, because a load also counts tasks
+ * waiting on a disk (a network share that stopped answering), which are not
+ * using the processor. Measured on the Pi during an apt-get run: 0.76, under
+ * the 0.9 a quad-core's threshold works out at.
+ */
+function loadShare(s: SystemPayload, cores: number): number | null {
+  const fiveMinutes = s.load?.[1]
+  return fiveMinutes == null ? null : Math.min(100, (fiveMinutes / cores) * 100)
+}
+
 /** Rises at `on`, falls back below `off`, keeps its previous state between. */
 function judge(value: number | null, was: boolean, on: number, off: number): boolean {
   if (value == null) return false
@@ -101,12 +119,21 @@ export function evaluateAlerts(previous: ReadonlySet<AlertKind>, s: SystemPayloa
     if (judge(value, previous.has(kind), on, off)) out.push({ kind, value: round(value!) })
   }
   check('temperature', s.temperature_c, TEMPERATURE_ON, TEMPERATURE_OFF)
-  const cpuOn = CPU_CORE_SHARE_ON / Math.max(1, s.cpus ?? 1)
-  check('cpu', cpuAverage(history), cpuOn, cpuOn * CPU_OFF_RATIO)
+  const cores = Math.max(1, s.cpus ?? 1)
+  const cpuOn = CPU_CORE_SHARE_ON / cores
+  check('cpu', cpuAverage(history) ?? loadShare(s, cores), cpuOn, cpuOn * CPU_OFF_RATIO)
   check('memory', usedPercent(s.memory), USAGE_ON, USAGE_OFF)
   check('disk', usedPercent(s.disk), USAGE_ON, USAGE_OFF)
-  // The instantaneous alarm only: the since-boot bit tells of a past episode,
-  // and stays true until the next boot — a triangle nobody could clear.
+  // Two alerts, one at a time. Live (`under_voltage`): an episode right now,
+  // whatever was acknowledged. Past (`under_voltage_since_boot`): the
+  // firmware's sticky bit, which only clears at reboot — an episode lasts
+  // milliseconds and a 5 s probe almost never lands on one, so this is the
+  // alert that actually shows. It stays lit until the owner acknowledges it
+  // (`POST /api/system/under-voltage/acknowledge`), which the core keeps for
+  // the rest of this boot.
   if (s.under_voltage === true) out.push({ kind: 'voltage', value: null })
+  else if (s.under_voltage_since_boot === true && s.under_voltage_acknowledged !== true) {
+    out.push({ kind: 'voltage_past', value: null })
+  }
   return out
 }
