@@ -70,6 +70,16 @@ impl Lyrics {
     }
 }
 
+/// Most lines `parse_lrc` will produce. A real song has a few hundred; the
+/// cap exists because one input line may carry thousands of timestamps.
+pub const MAX_LYRIC_LINES: usize = 10_000;
+
+/// Most bytes of line text `parse_lrc` will produce, in total. Several stamps
+/// ahead of one text clone that text once each, so a small input could expand
+/// into tens of megabytes; a chorus repeated by multi-stamps stays far below
+/// this. Past either cap the input is treated as unparseable, not truncated.
+pub const MAX_LYRIC_TEXT_BYTES: usize = 4 * LYRICS_MAX_BYTES;
+
 /// One timed line. An empty `text` is a pause, kept so the highlight leaves
 /// the previous line when the singer stops.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,8 +103,13 @@ impl LyricsSubject {
     pub fn matches(&self, artist: Option<&str>, title: Option<&str>) -> bool {
         match (artist, title) {
             (Some(artist), Some(title)) => {
-                normalize_for_match(&self.artist) == normalize_for_match(artist)
-                    && normalize_for_match(&self.title) == normalize_for_match(title)
+                let same = |ours: &str, theirs: &str| {
+                    let ours = normalize_for_match(ours);
+                    // Two names that fold to nothing ("!!!" and "???") are
+                    // not the same name, only two names with no letters.
+                    !ours.is_empty() && ours == normalize_for_match(theirs)
+                };
+                same(&self.artist, artist) && same(&self.title, title)
             }
             _ => false,
         }
@@ -107,12 +122,21 @@ impl LyricsSubject {
 /// ("(Live)", "[Radio Edit]") and a featuring ("feat. X", "ft. X") removed,
 /// punctuation reduced to single spaces.
 pub fn normalize_for_match(s: &str) -> String {
-    // The suffix is cut only when something precedes it: "(What's the Story)
-    // Morning Glory?" must not normalize to nothing.
-    let cut = match s.find(['(', '[']) {
-        Some(i) if !s[..i].trim().is_empty() => &s[..i],
-        _ => s,
-    };
+    // Only a *trailing* group is a suffix, and only when something precedes
+    // it: "Song (Part 1) Name" keeps its middle, and "(What's the Story)
+    // Morning Glory?" does not lose its head.
+    let mut cut = s.trim_end();
+    loop {
+        let open = match cut.chars().next_back() {
+            Some(')') => '(',
+            Some(']') => '[',
+            _ => break,
+        };
+        match cut.rfind(open) {
+            Some(i) if !cut[..i].trim().is_empty() => cut = cut[..i].trim_end(),
+            _ => break,
+        }
+    }
     let folded: String = cut.chars().flat_map(char::to_lowercase).map(fold_accent).collect();
     let mut words: Vec<&str> = Vec::new();
     for word in folded.split_whitespace() {
@@ -194,11 +218,14 @@ fn strip_word_tags(text: &str) -> String {
 /// Tolerates a BOM and CRLF; several timestamps ahead of one text (one line
 /// per timestamp); the headers `[ar:]`, `[ti:]`, `[al:]`, `[by:]`,
 /// `[length:]`, which are ignored; and `[offset:±N]` in milliseconds, applied
-/// to every line (saturating at 0) wherever in the file it stands.
+/// to every line wherever in the file it stands. By the LRC convention a
+/// positive offset shows the lyrics **earlier** (`t - N`, saturating at 0) and
+/// a negative one later.
 pub fn parse_lrc(text: &str) -> Option<Vec<LyricLine>> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines: Vec<LyricLine> = Vec::new();
     let mut offset_ms: i64 = 0;
+    let mut text_bytes = 0usize;
     for raw in text.lines() {
         let mut rest = raw.trim_start();
         let mut stamps: Vec<u32> = Vec::new();
@@ -223,6 +250,10 @@ pub fn parse_lrc(text: &str) -> Option<Vec<LyricLine>> {
         }
         let text = strip_word_tags(rest).trim().to_string();
         for t_ms in stamps {
+            text_bytes += text.len();
+            if lines.len() >= MAX_LYRIC_LINES || text_bytes > MAX_LYRIC_TEXT_BYTES {
+                return None;
+            }
             lines.push(LyricLine { t_ms, text: text.clone() });
         }
     }
@@ -231,7 +262,7 @@ pub fn parse_lrc(text: &str) -> Option<Vec<LyricLine>> {
     }
     if offset_ms != 0 {
         for l in &mut lines {
-            l.t_ms = (i64::from(l.t_ms) + offset_ms).clamp(0, i64::from(u32::MAX)) as u32;
+            l.t_ms = (i64::from(l.t_ms) - offset_ms).clamp(0, i64::from(u32::MAX)) as u32;
         }
     }
     // `sort_by_key` is stable: two lines at the same instant keep file order.
@@ -307,13 +338,49 @@ mod tests {
 
     #[test]
     fn the_offset_tag_shifts_every_line_and_never_below_zero() {
+        // LRC convention: a positive offset shows the lyrics earlier.
         let shifted = parse_lrc("[offset:+500]\n[00:01.00]a\n[00:02.00]b").unwrap();
-        assert_eq!(shifted, vec![line(1500, "a"), line(2500, "b")]);
+        assert_eq!(shifted, vec![line(500, "a"), line(1500, "b")]);
         // The offset may also come after the lines it applies to.
         let late = parse_lrc("[00:01.00]a\n[offset:+500]").unwrap();
-        assert_eq!(late, vec![line(1500, "a")]);
-        let clamped = parse_lrc("[offset:-2000]\n[00:01.00]a").unwrap();
+        assert_eq!(late, vec![line(500, "a")]);
+        let clamped = parse_lrc("[offset:+2000]\n[00:01.00]a").unwrap();
         assert_eq!(clamped, vec![line(0, "a")]);
+        let delayed = parse_lrc("[offset:-500]\n[00:01.00]a").unwrap();
+        assert_eq!(delayed, vec![line(1500, "a")]);
+    }
+
+    #[test]
+    fn an_amplifying_lrc_is_refused_rather_than_expanded() {
+        // 3000 stamps before a 1 KiB text: 3 MB of output from 33 KB of input.
+        let stamps: String = (0..3000).map(|i| format!("[{:02}:{:02}.00]", i / 60, i % 60)).collect();
+        assert_eq!(parse_lrc(&format!("{stamps}{}", "x".repeat(1024))), None);
+        // Many empty lines: the line cap alone refuses it.
+        let many = "[00:01.00]".repeat(MAX_LYRIC_LINES + 1);
+        assert_eq!(parse_lrc(&many), None);
+        assert_eq!(parse_lrc(&"[00:01.00]".repeat(MAX_LYRIC_LINES)).map(|l| l.len()), Some(MAX_LYRIC_LINES));
+        // A normal chorus repeated by multi-stamps still parses.
+        let chorus = parse_lrc("[00:10.00][00:50.00][01:30.00][02:10.00]La la la\n[00:20.00]verse").unwrap();
+        assert_eq!(chorus.len(), 5);
+        assert_eq!(chorus[1], line(20_000, "verse"));
+    }
+
+    #[test]
+    fn names_that_normalize_to_nothing_never_match() {
+        let punctuation = LyricsSubject { artist: "!!!".into(), title: "???".into() };
+        assert!(!punctuation.matches(Some("..."), Some("---")));
+        assert!(!punctuation.matches(Some("!!!"), Some("???")));
+        let empty = LyricsSubject { artist: "".into(), title: "x".into() };
+        assert!(!empty.matches(Some(""), Some("x")));
+    }
+
+    #[test]
+    fn only_a_trailing_bracketed_suffix_is_stripped() {
+        assert_eq!(normalize_for_match("Song (Part 1) Name"), "song part 1 name");
+        assert_eq!(normalize_for_match("Song [Remastered 2011]"), "song");
+        assert_eq!(normalize_for_match("Song (Live) [Remastered]"), "song");
+        assert_eq!(normalize_for_match("Song (Live)"), "song");
+        assert_eq!(normalize_for_match("(Intro)"), "intro");
     }
 
     #[test]

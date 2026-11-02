@@ -49,7 +49,7 @@ pub use contract::{
 pub use display::{SourcesCatalog, Cover, DisplayFrame, SourceCatalog, COVER_MAX_BYTES};
 pub use lyrics::{
     normalize_for_match, parse_lrc, LyricLine, Lyrics, LyricsSubject, RenderedLyrics,
-    LYRICS_MAX_BYTES,
+    LYRICS_MAX_BYTES, MAX_LYRIC_LINES, MAX_LYRIC_TEXT_BYTES,
 };
 pub use metadata::{
     valid_year, CoverRef, Enrichment, DateFormat, Clock, IdentityUpdate, Known, Link, Track,
