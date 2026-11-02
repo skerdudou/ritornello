@@ -42,6 +42,7 @@ export const CATALOG: Record<string, string> = {
   mounted_no: 'not mounted',
   writable_label: 'allow writes',
   archive_covers_label: 'keep found covers here',
+  archive_lyrics_label: 'keep found lyrics here',
   cover_name_label: 'Name of a kept cover',
   cover_name_help: 'Same name on every source.',
   btn_add_share: 'Declare a share',

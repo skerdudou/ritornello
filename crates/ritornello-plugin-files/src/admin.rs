@@ -170,6 +170,12 @@ pub enum Op {
         name: String,
         archive: bool,
     },
+    /// The lyrics' own flag, handled exactly as `SetArchiveCovers` and kept
+    /// apart from it: a cover speaks for a folder, a `.lrc` for one track.
+    SetArchiveLyrics {
+        name: String,
+        archive: bool,
+    },
     /// One setting for every root, unlike `SetArchiveCovers`: where a cover
     /// may be written is a question about each library, what it is called is
     /// a question about the players that read them all. A name outside
@@ -734,6 +740,7 @@ impl AdminPlugin for FilesAdmin {
                     domain: domain.clone(),
                     writable,
                     archive_covers: false,
+                    archive_lyrics: false,
                 };
                 table.root.push(root);
                 // Validate **before** writing anything: a credentials file
@@ -860,6 +867,18 @@ impl AdminPlugin for FilesAdmin {
                 // `SetWritable`.** This flag is not a mount option: it is read
                 // at every write. Remounting would restart a unit and could
                 // raise a polkit prompt for nothing.
+                *self.roots.write().await = table;
+                Ok(())
+            }
+            Op::SetArchiveLyrics { name, archive } => {
+                let mut table = self.roots.read().await.clone();
+                let Some(r) = table.root.iter_mut().find(|r| r.name == name) else {
+                    return Err(self.text_with("unknown_source", "name", &name));
+                };
+                r.archive_lyrics = archive;
+                self.write_table(&table)?;
+                // No `reconcile_roots`, for the reason `SetArchiveCovers`
+                // gives: read at every write, never a mount option.
                 *self.roots.write().await = table;
                 Ok(())
             }
@@ -1623,6 +1642,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archiving_lyrics_is_a_flag_of_its_own_and_remounts_nothing() {
+        // Its own flag: arming lyrics leaves covers as they were, and the
+        // other way round. And no remount: `reconcile_roots` overwrites
+        // `mount_error` whatever systemd answers, so a sentinel left there
+        // survives only if nothing was remounted.
+        let (mut admin, root_dir) = test_admin();
+        let _guard = divert_proc_mounts(
+            &root_dir,
+            "//192.168.1.20/musique /mnt/ritornello/musique cifs ro,relatime 0 0\n",
+        );
+        admin.set_data(add_share("p")).await.unwrap();
+        *admin.mount_error.lock().unwrap() = Some("sentinel".into());
+        admin
+            .set_data(serde_json::json!({
+                "op": "set_archive_lyrics", "name": "musique", "archive": true
+            }))
+            .await
+            .unwrap();
+        let root = admin.roots.read().await.by_name("musique").unwrap().clone();
+        assert!(root.archive_lyrics);
+        assert!(!root.archive_covers, "lyrics must not arm covers");
+        assert_eq!(admin.mount_error.lock().unwrap().as_deref(), Some("sentinel"), "nothing remounted");
+
+        // Re-read from disk: the flag is worthless if it does not survive a
+        // restart.
+        let reread = Roots::load(&admin.roots_path).unwrap();
+        assert!(reread.by_name("musique").unwrap().archive_lyrics);
+
+        // And covers do not arm lyrics either.
+        admin
+            .set_data(serde_json::json!({
+                "op": "set_archive_lyrics", "name": "musique", "archive": false
+            }))
+            .await
+            .unwrap();
+        admin
+            .set_data(serde_json::json!({
+                "op": "set_archive_covers", "name": "musique", "archive": true
+            }))
+            .await
+            .unwrap();
+        let root = admin.roots.read().await.by_name("musique").unwrap().clone();
+        assert!(root.archive_covers && !root.archive_lyrics);
+        // Shown to the page, which reads the flag from the root itself.
+        assert_eq!(admin.get_data().await["roots"][0]["archive_lyrics"], false);
+
+        // An unknown source is refused by the key that names it, as for covers.
+        let err = admin
+            .set_data(serde_json::json!({
+                "op": "set_archive_lyrics", "name": "absente", "archive": true
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            Text::Keyed { key: "unknown_source".into(), params: HashMap::from([("name".to_string(), "absente".to_string())]) }
+        );
+    }
+
+    #[tokio::test]
     async fn the_cover_name_is_published_persisted_and_shown() {
         let (mut admin, _root_dir) = test_admin();
         // Shown before anything is chosen: the default, and the names on offer
@@ -2079,6 +2158,7 @@ mod tests {
                 domain: String::new(),
                 writable: false,
                 archive_covers: false,
+                archive_lyrics: false,
             }],
         };
         (admin, root_dir)
@@ -2197,6 +2277,7 @@ mod tests {
                 domain: String::new(),
                 writable: false,
                 archive_covers: false,
+                archive_lyrics: false,
             }],
         };
         let err = admin
@@ -2230,6 +2311,7 @@ mod tests {
                 domain: String::new(),
                 writable: false,
                 archive_covers: false,
+                archive_lyrics: false,
             }],
         };
         admin

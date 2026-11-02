@@ -311,12 +311,19 @@ fn decide(
 ///   without that freeze a clock-only name passes on any machine whose clock
 ///   happens to be fine-grained. Measured: it does pass, on this one.
 fn attempt_name(extension: &str, nanos: u128) -> String {
+    temporary_name(TEMPORARY_STEM, extension, nanos)
+}
+
+/// [`attempt_name`] under another fixed stem: what `lyrics::store` writes
+/// before its own rename. One counter for both, so the property that two
+/// attempts of this process cannot collide is argued, and tested, once.
+pub(crate) fn temporary_name(stem: &str, extension: &str, nanos: u128) -> String {
     static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // The stamp separates this run from a leftover of an earlier one that
     // happened to be handed the same pid; the counter separates two attempts of
     // this run. A clock that refuses to answer costs neither.
-    format!(".{TEMPORARY_STEM}.{extension}.{}-{nanos}-{seq}.tmp", std::process::id())
+    format!(".{stem}.{extension}.{}-{nanos}-{seq}.tmp", std::process::id())
 }
 
 /// Two album names for the same album?
@@ -415,6 +422,7 @@ mod tests {
                 domain: String::new(),
                 writable: false,
                 archive_covers: true,
+                archive_lyrics: false,
             }],
         }
     }
@@ -799,6 +807,7 @@ mod tests {
                 domain: String::new(),
                 writable: false,
                 archive_covers: true,
+                archive_lyrics: false,
             }],
         };
         let played = Path::new("/mnt/ritornello/nas/Kind of Blue/01.flac");
