@@ -16,7 +16,7 @@ const CATALOG = {
     'Only prereleases are published; tick “Offer beta versions” below to be offered them',
   update_never_checked: 'Never checked',
   update_aligned: 'Up to date',
-  update_core_version: 'Core version: {version}',
+  system_version: 'Core version',
   update_unknown: 'Unknown',
   update_rolled_back: 'The update did not start and the previous version was put back',
   update_rollback_failed:
@@ -161,7 +161,7 @@ describe('UpdateCard', () => {
   // two differ, so reading `offered` (or the release's version) fails here.
   it('shows the version of the core that runs', () => {
     const w = mountCard(payload())
-    expect(w.get('[data-update-core-version]').text()).toBe('Core version: 0.2.0')
+    expect(w.get('[data-update-core-version]').text()).toBe('Core version : 0.2.0')
   })
 
   // Before any check the core already sends its own row, so the line does
@@ -169,7 +169,7 @@ describe('UpdateCard', () => {
   it('shows the core version before any check, and nothing before the first read', () => {
     const never = payload({ outcome: { kind: 'never_checked' }, release_version: null })
     never.components[0] = { ...never.components[0]!, offered: null, availability: 'unknown' }
-    expect(mountCard(never).get('[data-update-core-version]').text()).toBe('Core version: 0.2.0')
+    expect(mountCard(never).get('[data-update-core-version]').text()).toBe('Core version : 0.2.0')
     expect(mountCard(payload({ components: [] })).find('[data-update-core-version]').exists()).toBe(false)
   })
 

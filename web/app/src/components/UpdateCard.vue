@@ -35,6 +35,10 @@ const { t } = useCatalog()
  * builds that row from its own version even before any check
  * (`UpdateState::initial`), so the line does not wait for GitHub. Hidden
  * only while the page has not read `/api/update` yet (no rows at all).
+ *
+ * The same number, under the same label key (`system_version`) and in the
+ * same "label : value" shape, as the System page's own line — that one reads
+ * `/api/system`, and both come from the core's `CARGO_PKG_VERSION`.
  */
 const coreVersion = computed(
   () => props.update.components.find((c) => c.kind === 'core')?.installed ?? null,
@@ -163,7 +167,7 @@ function onCadenceKindChange(kind: unknown) {
     <CardHeader><CardTitle>{{ t('update_title') }}</CardTitle></CardHeader>
     <CardContent class="space-y-2">
       <p v-if="coreVersion" data-update-core-version class="text-sm text-muted-foreground">
-        {{ t('update_core_version', { version: coreVersion }) }}
+        {{ t('system_version') }} : {{ coreVersion }}
       </p>
       <UpdateSummary :update="update" />
 
