@@ -77,6 +77,11 @@ exists.
   its 74 stations — which broadcast no ICY at all — and the NRJ group's
   365 webradios). Each field says where it came from, down to the release
   year and the links to the streaming platforms.
+- **Lyrics** — a microphone on the player card opens the words of the
+  song, the line being sung highlighted when they are timed: from a `.lrc`
+  beside the file, from the file's own tags, or found on
+  [LRCLIB](https://lrclib.net) — and a root can be armed to keep what was
+  found as a `.lrc` beside the track, never over one already there.
 - **Any remote control** — any Linux input device (`evdev`) will do,
   including a USB infrared receiver; keys are learned from the browser,
   presets ship with the project (MCE, keyboard). Beside the fixed actions,
@@ -133,6 +138,7 @@ flowchart LR
         core <--> ouifm["ouifm-metas plugin"]
         core <--> rf["radiofrance-metas plugin"]
         core <--> nrj["nrj-metas plugin"]
+        core <--> lrclib["lrclib plugin"]
         input["generic-input plugin<br/>(evdev)"] --> core
         core --> console["console plugin<br/>(HDMI screen)"]
         mpd["mpd plugin"] <--> core
@@ -153,13 +159,14 @@ executable.
 |---|---|---|
 | `radio` | source | Internet radio, presets, Radio Browser directory, admin page |
 | `cd` | source | CD drive (`/dev/sr0`), disc identification, eject |
-| `files` | source | Local folders, USB, SMB shares mounted on demand, playlists, file browser, covers archived beside the tracks |
+| `files` | source | Local folders, USB, SMB shares mounted on demand, playlists, file browser, covers and lyrics archived beside the tracks, `.lrc` lyrics read beside them |
 | `generic-input` | input | Any `evdev` device: IR receiver, keyboard, remote; key learning in the browser, one key per source |
 | `console` | display | Now-playing and clock screens on the Linux console (HDMI) |
 | `musicbrainz` | metadata | Album, year, cover art and platform links for discs and streams |
 | `ouifm-metas` | metadata | OUI FM's now-playing feed (21 webradios) |
 | `radiofrance-metas` | metadata | Radio France's live endpoint (74 stations without ICY) |
 | `nrj-metas` | metadata | NRJ group's on-air endpoint (NRJ, Nostalgie, Chérie FM, Rire & Chansons — 365 stations) |
+| `lrclib` | metadata | Song lyrics from [LRCLIB](https://lrclib.net), synced when available, kept in a cache on the device; only completes what a file does not carry |
 | `mpd` | server | Exposes the device as an MPD server for existing clients — a protocol subset: no tag database, no queue editing |
 
 A Rust SDK ([`ritornello-plugin-sdk`](crates/ritornello-plugin-sdk)) provides
