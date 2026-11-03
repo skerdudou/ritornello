@@ -30,6 +30,16 @@ const props = defineProps<{ update: UpdatePayload; settings: SettingsPayload }>(
 const emit = defineEmits<{ check: []; install: []; save: []; sources: [] }>()
 const { t } = useCatalog()
 
+/**
+ * The version of the core that runs, read from the core's own row: the core
+ * builds that row from its own version even before any check
+ * (`UpdateState::initial`), so the line does not wait for GitHub. Hidden
+ * only while the page has not read `/api/update` yet (no rows at all).
+ */
+const coreVersion = computed(
+  () => props.update.components.find((c) => c.kind === 'core')?.installed ?? null,
+)
+
 const WEEKDAYS: Weekday[] = [
   'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
 ]
@@ -152,6 +162,9 @@ function onCadenceKindChange(kind: unknown) {
   <Card data-update-card>
     <CardHeader><CardTitle>{{ t('update_title') }}</CardTitle></CardHeader>
     <CardContent class="space-y-2">
+      <p v-if="coreVersion" data-update-core-version class="text-sm text-muted-foreground">
+        {{ t('update_core_version', { version: coreVersion }) }}
+      </p>
       <UpdateSummary :update="update" />
 
       <p v-if="update.major_update_waiting" data-update-major-waiting class="text-sm">

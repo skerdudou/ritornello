@@ -16,6 +16,7 @@ const CATALOG = {
     'Only prereleases are published; tick “Offer beta versions” below to be offered them',
   update_never_checked: 'Never checked',
   update_aligned: 'Up to date',
+  update_core_version: 'Core version: {version}',
   update_unknown: 'Unknown',
   update_rolled_back: 'The update did not start and the previous version was put back',
   update_rollback_failed:
@@ -154,6 +155,22 @@ describe('UpdateCard', () => {
     // The whole rendered sentence, with toBe: asserting `toContain('0.3.0')`
     // would pass just as well if the two numbers were swapped.
     expect(w.get('[data-update-summary]').text()).toBe('core: 0.2.0 → 0.3.0')
+  })
+
+  // The installed core's number, not the offered one: in this payload the
+  // two differ, so reading `offered` (or the release's version) fails here.
+  it('shows the version of the core that runs', () => {
+    const w = mountCard(payload())
+    expect(w.get('[data-update-core-version]').text()).toBe('Core version: 0.2.0')
+  })
+
+  // Before any check the core already sends its own row, so the line does
+  // not wait for GitHub; it is absent only while no row has been read.
+  it('shows the core version before any check, and nothing before the first read', () => {
+    const never = payload({ outcome: { kind: 'never_checked' }, release_version: null })
+    never.components[0] = { ...never.components[0]!, offered: null, availability: 'unknown' }
+    expect(mountCard(never).get('[data-update-core-version]').text()).toBe('Core version: 0.2.0')
+    expect(mountCard(payload({ components: [] })).find('[data-update-core-version]').exists()).toBe(false)
   })
 
   it('says nothing has been published rather than showing a fault', () => {

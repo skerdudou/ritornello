@@ -708,7 +708,9 @@ its section.
 
 ### Update card
 
-Backed by `GET /api/update`. One line: never checked, no release
+Backed by `GET /api/update`. It opens on the version of the core that runs,
+read from the core's own row, which the core fills from its own version even
+before any check: the number does not wait for GitHub. Then one line: never checked, no release
 published yet, only prereleases published, up to date, or an update
 available (the installed and the
 offered version, in that order, so a reader notices if they were ever
