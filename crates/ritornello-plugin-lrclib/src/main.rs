@@ -245,14 +245,22 @@ impl LrclibPlugin {
         let wanted = self.wanted.take().expect("checked above");
         self.in_flight = true;
         let lookup = self.lookup.clone();
-        let tx = self.outcome_tx.clone();
+        let report = Report {
+            tx: self.outcome_tx.clone(),
+            pending: Some(Outcome {
+                song: wanted.song,
+                subject: wanted.subject,
+                key,
+                answer: Answer::Unavailable { retry_after: None },
+            }),
+        };
         // A task, not the `next_enrichment` future: that future is dropped
         // at every `NowPlaying`, and a request dropped with it would be lost
         // for a song that has not changed.
         tokio::spawn(async move {
+            let mut report = report;
             let answer = lookup.lookup(&wanted.query).await;
-            let outcome = Outcome { song: wanted.song, subject: wanted.subject, key, answer };
-            let _ = tx.send(outcome).await;
+            report.send(answer).await;
         });
     }
 
@@ -298,6 +306,40 @@ impl LrclibPlugin {
         };
         if self.current.as_ref() == Some(&song) {
             self.ready = Some((song, enrichment));
+        }
+    }
+}
+
+/// The one message a lookup task owes, sent even when the task does not end
+/// normally.
+///
+/// `in_flight` is cleared only by the outcome it reports: a task that
+/// panicked, or was dropped by a runtime shutting down, would otherwise leave
+/// the plugin waiting for an answer that never comes, and silent for every
+/// song after. Dropped unsent, the guard reports the lookup as unanswered —
+/// what it was — so the song is spaced and the plugin moves on.
+struct Report {
+    tx: mpsc::Sender<Outcome>,
+    /// The outcome still owed, its answer `Unavailable` until one arrives.
+    pending: Option<Outcome>,
+}
+
+impl Report {
+    async fn send(&mut self, answer: Answer) {
+        if let Some(mut outcome) = self.pending.take() {
+            outcome.answer = answer;
+            let _ = self.tx.send(outcome).await;
+        }
+    }
+}
+
+impl Drop for Report {
+    fn drop(&mut self) {
+        if let Some(outcome) = self.pending.take() {
+            tracing::warn!("LRCLIB: a lookup ended without an answer; reported as unanswered");
+            // One request at a time, so the channel has room: `try_send`
+            // cannot be refused for want of it, and a drop cannot await.
+            let _ = self.tx.try_send(outcome);
         }
     }
 }
@@ -421,6 +463,23 @@ mod tests {
             let (delay, answer) = next.unwrap_or_else(|| panic!("an unscripted question: {q:?}"));
             tokio::time::sleep(delay).await;
             answer
+        }
+    }
+
+    /// A lookup whose first question panics — a bug in a parser, say — and
+    /// that answers from `then` afterwards.
+    struct PanicsOnce {
+        then: Arc<Scripted>,
+        panicked: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Lookup for PanicsOnce {
+        async fn lookup(&self, q: &Query) -> Answer {
+            if !self.panicked.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                panic!("a lookup that panics: {q:?}");
+            }
+            self.then.lookup(q).await
         }
     }
 
@@ -675,6 +734,59 @@ mod tests {
         assert_eq!(lookup.asked().len(), 2);
     }
 
+    /// The spacing's edge, pinned: still held a second before ten minutes.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_song_is_not_asked_again_before_ten_minutes() {
+        let lookup = Scripted::answering(vec![
+            Answer::Unavailable { retry_after: None },
+            Answer::Absent,
+        ]);
+        let mut f = fixture(lookup.clone());
+        let start = Instant::now();
+        f.plugin.now_playing(radio(lucky())).await;
+        assert_eq!(next(&mut f.plugin, Duration::from_secs(1)).await, None);
+
+        f.plugin.now_playing(stopped()).await;
+        tokio::time::sleep_until(start + Duration::from_secs(9 * 60 + 59)).await;
+        f.plugin.now_playing(radio(lucky())).await;
+        assert_eq!(next(&mut f.plugin, Duration::from_millis(500)).await, None);
+        assert_eq!(lookup.asked().len(), 1, "not asked at 9:59");
+
+        f.plugin.now_playing(stopped()).await;
+        tokio::time::sleep_until(start + Duration::from_secs(10 * 60 + 1)).await;
+        f.plugin.now_playing(radio(lucky())).await;
+        assert!(next(&mut f.plugin, Duration::from_secs(1)).await.is_some());
+        assert_eq!(lookup.asked().len(), 2, "asked again past ten minutes");
+    }
+
+    /// A server asking for longer than the spacing is obeyed for that song
+    /// too: twenty minutes asked, nothing at eleven.
+    #[tokio::test(start_paused = true)]
+    async fn a_server_wait_longer_than_the_spacing_holds_the_song_for_that_long() {
+        let lookup = Scripted::answering(vec![
+            Answer::Unavailable { retry_after: Some(Duration::from_secs(20 * 60)) },
+            Answer::Absent,
+        ]);
+        let mut f = fixture(lookup.clone());
+        let start = Instant::now();
+        f.plugin.now_playing(radio(lucky())).await;
+        assert_eq!(next(&mut f.plugin, Duration::from_secs(1)).await, None);
+
+        f.plugin.now_playing(stopped()).await;
+        tokio::time::sleep_until(start + Duration::from_secs(11 * 60)).await;
+        f.plugin.now_playing(radio(lucky())).await;
+        // Long enough to see the end of the pause: a song spaced for only ten
+        // minutes would have waited for it and been asked at twenty.
+        assert_eq!(next(&mut f.plugin, Duration::from_secs(10 * 60)).await, None);
+        assert_eq!(lookup.asked().len(), 1, "not asked at 11 min, nor when the pause ended");
+
+        f.plugin.now_playing(stopped()).await;
+        tokio::time::sleep_until(start + Duration::from_secs(21 * 60)).await;
+        f.plugin.now_playing(radio(lucky())).await;
+        assert!(next(&mut f.plugin, Duration::from_secs(1)).await.is_some());
+        assert_eq!(lookup.asked().len(), 2);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_overloaded_answer_holds_every_request_for_the_server_s_wait() {
         let lookup = Scripted::answering(vec![
@@ -691,6 +803,25 @@ mod tests {
         assert!(next(&mut f.plugin, Duration::from_secs(60)).await.is_some());
         assert_eq!(lookup.asked().len(), 2);
         assert_eq!(start.elapsed(), Duration::from_secs(29), "asked when the server's 30 s were over");
+    }
+
+    /// A lookup task that panics never reports, and `in_flight` was cleared
+    /// only by a report: the plugin then waited for good, silent for every
+    /// later song.
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_lookup_does_not_silence_the_plugin() {
+        let then = Scripted::answering(vec![Answer::Found { lyrics: real_lyrics(), duration_s: Some(248) }]);
+        let mut f = fixture(Arc::new(PanicsOnce { then: then.clone(), panicked: false.into() }));
+        f.plugin.now_playing(radio(lucky())).await;
+        assert_eq!(next(&mut f.plugin, Duration::from_secs(5)).await, None, "nothing to show for a panic");
+        assert!(!f.plugin.in_flight, "the panic was reported");
+
+        let crush = known(Some("Daft Punk"), Some("Instant Crush"));
+        f.plugin.now_playing(radio(crush)).await;
+        let e = next(&mut f.plugin, DEFAULT_PAUSE + Duration::from_secs(1)).await;
+        assert!(e.is_some_and(|e| e.lyrics.is_some()), "the next song is still searched");
+        assert_eq!(then.asked().len(), 1);
+        assert_eq!(then.asked()[0].title, "Instant Crush");
     }
 
     #[tokio::test(start_paused = true)]

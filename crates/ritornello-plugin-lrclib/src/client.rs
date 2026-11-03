@@ -151,7 +151,24 @@ impl Client {
     /// server's match is looser than ours. When it rejects the one record
     /// `/api/get` gave, the search is asked too before concluding: an absence
     /// is cached for 30 days, and one fuzzy server match must not settle it.
+    ///
+    /// For the same reason, an absence under names that carry what matching
+    /// folds away ("Daft Punk feat. Pharrell Williams", "Get Lucky (Radio
+    /// Edit)") is checked once more, with a search under the names without
+    /// it ([`matching::stripped`]): LRCLIB compares the names it is sent, and
+    /// its records seldom carry a featuring or an edit in them.
     pub async fn lookup(&self, q: &Query) -> Answer {
+        let answer = self.lookup_as_named(q).await;
+        let (artist, title) = (matching::stripped(&q.artist), matching::stripped(&q.title));
+        if answer != Answer::Absent || (artist == q.artist.trim() && title == q.title.trim()) {
+            return answer;
+        }
+        let names = [("artist_name", artist.to_string()), ("track_name", title.to_string())];
+        self.search(q, &names).await
+    }
+
+    /// [`Client::lookup`] under the names exactly as `q` carries them.
+    async fn lookup_as_named(&self, q: &Query) -> Answer {
         let names = [("artist_name", q.artist.clone()), ("track_name", q.title.clone())];
         if let Some(duration) = q.duration_s {
             let mut params = names.to_vec();
@@ -171,7 +188,12 @@ impl Client {
                 Reply::Unavailable(retry_after) => return Answer::Unavailable { retry_after },
             }
         }
-        match self.fetch("/api/search", &names).await {
+        self.search(q, &names).await
+    }
+
+    /// `/api/search` under `names`, its records judged against `q`.
+    async fn search(&self, q: &Query, names: &[(&str, String)]) -> Answer {
+        match self.fetch("/api/search", names).await {
             Reply::Body(body) => match parse_search(&body) {
                 Some(records) => matching::answer_for(q, &records),
                 None => unreadable("/api/search"),
@@ -487,6 +509,75 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2, "{seen:?}");
         assert!(seen[1].starts_with("GET /api/search?"), "{seen:?}");
+    }
+
+    /// Names as a radio's ICY header or a tag carries them, which LRCLIB
+    /// compares as sent.
+    fn featuring(duration_s: Option<u32>) -> Query {
+        Query {
+            artist: "Daft Punk feat. Pharrell Williams".into(),
+            title: "Get Lucky (Radio Edit)".into(),
+            album: None,
+            duration_s,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_absence_under_decorated_names_is_searched_again_without_them() {
+        let (base, seen) = serve(vec![
+            canned("404 Not Found", "{}"),
+            canned("200 OK", "[]"),
+            canned("200 OK", SEARCH),
+        ])
+        .await;
+        let client = Client::new(&base).unwrap();
+        match client.lookup(&featuring(Some(254))).await {
+            Answer::Found { duration_s, .. } => assert_eq!(duration_s, Some(254), "still judged on the duration"),
+            other => panic!("expected the stripped search's 254 s version, got {other:?}"),
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert!(seen[1].starts_with("GET /api/search?"), "{seen:?}");
+        assert!(seen[1].contains("artist_name=Daft+Punk+feat.+Pharrell+Williams"), "{seen:?}");
+        assert!(seen[2].starts_with("GET /api/search?"), "{seen:?}");
+        assert!(seen[2].contains("artist_name=Daft+Punk&track_name=Get+Lucky HTTP"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn the_second_search_is_asked_once_and_its_absence_is_final() {
+        // `/api/get` (a 404), the search as named, the search stripped: three
+        // requests, and no fourth.
+        let (base, seen) = serve(vec![
+            canned("404 Not Found", "{}"),
+            canned("200 OK", "[]"),
+            canned("200 OK", "[]"),
+        ])
+        .await;
+        let client = Client::new(&base).unwrap();
+        assert_eq!(client.lookup(&featuring(Some(254))).await, Answer::Absent);
+        assert_eq!(seen.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn names_with_nothing_to_strip_are_not_searched_twice() {
+        // One canned answer: a second request would find the port closed and
+        // end `Unavailable`, not `Absent`.
+        let (base, seen) = serve(vec![canned("200 OK", "[]")]).await;
+        let client = Client::new(&base).unwrap();
+        assert_eq!(client.lookup(&lucky(None)).await, Answer::Absent);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn only_an_absence_is_searched_again() {
+        // LRCLIB did not answer: nothing was concluded, so there is nothing
+        // to check under other names — and asking again at once is what the
+        // pause after an outage exists to prevent. The server would answer
+        // a second search: one made would show, in the count and the answer.
+        let (base, seen) = serve(vec![canned("503 Service Unavailable", OVERLOADED), canned("200 OK", SEARCH)]).await;
+        let client = Client::new(&base).unwrap();
+        assert_eq!(client.lookup(&featuring(None)).await, Answer::Unavailable { retry_after: None });
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

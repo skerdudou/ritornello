@@ -53,12 +53,27 @@ impl AdminPlugin for LrclibAdmin {
             params: HashMap::from([("detail".to_string(), e.to_string())]),
         })?;
         match write {
-            Write::Clear => crate::lock(&self.cache).clear().map_err(|e| {
+            Write::Clear => {
+                // A directory listing and one removal per entry, on an SD
+                // card, under a lock the metadata half may be holding: off
+                // the runtime's threads, so the admin protocol — serial,
+                // with a five-second ceiling — is never what waits for it.
+                let cache = self.cache.clone();
+                let cleared = tokio::task::spawn_blocking(move || crate::lock(&cache).clear()).await;
                 // The I/O detail goes to the log, not to the page: a raw OS
                 // message is neither translated nor actionable there.
-                tracing::warn!("could not empty the lyrics cache: {e}");
-                Text::Keyed { key: "clear_failed".into(), params: HashMap::new() }
-            }),
+                match cleared {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => {
+                        tracing::warn!("could not empty the lyrics cache: {e}");
+                        Err(Text::Keyed { key: "clear_failed".into(), params: HashMap::new() })
+                    }
+                    Err(e) => {
+                        tracing::warn!("emptying the lyrics cache did not finish: {e}");
+                        Err(Text::Keyed { key: "clear_failed".into(), params: HashMap::new() })
+                    }
+                }
+            }
         }
     }
 }
@@ -104,6 +119,38 @@ mod tests {
         let mut shared = crate::lock(&cache);
         assert_eq!(shared.get(&Key::of(&query("Get Lucky")), SystemTime::now()), None);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "the files are gone from the disk");
+    }
+
+    /// The clear waits for the cache lock and walks the directory: done on
+    /// the runtime's own thread, it held every other task of the plugin —
+    /// and the admin reply — for as long as both took.
+    #[tokio::test]
+    async fn a_clear_never_holds_the_runtime_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = filled(dir.path());
+        let held = cache.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = crate::lock(&held);
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        });
+        locked_rx.recv().unwrap();
+
+        let mut admin = LrclibAdmin::new(cache);
+        let ticker = tokio::spawn(tokio::time::sleep(std::time::Duration::from_millis(50)));
+        let clear = admin.set_data(serde_json::json!({ "action": "clear" }));
+        tokio::pin!(clear);
+        // `biased`: the clear is polled first. Blocking, it would only come
+        // back once the lock was free, done — before the ticker ever ran.
+        tokio::select! {
+            biased;
+            _ = &mut clear => panic!("the clear ran on the runtime thread, waiting for the lock"),
+            _ = ticker => {}
+        }
+        assert!(clear.await.is_ok(), "and it completes once the lock is free");
+        holder.join().unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

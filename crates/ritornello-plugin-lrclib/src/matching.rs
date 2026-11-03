@@ -49,6 +49,38 @@ pub fn choose<'a>(q: &Query, records: &'a [Record]) -> Option<&'a Record> {
     }
 }
 
+/// `name` without what [`normalize_for_match`] folds away as not part of the
+/// name — a trailing bracketed group ("(Radio Edit)") and a featuring ("feat.
+/// Pharrell Williams") — but otherwise as written: case, accents and
+/// punctuation kept, since it is sent to LRCLIB rather than compared.
+///
+/// The same two cuts, in the same order and under the same conditions, as
+/// the normalization: only a *trailing* group with something before it, only
+/// a featuring after the first word.
+pub fn stripped(name: &str) -> &str {
+    let mut cut = name.trim();
+    loop {
+        let open = match cut.chars().next_back() {
+            Some(')') => '(',
+            Some(']') => '[',
+            _ => break,
+        };
+        match cut.rfind(open) {
+            Some(i) if !cut[..i].trim().is_empty() => cut = cut[..i].trim_end(),
+            _ => break,
+        }
+    }
+    for (n, word) in cut.split_whitespace().enumerate() {
+        let bare = word.trim_end_matches('.').to_lowercase();
+        if n > 0 && matches!(bare.as_str(), "feat" | "ft" | "featuring") {
+            // `word` is a slice of `cut`: its offset is where the cut goes.
+            let at = word.as_ptr() as usize - cut.as_ptr() as usize;
+            return cut[..at].trim_end();
+        }
+    }
+    cut
+}
+
 /// The answer a set of records gives to `q`.
 pub fn answer_for(q: &Query, records: &[Record]) -> Answer {
     match choose(q, records) {
@@ -181,6 +213,43 @@ mod tests {
         let q = query("Aphex Twin", "Avril 14th", None, Some(125));
         assert!(choose(&q, &records).is_some_and(|r| r.instrumental));
         assert_eq!(answer_for(&q, &records), Answer::Instrumental);
+    }
+
+    #[test]
+    fn a_get_answer_without_a_duration_asked_is_accepted_on_names_alone() {
+        // The real `/api/get` answer to a question with no duration: LRCLIB
+        // picked the version itself, and nothing here can check it — the
+        // names are all there is, and they match.
+        const GET_NODURATION: &str = include_str!("../tests/fixtures/get-noduration.json");
+        let record = crate::client::parse_record(GET_NODURATION).expect("the captured answer parses");
+        let records = std::slice::from_ref(&record);
+        assert!(choose(&query("Daft Punk", "Get Lucky", None, None), records).is_some());
+        match answer_for(&query("Daft Punk", "Get Lucky", None, None), records) {
+            Answer::Found { lyrics, duration_s } => {
+                assert_eq!(duration_s, Some(248), "the version LRCLIB chose");
+                assert!(lyrics.is_synced());
+            }
+            other => panic!("expected the record's lyrics, got {other:?}"),
+        }
+        // The names still decide: another artist is refused.
+        assert_eq!(choose(&query("Pharrell Williams", "Get Lucky", None, None), records), None);
+    }
+
+    #[test]
+    fn stripped_names_lose_only_what_matching_folds_away() {
+        assert_eq!(stripped("Daft Punk feat. Pharrell Williams"), "Daft Punk");
+        assert_eq!(stripped("Daft Punk Ft Pharrell"), "Daft Punk");
+        assert_eq!(stripped("Get Lucky (Radio Edit)"), "Get Lucky");
+        assert_eq!(stripped("Get Lucky [Remastered] (Live)"), "Get Lucky");
+        assert_eq!(stripped("Café Crème (feat. X)"), "Café Crème", "case and accents kept");
+        // What the normalization keeps, this keeps.
+        assert_eq!(stripped("Ft"), "Ft", "a band called Ft is still a band");
+        assert_eq!(stripped("(What's the Story) Morning Glory?"), "(What's the Story) Morning Glory?");
+        assert_eq!(stripped("Song (Part 1) Name"), "Song (Part 1) Name");
+        assert_eq!(stripped("  Get Lucky  "), "Get Lucky");
+        for name in ["Daft Punk feat. Pharrell Williams", "Get Lucky [Remastered] (Live)", "Ft", "Beyoncé ft. Jay-Z"] {
+            assert_eq!(normalize_for_match(stripped(name)), normalize_for_match(name), "{name}");
+        }
     }
 
     #[test]
