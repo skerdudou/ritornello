@@ -120,6 +120,8 @@ examples = ["deploy/nrj-metas.example.toml"]
 
 [plugins.musicbrainz]
 
+[plugins.lrclib]
+
 [plugins.generic-input]
 tree = [
   { from = "deploy/input-presets", to = "etc/ritornello/input-presets" },

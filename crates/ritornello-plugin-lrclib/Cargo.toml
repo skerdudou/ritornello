@@ -7,6 +7,16 @@ version = "0.2.0-beta.8"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+build = "build.rs"
+
+# What the release catalogue publishes about this plugin, so the installables
+# dialog can describe it before anything of it has ever run. English here
+# because this is the only declaration guaranteed to exist; a translation is
+# an addition in the plugin's own pack.
+[package.metadata.ritornello]
+kinds = ["metadata"]
+description = "Finds song lyrics online on LRCLIB, synced when available."
+admin = true
 
 [[bin]]
 name = "ritornello-plugin-lrclib"
@@ -20,6 +30,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
 # No `json` feature: the body is read as text and parsed by `parse_record` /
 # `parse_search`, so a malformed answer is told apart from a transport error.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
@@ -28,6 +40,12 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # version as the core's, so Cargo.lock gains no second copy.
 sha2 = "0.11"
 ritornello-proto = { path = "../ritornello-proto" }
+ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
+ritornello-i18n = { path = "../ritornello-i18n" }
 
 [dev-dependencies]
+# Simulated clock: the spacing after an overloaded answer is ten minutes, and
+# the wait for a measured duration three seconds. `full` does not include
+# `test-util`, without which `start_paused` does not compile.
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
