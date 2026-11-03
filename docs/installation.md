@@ -1766,14 +1766,16 @@ local disk, the page and the files journey of the end-to-end harness against a
   `©lyr`), with ffmpeg 6.1.1 and mpv 0.37 — never from the NAS's own files,
   as tagged by whatever tool tagged them, and never through the Pi's mpv
   0.40, whose key names could differ;
-- a `.lrc` **read from the SMB share** — its encoding (a Windows tool's
-  Latin-1, or CP1252, which the Latin-1 fallback reads wrong for `’` and
-  `œ`), its case on a share mounted case-insensitively, and the circuit
-  breaker's bound on a NAS that has to spin up — has not been tried;
+- a `.lrc` **read from the SMB share** — its encoding (the Windows-1252
+  fallback is covered by tests on real bytes, `’`, `œ` and `…` included, but
+  no file actually written by a Windows tool on the NAS has been read), its
+  case on a share mounted case-insensitively, and the circuit breaker's
+  bound on a NAS that has to spin up — has not been tried;
 - **archiving a `.lrc` onto the share** has never written a file there: not
   the `archive_lyrics` switch on the page, not `files-mount` 1.0.2 (which
   only adds that field to the roots table) on the device, not the write
-  through a temporary and a rename on a cifs mount;
+  through a temporary and a hard link on a cifs mount — nor, where that
+  mount refuses hard links, the exclusive-create fallback;
 - **LRCLIB under real use**: its behaviour is known from a handful of
   requests made by hand on 2026-11-02 (the 503 for an unknown song, the
   ±2 s tolerance, the twenty versions of "Get Lucky"). Nobody has watched

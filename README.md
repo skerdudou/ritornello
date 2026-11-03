@@ -78,7 +78,8 @@ exists.
   365 webradios). Each field says where it came from, down to the release
   year and the links to the streaming platforms.
 - **Lyrics** — a microphone on the player card opens the words of the
-  song, the line being sung highlighted when they are timed: from a `.lrc`
+  song, the line being sung highlighted when they are timed and the
+  player knows where the song stands: from a `.lrc`
   beside the file, from the file's own tags, or found on
   [LRCLIB](https://lrclib.net) — and a root can be armed to keep what was
   found as a `.lrc` beside the track, never over one already there.

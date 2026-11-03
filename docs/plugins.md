@@ -1585,18 +1585,21 @@ reverts the setting alone, never the playlist that shares the file. Like
 chain](#the-lyrics-chain)): `<track stem>.lrc`, the **whole** name compared
 case-insensitively — on a share mounted case-insensitively `01 - song.lrc`
 and `01 - Song.lrc` are one file, and the writer below uses the very same
-predicate to decide a lyrics file "is already there", so what is read and
-what is never written over stay one set. Several candidates on a
-case-sensitive disk are settled by name, the exact case first. It is read
-leniently: UTF-8 with or without a byte-order mark, anything else as
-Latin-1 (the encoding of every Windows tool of the 2000s, in which any byte
-sequence is valid, so the fallback never fails), through a bounded read so
+predicate for its early refusal that a lyrics file "is already there", so
+what is read and what is never written over stay one set. Several
+candidates on a case-sensitive disk are settled by name, the exact case
+first. It is read leniently: UTF-8 with or without a byte-order mark,
+anything else as Windows-1252 (the encoding of every Windows tool of the
+2000s; not Latin-1, which would turn the typographic apostrophe `’`, `œ` or
+`…` into control characters; the five positions CP1252 leaves undefined keep
+their Latin-1 value, so the fallback never fails), through a bounded read so
 a huge file misnamed `.lrc` costs a few kilobytes. Timestamps make it
 synced, their absence plain text. The lookup runs under the same circuit
 breaker as the cover's, and its answer is told apart three ways: no `.lrc`
 (the one case worth offering to keep lyrics found elsewhere), a readable
 one, and one that holds nothing worth showing — logged and left alone, not
-offered over, since the owner's file is not ours to judge.
+offered over, since the owner's file is not ours to judge. A folder that
+cannot be listed is not "no `.lrc`": it is unknown, and earns no offer.
 
 **Keeping found lyrics is a per-root flag of its own, `archive_lyrics`**,
 false by default, toggled by the admin op `set_archive_lyrics` (`{"op":
@@ -1615,7 +1618,13 @@ empty or over the ceiling, or **any** `<stem>.lrc` is already there,
 whatever its case: the owner's own lyrics, timed by hand, are worth more
 than anything the network found. Synced lyrics win over plain when both
 came, since timing is what a `.lrc` is for; the file is written in UTF-8,
-through a temporary in the same folder and a rename. The write works
+through a temporary in the same folder **hard-linked** to its name, never
+renamed: a rename replaces what it lands on, so a `.lrc` saved between the
+check and the write, or one only the share's own case folding sees (`CAFÉ.lrc`
+beside `Café.flac`), would be lost — the link fails with "already there"
+instead, judged by the filesystem itself. A share that refuses hard links
+gets the file created exclusively (`O_EXCL`) and written in place: still
+never an overwrite, only no longer atomic. The write works
 detached, under the archive's own twenty-second bound, and every outcome is
 a journal line ("lyrics archived at …", "lyrics not archived: …"). The
 homogeneity rule of covers has no object here: a `.lrc` names its track.
@@ -2741,12 +2750,19 @@ without anything being lost: the entries already there are not touched.
   asked, 367 s answered), nearest first, then synced over plain, then the
   same album. For a file the length is the one mpv measured
   (`Known::measured_duration_s`), which the core fills on its next tick after
-  a track change — so a `files` or `cd` track waits **up to three seconds**
-  for it before being searched without one, rather than let LRCLIB pick any
-  version and cache that guess. With a duration it asks `/api/get` first,
-  then `/api/search`; without one, `/api/search` alone. A record `/api/get`
-  hands back for another artist (it matches loosely) is checked like any
-  other, and the search is asked before concluding there is nothing.
+  a track change — so a `files` or `cd` track that declares no duration of
+  its own waits **up to three seconds** for it before being searched without
+  one, rather than let LRCLIB pick any version and cache that guess. The wait
+  is decided on the source's **name** (`MEASURED_SOURCES`: `files` and `cd`):
+  a third-party source of files should declare `duration_s` itself, or its
+  tracks are searched at once, without a duration. With a duration it asks
+  `/api/get` first, then `/api/search`; without one, `/api/search` alone. A
+  record `/api/get` hands back for another artist (it matches loosely) is
+  checked like any other, and the search is asked before concluding there is
+  nothing. Names are sent as the track carries them; when that ends in an
+  absence and they hold what matching folds away ("Daft Punk feat. Pharrell
+  Williams", "Get Lucky (Radio Edit)"), one more search goes out under the
+  names without it, before concluding.
 
   **A song LRCLIB does not have answers 503.** Measured on 2026-11-02: an
   unknown track gets `ServerOverloaded`, every time, on `/api/get` and
@@ -2755,8 +2771,9 @@ without anything being lost: the entries already there are not touched.
   outage, and the plugin treats every 503 — every unanswered request, in
   fact: rate limit, timeout, unreachable, unreadable, or a body past 2 MiB —
   as an outage: **nothing is emitted and nothing is cached**, the same song
-  is not asked about again for ten minutes (a song's length, so one listening
-  asks once), and no request at all goes out until the server's
+  is not asked about again for at least ten minutes (a song's length, so one
+  listening asks once) — longer when the server's `Retry-After` asks for
+  longer, capped at an hour — and no request at all goes out until the server's
   `Retry-After` has passed — 60 s when it gives none, capped at an hour. That
   spacing is in memory only: a restart is a legitimate reason to ask again.
   A song LRCLIB answered about with nothing that fits, or as instrumental, is
