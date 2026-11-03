@@ -2631,10 +2631,12 @@ mod tests {
         core.handle_source_update("radio", plays(serde_json::json!({"kind": "file", "path": "/music/b.flac"})));
         assert_eq!(np_rx.borrow_and_update().known.measured_duration_s, None, "the previous file's length");
 
-        // Nothing plays: nothing measured is told.
+        // The new file's own length, once measured, is told.
         core.refresh_position().await;
         core.publish_state();
         assert_eq!(np_rx.borrow_and_update().known.measured_duration_s, Some(254));
+
+        // Nothing plays: nothing measured is told.
         core.handle_command(Command::Power).await.unwrap();
         assert_eq!(np_rx.borrow_and_update().known.measured_duration_s, None, "in standby");
     }
@@ -2657,6 +2659,32 @@ mod tests {
         let state = state_rx.borrow_and_update().clone();
         assert_eq!(state.track.title.as_deref(), Some("B"));
         assert_eq!(state.track.lyrics_href, None, "song A's words must not stay up under song B");
+    }
+
+    /// A song played again — a radio coming back to it — is the most recent
+    /// entry of the lyrics store, whatever its age: left where it was, the
+    /// least recent, the next song's words would evict it while the page may
+    /// still be fetching it.
+    #[tokio::test]
+    async fn lyrics_published_again_are_not_the_next_ones_evicted() {
+        let (mut core, _np_rx, mut state_rx, _d) = setup_metadata(vec![]);
+        core.apply(SourceAction::play("/music/a.flac").finite()).await.unwrap();
+        core.handle_source_update("radio", plays(serde_json::json!({"kind": "stream", "url": "http://ogg"})));
+        let song = |i: usize| ritornello_proto::Track { title: Some(format!("Song {i}")), ..Default::default() };
+        let words = |i: usize| lrc(&format!("[00:01.00]Words of song {i}"));
+        let key = |i: usize| lyrics_href(&words(i)).trim_start_matches(crate::lyrics::HREF_PREFIX).to_string();
+        // The store filled, song 0 the least recent.
+        for i in 0..crate::lyrics::CAPACITY {
+            core.handle_file_tags(Some(song(i)), Some(words(i)));
+        }
+        // Song 0 again, still held: published from the store as it is.
+        core.handle_file_tags(Some(song(0)), Some(words(0)));
+        assert_eq!(state_rx.borrow_and_update().track.lyrics_href, Some(lyrics_href(&words(0))));
+        // A new song: the least recent goes, and that is no longer song 0.
+        core.handle_file_tags(Some(song(99)), Some(words(99)));
+        assert!(core.lyrics.get(&key(0)).is_some(), "the words published again were evicted");
+        assert!(core.lyrics.get(&key(1)).is_none(), "the least recent goes once the store is full");
+        assert!(core.lyrics.get(&key(99)).is_some());
     }
 
     /// A real `USLT` frame, read by the same libavformat mpv is built on:

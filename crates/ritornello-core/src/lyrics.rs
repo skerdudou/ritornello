@@ -22,7 +22,7 @@ pub const HREF_PREFIX: &str = "/api/lyrics/";
 /// track's href while the next one is already up. At the 64 KiB ceiling
 /// (`LYRICS_MAX_BYTES`) this is half a megabyte at worst, a few tens of
 /// kilobytes in practice.
-const CAPACITY: usize = 8;
+pub(crate) const CAPACITY: usize = 8;
 
 /// `Cache-Control` of the route. `immutable` because the URL names its
 /// content: other words get another key, hence another URL. `private`
@@ -74,7 +74,11 @@ impl LyricsStore {
     }
 
     /// Moves `key` to the front if held. `true` if it was.
-    fn touch(&self, key: &str) -> bool {
+    ///
+    /// What `publish_state` does with the current key at every frame: a song
+    /// played again (a radio coming back to it) is then the most recent
+    /// entry, never the least recent one the next insertion evicts.
+    pub fn touch(&self, key: &str) -> bool {
         let mut entries = self.entries.lock().unwrap();
         let Some(i) = entries.iter().position(|(k, _)| k == key) else {
             return false;
@@ -85,11 +89,6 @@ impl LyricsStore {
             entries.push_front(entry);
         }
         true
-    }
-
-    /// Whether `key` is held, without touching anything.
-    pub fn holds(&self, key: &str) -> bool {
-        self.entries.lock().unwrap().iter().any(|(k, _)| k == key)
     }
 
     /// The lyrics published under `key`, as the route serves them.

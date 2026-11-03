@@ -14,8 +14,10 @@ impl<P: Player> Core<P> {
         // that has some. Once per frame, so the held key is checked first:
         // `selected_lyrics` may compose the whole text to judge a plugin's
         // words, and that is only worth doing when there is something to store.
+        // Checked by `touch`, which also makes a held key the most recent:
+        // the current words must never be the next ones evicted.
         if let Some(key) = self.metadata.lyrics_key()
-            && !self.lyrics.holds(&key)
+            && !self.lyrics.touch(&key)
             && let Some((l, _)) = self.metadata.selected_lyrics()
         {
             self.lyrics.insert(key, l);
