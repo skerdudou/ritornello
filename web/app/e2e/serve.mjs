@@ -143,6 +143,24 @@ const tracks = ['01', '02', '03']
 // carrying a different action, parsed and resolved by the plugin.
 writeFileSync(join(albumNative, 'tout.m3u'), tracks.map((n) => `${n}.mp3`).join('\n') + '\n')
 
+// A sidecar `.lrc` beside the first track, with the track's exact stem: what
+// the files plugin reads and announces as that track's lyrics. Timed from the
+// first second and every few seconds over the track's 30, so a line is active
+// whenever the journey looks — and the scan filters it out (`scan::is_audio`),
+// so no listing changes.
+writeFileSync(
+  join(albumNative, '01.lrc'),
+  [
+    '[ar:Ritornello]',
+    '[ti:Track 01]',
+    '[00:00.00]First line of the sidecar',
+    '[00:01.00]Second line of the sidecar',
+    '[00:05.00]Third line of the sidecar',
+    '[00:10.00]Fourth line of the sidecar',
+    '[00:20.00]Last line of the sidecar',
+  ].join('\n') + '\n',
+)
+
 // The device wizard opens on the mounted volumes, read from `/proc/mounts`.
 // A journey has no privilege and can mount nothing, so it *describes* a volume
 // instead of creating one: the plugin reads the table through

@@ -4,6 +4,7 @@ import { ReloadIcon } from '@radix-icons/vue'
 import { Badge, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import ProgressBar from './ProgressBar.vue'
 import ProvenanceDetails from './ProvenanceDetails.vue'
+import LyricsDialog from './LyricsDialog.vue'
 import AppleMusicIcon from './icons/AppleMusicIcon.vue'
 import DeezerIcon from './icons/DeezerIcon.vue'
 import YoutubeIcon from './icons/YoutubeIcon.vue'
@@ -216,8 +217,19 @@ const hasOrigins = computed(() => {
 // The bottom row of the track block (provenance, duration, links) only exists
 // if there is something to put in it: otherwise `min-h-11` would reserve 44
 // empty px under the album, which is the most common case (a bare ICY title).
+//
+// The lyrics dialog lives in this row, so the row (and the track block above
+// it) also stays while that dialog is open: the next song may have nothing to
+// show at all, and unmounting the row would close the dialog from under the
+// listener, where it is meant to say "no lyrics for this track" and wait.
+const lyricsOpen = ref(false)
 const badgeRow = computed(
-  () => hasOrigins.value || durationToShow.value || links.value.length > 0,
+  () =>
+    hasOrigins.value ||
+    durationToShow.value ||
+    links.value.length > 0 ||
+    !!props.state?.lyrics_href ||
+    lyricsOpen.value,
 )
 // Bubbled up to the parent: HomeView is what posts the commands (as for the
 // rest of the remote), the card itself posts none.
@@ -330,7 +342,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
         <p v-if="state?.status && !state.standby" class="text-sm text-muted-foreground" data-player-status>
           {{ state.status }}
         </p>
-        <div v-if="!nothingToShow(state) || state?.location" class="flex min-w-0 flex-col items-center gap-0.5 md:items-start" data-now-playing>
+        <div v-if="!nothingToShow(state) || state?.location || lyricsOpen" class="flex min-w-0 flex-col items-center gap-0.5 md:items-start" data-now-playing>
           <p v-if="state?.title" class="text-xl font-semibold leading-tight text-foreground" data-title>{{ state.title }}</p>
           <p v-if="state?.artist" class="text-sm text-foreground" data-artist>{{ state.artist }}</p>
           <!-- The year sits next to the album, where a year is read. It also
@@ -360,6 +372,15 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
                  *which field* comes from *whom*. The detail now lives in a
                  popover, where there is room to spell it out. -->
             <ProvenanceDetails :state="state" />
+            <!-- The microphone: only there when the song has lyrics (the
+                 component decides, from `href`). -->
+            <LyricsDialog
+              v-model:open="lyricsOpen"
+              :href="state?.lyrics_href ?? null"
+              :synced="state?.lyrics_synced ?? false"
+              :position-s="state?.position_s ?? null"
+              :origin="state?.lyrics_origin ?? null"
+            />
             <span
               v-if="durationToShow"
               class="text-xs text-muted-foreground"
