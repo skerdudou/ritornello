@@ -1,12 +1,16 @@
-**Nothing to do** — replace the binaries.
+**Action required** — update the `files` plugin with **ritornello-install**
+(`ritornello-install --host account@host --version v0.2.0-beta.9 --keep`),
+once, from a workstation.
 
-No systemd unit, polkit rule, privileged updater or mount helper changed
-since beta.7, so the page updates everything by itself. This assumes the
-device already went through ritornello-install 0.3.0 or later once, as
-beta.7 asked.
+The mount helper changed: `files-mount` moves from 1.0.1 to 1.0.2, for a new
+per-share flag (`archive_lyrics`) in the roots table it reads too. Only
+ritornello-install places the helper, so the page refuses to update `files`
+on its own and says so. Everything else — the core, the other plugins and
+the language packs — updates from the page as usual: no systemd unit,
+polkit rule or privileged updater changed since beta.8.
 
 This is not a wire break: three contracts gained compatible additions
-(`source` 1.2, `display` 1.1, `metadata` 1.1) and the bootstrap
+(`source` 1.3, `display` 1.2, `metadata` 1.2) and the bootstrap
 `PROTOCOL_VERSION` did not move. Any mix of old and new components still
 talks: an older core ignores what it does not know.
 <!-- The opening block above is this release's answer to "is there anything
@@ -44,49 +48,52 @@ talks: an older core ignores what it does not know.
 
 ## Behaviour changes
 
-**Stop keeps the track on screen, and Next and Previous move it.** While
-nothing plays, the source keeps one track *armed*: the one Play starts.
-- The screen (web page and physical display) keeps its title, artist and
-  cover.
-- Next and Previous move the armed track without any sound, and Play
-  starts it from its beginning.
-- **Files**: Stop arms the track that was playing. Next and Previous
-  follow the current order, shuffled or not, and wrap around. At the end
-  of the list (repeat off), the first track of the next pass is armed.
-- **CD**: a disc that is inserted and not played shows its armed track at
-  once, and MusicBrainz is asked for its titles then. Next and Previous
-  stop at both ends of the disc. Eject forgets the track. Play after Stop
-  restarts the track that is armed, whatever the "on insertion" setting
-  says: that setting governs arrival and insertion only.
-- **Radio**: Stop keeps the station's number and name, but not the song
-  that was on air. Next and Previous change station without tuning in.
-- A third-party source keeps today's behaviour until it learns to arm a
-  track: Stop empties the screen.
+**New plugin: Web streaming** (`web-streaming`, official, not installed by
+default — add it from Settings → Plugins). Paste links from YouTube,
+SoundCloud, Bandcamp or any site yt-dlp reads, a single video or a
+playlist; each becomes a preset, played without ads from the page or the
+remote. Next and Previous move within a playlist, and otherwise to the
+neighbouring preset.
+- **Download** the audio of chosen presets from the plugin's page into a
+  folder you pick on a writable share of the `files` plugin (a new folder
+  can be created there). The dialog reopens on the last folder used.
+- The plugin keeps its own **yt-dlp** up to date: its signature is checked
+  against the yt-dlp maintainers' key, and an older version is never put
+  back over a newer one. A stable or nightly channel, and a check button,
+  sit on the plugin's page.
+- **Never reaches your local network**: a link, a playlist entry or a
+  download that leads to a local address is refused. One known gap remains:
+  mpv itself follows redirections, playlists and manifests, which the
+  plugin cannot judge.
+- Needs **Python 3** on the device (DietPi and Raspberry Pi OS have it).
+  About 6.5 s pass on a Raspberry Pi 2 before each video is heard.
 
-**The display shows whether it plays.** The first line of the console
-display now starts with ▶ (playing), ║ (paused) or ■ (stopped).
+**Lyrics.** A microphone key in the player card opens the lyrics of the
+current track, the sung line highlighted when they are timed. They come
+from a `<track>.lrc` beside the file, else from the file's tags, else from
+LRCLIB through the new **`lrclib`** plugin (official, not installed by
+default). The `files` plugin's Sources tab gains a per-share switch, off by
+default, to keep lyrics found online as a `.lrc` beside the track; it never
+overwrites one.
 
-**Choosing a source wakes the device.** In standby, a source key — on the
-page, the remote or from an MPD client — wakes the device on that source.
-The active source wakes where it was, and another one is switched to.
-Everything else still waits for Power.
+**System alerts.** A warning triangle beside **System** (top bar, and the
+System tab of the phone's bottom bar) when a metric runs away, with one
+sentence per alert at the top of the System page: temperature (80 °C),
+processor (90 % of one core over three minutes), memory or disk (90 %), and
+under-voltage. A past under-voltage stays lit until you press
+**Acknowledge**, which holds until the next reboot.
 
-**Source icons in the player card.** The home page chooses the source with
-one icon key per source in the player card's header, the active one
-pressed. When they do not fit, the single Source key cycles through them
-as before. A source without an icon shows its initial. The bar of named
-source keys above the cards is gone.
+**The core's version in Settings.** The Updates card opens on the version
+of the core that runs, even before any check. The System page's line shows
+the same number and is now labelled "Core version" too, rather than
+"Ritornello version": the release's number differs when the core did not
+move.
 
-**The presets card in standby, and its pages.** In standby, the presets
-grid keeps showing the active source's stations. With several pages, the
-pagination sits in the card header ("11–20 of 23"), and the lone count
-under the title is gone.
+**Source keys away from standby.** In the player card's header the source
+icon keys now start at the left edge, and the corner keeps standby alone.
 
-**Choose the name of an archived cover.** The files plugin's Sources tab
-picks, once for every source, the name a found cover is saved under next
-to the music: `cover` (the default, as before), `folder`, `front`,
-`albumart` or `album`. A folder that already holds an image under any of
-those names, in any case, is never written to.
+**MPD: adding never wakes the device.** In standby, an `add` from an MPD
+client no longer wakes the device, whatever the source of the entry.
 
 ## Install
 
