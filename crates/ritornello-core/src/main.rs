@@ -2421,6 +2421,7 @@ async fn main() -> Result<()> {
                     state: state_tx,
                 },
                 sources_catalog: sources_catalog_tx,
+                plugin_data_root: plugin_data_root.clone(),
             },
             cover_tx,
             extraction_tx,
@@ -3409,6 +3410,9 @@ mod toggle_tests {
         async fn set_loop_track(&self, _on: bool) -> Result<()> {
             Ok(())
         }
+        async fn set_ytdl(&self, _path: Option<&std::path::Path>) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// A source client that answers nothing useful. No test here sends it a
@@ -3476,6 +3480,7 @@ mod toggle_tests {
                 registry: registry.clone(),
                 manifest_order: manifest_order.clone(),
                 sources_catalog: sources_catalog_tx,
+                plugin_data_root: root.join("plugin-data"),
                 metadata: MetadataWiring {
                     plugins: vec![],
                     now_playing: now_playing_tx,

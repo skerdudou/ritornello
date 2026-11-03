@@ -101,6 +101,10 @@ pub struct Wiring {
     /// send the names of 51 stations on every single state frame per second
     /// of playback.
     pub sources_catalog: watch::Sender<SourcesCatalog>,
+    /// The root of the plugins' data directories — the same one every plugin
+    /// is launched with. The core derives from it (`plugins::data_dir_for`)
+    /// the one place a source may name a program from (`Play::ytdl_path`).
+    pub plugin_data_root: PathBuf,
 }
 
 /// Metadata wiring.
@@ -123,6 +127,8 @@ pub struct Core<P: Player> {
     sources: HashMap<String, Arc<dyn Source>>,
     source_order: Vec<String>,
     active_source: String,
+    /// See `Wiring::plugin_data_root`.
+    plugin_data_root: PathBuf,
     volume: u8,
     muted: bool,
     standby: bool,
@@ -543,6 +549,7 @@ impl<P: Player> Core<P> {
             manifest_order,
             metadata,
             sources_catalog,
+            plugin_data_root,
         } = wiring;
         // File order, not alphabetical. One order commands both the source key
         // and metadata arbitration, so the list the page shows is the list the
@@ -629,6 +636,7 @@ impl<P: Player> Core<P> {
             now_playing_tx: metadata.now_playing,
             state_tx: metadata.state,
             sources_catalog_tx: sources_catalog,
+            plugin_data_root,
             settings: persisted.settings.clone(),
             volume_deadline: None,
             position_s: None,
@@ -1855,6 +1863,7 @@ mod tests {
             manifest_order: vec![],
             metadata: silent_wiring(vec![]),
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            plugin_data_root: std::path::PathBuf::from("/root"),
         };
         let (cover_tx, _cover_rx) = mpsc::channel::<(String, bool)>(4);
         let (app_state, core) = crate::assemble_covers_and_core(

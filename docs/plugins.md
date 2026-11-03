@@ -685,8 +685,9 @@ names the UI draws are exactly these eight: `radio`, `disc`, `folder`,
 `music`, `headphones`, `podcast`, `tv` and `usb`. Any other name, and `None`
 (the default), shows the source's **initial** instead, so a plugin that
 announces nothing, or something this version of the UI does not know, still
-gets a key. The bundled sources announce `radio` (radio), `disc` (cd) and
-`folder` (files).
+gets a key. All are strokes in the text colour. The bundled sources announce
+`radio` (radio), `disc` (cd), `folder` (files) and `headphones`
+(web-streaming).
 
 The name travels in the plugin's bootstrap announcement, which carries no
 version of its own, and the core reads it once, when the plugin registers.
@@ -2405,6 +2406,365 @@ the Pi:
   combination has never been watched on the device, and it is on the list
   precisely because a status that vanished the moment a cover arrived is the
   kind of defect only a screen shows.
+
+## `ritornello-plugin-web-streaming` — web streaming
+
+It plays the audio of web links — YouTube first, then every site that
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) knows how to read (SoundCloud and
+Bandcamp are among the ones captured for its tests) — and downloads it to a
+folder of a writable network share. A video is never shown: yt-dlp is asked
+for the audio stream only, and the advertisements of a site are inserted by
+its own player, which is never involved. The name was chosen on purpose
+over "YouTube": in French, "streaming musical" does not mean radio, and the
+plugin is not tied to one site.
+
+It is a source plugin with an admin page, `http://<host>:8080/plugins/web-streaming/`,
+and it announces the `headphones` icon (see [A source's icon](#a-sources-icon)).
+It is **not installed by default**: it ships in every release and is offered
+in the installables dialog, but the installer preselects nothing on a new
+device. It needs **`python3`** on the device (see
+[yt-dlp, managed by the plugin](#yt-dlp-managed-by-the-plugin)).
+
+### Presets
+
+Presets work like the radio's: numbered **by position** (1 to 99),
+reordered by dragging a row or with the ▲▼ arrows, announced to the core as
+`preset_count`, listed by name for `list_presets`. They are kept in
+`entries.toml`. As on the radio, a save that moves or renames the preset
+that plays (or is armed) corrects its number and name on the card and in
+`state.json`, found again by its link; one deleted while it plays keeps
+playing with no number.
+
+Links are added in a text area, **one link per line**. The plugin asks
+yt-dlp about each of them in the background (title, channel, the videos of
+a playlist) and the page follows the progress; nothing is written until
+"Save" is clicked. A link is either a **video** or a **playlist**:
+
+- a YouTube link is recognised for what it is (`watch?v=`, `playlist?list=`,
+  `shorts/`, `embed/`, `youtu.be/`; any other shape or host of the YouTube
+  family is refused, and a link that the YouTube rules refuse never falls
+  back to the generic ones). A `watch?v=…&list=…` link makes the operator
+  choose: the video alone, or the playlist;
+- any other `http` or `https` link is kept as it is (scheme and host
+  lowercased, fragment dropped) and yt-dlp decides what it is. A link with
+  credentials, a control character or whitespace, or a host that is a
+  literal local address is refused at once; a *name* is judged when it
+  resolves (see [Never the local network](#never-the-local-network));
+- a **live stream** is refused (it never ends): `/live/` links, and anything
+  yt-dlp reports as live or upcoming, whether pasted or met in a playlist.
+
+Hosts apart from YouTube are known by `extractor:id` (yt-dlp's own fields);
+a YouTube entry keeps its 11-character id and its rebuilt `watch` address. A
+playlist's videos are cached in `lists/` and refreshed in the background
+when it is played; playback starts from the cache without waiting, and a
+failed refresh keeps the old list. Saving a playlist writes its freshly
+probed videos to that cache in the same save. Shuffle and repeat are not
+supported by this source yet (the order of `files` is private to its
+binary).
+
+### Playback
+
+Playing a preset sends the core a `Play` that carries the path of the
+plugin's own yt-dlp (`ytdl_path`, `source` contract 1.3), and **mpv's own
+ytdl hook** resolves the address when it reaches it. This is how a playlist
+chains, and why the expiry of stream URLs does not matter.
+
+- The **core means to let the hook run a yt-dlp only for a playback that
+  asks for it**: mpv is started with every `http(s)` address excluded from
+  the hook's fallback, and every other `Play` (radio, CD, files) points the
+  hook at a program that does nothing (`/bin/false`), so a radio stream that
+  fails should never wake yt-dlp, even after a web-streaming playback. That
+  last effect is reasoned from mpv's source, **not measured**: in the
+  measurements every non-web load ran `/bin/false`, which the counters could
+  not see. What was measured (mpv 0.37 only): `ytdl://` loads reach the
+  wrapper 100 times out of 100 with this scheme, against 25 out of 100 with
+  the former `ytdl` toggle, and `ytdl://` is not subject to the exclusion.
+  Likewise, the http entries of a flat playlist the hook expands during a web
+  playback are excluded too, so they do not reach the wrapper and simply
+  fail; that has not been tested. The hook
+  script itself stays loaded: switching mpv's `ytdl` off and on reloads it
+  behind the next load, and on mpv 0.37 that lost three web plays out of
+  four that followed another source's play. The path is accepted **only
+  when it lies under the announcing plugin's own data directory** (and holds
+  no `:`, mpv's list separator for it); anywhere else is refused, not
+  followed.
+- Every address handed to mpv is written as `ytdl://<address>`, a single
+  video and every entry of the `.m3u` alike, so that mpv *always* goes
+  through the hook and therefore through the guarded wrapper, instead of
+  opening a direct-looking address itself first.
+- **About 6.5 s pass before the sound of each video** on the Raspberry Pi 2
+  (yt-dlp resolving the address), **between two entries of a playlist too**:
+  mpv resolves each entry when it gets there. This is a measured limit, not
+  a defect to be fixed here.
+- When the hook fails, mpv runs the wrapper a second time (measured on mpv
+  0.37), so a failing link costs two runs.
+- **A failed playback says why.** mpv resolves through the wrapper, out of
+  the plugin's sight, and goes idle when that fails; the core then stops the
+  source. So the wrapper records each failed `-J` run it serves for mpv (the
+  plugin's own runs are marked and left out) in
+  `last-playback-failure.json`: when, the host, a code (`guard_refused`,
+  `live_refused`, `no_formats`, `ytdlp_failed`) and yt-dlp's last line. The
+  page's yt-dlp card shows the last one ("Last playback failure, …"), with
+  yt-dlp's own words under it, and the Stop that follows a failed playback
+  carries the same sentence as the source's status, once. In a playlist, an
+  entry mpv skipped past is not blamed on the playback.
+- While a playlist plays, next and previous are mpv's (`PlayerNext` /
+  `PlayerPrev`) and the position comes back through `player_track`; on a
+  single video, or when stopped, they move to the adjacent preset as the
+  radio does.
+
+### yt-dlp, managed by the plugin
+
+This is the one place where the product downloads and runs code that none
+of its releases shipped, so it is deliberately strict.
+
+**What is installed.** The `yt-dlp` zipapp of the latest release (the same
+file on every architecture) is **extracted** into `yt-dlp/` under the data
+directory, then started once so that Python writes its bytecode cache. On
+the reference device, measured on yt-dlp 2026.10.26 (Python 3.13.5, armv7l):
+
+| | `--version` | one video's stream address |
+|---|---|---|
+| the zipapp run as it comes | 9.0 s | 17.7 s |
+| the PyInstaller `armv7l` archive | 5.4 s | 10.7 s |
+| **the zipapp extracted, bytecode cached** | **1.9 s** | **6.5 to 8.6 s** |
+
+(The first launch compiles: 5.2 s.) The same times were measured inside a
+transient unit under the service's own hardening (`User=ritornello`,
+`ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`,
+`RestrictSUIDSGID`). yt-dlp no longer publishes a bare `armv7l` binary, only
+that archive, which is why the zipapp is used. A flat playlist of 182 videos
+took 21 s.
+
+**The wrapper.** What mpv and the plugin both run is `bin/yt-dlp`, a small
+Python script the plugin writes, with `python3 -IS`. It calls `yt_dlp.main`
+in its own process (one process, no grandchild, so a kill reaches
+everything) with the plugin's `yt-dlp.conf`, and carries the network guard
+below.
+
+**The JavaScript runtime is a fallback, never the first attempt.** The
+wrapper first runs yt-dlp *without* a runtime and, only if that fails,
+runs the same arguments again in the same process with the best runtime the
+device offers. Measured on the device, a runtime only costs time today: no
+runtime 6.4 to 8.8 s per video; node 22, 26 to 29 s (about 4 times slower);
+QuickJS, about 125 s (about 20 times slower); and Debian 13's node 20.19.2 is
+below yt-dlp's minimum (node 22) so it is ignored. Without a runtime YouTube
+works today (yt-dlp warns that extraction without one is deprecated), but
+that may stop; the runtime is kept for that day. The order is the plugin's
+own `deno` (**only on x86_64 and aarch64**: deno publishes nothing for 32-bit
+ARM), then a system `node` of at least 22, then a system QuickJS (flagged
+slow). On the reference device none exists that helps, and the page says so.
+deno is not signed by its authors: its zip is checked against the
+`.sha256sum` published next to it, which catches a damaged download but not
+a compromised release. That is the whole of its trust, and why it is only a
+fallback.
+
+**Trust in yt-dlp's release.** The plugin embeds yt-dlp's release
+**public key** and nothing is put in place unless the chain holds:
+`SHA2-256SUMS.sig` is a detached OpenPGP signature over `SHA2-256SUMS`; that
+list names the SHA-256 of the asset; the asset must hash to the sum listed
+under its exact name. The signature is checked in Rust (the `pgp` crate): the
+device has no `gpgv`. A refusal, or any failed step, leaves the copy in
+place untouched; the new one is extracted aside, warmed up, then swapped in
+by renames (a crash in the middle is undone at the next start). The key is
+`Simon Sawicki (yt-dlp signing key) <contact@grub4k.xyz>`, RSA 4096,
+fingerprint **`AC0C BBE6 848D 6A87 3464 AF4E 57CF 6593 3B5A 7581`**. It was
+taken from `public.key` at the root of yt-dlp's repository, cross-checked
+against keys.openpgp.org (which publishes an address only once its owner
+confirmed it), and the fingerprint was **confirmed by the project's owner on
+2026-11-03**; a test holds the embedded key to it. A change of key by
+yt-dlp therefore needs a release of this plugin.
+
+**Channels.** Stable by default; the page switches to **nightly** and back,
+for the days when a site breaks and only the nightly repairs it (both are
+signed by the same key). The channel is kept in `settings.toml`. The plugin
+checks at start and then at most once a day, in the background, and the page
+has two actions: "Check for an update" (it ignores the once-a-day limit and
+keeps the rollback protection on) and "Install anyway". **Rollback
+protection**: on the channel already installed, a signed release *older*
+than the installed one, another build of the same version, or a release
+whose version cannot be read, is refused (a signed list can otherwise be
+replayed to freeze a device on an old, vulnerable copy), unless the operator
+accepts it with "Install anyway". **A channel switch is not refused as a
+rollback**, in either direction: the comparison is skipped when the
+installed record's channel differs from the channel being installed
+(`judge_rollback`; `an_older_release_is_taken_when_the_operator_changed_channel`
+installs an older nightly unforced), and so is it when nothing is installed
+or the install is not intact. Choosing a channel on the page saves it and
+requests an unforced update, which is therefore enough. The swap waits for the
+download in progress; a playback or probe that starts during its two renames
+can fail once.
+
+**The capabilities panel** shows what the device offers: `python3` and its
+version (with the exact `apt` command if it is missing), the JavaScript
+runtime found and whether it is slow, and a "Check again" button. Nothing
+is suggested for the JavaScript runtime on 32-bit ARM, where none helps.
+
+**Prerequisites.** `python3` is a system prerequisite of this plugin only.
+Because the wrapper runs Python with `-I` and `-S` (no `site`, so no
+site-packages), TLS is verified against the **system CA store**
+(`ca-certificates`), not a bundled one.
+
+### Never the local network
+
+Links of any site are opened, and the addresses reached from them come from
+remote data, so one limit is absolute: **the plugin must never reach the
+operator's own network** (the router's page, the NAS, the core's own HTTP
+port). Three guards, all needed:
+
+1. **Every connection of yt-dlp.** Before `yt_dlp` is imported, the wrapper
+   replaces the sockets' `connect`, `connect_ex`, `sendto` and `sendmsg`
+   with versions that judge the **effective** address: a name is resolved
+   first and the numeric address that resolution gave is the one judged and
+   connected to, so redirects, a DNS answer that changes, or a host spelled
+   `127.1` all end in a judged connect. A local one is refused with "local
+   network refused". Probes, playback resolution and downloads are all one
+   Python process, guarded whole; only the JavaScript runtime of the
+   fallback (deno, node or QuickJS, when one is used) runs apart, outside
+   the guard, and it is handed YouTube's player code, not addresses. The
+   interpreter runs `-IS` and
+   closes `curl_cffi` by name: libcurl would connect without Python's
+   `socket`.
+2. **What mpv fetches itself.** When mpv's hook asks for `-J`, the wrapper
+   keeps the answer and drops every format (and chosen format, requested
+   format, subtitle) whose host resolves to a local address, or does not
+   resolve in time (5 s, all hosts at once); a video left with nothing to
+   play fails. An entry of a `playlist` or `multi_video` answer, flat or
+   full, is dropped when its `url` or its `webpage_url` is: mpv's hook (read
+   in its source, 0.37 and 0.40) loads an entry from `webpage_url` when it
+   has one, from `url` otherwise, and opens it itself when it holds `://`.
+   A bare id is left (mpv turns it into `ytdl://<id>`, back through the
+   wrapper, or `https://youtu.be/<id>`). A playlist left with no entry fails
+   like a video.
+3. **The plugin's own fetch** (the cover thumbnails): https only, no
+   credentials, the default port, a resolver that drops local addresses
+   (a literal address is judged before connecting, since a literal skips any
+   resolver), every redirect judged again and bounded.
+
+**What counts as local** (the same table, `tests/fixtures/local-network.txt`,
+holds the Rust and the Python predicate to each other, one line per edge):
+`0.0.0.0/8`, `10/8`, `100.64/10` (CGNAT, which Python's `is_private` does
+not cover), `127/8`, `169.254/16`, `172.16/12`, `192.168/16`, multicast
+`224/4` and reserved `240/4`; for IPv6 `::/96` (unspecified, loopback and
+the deprecated IPv4-compatible form), `fc00::/7`, `fe80::/10`, `fec0::/10`,
+`ff00::/8`. Three forms that carry an IPv4 are judged on it: an
+IPv4-mapped address (`::ffff:`), NAT64 (`64:ff9b::/96`) and 6to4
+(`2002::/16`, the IPv4 in bits 16 to 47). The local-use NAT64 block
+`64:ff9b:1::/48` is refused whole, because where its IPv4 sits depends on
+the operator's prefix length. An address that cannot be parsed is refused.
+
+**Accepted residual risk.** Everything mpv fetches itself is out of the
+wrapper's reach. mpv (ffmpeg) resolves the stream's host again, follows HTTP
+redirects, and reads m3u/pls playlists and HLS/DASH manifests whose entries,
+segments and keys it then fetches: a hostile site, or a DNS answer that
+changes between the two resolutions, can make mpv send **any number of GETs,
+with any path and query, to hosts of the local network** — enough to
+trigger a GET endpoint of a router or a NAS, the way a cross-site request
+would. The answers are only ever played as audio: nothing of them is sent
+anywhere. The link the plugin hands mpv is not part of it: every address is
+written `ytdl://`, so mpv opens none of them itself and goes through the
+hook (measured on mpv 0.37). The http entries of a playlist the hook's
+answer expands are opened by mpv itself (the core keeps every `http(s)`
+address out of the hook's fallback, so they never come back through the
+wrapper): their hosts are judged once, by the filter above, and mpv
+resolves them again, the same second resolution as a stream's. This was accepted by the project's owner for this release. **A
+follow-up is planned**: a guarding proxy, owned by the plugin, through which
+mpv would be routed for each load.
+
+### Downloads
+
+Presets are ticked in the list, and the one "Download…" button under it
+(greyed out while no share is offered, nothing is ticked
+or changes are unsaved) writes the
+audio **without re-encoding** (`-f bestaudio`, one stream: whatever audio stream the site offers, opus or
+m4a on YouTube) into
+a folder of a share:
+
+- **Where.** Only an SMB root of the `files` plugin that is declared
+  *writable* **and** is mounted `rw` right now (read from `/proc/mounts`) is
+  offered; a local root never is, since the service writes only under
+  `/etc/ritornello` and `/mnt/ritornello`. The plugin reads the roots through
+  `ritornello-files-mount` **as a library** (the same grammar and the same
+  reading of `/proc/mounts`) from `media-roots.toml` of the `files` plugin's
+  data directory; it never runs the helper. With no such share, the button is
+  disabled and the page says to declare one in Files. The page then browses
+  the share's sub-folders and can create one; the last choice is
+  remembered.
+- **Confinement.** The folder is resolved under the folder `files` itself
+  shows (the root's base directory, not the whole share), components
+  without `..`, `/`, `\` or NUL, and the canonical path (symbolic links
+  followed) must stay under it. Between resolving and writing minutes later,
+  a folder swapped for a symlink would be followed: accepted, since whoever
+  can do that is the operator's own NAS writer.
+- **`$` is refused in every folder name** (and not offered when browsing).
+  yt-dlp runs `expandvars` on the whole output template: `$HOME` and `${PATH}`
+  were measured expanded and `$$` is no escape, so a folder holding a `$`
+  would be written somewhere other than the folder that was checked.
+- **Names are the plugin's.** yt-dlp is handed a finished path, not a
+  template to fill from remote data: a title is turned into a name that
+  cannot leave its folder (at most 120 bytes) and `%` is doubled. A
+  playlist goes into a sub-folder of its name, tracks numbered
+  (`01 - Title.ext`; three digits above 99).
+- **Only yt-dlp's native downloader runs** (`--downloader native`,
+  `--hls-prefer-native`), so every byte goes through the guard of the
+  wrapper, which sees the sockets of its own process and of nothing it would
+  start; and `--ffmpeg-location` points below `/dev/null`, so even the native
+  HLS downloader, which would hand an AES-128 stream to ffmpeg when it finds
+  one, cannot. **No ffmpeg anywhere**, on any target (the owner's decision):
+  no conversion, no embedded metadata, no thumbnail asked of yt-dlp. A stream
+  that cannot be had that way fails rather than downloading outside the
+  guard.
+- **The cover.** The plugin picks a `jpg` from the thumbnails the probe
+  listed, fetches it itself through the guard (timeouts, a size cap, no
+  redirect to anywhere local) and writes it as
+  `cover.jpg` (a playlist's folder; for a single video, next to it and only
+  if the folder has none). No jpg offered, or a failed fetch, is never a
+  failure of the download.
+- **Jobs.** One at a time, one video at a time so one failure never stops a
+  playlist; progress read from `--newline --progress-template`; cancellable;
+  the last twenty are kept in `jobs.json`. The share is resolved when the job
+  *starts*, and judged again (declared, mounted `rw`, the folder confined)
+  after each video that fails: if it no longer holds, that video says why in
+  the share's words, the rest of its playlist is skipped with that reason,
+  the presets after it are not tried, and the job is **failed** with the
+  share's message, rather than resolving every remaining video only to fail
+  its write. A share never blocks the plugin (every filesystem call on a
+  share has a deadline).
+  Nothing is left to do afterwards: `files` sees the new files by browsing.
+
+Downloading may be against a site's terms of service (YouTube's, notably);
+this is the owner's decision, for private use.
+
+### The page
+
+Served by the core like the other plugins' pages. It holds: the preset list
+(add, preview of the probed lines, reorder, save); the **capabilities** panel
+and the yt-dlp panel (version, channel, "Check for an update", "Install
+anyway", the last failure); the download dialog (share, folder, create a
+folder); and the list of jobs. **No admin operation waits for yt-dlp, the
+network, a share or a job**: the admin protocol gives `GetData` 5 seconds and
+`SetData` 30, so every slow thing is started, a progress record is kept, and
+the page polls it.
+
+### Its data directory
+
+`/var/lib/ritornello/plugins/web-streaming/`; the plugin writes nothing else
+(`no_plugin_spells_a_data_path_of_its_own` holds it).
+
+| File | Content |
+|---|---|
+| `entries.toml` | the presets |
+| `state.json` | the armed preset |
+| `settings.toml` | the yt-dlp channel, the last check, what is installed; the last download folder |
+| `lists/<key>.json` | the cached videos of each playlist |
+| `playlist.m3u` | the list handed to mpv, never shown |
+| `jobs.json` | the last twenty downloads |
+| `yt-dlp/` | the extracted zipapp and its bytecode cache |
+| `yt-dlp.new/`, `yt-dlp.old/` | transient: the copy being installed, and the one being replaced, during an update (a crash in between is undone at the next start) |
+| `bin/yt-dlp` | the wrapper |
+| `bin/deno` | the plugin's own deno, on x86_64 and aarch64 only |
+| `yt-dlp.conf` | what the wrapper hands yt-dlp |
+| `cache/` | yt-dlp's cache |
 
 ## Now-playing metadata (the `metadata` kind)
 

@@ -1,0 +1,143 @@
+{
+ "uploader": "Forss",
+ "uploader_id": "183",
+ "uploader_url": "https://soundcloud.com/forss",
+ "timestamp": 1190472346,
+ "title": "Flickermood",
+ "track": "Flickermood",
+ "description": "From the Soulhack album,&nbsp;recently featured in this ad <a href=\"https://www.dswshoes.com/tv_commercial.jsp?m=october2007\">https://www.dswshoes.com/tv_commercial.jsp?m=october2007</a> ",
+ "duration": 213.886,
+ "webpage_url": "https://soundcloud.com/forss/flickermood",
+ "license": "all-rights-reserved",
+ "view_count": 972538,
+ "like_count": 2621,
+ "comment_count": 400,
+ "repost_count": 413,
+ "release_timestamp": 1054512000,
+ "modified_timestamp": 1657536958,
+ "genres": [
+  "Electronic"
+ ],
+ "tags": [
+  "downtempo"
+ ],
+ "artists": [
+  "Forss"
+ ],
+ "id": "293",
+ "thumbnails": [
+  {
+   "id": "mini",
+   "url": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-mini.jpg",
+   "width": 16,
+   "height": 16,
+   "resolution": "16x16"
+  },
+  {
+   "id": "tiny",
+   "url": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-tiny.jpg",
+   "width": 20,
+   "height": 20,
+   "resolution": "20x20"
+  },
+  {
+   "id": "small",
+   "url": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-small.jpg",
+   "width": 32,
+   "height": 32,
+   "resolution": "32x32"
+  },
+  {
+   "id": "badge",
+   "url": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-badge.jpg",
+   "width": 47,
+   "height": 47,
+   "resolution": "47x47"
+  },
+  {
+   "id": "t67x67",
+   "url": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-t67x67.jpg",
+   "width": 67,
+   "height": 67,
+   "resolution": "67x67"
+  },
+  {
+   "id": "large",
+   "url": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-large.jpg",
+   "width": 100,
+   "height": 100,
+   "resolution": "100x100"
+  },
+  {
+   "id": "t300x300",
+   "url": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-t300x300.jpg",
+   "width": 300,
+   "height": 300,
+   "resolution": "300x300"
+  },
+  {
+   "id": "crop",
+   "url": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-crop.jpg",
+   "width": 400,
+   "height": 400,
+   "resolution": "400x400"
+  },
+  {
+   "id": "t500x500",
+   "url": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-t500x500.jpg",
+   "width": 500,
+   "height": 500,
+   "resolution": "500x500"
+  },
+  {
+   "id": "original",
+   "url": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-original.jpg",
+   "preference": 10
+  }
+ ],
+ "original_url": "https://soundcloud.com/forss/flickermood",
+ "webpage_url_basename": "flickermood",
+ "webpage_url_domain": "soundcloud.com",
+ "extractor": "soundcloud",
+ "extractor_key": "Soundcloud",
+ "playlist": null,
+ "playlist_index": null,
+ "thumbnail": "https://i1.sndcdn.com/artworks-000067273316-smsiqx-original.jpg",
+ "display_id": "293",
+ "fulltitle": "Flickermood",
+ "duration_string": "3:33",
+ "upload_date": "20070922",
+ "release_date": "20030602",
+ "modified_date": "20220711",
+ "release_year": 2003,
+ "artist": "Forss",
+ "genre": "Electronic",
+ "requested_subtitles": null,
+ "_has_drm": null,
+ "epoch": 1793705893,
+ "format_id": "hls_aac_160k",
+ "ext": "m4a",
+ "acodec": "mp4a.40.2",
+ "vcodec": "none",
+ "abr": 160,
+ "protocol": "m3u8_native",
+ "container": "m4a_dash",
+ "quality": 0,
+ "format_note": null,
+ "preference": null,
+ "audio_ext": "m4a",
+ "video_ext": "none",
+ "vbr": 0,
+ "tbr": 160,
+ "resolution": "audio only",
+ "aspect_ratio": null,
+ "filesize_approx": 4277720,
+ "format": "hls_aac_160k - audio only",
+ "_type": "video",
+ "_version": {
+  "version": "2026.10.26",
+  "current_git_head": null,
+  "release_git_head": "c91f8de0bfb3577894abad716eaaa01659e6bd14",
+  "repository": "yt-dlp/yt-dlp"
+ }
+}

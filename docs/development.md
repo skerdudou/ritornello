@@ -290,8 +290,9 @@ request — the last three jobs below only on a tag:
   the built dist, never a test result;
 - `rust` — downloads the dist, **refuses to go on if one is missing**
   (`build.rs` would otherwise embed a placeholder UI and only warn), then
-  `cargo build`, `clippy -D warnings`, `cargo test`; `ffmpeg` is installed
-  so the duration tests do not skip themselves;
+  `cargo build`, `clippy -D warnings`, `cargo test`; `ffmpeg` and `mpv` are
+  installed so the duration tests and the test of mpv's yt-dlp hook on a real
+  mpv do not skip themselves;
 - `e2e` — same dist, debug build of the core, `mpv` installed (the
   journeys really play), Playwright on chromium; the report is uploaded on
   failure;

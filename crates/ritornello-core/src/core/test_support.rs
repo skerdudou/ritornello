@@ -30,6 +30,9 @@ pub(super) struct FakePlayer {
     /// When true, `set_loop_track` fails — the IPC timeout, which says
     /// nothing about whether mpv applied the command.
     pub(super) loop_fails: Arc<std::sync::atomic::AtomicBool>,
+    /// When true, `set_ytdl` fails — the IPC timeout, or an mpv that
+    /// refuses the option.
+    pub(super) ytdl_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -98,6 +101,17 @@ impl crate::player::Player for FakePlayer {
     async fn set_loop_track(&self, on: bool) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push(format!("loop_track {on}"));
         if self.loop_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
+        Ok(())
+    }
+    async fn set_ytdl(&self, path: Option<&std::path::Path>) -> anyhow::Result<()> {
+        let call = match path {
+            Some(p) => format!("ytdl {}", p.display()),
+            None => "ytdl off".to_string(),
+        };
+        self.calls.lock().unwrap().push(call);
+        if self.ytdl_fails.load(std::sync::atomic::Ordering::SeqCst) {
             anyhow::bail!("mpv: command timeout");
         }
         Ok(())
@@ -343,6 +357,7 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
             registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            plugin_data_root: std::path::PathBuf::from("/root"),
             metadata: MetadataWiring {
                 plugins: vec![],
                 now_playing: watch::channel(NowPlaying { source: String::new(), identity: None, ..Default::default() }).0,
@@ -386,6 +401,7 @@ pub(super) fn setup_metadata(
             registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            plugin_data_root: std::path::PathBuf::from("/root"),
             metadata: MetadataWiring { plugins, now_playing: np_tx, state: state_tx },
         },
         covers,
@@ -446,6 +462,7 @@ pub(super) fn test_core_with_extraction() -> (
             registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            plugin_data_root: std::path::PathBuf::from("/root"),
             metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
         },
         covers,
@@ -489,6 +506,7 @@ pub(super) fn test_core_with_armed_read() -> (
             registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            plugin_data_root: std::path::PathBuf::from("/root"),
             metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
         },
         covers,
@@ -555,6 +573,7 @@ pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<Playe
             registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            plugin_data_root: std::path::PathBuf::from("/root"),
             metadata: MetadataWiring {
                 plugins: vec![],
                 now_playing: watch::channel(NowPlaying {
@@ -838,6 +857,7 @@ pub(super) fn test_core_with_cover_channel() -> (
             registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            plugin_data_root: std::path::PathBuf::from("/root"),
             metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
         },
         covers,
@@ -1143,6 +1163,7 @@ fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> Archivin
             registry: test_registry(&root),
             manifest_order,
             sources_catalog: watch::channel(SourcesCatalog::default()).0,
+            plugin_data_root: std::path::PathBuf::from("/root"),
             metadata: MetadataWiring {
                 plugins: vec![ARCHIVING_CONTRIBUTOR.to_string()],
                 now_playing: watch::channel(NowPlaying::default()).0,

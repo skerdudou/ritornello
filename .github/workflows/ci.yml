@@ -179,7 +179,8 @@ jobs:
       - name: Test tools
         # ffmpeg: otherwise nine tests silently skip themselves (grep -rc
         # "ffmpeg missing" across the repo, excluding the e2e comment that
-        # merely names the same failure mode).
+        # merely names the same failure mode). mpv: the core's test of mpv's
+        # yt-dlp hook on a real mpv ("mpv missing") skips itself otherwise.
         # Cached by the action, keyed on the package list and `version`: a warm
         # run restores the .debs and runs no `apt-get update`. Bump `version`
         # to throw the cache away by hand.
@@ -187,7 +188,7 @@ jobs:
         # third-party action that restores .debs and runs their install scripts.
         uses: awalsh128/cache-apt-pkgs-action@553a35bb8ebd9fcabcb1c9451aa4c98e1b4ca8a9 # v1.6.3
         with:
-          packages: ffmpeg
+          packages: ffmpeg mpv
           # Postinst scripts register libblas.so.3 (update-alternatives):
           # without them a restored ffmpeg cannot start, and the tests that
           # need it skip themselves silently.

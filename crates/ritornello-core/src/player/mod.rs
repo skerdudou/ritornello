@@ -59,4 +59,11 @@ pub trait Player: Send + Sync + 'static {
     /// doing so. A setting of the player, not of the file: it survives the
     /// loads that follow until it is set again.
     async fn set_loop_track(&self, on: bool) -> Result<()>;
+    /// Decides which program mpv's `ytdl_hook` runs for the **next** load:
+    /// `Some(path)` names the source's `yt-dlp`, `None` names one that does
+    /// nothing (`mpv::YTDL_NOWHERE`), so no `yt-dlp` runs for a load that did
+    /// not ask for one. A setting of the player that stays until set again,
+    /// so the core sends it before **every** `Play`. It never unloads the
+    /// hook script (see `MpvPlayer`'s implementation for what that did).
+    async fn set_ytdl(&self, path: Option<&std::path::Path>) -> Result<()>;
 }

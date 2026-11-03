@@ -240,7 +240,7 @@ pub enum Origin {
     /// `docs/plugins.md` for what that means for a third-party author — one
     /// line in `Cargo.toml`.
     Unknown,
-    /// Ours. The path all ten official plugins take.
+    /// Ours. The path all twelve official plugins take.
     Ours,
     /// Another GitHub repository, addressable as `owner/repo`: its own
     /// releases decide this plugin's version.
@@ -1661,7 +1661,7 @@ def456 ritornello-plugin-radio-0.2.0-armv7.tar.gz
     /// `declare_runtime!` puts in every official announcement. Written out
     /// rather than built from `REPO`: a test that reused whatever the code
     /// computes could not catch a comparison made on the raw string, which
-    /// would classify all ten official plugins as third-party.
+    /// would classify all twelve official plugins as third-party.
     #[test]
     fn a_plugin_announcing_the_workspace_url_is_one_of_ours() {
         assert_eq!(origin(Some("https://github.com/skerdudou/ritornello")), Origin::Ours);

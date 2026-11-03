@@ -634,8 +634,27 @@ pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) 
         format!("--cdda-device={cd_dev}"),
         format!("--audio-buffer={audio_buffer}"),
         format!("--demuxer-readahead-secs={readahead}"),
+        // mpv's yt-dlp hook stays loaded, and is neutral until a `Play`
+        // names a program (`Player::set_ytdl`). `exclude=.` (a Lua pattern
+        // matching any address) is meant to keep every `http(s)` address out
+        // of the hook's fallback for good, so that a dead radio fails at once;
+        // that is reasoned from mpv's source, NOT measured (every non-web load
+        // ran `/bin/false`, which the counters could not see; nothing on
+        // 0.40). What was measured, on mpv 0.37 only: a web-streaming load
+        // always reaches the hook as `ytdl://`, which the exclusion does not
+        // cover (100/100 with it, 25/100 with the old toggle). The program
+        // starts as one that exists
+        // and does nothing, so a `ytdl://` address loaded before any `Play`
+        // runs no `yt-dlp` found on the `PATH`.
+        format!("--script-opts=ytdl_hook-exclude=.,ytdl_hook-ytdl_path={YTDL_NOWHERE}"),
     ]
 }
+
+/// The program mpv's yt-dlp hook runs for a load that named none: it
+/// exists, so the hook adopts it (a path that does not exist would leave the
+/// hook running the program it found before), and it exits non-zero at once
+/// without reading anything. See `Player::set_ytdl` on `MpvPlayer`.
+pub const YTDL_NOWHERE: &str = "/bin/false";
 
 /// Properties the core asks mpv to push. `metadata` carries the ICY header
 /// received from the station (key `icy-title`), the only title source
@@ -803,6 +822,44 @@ impl super::Player for MpvPlayer {
         self.ipc.command(&[json!("set_property"), json!("loop-file"), json!(value)]).await?;
         Ok(())
     }
+
+    /// One `change-list script-opts append ytdl_hook-ytdl_path=…`, the
+    /// source's program or [`YTDL_NOWHERE`], and nothing else: the hook
+    /// script stays loaded for mpv's whole life.
+    ///
+    /// **Never `set_property ytdl`.** `ytdl` is a built-in-script option:
+    /// `false` unloads `ytdl_hook.lua` and `true` loads it anew,
+    /// asynchronously, so the `loadfile ytdl://…` sent right after found no
+    /// hook yet and mpv answered "No protocol handler found". Measured on mpv
+    /// 0.37 in the core's order with no delay (25 runs each,
+    /// `tools/c1-race.py` of the design records): the toggle reached the
+    /// wrapper in 25 of 100 web plays following another source's play (four
+    /// series: 0, 10, 8 and 7 of 25); this one option in 100 of 100,
+    /// playlist loads included.
+    ///
+    /// **A program that exists, not one that does not.** The hook remembers
+    /// the last program it *found*, and runs it when a new path is not found:
+    /// pointed at `/dev/null/yt-dlp`, a `ytdl://` address in another
+    /// source's load still ran the previous web playback's wrapper once per
+    /// run (25/25), on the hook's second attempt. [`YTDL_NOWHERE`] is found,
+    /// so it replaces the remembered one. A dead `http` stream is meant never
+    /// to reach the hook: [`mpv_args`] excludes every `http(s)` address from
+    /// the hook's fallback for mpv's whole life. That effect is reasoned from
+    /// mpv's source, not measured (on 0.37 or 0.40).
+    ///
+    /// The option is read by the next load: the hook script receives the
+    /// change before that load's hook runs (measured on mpv 0.37 only, same
+    /// runs). No
+    /// `--ytdl-format` is needed: under `--no-video` mpv already asks for
+    /// `bestaudio/best`.
+    async fn set_ytdl(&self, path: Option<&std::path::Path>) -> Result<()> {
+        let program = path.map_or_else(|| YTDL_NOWHERE.to_string(), |p| p.display().to_string());
+        let option = format!("ytdl_hook-ytdl_path={program}");
+        self.ipc
+            .command(&[json!("change-list"), json!("script-opts"), json!("append"), json!(option)])
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -832,6 +889,122 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(v, serde_json::json!(42));
+    }
+
+    /// The exact command measured to be honoured by the next `loadfile` on
+    /// mpv 0.37, and never `set_property ytdl` (which reloads the hook
+    /// script behind the load: see `set_ytdl`).
+    #[tokio::test]
+    async fn set_ytdl_sends_the_measured_commands() {
+        use crate::player::Player;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+
+        // Answers every command until the client goes away; returns them in order.
+        let server = tokio::spawn(async move {
+            let (r, mut w) = server.into_split();
+            let mut lines = BufReader::new(r).lines();
+            let mut seen = Vec::new();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let id = req["request_id"].as_u64().unwrap();
+                let resp = format!("{{\"error\":\"success\",\"data\":null,\"request_id\":{id}}}\n");
+                w.write_all(resp.as_bytes()).await.unwrap();
+                seen.push(req["command"].clone());
+            }
+            seen
+        });
+
+        player.set_ytdl(Some(std::path::Path::new("/p/yt-dlp"))).await.unwrap();
+        player.set_ytdl(None).await.unwrap();
+        drop(player);
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                serde_json::json!(["change-list", "script-opts", "append", "ytdl_hook-ytdl_path=/p/yt-dlp"]),
+                serde_json::json!(["change-list", "script-opts", "append", "ytdl_hook-ytdl_path=/bin/false"]),
+            ]
+        );
+    }
+
+    /// The real thing, on a real mpv: another source's `Play` then a
+    /// web-streaming `Play`, sent back to back in the core's order
+    /// (`set_ytdl`, then the load), five times over. The regression: the old
+    /// `set_property ytdl false/true` reloaded the hook script behind the
+    /// load, and the web play reached the wrapper in 25 of 100 measured runs
+    /// — five in a row would pass by chance about once in four hundred.
+    ///
+    /// Also held, on the same mpv: another source's load of a dead `http`
+    /// stream and of a `ytdl://` address runs neither the wrapper of the web
+    /// playback before it nor a `yt-dlp` found on the `PATH`.
+    ///
+    /// Needs `mpv` (the CI's rust job installs it); without it the test says
+    /// so on stderr and returns, like the tests that need ffmpeg.
+    #[tokio::test]
+    async fn a_web_play_right_after_another_source_reaches_its_ytdlp_on_a_real_mpv() {
+        use crate::player::Player;
+        use std::os::unix::fs::PermissionsExt;
+        if std::process::Command::new("mpv").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+            eprintln!("mpv missing: skipping test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let calls = d.join("calls.log");
+        let script = |path: &Path, body: String| {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        std::fs::create_dir(d.join("pathbin")).unwrap();
+        for (path, tag) in [(d.join("wrapper"), "WRAP"), (d.join("pathbin/yt-dlp"), "PATH")] {
+            script(&path, format!("#!/bin/sh\necho {tag} >> '{}'\nexit 1\n", calls.display()));
+        }
+        // The production arguments, plus what a test machine needs: no
+        // user configuration, no sound card, our stand-in first on the PATH.
+        let mpv = d.join("mpv");
+        script(
+            &mpv,
+            format!(
+                "#!/bin/sh\nPATH='{}':\"$PATH\" exec mpv --no-config --ao=null \"$@\"\n",
+                d.join("pathbin").display()
+            ),
+        );
+        let (tx, mut rx) = mpsc::channel(1024);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let (player, _child) =
+            start(mpv.to_str().unwrap(), &d.join("mpv.sock"), "/dev/null", AUDIO_BUFFER_DEFAULT, READAHEAD_DEFAULT, tx)
+                .await
+                .unwrap();
+        let count = |tag: &str| std::fs::read_to_string(&calls).unwrap_or_default().lines().filter(|l| *l == tag).count();
+        let wrapper = d.join("wrapper");
+        for i in 0..5 {
+            // Another source's Play: a dead radio.
+            player.set_ytdl(None).await.unwrap();
+            player.play(&format!("http://127.0.0.1:9/x{i}.mp3")).await.unwrap();
+            // The web Play, right behind it.
+            let before = count("WRAP");
+            player.set_ytdl(Some(&wrapper)).await.unwrap();
+            player.play(&format!("ytdl://https://example.invalid/v{i}")).await.unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while count("WRAP") == before {
+                assert!(std::time::Instant::now() < deadline, "web play {i} never reached its yt-dlp");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            // Let the hook's second attempt land before counting again.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let (wrap, path) = (count("WRAP"), count("PATH"));
+            // Another source's Play naming a ytdl:// address itself, then a
+            // dead http stream given the time to fail.
+            player.set_ytdl(None).await.unwrap();
+            player.play(&format!("ytdl://http://127.0.0.1:9/y{i}")).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            player.set_ytdl(None).await.unwrap();
+            player.play(&format!("http://127.0.0.1:9/z{i}.mp3")).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            assert_eq!((count("WRAP"), count("PATH")), (wrap, path), "run {i}: another source's load ran a yt-dlp");
+        }
+        assert_eq!(count("PATH"), 0, "a yt-dlp found on the PATH ran");
     }
 
     #[tokio::test]
@@ -1442,6 +1615,8 @@ pub(crate) mod tests {
         assert!(args.contains(&"--no-terminal".to_string()));
         assert!(args.contains(&"--input-ipc-server=/run/rp/mpv.sock".to_string()));
         assert!(args.contains(&"--cdda-device=/dev/sr0".to_string()));
+        // The yt-dlp hook: no http(s) fallback ever, a program that does nothing.
+        assert!(args.contains(&"--script-opts=ytdl_hook-exclude=.,ytdl_hook-ytdl_path=/bin/false".to_string()), "{args:?}");
     }
 
     /// mpv answers `null` on `time-pos` when nothing is loaded, and an

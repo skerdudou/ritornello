@@ -2,3 +2,5 @@
 *.awk text eol=lf
 *.service text eol=lf
 *.rules text eol=lf
+# Signed bytes: a line-ending conversion would break the signature they carry.
+crates/ritornello-plugin-web-streaming/tests/fixtures/sums/** -text

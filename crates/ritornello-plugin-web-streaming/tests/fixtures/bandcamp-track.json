@@ -1,0 +1,71 @@
+{
+ "id": "1812978515",
+ "title": "youtube-dl \"'/\\ä↭ - youtube-dl \"'/\\ä↭ - youtube-dl test song \"'/\\ä↭",
+ "thumbnail": "https://f4.bcbits.com/img/a3216802731_5.jpg",
+ "uploader": "youtube-dl \"'/\\ä↭",
+ "uploader_id": "youtube-dl",
+ "uploader_url": "https://youtube-dl.bandcamp.com",
+ "timestamp": 1354224127,
+ "release_timestamp": null,
+ "duration": 9.8485,
+ "track": "youtube-dl \"'/\\ä↭ - youtube-dl test song \"'/\\ä↭",
+ "track_number": null,
+ "track_id": "1812978515",
+ "artist": "youtube-dl \"'/\\ä↭",
+ "album": null,
+ "album_artist": "youtube-dl \"'/\\ä↭",
+ "tags": [
+  "experimental",
+  "youtube-dl",
+  "Düsseldorf"
+ ],
+ "webpage_url": "https://youtube-dl.bandcamp.com/track/youtube-dl-test-song",
+ "original_url": "https://youtube-dl.bandcamp.com/track/youtube-dl-test-song",
+ "webpage_url_basename": "youtube-dl-test-song",
+ "webpage_url_domain": "youtube-dl.bandcamp.com",
+ "extractor": "Bandcamp",
+ "extractor_key": "Bandcamp",
+ "playlist": null,
+ "playlist_index": null,
+ "thumbnails": [
+  {
+   "url": "https://f4.bcbits.com/img/a3216802731_5.jpg",
+   "id": "0"
+  }
+ ],
+ "display_id": "1812978515",
+ "fulltitle": "youtube-dl \"'/\\ä↭ - youtube-dl \"'/\\ä↭ - youtube-dl test song \"'/\\ä↭",
+ "duration_string": "9",
+ "upload_date": "20121129",
+ "release_year": null,
+ "album_artists": [
+  "youtube-dl \"'/\\ä↭"
+ ],
+ "artists": [
+  "youtube-dl \"'/\\ä↭"
+ ],
+ "requested_subtitles": null,
+ "_has_drm": null,
+ "epoch": 1793705896,
+ "format_id": "mp3-128",
+ "ext": "mp3",
+ "vcodec": "none",
+ "acodec": "mp3",
+ "abr": 128,
+ "protocol": "https",
+ "audio_ext": "mp3",
+ "video_ext": "none",
+ "vbr": 0,
+ "tbr": 128,
+ "resolution": "audio only",
+ "aspect_ratio": null,
+ "filesize_approx": 157576,
+ "format": "mp3-128 - audio only",
+ "_type": "video",
+ "_version": {
+  "version": "2026.10.26",
+  "current_git_head": null,
+  "release_git_head": "c91f8de0bfb3577894abad716eaaa01659e6bd14",
+  "repository": "yt-dlp/yt-dlp"
+ }
+}

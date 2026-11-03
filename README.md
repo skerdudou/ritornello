@@ -143,6 +143,7 @@ flowchart LR
         input["generic-input plugin<br/>(evdev)"] --> core
         core --> console["console plugin<br/>(HDMI screen)"]
         mpd["mpd plugin"] <--> core
+        web["web-streaming plugin<br/>(YouTube and more)"] <--> core
         core <--> mpv
     end
     mpv --> hp["ALSA → amplifier"]
@@ -161,6 +162,7 @@ executable.
 | `radio` | source | Internet radio, presets, Radio Browser directory, admin page |
 | `cd` | source | CD drive (`/dev/sr0`), disc identification, eject |
 | `files` | source | Local folders, USB, SMB shares mounted on demand, playlists, file browser, covers and lyrics archived beside the tracks, `.lrc` lyrics read beside them |
+| `web-streaming` | source | Web links — YouTube, Bandcamp, SoundCloud and every site yt-dlp reads — played and downloaded to a share, with its own signature-checked yt-dlp; guards against reaching the local network (see [docs/plugins.md](docs/plugins.md#never-the-local-network) for the one accepted exception) |
 | `generic-input` | input | Any `evdev` device: IR receiver, keyboard, remote; key learning in the browser, one key per source |
 | `console` | display | Now-playing and clock screens on the Linux console (HDMI) |
 | `musicbrainz` | metadata | Album, year, cover art and platform links for discs and streams |

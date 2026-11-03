@@ -2,6 +2,47 @@
 
 use super::*;
 
+/// The `yt-dlp` a source declared (`SourceAction::Play::ytdl_path`), if it is
+/// under that source's own data directory — and `None` otherwise.
+///
+/// Pure on purpose: no `canonicalize`, no file access, since this runs inside
+/// `apply`. The check is therefore on path **components**, which is what keeps
+/// it sound without touching the disk:
+///
+/// - absolute, because mpv would resolve a relative path against its own
+///   working directory;
+/// - no `..` component, which would climb out of the directory while still
+///   starting with it;
+/// - `starts_with` on components, not on text, so `<dir>-evil/...` is not
+///   under `<dir>`;
+/// - strictly below the directory: the directory itself is not a program.
+///
+/// A symlink inside the data directory is not followed here; the directory is
+/// the plugin's own (it is the one place the plugin may write), and what it
+/// names is that plugin's to run, as it already is for the plugin's own
+/// process.
+fn ytdl_path_allowed(data_dir: &std::path::Path, declared: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    // A NUL cannot be part of a path mpv would receive intact. A `:` is
+    // mpv's list separator for this option: the hook searches each part in
+    // turn, and a relative part is looked up on the `PATH` — measured on mpv
+    // 0.37, `<dir>/bin/absent:yt-dlp` ran the `PATH`'s `yt-dlp`.
+    if declared.contains(['\0', ':']) {
+        return None;
+    }
+    let path = std::path::Path::new(declared);
+    if !path.is_absolute() {
+        return None;
+    }
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return None;
+    }
+    if !path.starts_with(data_dir) || path == data_dir {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
 impl<P: Player> Core<P> {
     /// Name of the currently active source (for the live status page).
     pub fn active_source(&self) -> &str {
@@ -441,7 +482,45 @@ impl<P: Player> Core<P> {
     pub(super) async fn apply(&mut self, action: SourceAction) -> Result<()> {
         match action {
             SourceAction::Noop => {}
-            SourceAction::Play { uri, start, finite, playlist, loopable } => {
+            SourceAction::Play { uri, start, finite, playlist, loopable, ytdl_path } => {
+                // Validated **before** anything is touched: a refused path
+                // drops the whole `Play`, so nothing loads under a state the
+                // core did not mean to set. The sender is always the active
+                // source, and its data directory is the only place it may
+                // name a program from.
+                let ytdl = match ytdl_path {
+                    Some(declared) => {
+                        let allowed = crate::plugins::data_dir_for(&self.plugin_data_root, &self.active_source)
+                            .and_then(|dir| ytdl_path_allowed(&dir, &declared));
+                        let Some(path) = allowed else {
+                            anyhow::bail!(
+                                "plugin {} declared a yt-dlp outside its own data directory: {declared:?}",
+                                self.active_source
+                            );
+                        };
+                        Some(path)
+                    }
+                    None => None,
+                };
+                // Sent on **every** `Play`, with the path or without: the
+                // setting is sticky in mpv, so a `Play` that does not ask for
+                // `yt-dlp` must point the hook away from the previous
+                // playback's. The core keeps no cache that a failed command
+                // could leave wrong.
+                //
+                // Only a `Play` that needs the hook fails with it. For any
+                // other, the neutralisation is a precaution on top of
+                // `mpv_args` (no `http(s)` address ever reaches the hook), and
+                // a radio must still play where it cannot be sent: logged,
+                // not fatal.
+                match ytdl.as_deref() {
+                    Some(path) => self.player.set_ytdl(Some(path)).await?,
+                    None => {
+                        if let Err(e) = self.player.set_ytdl(None).await {
+                            tracing::warn!("could not point mpv's yt-dlp hook away before a load: {e:#}");
+                        }
+                    }
+                }
                 // The restart machinery (`expecting_stream` then
                 // `PlaybackIdle` → retry) only exists for network streams:
                 // content that ends is a normal end, not a failure. Confusing
@@ -597,6 +676,7 @@ mod tests {
                 manifest_order: order.iter().map(|n| n.to_string()).collect(),
                 metadata: silent_wiring(vec![]),
                 sources_catalog: watch::channel(SourcesCatalog::default()).0,
+                plugin_data_root: std::path::PathBuf::from("/root"),
             },
             covers,
             cover_tx,
@@ -1318,7 +1398,7 @@ mod tests {
         };
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata, sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
         core.resume().await.unwrap();
         core.handle_command(Command::SourceCycle).await.unwrap();
         // It is the core that stopped mpv, without depending on the plugins.
@@ -1345,7 +1425,7 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted: PersistedState::default(), state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert!(core.handle_command(Command::SourceCycle).await.is_err());
         // The state is consistent: new source everywhere, and nothing plays.
@@ -1435,5 +1515,205 @@ mod tests {
         assert_eq!(state_rx.borrow().source, "");
         core.handle_command(Command::SourceCycle).await.unwrap();
         assert_eq!(state_rx.borrow().source, "cd");
+    }
+
+    /// `ytdl_path_allowed`, one assertion per branch of its predicate: the
+    /// mutation proof breaks each branch in turn and exactly one of these
+    /// tests must fail.
+    mod ytdl_path {
+        use super::super::ytdl_path_allowed;
+        use std::path::{Path, PathBuf};
+
+        const DIR: &str = "/root/web-streaming";
+
+        fn allowed(declared: &str) -> Option<PathBuf> {
+            ytdl_path_allowed(Path::new(DIR), declared)
+        }
+
+        #[test]
+        fn a_program_under_the_data_directory_is_allowed() {
+            assert_eq!(allowed("/root/web-streaming/bin/yt-dlp"), Some(PathBuf::from("/root/web-streaming/bin/yt-dlp")));
+        }
+
+        #[test]
+        fn a_relative_path_is_refused() {
+            // Relative to nothing the core controls: mpv would resolve it
+            // against its own working directory.
+            assert_eq!(allowed("bin/yt-dlp"), None);
+            // Relative even though it spells the directory's tail.
+            assert_eq!(allowed("root/web-streaming/bin/yt-dlp"), None);
+        }
+
+        /// The `is_absolute` check is not redundant: with a relative data
+        /// directory (a misconfigured root), a relative path would pass the
+        /// prefix check alone.
+        #[test]
+        fn a_relative_path_is_refused_even_under_a_relative_data_directory() {
+            assert_eq!(ytdl_path_allowed(Path::new("web-streaming"), "web-streaming/bin/yt-dlp"), None);
+        }
+
+        #[test]
+        fn a_parent_component_is_refused_even_when_the_prefix_matches() {
+            // Component-wise under the directory, yet it resolves to the
+            // radio's.
+            assert_eq!(allowed("/root/web-streaming/../radio/bin/yt-dlp"), None);
+        }
+
+        #[test]
+        fn a_path_outside_the_data_directory_is_refused() {
+            assert_eq!(allowed("/usr/bin/yt-dlp"), None);
+            assert_eq!(allowed("/root/radio/bin/yt-dlp"), None);
+        }
+
+        #[test]
+        fn a_textual_prefix_without_a_separator_is_refused() {
+            // `starts_with` on a string would accept it.
+            assert_eq!(allowed("/root/web-streaming-evil/bin/yt-dlp"), None);
+        }
+
+        #[test]
+        fn the_directory_itself_is_not_a_program() {
+            assert_eq!(allowed("/root/web-streaming"), None);
+            assert_eq!(allowed("/root/web-streaming/"), None);
+        }
+
+        /// mpv splits the option on `:` and looks a relative part up on the
+        /// `PATH`: under the directory as text, a `yt-dlp` of the system in
+        /// effect.
+        #[test]
+        fn a_colon_is_refused() {
+            assert_eq!(allowed("/root/web-streaming/bin/absent:yt-dlp"), None);
+            assert_eq!(allowed("/root/web-streaming/bin/yt-dlp:"), None);
+        }
+
+        #[test]
+        fn an_empty_path_is_refused() {
+            assert_eq!(allowed(""), None);
+        }
+
+        #[test]
+        fn a_path_with_a_nul_byte_is_refused() {
+            assert_eq!(allowed("/root/web-streaming/bin/yt-dlp\0"), None);
+        }
+    }
+
+    async fn play_from(source: &str, action: SourceAction) -> (Result<()>, Vec<String>, tempfile::TempDir) {
+        let (mut core, player_calls, _sc, _rx, dir) = setup();
+        core.active_source = source.to_string();
+        let result = core.apply(action).await;
+        let calls = player_calls.lock().unwrap().clone();
+        (result, calls, dir)
+    }
+
+    #[tokio::test]
+    async fn a_play_with_an_allowed_ytdl_path_sets_it_before_loading() {
+        let (result, calls, _d) = play_from(
+            "web-streaming",
+            SourceAction::play("https://www.youtube.com/watch?v=x").ytdl_path("/root/web-streaming/bin/yt-dlp"),
+        )
+        .await;
+        result.unwrap();
+        let ytdl = calls.iter().position(|c| c == "ytdl /root/web-streaming/bin/yt-dlp").expect("ytdl path set");
+        let play = calls.iter().position(|c| c == "play https://www.youtube.com/watch?v=x").expect("played");
+        assert!(ytdl < play, "{calls:?}");
+    }
+
+    #[tokio::test]
+    async fn a_play_with_a_foreign_ytdl_path_is_refused_and_does_not_play() {
+        let (result, calls, _d) = play_from(
+            "web-streaming",
+            SourceAction::play("https://www.youtube.com/watch?v=x").ytdl_path("/root/radio/bin/yt-dlp"),
+        )
+        .await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("web-streaming"), "the error must name the plugin: {err}");
+        assert!(calls.is_empty(), "{calls:?}");
+    }
+
+    #[tokio::test]
+    async fn a_play_without_ytdl_path_disables_the_hook_before_loading() {
+        let (result, calls, _d) = play_from("radio", SourceAction::play("http://127.0.0.1:9/x.mp3")).await;
+        result.unwrap();
+        let off = calls.iter().position(|c| c == "ytdl off").expect("hook disabled");
+        let play = calls.iter().position(|c| c.starts_with("play ")).expect("played");
+        assert!(off < play, "{calls:?}");
+        assert!(calls.iter().all(|c| !c.starts_with("ytdl /")), "{calls:?}");
+    }
+
+    /// A radio must still play where mpv cannot be told to point its hook
+    /// away (an IPC timeout, an mpv that refuses the option): that command is
+    /// a precaution for it, logged when it fails.
+    #[tokio::test]
+    async fn a_play_without_ytdl_path_still_plays_when_the_hook_cannot_be_pointed_away() {
+        let (mut core, player_calls, _sc, _rx, _dir) = setup();
+        core.active_source = "radio".to_string();
+        core.player.ytdl_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        core.apply(SourceAction::play("http://icecast/fip.mp3")).await.unwrap();
+        let calls = player_calls.lock().unwrap().clone();
+        assert_eq!(calls, ["ytdl off", "play http://icecast/fip.mp3"]);
+    }
+
+    /// The other side of the same branch: a `Play` that needs the hook does
+    /// not load when its program could not be set — the load would run
+    /// whichever program the hook last had.
+    #[tokio::test]
+    async fn a_play_with_ytdl_path_does_not_load_when_the_path_cannot_be_set() {
+        let (mut core, player_calls, _sc, _rx, _dir) = setup();
+        core.active_source = "web-streaming".to_string();
+        core.player.ytdl_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = core
+            .apply(SourceAction::play("ytdl://https://www.youtube.com/watch?v=x").ytdl_path("/root/web-streaming/bin/yt-dlp"))
+            .await;
+        assert!(result.is_err());
+        let calls = player_calls.lock().unwrap().clone();
+        assert!(calls.iter().all(|c| !c.starts_with("play ")), "{calls:?}");
+    }
+
+    /// Moving inside mpv's own list is not a load decided by a source: it
+    /// touches no hook setting (the one the list was loaded with stays, so a
+    /// web playlist keeps its yt-dlp for every entry).
+    #[tokio::test]
+    async fn player_next_and_prev_leave_the_hook_setting_alone() {
+        let (mut core, player_calls, _sc, _rx, _dir) = setup();
+        core.active_source = "web-streaming".to_string();
+        core.apply(SourceAction::PlayerNext).await.unwrap();
+        core.apply(SourceAction::PlayerPrev).await.unwrap();
+        let calls = player_calls.lock().unwrap().clone();
+        assert!(calls.iter().all(|c| !c.starts_with("ytdl")), "{calls:?}");
+        assert!(calls.contains(&"next".to_string()) && calls.contains(&"prev".to_string()), "{calls:?}");
+    }
+
+    /// The regression: the setting is sticky in mpv, so a radio `Play` after a
+    /// yt-dlp one must point the hook away again, and the next yt-dlp `Play`
+    /// must point it back.
+    #[tokio::test]
+    async fn a_radio_play_after_a_ytdlp_play_turns_the_hook_off_and_back_on() {
+        let (mut core, player_calls, _sc, _rx, _dir) = setup();
+        core.active_source = "web-streaming".to_string();
+        core.apply(SourceAction::play("https://www.youtube.com/watch?v=x").ytdl_path("/root/web-streaming/bin/yt-dlp"))
+            .await
+            .unwrap();
+        core.apply(SourceAction::play("http://127.0.0.1:9/x.mp3")).await.unwrap();
+        core.apply(SourceAction::play("https://www.youtube.com/watch?v=y").ytdl_path("/root/web-streaming/bin/yt-dlp"))
+            .await
+            .unwrap();
+        let toggles: Vec<String> = player_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.starts_with("ytdl") || c.starts_with("play "))
+            .cloned()
+            .collect();
+        assert_eq!(
+            toggles,
+            [
+                "ytdl /root/web-streaming/bin/yt-dlp",
+                "play https://www.youtube.com/watch?v=x",
+                "ytdl off",
+                "play http://127.0.0.1:9/x.mp3",
+                "ytdl /root/web-streaming/bin/yt-dlp",
+                "play https://www.youtube.com/watch?v=y",
+            ]
+        );
     }
 }

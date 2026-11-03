@@ -114,3 +114,11 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-console"
 [[plugin]]
 name = "mpd"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-mpd"
+
+# Web streaming: links of YouTube and of every site yt-dlp reads, played
+# without ads and downloaded to a writable share of the files plugin.
+# Prerequisite: python3 must be installed on the device (yt-dlp, which the
+# plugin manages itself, needs it). Admin page at /plugins/web-streaming/.
+[[plugin]]
+name = "web-streaming"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-web-streaming"
