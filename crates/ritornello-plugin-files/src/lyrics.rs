@@ -9,8 +9,9 @@
 //!
 //! A `.lrc` is written by hand and by every tagger that ever existed, so this
 //! reads leniently: UTF-8 with or without a byte-order mark, and anything that
-//! is not UTF-8 as Latin-1 — the encoding of every Windows tool of the 2000s,
-//! and one in which any byte sequence is valid, so the fallback never fails.
+//! is not UTF-8 as Windows-1252 — the encoding of every Windows tool of the
+//! 2000s, and one in which any byte sequence decodes, so the fallback never
+//! fails (see `windows_1252`).
 //! What it is then is decided by `ritornello_proto::parse_lrc`, the one LRC
 //! parser of the project: timestamps make it `synced`, their absence `plain`.
 //!
@@ -20,7 +21,8 @@
 //! lands in someone's own music library and stays there — minus the
 //! homogeneity rule, which has no object here. Above all it never replaces a
 //! `.lrc` that is there already, whatever its case: the owner's own lyrics,
-//! timed by hand, are worth more than anything the network found.
+//! timed by hand, are worth more than anything the network found. That rule
+//! is the filesystem's to enforce, not a listing's (see `place`).
 
 use crate::archive::Outcome;
 use ritornello_plugin_files::roots::{RootKind, Roots};
@@ -55,17 +57,19 @@ fn names_the_sidecar(candidate: &Path, track: &Path) -> bool {
 
 /// The `.lrc` beside `file`: same folder, same stem, extension in any case.
 ///
-/// `None` when there is none — and also when the folder cannot be listed,
-/// which the caller cannot tell apart; that is why `lookup` runs under the
-/// circuit breaker, whose own `None` says "the share did not answer".
+/// `Ok(None)` when there is none; `Err` when the folder cannot be listed,
+/// which is not an absence — a share refusing a listing at once would
+/// otherwise read as "no sidecar" and earn an offer to write beside lyrics
+/// nobody has looked for.
 ///
 /// Several candidates (`x.lrc` and `x.LRC` on a case-sensitive disk) are
 /// settled by name, the exact-case one first, so the answer does not depend on
 /// the order `read_dir` happens to return.
-pub fn sidecar(file: &Path) -> Option<PathBuf> {
-    let dir = file.parent()?;
-    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
+pub fn sidecar(file: &Path) -> std::io::Result<Option<PathBuf>> {
+    let Some(dir) = file.parent() else {
+        return Ok(None);
+    };
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)?
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| !t.is_dir()))
         .map(|e| e.path())
@@ -73,7 +77,30 @@ pub fn sidecar(file: &Path) -> Option<PathBuf> {
         .collect();
     let exact = file.with_extension(EXTENSION);
     found.sort_by_key(|p| (p != &exact, p.clone()));
-    found.into_iter().next()
+    Ok(found.into_iter().next())
+}
+
+/// `bytes` as Windows-1252, the encoding Windows tools write when they do not
+/// write UTF-8 — and not Latin-1, which it extends: a typographic apostrophe
+/// (`Don’t`) is the byte 0x92 there, which Latin-1 turns into an invisible
+/// control character. Every byte decodes: the five positions Windows-1252
+/// leaves undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D) keep their Latin-1 code
+/// point, as browsers decode them, so this fallback never fails either.
+fn windows_1252(bytes: &[u8]) -> String {
+    /// 0x80 to 0x9F; `None` for the five undefined positions.
+    const HIGH: [Option<char>; 32] = [
+        Some('€'), None, Some('‚'), Some('ƒ'), Some('„'), Some('…'), Some('†'), Some('‡'),
+        Some('ˆ'), Some('‰'), Some('Š'), Some('‹'), Some('Œ'), None, Some('Ž'), None,
+        None, Some('‘'), Some('’'), Some('“'), Some('”'), Some('•'), Some('–'), Some('—'),
+        Some('˜'), Some('™'), Some('š'), Some('›'), Some('œ'), None, Some('ž'), Some('Ÿ'),
+    ];
+    bytes
+        .iter()
+        .map(|&b| match b {
+            0x80..=0x9F => HIGH[usize::from(b - 0x80)].unwrap_or(char::from(b)),
+            _ => char::from(b),
+        })
+        .collect()
 }
 
 /// The lyrics held by the `.lrc` at `path`, or `None` when it holds none
@@ -81,8 +108,8 @@ pub fn sidecar(file: &Path) -> Option<PathBuf> {
 ///
 /// Read through a `take` and not a `read_to_end`: a multi-gigabyte file named
 /// `.lrc` by mistake must cost a few kilobytes, not the appliance's memory.
-/// The ceiling is checked on the bytes, a byte-order mark aside; Latin-1 can
-/// then only grow under UTF-8, and `validated` checks the result again.
+/// The ceiling is checked on the bytes, a byte-order mark aside; Windows-1252
+/// can then only grow under UTF-8, and `validated` checks the result again.
 pub fn read(path: &Path) -> Option<Lyrics> {
     const BOM: &[u8] = b"\xEF\xBB\xBF";
     let mut bytes = Vec::new();
@@ -97,9 +124,8 @@ pub fn read(path: &Path) -> Option<Lyrics> {
     }
     let text = match std::str::from_utf8(bytes) {
         Ok(text) => text.to_string(),
-        // Latin-1: each byte is the code point of the same number. No crate,
-        // and no failure — which is the point of the fallback.
-        Err(_) => bytes.iter().map(|&b| char::from(b)).collect(),
+        // No crate, and no failure — which is the point of the fallback.
+        Err(_) => windows_1252(bytes),
     };
     // One line ending, whatever the editor wrote: `parse_lrc` copes with CRLF
     // already, but the plain text is shown and archived as it stands.
@@ -120,11 +146,16 @@ pub fn read(path: &Path) -> Option<Lyrics> {
 /// - `Some(Some(l))` — found and readable;
 /// - `None` — a `.lrc` is there but holds nothing worth showing. Not
 ///   `Some(None)`: an offer would only end in "a lyrics file is already
-///   there", and the owner's file is not ours to judge.
+///   there", and the owner's file is not ours to judge. `None` too when the
+///   folder could not be listed: unknown, not absent.
 pub fn lookup(file: &Path) -> Option<Option<Lyrics>> {
     match sidecar(file) {
-        None => Some(None),
-        Some(path) => match read(&path) {
+        Err(e) => {
+            tracing::info!("{}: cannot list its folder: {e}", file.display());
+            None
+        }
+        Ok(None) => Some(None),
+        Ok(Some(path)) => match read(&path) {
             Some(lyrics) => Some(Some(lyrics)),
             None => {
                 tracing::info!("{}: ignored, it holds no readable lyrics", path.display());
@@ -177,33 +208,79 @@ pub fn store(roots: &Roots, identity: &serde_json::Value, lyrics: &Lyrics) -> Ou
     };
 
     // 5. Never overwrite: any `<stem>.lrc`, whatever its case (see
-    //    `names_the_sidecar`).
+    //    `names_the_sidecar`). Only an early refusal, cheap and readable: the
+    //    guarantee itself is `place`'s, since a listing can neither see a
+    //    file that arrives after it nor fold case the way a share does.
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries.flatten().map(|e| e.path()).collect::<Vec<PathBuf>>(),
         Err(e) => return Outcome::Failed(format!("cannot list {}: {e}", dir.display())),
     };
     if entries.iter().any(|p| names_the_sidecar(p, &played)) {
-        return Outcome::Refused("a lyrics file is already there");
+        return Outcome::Refused(ALREADY_THERE);
     }
 
-    // 6. A temporary in the same folder, then a rename — atomic, and argued
-    //    in `archive::attempt_name`. UTF-8, whatever the sidecar this replaces
-    //    the absence of would have been: it is what every reader expects
-    //    today, and what `read` tries first.
+    // 6. UTF-8, whatever the sidecar this replaces the absence of would have
+    //    been: it is what every reader expects today, and what `read` tries
+    //    first.
+    let target = dir.join(format!("{}.{EXTENSION}", stem.to_string_lossy()));
+    place(dir, &target, &format!("{text}\n"))
+}
+
+/// The refusal an existing target earns, from the listing or from the
+/// filesystem: one sentence for both, since they are one rule.
+const ALREADY_THERE: &str = "a lyrics file is already there";
+
+/// Writes `content` at `target` **only if nothing is there** — judged by the
+/// filesystem, atomically, under its own case rules.
+///
+/// A temporary in the same folder (named as argued in
+/// `archive::attempt_name`), then a hard link to the target, and not a
+/// rename: a rename replaces what it lands on, so a `.lrc` the owner saved
+/// between the listing and the rename would be lost, and a share folding `É`
+/// to `é` sees a match the listing's ASCII folding cannot. A link fails with
+/// `EEXIST` in both cases. Readers never see a half-written file.
+///
+/// Some shares refuse hard links (cifs without the Unix extensions answers
+/// `EPERM` or `EOPNOTSUPP`): any link failure other than "already there" then
+/// falls back to `create_exclusively`. Still never an overwrite; only the
+/// atomicity of the content is lost.
+fn place(dir: &Path, target: &Path, content: &str) -> Outcome {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let temporary = dir.join(crate::archive::temporary_name(TEMPORARY_STEM, EXTENSION, stamp));
-    let target = dir.join(format!("{}.{EXTENSION}", stem.to_string_lossy()));
-    if let Err(e) = std::fs::write(&temporary, format!("{text}\n")) {
+    if let Err(e) = std::fs::write(&temporary, content) {
         let _ = std::fs::remove_file(&temporary);
         return Outcome::Failed(format!("cannot write into {}: {e}", dir.display()));
     }
-    if let Err(e) = std::fs::rename(&temporary, &target) {
-        let _ = std::fs::remove_file(&temporary);
-        return Outcome::Failed(format!("cannot name {}: {e}", target.display()));
+    let linked = std::fs::hard_link(&temporary, target);
+    let _ = std::fs::remove_file(&temporary);
+    match linked {
+        Ok(()) => Outcome::Written(target.to_path_buf()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Outcome::Refused(ALREADY_THERE),
+        Err(e) => {
+            tracing::debug!("{}: no hard link ({e}), creating it exclusively", target.display());
+            create_exclusively(target, content)
+        }
     }
-    Outcome::Written(target)
+}
+
+/// `place`'s fallback where hard links are refused: `create_new` is
+/// `O_EXCL`, so an existing target is refused by the filesystem here too. A
+/// failed write removes the file this very call created.
+fn create_exclusively(target: &Path, content: &str) -> Outcome {
+    use std::io::Write;
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(target) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Outcome::Refused(ALREADY_THERE),
+        Err(e) => return Outcome::Failed(format!("cannot name {}: {e}", target.display())),
+    };
+    if let Err(e) = file.write_all(content.as_bytes()) {
+        drop(file);
+        let _ = std::fs::remove_file(target);
+        return Outcome::Failed(format!("cannot write {}: {e}", target.display()));
+    }
+    Outcome::Written(target.to_path_buf())
 }
 
 #[cfg(test)]
@@ -264,7 +341,7 @@ mod tests {
         for name in ["01 - Song.lrc", "01 - Song.LRC", "01 - Song.Lrc"] {
             let dir = folder(&[("01 - Song.flac", b""), (name, LRC.as_bytes())]);
             let track = dir.path().join("01 - Song.flac");
-            assert_eq!(sidecar(&track), Some(dir.path().join(name)), "{name}");
+            assert_eq!(sidecar(&track).unwrap(), Some(dir.path().join(name)), "{name}");
         }
     }
 
@@ -279,7 +356,7 @@ mod tests {
             ("01 - Song (live).lrc", LRC.as_bytes()),
             ("01 - Song.flac.lrc", LRC.as_bytes()),
         ]);
-        assert_eq!(sidecar(&dir.path().join("01 - Song.flac")), None);
+        assert_eq!(sidecar(&dir.path().join("01 - Song.flac")).unwrap(), None);
         // The lookup's own answer for that: no sidecar, which is what allows
         // an offer.
         assert_eq!(lookup(&dir.path().join("01 - Song.flac")), Some(None));
@@ -290,18 +367,37 @@ mod tests {
         // `file_stem` drops the last extension only: "Vol. 2" must not be
         // matched as "Vol".
         let dir = folder(&[("Vol. 2.flac", b""), ("Vol. 2.lrc", LRC.as_bytes()), ("Vol.lrc", b"x")]);
-        assert_eq!(sidecar(&dir.path().join("Vol. 2.flac")), Some(dir.path().join("Vol. 2.lrc")));
+        assert_eq!(sidecar(&dir.path().join("Vol. 2.flac")).unwrap(), Some(dir.path().join("Vol. 2.lrc")));
     }
 
     #[test]
-    fn a_latin1_lrc_is_read_as_latin1() {
+    fn a_windows_lrc_is_read_as_windows_1252() {
         // What a Windows tagger of the 2000s writes: "Café" with é as the
-        // single byte 0xE9, which is not UTF-8.
-        let dir = folder(&[("t.lrc", b"[00:01.00]Caf\xe9 cr\xe8me\r\n[00:02.00]Na\xefve")]);
-        let lyrics = read(&dir.path().join("t.lrc")).expect("Latin-1 is lyrics too");
+        // single byte 0xE9, which is not UTF-8 — and the typographic
+        // apostrophe, the œ ligature and the ellipsis in the 0x80-0x9F range
+        // that Latin-1 would turn into invisible control characters.
+        let dir = folder(&[(
+            "t.lrc",
+            b"[00:01.00]Caf\xe9 cr\xe8me\r\n[00:02.00]Don\x92t, c\x9cur\x85\r\n[00:03.00]Na\xefve",
+        )]);
+        let lyrics = read(&dir.path().join("t.lrc")).expect("Windows-1252 is lyrics too");
         let text = lyrics.synced.expect("timestamps make it synced");
-        assert_eq!(text, "[00:01.00]Café crème\n[00:02.00]Naïve");
-        assert_eq!(parse_lrc(&text).unwrap()[0].text, "Café crème");
+        assert_eq!(text, "[00:01.00]Café crème\n[00:02.00]Don’t, cœur…\n[00:03.00]Naïve");
+        assert_eq!(parse_lrc(&text).unwrap()[1].text, "Don’t, cœur…");
+    }
+
+    #[test]
+    fn every_byte_decodes_and_the_undefined_ones_keep_their_latin1_point() {
+        // The 27 defined positions of 0x80-0x9F, and the 5 undefined ones
+        // mapped as browsers do: the fallback must never fail.
+        let high: Vec<u8> = (0x80..=0x9F).collect();
+        assert_eq!(
+            windows_1252(&high),
+            "€\u{81}‚ƒ„…†‡ˆ‰Š‹Œ\u{8D}Ž\u{8F}\u{90}‘’“”•–—˜™š›œ\u{9D}žŸ"
+        );
+        let low: Vec<u8> = (0x00..0x80).chain(0xA0..=0xFF).collect();
+        let identity: String = low.iter().map(|&b| char::from(b)).collect();
+        assert_eq!(windows_1252(&low), identity);
     }
 
     #[test]
@@ -413,6 +509,55 @@ mod tests {
             );
             assert_eq!(std::fs::read(dir.path().join(existing)).unwrap(), b"the owner's own timing");
         }
+    }
+
+    #[test]
+    fn a_lyrics_file_that_appears_after_the_listing_is_never_overwritten() {
+        // The race the listing cannot see: the owner saves `01.lrc` once the
+        // check has passed. The write step finds it in place and must refuse.
+        let dir = folder(&[("01.flac", b"")]);
+        let target = dir.path().join("01.lrc");
+        std::fs::write(&target, b"the owner's own timing").unwrap();
+        assert_eq!(refusal(place(dir.path(), &target, "[00:01.00]Found\n")), "a lyrics file is already there");
+        assert_eq!(std::fs::read(&target).unwrap(), b"the owner's own timing");
+        // Nothing of the attempt is left beside it.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn the_fallback_without_hard_links_never_overwrites_either() {
+        let dir = folder(&[("01.lrc", b"the owner's own timing")]);
+        let target = dir.path().join("01.lrc");
+        assert_eq!(refusal(create_exclusively(&target, "[00:01.00]Found\n")), "a lyrics file is already there");
+        assert_eq!(std::fs::read(&target).unwrap(), b"the owner's own timing");
+        // And where nothing is there, it writes.
+        let fresh = dir.path().join("02.lrc");
+        assert!(matches!(create_exclusively(&fresh, "[00:01.00]Found\n"), Outcome::Written(_)));
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "[00:01.00]Found\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_folder_that_cannot_be_listed_is_unknown_not_absent() {
+        // A share that refuses the listing at once: no offer may follow, so
+        // the answer is "unknown" and not "no sidecar".
+        use std::os::unix::fs::PermissionsExt;
+        let dir = folder(&[]);
+        // A folder gone from under the track fails the listing too.
+        assert_eq!(lookup(&dir.path().join("Nowhere").join("01.flac")), None);
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let listable = std::fs::read_dir(&locked).is_ok();
+        let answer = lookup(&locked.join("01.flac"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if listable {
+            // Running as root: permissions do not bite, and the case cannot
+            // be produced this way.
+            eprintln!("skipped: the folder stayed listable");
+            return;
+        }
+        assert_eq!(answer, None);
     }
 
     #[test]
