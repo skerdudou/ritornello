@@ -191,6 +191,10 @@ pub struct AppState {
     /// Retained covers, served on `/api/cover/{key}`. An `Arc`: the core's
     /// download task inserts into it, the router reads from it.
     pub covers: Arc<crate::cover::CoverCache>,
+    /// Retained lyrics, served on `/api/lyrics/{key}`. **The core's own
+    /// store** (see `assemble_covers_and_core`): the core fills it before
+    /// publishing an href, the route reads it.
+    pub lyrics: Arc<crate::lyrics::LyricsStore>,
     /// Enabled/disabled toggle of the plugins: the manifest to rewrite, the
     /// accepted names, and the core's ear.
     pub plugins: Arc<PluginsControl>,
@@ -253,6 +257,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/command", axum::routing::post(command_post))
         .route("/api/cover/{key}", get(crate::cover::cover_get))
         .route("/api/cover-cache", get(crate::cover::cache_json))
+        .route("/api/lyrics/{key}", get(crate::lyrics::lyrics_get))
         .route("/api/update", get(crate::update::routes::update_json))
         .route("/api/update/catalogue", get(crate::update::routes::update_catalogue_json))
         .route("/api/update/check", axum::routing::post(crate::update::routes::update_check_post))
@@ -647,6 +652,7 @@ pub(crate) mod tests_support {
             sources_catalog: tokio::sync::watch::channel(ritornello_proto::SourcesCatalog::default()).1,
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
+            lyrics: Arc::new(crate::lyrics::LyricsStore::new()),
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
@@ -701,6 +707,7 @@ pub(crate) mod tests_support {
             sources_catalog: tokio::sync::watch::channel(ritornello_proto::SourcesCatalog::default()).1,
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
+            lyrics: Arc::new(crate::lyrics::LyricsStore::new()),
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
@@ -757,6 +764,7 @@ pub(crate) mod tests_support {
             sources_catalog: tokio::sync::watch::channel(ritornello_proto::SourcesCatalog::default()).1,
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
+            lyrics: Arc::new(crate::lyrics::LyricsStore::new()),
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
@@ -845,6 +853,7 @@ pub(crate) mod tests_support {
             sources_catalog: tokio::sync::watch::channel(ritornello_proto::SourcesCatalog::default()).1,
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
+            lyrics: Arc::new(crate::lyrics::LyricsStore::new()),
             plugins: Arc::new(PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,
@@ -892,8 +901,8 @@ mod tests {
             })
             .collect();
         assert_eq!(j["contracts"], serde_json::Value::Object(expected), "every contract at the version this core speaks");
-        assert_eq!(j["contracts"]["source"], serde_json::json!({"major": 1, "minor": 2}), "{j}");
-        assert_eq!(j["contracts"]["metadata"], serde_json::json!({"major": 1, "minor": 1}), "{j}");
+        assert_eq!(j["contracts"]["source"], serde_json::json!({"major": 1, "minor": 3}), "{j}");
+        assert_eq!(j["contracts"]["metadata"], serde_json::json!({"major": 1, "minor": 2}), "{j}");
         assert_eq!(j["contracts"].as_object().unwrap().len(), 5, "every contract, none forgotten: {j}");
         assert!(j.get("protocol").is_none(), "the single protocol number is gone: {j}");
     }

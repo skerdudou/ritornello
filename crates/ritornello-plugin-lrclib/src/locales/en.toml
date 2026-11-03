@@ -1,0 +1,16 @@
+# Admin page of the lrclib plugin: the lyrics cache it keeps on the device.
+# English is embedded in the binary; the language packs live in
+# deploy/locales/lrclib/<language>.toml and are kept in step by a key-parity
+# test.
+title = "Lyrics cache"
+intro = "Lyrics found on LRCLIB, and the songs it has none for, are kept on this device so that a song heard again is not asked about again. A song without lyrics is asked about again after 30 days."
+size = "Size on disk"
+found = "Songs with lyrics"
+absent = "Songs without lyrics"
+size_bytes = "{n} B"
+size_kib = "{n} KiB"
+size_mib = "{n} MiB"
+clear = "Clear"
+attribution = "Lyrics come from LRCLIB, a free and open lyrics database:"
+bad_request = "Unexpected request: {detail}"
+clear_failed = "could not empty the lyrics cache"

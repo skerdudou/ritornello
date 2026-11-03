@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use ritornello_proto::{
-    SourcesCatalog, Cover, DisplayFrame, Enrichment, IdentityUpdate, NowPlaying, PlayRequest, PlayerState, Preset,
-    SourceAction, SourceMessage, SourceReq, SourceRequest, Text,
+    SourcesCatalog, Cover, DisplayFrame, Enrichment, IdentityUpdate, LyricsFrame, NowPlaying, PlayRequest, PlayerState,
+    Preset, SourceAction, SourceMessage, SourceReq, SourceRequest, Text,
 };
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -184,6 +184,10 @@ pub struct Notification {
     pub cover_thumb: Option<ritornello_proto::CoverRef>,
     /// See `SourceMessage::cover_archivable`.
     pub cover_archivable: Option<bool>,
+    /// See `SourceMessage::lyrics`.
+    pub lyrics: Option<ritornello_proto::Lyrics>,
+    /// See `SourceMessage::lyrics_archivable`.
+    pub lyrics_archivable: Option<bool>,
     /// See `SourceMessage::play_request`. Written only on this spontaneous
     /// path; a reply never carries one.
     pub play_request: Option<PlayRequest>,
@@ -286,6 +290,19 @@ impl Notification {
     /// `SourceMessage::cover_archivable`.
     pub fn cover_archivable(mut self, yes: bool) -> Self {
         self.cover_archivable = Some(yes);
+        self
+    }
+
+    /// See `SourceMessage::lyrics`.
+    pub fn lyrics(mut self, l: ritornello_proto::Lyrics) -> Self {
+        self.lyrics = Some(l);
+        self
+    }
+
+    /// Declares that this Source would keep lyrics found elsewhere for what
+    /// it is playing. See `SourceMessage::lyrics_archivable`.
+    pub fn lyrics_archivable(mut self, yes: bool) -> Self {
+        self.lyrics_archivable = Some(yes);
         self
     }
 
@@ -434,6 +451,15 @@ pub trait SourcePlugin: Send + 'static {
     /// the system to reap.
     async fn archive_cover(&mut self, _identity: serde_json::Value, _file: String) {}
 
+    /// The core holds lyrics for `identity` and this Source offered to keep
+    /// them. See `SourceReq::ArchiveLyrics`: `identity` designates a folder,
+    /// it does not gate a comparison.
+    ///
+    /// **Return at once**, for the same reason as `archive_cover`: a write
+    /// onto a share belongs in a detached task. Default: the lyrics are
+    /// ignored.
+    async fn archive_lyrics(&mut self, _identity: serde_json::Value, _lyrics: ritornello_proto::Lyrics) {}
+
     /// The player moved on its own to the track at index `n`.
     ///
     /// Default implementation: nothing — a radio has no tracks. A Source that
@@ -548,6 +574,10 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                         plugin.archive_cover(identity, file).await;
                         SourceOutcome::new(SourceAction::Noop)
                     }
+                    SourceReq::ArchiveLyrics { identity, lyrics } => {
+                        plugin.archive_lyrics(identity, lyrics).await;
+                        SourceOutcome::new(SourceAction::Noop)
+                    }
                 };
                 let msg = SourceMessage {
                     id: Some(req.id),
@@ -580,6 +610,11 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     // Same reasoning as `cover` just above: a reply never
                     // declares this, only the spontaneous notification does.
                     cover_archivable: None,
+                    // Lyrics follow the cover's route, for the same reason:
+                    // finding them may mean reading a share, and a reply must
+                    // not wait on that.
+                    lyrics: None,
+                    lyrics_archivable: None,
                     // A request exists only in a spontaneous notification.
                     play_request: None,
                     armed: outcome.armed,
@@ -608,6 +643,8 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             cover: n.cover,
                             cover_thumb: n.cover_thumb,
                             cover_archivable: n.cover_archivable,
+                            lyrics: n.lyrics,
+                            lyrics_archivable: n.lyrics_archivable,
                             play_request: n.play_request,
                             armed: n.armed,
                         };
@@ -676,6 +713,23 @@ pub trait DisplayPlugin: Send + 'static {
     async fn cover(&mut self, _c: Cover) -> Result<()> {
         Ok(())
     }
+
+    /// Does this display want to receive lyrics frames?
+    ///
+    /// **Default: no**, for the same reason as `wants_covers`, whose rules it
+    /// follows: read once at registration, and that value becomes the
+    /// announcement flag (`Announcement::lyrics`).
+    fn wants_lyrics(&self) -> bool {
+        false
+    }
+
+    /// The lyrics of what is playing, already parsed into lines.
+    ///
+    /// Default: **ignored**, like `cover`. Received only if `wants_lyrics`
+    /// returns true.
+    async fn lyrics(&mut self, _f: LyricsFrame) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Binds a display's socket, without serving yet.
@@ -732,6 +786,7 @@ pub async fn serve_display(listener: UnixListener, mut plugin: impl DisplayPlugi
             DisplayFrame::State(state) => plugin.show(state).await?,
             DisplayFrame::Catalog(c) => plugin.sources_catalog(c).await?,
             DisplayFrame::Cover(c) => plugin.cover(c).await?,
+            DisplayFrame::Lyrics(f) => plugin.lyrics(f).await?,
         }
     }
 }
@@ -1493,6 +1548,62 @@ mod tests {
         assert!(!n.transient);
     }
 
+    /// End to end, from the builders to the line on the socket: the
+    /// constructors set the fields, **and** the notification path of
+    /// `serve_source` copies them into the frame. A copy left at `None` there
+    /// compiles — the literal only forces the field to be named.
+    #[tokio::test]
+    async fn the_notification_carries_lyrics_via_its_constructor() {
+        fn words() -> ritornello_proto::Lyrics {
+            ritornello_proto::Lyrics { plain: Some("Hello".into()), synced: None }
+        }
+        let n = Notification::new().lyrics(words()).lyrics_archivable(true);
+        assert_eq!(n.lyrics, Some(words()));
+        assert_eq!(n.lyrics_archivable, Some(true));
+        assert_eq!(n.cover, None, "the other fields do not move");
+
+        struct LyricsSource {
+            announced: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for LyricsSource {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.announced {
+                    // `pending`, not `None`: `None` is terminal.
+                    std::future::pending().await
+                } else {
+                    self.announced = true;
+                    Some(Notification::new().lyrics(words()).lyrics_archivable(true))
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(LyricsSource { announced: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, _write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines.next_line().await.unwrap().expect("the spontaneous notification");
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, None, "{line}");
+        assert_eq!(msg.lyrics, Some(words()), "{line}");
+        assert_eq!(msg.lyrics_archivable, Some(true), "{line}");
+    }
+
     #[test]
     fn the_builder_status_text_lands_in_the_frame() {
         let key = Text::Keyed { key: "no_disc".into(), params: HashMap::new() };
@@ -1871,6 +1982,56 @@ mod tests {
         assert_eq!(msg.id, Some(1), "the oneshot must be released immediately");
         assert_eq!(msg.action, Some(SourceAction::Noop));
         assert_eq!(seen.lock().unwrap().as_deref(), Some("/tmp/c.jpg"));
+    }
+
+    #[tokio::test]
+    async fn archive_lyrics_is_dispatched_with_its_lyrics_and_answers_noop() {
+        // The twin of `archive_cover`: the same "reply at once" rule, and the
+        // lyrics arrive inline, as the wire carried them.
+        struct RecordingLyrics {
+            seen: std::sync::Arc<std::sync::Mutex<Option<ritornello_proto::Lyrics>>>,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for RecordingLyrics {
+            async fn activate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn archive_lyrics(&mut self, _identity: serde_json::Value, lyrics: ritornello_proto::Lyrics) {
+                *self.seen.lock().unwrap() = Some(lyrics);
+            }
+        }
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        let server_seen = seen.clone();
+        tokio::spawn(async move {
+            run_source_plugin(RecordingLyrics { seen: server_seen }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write
+            .write_all(
+                b"{\"id\":1,\"req\":\"ArchiveLyrics\",\"arg\":{\"identity\":{\"kind\":\"file\",\"path\":\"/m/a/01.flac\"},\"lyrics\":{\"synced\":\"[00:01.00]Hello\"}}}\n",
+            )
+            .await
+            .unwrap();
+        let line = lines.next_line().await.unwrap().unwrap();
+        let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(msg.id, Some(1), "the oneshot must be released immediately");
+        assert_eq!(msg.action, Some(SourceAction::Noop));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(ritornello_proto::Lyrics { plain: None, synced: Some("[00:01.00]Hello".into()) })
+        );
     }
 
     /// Source whose notification stream dries up: first call `None`, then
@@ -2720,6 +2881,61 @@ mod display_tests {
         };
         w.write_all(
             format!("{}\n", serde_json::to_string(&DisplayFrame::Cover(expected.clone())).unwrap())
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        for _ in 0..100 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(seen.lock().unwrap().as_slice(), &[expected]);
+    }
+
+    #[tokio::test]
+    async fn an_interested_display_receives_the_lyrics_frame() {
+        // The twin of the cover's dispatch: a lyrics frame reaches
+        // `DisplayPlugin::lyrics`, whole.
+        #[derive(Clone, Default)]
+        struct Interested {
+            frames: Arc<Mutex<Vec<LyricsFrame>>>,
+        }
+        #[async_trait::async_trait]
+        impl DisplayPlugin for Interested {
+            async fn show(&mut self, _state: PlayerState) -> Result<()> {
+                Ok(())
+            }
+            fn wants_lyrics(&self) -> bool {
+                true
+            }
+            async fn lyrics(&mut self, f: LyricsFrame) -> Result<()> {
+                self.frames.lock().unwrap().push(f);
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("display.sock");
+        let listener = bind_display(&socket).unwrap();
+        let plugin = Interested::default();
+        let seen = plugin.frames.clone();
+        tokio::spawn(async move {
+            serve_display(listener, plugin).await.unwrap();
+        });
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (_r, mut w) = stream.into_split();
+        use tokio::io::AsyncWriteExt;
+        let expected = LyricsFrame {
+            href: "/api/lyrics/1a2b".into(),
+            content: ritornello_proto::RenderedLyrics {
+                synced: Some(vec![ritornello_proto::LyricLine { t_ms: 1000, text: "Hello".into() }]),
+                plain: None,
+            },
+        };
+        w.write_all(
+            format!("{}\n", serde_json::to_string(&DisplayFrame::Lyrics(expected.clone())).unwrap())
                 .as_bytes(),
         )
         .await

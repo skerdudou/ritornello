@@ -9,6 +9,7 @@ mod i18n;
 mod metadata;
 mod docs_map;
 mod langpack;
+mod lyrics;
 mod packaging_manifest;
 mod plugin_catalogue_declaration;
 mod version_coherence;
@@ -125,11 +126,42 @@ struct UnreachableNotice {
     tx: mpsc::Sender<(String, u64)>,
 }
 
+/// What a display asked to receive beside the state, and where the relay
+/// reads it from.
+///
+/// **Lyrics follow the covers' rules**: only to a display that asked
+/// (`Announcement::lyrics`), only when the state's `lyrics_href` changes, and
+/// after the state that names them. They come from the core's in-memory
+/// store, already parsed.
+///
+/// The two flags come from **the plugin's own announcement**, never a
+/// default: it is the binary that said what it wanted. The two stores are
+/// the core's own (see `assemble_covers_and_core`).
+#[derive(Clone)]
+struct DisplayFeeds {
+    wants_covers: bool,
+    covers: Arc<cover::CoverCache>,
+    wants_lyrics: bool,
+    lyrics: Arc<lyrics::LyricsStore>,
+}
+
+#[cfg(test)]
+impl DisplayFeeds {
+    /// A display that asked for nothing beside the state.
+    fn none() -> Self {
+        Self {
+            wants_covers: false,
+            covers: Arc::new(cover::CoverCache::default()),
+            wants_lyrics: false,
+            lyrics: Arc::new(lyrics::LyricsStore::new()),
+        }
+    }
+}
+
 fn display_relay(
     name: String,
     client: Arc<DisplayClient>,
-    wants_covers: bool,
-    covers: Arc<cover::CoverCache>,
+    feeds: DisplayFeeds,
     mut state_rx: watch::Receiver<PlayerState>,
     mut catalog_rx: watch::Receiver<SourcesCatalog>,
     notice: UnreachableNotice,
@@ -151,7 +183,8 @@ fn display_relay(
         /// re-read loop.
         const COVER_ATTEMPTS: u8 = 3;
 
-        /// What the relay remembers of its cover attempts.
+        /// What the relay remembers of its cover attempts — and, in a second
+        /// instance, of its lyrics attempts, under the same rules.
         ///
         /// Two fields, not one, because "pushed" and "attempted without
         /// success" are two different facts: conflating them is what lost the
@@ -190,37 +223,7 @@ fn display_relay(
             tracking: &mut CoverTracking,
             href: Option<&str>,
         ) -> anyhow::Result<()> {
-            // `None` (nothing is playing anymore, or the cover was removed)
-            // emits no frame: the display learns it from the missing
-            // `cover_href` in the state it just received. Inventing an empty
-            // cover frame would make a zero-byte image exist in the protocol.
-            // Both memories are cleared: the next cover, even identical to
-            // the previous one, describes a new track.
-            let Some(href) = href else {
-                tracking.pushed = None;
-                tracking.failures = None;
-                return Ok(());
-            };
-            if tracking.pushed.as_deref() == Some(href) {
-                return Ok(());
-            }
-            // Budget consumed for *this* href: attempt nothing more. A
-            // different href wipes the slate, which the `match` below does.
-            let attempts = match &tracking.failures {
-                Some((h, n)) if h == href => {
-                    if *n >= COVER_ATTEMPTS {
-                        return Ok(());
-                    }
-                    *n
-                }
-                _ => 0,
-            };
-            let Some(key) = href.strip_prefix(cover::HREF_PREFIX) else {
-                // A href without our prefix will never become valid: consume
-                // the whole budget at once rather than retrying three times a
-                // string that cannot change.
-                tracing::debug!("cover href {href} has no key, nothing pushed");
-                tracking.failures = Some((href.to_owned(), COVER_ATTEMPTS));
+            let Some((href, key, attempts)) = due(tracking, href, cover::HREF_PREFIX) else {
                 return Ok(());
             };
             let Some(line) = covers.line(key, href).await else {
@@ -233,6 +236,93 @@ fn display_relay(
             client.send_cover_line(&line).await?;
             tracking.pushed = Some(href.to_owned());
             tracking.failures = None;
+            Ok(())
+        }
+
+        /// Whether `href` is owed an attempt, and with which key and how many
+        /// attempts already spent: the part of the decision covers and lyrics
+        /// share. `None` = nothing to send now.
+        fn due<'h>(
+            tracking: &mut CoverTracking,
+            href: Option<&'h str>,
+            prefix: &str,
+        ) -> Option<(&'h str, &'h str, u8)> {
+            // `None` (nothing is playing anymore, or the cover was removed)
+            // emits no frame: the display learns it from the missing
+            // `cover_href` in the state it just received. Inventing an empty
+            // cover frame would make a zero-byte image exist in the protocol.
+            // Both memories are cleared: the next cover, even identical to
+            // the previous one, describes a new track.
+            let Some(href) = href else {
+                tracking.pushed = None;
+                tracking.failures = None;
+                return None;
+            };
+            if tracking.pushed.as_deref() == Some(href) {
+                return None;
+            }
+            // Budget consumed for *this* href: attempt nothing more. A
+            // different href wipes the slate, which the `match` below does.
+            let attempts = match &tracking.failures {
+                Some((h, n)) if h == href => {
+                    if *n >= COVER_ATTEMPTS {
+                        return None;
+                    }
+                    *n
+                }
+                _ => 0,
+            };
+            let Some(key) = href.strip_prefix(prefix) else {
+                // A href without our prefix will never become valid: consume
+                // the whole budget at once rather than retrying three times a
+                // string that cannot change.
+                tracing::debug!("href {href} has no key, nothing pushed");
+                tracking.failures = Some((href.to_owned(), COVER_ATTEMPTS));
+                return None;
+            };
+            Some((href, key, attempts))
+        }
+
+        /// Pushes the lyrics `href` designates, under `push_cover`'s rules.
+        /// They are in memory, so a miss means the store no longer holds them
+        /// (eight track changes later); the same three attempts bound it.
+        async fn push_lyrics(
+            client: &DisplayClient,
+            lyrics: &lyrics::LyricsStore,
+            tracking: &mut CoverTracking,
+            href: Option<&str>,
+        ) -> anyhow::Result<()> {
+            let Some((href, key, attempts)) = due(tracking, href, lyrics::HREF_PREFIX) else {
+                return Ok(());
+            };
+            let Some(line) = lyrics.line(key, href) else {
+                tracing::debug!("lyrics {key} no longer held, nothing pushed");
+                tracking.failures = Some((href.to_owned(), attempts + 1));
+                return Ok(());
+            };
+            // The cover's method writes any pre-encoded line as is.
+            client.send_cover_line(&line).await?;
+            tracking.pushed = Some(href.to_owned());
+            tracking.failures = None;
+            Ok(())
+        }
+
+        /// What follows a state frame that went out: its cover, then its
+        /// lyrics, each only if this display asked. A display that did not
+        /// ask pays for neither the read nor the encoding.
+        async fn push_extras(
+            client: &DisplayClient,
+            feeds: &DisplayFeeds,
+            cover_tracking: &mut CoverTracking,
+            lyrics_tracking: &mut CoverTracking,
+            state: &PlayerState,
+        ) -> anyhow::Result<()> {
+            if feeds.wants_covers {
+                push_cover(client, &feeds.covers, cover_tracking, state.track.cover_href.as_deref()).await?;
+            }
+            if feeds.wants_lyrics {
+                push_lyrics(client, &feeds.lyrics, lyrics_tracking, state.track.lyrics_href.as_deref()).await?;
+            }
             Ok(())
         }
 
@@ -262,16 +352,11 @@ fn display_relay(
             // The current cover goes out right away, like the state and the
             // sources catalog and for the same reason: a hot-wired display
             // must show what is playing without waiting for the next track
-            // change.
+            // change. The current lyrics likewise.
             let mut cover_tracking = CoverTracking::default();
-            if wants_covers
-                && let Err(e) = push_cover(
-                    &client,
-                    &covers,
-                    &mut cover_tracking,
-                    state.track.cover_href.as_deref(),
-                )
-                .await
+            let mut lyrics_tracking = CoverTracking::default();
+            if let Err(e) =
+                push_extras(&client, &feeds, &mut cover_tracking, &mut lyrics_tracking, &state).await
             {
                 tracing::warn!("display plugin {name} relay stopped: {e}");
                 break 'alive true;
@@ -281,21 +366,15 @@ fn display_relay(
                     r = state_rx.changed() => match r {
                         Ok(()) => {
                             let e = state_rx.borrow_and_update().clone();
-                            let send_result = client.send(&e).await;
-                            // State first, cover second: this way the display
-                            // knows the `cover_href` before receiving the
-                            // bytes that claim it.
-                            match (send_result, wants_covers) {
-                                (Ok(()), true) => {
-                                    push_cover(
-                                        &client,
-                                        &covers,
-                                        &mut cover_tracking,
-                                        e.track.cover_href.as_deref(),
-                                    )
-                                    .await
+                            // State first, cover and lyrics second: this way
+                            // the display knows the `cover_href` and the
+                            // `lyrics_href` before receiving what claims them.
+                            match client.send(&e).await {
+                                Ok(()) => {
+                                    push_extras(&client, &feeds, &mut cover_tracking, &mut lyrics_tracking, &e)
+                                        .await
                                 }
-                                (other, _) => other,
+                                other => other,
                             }
                         }
                         // The core is stopping, not the plugin: exit without
@@ -626,6 +705,8 @@ struct HotPlugChildren {
     /// `assemble_covers_and_core`): a hot-wired display must read the covers
     /// the core has already fetched, not a fresh, empty cache.
     covers: Arc<cover::CoverCache>,
+    /// The core's lyrics store, for the same reason as `covers`.
+    lyrics: Arc<lyrics::LyricsStore>,
     status_state: Arc<RwLock<StatusState>>,
     admin_backends: admin::AdminBackends,
     /// **The same** `Arc` as the HTTP `AppState`'s, for the same reason as
@@ -941,11 +1022,16 @@ async fn hotplug<P: player::Player>(
                     display_relay(
                         name.clone(),
                         client,
-                        // The flag **from this plugin's own announcement**, never
+                        // The flags **from this plugin's own announcement**, never
                         // a default value: it is the binary that said whether it
-                        // wanted the bytes (see `Announcement::covers`).
-                        announcement.covers,
-                        children.covers.clone(),
+                        // wanted the bytes (see `Announcement::covers`) and the
+                        // words (`Announcement::lyrics`).
+                        DisplayFeeds {
+                            wants_covers: announcement.covers,
+                            covers: children.covers.clone(),
+                            wants_lyrics: announcement.lyrics,
+                            lyrics: children.lyrics.clone(),
+                        },
                         children.state_rx.clone(),
                         children.catalog_rx.clone(),
                         UnreachableNotice { wiring, tx: children.unreachable_tx.clone() },
@@ -1050,7 +1136,8 @@ async fn hotplug<P: player::Player>(
 /// break that equality on the very first call, not only when reviewing the
 /// diff.
 ///
-/// `skeleton.covers` is ignored: it exists only so the caller does not have
+/// `skeleton.covers` and `skeleton.lyrics` are ignored: they exist only so
+/// the caller does not have
 /// to build the `AppState` in two pieces — all its other fields pass through
 /// unchanged.
 pub(crate) fn assemble_covers_and_core<P: player::Player>(
@@ -1063,7 +1150,9 @@ pub(crate) fn assemble_covers_and_core<P: player::Player>(
 ) -> (AppState, core::Core<P>) {
     let covers = Arc::new(cover::CoverCache::new());
     let core_engine = core::Core::new(player, wiring, covers.clone(), cover_tx, extraction_tx, armed_read_tx);
-    let app_state = AppState { covers, ..skeleton };
+    // The lyrics store is the core's own, built by `Core::new`: handed out
+    // from there, it cannot be a second one either.
+    let app_state = AppState { covers, lyrics: core_engine.app_lyrics().clone(), ..skeleton };
     (app_state, core_engine)
 }
 
@@ -1903,7 +1992,7 @@ async fn main() -> Result<()> {
     // the relays are spawned (below, after `Core::new`), the announcement is
     // no longer at hand, and nothing must rebuild this flag other than by
     // copying it from what the plugin announced.
-    let mut display_clients: Vec<(String, Arc<DisplayClient>, bool)> = Vec::new();
+    let mut display_clients: Vec<(String, Arc<DisplayClient>, bool, bool)> = Vec::new();
     let mut admin_backends: HashMap<String, Arc<dyn admin::AdminBackend>> = HashMap::new();
 
     for name in &manifest_order {
@@ -1971,7 +2060,7 @@ async fn main() -> Result<()> {
                 }
                 PluginKind::Display => match DisplayClient::connect(&socket).await {
                     Ok(client) => {
-                        display_clients.push((name.clone(), client, announcement.covers));
+                        display_clients.push((name.clone(), client, announcement.covers, announcement.lyrics));
                         plugin_statuses.push(announced_plugin_line(name, "display", true, announcement, &limited));
                     }
                     Err(e) => {
@@ -2242,6 +2331,8 @@ async fn main() -> Result<()> {
     // must read **the same** `Arc` as the core and the HTTP route, never a
     // second cache — this is where the core drops the bytes it fetches.
     let app_covers;
+    // The core's lyrics store, pulled out for the same reason.
+    let app_lyrics;
     {
         // Asked once, before serving: the answer gates the System tab's two
         // OS buttons, and asking per request would mean spawning `busctl`
@@ -2299,6 +2390,7 @@ async fn main() -> Result<()> {
                 ..Default::default()
             }),
             covers: Arc::new(cover::CoverCache::default()),
+            lyrics: Arc::new(lyrics::LyricsStore::new()),
             plugins: Arc::new(status::PluginsControl {
                 manifest: plugins_path.clone(),
                 tx: plugin_order_tx,
@@ -2344,6 +2436,7 @@ async fn main() -> Result<()> {
             core.set_source_icon(&name, icon);
         }
         app_covers = app_state.covers.clone();
+        app_lyrics = app_state.lyrics.clone();
         let app = status::router(app_state);
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("web interface on http://{http_addr}/");
@@ -2396,12 +2489,16 @@ async fn main() -> Result<()> {
     if display_clients.is_empty() {
         tracing::warn!("no display plugin connected, continuing without display");
     }
-    for (name, display_client, wants_covers) in display_clients {
+    for (name, display_client, wants_covers, wants_lyrics) in display_clients {
         display_relay(
             name,
             display_client,
-            wants_covers,
-            app_covers.clone(),
+            DisplayFeeds {
+                wants_covers,
+                covers: app_covers.clone(),
+                wants_lyrics,
+                lyrics: app_lyrics.clone(),
+            },
             state_rx.clone(),
             catalog_rx.clone(),
             UnreachableNotice { wiring: 0, tx: unreachable_tx.clone() },
@@ -2424,6 +2521,7 @@ async fn main() -> Result<()> {
         state_rx: state_rx.clone(),
         catalog_rx: catalog_rx.clone(),
         covers: app_covers.clone(),
+        lyrics: app_lyrics.clone(),
         status_state: status_state.clone(),
         admin_backends: admin_backends.clone(),
         admin_assets: admin_assets.clone(),
@@ -3177,8 +3275,7 @@ mod unreachable_tests {
         display_relay(
             "dead".into(),
             client,
-            false,
-            Arc::new(cover::CoverCache::default()),
+            DisplayFeeds::none(),
             state_rx,
             catalog_rx,
             UnreachableNotice { wiring: 7, tx },
@@ -3216,8 +3313,7 @@ mod unreachable_tests {
         display_relay(
             "alive".into(),
             client,
-            false,
-            Arc::new(cover::CoverCache::default()),
+            DisplayFeeds::none(),
             state_rx,
             catalog_rx,
             UnreachableNotice { wiring: 3, tx },
@@ -3405,6 +3501,7 @@ mod toggle_tests {
             state_rx,
             catalog_rx,
             covers,
+            lyrics: core.app_lyrics().clone(),
             status_state: Arc::new(RwLock::new(StatusState {
                 // The constructor and not a literal: a field added to
                 // `PluginStatus` must not break this bench, whose subject
@@ -3426,6 +3523,7 @@ mod toggle_tests {
                 kinds: vec![PluginKind::Display],
                 admin: true,
                 covers: false,
+                lyrics: false,
                 enriches_armed: false,
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -3462,6 +3560,7 @@ mod toggle_tests {
             kinds: vec![kind],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4374,6 +4473,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: foreign,
@@ -4425,6 +4525,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4468,6 +4569,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: foreign,
@@ -4516,6 +4618,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Source],
             admin: true,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: foreign,
@@ -4574,6 +4677,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: true,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION + 1,
@@ -4611,6 +4715,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display, PluginKind::Input],
             admin: true,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4648,7 +4753,7 @@ mod toggle_tests {
             json["incompatible"],
             serde_json::json!({
                 "reason": "major",
-                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 1}}],
+                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 2}}],
             }),
             "{json}"
         );
@@ -4708,7 +4813,7 @@ mod toggle_tests {
         // reason that is not this test's.
         let socket = ritornello_plugin_sdk::socket_kind(&b.children.sockets_dir.join("mpd"), PluginKind::Display);
         let _display = tokio::net::UnixListener::bind(&socket).unwrap();
-        let a = mpd_like(ContractVersion::new(1, 2));
+        let a = mpd_like(ContractVersion::new(1, 3));
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
 
@@ -4726,7 +4831,7 @@ mod toggle_tests {
             assert_eq!(line.incompatible, None);
             assert_eq!(
                 line.limited,
-                vec![display_gap(ContractVersion::new(1, 2))],
+                vec![display_gap(ContractVersion::new(1, 3))],
                 "the {} line must name the display contract, and only it",
                 line.kind
             );
@@ -4748,6 +4853,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4779,6 +4885,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4809,6 +4916,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4846,6 +4954,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4895,6 +5004,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4925,6 +5035,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Display],
             admin: false,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -4958,6 +5069,7 @@ mod toggle_tests {
             kinds: vec![PluginKind::Source],
             admin: true,
             covers: false,
+            lyrics: false,
             enriches_armed: false,
             ui_version: Some("3".into()),
             protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -5149,13 +5261,14 @@ mod relay_tests {
     use super::*;
     use crate::cover::{fixtures, CoverCache, CoverPayload};
     use ritornello_plugin_sdk::{bind_display, serve_display, DisplayPlugin};
-    use ritornello_proto::Cover;
+    use ritornello_proto::{Cover, LyricsFrame};
 
     #[derive(Debug, PartialEq)]
     enum Received {
         State(Box<PlayerState>),
         SourcesCatalog(SourcesCatalog),
         CoverPayload(Cover),
+        Lyrics(LyricsFrame),
     }
 
     /// A display that handles **everything**: this is deliberate. If the
@@ -5181,6 +5294,13 @@ mod relay_tests {
         }
         async fn cover(&mut self, c: Cover) -> Result<()> {
             let _ = self.tx.send(Received::CoverPayload(c));
+            Ok(())
+        }
+        fn wants_lyrics(&self) -> bool {
+            true
+        }
+        async fn lyrics(&mut self, f: LyricsFrame) -> Result<()> {
+            let _ = self.tx.send(Received::Lyrics(f));
             Ok(())
         }
     }
@@ -5229,6 +5349,11 @@ mod relay_tests {
         covers: Arc<CoverCache>,
         initial_state: PlayerState,
     ) -> Bench {
+        let feeds = DisplayFeeds { wants_covers, covers, ..DisplayFeeds::none() };
+        bench_with(feeds, initial_state).await
+    }
+
+    async fn bench_with(feeds: DisplayFeeds, initial_state: PlayerState) -> Bench {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("display.sock");
         let listener = bind_display(&socket).unwrap();
@@ -5246,8 +5371,7 @@ mod relay_tests {
         display_relay(
             "bench".into(),
             client,
-            wants_covers,
-            covers,
+            feeds,
             state_rx,
             catalog_rx,
             UnreachableNotice { wiring: 0, tx: mpsc::channel(4).0 },
@@ -5576,5 +5700,78 @@ mod relay_tests {
             "and it must be the share's current image, not the one the cache had encoded \
              before the replacement"
         );
+    }
+
+    /// A store holding one set of words, and the state that names it — as
+    /// the core produces them: `publish_state` stores before it publishes.
+    fn lyrics_and_state(key: &str) -> (Arc<lyrics::LyricsStore>, PlayerState) {
+        let store = Arc::new(lyrics::LyricsStore::new());
+        store.insert(
+            key.into(),
+            &ritornello_proto::Lyrics { plain: None, synced: Some("[00:01.00]First\n[00:02.00]Second".into()) },
+        );
+        let state = PlayerState {
+            source: "files".into(),
+            track: ritornello_proto::Track {
+                lyrics_href: Some(format!("{}{key}", lyrics::HREF_PREFIX)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        (store, state)
+    }
+
+    fn lyrics_from(received: &[Received]) -> Vec<&LyricsFrame> {
+        received
+            .iter()
+            .filter_map(|r| match r {
+                Received::Lyrics(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_display_that_asked_receives_the_lyrics_after_the_state() {
+        let (store, with_lyrics) = lyrics_and_state("abc");
+        let feeds = DisplayFeeds { wants_lyrics: true, lyrics: store, ..DisplayFeeds::none() };
+        let mut b = bench_with(feeds, PlayerState::default()).await;
+
+        // `trigger` panics on any lyrics frame arriving before the state that
+        // names them: that is the "after" half of this test.
+        let received = trigger(&mut b, with_lyrics).await;
+        let seen = lyrics_from(&received);
+        assert_eq!(seen.len(), 1, "one set of words, once, the witness repeating the href: {received:?}");
+        assert_eq!(seen[0].href, format!("{}abc", lyrics::HREF_PREFIX), "the state's own href");
+        let lines = seen[0].content.synced.as_ref().expect("already parsed for the display");
+        assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["First", "Second"]);
+
+        // Unchanged href: nothing goes out again.
+        assert!(lyrics_from(&witness(&mut b).await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_display_that_did_not_ask_never_receives_lyrics() {
+        // The stub handles lyrics and the store holds them: only the flag
+        // from the announcement stands between them.
+        let (store, with_lyrics) = lyrics_and_state("abc");
+        let feeds = DisplayFeeds { wants_lyrics: false, lyrics: store, ..DisplayFeeds::none() };
+        let mut b = bench_with(feeds, with_lyrics.clone()).await;
+        let received = witness(&mut b).await;
+        assert!(lyrics_from(&received).is_empty(), "{received:?}");
+        let mut next = with_lyrics;
+        next.track.lyrics_href = Some(format!("{}other", lyrics::HREF_PREFIX));
+        let received = trigger(&mut b, next).await;
+        assert!(lyrics_from(&received).is_empty(), "{received:?}");
+    }
+
+    #[tokio::test]
+    async fn the_current_lyrics_reach_a_display_wired_mid_song() {
+        // A display wired while a song plays must not wait for the next one.
+        let (store, with_lyrics) = lyrics_and_state("abc");
+        let feeds = DisplayFeeds { wants_lyrics: true, lyrics: store, ..DisplayFeeds::none() };
+        let mut b = bench_with(feeds, with_lyrics).await;
+        let received = witness(&mut b).await;
+        assert_eq!(lyrics_from(&received).len(), 1, "{received:?}");
     }
 }

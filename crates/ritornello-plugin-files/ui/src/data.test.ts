@@ -68,6 +68,16 @@ describe('root normalization', () => {
     expect(normalizeRoot({ name: 'x' }).archive_covers).toBe(false)
   })
 
+  it('defaults archive_lyrics to false, never to undefined', () => {
+    // Same reasoning as `archive_covers`: a table written before the flag
+    // existed, or a stale response, omits it, and the checkbox must then
+    // read as off rather than as neither.
+    expect(normalizeRoot({ name: 'x' }).archive_lyrics).toBe(false)
+    expect(normalizeRoot({ name: 'x', archive_lyrics: true }).archive_lyrics).toBe(true)
+    // Not borrowed from the covers' flag.
+    expect(normalizeRoot({ name: 'x', archive_covers: true }).archive_lyrics).toBe(false)
+  })
+
   it('treats any unknown kind as a share', () => {
     expect(normalizeRoot({ kind: 'local' }).kind).toBe('local')
     expect(normalizeRoot({}).kind).toBe('smb')

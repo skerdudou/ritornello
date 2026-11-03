@@ -12,6 +12,7 @@
 mod admin;
 mod archive;
 mod cover;
+mod lyrics;
 mod state;
 
 use anyhow::Result;
@@ -146,6 +147,56 @@ fn offers_archive(roots: &Roots, file: &Path, probed: FolderState) -> bool {
     }
 }
 
+/// What the sidecar lookup answered for the armed track — three outcomes, and
+/// the outer `Option` is the one that matters:
+///
+/// - `None` — **nobody knows**: the share did not answer in time (or the
+///   `.lrc` there holds nothing readable, see `lyrics::lookup`);
+/// - `Some(None)` — looked, and there is no `.lrc` beside the track;
+/// - `Some(Some(l))` — found.
+///
+/// Unlike the cover's channel, which sends `None` for both "timed out" and
+/// "nothing there" and recovers the difference from a memo, this one carries
+/// the difference itself: there is no per-track memo to read it from, and
+/// "unknown" read as "absent" would offer to write beside a `.lrc` nobody
+/// has looked for.
+type SidecarAnswer = Option<Option<ritornello_proto::Lyrics>>;
+
+/// Should this Source offer to keep lyrics found elsewhere for `file`?
+///
+/// The twin of `offers_archive`, and a free function for the same reason. An
+/// offer only when the lookup **answered** that no `.lrc` is there, the root
+/// was told to archive lyrics, and — for a share — it is mounted writable.
+fn offers_lyrics_archive(roots: &Roots, file: &Path, answer: &SidecarAnswer) -> bool {
+    if !matches!(answer, Some(None)) {
+        return false;
+    }
+    let Some(root) = roots.root_of(file) else { return false };
+    if !root.archive_lyrics {
+        return false;
+    }
+    // Same reading of `writable` as `offers_archive`, and the same reason.
+    match root.kind {
+        RootKind::Smb => root.writable,
+        RootKind::Local => true,
+    }
+}
+
+/// Waits on an in-flight answer, or for ever when there is none.
+///
+/// What lets `poll_notification` wait on the cover and the lyrics **in one
+/// `select!`**: an empty slot is a branch that never completes rather than a
+/// special case, and the receiver stays in `self` until its branch completes
+/// (see `cover_in_flight` for why that is the whole of cancel-safety).
+async fn answer_of<T>(
+    slot: &mut Option<tokio::sync::oneshot::Receiver<T>>,
+) -> Result<T, tokio::sync::oneshot::error::RecvError> {
+    match slot {
+        Some(rx) => rx.await,
+        None => std::future::pending().await,
+    }
+}
+
 struct FilesSource {
     /// Shared with the Admin half, which modifies it from the page.
     playlist: Arc<AsyncRwLock<Playlist>>,
@@ -246,6 +297,17 @@ struct FilesSource {
     /// listening. This is deliberate: a cover of the previous track must
     /// never announce itself for the track that has just started.
     cover_in_flight: Option<tokio::sync::oneshot::Receiver<Option<ritornello_proto::CoverRef>>>,
+    /// In-flight result of the `.lrc` lookup for the armed track: the twin of
+    /// `cover_in_flight`, launched by the same `arm_cover` on its own task,
+    /// replaced the same way by the next track, and awaited in the same
+    /// `select!` (see `poll_notification`). See `SidecarAnswer` for its
+    /// three outcomes.
+    ///
+    /// **No memory per track**, unlike the cover's per folder: a `.lrc`
+    /// belongs to one file, so the next track always asks again — one
+    /// `readdir` — and a `.lrc` just archived is found by the next lookup
+    /// with nothing to forget.
+    lyrics_in_flight: Option<tokio::sync::oneshot::Receiver<SidecarAnswer>>,
     /// Cover remembered **per directory**: the probed directory, and what was
     /// found there (`None` in second position = probed, nothing certain).
     ///
@@ -424,6 +486,10 @@ impl FilesSource {
         // one answers, `poll_notification` must find here the file this
         // very call was about (see the field's doc).
         self.current_file = Some(file.to_path_buf());
+        // The lyrics ride on the same trigger: every path that declares an
+        // identity comes through here, and the core forgets a Source's lyrics
+        // on every identity change just as it forgets its cover.
+        self.arm_lyrics(file);
         // A fresh receiver replaces the one of a probe still in flight: this is
         // what discards the cover of a track already left (see the doc of
         // `cover_in_flight`).
@@ -480,6 +546,30 @@ impl FilesSource {
             }
             // Ignored if nobody is listening any more (track changed since):
             // this is the very mechanism that discards a stale result.
+        });
+    }
+
+    /// Arms the announcement of `file`'s own `.lrc`, on a task of its own
+    /// bounded by the circuit breaker — for every reason `arm_cover` gives,
+    /// and with the same discarding of a previous track's answer by
+    /// replacing the receiver.
+    fn arm_lyrics(&mut self, file: &Path) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.lyrics_in_flight = Some(rx);
+        let health = self.health.clone();
+        let path = file.to_path_buf();
+        tokio::spawn(async move {
+            let to_read = path.clone();
+            let answer = match health.bounded(&path, move || lyrics::lookup(&to_read)).await {
+                Some(answer) => answer,
+                // "Unknown", and said as such: an offer made on it would
+                // write beside a `.lrc` nobody has looked for.
+                None => {
+                    tracing::warn!("lyrics lookup beside {} gave up: share not answering", path.display());
+                    None
+                }
+            };
+            let _ = tx.send(answer);
         });
     }
 
@@ -1009,6 +1099,48 @@ impl SourcePlugin for FilesSource {
         });
     }
 
+    /// The core found lyrics for a track that has no `.lrc`, after this
+    /// Source offered to keep them. The twin of `archive_cover`, minus the
+    /// staged file (lyrics arrive inline): **returns at once and works
+    /// detached**, under one `Health` bound for the folder, and every outcome
+    /// is a line in the journal. See `lyrics::store` for the refusals.
+    async fn archive_lyrics(&mut self, identity: serde_json::Value, found: ritornello_proto::Lyrics) {
+        let roots = self.roots.clone();
+        let health = self.health.clone();
+        tokio::spawn(async move {
+            let table = roots.read().await.clone();
+            let report = |outcome: archive::Outcome| match outcome {
+                archive::Outcome::Written(p) => tracing::info!("lyrics archived at {}", p.display()),
+                archive::Outcome::Refused(why) => tracing::info!("lyrics not archived: {why}"),
+                archive::Outcome::Failed(e) => tracing::warn!("lyrics not archived: {e}"),
+            };
+            // An echo that names no file of ours names no share either: the
+            // refusal is pronounced without touching one, so there is
+            // nothing to bound.
+            let Some(guarded) = archive::echoed_file(&identity) else {
+                report(lyrics::store(&table, &identity, &found));
+                return;
+            };
+            // Read before `bounded`, for the reason `archive_cover` gives:
+            // afterwards it would be true for an elapsed bound as well.
+            let already_silent = health.unreachable(&guarded);
+            // Logged from inside the closure, for the reason `archive_cover`
+            // gives: an elapsed bound discards what the closure returns.
+            let work = move || report(lyrics::store(&table, &identity, &found));
+            if health.bounded_within(&guarded, archive::BOUND, work).await.is_none() {
+                if already_silent {
+                    tracing::warn!("lyrics not archived: {} is not answering", guarded.display());
+                } else {
+                    tracing::warn!(
+                        "lyrics not archived yet: {} did not answer within the bound; \
+                         the attempt continues in the background and will report itself",
+                        guarded.display()
+                    );
+                }
+            }
+        });
+    }
+
     /// mpv went idle at the end of the finite list `has_finite_list`
     /// declares — as opposed to a live stream cutting out, which has no
     /// equivalent here.
@@ -1090,8 +1222,55 @@ impl SourcePlugin for FilesSource {
         // with nothing left to resume — the cover would never be announced for
         // that track, and nothing would say so. That is why the offer below is
         // computed with `try_read` and not `read().await`.
-        if let Some(rx) = &mut self.cover_in_flight {
-            let result = rx.await;
+        //
+        // **Two lookups now, and one wait for both.** The cover and the `.lrc`
+        // are each awaited in a branch of one `select!`, and each branch takes
+        // its own answer out of `self` and is handled — synchronously — up to
+        // its `return`. Awaiting the lyrics *after* the cover would have
+        // reopened the very hole described above: a cover received, its slot
+        // cleared, then a suspension on the `.lrc` during which a core request
+        // cancels this future and the cover is gone. `biased`, so that when
+        // both are ready the cover goes first and the order is the same on
+        // every run. The loop only comes back round when an answer had nothing
+        // to say, to wait on the other one.
+        loop {
+            if self.cover_in_flight.is_none() && self.lyrics_in_flight.is_none() {
+                break;
+            }
+            enum Ready<C, L> {
+                Cover(C),
+                Lyrics(L),
+            }
+            let ready = tokio::select! {
+                biased;
+                cover = answer_of(&mut self.cover_in_flight) => Ready::Cover(cover),
+                lyrics = answer_of(&mut self.lyrics_in_flight) => Ready::Lyrics(lyrics),
+            };
+            let result = match ready {
+                Ready::Cover(cover) => cover,
+                Ready::Lyrics(answer) => {
+                    // Cleared only now that it answered, as the cover's is.
+                    self.lyrics_in_flight = None;
+                    // A vanished task knows no more than a timeout.
+                    let answer: SidecarAnswer = answer.unwrap_or(None);
+                    if let Some(Some(found)) = answer {
+                        return Some(Notification::new().lyrics(found));
+                    }
+                    // `try_read`, never `read().await`: see above.
+                    let offer = match &self.current_file {
+                        Some(file) => self
+                            .roots
+                            .try_read()
+                            .map(|table| offers_lyrics_archive(&table, file, &answer))
+                            .unwrap_or(false),
+                        None => false,
+                    };
+                    if offer {
+                        return Some(Notification::new().lyrics_archivable(true));
+                    }
+                    continue;
+                }
+            };
             // Cleared only after the probe has answered — this is what makes
             // the guarantee above true: as long as no answer has arrived, the
             // field stays in place for the next round.
@@ -1148,8 +1327,9 @@ impl SourcePlugin for FilesSource {
             // returning it would only cost a wake-up. Above all not `None`
             // here either way — that is terminal for the SDK (see the comment
             // on `preset_count_rx` just below) — so a frame with nothing to
-            // say simply falls through to the rest of the function, which
-            // waits for the next event.
+            // say goes back round the loop, to the `.lrc` answer if one is
+            // still owed, and then to the rest of the function, which waits
+            // for the next event.
             if matches!(result, Ok(Some(_))) || offer {
                 return Some(n);
             }
@@ -1376,6 +1556,7 @@ async fn main() -> Result<()> {
         mpv_playlist_path,
         preset_count_rx: Some(preset_count_rx),
         cover_in_flight: None,
+        lyrics_in_flight: None,
         cover_by_dir: Arc::new(Mutex::new(None)),
         health: health.clone(),
         // Cloned, not moved: `admin` below takes the table itself, and the
@@ -1458,6 +1639,7 @@ mod tests {
             domain: String::new(),
             writable: false,
             archive_covers: false,
+            archive_lyrics: false,
         }
     }
 
@@ -1606,6 +1788,7 @@ mod tests {
             mpv_playlist_path: root.join("plugin-files.m3u"),
             preset_count_rx: None,
             cover_in_flight: None,
+            lyrics_in_flight: None,
             cover_by_dir: Arc::new(Mutex::new(None)),
             health: Arc::new(ritornello_plugin_files::health::Health::new()),
             roots: Arc::new(AsyncRwLock::new(Roots::default())),
@@ -2088,6 +2271,180 @@ mod tests {
             n.cover,
             Some(ritornello_proto::CoverRef::Path { path: "/nas/Album/cover.jpg".into() })
         );
+    }
+
+    /// The next notification, or a failure after ten seconds. A notification
+    /// that never comes is exactly what a broken lyrics path produces, and
+    /// an unbounded `.await` turned that into a test hanging for ever.
+    async fn bounded_poll(s: &mut FilesSource, what: &str) -> Notification {
+        tokio::time::timeout(std::time::Duration::from_secs(10), s.poll_notification())
+            .await
+            .unwrap_or_else(|_| panic!("{what}: nothing within ten seconds"))
+            .unwrap_or_else(|| panic!("{what}: never None"))
+    }
+
+    /// A local root over `dir` with only the lyrics flag set — so no test of
+    /// the lyrics offer can pass on the cover's flag.
+    fn lyrics_root(dir: &Path) -> Roots {
+        Roots {
+            root: vec![Root {
+                name: "usb".into(),
+                kind: RootKind::Local,
+                path: Some(dir.to_string_lossy().into_owned()),
+                archive_lyrics: true,
+                ..smb_root("unused")
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn the_sidecar_lyrics_are_announced_after_a_play() {
+        // The cover and the `.lrc` of one track, both beside it: two lookups,
+        // two notifications, and neither may cost the other its announcement.
+        let dir = tempfile::tempdir().unwrap();
+        let track = dir.path().join("01 - Get Lucky.flac");
+        std::fs::write(&track, b"x").unwrap();
+        std::fs::write(dir.path().join("cover.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("01 - Get Lucky.LRC"), b"[00:01.00]Like the legend\r\n").unwrap();
+        let mut s = test_source(Playlist {
+            entries: vec![Entry { path: track, title: None, duration_s: None }],
+            index: 0,
+        });
+        s.activate().await;
+        let first = bounded_poll(&mut s, "a notification expected").await;
+        let second = bounded_poll(&mut s, "a second notification expected").await;
+        // `biased`: the cover first when both are ready, the lyrics after —
+        // collected from both frames all the same, the point being that each
+        // is announced once.
+        let covers: Vec<_> = [&first, &second].iter().filter_map(|n| n.cover.clone()).collect();
+        let lyrics: Vec<_> = [&first, &second].iter().filter_map(|n| n.lyrics.clone()).collect();
+        assert_eq!(
+            covers,
+            vec![ritornello_proto::CoverRef::Path {
+                path: dir.path().join("cover.jpg").to_string_lossy().into_owned()
+            }],
+            "the cover is still announced"
+        );
+        assert_eq!(
+            lyrics,
+            vec![ritornello_proto::Lyrics { plain: None, synced: Some("[00:01.00]Like the legend".into()) }]
+        );
+        // No offer beside a `.lrc` the owner has, whatever the root says.
+        assert!(first.lyrics_archivable.is_none() && second.lyrics_archivable.is_none());
+    }
+
+    #[test]
+    fn an_offer_is_made_only_without_a_sidecar_and_with_the_flag() {
+        let file = Path::new("/media/usb/Album/01.flac");
+        let local = lyrics_root(Path::new("/media/usb"));
+        let absent: SidecarAnswer = Some(None);
+
+        // Looked, nothing there, the root armed: the one case for an offer.
+        assert!(offers_lyrics_archive(&local, file, &absent));
+        // The share did not answer in time: "unknown" is not "absent".
+        assert!(!offers_lyrics_archive(&local, file, &None));
+        // A `.lrc` was found: nothing to keep.
+        let found = Some(Some(ritornello_proto::Lyrics { plain: Some("x".into()), synced: None }));
+        assert!(!offers_lyrics_archive(&local, file, &found));
+        // The flag off — the cover's flag on, which must not stand in for it.
+        let mut off = local.clone();
+        off.root[0].archive_lyrics = false;
+        off.root[0].archive_covers = true;
+        assert!(!offers_lyrics_archive(&off, file, &absent));
+        // A path no root owns.
+        assert!(!offers_lyrics_archive(&Roots::default(), file, &absent));
+
+        // A share: armed but read-only, no offer; writable, an offer.
+        let on_nas = Path::new("/mnt/ritornello/nas/Album/01.flac");
+        let ro = Roots { root: vec![Root { archive_lyrics: true, ..smb_root("musique") }] };
+        assert!(!offers_lyrics_archive(&ro, on_nas, &absent));
+        let rw = Roots { root: vec![Root { archive_lyrics: true, writable: true, ..smb_root("musique") }] };
+        assert!(offers_lyrics_archive(&rw, on_nas, &absent));
+    }
+
+    #[tokio::test]
+    async fn a_track_without_a_sidecar_on_an_armed_root_is_offered() {
+        // The predicate above, reached from a real play: no `.lrc`, no image,
+        // a root armed for lyrics only — the offer goes out, and the cover's
+        // does not.
+        let dir = tempfile::tempdir().unwrap();
+        let track = dir.path().join("01.flac");
+        std::fs::write(&track, b"x").unwrap();
+        let mut s = test_source(Playlist {
+            entries: vec![Entry { path: track, title: None, duration_s: None }],
+            index: 0,
+        });
+        s.roots = Arc::new(AsyncRwLock::new(lyrics_root(dir.path())));
+        s.activate().await;
+        let n = bounded_poll(&mut s, "an offer expected").await;
+        assert_eq!(n.lyrics_archivable, Some(true));
+        assert!(n.lyrics.is_none() && n.cover_archivable.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_poll_loses_neither_the_cover_nor_the_lyrics() {
+        // The cover answers first, the `.lrc` later, and a core request
+        // cancels the poll in between. Awaiting the lyrics *after* taking the
+        // cover would lose the cover on that cancellation: it would exist
+        // only in the dropped future. Both must come out, each once.
+        let (cover_tx, cover_rx) = tokio::sync::oneshot::channel();
+        let (lyrics_tx, lyrics_rx) = tokio::sync::oneshot::channel();
+        let mut s = test_source(Playlist::default());
+        s.cover_in_flight = Some(cover_rx);
+        s.lyrics_in_flight = Some(lyrics_rx);
+        let cover = ritornello_proto::CoverRef::Path { path: "/nas/Album/cover.jpg".into() };
+        cover_tx.send(Some(cover.clone())).unwrap();
+
+        let mut seen = Vec::new();
+        // One scheduler pass, then the poll is dropped as the SDK's
+        // `select!` drops it.
+        tokio::select! {
+            biased;
+            n = s.poll_notification() => seen.push(n.expect("never None")),
+            _ = tokio::task::yield_now() => {}
+        }
+        // Still pending on the lyrics: a poll cancelled while waiting.
+        tokio::select! {
+            biased;
+            n = s.poll_notification() => seen.push(n.expect("never None")),
+            _ = tokio::task::yield_now() => {}
+        }
+        let lyrics = ritornello_proto::Lyrics { plain: Some("words".into()), synced: None };
+        lyrics_tx.send(Some(Some(lyrics.clone()))).unwrap();
+        seen.push(bounded_poll(&mut s, "never None").await);
+
+        assert_eq!(seen.iter().filter_map(|n| n.cover.clone()).collect::<Vec<_>>(), vec![cover]);
+        assert_eq!(seen.iter().filter_map(|n| n.lyrics.clone()).collect::<Vec<_>>(), vec![lyrics]);
+    }
+
+    #[tokio::test]
+    async fn archived_lyrics_are_found_by_the_next_play() {
+        // The whole loop on this side: offered, handed over, written beside
+        // the track, and read back from there on the next listen without the
+        // network.
+        let dir = tempfile::tempdir().unwrap();
+        let track = dir.path().join("01.flac");
+        std::fs::write(&track, b"x").unwrap();
+        let mut s = test_source(Playlist {
+            entries: vec![Entry { path: track.clone(), title: None, duration_s: None }],
+            index: 0,
+        });
+        s.roots = Arc::new(AsyncRwLock::new(lyrics_root(dir.path())));
+        let found = ritornello_proto::Lyrics { plain: None, synced: Some("[00:01.00]Hello".into()) };
+        s.archive_lyrics(FilesSource::identity(&track), found.clone()).await;
+        // Detached work: poll for the file rather than assume it is there.
+        let written = dir.path().join("01.lrc");
+        for _ in 0..250 {
+            if written.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(written.exists(), "the lyrics must land beside the track");
+
+        s.activate().await;
+        let n = bounded_poll(&mut s, "the archived lyrics announced").await;
+        assert_eq!(n.lyrics, Some(found));
     }
 
     #[tokio::test]

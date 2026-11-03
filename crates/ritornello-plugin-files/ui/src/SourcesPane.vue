@@ -54,6 +54,10 @@ function toggleArchive(name: string, archive: boolean): void {
   void props.send({ op: 'set_archive_covers', name, archive })
 }
 
+function toggleArchiveLyrics(name: string, archive: boolean): void {
+  void props.send({ op: 'set_archive_lyrics', name, archive })
+}
+
 function chooseCoverName(coverName: string): void {
   void props.send({ op: 'set_cover_name', cover_name: coverName })
 }
@@ -130,6 +134,18 @@ function goUp(): void {
           @change="toggleArchive(r.name, ($event.target as HTMLInputElement).checked)"
         />
         {{ t('archive_covers_label') }}
+      </label>
+
+      <!-- The lyrics' own switch, greyed by the same rule as the covers'. -->
+      <label class="flex items-center gap-1 text-sm">
+        <input
+          type="checkbox"
+          data-archive-lyrics
+          :checked="r.archive_lyrics"
+          :disabled="frozen || (r.kind === 'smb' && !r.writable)"
+          @change="toggleArchiveLyrics(r.name, ($event.target as HTMLInputElement).checked)"
+        />
+        {{ t('archive_lyrics_label') }}
       </label>
 
       <Button

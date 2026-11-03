@@ -30,7 +30,7 @@
 mod tests {
     use std::path::{Path, PathBuf};
 
-    /// The ten plugins shipped as their own archive, plus the core. Listed
+    /// The eleven plugins shipped as their own archive, plus the core. Listed
     /// here AND checked against `deploy/plugins.example.toml` below, so a
     /// plugin added to the repository without a version of its own is a red
     /// test rather than an archive named after the wrong number.
@@ -38,6 +38,7 @@ mod tests {
         "radio",
         "cd",
         "musicbrainz",
+        "lrclib",
         "nrj-metas",
         "ouifm-metas",
         "radiofrance-metas",

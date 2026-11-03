@@ -87,6 +87,16 @@ exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-nrj-metas"
 name = "musicbrainz"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-musicbrainz"
 
+# Song lyrics from LRCLIB (lrclib.net), kept in a cache in this plugin's own
+# data directory; admin page at /plugins/lrclib/ to see and empty it. It
+# completes only — lyrics a file carries beside itself always win, and it
+# asks nothing when lyrics are already held — so its place among the
+# `metadata` plugins is readability, not priority: after the ones that name
+# the song, since it needs an artist and a title to search.
+[[plugin]]
+name = "lrclib"
+exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-lrclib"
+
 [[plugin]]
 name = "generic-input"
 exec = "/usr/local/lib/ritornello/plugins/ritornello-plugin-generic-input"

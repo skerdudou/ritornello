@@ -1608,6 +1608,11 @@ mod tests {
                 // forces this test to be revisited when a field appears.
                 cover_href: None,
                 cover_origin: None,
+                // Same reason for lyrics: the plugin reads none, and the
+                // literal stays complete.
+                lyrics_href: None,
+                lyrics_synced: false,
+                lyrics_origin: None,
                 // Same reason: the MPD protocol carries no provenance, the
                 // plugin reads none, and the literal stays complete so
                 // that an added field forces a pass back through here.

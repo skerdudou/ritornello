@@ -37,6 +37,10 @@ struct Half {
     /// the plugin is moved into its loop: after that, it can no longer be
     /// queried.
     covers: bool,
+    /// Does this half want lyrics frames? Always `false` outside of a
+    /// display. Kept here for the same reason as `covers`, and read from
+    /// `DisplayPlugin::wants_lyrics` the same way.
+    lyrics: bool,
     /// The icon this half shows under. Always `None` outside of a source.
     ///
     /// Kept here for the same reason as `covers`: `announcement()` derives
@@ -198,6 +202,7 @@ impl Runtime {
         self.halves.push(Half {
             kind: PluginKind::Source,
             covers: false,
+            lyrics: false,
             icon,
             enriches_armed: false,
             serve: Box::pin(serve_source(l, plugin)),
@@ -213,9 +218,11 @@ impl Runtime {
         // flag impossible to falsify — there is no parameter to
         // fill in, only a plugin method to read.
         let covers = plugin.wants_covers();
+        let lyrics = plugin.wants_lyrics();
         self.halves.push(Half {
             kind: PluginKind::Display,
             covers,
+            lyrics,
             icon: None,
             enriches_armed: false,
             serve: Box::pin(serve_display(l, plugin)),
@@ -228,6 +235,7 @@ impl Runtime {
         self.halves.push(Half {
             kind: PluginKind::Input,
             covers: false,
+            lyrics: false,
             icon: None,
             enriches_armed: false,
             serve: Box::pin(serve_input(l, plugin)),
@@ -242,6 +250,7 @@ impl Runtime {
         self.halves.push(Half {
             kind: PluginKind::Metadata,
             covers: false,
+            lyrics: false,
             icon: None,
             enriches_armed,
             serve: Box::pin(serve_metadata(l, plugin)),
@@ -270,6 +279,9 @@ impl Runtime {
             // register of halves, so no path can announce covers
             // for a display that doesn't want any, nor the reverse.
             covers: self.halves.iter().any(|m| m.covers),
+            // Derived like `covers`, from the registered display's own
+            // `DisplayPlugin::wants_lyrics`.
+            lyrics: self.halves.iter().any(|m| m.lyrics),
             ui_version: self.ui_version.clone(),
             // Derived like `covers`: only a registered source half carries
             // one, read from its own `SourcePlugin::icon`.
@@ -692,6 +704,49 @@ mod tests {
                 a.covers, wants,
                 "the announcement must describe exactly what the registered display wants"
             );
+        }
+    }
+
+    /// A display that **overrides** `wants_lyrics`, and nothing else: the
+    /// twin of `DisplayThatWantsCovers`, for the same reason.
+    struct DisplayThatWantsLyrics;
+
+    #[async_trait::async_trait]
+    impl crate::DisplayPlugin for DisplayThatWantsLyrics {
+        async fn show(&mut self, _state: PlayerState) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn wants_lyrics(&self) -> bool {
+            true
+        }
+    }
+
+    /// Same invariant as `covers`: the flag is read from the registered
+    /// display, in both directions, with two displays that differ only by
+    /// `wants_lyrics`. The two flags are independent: wanting lyrics says
+    /// nothing about covers.
+    #[tokio::test]
+    async fn a_display_that_wants_lyrics_is_announced_so() {
+        for wants in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let register = dir.path().join("register.sock");
+            let listener = UnixListener::bind(&register).unwrap();
+            let prefix = dir.path().join("display");
+
+            let rt = Runtime::new("display".into(), register.clone(), prefix.clone(), "0.0.0-test", None);
+            let rt = if wants {
+                rt.display(DisplayThatWantsLyrics).unwrap()
+            } else {
+                // Does not override `wants_lyrics`: the default body decides.
+                rt.display(PlaceholderDisplay { received: Arc::new(Mutex::new(Vec::new())) })
+                    .unwrap()
+            };
+            tokio::spawn(async move { rt.run().await.unwrap() });
+
+            let a = read_announcement(&listener).await;
+            assert_eq!(a.kinds, vec![PluginKind::Display]);
+            assert_eq!(a.lyrics, wants, "the announcement must describe what the display wants");
+            assert!(!a.covers, "wanting lyrics must not announce covers");
         }
     }
 

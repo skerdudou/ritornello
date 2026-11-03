@@ -43,6 +43,7 @@ mod tests {
             domain: "WORKGROUP".into(),
             writable: false,
             archive_covers: false,
+            archive_lyrics: false,
         }
     }
 

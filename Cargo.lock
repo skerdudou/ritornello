@@ -1352,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-files-mount"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "ritornello-plugin-sdk",
@@ -1473,6 +1473,25 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ritornello-plugin-lrclib"
+version = "0.2.0-beta.8"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "reqwest",
+ "ritornello-i18n",
+ "ritornello-plugin-sdk",
+ "ritornello-proto",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

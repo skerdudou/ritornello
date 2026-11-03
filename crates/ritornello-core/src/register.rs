@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(
             stamped["contracts"],
             serde_json::json!({
-                "display": {"major": 1, "minor": 1},
+                "display": {"major": 1, "minor": 2},
                 "input": {"major": 1, "minor": 0},
                 "admin": {"major": 1, "minor": 0},
             })
@@ -1111,6 +1111,7 @@ mod tests {
                     kinds: vec![PluginKind::Metadata],
                     admin: false,
                     covers: false,
+                    lyrics: false,
                     enriches_armed: false,
                     ui_version: None,
                     protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -1132,6 +1133,7 @@ mod tests {
                 kinds: vec![PluginKind::Source],
                 admin: true,
                 covers: false,
+                lyrics: false,
                 enriches_armed: false,
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,

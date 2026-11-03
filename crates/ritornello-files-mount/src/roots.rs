@@ -45,6 +45,14 @@ pub struct Root {
     /// the write path says so rather than letting an `EROFS` bubble up.
     #[serde(default)]
     pub archive_covers: bool,
+    /// Keep on this root, beside a track, the lyrics a network contributor
+    /// found for it when it has no `.lrc` of its own. Its own flag rather
+    /// than a rider on `archive_covers`: a cover speaks for a whole folder,
+    /// a `.lrc` for one track, and an owner may welcome one and not the
+    /// other. False by default, for the same reason as `archive_covers`, and
+    /// like it **not a mount option** and inert on a share until `writable`.
+    #[serde(default)]
+    pub archive_lyrics: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +357,7 @@ mod tests {
             domain: String::new(),
             writable: false,
             archive_covers: false,
+            archive_lyrics: false,
         }
     }
 
@@ -364,6 +373,7 @@ mod tests {
             domain: String::new(),
             writable: false,
             archive_covers: false,
+            archive_lyrics: false,
         }
     }
 
@@ -513,6 +523,7 @@ mod tests {
             domain: String::new(),
             writable: false,
             archive_covers: false,
+            archive_lyrics: false,
         }
     }
 
@@ -545,6 +556,42 @@ path = "/media/usb"
         // The `writable` default matters: a share is not writable unless asked
         // for.
         assert!(!roots.by_name("nas").unwrap().writable);
+    }
+
+    #[test]
+    fn a_table_without_archive_lyrics_reads_back_as_false() {
+        // Every table written before this flag existed lacks it, and the
+        // device must read those as they were meant: nothing was ever
+        // allowed to write a lyrics file. The other flags are set here so a
+        // default borrowed from one of them (`archive_covers`, `writable`)
+        // could not pass for this one.
+        let roots: Roots = toml::from_str(
+            r#"
+[[root]]
+name = "nas"
+kind = "smb"
+host = "192.168.1.20"
+share = "musique"
+writable = true
+archive_covers = true
+"#,
+        )
+        .unwrap();
+        let nas = roots.by_name("nas").unwrap();
+        assert!(nas.archive_covers && nas.writable);
+        assert!(!nas.archive_lyrics);
+
+        // And the flag reads back when it is there.
+        let roots: Roots = toml::from_str(
+            "[[root]]
+name = \"usb\"
+kind = \"local\"
+path = \"/media/usb\"
+archive_lyrics = true
+",
+        )
+        .unwrap();
+        assert!(roots.by_name("usb").unwrap().archive_lyrics);
     }
 
     #[test]

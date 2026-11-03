@@ -131,6 +131,14 @@ privilege boundary](#the-privilege-boundary) below).
 
 Each plugin's own files, below, in its section.
 
+One rule is worth stating here rather than there, because it is a trap: **a
+cache that cleans its own directory needs a directory of its own.** `lrclib`
+keeps its lyrics cache in `cache/` under its data directory, never in the
+data directory itself: opening the cache and emptying it from the admin page
+both delete every file they do not recognise as one of their entries, and
+anything a later version put beside them — a settings file, a state file —
+would go with them.
+
 ### Writing a plugin of your own
 
 A plugin built outside this repository is a **third-party** plugin, and the
@@ -1573,6 +1581,56 @@ what a plugin rolled back past a release that added a name would read —
 reverts the setting alone, never the playlist that shares the file. Like
 `archive_covers`, it is read at every write and needs no restart.
 
+**A `.lrc` beside a track is its lyrics** (see [the lyrics
+chain](#the-lyrics-chain)): `<track stem>.lrc`, the **whole** name compared
+case-insensitively — on a share mounted case-insensitively `01 - song.lrc`
+and `01 - Song.lrc` are one file, and the writer below uses the very same
+predicate for its early refusal that a lyrics file "is already there", so
+what is read and what is never written over stay one set. Several
+candidates on a case-sensitive disk are settled by name, the exact case
+first. It is read leniently: UTF-8 with or without a byte-order mark,
+anything else as Windows-1252 (the encoding of every Windows tool of the
+2000s; not Latin-1, which would turn the typographic apostrophe `’`, `œ` or
+`…` into control characters; the five positions CP1252 leaves undefined keep
+their Latin-1 value, so the fallback never fails), through a bounded read so
+a huge file misnamed `.lrc` costs a few kilobytes. Timestamps make it
+synced, their absence plain text. The lookup runs under the same circuit
+breaker as the cover's, and its answer is told apart three ways: no `.lrc`
+(the one case worth offering to keep lyrics found elsewhere), a readable
+one, and one that holds nothing worth showing — logged and left alone, not
+offered over, since the owner's file is not ours to judge. A folder that
+cannot be listed is not "no `.lrc`": it is unknown, and earns no offer.
+
+**Keeping found lyrics is a per-root flag of its own, `archive_lyrics`**,
+false by default, toggled by the admin op `set_archive_lyrics` (`{"op":
+"set_archive_lyrics", "name": …, "archive": true|false}`), and shown on the
+page beside the covers' switch, greyed by the same rule (only an SMB share
+mounted read-only). It is separate from `archive_covers` because a cover
+speaks for a folder and a `.lrc` for one track, and an owner may welcome one
+and not the other. Like `archive_covers` it lives in `media-roots.toml`, is
+**not** a mount option, remounts nothing, and is read at every write. The
+plugin offers to keep lyrics (`lyrics_archivable`) only when the lookup
+answered that no `.lrc` is there, the root is armed, and a share is mounted
+writable; and it refuses again on arrival, in the cover's order and for the
+cover's reasons — the echo is not one of its files, no declared root owns
+the folder, the root is not armed or the share not writable, the lyrics are
+empty or over the ceiling, or **any** `<stem>.lrc` is already there,
+whatever its case: the owner's own lyrics, timed by hand, are worth more
+than anything the network found. Synced lyrics win over plain when both
+came, since timing is what a `.lrc` is for; the file is written in UTF-8,
+through a temporary in the same folder **hard-linked** to its name, never
+renamed: a rename replaces what it lands on, so a `.lrc` saved between the
+check and the write, or one only the share's own case folding sees (`CAFÉ.lrc`
+beside `Café.flac`), would be lost — the link fails with "already there"
+instead, judged by the filesystem itself. A share that refuses hard links
+gets the file created exclusively (`O_EXCL`) and written in place: still
+never an overwrite, only no longer atomic. The write works
+detached, under the archive's own twenty-second bound, and every outcome is
+a journal line ("lyrics archived at …", "lyrics not archived: …"). The
+homogeneity rule of covers has no object here: a `.lrc` names its track.
+`archive_lyrics` is a field of the roots table the mount helper reads too,
+which is why `files-mount` moved to 1.0.2 with it.
+
 **Updating an existing installation.** As for every other plugin,
 `ritornello-install` installs the binary and, on a device already in service,
 appends the `files` entry to `/etc/ritornello/plugins.toml` if it is
@@ -1640,8 +1698,8 @@ A display plugin receives the appliance's full state — `PlayerState`, the
 same structured payload that feeds the SPA's Player card (see
 [interface.md](interface.md)) — through a one-way call,
 `DisplayPlugin::show(state)`, no answer expected. It is not the only call:
-the protocol carries **three** kinds of frame today, and a plugin may ignore
-two of them. **The core imposes no
+the protocol carries **four** kinds of frame today, and a plugin may ignore
+three of them. **The core imposes no
 layout**: it hands over data, never composed lines, so a future display (an
 SSD1306 OLED over SPI/I2C, a wall panel with a scrolling ticker) is free to
 lay its own screen out, at whatever size, with no fallback rule to
@@ -1665,6 +1723,9 @@ what made that migration verifiable.
 - `{"frame":"cover","data":{…}}` — the bytes of the cover of what is
   playing, base64 on the wire, pushed **only** to the displays that asked
   for them.
+- `{"frame":"lyrics","data":{"href":…,"synced":[{"t_ms":…,"text":…}…],"plain":…}}`
+  — the lyrics of what is playing, already parsed (`display` contract 1.2),
+  pushed **only** to the displays that asked for them.
 
 **Why the catalogue has a channel of its own** rather than a field in
 `PlayerState`, since that is the decision a future reader is most likely to
@@ -1684,7 +1745,8 @@ radio republishes the same list on every save of its admin page, and that
 must not wake the displays.
 
 Both new frames have a **default body that ignores them** —
-`DisplayPlugin::catalogue` returns `Ok(())`, `DisplayPlugin::cover` too —
+`DisplayPlugin::catalogue` returns `Ok(())`, `DisplayPlugin::cover` too, and
+so does `DisplayPlugin::lyrics`, added later —
 which is what makes each new kind of frame a non-breaking addition, and is
 also why **no behaviour of this console plugin changed** when the two were
 added: a twenty-column screen has no use for either. A frame of a kind the
@@ -1717,6 +1779,22 @@ says which one it is, and a plugin that must answer "the cover of that
 track" (the MPD server does) has no other correlation available. Its ceiling
 is `COVER_MAX_BYTES`, **20 MiB** — see the MPD server's section below for
 what that number costs and what it excludes.
+
+Lyrics follow the covers' rules exactly. A display that wants them overrides
+`DisplayPlugin::wants_lyrics`, from which the SDK derives the announcement's
+`lyrics` flag (left off the wire when false, so a display that does not want
+them announces the line it announced before), and receives them in
+`DisplayPlugin::lyrics`, whose default body ignores them. The core pushes a
+frame only when the state's `lyrics_href` changes, after the state that
+names it, from its in-memory store. The lines arrive **already parsed**,
+times in milliseconds — never LRC, so the one parser of `ritornello-proto`
+stays the only one — and the object is the very one `GET /api/lyrics/{key}`
+serves, plus the `href` that tells which track the words belong to:
+`synced` (the timed lines when the LRC parses, else `null`) and `plain` (the
+text otherwise — an unparseable LRC included, still words worth showing —
+else `null`), both keys always present. **No bundled display asks for them
+yet** — neither the console nor `mpd` overrides `wants_lyrics` — so this
+frame has only ever travelled in tests.
 
 Every piece of information the core knows travels both raw and already
 resolved into words: `volume` is a number a display can turn into a gauge,
@@ -2336,8 +2414,10 @@ what it knows about it.
 
 **The current track is a partial state, completed by layers rather than
 overwritten by them.** `NowPlaying` carries `known` — what is already
-known of the track (artist, title, album, duration, release year, plus a
-boolean saying whether a cover is already held) — so a contributor can see what is
+known of the track (artist, title, album, duration, release year, plus two
+booleans saying whether a cover and lyrics are already held, and the
+duration the player measured on a file, see [the lyrics
+chain](#the-lyrics-chain)) — so a contributor can see what is
 missing and either fill it in or abstain, instead of blindly declaring
 everything it knows and letting the freshest answer win. Three layers
 feed it, from least informed to most:
@@ -2379,11 +2459,13 @@ project has always had: **a plugin still outranks ICY and file tags in
 all circumstances**, as long as the station does not change, because
 overwriting is the default and a plugin is the last layer to speak. What
 used to be stated as a rule in its own right is now a *consequence* of
-that default — and a deliberately chosen one, since it is what lets all
-four bundled plugins keep exactly the precedence they have today without
-a single line of theirs changing (only `musicbrainz` declares
-`fill_only`, and only on the path where it does not already know what is
-playing — see [the cover chain](#the-cover-chain) below). The reason a
+that default — and a deliberately chosen one, since it is what let the
+four metadata plugins bundled at the time keep exactly the precedence they
+had without a single line of theirs changing (`musicbrainz` declares
+`fill_only` only on the path where it does not already know what is
+playing — see [the cover chain](#the-cover-chain) below — and `lrclib`,
+added since, declares it on every answer: it only ever completes, see [the
+lyrics chain](#the-lyrics-chain)). The reason a
 plugin outranks tags too is the same one that puts it on top at all — a
 plugin fetches what the file cannot say (an online database, a separate
 feed), so letting the file overrule it would discard the more informed
@@ -2490,7 +2572,7 @@ A `plugins.toml` completed by an older version of the script, which only
 ever provisioned the file, is brought up to date by the next deployment
 without anything being lost: the entries already there are not touched.
 
-### The four bundled plugins
+### The five bundled plugins
 
 - `ritornello-plugin-musicbrainz` recognizes a disc through MusicBrainz.
   This is the code that used to live in `ritornello-plugin-cd`, where a
@@ -2542,7 +2624,7 @@ without anything being lost: the entries already there are not touched.
   FIP's 12 webradios, France Musique's 11, and the 45 `ici` (ex-France Bleu)
   local stations.
 
-  This is the plugin with the strongest case of the four: Radio France's
+  This is the plugin with the strongest case of the station plugins: Radio France's
   streams carry **no ICY metadata at all** — no `icy-metaint` header, not even
   filler text — so without it a Radio France station on the device shows
   nothing. The endpoint states itself when to be called again
@@ -2644,6 +2726,71 @@ without anything being lost: the entries already there are not touched.
   [README](../crates/ritornello-plugin-nrj-metas/README.md) details the
   measured timings, the filler and wallpaper-cover rules, and why
   `musicbrainz`'s own ICY probe needs no special case for these stations.
+- `ritornello-plugin-lrclib` finds the lyrics of what is playing on
+  [LRCLIB](https://lrclib.net), a free and open lyrics database, synced
+  (timestamped) when it has them. **It only completes**: every answer is
+  `fill_only`, and it does not even ask when the core says lyrics are already
+  held (`Known::lyrics`) — a `.lrc` beside the file, or words in its tags,
+  always win (see [the lyrics chain](#the-lyrics-chain)). Its place in
+  `plugins.toml` is therefore readability, not priority: after the plugins
+  that name the song, since it needs an artist **and** a title to search — a
+  lone title matches anything. It does not opt in to armed tracks.
+
+  What sets a search off is a **new song** — the playing identity with its
+  artist and title, folded the way matching folds them — and not a new
+  `NowPlaying`: the core sends one whenever `known` grows, and a measured
+  duration or a cover arriving for the same song is no reason to ask LRCLIB
+  again. One request at a time, as LRCLIB asks of its clients.
+
+  **The duration is the only thing that tells two versions apart.** Measured
+  on 2026-11-02, a search for "Get Lucky" returns twenty records with the
+  same artist and title, from 193 s to 370 s, and lyrics of the wrong version
+  drift off the music within a verse. A record is kept only within 3 s of the
+  track's length (LRCLIB itself tolerates about ±2 s on `/api/get`: 369 s
+  asked, 367 s answered), nearest first, then synced over plain, then the
+  same album. For a file the length is the one mpv measured
+  (`Known::measured_duration_s`), which the core fills on its next tick after
+  a track change — so a `files` or `cd` track that declares no duration of
+  its own waits **up to three seconds** for it before being searched without
+  one, rather than let LRCLIB pick any version and cache that guess. The wait
+  is decided on the source's **name** (`MEASURED_SOURCES`: `files` and `cd`):
+  a third-party source of files should declare `duration_s` itself, or its
+  tracks are searched at once, without a duration. With a duration it asks
+  `/api/get` first, then `/api/search`; without one, `/api/search` alone. A
+  record `/api/get` hands back for another artist (it matches loosely) is
+  checked like any other, and the search is asked before concluding there is
+  nothing. Names are sent as the track carries them; when that ends in an
+  absence and they hold what matching folds away ("Daft Punk feat. Pharrell
+  Williams", "Get Lucky (Radio Edit)"), one more search goes out under the
+  names without it, before concluding.
+
+  **A song LRCLIB does not have answers 503.** Measured on 2026-11-02: an
+  unknown track gets `ServerOverloaded`, every time, on `/api/get` and
+  `/api/search` alike, and `/api/get-cached` answers 404 even for a known
+  one, so it is of no use. An absence therefore cannot be told from an
+  outage, and the plugin treats every 503 — every unanswered request, in
+  fact: rate limit, timeout, unreachable, unreadable, or a body past 2 MiB —
+  as an outage: **nothing is emitted and nothing is cached**, the same song
+  is not asked about again for at least ten minutes (a song's length, so one
+  listening asks once) — longer when the server's `Retry-After` asks for
+  longer, capped at an hour — and no request at all goes out until the server's
+  `Retry-After` has passed — 60 s when it gives none, capped at an hour. That
+  spacing is in memory only: a restart is a legitimate reason to ask again.
+  A song LRCLIB answered about with nothing that fits, or as instrumental, is
+  `searched` (it shows as "searched and found nothing" in the provenance
+  dialog, see [interface.md](interface.md#where-the-metadata-comes-from)).
+
+  **What it found is kept on disk**, in `cache/` under its data directory
+  (see [Where a plugin keeps its data](#where-a-plugin-keeps-its-data)):
+  one JSON file per song, named by a hash of its key — artist and title
+  folded, and the duration, since two versions of a song are two entries;
+  the album is not part of it. Lyrics found never expire (published lyrics do
+  not change); an absence holds 30 days (LRCLIB grows); an outage is never
+  kept, since remembered as an absence it would hide lyrics for a month. The
+  directory is capped at 20 MiB, least recently used first out — a few
+  thousand songs, small next to an SD card. Its admin page shows the
+  cache's size, how many songs it holds with and without lyrics, a button to
+  empty it, and credits LRCLIB.
 
 ### Splitting the ICY string
 
@@ -2954,6 +3101,105 @@ millisecond — a disk cache would buy almost nothing here, while adding a
 directory to provision, a size to police, and one more piece of state to
 reason about when something looks wrong.
 
+### The lyrics chain
+
+Lyrics are arbitrated **like the cover, for the cover's reasons**, in three
+tiers (`Metadata::selected_lyrics`):
+
+1. **The Source** — `files` reads a `.lrc` lying beside the track (same
+   folder, same stem, extension in any case) and announces it on its own
+   channel, `SourceMessage::lyrics` (`source` contract 1.3), as it announces
+   a `folder.jpg`: in a notification once the listing has resolved, so
+   playback never waits on a share. Credited to the Source's name.
+2. **The file's own tags**, read by the core from mpv's `metadata`
+   property, the same one the text tags come from (`player::mpv::file_lyrics`).
+   The keys were measured on 2026-11-03 with ffmpeg 6.1.1 and mpv 0.37:
+   an mp3's ID3v2 `USLT` frame surfaces as `lyrics-<language>` (or
+   `lyrics-<descriptor>-<language>`), never as plain `lyrics`; an mp3 tagged
+   by ffmpeg itself, a flac's Vorbis comment `LYRICS` and an m4a's `©lyr` atom
+   as `lyrics` (case aside); a flac's `UNSYNCEDLYRICS` (foobar2000, Mp3tag) as
+   itself. So the words are `lyrics`, else the first key starting with
+   `lyrics-`, and `unsyncedlyrics` is the plain text. Credited to `tags`.
+3. **The `metadata` plugins** — the overriding ones first, then the
+   `fill_only` ones, each group in declaration order. `lrclib` is the one
+   shipped contributor, and it only completes.
+
+A plugin, even an overriding one, **never replaces words the owner put next
+to the file or inside it**: the first two tiers are judged before any plugin
+is looked at, which is why `lrclib` need not ask when `Known::lyrics` is
+already true.
+
+**A plugin's lyrics count only while they name the song announced now.** The
+identity echo that guards every enrichment is not enough here: a radio's
+identity is its stream's URL, the same from one song to the next, so words
+found for song A would stay up under song B — whether the station moved on
+before the plugin answered again, or the answer about A arrived after B was
+announced. An `Enrichment` that carries `lyrics` must therefore carry
+`lyrics_subject`, the artist and title it was found **for**; the core drops
+lyrics that come without one, or with a blank name in it, at the door
+(`Enrichment::cleaned`), and keeps a plugin's lyrics only while that subject
+matches the artist and title on screen. The match folds both sides the same
+way (`normalize_for_match`, shared with `lrclib`'s own matching): lowercase,
+common accents folded, a trailing parenthesised or bracketed suffix
+("(Live)", "[Radio Edit]") and a featuring dropped, punctuation reduced to
+spaces — and a side with nothing left never matches. The Source's and the
+tags' lyrics carry no subject and need none: they belong to the file, and a
+new file is a new identity.
+
+**What travels where.** Plugins learn only whether lyrics are held
+(`Known::lyrics`, a boolean, as for the cover), and, for a file, the
+duration mpv measured on it (`Known::measured_duration_s`, `metadata`
+contract 1.2). The second is a separate field from `duration_s` on purpose:
+a lyrics service holds several versions of one song, and only the length of
+what is actually playing tells them apart — a duration copied from a
+database would pick the database's version, not ours. The core resets it at
+every track change, since the previous file's length would pick the wrong
+version of the next one, and tells it only while something plays.
+
+The words themselves never ride the state frame, which goes out several
+times per second: `Morceau` carries `lyrics_href`, always of the form
+`/api/lyrics/{key}`, `lyrics_synced` (the lyrics behind it are timestamped,
+so a display can offer a following view without fetching them first) and
+`lyrics_origin`, who supplied them; the provenance dialog gains a "Lyrics"
+row. The key is a hash of the content, so other words get another URL. The
+route answers from a small table **in memory** (`LyricsStore`, eight sets of
+lyrics — only the retained one is published; the others cover a page still
+fetching the previous track's), filled **before** the state that names
+them goes out, so a page never receives an href the route does not hold;
+it reads no disk at all, as no HTTP route may block. See
+[interface.md](interface.md) for the route and the page.
+
+**One LRC parser for the whole project**, in `ritornello-proto`
+(`parse_lrc`): `files` reads LRC, LRCLIB sends it, the core turns it into
+lines, and two parsers would disagree on a real-world file sooner or later.
+It is deliberately lenient — a lyrics file is written by hand and abused by
+every editor that ever touched it: a byte-order mark and CRLF, several
+timestamps ahead of one text, enhanced-LRC word tags (dropped), the headers
+`[ar:]`, `[ti:]`, `[al:]`, `[by:]`, `[length:]` (ignored) and `[offset:±N]`,
+applied to every line — by the LRC convention a positive offset shows the
+words **earlier**. Text with no timestamp is plain lyrics, not synced ones.
+Every set of lyrics, whoever brought it, goes through one gate
+(`Lyrics::validated`): empty text is no lyrics, and past 64 KiB
+(`LYRICS_MAX_BYTES`, `plain` and `synced` together) it is not lyrics but a
+book, or a binary read as text, and is dropped.
+
+**Lyrics found elsewhere can be kept beside the file**, under the same
+rules as an archived cover. A Source offers it (`SourceMessage::lyrics_archivable`);
+the core then hands the retained words over **inline** —
+`SourceReq::ArchiveLyrics { identity, lyrics }`, text bounded by the gate
+above, so no staged file — only when they come from a **plugin** (the
+`.lrc` is already there, the tags already carry theirs), only while
+something plays (an armed track's folder is one nobody listened to), and
+once per set of words and per track. `files` writes them as
+`<track stem>.lrc` on a root armed for it (see its section above). In the
+SDK a Source declares both in a notification (`Notification::lyrics`,
+`Notification::lyrics_archivable`) and receives the hand-over in
+`SourcePlugin::archive_lyrics`, which must **return at once** and write in a
+detached task, as `archive_cover` does; its default ignores the words.
+
+**Displays can ask for the lyrics**, already parsed, as they ask for covers
+— see the `lyrics` frame in [the display section](#ritornello-plugin-console--the-display).
+
 ### Where it shows up
 
 On the displays, arbitration's result lands in the same structured state as
@@ -3069,7 +3315,8 @@ Opt in only when what you answer is true of a silent track too. `musicbrainz`
 does (a disc's title and an album's cover are static facts, and the disc path
 still queries once per disc); the three station plugins (`radiofrance-metas`,
 `nrj-metas`, `ouifm-metas`) do not, since they describe what is on air, and
-there is nothing on air while stopped. A plugin that opts in handles an armed
+there is nothing on air while stopped; nor does `lrclib`, which looks lyrics
+up for a song being heard. A plugin that opts in handles an armed
 identity like a playing one; it can read `armed` to tell them apart.
 
 One more field of `Enrichment` needs attention from a plugin only if it can
@@ -3085,7 +3332,7 @@ plugin need not track staleness for it separately — and only the plugin
 currently winning the arbitration gets to anchor it: one held in reserve
 answering with an unrelated correction (a fixed title, a late cover) must not
 be read as fresh progress, or the bar would jump backward the instant it
-spoke. Two of the four bundled plugins fill it. `radiofrance-metas` computes
+spoke. Two of the five bundled plugins fill it. `radiofrance-metas` computes
 it from the same `startTime` it already reads for `duration_s`.
 `ouifm-metas` has no date to read — its feed carries none — so it answers only
 from a start it witnessed: a frame pushed while its connection was already
@@ -3094,7 +3341,20 @@ with is the track already on air, of unknown elapsed time (`None`), unless it
 is the very track the plugin saw start before a reconnection. Its bar
 therefore appears from the second track heard on a station, and runs a few
 seconds ahead of the speaker, the audio stream lagging the feed by its
-buffering. The other two leave it at `None`.
+buffering. The other three leave it at `None`.
+
+**Lyrics need one more field than the words.** A plugin that finds lyrics
+sets `lyrics` (`plain` and/or `synced`, the latter LRC) **and**
+`lyrics_subject`, the artist and title it searched for; without the subject,
+or with a blank name in it, the core drops the lyrics at the door, since it
+could not tell them from a late answer about the previous song (see [the
+lyrics chain](#the-lyrics-chain)). Send the names as you queried them: the
+core folds them itself before comparing. `Known::lyrics` says whether lyrics
+are already held — there is no point asking then, as nothing a plugin
+brings displaces the Source's or the tags' — and `Known::measured_duration_s`
+carries the length mpv measured on a file, which arrives a tick after the
+track does and is reset at every track change. A plugin that keys its work
+on a new `NowPlaying` rather than on a new song will search twice per track.
 
 `next_enrichment` must be **cancellable without loss**: its future is
 dropped as soon as a `NowPlaying` arrives, so any durable state (open
@@ -3242,8 +3502,8 @@ and a single set of components serve everyone. An incompatible contract
 is reported in the interface rather than breaking the page.
 
 Native ESM requires no build step: a simple plugin can ship a
-**hand-written** `ui.js`. The four bundled plugin pages (radio, files,
-generic-input, mpd) use a Vite build (see
+**hand-written** `ui.js`. The seven bundled plugin pages (radio, cd, files,
+generic-input, mpd, musicbrainz, lrclib) use a Vite build (see
 `crates/ritornello-plugin-radio/ui/`) to benefit from `.vue` files and
 TypeScript — a comfort choice, not a requirement.
 

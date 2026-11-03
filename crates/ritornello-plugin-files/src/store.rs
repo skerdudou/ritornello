@@ -260,6 +260,7 @@ mod tests {
                 domain: String::new(),
                 writable,
                 archive_covers: false,
+                archive_lyrics: false,
             }],
         };
         (dir, roots)

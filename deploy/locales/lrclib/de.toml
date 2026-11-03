@@ -1,0 +1,15 @@
+# Admin page of the lrclib plugin: the lyrics cache it keeps on the device.
+# English is embedded in the binary; this German pack ships separately, and a
+# key-parity test forbids them to diverge.
+title = "Liedtext-Cache"
+intro = "Auf LRCLIB gefundene Liedtexte und die Titel, für die es keine hat, werden auf diesem Gerät aufbewahrt, damit ein erneut gehörter Titel nicht noch einmal abgefragt wird. Ein Titel ohne Liedtext wird nach 30 Tagen erneut abgefragt."
+size = "Größe auf dem Datenträger"
+found = "Titel mit Liedtext"
+absent = "Titel ohne Liedtext"
+size_bytes = "{n} B"
+size_kib = "{n} KiB"
+size_mib = "{n} MiB"
+clear = "Leeren"
+attribution = "Die Liedtexte stammen von LRCLIB, einer freien und offenen Liedtext-Datenbank:"
+bad_request = "Unerwartete Anfrage: {detail}"
+clear_failed = "der Liedtext-Cache konnte nicht geleert werden"

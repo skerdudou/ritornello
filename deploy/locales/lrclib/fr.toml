@@ -1,0 +1,15 @@
+# Admin page of the lrclib plugin: the lyrics cache it keeps on the device.
+# English is embedded in the binary; this French pack ships separately, and a
+# key-parity test forbids them to diverge.
+title = "Cache des paroles"
+intro = "Les paroles trouvées sur LRCLIB, et les morceaux pour lesquels il n'en a pas, sont gardés sur l'appareil : un morceau réentendu n'est pas redemandé. Un morceau sans paroles est redemandé au bout de 30 jours."
+size = "Taille sur le disque"
+found = "Morceaux avec paroles"
+absent = "Morceaux sans paroles"
+size_bytes = "{n} o"
+size_kib = "{n} Kio"
+size_mib = "{n} Mio"
+clear = "Vider"
+attribution = "Les paroles viennent de LRCLIB, une base de paroles libre et ouverte :"
+bad_request = "Requête inattendue : {detail}"
+clear_failed = "impossible de vider le cache des paroles"

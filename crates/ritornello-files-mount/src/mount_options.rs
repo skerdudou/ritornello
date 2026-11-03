@@ -85,6 +85,7 @@ mod tests {
             domain: String::new(),
             writable: false,
             archive_covers: false,
+            archive_lyrics: false,
         }
     }
 

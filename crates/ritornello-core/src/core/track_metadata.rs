@@ -271,6 +271,11 @@ impl<P: Player> Core<P> {
         // was for this one — the same "absent = keep, until what it described
         // is gone" reading `preset_count` gets on a source change.
         self.source_cover_archivable = false;
+        // The same folder reasoning for the offer to keep lyrics, and the
+        // slot goes with the slate: the words of the track that left were
+        // judged for it, not for this one.
+        self.source_lyrics_archivable = false;
+        self.lyrics_archive_attempted = None;
         // The track changed: the previous track's anchor must not keep
         // advancing under the next one's title. The last published position
         // must disappear with it, otherwise the frame emitted right away
@@ -278,6 +283,12 @@ impl<P: Player> Core<P> {
         // until the next tick (up to one second).
         self.position_anchor = None;
         self.position_s = None;
+        // The measured duration too, and for the plugins it is worse than a
+        // second of wrong display: it now rides `known` (see `known`), and a
+        // lyrics plugin told the previous track's length would pick the wrong
+        // version of this one — or settle that it has none. The next tick
+        // measures the new file.
+        self.measured_duration_s = None;
         let np = NowPlaying {
             source: self.active_source.clone(),
             identity: self.metadata.identity().cloned(),
@@ -286,7 +297,7 @@ impl<P: Player> Core<P> {
             // rather than a frozen `Known::default()`: the value stays
             // correct if the reset were ever to change, and `publish_state`
             // republishes this same field as soon as it stops being empty.
-            known: self.metadata.known(),
+            known: self.known(),
             armed: self.armed,
         };
         // Failure impossible in practice: a `watch::Sender::send` only fails
@@ -333,6 +344,10 @@ impl<P: Player> Core<P> {
         if !armed && let Some(key) = self.metadata.published_cover().map(str::to_string) {
             self.start_cover_archive(&key);
         }
+        // The same debt for lyrics found while it was armed.
+        if !armed {
+            self.start_lyrics_archive();
+        }
     }
 
     /// Title announced by the stream itself (ICY header seen by mpv).
@@ -369,11 +384,27 @@ impl<P: Player> Core<P> {
     /// finite content — hence during the only kind of playback where file
     /// tags exist. Using it would have produced a layer that never shows
     /// up, with nothing in the logs.
-    pub(super) fn handle_file_tags(&mut self, track: ritornello_proto::Track) {
+    ///
+    /// **The lyrics are always restated, `None` included.** The tags tier
+    /// carries no subject, and on a stream that sends file-style tags (an
+    /// Ogg stream's Vorbis comments) the identity never changes from one
+    /// song to the next: if a frame without lyrics left the previous ones in
+    /// place, the last song's words would stay up under every song after it.
+    /// Each frame describes the whole tag set, so its absence of lyrics is a
+    /// fact, not silence.
+    pub(super) fn handle_file_tags(
+        &mut self,
+        track: Option<ritornello_proto::Track>,
+        lyrics: Option<ritornello_proto::Lyrics>,
+    ) {
         if self.standby || !self.playback {
             return;
         }
-        if !self.metadata.set_tags(track) {
+        // Both applied before either is judged: a `||` would skip the lyrics
+        // whenever the text changed.
+        let tags_changed = track.is_some_and(|t| self.metadata.set_tags(t));
+        let lyrics_changed = self.metadata.set_lyrics_tags(lyrics);
+        if !tags_changed && !lyrics_changed {
             return;
         }
         self.publish_state();
@@ -539,6 +570,9 @@ impl<P: Player> Core<P> {
         // relaunch the fetch for the new target.
         self.start_cover_fetch();
         self.publish_state();
+        // After the screen, like the cover's archive: keeping the words on
+        // the share is a convenience the listener never waits for.
+        self.start_lyrics_archive();
     }
 
     /// Retains the cover a Source just declared on its own channel (see
@@ -853,6 +887,84 @@ impl<P: Player> Core<P> {
         drop(task);
     }
 
+    /// Hands the retained lyrics to the active Source, if it offered to keep
+    /// them and they came from somewhere else.
+    ///
+    /// Four conditions, each a refusal the cover's archive makes too:
+    /// - the Source made the offer (a radio has no folder to write into);
+    /// - something plays (an armed track's folder is one nobody listened to:
+    ///   `publish_armed_flag` calls again on Play);
+    /// - the words come from a **plugin** — the Source's own `.lrc` is
+    ///   already there, and the file's tags already carry theirs;
+    /// - not already attempted for this key: one hand-over per set of words
+    ///   and per track, never one per enrichment of the same answer.
+    ///
+    /// Callable at any time: each caller is a moment one of these may have
+    /// just become true (an enrichment, the offer, Play).
+    pub(super) fn start_lyrics_archive(&mut self) {
+        if !self.source_lyrics_archivable || self.armed {
+            return;
+        }
+        if !self.metadata.lyrics_from_a_plugin() {
+            return;
+        }
+        let Some(key) = self.metadata.lyrics_key() else { return };
+        if self.lyrics_archive_attempted.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        let Some((lyrics, _)) = self.metadata.selected_lyrics() else { return };
+        let lyrics = lyrics.clone();
+        // Read now, beside the words it belongs to: the echo designates the
+        // folder, and inside the task playback may have moved on.
+        let Some(identity) = self.metadata.identity().cloned() else { return };
+        let Some(source) = self.sources.get(&self.active_source).cloned() else { return };
+        self.lyrics_archive_attempted = Some(key.clone());
+        let task = tokio::spawn(async move {
+            // Detached: the SDK answers before writing, but a request still
+            // costs a round trip the core loop must not wait for. A failure is
+            // only logged — the slot stays taken, since repeating the request
+            // for every enrichment of this answer would only repeat it.
+            if let Err(e) = source.request(ritornello_proto::SourceReq::ArchiveLyrics { identity, lyrics }).await {
+                tracing::warn!("lyrics {key}: the hand-over to the source failed: {e}");
+            }
+        });
+        #[cfg(test)]
+        {
+            self.lyrics_archive_task = Some(task);
+        }
+        #[cfg(not(test))]
+        drop(task);
+    }
+
+    /// Waits for the task `start_lyrics_archive` detached, if any. Test-only,
+    /// like `settle_cover_archive`.
+    #[cfg(test)]
+    pub(crate) async fn settle_lyrics_archive(&mut self) {
+        if let Some(task) = self.lyrics_archive_task.take() {
+            task.await.expect("the lyrics archive task must not panic");
+        }
+    }
+
+    /// The lyrics store the HTTP route and the display relays read — the
+    /// core's own, handed to them by `assemble_covers_and_core`.
+    pub(crate) fn app_lyrics(&self) -> &Arc<crate::lyrics::LyricsStore> {
+        &self.lyrics
+    }
+
+    /// What the `metadata` plugins are told is known: `Metadata::known`,
+    /// plus the duration mpv measured on the file.
+    ///
+    /// Added here because `Metadata` never sees mpv's measure, and under the
+    /// condition `player_state` publishes it: something plays and the device
+    /// is awake. A stream has none (`refresh_position` clears it).
+    pub(super) fn known(&self) -> ritornello_proto::Known {
+        let mut known = self.metadata.known();
+        if self.playback && !self.standby {
+            known.measured_duration_s = self.measured_duration_s;
+        }
+        known
+    }
+
     /// The cache the detached task of `start_cover_fetch` fills — **the
     /// same one** as the HTTP `AppState`'s, see the `covers` field doc.
     /// Test-only: it is what lets tests prove the sharing without going
@@ -907,6 +1019,7 @@ mod tests {
                     kinds: vec![ritornello_proto::PluginKind::Metadata],
                     admin: false,
                     covers: false,
+                    lyrics: false,
                     enriches_armed: false,
                     ui_version: None,
                     protocol: ritornello_proto::PROTOCOL_VERSION,
@@ -2404,5 +2517,284 @@ mod tests {
         // channel holds every fetch's answer, so an empty one says none ran.
         tokio::task::yield_now().await;
         assert!(cover_rx.try_recv().is_err(), "no second fetch of a cover already shown");
+    }
+
+    fn lrc(text: &str) -> ritornello_proto::Lyrics {
+        ritornello_proto::Lyrics { plain: None, synced: Some(text.into()) }
+    }
+
+    /// The Source's probe notification carrying the `.lrc` beside the file.
+    fn with_lyrics(l: ritornello_proto::Lyrics) -> SourceUpdate {
+        SourceUpdate { lyrics: Some(l), ..sdk_frame() }
+    }
+
+    fn lyrics_href(l: &ritornello_proto::Lyrics) -> String {
+        let validated = l.clone().validated().expect("valid test lyrics");
+        format!("{}{}", crate::lyrics::HREF_PREFIX, crate::lyrics::key(&validated))
+    }
+
+    #[tokio::test]
+    async fn source_lyrics_become_a_local_href_in_the_state() {
+        let (mut core, mut np_rx, mut state_rx, _d) = setup_metadata(vec![]);
+        core.handle_source_update("radio", plays(serde_json::json!({"kind": "file", "path": "/a.flac"})));
+        let words = lrc("[00:01.00]Hello\n[00:02.00]World");
+        core.handle_source_update("radio", with_lyrics(words.clone()));
+
+        let state = state_rx.borrow_and_update().clone();
+        assert_eq!(state.track.lyrics_href.as_deref(), Some(lyrics_href(&words).as_str()));
+        assert!(state.track.lyrics_synced);
+        assert_eq!(state.track.lyrics_origin.as_deref(), Some("radio"));
+        assert!(np_rx.borrow_and_update().known.lyrics, "a plugin must know it need not look");
+
+        // Words the gate refuses are "nothing new", never "no more lyrics".
+        core.handle_source_update("radio", with_lyrics(ritornello_proto::Lyrics::default()));
+        assert_eq!(
+            core.player_state().track.lyrics_href.as_deref(),
+            Some(lyrics_href(&words).as_str()),
+            "a malformed declaration must not erase the valid one"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_lyrics_from_an_inactive_source_are_not_retained() {
+        let (mut core, _np_rx, _state_rx, _d) = setup_metadata(vec![]);
+        core.handle_source_update("radio", plays(serde_json::json!({"kind": "file", "path": "/a.flac"})));
+        core.handle_source_update("cd", with_lyrics(lrc("[00:01.00]Not mine")));
+        assert_eq!(core.player_state().track.lyrics_href, None);
+    }
+
+    /// What the page does on receiving the state: fetch the href. Through
+    /// the real router, with the core's own store. If `publish_state` ever
+    /// published before storing, the assertion it carries under test fires
+    /// right here, on the publication this test triggers.
+    #[tokio::test]
+    async fn the_http_route_serves_the_lyrics_the_core_just_published() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (mut core, _np_rx, mut state_rx, _d) = setup_metadata(vec![]);
+        core.handle_source_update("radio", plays(serde_json::json!({"kind": "file", "path": "/a.flac"})));
+        let words = lrc("[00:01.00]Hello\n[00:02.00]World");
+        core.handle_source_update("radio", with_lyrics(words.clone()));
+        let href = state_rx.borrow_and_update().track.lyrics_href.clone().expect("published");
+        let key = href.strip_prefix(crate::lyrics::HREF_PREFIX).unwrap().to_string();
+
+        let app = crate::status::router(crate::status::AppState {
+            lyrics: core.app_lyrics().clone(),
+            ..crate::status::tests_support::app_state()
+        });
+        let resp = app.clone().oneshot(Request::get(&href).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "the route must read the store the core filled");
+        assert_eq!(resp.headers()[header::ETAG], format!("\"{key}\"").as_str());
+        assert_eq!(resp.headers()[header::CACHE_CONTROL], "private, max-age=31536000, immutable");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let served: ritornello_proto::RenderedLyrics = serde_json::from_slice(&body).unwrap();
+        assert_eq!(served, ritornello_proto::RenderedLyrics::from_lyrics(&words.validated().unwrap()));
+        let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(raw["plain"], serde_json::Value::Null, "both keys always present, the page reads them");
+
+        let revalidation = Request::get(&href)
+            .header(header::IF_NONE_MATCH, format!("\"{key}\""))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(revalidation).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_lyrics_key_is_a_404() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let app = crate::status::router(crate::status::tests_support::app_state());
+        let resp = app
+            .oneshot(Request::get("/api/lyrics/0123456789abcdef").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_measured_duration_reaches_the_metadata_plugins() {
+        let (mut core, mut np_rx, _state_rx, _d) = setup_metadata(vec![]);
+        core.apply(SourceAction::play("/music/a.flac").finite()).await.unwrap();
+        core.handle_source_update("radio", plays(serde_json::json!({"kind": "file", "path": "/music/a.flac"})));
+        core.set_progress(Some(1.0), Some(254.0));
+        core.refresh_position().await;
+        core.publish_state();
+        assert_eq!(np_rx.borrow_and_update().known.measured_duration_s, Some(254));
+
+        // The next file: the previous length must not be told about it, or a
+        // lyrics plugin would pick the wrong version of the new song.
+        core.handle_source_update("radio", plays(serde_json::json!({"kind": "file", "path": "/music/b.flac"})));
+        assert_eq!(np_rx.borrow_and_update().known.measured_duration_s, None, "the previous file's length");
+
+        // The new file's own length, once measured, is told.
+        core.refresh_position().await;
+        core.publish_state();
+        assert_eq!(np_rx.borrow_and_update().known.measured_duration_s, Some(254));
+
+        // Nothing plays: nothing measured is told.
+        core.handle_command(Command::Power).await.unwrap();
+        assert_eq!(np_rx.borrow_and_update().known.measured_duration_s, None, "in standby");
+    }
+
+    #[tokio::test]
+    async fn embedded_lyrics_reach_the_state_and_leave_with_the_next_song() {
+        // The reviewer's case: a stream sending file-style tags keeps one
+        // identity, so only the next tag frame can take the words down.
+        let (mut core, _np_rx, mut state_rx, _d) = setup_metadata(vec![]);
+        core.apply(SourceAction::play("/music/a.flac").finite()).await.unwrap();
+        core.handle_source_update("radio", plays(serde_json::json!({"kind": "stream", "url": "http://ogg"})));
+        let song = |title: &str| ritornello_proto::Track { title: Some(title.into()), ..Default::default() };
+        let words = lrc("[00:01.00]First song");
+        core.handle_file_tags(Some(song("A")), Some(words.clone()));
+        let state = state_rx.borrow_and_update().clone();
+        assert_eq!(state.track.lyrics_href.as_deref(), Some(lyrics_href(&words).as_str()));
+        assert_eq!(state.track.lyrics_origin.as_deref(), Some(crate::metadata::ORIGIN_TAGS));
+
+        core.handle_file_tags(Some(song("B")), None);
+        let state = state_rx.borrow_and_update().clone();
+        assert_eq!(state.track.title.as_deref(), Some("B"));
+        assert_eq!(state.track.lyrics_href, None, "song A's words must not stay up under song B");
+    }
+
+    /// A song played again — a radio coming back to it — is the most recent
+    /// entry of the lyrics store, whatever its age: left where it was, the
+    /// least recent, the next song's words would evict it while the page may
+    /// still be fetching it.
+    #[tokio::test]
+    async fn lyrics_published_again_are_not_the_next_ones_evicted() {
+        let (mut core, _np_rx, mut state_rx, _d) = setup_metadata(vec![]);
+        core.apply(SourceAction::play("/music/a.flac").finite()).await.unwrap();
+        core.handle_source_update("radio", plays(serde_json::json!({"kind": "stream", "url": "http://ogg"})));
+        let song = |i: usize| ritornello_proto::Track { title: Some(format!("Song {i}")), ..Default::default() };
+        let words = |i: usize| lrc(&format!("[00:01.00]Words of song {i}"));
+        let key = |i: usize| lyrics_href(&words(i)).trim_start_matches(crate::lyrics::HREF_PREFIX).to_string();
+        // The store filled, song 0 the least recent.
+        for i in 0..crate::lyrics::CAPACITY {
+            core.handle_file_tags(Some(song(i)), Some(words(i)));
+        }
+        // Song 0 again, still held: published from the store as it is.
+        core.handle_file_tags(Some(song(0)), Some(words(0)));
+        assert_eq!(state_rx.borrow_and_update().track.lyrics_href, Some(lyrics_href(&words(0))));
+        // A new song: the least recent goes, and that is no longer song 0.
+        core.handle_file_tags(Some(song(99)), Some(words(99)));
+        assert!(core.lyrics.get(&key(0)).is_some(), "the words published again were evicted");
+        assert!(core.lyrics.get(&key(1)).is_none(), "the least recent goes once the store is full");
+        assert!(core.lyrics.get(&key(99)).is_some());
+    }
+
+    /// A real `USLT` frame, read by the same libavformat mpv is built on:
+    /// what reaches the `metadata` property is what `file_lyrics` must read.
+    #[tokio::test]
+    async fn an_embedded_uslt_frame_reaches_file_lyrics_through_ffmpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(mp3) = test_mp3_with_lyrics(dir.path()) else {
+            eprintln!("ffmpeg absent: test skipped");
+            return;
+        };
+        let Ok(out) = std::process::Command::new("ffprobe")
+            .args(["-loglevel", "error", "-show_entries", "format_tags", "-of", "json"])
+            .arg(&mp3)
+            .output()
+        else {
+            eprintln!("ffprobe absent: test skipped");
+            return;
+        };
+        let probed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let tags = &probed["format"]["tags"];
+        let l = crate::player::mpv::file_lyrics(tags).unwrap_or_else(|| panic!("no lyrics read from {tags}"));
+        assert_eq!(l.synced.as_deref(), Some(EMBEDDED_LRC));
+    }
+
+    #[tokio::test]
+    async fn plugin_lyrics_are_archived_once_when_the_source_offers() {
+        let mut core = archiving_core().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.offer_lyrics_archive().await;
+        core.declare_plugin_lyrics("Words").await;
+        let sent = core.lyrics_archive_requests();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0].0["path"], "/mnt/ritornello/nas/Album/01.flac", "the echo names the folder");
+        assert_eq!(sent[0].1.plain.as_deref(), Some("Words"));
+
+        // The next probe restates the offer: the same words are not sent again.
+        core.offer_lyrics_archive().await;
+        assert_eq!(core.lyrics_archive_requests().len(), 1, "once per set of words");
+
+        // Other words for the same track are another key.
+        core.declare_plugin_lyrics("Corrected words").await;
+        assert_eq!(core.lyrics_archive_requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_offer_arriving_after_the_words_still_archives_them() {
+        // A plugin answering from its cache beats a folder probe on a
+        // sleeping share.
+        let mut core = archiving_core().await;
+        core.play_file("/mnt/ritornello/nas/Album/02.flac").await;
+        core.declare_plugin_lyrics("Words").await;
+        assert!(core.lyrics_archive_requests().is_empty(), "no offer yet");
+        core.offer_lyrics_archive().await;
+        assert_eq!(core.lyrics_archive_requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_archive_request_without_the_source_s_offer() {
+        let mut core = core_without_offer().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.declare_plugin_lyrics("Words").await;
+        assert!(core.lyrics_archive_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_offer_is_forgotten_with_the_track() {
+        let mut core = archiving_core().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.offer_lyrics_archive().await;
+        // Another folder, whose probe makes no lyrics offer.
+        core.play_file("/mnt/ritornello/nas/Other/01.flac").await;
+        core.declare_plugin_lyrics("Words").await;
+        assert!(core.lyrics_archive_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lyrics_from_the_source_itself_are_never_sent_back_to_it() {
+        let mut core = archiving_core().await;
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.offer_lyrics_archive().await;
+        // The `.lrc` beside the file, then a plugin's words below it.
+        core.handle_source_update(ARCHIVING_SOURCE, with_lyrics(lrc("[00:01.00]From the share")));
+        core.declare_plugin_lyrics("Words").await;
+        assert_eq!(core.player_state().track.lyrics_origin.as_deref(), Some(ARCHIVING_SOURCE));
+        assert!(core.lyrics_archive_requests().is_empty(), "the words are already on the share");
+    }
+
+    #[tokio::test]
+    async fn lyrics_from_the_file_s_own_tags_are_never_archived() {
+        let mut core = archiving_core().await;
+        core.apply(SourceAction::play("/mnt/ritornello/nas/Album/01.flac").finite()).await.unwrap();
+        core.play_file("/mnt/ritornello/nas/Album/01.flac").await;
+        core.offer_lyrics_archive().await;
+        core.handle_file_tags(None, Some(lrc("[00:01.00]In the file")));
+        core.declare_plugin_lyrics("Words").await;
+        assert_eq!(core.player_state().track.lyrics_origin.as_deref(), Some(crate::metadata::ORIGIN_TAGS));
+        assert!(core.lyrics_archive_requests().is_empty(), "the words are already in the file");
+    }
+
+    #[tokio::test]
+    async fn an_armed_track_s_lyrics_are_archived_only_once_it_plays() {
+        let mut core = archiving_core().await;
+        core.arm_file("/mnt/ritornello/nas/Armed/01.flac").await;
+        core.offer_lyrics_archive().await;
+        core.declare_plugin_lyrics("Words").await;
+        assert!(core.lyrics_archive_requests().is_empty(), "nobody played this folder");
+
+        core.play_file("/mnt/ritornello/nas/Armed/01.flac").await;
+        core.settle_lyrics_archive().await;
+        assert_eq!(core.lyrics_archive_requests().len(), 1, "now it plays");
     }
 }

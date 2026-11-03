@@ -1,0 +1,15 @@
+# Admin page of the lrclib plugin: the lyrics cache it keeps on the device.
+# English is embedded in the binary; this Spanish pack ships separately, and a
+# key-parity test forbids them to diverge.
+title = "Caché de letras"
+intro = "Las letras encontradas en LRCLIB, y las canciones para las que no tiene ninguna, se guardan en este dispositivo para no volver a preguntar por una canción que se vuelve a escuchar. Por una canción sin letra se vuelve a preguntar al cabo de 30 días."
+size = "Tamaño en disco"
+found = "Canciones con letra"
+absent = "Canciones sin letra"
+size_bytes = "{n} B"
+size_kib = "{n} KiB"
+size_mib = "{n} MiB"
+clear = "Vaciar"
+attribution = "Las letras proceden de LRCLIB, una base de datos de letras libre y abierta:"
+bad_request = "Solicitud inesperada: {detail}"
+clear_failed = "no se pudo vaciar la caché de letras"

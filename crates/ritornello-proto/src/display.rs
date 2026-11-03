@@ -27,6 +27,24 @@ pub enum DisplayFrame {
     State(PlayerState),
     Catalog(SourcesCatalog),
     Cover(Cover),
+    Lyrics(LyricsFrame),
+}
+
+/// The lyrics of what's playing, pushed only to the displays that asked for
+/// them (see `Announcement::lyrics`) — the twin of [`Cover`].
+///
+/// Pushed **already parsed**: a display gets lines with their times, never
+/// LRC, so the one parser of this crate stays the only one (see `lyrics`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LyricsFrame {
+    /// Exactly the `lyrics_href` the state frame publishes for the same
+    /// lyrics (`/api/lyrics/{key}`): what tells a display which track these
+    /// words belong to, as `Cover::href` does for an image.
+    pub href: String,
+    /// Flattened, so the frame reads `{"href":…,"synced":[…],"plain":…}` —
+    /// the same object the HTTP route serves, plus its href.
+    #[serde(flatten)]
+    pub content: crate::RenderedLyrics,
 }
 
 /// Cap on the bytes of a cover pushed over this protocol.
@@ -235,6 +253,25 @@ mod tests {
         let json = serde_json::to_string(&with).unwrap();
         assert!(json.contains(r#""icon":"radio""#), "{json}");
         assert!(!serde_json::to_string(&old).unwrap().contains("icon"));
+    }
+
+    #[test]
+    fn a_lyrics_frame_carries_the_href_and_the_parsed_lines() {
+        // The lines travel already parsed: a display has no LRC parser of its
+        // own, and the one in this crate is the only one (see `lyrics`).
+        let frame = DisplayFrame::Lyrics(LyricsFrame {
+            href: "/api/lyrics/1a2b".into(),
+            content: crate::RenderedLyrics {
+                synced: Some(vec![crate::LyricLine { t_ms: 1000, text: "Hello".into() }]),
+                plain: None,
+            },
+        });
+        let json = serde_json::to_string(&frame).unwrap();
+        assert_eq!(
+            json,
+            r#"{"frame":"lyrics","data":{"href":"/api/lyrics/1a2b","synced":[{"t_ms":1000,"text":"Hello"}],"plain":null}}"#
+        );
+        assert_eq!(serde_json::from_str::<DisplayFrame>(&json).unwrap(), frame);
     }
 
     // What becomes of a frame of an unknown kind is checked where it's

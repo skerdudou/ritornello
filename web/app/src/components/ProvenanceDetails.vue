@@ -39,7 +39,7 @@ const props = defineProps<{ state: PlayerPayload | null }>()
  * "album, artist, duration, title" — the alphabetical order of a dictionary,
  * not that of a player card.
  */
-const ORDER = ['title', 'artist', 'album', 'year', 'duration', 'cover', 'links'] as const
+const ORDER = ['title', 'artist', 'album', 'year', 'duration', 'cover', 'lyrics', 'links'] as const
 
 /** The label of each field, by catalog key. */
 const LABEL: Record<string, string> = {
@@ -49,6 +49,7 @@ const LABEL: Record<string, string> = {
   year: 'provenance_field_year',
   duration: 'provenance_field_duration',
   cover: 'provenance_field_cover',
+  lyrics: 'provenance_field_lyrics',
   links: 'provenance_field_links',
 }
 

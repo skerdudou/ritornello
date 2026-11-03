@@ -116,6 +116,9 @@ pub(super) struct FakeSource {
     /// `path` field, and the **bytes** at that file — which a formatted string
     /// could only be matched against by substring.
     pub(super) archives: Arc<Mutex<Vec<(serde_json::Value, String)>>>,
+    /// Every `SourceReq::ArchiveLyrics` this source received: the echoed
+    /// identity and the words.
+    pub(super) lyrics_archives: Arc<Mutex<Vec<(serde_json::Value, ritornello_proto::Lyrics)>>>,
     /// This Source takes the file but its reply never comes back in time.
     ///
     /// Models the one failure mode that matters for the hand-over:
@@ -180,6 +183,10 @@ impl Source for FakeSource {
                 if self.refuses_archive {
                     anyhow::bail!("no reply within the correlation deadline");
                 }
+                SourceAction::Noop
+            }
+            (_, SourceReq::ArchiveLyrics { identity, lyrics }) => {
+                self.lyrics_archives.lock().unwrap().push((identity, lyrics));
                 SourceAction::Noop
             }
             _ => SourceAction::Noop,
@@ -692,6 +699,56 @@ pub(super) fn test_mp3_with_cover(dir: &std::path::Path) -> Option<std::path::Pa
     ok.then_some(output)
 }
 
+/// The LRC `test_mp3_with_lyrics` embeds.
+pub(super) const EMBEDDED_LRC: &str = "[00:01.00]First line\n[00:02.50]Second line";
+
+/// Generates, via ffmpeg, a one-second mp3 carrying a **real** ID3v2.3
+/// `USLT` frame (language `eng`, no descriptor) with `EMBEDDED_LRC`, plus a
+/// title and an artist. `None` if ffmpeg is absent, like
+/// `test_mp3_with_cover`.
+///
+/// **The tag is written here, not by ffmpeg**, and that is measured:
+/// ffmpeg 6.1 writes `-metadata lyrics=…` as a `TXXX` frame described
+/// `USLT`, never as a `USLT` frame, so a file tagged that way would prove
+/// nothing about what a tagger (Mp3tag, foobar2000, Picard) actually writes.
+/// ffmpeg only makes the audio, untagged; the ID3v2.3 header and its three
+/// frames are prepended by hand — ISO-8859-1 text, encoding byte 0.
+pub(super) fn test_mp3_with_lyrics(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let bare = dir.join("bare.mp3");
+    let ok = std::process::Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+        .args(["-c:a", "libmp3lame", "-write_id3v2", "0"])
+        .arg(&bare)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return None;
+    }
+    let frame = |id: &[u8; 4], body: &[u8]| {
+        let mut f = id.to_vec();
+        f.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+        f.extend_from_slice(&[0, 0]);
+        f.extend_from_slice(body);
+        f
+    };
+    let text = |s: &str| [&[0u8][..], s.as_bytes()].concat();
+    let mut frames = frame(b"TIT2", &text("Title"));
+    frames.extend(frame(b"TPE1", &text("Artist")));
+    // Encoding, language, empty descriptor and its terminator, then the words.
+    frames.extend(frame(b"USLT", &[&[0u8][..], b"eng", &[0u8][..], EMBEDDED_LRC.as_bytes()].concat()));
+    // The tag size is "syncsafe": seven bits per byte.
+    let n = frames.len();
+    let size = [(n >> 21) as u8 & 0x7f, (n >> 14) as u8 & 0x7f, (n >> 7) as u8 & 0x7f, n as u8 & 0x7f];
+    let mut file = b"ID3\x03\x00\x00".to_vec();
+    file.extend_from_slice(&size);
+    file.extend(frames);
+    file.extend(std::fs::read(&bare).ok()?);
+    let output = dir.join("with_lyrics.mp3");
+    std::fs::write(&output, file).ok()?;
+    Some(output)
+}
+
 /// Rewrites the picture embedded in `output` **in place**, same path, via
 /// ffmpeg — the retag scenario the stale-embedded-path bug lives in: a
 /// track's audio file changes what it carries without moving. Same pipeline
@@ -843,6 +900,8 @@ pub(super) struct ArchivingRig {
     core: Core<FakePlayer>,
     /// Every hand-over received, in order.
     archives: Arc<Mutex<Vec<(serde_json::Value, String)>>>,
+    /// Every lyrics hand-over received, in order.
+    lyrics_archives: Arc<Mutex<Vec<(serde_json::Value, ritornello_proto::Lyrics)>>>,
     /// Whether this Source makes the offer at all. Read by `play_file`, which
     /// re-declares it after every identity — as `plugin-files` does, and as
     /// the core requires: the offer is forgotten on identity change, because
@@ -984,6 +1043,42 @@ impl ArchivingRig {
     pub(super) fn archive_requests(&self) -> Vec<(serde_json::Value, String)> {
         self.archives.lock().unwrap().clone()
     }
+
+    /// The Source's probe notification offering to keep lyrics, in the shape
+    /// the SDK writes (see `offers_archive`).
+    pub(super) async fn offer_lyrics_archive(&mut self) {
+        let offer = SourceUpdate { lyrics_archivable: Some(true), ..sdk_frame() };
+        self.core.handle_source_update(ARCHIVING_SOURCE, offer);
+        self.core.settle_lyrics_archive().await;
+    }
+
+    /// The contributor answers with words found for "Artist - Title", the
+    /// text it also announces — so the words match the song shown. Then
+    /// awaits whatever hand-over that detached, as `finish_the_fetch` does.
+    pub(super) async fn declare_plugin_lyrics(&mut self, words: &str) {
+        let identity = self.core.metadata.identity().cloned().expect("something must be playing");
+        self.core.handle_enrichment(
+            ARCHIVING_CONTRIBUTOR,
+            Enrichment {
+                identity,
+                artist: Some("Artist".into()),
+                title: Some("Title".into()),
+                lyrics: Some(ritornello_proto::Lyrics { plain: Some(words.into()), synced: None }),
+                lyrics_subject: Some(ritornello_proto::LyricsSubject {
+                    artist: "Artist".into(),
+                    title: "Title".into(),
+                }),
+                ..Default::default()
+            },
+        );
+        self.core.settle_lyrics_archive().await;
+    }
+
+    /// Every lyrics hand-over the Source received: the echoed identity and
+    /// the words.
+    pub(super) fn lyrics_archive_requests(&self) -> Vec<(serde_json::Value, ritornello_proto::Lyrics)> {
+        self.lyrics_archives.lock().unwrap().clone()
+    }
 }
 
 /// A core whose Source offers to keep originals, and whose network answers
@@ -1014,12 +1109,14 @@ pub(super) async fn archiving_core_whose_source_never_replies() -> ArchivingRig 
 fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> ArchivingRig {
     let dir = tempfile::tempdir().unwrap();
     let archives: Arc<Mutex<Vec<(serde_json::Value, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let lyrics_archives = Arc::new(Mutex::new(Vec::new()));
     let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
     sources.insert(
         ARCHIVING_SOURCE.into(),
         Arc::new(FakeSource {
             name: ARCHIVING_SOURCE,
             archives: archives.clone(),
+            lyrics_archives: lyrics_archives.clone(),
             refuses_archive,
             ..Default::default()
         }),
@@ -1057,5 +1154,5 @@ fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> Archivin
         mpsc::channel(4).0,
         mpsc::channel(4).0,
     );
-    ArchivingRig { core, archives, offers, _dir: dir }
+    ArchivingRig { core, archives, lyrics_archives, offers, _dir: dir }
 }

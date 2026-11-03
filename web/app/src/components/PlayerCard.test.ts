@@ -1,4 +1,4 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import PlayerCard from './PlayerCard.vue'
@@ -275,6 +275,72 @@ describe('PlayerCard', () => {
     // the plugin was never queried.
     expect(popover?.querySelector('[data-provenance-misses]')?.textContent).toContain('ouifm-metas')
     w.unmount()
+  })
+
+  it('names the lyrics contributor', async () => {
+    const w = mountWith({
+      title: 'So What',
+      cover_href: '/api/cover/1a2b',
+      lyrics_href: '/api/lyrics/9f9f',
+      provenance: { fields: { title: 'tags', cover: 'files', lyrics: 'lrclib', links: 'musicbrainz' } },
+    })
+    await w.get('[data-provenance-open]').trigger('click')
+    const popover = document.body.querySelector('[data-provenance-popover]')
+    expect(
+      popover?.querySelector('[data-provenance-field="lyrics"]')?.textContent?.trim(),
+    ).toBe('lrclib')
+    // Labelled, and in the card's order: after the cover, before the links.
+    const order = [...(popover?.querySelectorAll('[data-provenance-field]') ?? [])].map((e) =>
+      e.getAttribute('data-provenance-field'),
+    )
+    expect(order).toEqual(['title', 'cover', 'lyrics', 'links'])
+    expect(popover?.textContent).toContain('provenance_field_lyrics')
+    w.unmount()
+  })
+
+  describe('lyrics', () => {
+    it('shows no lyrics button without lyrics', () => {
+      const w = mountWith({ title: 'So What', provenance: { fields: { title: 'tags' } } })
+      expect(w.find('[data-lyrics-open]').exists()).toBe(false)
+    })
+
+    it('shows the lyrics button when the state carries a lyrics href', () => {
+      // Lyrics alone open the row: a bare ICY title has no provenance worth a
+      // `(?)`, but its lyrics are worth a microphone.
+      const w = mountWith({ title: 'So What', lyrics_href: '/api/lyrics/9f9f' })
+      const row = w.find('[data-badges]')
+      expect(row.exists()).toBe(true)
+      const button = row.find('[data-lyrics-open]')
+      expect(button.exists()).toBe(true)
+      expect(button.attributes('aria-label')).toBe('lyrics_open')
+      expect(button.classes()).toEqual(expect.arrayContaining(['size-11', 'relative', 'z-10']))
+    })
+
+    it('keeps the lyrics dialog open when the next song has nothing to show', async () => {
+      // The row holds the dialog: if it went with the song, the dialog would
+      // close on its own instead of saying there are no lyrics.
+      const fetchMock = vi.fn(async (url: string) =>
+        url === '/api/lyrics/9f9f'
+          ? new Response(JSON.stringify({ synced: null, plain: 'Some words' }), { status: 200 })
+          : new Response('{}', { status: 200 }),
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      const w = mount(PlayerCard, {
+        props: { state: full({ title: 'So What', lyrics_href: '/api/lyrics/9f9f' }), seekStep: 10 },
+        attachTo: document.body,
+      })
+      await w.get('[data-lyrics-open]').trigger('click')
+      await flushPromises()
+      expect(document.body.querySelector('[data-lyrics-dialog]')?.textContent).toContain('Some words')
+
+      await w.setProps({ state: full({}) })
+      await flushPromises()
+      const dialog = document.body.querySelector('[data-lyrics-dialog]')
+      expect(dialog).not.toBeNull()
+      expect(dialog?.querySelector('[data-lyrics-none]')).not.toBeNull()
+      w.unmount()
+      document.body.innerHTML = ''
+    })
   })
 
   it('names where what is playing comes from, first in the popover', async () => {

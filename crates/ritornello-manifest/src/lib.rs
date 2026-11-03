@@ -1381,7 +1381,7 @@ exec = \"/y\"
     }
 
     const REF: &[&str] =
-        &["radio", "cd", "files", "ouifm-metas", "radiofrance-metas", "nrj-metas", "musicbrainz"];
+        &["radio", "cd", "files", "ouifm-metas", "radiofrance-metas", "nrj-metas", "musicbrainz", "lrclib"];
 
     fn doc(names: &[&str]) -> String {
         names

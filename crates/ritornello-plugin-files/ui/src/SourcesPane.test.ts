@@ -114,6 +114,47 @@ describe('sources pane', () => {
     })
   })
 
+  it('offers lyrics archiving and greys it while the share is read-only', async () => {
+    // The same rule as the covers' switch, and a switch of its own: a cover
+    // speaks for a folder, a `.lrc` for one track, and an owner may want one
+    // without the other.
+    const { w } = await mountAdmin({ roots: [NAS] })
+    expect(w.find('[data-archive-lyrics]').attributes('disabled')).toBeDefined()
+
+    const { w: w2 } = await mountAdmin({ roots: [{ ...NAS, writable: true }] })
+    expect(w2.find('[data-archive-lyrics]').attributes('disabled')).toBeUndefined()
+
+    // A local folder has no read-only mount: never greyed there.
+    const { w: w3 } = await mountAdmin({ roots: [USB] })
+    expect(w3.find('[data-archive-lyrics]').attributes('disabled')).toBeUndefined()
+
+    // Checked from the root's own flag, not from the covers' one.
+    const { w: w4 } = await mountAdmin({
+      roots: [{ ...USB, archive_covers: true, archive_lyrics: false }],
+    })
+    expect((w4.find('[data-archive-lyrics]').element as HTMLInputElement).checked).toBe(false)
+    const { w: w5 } = await mountAdmin({
+      roots: [{ ...USB, archive_covers: false, archive_lyrics: true }],
+    })
+    expect((w5.find('[data-archive-lyrics]').element as HTMLInputElement).checked).toBe(true)
+    expect(w5.find('[data-archive-lyrics]').element.parentElement?.textContent).toContain(
+      'keep found lyrics here',
+    )
+  })
+
+  it('sends the lyrics archiving flag as an operation of its own', async () => {
+    const { w, s } = await mountAdmin({ roots: [{ ...NAS, writable: true }] })
+    await w.find('[data-archive-lyrics]').setValue(true)
+    await flushPromises()
+    expect(s.putsOf('set_archive_lyrics')[0]).toEqual({
+      op: 'set_archive_lyrics',
+      name: 'musique',
+      archive: true,
+    })
+    // And the covers' operation is not sent for it.
+    expect(s.putsOf('set_archive_covers')).toEqual([])
+  })
+
   it('offers the cover names the plugin serves, showing the chosen one', async () => {
     const { w } = await mountAdmin({ roots: [USB], cover_name: 'folder' })
     const select = w.find('[data-cover-name]')

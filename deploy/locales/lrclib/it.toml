@@ -1,0 +1,15 @@
+# Admin page of the lrclib plugin: the lyrics cache it keeps on the device.
+# English is embedded in the binary; this Italian pack ships separately, and a
+# key-parity test forbids them to diverge.
+title = "Cache dei testi"
+intro = "I testi trovati su LRCLIB, e i brani per cui non ne ha, vengono conservati su questo dispositivo, così un brano riascoltato non viene richiesto di nuovo. Un brano senza testo viene richiesto di nuovo dopo 30 giorni."
+size = "Dimensione su disco"
+found = "Brani con testo"
+absent = "Brani senza testo"
+size_bytes = "{n} B"
+size_kib = "{n} KiB"
+size_mib = "{n} MiB"
+clear = "Svuota"
+attribution = "I testi provengono da LRCLIB, un database di testi libero e aperto:"
+bad_request = "Richiesta inattesa: {detail}"
+clear_failed = "impossibile svuotare la cache dei testi"

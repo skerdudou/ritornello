@@ -208,6 +208,50 @@ at, since it is the appliance that fetches an image, not the browser
 (see [plugins.md](plugins.md) for the chain that produces it) — and
 `cover_origin`, described above. Both are absent when no cover is held.
 
+Three more carry the lyrics, the cover's twins: `lyrics_href`, likewise
+always a local URL, of the form `/api/lyrics/{key}` — the words themselves
+never ride a frame published several times a second — `lyrics_synced`,
+`true` when the lyrics behind it are timestamped, and `lyrics_origin`, who
+supplied them (a Source's name, `tags`, or a plugin's name; see
+[plugins.md](plugins.md#the-lyrics-chain) for the chain that retains them).
+All three are omitted when no lyrics are held, `lyrics_synced` also when
+they are plain text.
+
+`GET /api/lyrics/{key}` answers with the lyrics as JSON, already parsed:
+`{"synced":[{"t_ms":31480,"text":"…"},…],"plain":null}` when they are
+timed, `{"synced":null,"plain":"…"}` otherwise — both keys always present,
+the lines sorted by time, an empty `text` being a pause. The key is a hash
+of the content, so the answer is `Cache-Control: private, max-age=31536000,
+immutable` with the key as its `ETag` (an `If-None-Match` naming it gets a
+`304`): other words get another URL, and what someone listens to is nobody
+else's business, shared caches included. It is answered **from memory
+only** — the core keeps the last eight sets of lyrics it published and
+stores each before the state naming it goes out — so the route never waits
+on a disk or a share. A key it no longer holds is a `404`, logged at debug
+level only: a page still holding a previous track's href after eight changes
+is ordinary.
+
+**The microphone.** On the card's bottom row, beside the `(?)`, a microphone
+button appears when the track has lyrics (`lyrics_href`), and opens them in
+a dialog. **The text is fetched when the dialog opens, never before**:
+lyrics are read by someone who asked for them, and fetching them at every
+track change would cost the device a request per song for a dialog almost
+nobody opens; the URL being immutable, a second open of the same song is
+answered by the browser's cache. When the lyrics are timed **and** a
+position is known, the dialog follows the song: the line being sung is
+highlighted and scrolled to the middle, none before the first line (an
+intro). Scrolling by hand — wheel, touch, a drag of the scrollbar — holds
+that following for four seconds, so the text is not yanked from under the
+finger of someone reading ahead. Without a position (a radio no plugin
+tracks) or without timestamps, the whole text shows, unhighlighted —
+highlighting the first line for ever would claim a precision nobody has.
+The dialog says who supplied the lyrics under the text. **It survives the
+song**: when the track changes under it, the next song's lyrics replace the
+previous ones, and when the next song has none the dialog says so and stays
+open — the card keeps its row for that — rather than closing on the
+listener's behalf. A failed fetch (a `404`, a dropped network) reads as "no
+lyrics for this track", and a reopen tries again.
+
 Two further optional fields of the same `Morceau` feed the track block:
 `year`, the release year as a number, and `links`, a list of
 `{"platform":"youtube"|"deezer"|"apple_music","url":…}`. Both are
@@ -1475,7 +1519,9 @@ because `cover_href` is published in the state for every consumer of the
 protocol, present and future: the thumbnail is a service rendered to whoever
 asks, not a change in what the bare URL means. An unknown value falls back to
 full size rather than refusing the request — a typo in a URL must not blank
-the cover.
+the cover. Its twin for words, `GET /api/lyrics/{key}`, has none of this to
+weigh: lyrics are a few kilobytes, kept parsed in memory, and served whole
+(see the lyrics fields of the pushed `Morceau`, above).
 
 One user-visible consequence of this is worth stating plainly: an embedded
 picture larger than `cover_source_max_mio` now yields a `404` and no cover at
@@ -1524,7 +1570,7 @@ three keeps every case revalidating honestly.
 ### Where the metadata comes from
 
 A small `(?)` on the badge row opens a dialog naming, **field by field**, who
-supplied what: "Title: icy · Year: musicbrainz · Cover: files". It replaces the
+supplied what: "Title: icy · Year: musicbrainz · Cover: files · Lyrics: lrclib". It replaces the
 two origin badges (`origin`, `cover_origin`), which took space on the busiest
 row of the screen for two words nobody reads while listening — and which did not
 answer the question one actually asks in front of a wrong title. The displayed

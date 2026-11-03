@@ -14,7 +14,7 @@
 
 pub use ritornello_proto::{Track, PlayerState};
 
-use ritornello_proto::{CoverRef, Enrichment};
+use ritornello_proto::{CoverRef, Enrichment, Lyrics};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -60,9 +60,14 @@ fn note_fields(m: &mut Track, contributor: &str, derived_by: Option<&str>) {
 /// `searched`.
 ///
 /// Distinct from `Enrichment::is_empty`, which only speaks of the text: a
-/// contributor that only found a cover is not a failure.
+/// contributor that only found a cover is not a failure, and neither is one
+/// that only found the words — the LRCLIB plugin's whole answer.
 fn brings_nothing(e: &Enrichment) -> bool {
-    e.is_empty() && e.cover.is_none() && e.year.is_none() && e.links.is_empty()
+    e.is_empty()
+        && e.cover.is_none()
+        && e.year.is_none()
+        && e.links.is_empty()
+        && e.lyrics.is_none()
 }
 
 /// Resolution state: what is playing, what the stream says about it, what the
@@ -125,6 +130,29 @@ pub struct Metadata {
     /// contributors giving the same URL describe the same image and fail
     /// together.
     failed_covers: std::collections::HashSet<String>,
+    /// Lyrics declared by the Source on its channel (the `.lrc` next to the
+    /// file), with its origin. First tier, like `cover_source`, and for the
+    /// same reason: the file placed by hand is the text chosen by hand.
+    lyrics_source: Option<(Lyrics, String)>,
+    /// Lyrics carried by the file's own tags, read by the core.
+    lyrics_tags: Option<Lyrics>,
+    /// Content key of the lyrics `selected_lyrics` retains, `None` when it
+    /// retains none.
+    ///
+    /// Cached rather than computed by `state()`, which runs at least once a
+    /// second while anything plays: hashing up to 64 KiB of words that many
+    /// times would be work done for nothing. The price is an invariant —
+    /// this field must be recomputed (`refresh_lyrics_key`) after **every**
+    /// mutation that can change `selected_lyrics`, and that is not only the
+    /// lyrics setters: a plugin's lyrics count only while their subject
+    /// matches the composed text, so a new ICY title, new tags, a new
+    /// enrichment or a new order can retain or drop them. `state()` checks
+    /// the invariant in debug builds, so a forgotten path fails a test
+    /// rather than serving another song's words.
+    ///
+    /// Unlike `cover_cle`, it is known at once: the words are in hand the
+    /// moment they are declared, there is no fetch to wait for.
+    lyrics_cle: Option<String>,
 }
 
 impl Metadata {
@@ -146,6 +174,8 @@ impl Metadata {
     /// `order`.
     pub fn set_order(&mut self, order: Vec<String>) {
         self.order = order;
+        // The order decides which plugin's lyrics win.
+        self.refresh_lyrics_key();
     }
 
     /// The arbitration order in force, for whoever has just replaced it and
@@ -193,7 +223,9 @@ impl Metadata {
             || self.cover_source.is_some()
             || self.cover_tags.is_some()
             || self.cover_cle.is_some()
-            || !self.failed_covers.is_empty();
+            || !self.failed_covers.is_empty()
+            || self.lyrics_source.is_some()
+            || self.lyrics_tags.is_some();
         self.icy = None;
         self.tags = None;
         self.enrichments.clear();
@@ -205,6 +237,9 @@ impl Metadata {
         // for the next track — a CDN that woke up — and a list surviving the
         // identity would prevent asking for it again.
         self.failed_covers.clear();
+        self.lyrics_source = None;
+        self.lyrics_tags = None;
+        self.lyrics_cle = None;
         had
     }
 
@@ -221,6 +256,9 @@ impl Metadata {
             return false;
         }
         self.tags = Some(track);
+        // The tags are part of the composed text a plugin's lyrics are bound
+        // to (see `lyrics_cle`).
+        self.refresh_lyrics_key();
         true
     }
 
@@ -260,6 +298,15 @@ impl Metadata {
         // practice — both come from the station's same automation — but
         // lasting if the plugin stops answering. A slightly late title was
         // judged preferable to a form that changes twice per track.
+        //
+        // **Lyrics are deliberately not covered by that decision.** A late
+        // title is a small lie; the previous song's words scrolling under the
+        // next one is a large one. They are not erased either — they are
+        // bound to the song they were found for (`Enrichment::
+        // lyrics_subject`), and whether that song is still the one announced
+        // is judged against the composed text, which this title may have
+        // just changed.
+        self.refresh_lyrics_key();
         true
     }
 
@@ -321,11 +368,17 @@ impl Metadata {
         // door, with nothing but a `debug!` to show for it. No plugin of ours
         // sends a thumbnail without its cover today — which is exactly why
         // the omission would have been invisible.
+        //
+        // **`lyrics` is exempted too**, and here the case is not theoretical:
+        // the LRCLIB plugin answers with words and their subject, nothing
+        // else. Without this line its every answer was counted as no response
+        // — or as a withdrawal of what it had said before.
         if e.is_empty()
             && e.cover.is_none()
             && e.cover_thumb.is_none()
             && e.year.is_none()
             && e.links.is_empty()
+            && e.lyrics.is_none()
             && !e.searched
         {
             // **An enrichment that says nothing at all is a withdrawal**, no
@@ -358,6 +411,7 @@ impl Metadata {
                 if self.selected_cover() != before {
                     self.cover_cle = None;
                 }
+                self.refresh_lyrics_key();
                 return true;
             }
             tracing::debug!("empty enrichment from {plugin}, counted as no response");
@@ -387,6 +441,9 @@ impl Metadata {
         if self.selected_cover() != before {
             self.cover_cle = None;
         }
+        // Not only this plugin's lyrics: its text may be what another
+        // plugin's lyrics subject is now compared with.
+        self.refresh_lyrics_key();
         true
     }
 
@@ -438,6 +495,110 @@ impl Metadata {
         self.cover_tags = c;
         self.cover_cle = None;
         true
+    }
+
+    /// Retains the lyrics declared by the Source (a `.lrc` next to the
+    /// file). `true` if it is news.
+    ///
+    /// Validated here, through the one gate lyrics have: they crossed a
+    /// socket, and the arbitration must never retain words the display would
+    /// then refuse.
+    pub fn set_lyrics_source(&mut self, l: Option<Lyrics>, origin: &str) -> bool {
+        let fresh = l.and_then(Lyrics::validated).map(|l| (l, origin.to_string()));
+        if self.lyrics_source == fresh {
+            return false;
+        }
+        self.lyrics_source = fresh;
+        self.refresh_lyrics_key();
+        true
+    }
+
+    /// Retains the lyrics carried by the file's own tags. `true` if new.
+    pub fn set_lyrics_tags(&mut self, l: Option<Lyrics>) -> bool {
+        let fresh = l.and_then(Lyrics::validated);
+        if self.lyrics_tags == fresh {
+            return false;
+        }
+        self.lyrics_tags = fresh;
+        self.refresh_lyrics_key();
+        true
+    }
+
+    /// The lyrics that win, and who supplied them.
+    ///
+    /// The cover's order (see `selected_cover`), for the cover's reasons: the
+    /// Source, then the file's tags, then the plugins — overriding ones first,
+    /// then the `fill_only`s, each in declaration order. A plugin, even an
+    /// overriding one, never replaces words the owner put next to the file
+    /// or inside it.
+    ///
+    /// **A plugin's lyrics count only while their subject is the song
+    /// announced now.** The identity echo that guards every enrichment is not
+    /// enough here: a radio's identity is its stream's URL, the same from one
+    /// song to the next, so words found for song A would stay up under song B
+    /// — whether because the station moved on before the plugin answered
+    /// again, or because the answer for A arrived late, after B was
+    /// announced. The Source's and the tags' lyrics carry no subject and need
+    /// none: they belong to the file, and a new file is a new identity.
+    pub fn selected_lyrics(&self) -> Option<(&Lyrics, String)> {
+        self.lyrics_against(None)
+    }
+
+    /// `selected_lyrics`, against an already composed text when the caller
+    /// has one in hand — `known()` and `state()` both do, and composing it a
+    /// second time would cost a walk and a clone of every field.
+    fn lyrics_against(&self, text: Option<&Track>) -> Option<(&Lyrics, String)> {
+        if let Some((l, origin)) = &self.lyrics_source {
+            return Some((l, origin.clone()));
+        }
+        if let Some(l) = &self.lyrics_tags {
+            return Some((l, ORIGIN_TAGS.to_string()));
+        }
+        // Composed only here, and only when not handed in: the first two
+        // tiers need no text.
+        let composed;
+        let text = match text {
+            Some(t) => t,
+            None => {
+                composed = self.composed_text();
+                &composed
+            }
+        };
+        for fill_only in [false, true] {
+            for plugin in &self.order {
+                if let Some(e) = self.enrichments.get(plugin)
+                    && e.fill_only == fill_only
+                    && let Some(l) = &e.lyrics
+                    && e.lyrics_subject
+                        .as_ref()
+                        .is_some_and(|s| s.matches(text.artist.as_deref(), text.title.as_deref()))
+                {
+                    return Some((l, plugin.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Recomputes `lyrics_cle` from what `selected_lyrics` retains now. See
+    /// that field for when it must be called.
+    fn refresh_lyrics_key(&mut self) {
+        self.lyrics_cle = self.selected_lyrics().map(|(l, _)| crate::lyrics::key(l));
+    }
+
+    /// Content key of the retained lyrics, the one their `lyrics_href` names.
+    pub fn lyrics_key(&self) -> Option<String> {
+        self.lyrics_cle.clone()
+    }
+
+    /// The retained lyrics come from a `metadata` plugin — the only tier
+    /// worth handing to the Source to keep (see `Core::start_lyrics_archive`).
+    ///
+    /// Judged on the tiers, never on the origin's name: a plugin may be
+    /// both a source and a contributor under one name, and `selected_lyrics`
+    /// only reaches the plugins once both upper tiers are empty.
+    pub fn lyrics_from_a_plugin(&self) -> bool {
+        self.lyrics_source.is_none() && self.lyrics_tags.is_none() && self.lyrics_cle.is_some()
     }
 
     /// The cover that wins, and who supplied it.
@@ -572,6 +733,7 @@ impl Metadata {
     /// after the one done here for `cover`.
     pub fn known(&self) -> ritornello_proto::Known {
         let m = self.composed_text();
+        let lyrics = self.lyrics_against(Some(&m)).is_some();
         ritornello_proto::Known {
             artist: m.artist,
             title: m.title,
@@ -579,6 +741,14 @@ impl Metadata {
             duration_s: m.duration_s,
             year: m.year,
             cover: self.selected_cover().is_some(),
+            // Like `cover`: whether lyrics are held, never which. A lyrics
+            // plugin reads it to stay silent when the file already has its
+            // words — and it turns false again when the announced song no
+            // longer matches the retained words' subject.
+            lyrics,
+            // Metadata contract 1.2. The core measures no duration until
+            // playback is wired to it, and `None` keeps the frame as before.
+            measured_duration_s: None,
             // Verbatim, and from `self.icy` and not from `m`: `m` is the
             // **composed** text, where the ICY only appears as a last resort.
             stream_title: self.icy.clone(),
@@ -601,6 +771,23 @@ impl Metadata {
             m.cover_href = Some(format!("{}{key}", crate::cover::HREF_PREFIX));
             m.provenance.fields.insert("cover".into(), origin.clone());
             m.cover_origin = Some(origin);
+        }
+        // The key is cached (see `lyrics_cle`): only the origin and the form
+        // are read here. The debug check is what keeps that cache honest —
+        // every test that builds a state verifies it.
+        let lyrics = self.lyrics_against(Some(&m));
+        debug_assert_eq!(
+            self.lyrics_cle,
+            lyrics.as_ref().map(|(l, _)| crate::lyrics::key(l)),
+            "lyrics_cle was not refreshed after a change of the retained lyrics"
+        );
+        if let Some(key) = &self.lyrics_cle
+            && let Some((l, origin)) = lyrics
+        {
+            m.lyrics_href = Some(format!("{}{key}", crate::lyrics::HREF_PREFIX));
+            m.lyrics_synced = l.is_synced();
+            m.provenance.fields.insert("lyrics".into(), origin.clone());
+            m.lyrics_origin = Some(origin);
         }
         m
     }
@@ -848,6 +1035,7 @@ impl Metadata {
 mod tests {
     use super::*;
     use crate::cover::CoverSource;
+    use ritornello_proto::LyricsSubject;
     use serde_json::json;
 
     fn enrichment(identity: Value, artist: &str, title: &str) -> Enrichment {
@@ -2121,5 +2309,264 @@ mod tests {
         );
         let state = m.state();
         assert_eq!(state.duration_s, Some(214));
+    }
+
+    fn words(text: &str) -> Lyrics {
+        Lyrics { plain: Some(text.into()), synced: None }
+    }
+
+    fn subject(artist: &str, title: &str) -> LyricsSubject {
+        LyricsSubject { artist: artist.into(), title: title.into() }
+    }
+
+    /// A contributor's lyrics for the song `artist`/`title`, and nothing else:
+    /// the shape the LRCLIB plugin sends.
+    fn lyrics_only(id: &Value, text: &str, artist: &str, title: &str) -> Enrichment {
+        Enrichment {
+            identity: id.clone(),
+            lyrics: Some(words(text)),
+            lyrics_subject: Some(subject(artist, title)),
+            fill_only: true,
+            ..Default::default()
+        }
+    }
+
+    fn tagged(artist: &str, title: &str) -> Track {
+        Track {
+            artist: Some(artist.into()),
+            title: Some(title.into()),
+            origin: Some(ORIGIN_TAGS.into()),
+            ..Default::default()
+        }
+    }
+
+    fn retained(m: &Metadata) -> Option<(String, String)> {
+        m.selected_lyrics().map(|(l, origin)| (l.best_text().to_string(), origin))
+    }
+
+    #[test]
+    fn lyrics_follow_the_tiers_source_then_tags_then_plugin() {
+        // The same order as the cover, and for the same reasons: the `.lrc`
+        // placed next to the file is the text chosen by hand, the file's own
+        // tag complements it, a plugin comes last.
+        let id = json!({"path": "/music/a.flac"});
+        let mut m = Metadata::new(vec!["fill".into(), "special".into()]);
+        m.set_identity(Some(id.clone()));
+        m.set_tags(tagged("Miles Davis", "So What"));
+        assert_eq!(retained(&m), None);
+
+        // A `fill_only` declared first does not beat an overriding plugin
+        // declared lower, exactly as for the cover.
+        assert!(m.add("fill", lyrics_only(&id, "from fill", "Miles Davis", "So What")));
+        assert_eq!(retained(&m), Some(("from fill".into(), "fill".into())));
+        let mut special = lyrics_only(&id, "from special", "Miles Davis", "So What");
+        special.fill_only = false;
+        assert!(m.add("special", special));
+        assert_eq!(retained(&m), Some(("from special".into(), "special".into())));
+
+        assert!(m.set_lyrics_tags(Some(words("embedded"))));
+        assert_eq!(retained(&m), Some(("embedded".into(), ORIGIN_TAGS.into())));
+        assert!(!m.set_lyrics_tags(Some(words("embedded"))), "a repeat is no news");
+
+        assert!(m.set_lyrics_source(Some(words("sidecar")), "files"));
+        assert_eq!(retained(&m), Some(("sidecar".into(), "files".into())));
+        assert!(!m.set_lyrics_source(Some(words("sidecar")), "files"), "a repeat is no news");
+        assert!(m.known().lyrics);
+
+        // Each tier withdrawn in turn gives the place back to the next one.
+        assert!(m.set_lyrics_source(None, "files"));
+        assert_eq!(retained(&m), Some(("embedded".into(), ORIGIN_TAGS.into())));
+        assert!(m.set_lyrics_tags(None));
+        assert_eq!(retained(&m), Some(("from special".into(), "special".into())));
+    }
+
+    #[test]
+    fn a_plugin_never_overrides_a_sidecar_or_embedded_lyrics_even_when_overwriting() {
+        // "A plugin takes precedence under all circumstances" is the rule of
+        // the **text**. For the words, as for the image, what the owner put
+        // next to the file or inside it was chosen by hand.
+        let id = json!({"path": "/music/a.flac"});
+        let mut m = Metadata::new(vec!["lrclib".into()]);
+        m.set_identity(Some(id.clone()));
+        m.set_tags(tagged("Miles Davis", "So What"));
+        let mut overwriting = lyrics_only(&id, "from lrclib", "Miles Davis", "So What");
+        overwriting.fill_only = false;
+        overwriting.artist = Some("Miles Davis".into());
+        overwriting.title = Some("So What".into());
+        assert!(m.add("lrclib", overwriting));
+
+        m.set_lyrics_tags(Some(words("embedded")));
+        assert_eq!(retained(&m), Some(("embedded".into(), ORIGIN_TAGS.into())));
+        m.set_lyrics_tags(None);
+        m.set_lyrics_source(Some(words("sidecar")), "files");
+        assert_eq!(retained(&m), Some(("sidecar".into(), "files".into())));
+    }
+
+    #[test]
+    fn plugin_lyrics_are_dropped_when_the_announced_song_changes() {
+        // A radio: the identity is the stream's URL, it does not change from
+        // one song to the next, so the identity echo cannot tell the words of
+        // song A from those of song B. The subject can.
+        let id = json!({"url": "http://radio/stream"});
+        let mut m = Metadata::new(vec!["musicbrainz".into(), "lrclib".into()]);
+        m.set_identity(Some(id.clone()));
+        m.set_icy("Miles Davis - So What".into());
+        let split = |artist: &str, title: &str| Enrichment {
+            derived_from: Some(ORIGIN_ICY.into()),
+            ..enrichment(id.clone(), artist, title)
+        };
+        assert!(m.add("musicbrainz", split("Miles Davis", "So What")));
+        assert!(m.add("lrclib", lyrics_only(&id, "So what", "Miles Davis", "So What")));
+        assert_eq!(retained(&m), Some(("So what".into(), "lrclib".into())));
+        assert!(m.known().lyrics);
+        assert!(m.state().lyrics_href.is_some());
+
+        // The next song is announced and split; the lyrics plugin has not
+        // answered yet. Its words for the previous song must not stay up.
+        m.set_icy("John Coltrane - Naima".into());
+        assert!(m.add("musicbrainz", split("John Coltrane", "Naima")));
+        assert_eq!(retained(&m), None);
+        assert!(!m.known().lyrics);
+        assert_eq!(m.lyrics_key(), None);
+        let state = m.state();
+        assert_eq!(state.lyrics_href, None, "the cached key must follow a change of text");
+        assert_eq!(state.lyrics_origin, None);
+        assert!(!state.provenance.fields.contains_key("lyrics"));
+    }
+
+    #[test]
+    fn late_lyrics_for_the_previous_song_are_not_retained() {
+        // The LRCLIB answer for song A arrives while the split ICY already
+        // announces song B, under the same stream identity: the echo matches,
+        // only the subject tells them apart.
+        let id = json!({"url": "http://radio/stream"});
+        let mut m = Metadata::new(vec!["musicbrainz".into(), "lrclib".into()]);
+        m.set_identity(Some(id.clone()));
+        m.set_icy("John Coltrane - Naima".into());
+        assert!(m.add("musicbrainz", enrichment(id.clone(), "John Coltrane", "Naima")));
+
+        m.add("lrclib", lyrics_only(&id, "So what", "Miles Davis", "So What"));
+        assert_eq!(retained(&m), None);
+        assert!(!m.known().lyrics);
+        assert_eq!(m.state().lyrics_href, None);
+    }
+
+    #[test]
+    fn lyrics_bind_to_both_the_artist_and_the_title() {
+        // A radio plays one cover version after another: the same title by
+        // another artist is another song, and so is another title by the
+        // same artist. Either name alone is not enough.
+        let id = json!({"url": "http://radio/stream"});
+        for (artist, title) in [("Nina Simone", "My Way"), ("Frank Sinatra", "New York")] {
+            let mut m = Metadata::new(vec!["musicbrainz".into(), "lrclib".into()]);
+            m.set_identity(Some(id.clone()));
+            assert!(m.add("musicbrainz", enrichment(id.clone(), artist, title)));
+            m.add("lrclib", lyrics_only(&id, "And now", "Frank Sinatra", "My Way"));
+            assert_eq!(retained(&m), None, "{artist} / {title}");
+        }
+    }
+
+    #[test]
+    fn plugin_lyrics_follow_a_change_of_the_file_tags_or_of_the_icy() {
+        // The subject is judged on the **composed** text, whatever layer it
+        // comes from; the cached key has to follow each of them.
+        let id = json!({"path": "/music/a.flac"});
+        let mut m = Metadata::new(vec!["lrclib".into()]);
+        m.set_identity(Some(id.clone()));
+        m.set_tags(tagged("Miles Davis", "So What"));
+        m.add("lrclib", lyrics_only(&id, "So what", "Miles Davis", "So What"));
+        assert!(m.state().lyrics_href.is_some());
+        m.set_tags(tagged("Miles Davis", "Freddie Freeloader"));
+        assert_eq!(m.state().lyrics_href, None, "a tags change must refresh the key");
+
+        // An ICY title completed by a `fill_only`'s artist: the ICY alone
+        // decides whether the subject still holds.
+        let radio = json!({"url": "http://radio/stream"});
+        let mut m = Metadata::new(vec!["lrclib".into()]);
+        m.set_identity(Some(radio.clone()));
+        m.set_icy("So What".into());
+        let mut with_artist = lyrics_only(&radio, "So what", "Miles Davis", "So What");
+        with_artist.artist = Some("Miles Davis".into());
+        assert!(m.add("lrclib", with_artist));
+        assert!(m.state().lyrics_href.is_some());
+        m.set_icy("Naima".into());
+        assert_eq!(m.state().lyrics_href, None, "an ICY change must refresh the key");
+    }
+
+    #[test]
+    fn lyrics_alone_are_an_enrichment_not_a_withdrawal() {
+        // The LRCLIB plugin sends nothing but words: no text, no cover, no
+        // year. Counted as "entirely empty", the frame would be refused at the
+        // door — or worse, taken for a withdrawal of what it said before.
+        let id = json!({"path": "/music/a.flac"});
+        let mut m = Metadata::new(vec!["lrclib".into()]);
+        m.set_identity(Some(id.clone()));
+        m.set_tags(tagged("Miles Davis", "So What"));
+        // Words and their subject, nothing else — not even `searched`, which
+        // would get the frame through the door on its own.
+        assert!(m.add("lrclib", lyrics_only(&id, "So what", "Miles Davis", "So What")));
+        assert_eq!(retained(&m), Some(("So what".into(), "lrclib".into())));
+        // Corrected words from the same plugin replace the first ones; read as
+        // a withdrawal, they would remove them instead.
+        assert!(m.add("lrclib", lyrics_only(&id, "So what!", "Miles Davis", "So What")));
+        assert_eq!(retained(&m), Some(("So what!".into(), "lrclib".into())));
+
+        // With `searched`, it found something: it is not listed among those
+        // that searched in vain.
+        let mut frame = lyrics_only(&id, "So what", "Miles Davis", "So What");
+        frame.searched = true;
+        assert!(m.add("lrclib", frame));
+        assert!(m.state().provenance.misses.is_empty(), "{:?}", m.state().provenance.misses);
+    }
+
+    #[test]
+    fn an_identity_change_clears_the_lyrics_like_the_rest() {
+        let id = json!({"path": "/music/a.flac"});
+        let mut m = Metadata::new(vec!["lrclib".into()]);
+        m.set_identity(Some(id.clone()));
+        m.set_tags(tagged("Miles Davis", "So What"));
+        m.add("lrclib", lyrics_only(&id, "So what", "Miles Davis", "So What"));
+        m.set_lyrics_tags(Some(words("embedded")));
+        m.set_lyrics_source(Some(words("sidecar")), "files");
+        assert!(m.lyrics_key().is_some());
+
+        assert!(m.set_identity(Some(json!({"path": "/music/b.flac"}))));
+        assert_eq!(retained(&m), None);
+        assert_eq!(m.lyrics_key(), None);
+        assert_eq!(m.state().lyrics_href, None);
+
+        // Lyrics alone are part of the moment: forgetting them is forgetting
+        // something.
+        assert!(m.set_lyrics_tags(Some(words("embedded"))));
+        assert!(m.clear_moment());
+        assert!(m.set_lyrics_source(Some(words("sidecar")), "files"));
+        assert!(m.clear_moment());
+        assert_eq!(retained(&m), None);
+        assert!(!m.clear_moment());
+    }
+
+    #[test]
+    fn the_state_publishes_a_local_lyrics_href_and_its_origin() {
+        let mut m = Metadata::new(vec![]);
+        m.set_identity(Some(json!({"path": "/music/a.flac"})));
+        let synced = Lyrics { plain: None, synced: Some("[00:01.00]So what".into()) };
+        m.set_lyrics_source(Some(synced.clone()), "files");
+
+        let key = crate::lyrics::key(&synced);
+        assert_eq!(m.lyrics_key().as_deref(), Some(key.as_str()));
+        let state = m.state();
+        assert_eq!(state.lyrics_href, Some(format!("/api/lyrics/{key}")));
+        assert!(state.lyrics_synced);
+        assert_eq!(state.lyrics_origin.as_deref(), Some("files"));
+        assert_eq!(state.provenance.fields.get("lyrics").map(String::as_str), Some("files"));
+
+        m.set_lyrics_source(Some(words("So what")), "files");
+        let state = m.state();
+        assert!(!state.lyrics_synced, "plain words are not synced");
+        assert_eq!(
+            state.lyrics_href,
+            Some(format!("/api/lyrics/{}", crate::lyrics::key(&words("So what")))),
+            "the key follows the content"
+        );
     }
 }

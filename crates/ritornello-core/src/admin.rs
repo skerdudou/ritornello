@@ -500,6 +500,7 @@ mod tests {
             settings_tx: tokio::sync::mpsc::channel(4).0,
             system: Default::default(),
             covers: Arc::new(crate::cover::CoverCache::new()),
+            lyrics: Arc::new(crate::lyrics::LyricsStore::new()),
             plugins: Arc::new(crate::status::PluginsControl {
                 manifest: std::path::PathBuf::from("/nonexistent"),
                 tx: tokio::sync::mpsc::channel(1).0,

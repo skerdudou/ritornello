@@ -410,7 +410,7 @@ export type UpdateCadence = { kind: 'daily' } | { kind: 'weekly'; day: Weekday }
  * for each filled field, and those who searched without finding anything.
  */
 export interface Provenance {
-  /** By field name: `artist`, `title`, `album`, `year`, `duration`, `links`, `cover`. */
+  /** By field name: `artist`, `title`, `album`, `year`, `duration`, `links`, `cover`, `lyrics`. */
   fields?: Record<string, string>
   /** The plugins that searched and found nothing for this track. */
   misses?: string[]
@@ -421,6 +421,16 @@ export interface Provenance {
    * musicbrainz" states both facts.
    */
   derived?: Record<string, string>
+}
+
+/**
+ * The lyrics, `GET /api/lyrics/{key}`. Mirror of the core's `RenderedLyrics`:
+ * both keys are always present. `synced` holds the timed lines in order,
+ * `plain` the untimed text; either can be `null`.
+ */
+export interface RenderedLyrics {
+  synced: { t_ms: number; text: string }[] | null
+  plain: string | null
 }
 
 /**
@@ -586,6 +596,15 @@ export interface PlayerPayload {
   cover_href: string | null
   /** Who provided the cover: name of the Source, `tags`, or name of the plugin. */
   cover_origin: string | null
+  /**
+   * Local URL of the retained lyrics (`/api/lyrics/{key}`), served by the
+   * device. Absent when no lyrics are known for what is playing.
+   */
+  lyrics_href?: string | null
+  /** The lyrics carry timed lines. Absent when false. */
+  lyrics_synced?: boolean
+  /** Who provided the lyrics: the source (a sidecar `.lrc`) or a plugin. */
+  lyrics_origin?: string | null
   /**
    * Where each field comes from, and who searched without finding.
    *

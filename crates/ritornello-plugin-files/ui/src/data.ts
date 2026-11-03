@@ -34,6 +34,12 @@ export interface Root {
    * gating this on `writable` would grey it for ever there.
    */
   archive_covers: boolean
+  /**
+   * Keep, beside a track, the lyrics the appliance found on the internet for
+   * a track that had no `.lrc`. Its own flag, under the same rule as
+   * `archive_covers`: a cover speaks for a folder, a `.lrc` for one track.
+   */
+  archive_lyrics: boolean
 }
 
 export interface Track {
@@ -329,6 +335,7 @@ export function normalizeRoot(raw: unknown): Root {
     writable: o.writable === true,
     mounted: o.mounted === true,
     archive_covers: o.archive_covers === true,
+    archive_lyrics: o.archive_lyrics === true,
   }
 }
 

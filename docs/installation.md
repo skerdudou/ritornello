@@ -1763,6 +1763,45 @@ no `inventory.json` of format 2 has been published yet, no installer that
 records identities has run on the Pi, and the one run that places the core's
 root files again to record them has not been watched.
 
+**Lyrics have never been seen on the device.** Everything in [the lyrics
+chain](plugins.md#the-lyrics-chain) is covered by tests — the parser
+against a real LRCLIB answer, the plugin's lookup and matching against
+captured LRCLIB answers, the files plugin against temporary files on a
+local disk, the page and the files journey of the end-to-end harness against a
+`.lrc` beside a track — but none of it has run on the Pi:
+
+- lyrics **embedded in tags** have been read from test files tagged on a
+  development machine (mp3 `USLT`, flac `LYRICS` and `UNSYNCEDLYRICS`, m4a
+  `©lyr`), with ffmpeg 6.1.1 and mpv 0.37 — never from the NAS's own files,
+  as tagged by whatever tool tagged them, and never through the Pi's mpv
+  0.40, whose key names could differ;
+- a `.lrc` **read from the SMB share** — its encoding (the Windows-1252
+  fallback is covered by tests on real bytes, `’`, `œ` and `…` included, but
+  no file actually written by a Windows tool on the NAS has been read), its
+  case on a share mounted case-insensitively, and the circuit breaker's
+  bound on a NAS that has to spin up — has not been tried;
+- **archiving a `.lrc` onto the share** has never written a file there: not
+  the `archive_lyrics` switch on the page, not `files-mount` 1.0.2 (which
+  only adds that field to the roots table) on the device, not the write
+  through a temporary and a hard link on a cifs mount — nor, where that
+  mount refuses hard links, the exclusive-create fallback;
+- **LRCLIB under real use**: its behaviour is known from a handful of
+  requests made by hand on 2026-11-02 (the 503 for an unknown song, the
+  ±2 s tolerance, the twenty versions of "Get Lucky"). Nobody has watched
+  a day of radio go through it: how often a real station's song is found,
+  whether the ten-minute spacing and the pause after a 503 are enough for
+  LRCLIB not to throttle the device, or what `Retry-After` it actually
+  sends — none has been observed. Nor whether three seconds is long enough
+  for the Pi's first measured duration of a file on a sleeping NAS; past it,
+  the song is searched without a duration and the version LRCLIB picks is
+  cached;
+- the **`lyrics` display frame** has no consumer: no bundled display asks
+  for it, so the relay has only run in tests;
+- the **dialog following the song** has been checked in the end-to-end
+  harness (a desktop browser, a local file) — not on a phone, not against a
+  radio whose position a plugin anchors, and not for how far the highlight
+  drifts from the singer on a real stream's buffering.
+
 Not something left unverified, but worth recording here for whoever meets
 its traces in the history: `plugin_action_refusal`, the scaffold that made
 every not-yet-wired plugin gesture refuse honestly instead of silently

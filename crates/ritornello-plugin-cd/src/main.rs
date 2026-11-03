@@ -1511,6 +1511,10 @@ impl CdSource {
             // Nor does it offer to keep one: there is nothing on a disc to
             // write a cover file next to (see `SourceMessage::cover_archivable`).
             cover_archivable: None,
+            // Same for lyrics: a disc carries no lyrics file, and there is
+            // nowhere to keep one (see `SourceMessage::lyrics`).
+            lyrics: None,
+            lyrics_archivable: None,
             // A disc that becomes known while nothing plays (its TOC lands)
             // arms its track on this very frame, exactly as `issue` does.
             armed: issue.armed,

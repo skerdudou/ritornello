@@ -92,6 +92,14 @@ pub struct Announcement {
     /// registration protocol — the announcement cannot lie.
     #[serde(default)]
     pub covers: bool,
+    /// Does this display want to receive lyrics frames
+    /// (`DisplayFrame::Lyrics`)?
+    ///
+    /// Opt-in, and derived, like `covers`: the SDK reads
+    /// `DisplayPlugin::wants_lyrics`. `false` stays off the wire, so a display
+    /// that does not want them announces the line it announced before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lyrics: bool,
     /// Fingerprint of this plugin's UI assets (`ui.js` **and** `ui.css`
     /// together), so the shell can serve them from a URL that never needs
     /// revalidating.
@@ -263,6 +271,7 @@ mod tests {
             kinds: vec![PluginKind::Input, PluginKind::Display],
             admin: true,
             covers: true,
+            lyrics: false,
             ui_version: None,
             protocol: PROTOCOL_VERSION,
             contracts: BTreeMap::from([
@@ -280,7 +289,7 @@ mod tests {
         assert_eq!(
             line,
             format!(
-                r#"{{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":{PROTOCOL_VERSION},"contracts":{{"display":{{"major":1,"minor":1}},"input":{{"major":1,"minor":0}},"admin":{{"major":1,"minor":0}}}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}}"#
+                r#"{{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":{PROTOCOL_VERSION},"contracts":{{"display":{{"major":1,"minor":2}},"input":{{"major":1,"minor":0}},"admin":{{"major":1,"minor":0}}}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}}"#
             )
         );
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
@@ -305,6 +314,18 @@ mod tests {
         let a: Announcement =
             serde_json::from_str(r#"{"name":"console","kinds":["display"],"admin":false}"#).unwrap();
         assert!(!a.covers, "an absent field must never count as an opt-in");
+    }
+
+    #[test]
+    fn absent_lyrics_means_false() {
+        // The same idiom as `covers`: a display announced before this field
+        // never asked for lyrics frames, and its silence must not read as an
+        // opt-in. And `false` stays off the wire, so an announcement that does
+        // not want them is the line it was before.
+        let a: Announcement =
+            serde_json::from_str(r#"{"name":"console","kinds":["display"],"admin":false}"#).unwrap();
+        assert!(!a.lyrics, "an absent field must never count as an opt-in");
+        assert!(!serde_json::to_string(&a).unwrap().contains("lyrics"));
     }
 
     #[test]
@@ -348,6 +369,7 @@ mod tests {
             kinds: vec![PluginKind::Source],
             admin: true,
             covers: false,
+            lyrics: false,
             ui_version: None,
             protocol: PROTOCOL_VERSION,
             contracts: BTreeMap::from([
@@ -380,6 +402,7 @@ mod tests {
             kinds: vec![PluginKind::Source, PluginKind::Metadata],
             admin: false,
             covers: false,
+            lyrics: false,
             ui_version: None,
             protocol: PROTOCOL_VERSION,
             contracts: BTreeMap::from([
@@ -414,6 +437,7 @@ mod tests {
             kinds: vec![PluginKind::Source],
             admin: true,
             covers: false,
+            lyrics: false,
             ui_version: Some("deadbeef".into()),
             protocol: PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Source, SOURCE_CONTRACT)]),
@@ -447,6 +471,7 @@ mod tests {
             kinds: vec![PluginKind::Source],
             admin: false,
             covers: false,
+            lyrics: false,
             ui_version: None,
             protocol: PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Source, SOURCE_CONTRACT)]),

@@ -1,7 +1,7 @@
 use crate::player::Progress;
 use crate::types::Event;
 use anyhow::{bail, Context, Result};
-use ritornello_proto::Track;
+use ritornello_proto::{Lyrics, Track};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -110,7 +110,7 @@ impl MpvIpc {
                         // not a disguised priority.
                         (Some("metadata"), data) => icy_title(data)
                             .map(Event::IcyTitle)
-                            .or_else(|| file_tags(data).map(|m| Event::FileTags(Box::new(m)))),
+                            .or_else(|| file_tags_event(data)),
                         // The path mpv actually opened, never inferred from
                         // the Source's opaque identity (see `OBSERVED`).
                         (Some("path"), Value::String(p)) => Some(Event::Path(p.clone())),
@@ -356,12 +356,66 @@ pub fn file_tags(data: &Value) -> Option<Track> {
         origin: Some(crate::metadata::ORIGIN_TAGS.to_string()),
         cover_href: None,
         cover_origin: None,
+        // Like `cover_href`: a local URL the core builds once it holds
+        // lyrics, never something a tag carries.
+        lyrics_href: None,
+        lyrics_synced: false,
+        lyrics_origin: None,
         // Left empty here: it is `Metadata::text_block` that attributes
         // these fields to the tags, at composition time. Filling it in
         // here too would give two truths to keep in sync.
         provenance: Default::default(),
     };
     (!track.is_empty()).then_some(track)
+}
+
+/// Lyrics embedded in the **tags of the played file**, from that same
+/// `metadata` property, validated through `Lyrics::validated`.
+///
+/// The keys, **measured** on 2026-11-03 (ffmpeg 6.1.1, mpv 0.37.0, the
+/// `metadata` property read by a script on `file-loaded`, cross-checked
+/// with ffprobe's `format_tags`):
+///
+/// - mp3, a real ID3v2 `USLT` frame (language `eng`): `lyrics-eng`; with a
+///   content descriptor `desc`: `lyrics-desc-eng`. FFmpeg names the frame
+///   `lyrics-[descriptor-]language`, so the key is never just `lyrics`;
+/// - mp3 tagged by ffmpeg itself (`-metadata lyrics=…`): ffmpeg writes a
+///   `TXXX:USLT` frame, not a `USLT`, and reads it back as `lyrics`;
+/// - flac, Vorbis comment `LYRICS`: `LYRICS` (case kept);
+/// - flac, Vorbis comment `UNSYNCEDLYRICS` (foobar2000, Mp3tag): kept as
+///   `UNSYNCEDLYRICS`;
+/// - m4a, iTunes atom `©lyr`: `lyrics`.
+///
+/// Hence the grammar, without regard to case: `lyrics`, else the first key
+/// starting with `lyrics-`, as the words — LRC if they parse, plain text
+/// otherwise, `validated` deciding — and `unsyncedlyrics` as the plain
+/// text beside them.
+///
+/// Silent on a stream (an `icy-*` key present), for `file_tags`' reason: what
+/// a station puts beside its ICY title does not describe the song.
+pub fn file_lyrics(data: &Value) -> Option<Lyrics> {
+    let map = data.as_object()?;
+    if map.keys().any(|key| key.to_ascii_lowercase().starts_with("icy-")) {
+        return None;
+    }
+    let text = |pick: &dyn Fn(&str) -> bool| {
+        map.iter()
+            .find(|(key, _)| pick(&key.to_ascii_lowercase()))
+            .and_then(|(_, value)| value.as_str())
+            .map(str::to_string)
+    };
+    let words = text(&|k| k == "lyrics").or_else(|| text(&|k| k.starts_with("lyrics-")));
+    let plain = text(&|k| k == "unsyncedlyrics");
+    Lyrics { plain, synced: words }.validated()
+}
+
+/// The `FileTags` event a `metadata` property yields: emitted when the tags
+/// carry text **or** lyrics, so a file whose only tag is its words is not
+/// lost, and nothing for a stream (both readers are silent on `icy-*`).
+pub fn file_tags_event(data: &Value) -> Option<Event> {
+    let track = file_tags(data).map(Box::new);
+    let lyrics = file_lyrics(data);
+    (track.is_some() || lyrics.is_some()).then_some(Event::FileTags { track, lyrics })
 }
 
 /// Probes the played file for an embedded cover, without writing anything.
@@ -480,6 +534,10 @@ pub fn read_armed_file(path: &str) -> Option<(Option<Track>, Option<crate::cover
         origin: Some(crate::metadata::ORIGIN_TAGS.to_string()),
         cover_href: None,
         cover_origin: None,
+        // Same as in `file_tags`: built by the core, not read from tags.
+        lyrics_href: None,
+        lyrics_synced: false,
+        lyrics_origin: None,
         provenance: Default::default(),
     };
     Some(((!track.is_empty()).then_some(track), cover_of(path, &file)))
@@ -964,6 +1022,69 @@ pub(crate) mod tests {
         assert!(file_tags(&serde_json::json!({"title": "   "})).is_none());
         assert!(file_tags(&serde_json::json!({})).is_none());
         assert!(file_tags(&Value::Null).is_none());
+    }
+
+    /// The `metadata` property exactly as mpv 0.37 published it for each
+    /// fixture of the 2026-11-03 measurement (see `file_lyrics`).
+    #[test]
+    fn file_lyrics_reads_the_keys_ffmpeg_exposes() {
+        let lrc = "[00:01.00]First line\n[00:02.50]Second line";
+        let measured = [
+            // mp3, real USLT frame, language "eng".
+            serde_json::json!({"encoder":"Lavf60.16.100","title":"T","artist":"A","lyrics-eng":lrc}),
+            // mp3, real USLT frame with a content descriptor.
+            serde_json::json!({"lyrics-desc-eng":lrc,"encoder":"Lavf60.16.100","title":"T","artist":"A"}),
+            // mp3 tagged by ffmpeg (TXXX:USLT).
+            serde_json::json!({"encoder":"Lavf60.16.100","artist":"A","lyrics":lrc,"title":"T"}),
+            // flac, Vorbis comment LYRICS.
+            serde_json::json!({"title":"T","artist":"A","LYRICS":lrc,"encoder":"Lavf60.16.100"}),
+            // m4a, ©lyr atom, with the container keys an m4a also surfaces.
+            serde_json::json!({"language":"und","artist":"A","minor_version":"512","title":"T",
+                "compatible_brands":"M4A isomiso2","major_brand":"M4A ","encoder":"Lavf60.16.100",
+                "vendor_id":"[0][0][0][0]","handler_name":"SoundHandler","lyrics":lrc}),
+        ];
+        for data in &measured {
+            let l = file_lyrics(data).unwrap_or_else(|| panic!("no lyrics read from {data}"));
+            assert_eq!(l.synced.as_deref(), Some(lrc), "{data}");
+            assert_eq!(l.plain, None, "{data}");
+        }
+        // flac, Vorbis comment UNSYNCEDLYRICS: plain text.
+        let unsynced = serde_json::json!({"title":"T","artist":"A","UNSYNCEDLYRICS":"plain words","encoder":"Lavf60.16.100"});
+        assert_eq!(
+            file_lyrics(&unsynced),
+            Some(Lyrics { plain: Some("plain words".into()), synced: None })
+        );
+        // Words that are not LRC are plain text, not dropped.
+        let untimed = serde_json::json!({"lyrics-eng":"Just words"});
+        assert_eq!(file_lyrics(&untimed), Some(Lyrics { plain: Some("Just words".into()), synced: None }));
+        // Nothing to read: no lyrics, and not an empty set.
+        assert_eq!(file_lyrics(&serde_json::json!({"title":"T","lyrics-eng":"   "})), None);
+        assert_eq!(file_lyrics(&serde_json::json!({"title":"T"})), None);
+    }
+
+    #[test]
+    fn file_lyrics_stays_silent_on_a_stream() {
+        // What a station puts beside its ICY title is not the song's words.
+        let stream = serde_json::json!({"icy-title":"A - T","icy-name":"Station","lyrics":"[00:01.00]x"});
+        assert_eq!(file_lyrics(&stream), None);
+        assert_eq!(file_tags_event(&stream), None);
+    }
+
+    #[test]
+    fn file_tags_are_emitted_for_text_or_lyrics_alone() {
+        let lrc = "[00:01.00]Hi";
+        let both = file_tags_event(&serde_json::json!({"title":"T","LYRICS":lrc})).expect("emitted");
+        let Event::FileTags { track, lyrics } = both else { panic!("{both:?}") };
+        assert_eq!(track.and_then(|t| t.title).as_deref(), Some("T"));
+        assert!(lyrics.is_some());
+        // A file whose only tag is its words still reaches the core.
+        let alone = file_tags_event(&serde_json::json!({"LYRICS":lrc})).expect("emitted");
+        assert!(matches!(alone, Event::FileTags { track: None, lyrics: Some(_) }), "{alone:?}");
+        // Text without lyrics: emitted with `None`, which clears the words a
+        // previous song of the same stream carried.
+        let text = file_tags_event(&serde_json::json!({"title":"T2"})).expect("emitted");
+        assert!(matches!(text, Event::FileTags { track: Some(_), lyrics: None }), "{text:?}");
+        assert_eq!(file_tags_event(&serde_json::json!({"encoder":"Lavf"})), None);
     }
 
     #[test]

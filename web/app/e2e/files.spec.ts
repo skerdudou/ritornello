@@ -332,6 +332,23 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   await expect(thumb).toHaveCount(1)
   await expect(thumb).toHaveAttribute('aria-label', /.+/)
 
+  // A sidecar lrc shows the lyrics button and the timed lines. serve.mjs put
+  // `01.lrc` beside `01.mp3`: the files plugin reads it, the core retains and
+  // serves it, the card offers the microphone, and the dialog follows mpv's
+  // position. Nothing short of this journey has all four together.
+  const lyricsOpen = page.locator('[data-lyrics-open]')
+  await expect(lyricsOpen).toBeVisible({ timeout: 10_000 })
+  await lyricsOpen.click()
+  const lyricsDialog = page.locator('[data-lyrics-dialog]')
+  await expect(lyricsDialog).toBeVisible()
+  const activeLyric = lyricsDialog.locator('[data-lyrics-active]')
+  await expect(activeLyric).toHaveCount(1, { timeout: 10_000 })
+  await expect(activeLyric).toContainText('of the sidecar')
+  await expect(lyricsDialog.locator('[data-lyrics-origin]')).toBeVisible()
+  // Closed before the bar is dragged: the dialog is modal.
+  await page.keyboard.press('Escape')
+  await expect(lyricsDialog).toHaveCount(0)
+
   // Dragging the bar, end to end: a real mouse gesture issues a `SeekTo`,
   // which mpv really applies. No unit test can catch it (see
   // `ProgressBar.test.ts`, simulated drag on the component) nor the phone

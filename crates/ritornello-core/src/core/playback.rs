@@ -77,7 +77,7 @@ impl<P: Player> Core<P> {
             Event::IcyTitle(title) => self.handle_icy_title(title),
             // Same status as ICY with respect to `retry_count`: metadata does
             // not prove that playback is alive.
-            Event::FileTags(track) => self.handle_file_tags(*track),
+            Event::FileTags { track, lyrics } => self.handle_file_tags(track.map(|t| *t), lyrics),
             // Same status as the tags with respect to `retry_count`: the path
             // attests nothing about the liveness of the stream, it only
             // serves the embedded cover.

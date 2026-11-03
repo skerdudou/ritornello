@@ -14,6 +14,7 @@
 //! longer matches what is playing. Without this echo, a plugin's slow answer
 //! about the previous track would overwrite the current track.
 
+use crate::lyrics::{Lyrics, LyricsSubject};
 use serde::{Deserialize, Serialize};
 
 /// What the Source says about what it is playing, carried alongside the view.
@@ -64,6 +65,22 @@ pub struct Known {
     /// transmitting it would bloat every frame for nothing.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cover: bool,
+    /// Lyrics are **already held** for this track. A boolean for the same
+    /// reason as `cover` just above: a plugin only needs to know whether to
+    /// look, and the words themselves would ride every frame for nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lyrics: bool,
+    /// The duration **measured by the player** on the file itself, in
+    /// seconds, as opposed to `duration_s`, which any contributor may have
+    /// declared.
+    ///
+    /// A separate field because the two answer different questions: a
+    /// lyrics service holds several versions of one song (an album cut, a
+    /// radio edit, a live take), and only the length of what is actually
+    /// playing tells them apart — a duration copied from a database would
+    /// pick the database's version, not ours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_duration_s: Option<u32>,
     // No `links` here, and that is not an oversight: `Known` exists so that a
     // plugin works only on what is missing, yet none of ours *searches* for
     // links — it copies those from the reply it already reads. The field would
@@ -103,6 +120,8 @@ impl Known {
             && self.duration_s.is_none()
             && self.year.is_none()
             && !self.cover
+            && !self.lyrics
+            && self.measured_duration_s.is_none()
     }
 }
 
@@ -389,6 +408,22 @@ pub struct Enrichment {
     /// before, and absence stays absence on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_thumb: Option<CoverRef>,
+    /// The lyrics this contributor found, as raw text (see [`Lyrics`]).
+    ///
+    /// The same serde attributes as `cover`: a plugin that ignores the field
+    /// emits exactly the frame it emitted before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyrics: Option<Lyrics>,
+    /// The song the `lyrics` above were found **for**, as the contributor
+    /// queried it.
+    ///
+    /// Required beside `lyrics`, and [`Self::cleaned`] drops lyrics that come
+    /// without it. The identity echo is not enough here: a radio's identity is
+    /// the URL of its stream, so it does not change from one song to the next,
+    /// and a slow answer about the previous song would carry an echo that
+    /// still matches. Only the names say which song the words belong to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyrics_subject: Option<LyricsSubject>,
     /// This contributor only **fills in**: it replaces no field already set.
     ///
     /// Default `false` = it overwrites, which is the project's current rule ("a
@@ -461,6 +496,19 @@ impl Enrichment {
         // process, and a second grammar written here would eventually judge
         // them differently.
         self.cover_thumb = self.cover_thumb.take().and_then(CoverRef::validated);
+        // Lyrics go through their one gate, and only with a subject: lyrics
+        // that do not say which song they were found for cannot be told apart
+        // from a late answer about the previous one (see `lyrics_subject`).
+        // A subject with a blank name says no more than no subject at all:
+        // it would never match the current track, so it and its lyrics go.
+        self.lyrics_subject = self.lyrics_subject.take().and_then(|s| {
+            let (artist, title) = (s.artist.trim().to_string(), s.title.trim().to_string());
+            (!artist.is_empty() && !title.is_empty()).then_some(LyricsSubject { artist, title })
+        });
+        self.lyrics = match self.lyrics_subject {
+            Some(_) => self.lyrics.take().and_then(Lyrics::validated),
+            None => None,
+        };
         // Re-bounded here even though the contributor is supposed to have done
         // it: this value crosses a socket, and this layer is the one documented
         // as owner of the shape validation.
@@ -515,6 +563,19 @@ pub struct Track {
     /// from two different contributors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_origin: Option<String>,
+    /// **Local** URL of the lyrics, the twin of `cover_href`. Always of the
+    /// form `/api/lyrics/{key}`: the words themselves never ride the state
+    /// frame, which is published several times per second of playback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyrics_href: Option<String>,
+    /// The lyrics behind `lyrics_href` carry timestamps. Lets a display offer
+    /// a following view without fetching them first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lyrics_synced: bool,
+    /// Who provided these lyrics: the name of the Source, or of the plugin.
+    /// A third origin, for the same reason as `cover_origin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lyrics_origin: Option<String>,
     /// Who provided what, **field by field**, and who searched without
     /// finding.
     ///
@@ -537,9 +598,10 @@ pub struct Track {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     /// The contributor retained for each **filled** field, by field name:
-    /// `artist`, `title`, `album`, `year`, `duration`, `links`, `cover`.
+    /// `artist`, `title`, `album`, `year`, `duration`, `links`, `cover`,
+    /// `lyrics`.
     ///
-    /// A map rather than a seven-field structure: consumers iterate over it to
+    /// A map rather than an eight-field structure: consumers iterate over it to
     /// display it, none tests one field in particular, and a map does not
     /// break when a field is added to the track. `BTreeMap` and not `HashMap`:
     /// the iteration order is then stable, hence the serialized frame too —
@@ -918,6 +980,11 @@ mod tests {
             position_s: None,
             cover: None,
             cover_thumb: None,
+            lyrics: Some(crate::Lyrics { plain: Some("So what".into()), synced: None }),
+            lyrics_subject: Some(crate::LyricsSubject {
+                artist: "Miles Davis".into(),
+                title: "So What".into(),
+            }),
             fill_only: false,
             searched: false,
             derived_from: None,
@@ -1061,6 +1128,8 @@ mod tests {
             position_s: None,
             cover: None,
             cover_thumb: None,
+            lyrics: None,
+            lyrics_subject: None,
             fill_only: false,
             searched: false,
             derived_from: None,
@@ -1081,6 +1150,100 @@ mod tests {
         let artist_only =
             Enrichment { identity: json!(1), artist: Some("FIP".into()), ..Default::default() };
         assert!(!artist_only.is_empty());
+    }
+
+    fn lyrics_subject() -> crate::LyricsSubject {
+        crate::LyricsSubject { artist: "Daft Punk".into(), title: "Get Lucky".into() }
+    }
+
+    #[test]
+    fn lyrics_travel_in_an_enrichment_and_stay_absent_by_default() {
+        let e = Enrichment {
+            identity: json!(1),
+            lyrics: Some(crate::Lyrics {
+                plain: Some("Like the legend of the phoenix".into()),
+                synced: Some("[00:28.32]Like the legend of the phoenix".into()),
+            }),
+            lyrics_subject: Some(lyrics_subject()),
+            ..Default::default()
+        };
+        let back: Enrichment = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
+        // A plugin that ignores the field emits exactly the frame it emitted
+        // before: neither key appears when there is nothing to say.
+        let silent = serde_json::to_string(&Enrichment::default()).unwrap();
+        assert!(!silent.contains("lyrics"), "{silent}");
+    }
+
+    #[test]
+    fn lyrics_without_a_subject_are_dropped_by_cleaned() {
+        // A plugin must say which song it found the words for: without it,
+        // the core cannot tell late lyrics for the previous song on a radio
+        // (same stream identity) from lyrics for the current one.
+        let words = crate::Lyrics { plain: Some("Like the legend of the phoenix".into()), synced: None };
+        let orphan = Enrichment { identity: json!(1), lyrics: Some(words.clone()), ..Default::default() };
+        assert_eq!(orphan.cleaned().lyrics, None);
+
+        let kept = Enrichment {
+            identity: json!(1),
+            lyrics: Some(words.clone()),
+            lyrics_subject: Some(lyrics_subject()),
+            ..Default::default()
+        }
+        .cleaned();
+        assert_eq!(kept.lyrics, Some(words));
+
+        // And they go through the one gate lyrics have: blank words are no
+        // lyrics, subject or not.
+        let blank = Enrichment {
+            identity: json!(1),
+            lyrics: Some(crate::Lyrics { plain: Some("   ".into()), synced: None }),
+            lyrics_subject: Some(lyrics_subject()),
+            ..Default::default()
+        }
+        .cleaned();
+        assert_eq!(blank.lyrics, None);
+    }
+
+    #[test]
+    fn lyrics_with_a_blank_subject_are_dropped_by_cleaned() {
+        let words = crate::Lyrics { plain: Some("Like the legend of the phoenix".into()), synced: None };
+        for (artist, title) in [("  ", "Get Lucky"), ("Daft Punk", "\t"), ("", "")] {
+            let e = Enrichment {
+                identity: json!(1),
+                lyrics: Some(words.clone()),
+                lyrics_subject: Some(crate::LyricsSubject { artist: artist.into(), title: title.into() }),
+                ..Default::default()
+            }
+            .cleaned();
+            assert_eq!(e.lyrics_subject, None, "{artist:?} / {title:?}");
+            assert_eq!(e.lyrics, None, "{artist:?} / {title:?}");
+        }
+        // A subject that only needs trimming is kept, trimmed.
+        let e = Enrichment {
+            identity: json!(1),
+            lyrics: Some(words.clone()),
+            lyrics_subject: Some(crate::LyricsSubject { artist: " Daft Punk ".into(), title: "Get Lucky\n".into() }),
+            ..Default::default()
+        }
+        .cleaned();
+        assert_eq!(e.lyrics_subject, Some(lyrics_subject()));
+        assert_eq!(e.lyrics, Some(words));
+    }
+
+    #[test]
+    fn known_with_only_lyrics_or_a_measured_duration_is_not_empty() {
+        // `is_empty` is the `skip_serializing_if` of `NowPlaying::known`: a
+        // field it forgets disappears from the frame, and the plugins never
+        // learn that lyrics are already held, or how long the file really is.
+        let lyrics = Known { lyrics: true, ..Default::default() };
+        assert!(!lyrics.is_empty());
+        let measured = Known { measured_duration_s: Some(254), ..Default::default() };
+        assert!(!measured.is_empty());
+        let np = NowPlaying { source: "files".into(), known: measured, ..Default::default() };
+        let json = serde_json::to_string(&np).unwrap();
+        assert!(json.contains(r#""measured_duration_s":254"#), "{json}");
+        assert!(!serde_json::to_string(&Known::default()).unwrap().contains("lyrics"));
     }
 
     #[test]
@@ -1334,6 +1497,8 @@ mod tests {
                 duration_s: Some(218),
                 year: Some(1972),
                 cover: true,
+                lyrics: true,
+                measured_duration_s: Some(219),
                 // Non-default value, like the neighbouring fields: this test
                 // checks a complete round trip, and a default `None` would not
                 // have distinguished anything from a field forgotten in the
