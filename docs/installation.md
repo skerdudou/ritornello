@@ -591,7 +591,7 @@ core and the plugins; a companion has a number of its own, see above):
    finished release left it — `0.2.0` while the product prepares
    `0.2.1-beta.1` — and that is the normal shape of a narrow beta: only what
    differs is offered, so there is nothing to be stranded on. A beta may
-   therefore ship one component and leave the other ten alone, which is the
+   therefore ship one component and leave the other twelve alone, which is the
    cheapest way to try the machinery.
 
    Three guards, and they now agree. `version_coherence.rs` refuses a suffix
@@ -1801,6 +1801,63 @@ local disk, the page and the files journey of the end-to-end harness against a
   harness (a desktop browser, a local file) — not on a phone, not against a
   radio whose position a plugin anchors, and not for how far the highlight
   drifts from the singer on a real stream's buffering.
+
+**`ritornello-plugin-web-streaming` (see
+[plugins.md](plugins.md#ritornello-plugin-web-streaming--web-streaming)) has
+not yet been run, as a whole, on the device.** What has been measured on the
+Pi (a 32-bit armv7l Raspberry Pi 2, mpv 0.40, Python 3.13.5) is the
+yt-dlp zipapp's start-up and resolution times, the same times under the
+service's hardening, that mpv 0.40 honours `script-opts` set at run time,
+and the cost of the network guard (about 0.15 s per `-J`). Nothing else of it has been seen
+there. In particular:
+
+- the `ytdl://` addresses handed to mpv were measured on **mpv 0.37 only**
+  (WSL): that mpv goes to the hook and makes no direct connection first;
+  mpv 0.40, the device's, has not been observed doing the same;
+- how the core steers mpv's hook (the hook script never unloaded, `http(s)`
+  excluded from its fallback at launch, one `script-opts` change per `Play`
+  naming the plugin's yt-dlp or `/bin/false`) was measured as a whole on
+  **mpv 0.37 only**, 25 runs per case with no delay between commands (`ytdl://`
+  loads reach the wrapper 100/100, against 25/100 with the former toggle);
+  that the option change reaches the hook before the load on the device's
+  0.40 has not been observed;
+- that `ytdl_hook-exclude=.` neutralises every non-`ytdl://` load (a failing
+  radio stream never runs yt-dlp) is **reasoned from mpv's source, not
+  measured**, on 0.37 or 0.40: every non-web load ran `/bin/false` in the
+  measurements, which the counters could not see. Likewise, during a web
+  Play, the http entries of a flat playlist the hook expands are excluded, so
+  they do not reach the wrapper and simply fail; that has not been tested;
+- the plugin has **not been run on the device at all** yet: the owner will
+  test it from a beta release;
+- the **record of a failed playback** (`last-playback-failure.json`) is
+  written by the wrapper from yt-dlp's stderr, and was tested with a stand-in
+  `yt_dlp` that writes there the way yt-dlp's `write_string` does; its codes
+  come from yt-dlp's wording (`Requested format is not available`, `No video
+  formats found`), not from a capture of each case;
+- the **progress lines** of `--progress-template` that the download reads
+  are hand-written, not captured from a real yt-dlp, and no download to a real
+  `rw` share has been run;
+- the **residual mpv exposure** is accepted, not closed: everything mpv
+  fetches itself (redirects, m3u/pls playlists, HLS/DASH manifests, the
+  second resolution of a host) escapes the guard, and can be made to send
+  GET requests to hosts of the local network (see
+  [plugins.md](plugins.md#never-the-local-network)). A guarding proxy owned
+  by the plugin is a planned follow-up;
+- the **deno path** (the plugin's own deno, a fallback runtime on x86_64 and
+  aarch64) has never run on x86_64 or aarch64 hardware, and deno's integrity
+  rests on a published sum only. On the device, no runtime that helps exists
+  (node 20 is unsupported, node 22 is about 4 times and QuickJS about 20 times
+  slower than none), so the fallback has only been exercised with stand-ins;
+- the wrapper runs Python with **`-S`** (no site-packages) and relies on the
+  **system CA store** (`ca-certificates`) for TLS; whether the device has it
+  and that yt-dlp still plays without site-packages there is to be checked;
+- the plugin's **admin page has never been seen rendered** in a browser: it
+  is tested in jsdom only, and the end-to-end journeys do not open it;
+- the **headphones key** of the source bar (the source's icon) has never
+  been looked at either, on the page or on a device;
+- about 6.5 s before the sound of each video, playlist entries included, is
+  a measured limit (mpv resolves each entry when it reaches it), not a
+  verified-good behaviour of the whole chain.
 
 Not something left unverified, but worth recording here for whoever meets
 its traces in the history: `plugin_action_refusal`, the scaffold that made

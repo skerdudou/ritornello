@@ -127,7 +127,8 @@ mod tests {
             // Every contract started at 1.0. Since then:
             // - source: 1.1 for `play_request`, 1.2 for `armed`, 1.3 for
             //   lyrics (`SourceMessage::lyrics`, `lyrics_archivable`,
-            //   `SourceReq::ArchiveLyrics`);
+            //   `SourceReq::ArchiveLyrics`) and for `Play::ytdl_path`, both
+            //   in the same unreleased version;
             // - display: 1.1 for the source catalog's `icon`, 1.2 for lyrics
             //   (`DisplayFrame::Lyrics`, `Track::lyrics_href`…);
             // - metadata: 1.1 for `NowPlaying::armed`, 1.2 for lyrics

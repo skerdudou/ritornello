@@ -30,7 +30,7 @@
 mod tests {
     use std::path::{Path, PathBuf};
 
-    /// The eleven plugins shipped as their own archive, plus the core. Listed
+    /// The twelve plugins shipped as their own archive, plus the core. Listed
     /// here AND checked against `deploy/plugins.example.toml` below, so a
     /// plugin added to the repository without a version of its own is a red
     /// test rather than an archive named after the wrong number.
@@ -46,6 +46,7 @@ mod tests {
         "console",
         "generic-input",
         "mpd",
+        "web-streaming",
     ];
 
     /// Components that ship beside a plugin and are versioned on their own,

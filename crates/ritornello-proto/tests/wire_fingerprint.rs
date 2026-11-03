@@ -443,7 +443,7 @@ fn source_section() -> Vec<String> {
     let actions = [
         SourceAction::Noop,
         SourceAction::play("http://example.invalid/stream"),
-        SourceAction::play("file:///a.mp3").starting_at(3).playlist().finite().loopable(),
+        SourceAction::play("file:///a.mp3").starting_at(3).playlist().finite().loopable().ytdl_path("/data/bin/yt-dlp"),
         SourceAction::Stop,
         SourceAction::PlayerNext,
         SourceAction::PlayerPrev,

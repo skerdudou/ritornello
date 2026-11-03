@@ -733,7 +733,7 @@ mod tests {
         core.handle_command(Command::PlayPause).await.unwrap();
         assert_eq!(
             *player_calls.lock().unwrap(),
-            vec!["play http://fip".to_string()],
+            vec!["ytdl off".to_string(), "play http://fip".to_string()],
             "the active source must be asked again, not a pause into the void"
         );
     }

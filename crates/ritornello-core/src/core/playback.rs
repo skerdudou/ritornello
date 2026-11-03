@@ -288,7 +288,7 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert_eq!(core.handle_event(Event::PlaybackIdle).await, EventOutcome::Nothing);
     }
@@ -334,7 +334,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             *player_calls.lock().unwrap(),
-            vec!["load_list /var/lib/ritornello/plugin-files.m3u start=4".to_string()]
+            vec!["ytdl off".to_string(), "load_list /var/lib/ritornello/plugin-files.m3u start=4".to_string()]
         );
     }
 
@@ -352,7 +352,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             *player_calls.lock().unwrap(),
-            vec!["load_list /var/lib/ritornello/plugin-files.m3u start=auto".to_string()]
+            vec!["ytdl off".to_string(), "load_list /var/lib/ritornello/plugin-files.m3u start=auto".to_string()]
         );
     }
 
@@ -365,16 +365,17 @@ mod tests {
         core.apply(SourceAction::play("http://icecast/fip.m3u8")).await.unwrap();
         assert_eq!(
             *player_calls.lock().unwrap(),
-            vec!["play http://icecast/fip.m3u8".to_string()]
+            vec!["ytdl off".to_string(), "play http://icecast/fip.m3u8".to_string()]
         );
     }
 
     #[tokio::test]
     async fn a_play_without_index_positions_nothing() {
-        // The radio path: no superfluous command on the mpv socket.
+        // The radio path: nothing on the mpv socket but the hook switch-off
+        // (`ytdl off`) and the load itself.
         let (mut core, player_calls, _sc, _rx, _d) = setup();
         core.apply(SourceAction::play("http://icecast/fip.mp3")).await.unwrap();
-        assert_eq!(*player_calls.lock().unwrap(), vec!["play http://icecast/fip.mp3".to_string()]);
+        assert_eq!(*player_calls.lock().unwrap(), vec!["ytdl off".to_string(), "play http://icecast/fip.mp3".to_string()]);
     }
 
     #[tokio::test]
@@ -403,7 +404,7 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0 }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
         // Single source: SourceCycle re-activates "cd", which answers `Play cdda://`.
         core.handle_command(Command::SourceCycle).await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"play cdda://".to_string()));

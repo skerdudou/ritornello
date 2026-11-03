@@ -134,3 +134,5 @@ initial_config = ["deploy/input-bindings.example.toml"]
 
 [plugins.mpd]
 examples = ["deploy/mpd.example.toml"]
+
+[plugins.web-streaming]

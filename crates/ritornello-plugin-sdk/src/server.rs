@@ -357,8 +357,9 @@ pub trait SourcePlugin: Send + 'static {
 
     /// The icon this source shows under in the web UI, as a name from the
     /// fixed list it draws: `radio`, `disc`, `folder`, `music`, `headphones`,
-    /// `podcast`, `tv`, `usb`. Any other name, or `None` (the default), shows
-    /// the source's initial. Read once, when the plugin registers.
+    /// `podcast`, `tv`, `usb`, all strokes in the text colour. Any other
+    /// name, or `None` (the default), shows the source's initial. Read once,
+    /// when the plugin registers.
     fn icon(&self) -> Option<&'static str> {
         None
     }

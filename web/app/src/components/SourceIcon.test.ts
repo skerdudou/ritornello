@@ -24,6 +24,7 @@ describe('SourceIcon', () => {
     }
   })
 
+
   it('draws an svg for every icon of the list', () => {
     for (const icon of SOURCE_ICONS) {
       const w = mount(SourceIcon, { props: { name: 'x', icon } })

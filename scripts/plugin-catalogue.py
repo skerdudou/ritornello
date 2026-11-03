@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the release-wide catalogue: what each of the ten components is.
+"""Builds the release-wide catalogue: what each of the thirteen components is.
 
 Printed to stdout as JSON; the publish job of .github/workflows/ci.yml
 redirects it to assets/catalogue.json, built once for the whole release

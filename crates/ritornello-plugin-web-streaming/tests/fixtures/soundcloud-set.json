@@ -1,0 +1,176 @@
+{
+ "album": "The Royal Concept EP",
+ "album_artist": "The Royal Concept",
+ "album_type": "ep",
+ "uploader": "The Royal Concept",
+ "uploader_id": "9615865",
+ "uploader_url": "https://soundcloud.com/the-concept-band",
+ "timestamp": 1343497860,
+ "modified_timestamp": 1358471457,
+ "duration": 1398.595,
+ "license": "all-rights-reserved",
+ "like_count": 482,
+ "repost_count": 99,
+ "genres": [
+  "Indie/pop"
+ ],
+ "thumbnails": [
+  {
+   "id": "mini",
+   "url": "https://i1.sndcdn.com/artworks-000030896212-o16m9v-mini.jpg",
+   "width": 16,
+   "height": 16,
+   "resolution": "16x16"
+  },
+  {
+   "id": "tiny",
+   "url": "https://i1.sndcdn.com/artworks-000030896212-o16m9v-tiny.jpg",
+   "width": 20,
+   "height": 20,
+   "resolution": "20x20"
+  },
+  {
+   "id": "small",
+   "url": "https://i1.sndcdn.com/artworks-000030896212-o16m9v-small.jpg",
+   "width": 32,
+   "height": 32,
+   "resolution": "32x32"
+  },
+  {
+   "id": "badge",
+   "url": "https://i1.sndcdn.com/artworks-000030896212-o16m9v-badge.jpg",
+   "width": 47,
+   "height": 47,
+   "resolution": "47x47"
+  },
+  {
+   "id": "t67x67",
+   "url": "https://i1.sndcdn.com/artworks-000030896212-o16m9v-t67x67.jpg",
+   "width": 67,
+   "height": 67,
+   "resolution": "67x67"
+  },
+  {
+   "id": "large",
+   "url": "https://i1.sndcdn.com/artworks-000030896212-o16m9v-large.jpg",
+   "width": 100,
+   "height": 100,
+   "resolution": "100x100"
+  },
+  {
+   "id": "t300x300",
+   "url": "https://i1.sndcdn.com/artworks-000030896212-o16m9v-t300x300.jpg",
+   "width": 300,
+   "height": 300,
+   "resolution": "300x300"
+  },
+  {
+   "id": "crop",
+   "url": "https://i1.sndcdn.com/artworks-000030896212-o16m9v-crop.jpg",
+   "width": 400,
+   "height": 400,
+   "resolution": "400x400"
+  },
+  {
+   "id": "t500x500",
+   "url": "https://i1.sndcdn.com/artworks-000030896212-o16m9v-t500x500.jpg",
+   "width": 500,
+   "height": 500,
+   "resolution": "500x500"
+  },
+  {
+   "id": "original",
+   "url": "https://i1.sndcdn.com/artworks-000030896212-o16m9v-original.jpg",
+   "preference": 10
+  }
+ ],
+ "id": "2284613",
+ "title": "The Royal Concept EP",
+ "description": "\"The Royal Concept\" from Sweden\r\nDavid/ Povel / Magnus / Filip\r\n\r\nDebut EP from The Royal Concept out now http://smarturl.it/TRC\r\nTheRoyalConcept.com\r\nhttps://www.facebook.com/theroyalconceptmusic\r\nhttp://twitter.com/theroyalcncpt\r\nhttp://www.youtube.com/user/TheCNCPT",
+ "_type": "playlist",
+ "entries": [
+  {
+   "album": "The Royal Concept EP",
+   "album_artist": "The Royal Concept",
+   "album_type": "ep",
+   "ie_key": "Soundcloud",
+   "id": "75206121",
+   "_type": "url_transparent",
+   "url": "https://soundcloud.com/the-concept-band/world-on-fire-1",
+   "__x_forwarded_for_ip": null
+  },
+  {
+   "album": "The Royal Concept EP",
+   "album_artist": "The Royal Concept",
+   "album_type": "ep",
+   "ie_key": "Soundcloud",
+   "id": "47127625",
+   "_type": "url_transparent",
+   "url": "https://soundcloud.com/the-concept-band/gimme-twice-mastered",
+   "__x_forwarded_for_ip": null
+  },
+  {
+   "album": "The Royal Concept EP",
+   "album_artist": "The Royal Concept",
+   "album_type": "ep",
+   "ie_key": "Soundcloud",
+   "id": "47127627",
+   "_type": "url_transparent",
+   "url": "https://soundcloud.com/the-concept-band/goldrushed-mastered",
+   "__x_forwarded_for_ip": null
+  },
+  {
+   "album": "The Royal Concept EP",
+   "album_artist": "The Royal Concept",
+   "album_type": "ep",
+   "ie_key": "Soundcloud",
+   "id": "30510138",
+   "_type": "url_transparent",
+   "url": "https://soundcloud.com/the-concept-band/the-concept-d-d-dance",
+   "__x_forwarded_for_ip": null
+  },
+  {
+   "album": "The Royal Concept EP",
+   "album_artist": "The Royal Concept",
+   "album_type": "ep",
+   "ie_key": "Soundcloud",
+   "id": "47127629",
+   "_type": "url_transparent",
+   "url": "https://soundcloud.com/the-concept-band/in-the-end-mastered",
+   "__x_forwarded_for_ip": null
+  },
+  {
+   "album": "The Royal Concept EP",
+   "album_artist": "The Royal Concept",
+   "album_type": "ep",
+   "ie_key": "Soundcloud",
+   "id": "47127631",
+   "_type": "url_transparent",
+   "url": "https://api-v2.soundcloud.com/tracks/47127631",
+   "__x_forwarded_for_ip": null
+  }
+ ],
+ "webpage_url": "https://soundcloud.com/the-concept-band/sets/the-royal-concept-ep",
+ "original_url": "https://soundcloud.com/the-concept-band/sets/the-royal-concept-ep",
+ "webpage_url_basename": "the-royal-concept-ep",
+ "webpage_url_domain": "soundcloud.com",
+ "extractor": "soundcloud:set",
+ "extractor_key": "SoundcloudSet",
+ "duration_string": "23:18",
+ "upload_date": "20120728",
+ "modified_date": "20130118",
+ "release_year": null,
+ "album_artists": [
+  "The Royal Concept"
+ ],
+ "genre": "Indie/pop",
+ "playlist_count": 6,
+ "epoch": 1793705894,
+ "__files_to_move": {},
+ "_version": {
+  "version": "2026.10.26",
+  "current_git_head": null,
+  "release_git_head": "c91f8de0bfb3577894abad716eaaa01659e6bd14",
+  "repository": "yt-dlp/yt-dlp"
+ }
+}

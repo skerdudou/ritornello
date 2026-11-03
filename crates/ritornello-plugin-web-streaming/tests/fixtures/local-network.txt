@@ -1,0 +1,109 @@
+# What the network guard calls local. Read by BOTH predicates' tests: the
+# Python one of the wrapper (src/tool/wrapper.rs, `is_local`) and the Rust one
+# (src/netguard.rs, `is_local`), so that the two cannot drift apart.
+#
+# One line per range, both edges where an edge means something:
+#   <address> <local|public>   # what the line is for
+# An address the Rust parser does not read (`IpAddr::from_str`) must be
+# `local`: the Python predicate refuses what it cannot parse, and the Rust
+# test checks that every such line is one no URL host could be.
+
+# 0.0.0.0/8 ("this network")
+0.0.0.0 local
+0.255.255.255 local
+1.0.0.0 public
+# 10/8
+9.255.255.255 public
+10.0.0.0 local
+10.255.255.255 local
+11.0.0.0 public
+# 100.64/10 (CGNAT: Python's is_private does not cover it)
+100.63.255.255 public
+100.64.0.0 local
+100.127.255.255 local
+100.128.0.0 public
+# 127/8
+126.255.255.255 public
+127.0.0.0 local
+127.0.0.1 local
+127.255.255.255 local
+128.0.0.0 public
+# 169.254/16 (link-local)
+169.253.255.255 public
+169.254.0.0 local
+169.254.255.255 local
+169.255.0.0 public
+# 172.16/12
+172.15.255.255 public
+172.16.0.0 local
+172.31.255.255 local
+172.32.0.0 public
+# 192.168/16
+192.167.255.255 public
+192.168.0.0 local
+192.168.255.255 local
+192.169.0.0 public
+# 224/4 multicast, then 240/4 reserved (the broadcast address with it)
+223.255.255.255 public
+224.0.0.0 local
+239.255.255.255 local
+240.0.0.0 local
+255.255.255.255 local
+# Public IPv4
+8.8.8.8 public
+1.1.1.1 public
+
+# ::/96: unspecified, loopback, and the deprecated IPv4-compatible form
+:: local
+::1 local
+::ffff:ffff local
+::1:0:0 public
+# fc00::/7 (unique local)
+fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff public
+fc00:: local
+fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff local
+fe00:: public
+# fe80::/10 (link-local), then fec0::/10 (site-local, deprecated)
+fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff public
+fe80:: local
+febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff local
+fec0:: local
+feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff local
+# ff00::/8 (multicast)
+ff00:: local
+ff02::1 local
+ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff local
+# Public IPv6
+2001:4860:4860::8888 public
+2606:4700::1111 public
+
+# ::ffff:0:0/96 (IPv4-mapped): judged on the IPv4
+::ffff:192.168.1.1 local
+::ffff:127.0.0.1 local
+::ffff:100.64.0.1 local
+::ffff:8.8.8.8 public
+# 64:ff9b::/96 (NAT64): judged on the embedded IPv4
+64:ff9b::c0a8:101 local
+64:ff9b::7f00:1 local
+64:ff9b::808:808 public
+64:ff9b::1:0:0 public
+# 64:ff9b:1::/48 (local-use NAT64, RFC 8215): where the IPv4 sits depends on
+# the operator's prefix length, so the whole block is refused
+64:ff9b:1:: local
+64:ff9b:1:ffff:ffff:ffff:ffff:ffff local
+64:ff9b:2:: public
+# 2002::/16 (6to4): judged on the IPv4 in bits 16-47
+2002:c0a8:101:: local
+2002:7f00:1:: local
+2002:a00:1:: local
+2002:808:808:: public
+2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff public
+2003:: public
+
+# Unparseable: refused
+not-an-ip local
+2130706433 local
+127.1 local
+192.168.1 local
+::ffff:999.1.1.1 local
+fe80::1%eth0 local

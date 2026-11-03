@@ -1,0 +1,50 @@
+[package]
+name = "ritornello-plugin-web-streaming"
+# Its own version, not the product's: this component can be fixed and
+# published alone. Only the major follows the product;
+# version_coherence.rs asserts it.
+version = "0.2.0-beta.8"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# What the release catalogue publishes about this plugin, so the installables
+# dialog can describe it before anything of it has ever run.
+[package.metadata.ritornello]
+kinds = ["source"]
+description = "Audio from web links (YouTube, SoundCloud, Bandcamp…), played without ads and downloadable to a share"
+admin = true
+
+[[bin]]
+name = "ritornello-plugin-web-streaming"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+toml = "1.1"
+ritornello-proto = { path = "../ritornello-proto" }
+ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
+ritornello-i18n = { path = "../ritornello-i18n" }
+# As a library only: the grammar of the roots and the reading of /proc/mounts
+# are the files plugin's, and exist once. Never the helper binary.
+ritornello-files-mount = { path = "../ritornello-files-mount" }
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# The plugin installs a yt-dlp no release of ours shipped: its signed list of
+# sums is checked with yt-dlp's own key (no gpgv on the device), and the
+# zipapp is unpacked here. Pure Rust, no compression format but deflate.
+pgp = { version = "0.21", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+# Signs the tests' sums with a key generated for the test, never a real one.
+rand = "0.8"

@@ -1,7 +1,7 @@
 # Working on Ritornello
 
 Ritornello turns a Raspberry Pi into an internet radio and CD player: an
-unprivileged Rust core, eleven plugins that speak to it over Unix sockets, and
+unprivileged Rust core, twelve plugins that speak to it over Unix sockets, and
 a Vue web UI embedded in the binary. It runs every day in one living room.
 
 This file is short on purpose. The project's knowledge lives in `docs/` and

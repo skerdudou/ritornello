@@ -191,6 +191,26 @@ pub enum SourceAction {
         /// a live stream, which must never loop.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         loopable: bool,
+        /// Path of the `yt-dlp` executable mpv must use to resolve `uri`
+        /// (source contract 1.3).
+        ///
+        /// Declared by the source because only it knows where it manages that
+        /// binary. Before loading `uri`, the core sends `change-list
+        /// script-opts append ytdl_hook-ytdl_path=<path>`, which that load
+        /// honours instead of a lookup on the `PATH`; mpv's hook only ever
+        /// sees a `ytdl://` address (the core keeps every `http(s)` one out of
+        /// its fallback). The core **refuses the whole `Play`** unless the
+        /// path is absolute, has no `..` component, no `:` (mpv's list
+        /// separator for this option) and lies strictly under the declaring
+        /// source's own data directory (checked on components, with no file
+        /// access). Absent = the hook runs **no `yt-dlp` for that load** (the
+        /// core points it at a program that does nothing), never one left
+        /// over from an earlier `Play`. The hook script itself stays loaded:
+        /// toggling mpv's `ytdl` reloads it behind the load, measured to lose
+        /// most first plays on mpv 0.37. Every other source's frames are
+        /// unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ytdl_path: Option<String>,
     },
     Stop,
     PlayerNext,
@@ -217,7 +237,7 @@ impl SourceAction {
     /// Going through this constructor rather than the literal variant avoids a
     /// field added later forcing every caller to be touched.
     pub fn play(uri: impl Into<String>) -> Self {
-        SourceAction::Play { uri: uri.into(), start: None, finite: false, playlist: false, loopable: false }
+        SourceAction::Play { uri: uri.into(), start: None, finite: false, playlist: false, loopable: false, ytdl_path: None }
     }
 
     /// Positions playback on the element at index `n` of the list. No effect
@@ -258,6 +278,16 @@ impl SourceAction {
     pub fn loopable(mut self) -> Self {
         if let SourceAction::Play { loopable, .. } = &mut self {
             *loopable = true;
+        }
+        self
+    }
+
+    /// Declares the `yt-dlp` executable mpv must use to resolve the URI (see
+    /// the field's doc). No effect on an action that is not a `Play`.
+    #[must_use]
+    pub fn ytdl_path(mut self, path: impl Into<String>) -> Self {
+        if let SourceAction::Play { ytdl_path, .. } = &mut self {
+            *ytdl_path = Some(path.into());
         }
         self
     }
@@ -763,6 +793,21 @@ mod tests {
     }
 
     #[test]
+    fn play_carries_the_ytdl_path_and_omits_it_when_absent() {
+        let a = SourceAction::play("https://www.youtube.com/watch?v=x").ytdl_path("/d/bin/yt-dlp");
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains(r#""ytdl_path":"/d/bin/yt-dlp""#), "{json}");
+        assert_eq!(serde_json::from_str::<SourceAction>(&json).unwrap(), a);
+        let plain = serde_json::to_string(&SourceAction::play("file:///a.mp3")).unwrap();
+        assert!(!plain.contains("ytdl_path"), "{plain}");
+    }
+
+    #[test]
+    fn ytdl_path_is_a_no_op_outside_play() {
+        assert_eq!(SourceAction::Noop.ytdl_path("/x"), SourceAction::Noop);
+    }
+
+    #[test]
     fn loopable_travels_only_when_set() {
         let plain = serde_json::to_string(&SourceAction::play("/l.m3u").playlist().finite()).unwrap();
         assert!(!plain.contains("loopable"), "{plain}");
@@ -797,7 +842,8 @@ mod tests {
                 start: None,
                 finite: false,
                 playlist: false,
-                loopable: false
+                loopable: false,
+                ytdl_path: None
             }
         );
     }
