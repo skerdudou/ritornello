@@ -96,15 +96,19 @@ watch(
 
 const lines = computed(() => lyrics.value?.synced ?? [])
 /**
+ * Timed lines are shown as lines, followed or not: a Stop on a file loses the
+ * position, and swapping the list for a paragraph then would throw away the
+ * listener's place in it for a text that reads the same.
+ */
+const listed = computed(() => props.synced && lines.value.length > 0)
+/**
  * Follow the song only when it can be followed: timed lines, and a position.
  * A radio no plugin tracks has lines but no position; highlighting the first
  * line forever would claim a precision nobody has.
  */
-const following = computed(
-  () => props.synced && lines.value.length > 0 && props.positionS !== null,
-)
+const following = computed(() => listed.value && props.positionS !== null)
 const active = computed(() => (following.value ? activeLine(lines.value, props.positionS) : null))
-/** The whole text, for when the song is not followed. */
+/** The whole text, for lyrics that are not timed. */
 const wholeText = computed(() => {
   const l = lyrics.value
   if (!l) return null
@@ -183,7 +187,7 @@ watch([active, open], async ([index, isOpen]) => {
         <p v-else-if="loading" class="text-muted-foreground" role="status" data-lyrics-loading>
           {{ t('lyrics_loading') }}
         </p>
-        <ol v-else-if="following" class="space-y-1" data-lyrics-lines>
+        <ol v-else-if="listed" class="space-y-1" data-lyrics-lines>
           <li
             v-for="(line, i) in lines"
             :key="i"

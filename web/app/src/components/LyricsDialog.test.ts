@@ -2,6 +2,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import LyricsDialog from './LyricsDialog.vue'
 import { MANUAL_SCROLL_HOLD_MS } from '../composables/lyrics'
+import { resetCatalog, useCatalog } from '../composables/useCatalog'
 import type { RenderedLyrics } from '../types'
 
 // Shapes as `GET /api/lyrics/{key}` serves them: both keys always present.
@@ -23,6 +24,9 @@ beforeEach(() => {
   fetchMock = vi.fn(async (url: string) => {
     if (url === '/api/lyrics/aaa') return new Response(JSON.stringify(TIMED), { status: 200 })
     if (url === '/api/lyrics/bbb') return new Response(JSON.stringify(OTHER), { status: 200 })
+    if (url === '/api/i18n') {
+      return new Response(JSON.stringify({ lyrics_origin: 'Lyrics: {par}' }), { status: 200 })
+    }
     return new Response('{}', { status: 404 })
   })
   vi.stubGlobal('fetch', fetchMock)
@@ -32,6 +36,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  resetCatalog()
   wrapper?.unmount()
   wrapper = null
   document.body.innerHTML = ''
@@ -132,14 +137,32 @@ describe('LyricsDialog', () => {
     expect(scrollIntoView).toHaveBeenCalledTimes(2)
   })
 
-  it('shows the whole text without highlight when the position is unknown', async () => {
+  it('shows the timed lines without highlight when the position is unknown', async () => {
     // A radio no plugin tracks: timed lines, no position.
     const w = mountDialog({ href: '/api/lyrics/aaa', positionS: null })
     await openDialog(w)
     expect(dialog()?.querySelector('[data-lyrics-active]')).toBeNull()
-    const text = dialog()?.querySelector('[data-lyrics-text]')
-    expect(text?.textContent).toBe('First line\nSecond line\nThird line')
-    expect(text?.classList.contains('whitespace-pre-line')).toBe(true)
+    expect(dialog()?.querySelector('[data-lyrics-text]')).toBeNull()
+    const items = [...(dialog()?.querySelectorAll('[data-lyrics-lines] li') ?? [])]
+    expect(items.map((li) => li.textContent?.trim())).toEqual(['First line', 'Second line', 'Third line'])
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  it('keeps the same list when the position is lost, only the highlight goes', async () => {
+    // A Stop on a file: the position becomes unknown under the open dialog.
+    // Swapping the list for a paragraph would lose the listener's place.
+    const w = mountDialog({ href: '/api/lyrics/aaa', positionS: 5 })
+    await openDialog(w)
+    const list = dialog()?.querySelector('[data-lyrics-lines]')
+    expect(list).not.toBeNull()
+    expect(dialog()?.querySelector('[data-lyrics-active]')?.textContent?.trim()).toBe('Second line')
+
+    await w.setProps({ positionS: null })
+    await flushPromises()
+    expect(dialog()?.querySelector('[data-lyrics-lines]')).toBe(list)
+    expect(dialog()?.querySelector('[data-lyrics-active]')).toBeNull()
+    expect(dialog()?.querySelector('[data-lyrics-text]')).toBeNull()
+    expect(list?.querySelectorAll('li')).toHaveLength(3)
   })
 
   it('shows the whole text when the lyrics are not timed, even with a position', async () => {
@@ -176,10 +199,10 @@ describe('LyricsDialog', () => {
   })
 
   it('names who provided the lyrics', async () => {
+    await useCatalog().reload()
     const w = mountDialog({ href: '/api/lyrics/aaa', positionS: 5, origin: 'lrclib' })
     await openDialog(w)
-    // The catalog is not loaded under test: `t` returns the key.
-    expect(dialog()?.querySelector('[data-lyrics-origin]')).not.toBeNull()
+    expect(dialog()?.querySelector('[data-lyrics-origin]')?.textContent?.trim()).toBe('Lyrics: lrclib')
   })
 
   it('says there are no lyrics when the key is gone', async () => {
