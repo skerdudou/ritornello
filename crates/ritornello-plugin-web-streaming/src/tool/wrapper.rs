@@ -57,12 +57,15 @@
 //!   on, and judged before it is printed: the host of every address a
 //!   format, the chosen format, a requested format or a subtitle would be
 //!   fetched from is resolved (all at once, under [`RESOLVE_SECONDS`]), and
-//!   whatever has one local address, or none in time, is dropped. A video
-//!   left with nothing to play fails: nothing on stdout, "every format
-//!   points to the local network" on stderr, a non-zero exit. A flat
-//!   playlist's entries are page addresses and are left as they are: this
-//!   filter does not judge them, and mpv may open an http one itself (see
-//!   below) rather than through the hook.
+//!   whatever has one local address, or none in time, is dropped. An entry
+//!   of a `playlist` or `multi_video` answer, flat or full, is dropped when
+//!   its `url` or its `webpage_url` is: mpv's `ytdl_hook` (0.37 and 0.40)
+//!   loads an entry from `webpage_url` when it has one, from `url`
+//!   otherwise, and opens it itself when it holds `://` (a bare id it turns
+//!   into `ytdl://<id>` or `https://youtu.be/<id>`, so that is left). A
+//!   video, or a playlist, left with nothing to play fails: nothing on
+//!   stdout, "every format points to the local network" on stderr, a
+//!   non-zero exit.
 //! - **No C extension past the guard.** The interpreter runs with `-IS`
 //!   ([`PYTHON_FLAGS`]): no `site`, so no site-packages on the path, and
 //!   `curl_cffi` is closed by name before `yt_dlp` is imported (libcurl
@@ -78,12 +81,13 @@
 //! cross-site request would. The answers are only ever played as audio:
 //! nothing of them is sent anywhere. The link the plugin hands mpv is not
 //! part of it: every address is written `ytdl://`, so mpv opens none itself
-//! and goes through the hook (measured on mpv 0.37). What remains is the
-//! http entries of a flat playlist the hook's answer expands: mpv opens them
-//! itself, and the core keeps every `http(s)` address out of the hook's
-//! fallback, so they should not come back through this wrapper either. That
-//! last part is reasoned from mpv's source, not measured: during a web Play,
-//! such entries have not been observed to fail or to skip the wrapper.
+//! and goes through the hook (measured on mpv 0.37). The http entries of a
+//! playlist the hook's answer expands are opened by mpv itself, and the core
+//! keeps every `http(s)` address out of the hook's fallback, so they do not
+//! come back through this wrapper: their hosts are judged here, once, before
+//! mpv resolves them again. That last part is reasoned from mpv's source,
+//! not measured: during a web Play, such entries have not been observed to
+//! fail or to skip the wrapper.
 //!
 //! The JavaScript runtime of the fallback (`--js-runtimes`) is the one
 //! process yt-dlp starts: it runs outside the socket guard, handed YouTube's
@@ -238,6 +242,7 @@ socket.socket.sendmsg = _guarded_sendmsg
 ANSWER_FLAGS = ("-J", "--dump-single-json")
 _FLAT = ("url", "url_transparent")
 _SOURCES = ("url", "manifest_url", "fragment_base_url")
+_ENTRY_SOURCES = ("url", "webpage_url")
 
 
 # yt-dlp's short options that take a value (measured on the parser of
@@ -321,18 +326,31 @@ def _guard_video(v, ok):
     return not playable or "url" in v or bool(v.get("requested_formats"))
 
 
+def _entry_addresses(e):
+    """The addresses mpv's ytdl_hook may open an entry of a playlist from by
+    itself (mpv 0.37 and 0.40 alike): `site = entry.url`, replaced by
+    `entry.webpage_url` when there is one (unless the entries redirect to the
+    playlist itself), then opened as it is when it holds "://". Both are
+    judged, whichever mpv picks. A string without "://" is an id: mpv makes
+    it "ytdl://<id>" (back through this wrapper) or "https://youtu.be/<id>",
+    neither a host of the answer's choosing. Anything else is judged, and
+    having no host, refused."""
+    return [e[k] for k in _ENTRY_SOURCES
+            if e.get(k) is not None and not (isinstance(e[k], str) and "://" not in e[k])]
+
+
 def _guard_doc(doc, ok):
-    """The same for one answer: a video, or a playlist whose entries that are
-    not flat are videos (an entry left with nothing is dropped). A flat
-    entry is a page address and is left: mpv loads it later, through this
-    wrapper or (an http one) by itself; see the residual risk."""
+    """The same for one answer: a video, or a playlist. An entry of a
+    playlist is dropped when an address mpv may load it from
+    (`_entry_addresses`) is not ok, flat or not, and a full entry is then
+    judged as a video (an entry left with nothing is dropped)."""
     if not isinstance(doc, dict) or doc.get("_type") in _FLAT:
         return True
     if doc.get("_type") in ("playlist", "multi_video"):
         entries = doc.get("entries")
         if not isinstance(entries, list):
             return True
-        kept = [e for e in entries if _guard_doc(e, ok)]
+        kept = [e for e in entries if not isinstance(e, dict) or (ok(_entry_addresses(e)) and _guard_doc(e, ok))]
         doc["entries"] = kept
         return len(kept) > 0 or len(entries) == 0
     return _guard_video(doc, ok)
@@ -1183,12 +1201,15 @@ def main(argv=None):
     }
 
     /// The real capture with formats (`tests/fixtures/video-formats.json`,
-    /// see the README there), each of its two hosts replaced by a public
-    /// literal: no test resolves a name but `localhost`.
+    /// see the README there), each of its hosts mpv may load replaced by a
+    /// public literal (`www.youtube.com` is its `webpage_url`'s, judged when
+    /// it is an entry of a playlist): no test resolves a name but
+    /// `localhost`.
     fn captured() -> String {
         fixture("video-formats.json")
             .replace("rr4---sn-aaa-aaaaa.googlevideo.com", "142.250.74.14")
             .replace("manifest.googlevideo.com", "[2a00:1450:4007:80e::200e]")
+            .replace("www.youtube.com", "142.250.74.14")
     }
 
     fn with_host(url: &serde_json::Value, host: &str) -> serde_json::Value {
@@ -1346,10 +1367,10 @@ def main(argv=None):
     }
 
     #[test]
-    fn a_flat_playlists_entries_are_left_and_a_full_playlists_local_entries_dropped() {
-        // The real flat capture, whose entries name youtube.com: printed
-        // byte for byte (and nothing resolved: the tests have no network).
-        let text = fixture("playlist.json");
+    fn a_playlists_entries_that_reach_the_local_network_are_dropped_flat_or_full() {
+        // The real flat capture, its entries' host (www.youtube.com) a public
+        // literal (the tests have no network): printed byte for byte.
+        let text = fixture("playlist.json").replace("www.youtube.com", "142.250.74.14");
         let (code, out, err) = answer(&text, &["-J", "--flat-playlist"], "0");
         assert_eq!(code, 0, "{err}");
         assert!(out == text, "the flat playlist was rewritten");
@@ -1358,22 +1379,61 @@ def main(argv=None):
         let mut local = video.clone();
         local["id"] = "local".into();
         local["url"] = with_host(&local["url"], "192.168.0.2");
-        // A flat entry is left even when it names a local address: this
-        // filter does not judge page addresses (the module's residual risk).
-        // Local here so that judging it would drop it whatever the network.
-        let flat = serde_json::json!({"_type": "url", "url": "http://192.168.1.1/page"});
-        let list = serde_json::json!({"_type": "playlist", "id": "PL", "entries": [local, video, flat]});
+        // A flat entry is a page address mpv opens itself: judged too.
+        let flat_local = serde_json::json!({"_type": "url", "url": "http://192.168.1.1/page"});
+        let flat = serde_json::json!({"_type": "url", "url": "https://142.250.74.14/watch?v=x"});
+        let list = serde_json::json!({"_type": "playlist", "id": "PL", "entries": [local, video, flat_local, flat]});
         let (code, out, err) = answer(&list.to_string(), &["-J"], "0");
         assert_eq!(code, 0, "{err}");
         let got = parsed(&out, &err);
         let entries = got["entries"].as_array().unwrap();
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 2, "{entries:?}");
         assert_eq!(entries[0]["id"], "jNQXAC9IVRw");
         assert_eq!(entries[1], flat);
         // Every full entry local: nothing left to play.
         let list = serde_json::json!({"_type": "playlist", "id": "PL", "entries": [list["entries"][0].clone()]});
         let (code, out, _) = answer(&list.to_string(), &["-J"], "0");
         assert_eq!((code, out.as_str()), (1, ""));
+    }
+
+    /// mpv's `ytdl_hook` (0.37 and 0.40) loads an entry of a `playlist` or
+    /// `multi_video` answer from its `webpage_url` when it has one, its `url`
+    /// otherwise: a public `url` does not make a local page address safe.
+    #[test]
+    fn an_entry_whose_page_address_is_local_is_dropped_from_a_multi_video() {
+        let video: serde_json::Value = serde_json::from_str(&captured()).unwrap();
+        let entry = |id: &str, page: serde_json::Value| {
+            let mut e = video.clone();
+            e["id"] = id.into();
+            e["webpage_url"] = page;
+            e
+        };
+        let entries = vec![
+            entry("by-literal", "http://192.168.1.10/watch?v=a".into()),
+            entry("clean", "https://142.250.74.14/watch?v=b".into()),
+            entry("by-name", "https://localhost/watch?v=c".into()),
+            // Not an address mpv could open: no host to judge, refused.
+            entry("not-a-string", 12345.into()),
+            // A bare id: mpv loads it as ytdl://<id> (back through the
+            // wrapper) or https://youtu.be/<id>, never a host of its own.
+            entry("an-id", "jNQXAC9IVRw".into()),
+        ];
+        let list = serde_json::json!({"_type": "multi_video", "id": "MV", "entries": entries});
+        assert!(list["entries"].as_array().unwrap().iter().all(|e| e["url"].as_str().unwrap().starts_with("https://142.250.74.14/")));
+        let (code, out, err) = answer(&list.to_string(), &["-J"], "0");
+        assert_eq!(code, 0, "{err}");
+        let got = parsed(&out, &err);
+        let ids: Vec<&str> = got["entries"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["clean", "an-id"]);
+
+        // Every entry's page address local: nothing left to play.
+        let list = serde_json::json!({"_type": "multi_video", "id": "MV", "entries": [
+            entry("by-literal", "http://192.168.1.10/watch?v=a".into()),
+            entry("by-name", "https://localhost/watch?v=c".into()),
+        ]});
+        let (code, out, err) = answer(&list.to_string(), &["-J"], "0");
+        assert_eq!((code, out.as_str()), (1, ""), "{err}");
+        assert!(err.contains("every format points to the local network"), "{err}");
     }
 
     /// A fake `yt_dlp` whose `main` tries to import `curl_cffi` (a fake one

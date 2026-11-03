@@ -2629,8 +2629,13 @@ port). Three guards, all needed:
    keeps the answer and drops every format (and chosen format, requested
    format, subtitle) whose host resolves to a local address, or does not
    resolve in time (5 s, all hosts at once); a video left with nothing to
-   play fails. A flat playlist's entries are page addresses and are not
-   judged by this filter.
+   play fails. An entry of a `playlist` or `multi_video` answer, flat or
+   full, is dropped when its `url` or its `webpage_url` is: mpv's hook (read
+   in its source, 0.37 and 0.40) loads an entry from `webpage_url` when it
+   has one, from `url` otherwise, and opens it itself when it holds `://`.
+   A bare id is left (mpv turns it into `ytdl://<id>`, back through the
+   wrapper, or `https://youtu.be/<id>`). A playlist left with no entry fails
+   like a video.
 3. **The plugin's own fetch** (the cover thumbnails): https only, no
    credentials, the default port, a resolver that drops local addresses
    (a literal address is judged before connecting, since a literal skips any
@@ -2658,10 +2663,11 @@ trigger a GET endpoint of a router or a NAS, the way a cross-site request
 would. The answers are only ever played as audio: nothing of them is sent
 anywhere. The link the plugin hands mpv is not part of it: every address is
 written `ytdl://`, so mpv opens none of them itself and goes through the
-hook (measured on mpv 0.37). What remains beyond the stream is the http
-entries of a flat playlist the hook's answer expands, which mpv opens
-itself (the core keeps every `http(s)` address out of the hook's fallback,
-so they are never resolved through the wrapper either). This was accepted by the project's owner for this release. **A
+hook (measured on mpv 0.37). The http entries of a playlist the hook's
+answer expands are opened by mpv itself (the core keeps every `http(s)`
+address out of the hook's fallback, so they never come back through the
+wrapper): their hosts are judged once, by the filter above, and mpv
+resolves them again, the same second resolution as a stream's. This was accepted by the project's owner for this release. **A
 follow-up is planned**: a guarding proxy, owned by the plugin, through which
 mpv would be routed for each load.
 
