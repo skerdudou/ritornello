@@ -84,6 +84,14 @@ pub async fn fetch_core_identities(client: &reqwest::Client, url: &str) -> Optio
 /// as [`DECLINED`] is satisfied, offered or not. Every offered
 /// file when nothing is recorded. **Empty** when the release's own
 /// identities are unknown: the refusal stands, but no file can be named.
+///
+/// The [`DECLINED`] excuse is not limited to the grant rule paths, and does
+/// not need to be: it rests on the registry `installed.toml` being written
+/// only by root (`ritornello-install`), which records `declined` only for
+/// the rule path of a grant the operator refused (`grants::Grant::rule_path`).
+/// Were anything else ever allowed to write that file, or to record
+/// `declined` for a unit or the updater, this would let the page update the
+/// core past a privileged file nobody placed.
 pub fn files_needing_installer(
     offered: Option<&Identities>,
     recorded: Option<&Identities>,

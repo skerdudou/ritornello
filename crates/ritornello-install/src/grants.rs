@@ -13,7 +13,7 @@ use crate::registry::Registry;
 /// The identity recorded for a rule path whose grant was declined.
 ///
 /// `ritornello-core` reads it back as `update::privileged::DECLINED`; the two
-/// literals must stay equal.
+/// literals must stay equal; `declined_is_the_word_the_core_reads` checks it.
 pub const DECLINED: &str = "declined";
 
 /// The registry key the core's record lives under (`inv.core.name`).
@@ -148,5 +148,19 @@ mod tests {
             },
         );
         assert!(recorded_declined(Some(&reg)).is_empty());
+    }
+
+    /// The word recorded here is the word the core excuses. Two crates, two
+    /// literals, nothing else tying them: were they to diverge, every device
+    /// on which a grant was declined would see its declined rule as a missing
+    /// privileged file, and silently lose the core's updates from the page.
+    #[test]
+    fn declined_is_the_word_the_core_reads() {
+        assert_eq!(DECLINED, "declined");
+        let core = include_str!("../../ritornello-core/src/update/privileged.rs");
+        assert!(
+            core.contains(r#"pub const DECLINED: &str = "declined";"#),
+            "ritornello-core's update::privileged::DECLINED no longer reads \"declined\""
+        );
     }
 }
