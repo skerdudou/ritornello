@@ -1,8 +1,24 @@
-**Action required** — if the device has the `lrclib` plugin (beta.9),
-replace it with **`lrclib-lyrics`**, by hand, once: the update does not do
-it.
+**Action required** — run **ritornello-install** once, from a workstation,
+and, if the device has the `lrclib` plugin (beta.9), replace it with
+**`lrclib-lyrics`**: the update does neither by itself.
 
-The lyrics plugin is renamed: `lrclib` becomes `lrclib-lyrics` (same
+**1. The mount helper changed one last time for this reason.** `files-mount`
+moves from 1.0.2 to 1.0.3: the `files` plugin's own preferences
+(`archive_covers`, `archive_lyrics`) leave the library the root helper is
+built from, so that a future `files` preference never again needs the
+installer. What root mounts does not change, and `media-roots.toml` stays
+byte for byte the same. Only ritornello-install places the helper, so the
+page refuses to update `files` on its own and says so:
+
+```sh
+ritornello-install --host account@host --version v0.2.0-beta.10 --keep
+```
+
+Everything else — the core, the other plugins and the language packs —
+updates from the page as usual: no systemd unit, polkit rule or privileged
+updater changed since beta.9.
+
+**2. The lyrics plugin is renamed**: `lrclib` becomes `lrclib-lyrics` (same
 behaviour, still fed by LRCLIB). This release ships `lrclib-lyrics` and no
 longer ships `lrclib`. A device that has `lrclib` keeps running it
 untouched — the updater still finds its beta.9 archive, so it reports it
@@ -18,18 +34,17 @@ up to date and never offers anything for it again — and never installs
    an empty one in `/var/lib/ritornello/plugins/lrclib-lyrics`). Delete the
    old one with `sudo rm -r /var/lib/ritornello/plugins/lrclib`.
 
-With **ritornello-install** instead: `--keep` leaves `lrclib` in place (it
-is listed as a third-party plugin, since the release no longer knows it)
-and does not add `lrclib-lyrics`. Name the plugins with `--plugins`,
-`lrclib-lyrics` included and `lrclib` left out; add `--purge-data` to
-erase `lrclib`'s cache in the same run. Interactively, untick `lrclib` and
-tick `lrclib-lyrics`.
+Or both points in the one ritornello-install run: instead of `--keep`, name
+the plugins with `--plugins`, `lrclib-lyrics` included and `lrclib` left
+out (add `--purge-data` to erase `lrclib`'s cache). Interactively, untick
+`lrclib` and tick `lrclib-lyrics`. With `--keep`, `lrclib` stays (listed as
+a third-party plugin, since the release no longer knows it) and
+`lrclib-lyrics` is not added.
 
-Left in place, both plugins run side by side: the lyrics shown do not
-change, but a song not yet cached can be looked up twice on LRCLIB, and
-is cached twice.
+Left in place, both lyrics plugins run side by side: the lyrics shown do
+not change, but a song not yet cached can be looked up twice on LRCLIB.
 
-This rename is not a wire break: no contract moved, and the bootstrap
+This is not a wire break: no contract moved, and the bootstrap
 `PROTOCOL_VERSION` did not move.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
@@ -62,13 +77,7 @@ This rename is not a wire break: no contract moved, and the bootstrap
 
      **Action required** — wire break: install the core and every plugin
      together. A rollback of the core leaves every plugin refused until the
-     core is reinstalled.
-
-     For the release that ships this block: move the fr/de/es/it language
-     packs too (deploy/language-packs.toml). Their published archives still
-     carry `lrclib.toml`, not `lrclib-lyrics.toml`, so until they move the
-     renamed plugin's page stays in English on a non-English device, and
-     changed-components.sh only warns about it. -->
+     core is reinstalled. -->
 
 ## Behaviour changes
 
@@ -78,6 +87,45 @@ page is at `/plugins/lrclib-lyrics/`, its cache in
 `/var/lib/ritornello/plugins/lrclib-lyrics`, and it introduces itself to
 LRCLIB under the new name. What it does is unchanged. See the action above
 to switch a device that has `lrclib`.
+
+**Web streaming: videos that need JavaScript now play, faster.** Some
+YouTube videos no longer resolve without a JavaScript runtime ("This video
+is not available"). Measured on a Raspberry Pi 2:
+- On 32-bit ARM the plugin now installs and updates its own **node 22**
+  (about 108 MB), the last node line built for that architecture; its list
+  of sums must be signed by one of node's release keys, an older version
+  never replaces a newer one, and after node 22's end of life (April 2027)
+  it is kept and the page says so. Such a video: 2 min 10 s with QuickJS,
+  about 30 s with node, then **about 15 s** once yt-dlp's player cache,
+  which the plugin now turns on, has the current YouTube player.
+- Adding a link, refreshing a playlist or probing a download may now take
+  up to 5 minutes before the page gives up (was 2).
+- The capabilities panel says the JavaScript runtime only serves when a
+  video fails without one.
+
+**Web streaming downloads: format, cover, name.**
+- **Format**: original (as the site gives it, webm for YouTube), **m4a** or
+  **mp3**, remembered. mp3 (and m4a from a site without an m4a stream) is
+  converted on the device by ffmpeg, offered only when ffmpeg is installed
+  (`sudo apt install ffmpeg`); the page says when it is missing.
+- **Cover of a single video**: beside the track as `<name>.jpg` (default),
+  or embedded in the file (m4a, mp3, opus, ogg; a webm falls back beside the
+  file). No more `cover.jpg` for a single video: it became the cover of
+  every later video in the folder. Playlists keep their folder's
+  `cover.jpg`.
+- **Name**: the file's (or the playlist folder's) name can be changed in
+  the dialog, prefilled with the usual one; nothing is ever overwritten.
+- Creating a folder in the dialog now enters it.
+
+**Files: a track's own cover, and more formats.** `<track>.jpg` (or
+`.jpeg`, `.png`) beside a track is now its cover, before the folder's
+image, and a folder's lone image is no longer guessed from another track's
+own cover. The files plugin now lists every audio format mpv was seen to
+play, `.webm` included (a web-streaming download in its original format).
+
+**Plugins table after an install.** The configuration page reads the
+plugins table again once an install job is over, instead of showing the
+state from before it.
 
 ## Install
 
