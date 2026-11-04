@@ -123,6 +123,9 @@ image, and a folder's lone image is no longer guessed from another track's
 own cover. The files plugin now lists every audio format mpv was seen to
 play, `.webm` included (a web-streaming download in its original format).
 
+**The configuration page fits a phone.** It no longer scrolls sideways on
+a narrow screen, the Updates card included.
+
 **Plugins table after an install.** The configuration page reads the
 plugins table again once an install job is over, instead of showing the
 state from before it.
