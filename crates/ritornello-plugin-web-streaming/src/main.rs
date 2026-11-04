@@ -24,16 +24,25 @@ async fn main() -> Result<()> {
     let entries = Arc::new(AsyncRwLock::new(entries));
     // The download queue first: yt-dlp's updater takes its gate, so an update
     // waits for the job in progress instead of swapping the tool under it.
+    // The tool is made after the queue (it takes the queue's gate), and it
+    // is the tool that probes the machine for ffmpeg: the queue asks it
+    // through this cell, at each conversion.
+    let tool_cell: Arc<std::sync::OnceLock<Tool>> = Arc::default();
+    let ffmpeg = {
+        let cell = tool_cell.clone();
+        Arc::new(move || cell.get().and_then(|t| t.capabilities().ffmpeg_path))
+    };
     let ctx = Ctx {
         ytdlp: Arc::new(Ytdlp::new(&data)),
         lists: ListCache::new(&data),
-        limits: Limits::default(),
+        limits: Limits { ffmpeg, ..Limits::default() },
     };
     let resolver = jobs::resolver_for(files_roots_path(&data), Duration::from_secs(10));
     let jobs = Jobs::start(&data, entries.clone(), ctx, resolver);
     // yt-dlp: installed at once when absent, then checked daily, in the
     // background.
     let tool = Tool::new(&data, jobs.tool_gate())?;
+    let _ = tool_cell.set(tool.clone());
     tokio::spawn(tool::schedule(tool.clone()));
     // Ticked by the admin half after each save; the source half announces the
     // new table to the core.

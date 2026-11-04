@@ -77,7 +77,7 @@ fn the_fallback_is_cleaned_too_and_nothing_is_ever_empty() {
 
 #[test]
 fn the_download_command_is_exactly_the_documented_one() {
-    let args = download_args(Path::new("/mnt/ritornello/nas/Rock"), "01 - Song", "https://www.youtube.com/watch?v=jNQXAC9IVRw");
+    let args = download_args(Path::new("/mnt/ritornello/nas/Rock"), "01 - Song", "https://www.youtube.com/watch?v=jNQXAC9IVRw", Format::Original);
     assert_eq!(
         args,
         [
@@ -102,7 +102,7 @@ fn the_download_command_is_exactly_the_documented_one() {
 
 #[test]
 fn no_ffmpeg_dependent_flag_is_ever_passed() {
-    let args = download_args(Path::new("/d"), "n", "https://www.youtube.com/watch?v=jNQXAC9IVRw").join(" ");
+    let args = download_args(Path::new("/d"), "n", "https://www.youtube.com/watch?v=jNQXAC9IVRw", Format::Original).join(" ");
     for banned in ["thumbnail", "embed", "convert", "extract-audio", "merge", "-x"] {
         assert!(!args.contains(banned), "{banned}");
     }
@@ -110,7 +110,7 @@ fn no_ffmpeg_dependent_flag_is_ever_passed() {
 
 #[test]
 fn a_percent_in_a_name_cannot_write_a_template_field() {
-    let args = download_args(Path::new("/d/100%"), "%(id)s - 50%", "https://www.youtube.com/watch?v=jNQXAC9IVRw");
+    let args = download_args(Path::new("/d/100%"), "%(id)s - 50%", "https://www.youtube.com/watch?v=jNQXAC9IVRw", Format::Original);
     let template = &args[args.iter().position(|a| a == "-o").unwrap() + 1];
     assert_eq!(template, "/d/100%%/%%(id)s - 50%%.%(ext)s");
 }
@@ -423,19 +423,26 @@ async fn a_missing_binary_is_a_spawn_failure() {
 const PLAYLIST_URL: &str = "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI";
 
 /// A wrapper that answers a probe with `probe_json` and "downloads" by
-/// writing the file the `-o` template names, after `hook`.
+/// writing the file the `-o` template names, after `hook`. The hook may set
+/// `EXT` (the extension the site gave, `m4a` by default) and `SRC` (a real
+/// file copied instead of the word `audio`). Like yt-dlp, it leaves a file
+/// that is already there alone. Every call's arguments are logged, one line
+/// each, in `<log>.args`.
 fn wrapper(probe_json: &Path, log: &Path, hook: &str) -> String {
     format!(
         r#"case "$1" in -J) cat '{probe}'; exit 0;; esac
+echo "$*" >> '{log}.args'
 out=; url=
 while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; --) url="$2"; break;; esac; shift; done
 echo "$url" >> '{log}'
 echo "$out" >> '{log}.out'
 id="${{url##*=}}"
+EXT=m4a; SRC=
 {hook}
 echo "  42.0% $id"
-file=$(printf '%s' "$out" | sed 's/%(ext)s/m4a/; s/%%/%/g')
-printf 'audio' > "$file"
+file=$(printf '%s' "$out" | sed "s/%(ext)s/$EXT/; s/%%/%/g")
+[ -e "$file" ] && exit 0
+if [ -n "$SRC" ]; then cp "$SRC" "$file"; else printf 'audio' > "$file"; fi
 "#,
         probe = probe_json.display(),
         log = log.display(),
@@ -483,8 +490,12 @@ fn share_holds() -> ShareFuture {
 }
 
 async fn run(s: &Setup, entry: &Entry, cancel: &Cancel) -> (PresetEnd, Vec<Event>) {
+    run_choosing(s, entry, &Choices::default(), cancel).await
+}
+
+async fn run_choosing(s: &Setup, entry: &Entry, choices: &Choices, cancel: &Cancel) -> (PresetEnd, Vec<Event>) {
     let mut events = Vec::new();
-    let end = download_preset(&s.ctx, entry, &s.resolved, &share_holds, cancel, &mut |e| events.push(e)).await;
+    let end = download_preset(&s.ctx, entry, choices, &s.resolved, &share_holds, cancel, &mut |e| events.push(e)).await;
     (end, events)
 }
 
@@ -613,18 +624,432 @@ async fn titles_that_try_to_climb_or_template_stay_in_the_folder_and_literal() {
     assert_eq!(files_in(&s.resolved.dir), ["_.._escape 100% %(id)s.m4a"]);
 }
 
+fn zoo() -> Entry {
+    Entry { url: "https://www.youtube.com/watch?v=jNQXAC9IVRw".into(), kind: Kind::Video, title: "Me at the zoo".into(), ..playlist_entry() }
+}
+
+fn notes(events: &[Event]) -> Vec<Note> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Noted(_, n) => Some(n.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn choosing(format: Format, cover: CoverMode) -> Choices {
+    Choices { format, cover, name: None }
+}
+
 #[tokio::test]
-async fn a_single_video_goes_next_to_the_target_and_its_cover_only_if_none_exists() {
+async fn a_single_video_s_cover_is_its_own_picture_and_never_the_folder_s() {
     let s = setup(&fixture_path("video.json"), "", Some(JPEG.to_vec()));
-    let entry = Entry { url: "https://www.youtube.com/watch?v=jNQXAC9IVRw".into(), kind: Kind::Video, title: "Me at the zoo".into(), ..playlist_entry() };
-    run(&s, &entry, &Cancel::new()).await;
-    assert_eq!(files_in(&s.resolved.dir), ["Me at the zoo.m4a", "cover.jpg"], "no subfolder for one video");
-    // A second video next to it must not overwrite the cover.
-    std::fs::write(s.resolved.dir.join("cover.jpg"), b"mine").unwrap();
-    let before = s.calls.lock().unwrap().len();
-    run(&s, &entry, &Cancel::new()).await;
-    assert_eq!(std::fs::read(s.resolved.dir.join("cover.jpg")).unwrap(), b"mine");
-    assert_eq!(s.calls.lock().unwrap().len(), before, "not even fetched");
+    let (end, events) = run(&s, &zoo(), &Cancel::new()).await;
+    assert_eq!(end, PresetEnd::Finished);
+    // No `cover.jpg`: every other track of the folder would show it.
+    assert_eq!(files_in(&s.resolved.dir), ["Me at the zoo.jpg", "Me at the zoo.m4a"], "no subfolder for one video");
+    assert_eq!(std::fs::read(s.resolved.dir.join("Me at the zoo.jpg")).unwrap(), JPEG);
+    assert!(notes(&events).is_empty(), "{events:?}");
+}
+
+#[tokio::test]
+async fn a_name_already_taken_is_left_alone_and_said() {
+    let s = setup(&fixture_path("video.json"), "", Some(JPEG.to_vec()));
+    std::fs::write(s.resolved.dir.join("Me at the zoo.m4a"), b"mine").unwrap();
+    let (end, events) = run(&s, &zoo(), &Cancel::new()).await;
+    assert_eq!(end, PresetEnd::Finished);
+    assert_eq!(ended(&events), [(0, VideoState::Done)]);
+    assert_eq!(notes(&events), [Note::AlreadyPresent]);
+    assert_eq!(std::fs::read(s.resolved.dir.join("Me at the zoo.m4a")).unwrap(), b"mine");
+    // Nothing was put beside what the plugin did not write.
+    assert_eq!(files_in(&s.resolved.dir), ["Me at the zoo.m4a"]);
+    assert!(s.calls.lock().unwrap().is_empty(), "no cover fetched");
+}
+
+#[tokio::test]
+async fn a_separate_cover_never_overwrites_a_picture_already_there() {
+    let s = setup(&fixture_path("video.json"), "", Some(JPEG.to_vec()));
+    std::fs::write(s.resolved.dir.join("Me at the zoo.jpg"), b"mine").unwrap();
+    let (_, events) = run(&s, &zoo(), &Cancel::new()).await;
+    assert_eq!(notes(&events), [Note::CoverNameTaken]);
+    assert_eq!(std::fs::read(s.resolved.dir.join("Me at the zoo.jpg")).unwrap(), b"mine");
+    assert!(s.calls.lock().unwrap().is_empty(), "not even fetched");
+}
+
+#[tokio::test]
+async fn a_picture_that_appears_while_the_cover_is_fetched_is_not_overwritten() {
+    // The name was free when looked at; someone writes it during the fetch.
+    let mut s = setup(&fixture_path("video.json"), "", None);
+    let beside = s.resolved.dir.join("Me at the zoo.jpg");
+    s.ctx.limits.fetch_cover = Arc::new(move |_| {
+        std::fs::write(&beside, b"mine").unwrap();
+        Box::pin(async { Some(JPEG.to_vec()) })
+    });
+    let (_, events) = run(&s, &zoo(), &Cancel::new()).await;
+    assert_eq!(notes(&events), [Note::CoverNameTaken]);
+    assert_eq!(std::fs::read(s.resolved.dir.join("Me at the zoo.jpg")).unwrap(), b"mine");
+}
+
+#[tokio::test]
+async fn an_embedded_cover_goes_beside_a_webm_which_takes_none() {
+    let s = setup(&fixture_path("video.json"), "EXT=webm", Some(JPEG.to_vec()));
+    let (_, events) = run_choosing(&s, &zoo(), &choosing(Format::Original, CoverMode::Embedded), &Cancel::new()).await;
+    assert_eq!(notes(&events), [Note::CoverBeside]);
+    assert_eq!(files_in(&s.resolved.dir), ["Me at the zoo.jpg", "Me at the zoo.webm"]);
+    // And beside it never over a picture already there.
+    let s = setup(&fixture_path("video.json"), "EXT=webm", Some(JPEG.to_vec()));
+    std::fs::write(s.resolved.dir.join("Me at the zoo.jpg"), b"mine").unwrap();
+    let (_, events) = run_choosing(&s, &zoo(), &choosing(Format::Original, CoverMode::Embedded), &Cancel::new()).await;
+    assert_eq!(notes(&events), [Note::CoverBeside, Note::CoverNameTaken]);
+    assert_eq!(std::fs::read(s.resolved.dir.join("Me at the zoo.jpg")).unwrap(), b"mine");
+}
+
+#[tokio::test]
+async fn a_cover_that_cannot_be_embedded_goes_beside_the_file() {
+    // An m4a that is not one (the fake writes the word `audio`): lofty
+    // refuses it, the picture goes beside it.
+    let s = setup(&fixture_path("video.json"), "", Some(JPEG.to_vec()));
+    let (_, events) = run_choosing(&s, &zoo(), &choosing(Format::Original, CoverMode::Embedded), &Cancel::new()).await;
+    assert_eq!(notes(&events), [Note::CoverBeside]);
+    assert_eq!(std::fs::read(s.resolved.dir.join("Me at the zoo.jpg")).unwrap(), JPEG);
+    assert_eq!(std::fs::read(s.resolved.dir.join("Me at the zoo.m4a")).unwrap(), b"audio", "the file is untouched");
+}
+
+#[tokio::test]
+async fn a_playlist_keeps_its_cover_jpg_whatever_the_cover_choice() {
+    for mode in [CoverMode::Embedded, CoverMode::Separate] {
+        let s = setup(&fixture_path("playlist.json"), "", Some(JPEG.to_vec()));
+        run_choosing(&s, &playlist_entry(), &choosing(Format::Original, mode), &Cancel::new()).await;
+        let files = files_in(&s.resolved.dir.join("Popular Music Videos"));
+        assert_eq!(files.iter().filter(|f| f.ends_with(".jpg")).collect::<Vec<_>>(), ["cover.jpg"], "{mode:?}: {files:?}");
+    }
+}
+
+// ---- the names typed --------------------------------------------------------
+
+#[tokio::test]
+async fn a_typed_name_is_cleaned_like_a_title_and_stays_in_the_folder() {
+    let s = setup(&fixture_path("video.json"), "", Some(JPEG.to_vec()));
+    let choices = Choices { name: Some("../My $HOME/clip 100% %(id)s".into()), ..Choices::default() };
+    let (end, _) = run_choosing(&s, &zoo(), &choices, &Cancel::new()).await;
+    assert_eq!(end, PresetEnd::Finished);
+    assert_eq!(files_in(&s.resolved.dir), ["_My _HOME_clip 100% %(id)s.jpg", "_My _HOME_clip 100% %(id)s.m4a"]);
+    let template = std::fs::read_to_string(format!("{}.out", s.log.display())).unwrap();
+    assert!(template.trim().ends_with("/_My _HOME_clip 100%% %%(id)s.%(ext)s"), "{template}");
+    assert!(!template.contains('$'), "{template}");
+}
+
+#[tokio::test]
+async fn a_typed_name_that_cleans_to_nothing_leaves_the_default() {
+    for blank in ["", "   ", "..", " . "] {
+        let s = setup(&fixture_path("video.json"), "", None);
+        let choices = Choices { name: Some(blank.into()), ..Choices::default() };
+        run_choosing(&s, &zoo(), &choices, &Cancel::new()).await;
+        assert_eq!(files_in(&s.resolved.dir), ["Me at the zoo.m4a"], "{blank:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_playlist_s_typed_name_is_its_folder_and_its_tracks_keep_their_numbers() {
+    let s = setup(&fixture_path("playlist.json"), "", None);
+    let choices = Choices { name: Some("Mine/../x".into()), ..Choices::default() };
+    run_choosing(&s, &playlist_entry(), &choices, &Cancel::new()).await;
+    assert_eq!(files_in(&s.resolved.dir), ["Mine_.._x"]);
+    let files = files_in(&s.resolved.dir.join("Mine_.._x"));
+    assert!(files[0].starts_with("01 - "), "{files:?}");
+    // Blank: the playlist's title.
+    let s = setup(&fixture_path("playlist.json"), "", None);
+    run_choosing(&s, &playlist_entry(), &Choices { name: Some("  ".into()), ..Choices::default() }, &Cancel::new()).await;
+    assert_eq!(files_in(&s.resolved.dir), ["Popular Music Videos"]);
+}
+
+#[test]
+fn the_default_name_is_the_preset_s_title_cleaned_else_its_id() {
+    let video = |title: &str| Entry { title: title.into(), ..zoo() };
+    assert_eq!(default_name(&video("Me at the zoo")), "Me at the zoo");
+    assert_eq!(default_name(&video("a/b: $x")), "a_b_ _x");
+    assert_eq!(default_name(&video("..")), "jNQXAC9IVRw");
+    assert_eq!(default_name(&Entry { title: String::new(), ..playlist_entry() }), "PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI");
+    let other = Entry { url: "https://soundcloud.com/forss/flickermood".into(), title: String::new(), identity: Some("Soundcloud:293".into()), ..zoo() };
+    assert_eq!(default_name(&other), "293");
+}
+
+// ---- formats and ffmpeg -----------------------------------------------------
+
+#[test]
+fn each_format_asks_its_stream_and_never_hands_ffmpeg_to_yt_dlp() {
+    let url = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+    for (format, selector) in [
+        (Format::Original, "bestaudio"),
+        (Format::M4a, "bestaudio[ext=m4a]/bestaudio"),
+        (Format::Mp3, "bestaudio"),
+    ] {
+        let args = download_args(Path::new("/d"), "n", url, format);
+        assert_eq!(args[..2], ["-f".to_string(), selector.to_string()], "{format:?}");
+        let after = |flag: &str| args.iter().position(|a| a == flag).map(|i| args[i + 1].as_str());
+        assert_eq!(after("--ffmpeg-location"), Some(NO_FFMPEG), "{format:?}");
+        let joined = args.join(" ");
+        for banned in ["thumbnail", "embed", "convert", "extract-audio", "audio-format", "merge", "-x", "postprocessor"] {
+            assert!(!joined.contains(banned), "{format:?}: {banned}");
+        }
+    }
+}
+
+#[test]
+fn the_conversion_reads_and_writes_only_local_files_and_never_overwrites() {
+    let args = conversion_args(Path::new("/d/a:b.webm"), Path::new("/d/.a:b.mp3.converting"), Format::Mp3);
+    assert_eq!(
+        args,
+        [
+            "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file", "-i", "file:/d/a:b.webm",
+            "-vn", "-map", "0:a:0", "-c:a", "libmp3lame", "-q:a", "2", "-f", "mp3", "-n", "file:/d/.a:b.mp3.converting",
+        ]
+    );
+    let args = conversion_args(Path::new("/d/x.webm"), Path::new("/d/.x.m4a.converting"), Format::M4a);
+    let joined = args.join(" ");
+    assert!(joined.contains("-c:a aac") && joined.contains("-f ipod"), "{joined}");
+}
+
+/// A fake ffmpeg that logs its arguments to `log` and writes `converted` to
+/// the path of its last argument, after `hook`; refusing, like `-n`, a path
+/// that exists.
+fn fake_ffmpeg(dir: &Path, log: &Path, hook: &str) -> PathBuf {
+    crate::tool::testkit::write_script(
+        dir,
+        "ffmpeg",
+        &format!(
+            "echo \"$*\" >> '{log}'\nfor a; do last=\"$a\"; done\nout=\"${{last#file:}}\"\n{hook}\n[ -e \"$out\" ] && exit 1\nprintf converted > \"$out\"",
+            log = log.display()
+        ),
+    )
+}
+
+struct WithFfmpeg {
+    s: Setup,
+    log: PathBuf,
+    _bin: tempfile::TempDir,
+}
+
+fn with_ffmpeg(hook: &str, ffmpeg_hook: &str) -> WithFfmpeg {
+    let mut s = setup(&fixture_path("video.json"), hook, Some(JPEG.to_vec()));
+    let bin = tempfile::tempdir().unwrap();
+    let log = bin.path().join("ffmpeg.log");
+    let ffmpeg = fake_ffmpeg(bin.path(), &log, ffmpeg_hook);
+    s.ctx.limits.ffmpeg = Arc::new(move || Some(ffmpeg.clone()));
+    WithFfmpeg { s, log, _bin: bin }
+}
+
+#[tokio::test]
+async fn mp3_is_converted_by_the_plugin_and_the_original_removed() {
+    let w = with_ffmpeg("EXT=webm", "");
+    let (end, events) = run_choosing(&w.s, &zoo(), &choosing(Format::Mp3, CoverMode::Separate), &Cancel::new()).await;
+    assert_eq!(end, PresetEnd::Finished);
+    assert!(events.contains(&Event::Converting(0)), "{events:?}");
+    assert_eq!(ended(&events), [(0, VideoState::Done)]);
+    assert!(notes(&events).is_empty(), "{events:?}");
+    assert_eq!(files_in(&w.s.resolved.dir), ["Me at the zoo.jpg", "Me at the zoo.mp3"]);
+    assert_eq!(std::fs::read(w.s.resolved.dir.join("Me at the zoo.mp3")).unwrap(), b"converted");
+    // ffmpeg was the plugin's: yt-dlp never saw it.
+    let dir = w.s.resolved.dir.display().to_string();
+    let ran = std::fs::read_to_string(&w.log).unwrap();
+    assert_eq!(
+        ran.trim(),
+        format!(
+            "-nostdin -hide_banner -loglevel error -protocol_whitelist file -i file:{dir}/Me at the zoo.webm -vn -map 0:a:0 -c:a libmp3lame -q:a 2 -f mp3 -n file:{dir}/.Me at the zoo.mp3.converting"
+        )
+    );
+    let ytdlp = std::fs::read_to_string(format!("{}.args", w.s.log.display())).unwrap();
+    assert!(ytdlp.contains("--ffmpeg-location /dev/null/ffmpeg") && !ytdlp.contains(&w._bin.path().display().to_string()), "{ytdlp}");
+}
+
+#[tokio::test]
+async fn without_ffmpeg_the_site_s_format_is_kept_and_said() {
+    for format in [Format::Mp3, Format::M4a] {
+        let s = setup(&fixture_path("video.json"), "EXT=webm", None);
+        let (end, events) = run_choosing(&s, &zoo(), &choosing(format, CoverMode::Separate), &Cancel::new()).await;
+        assert_eq!(end, PresetEnd::Finished);
+        assert_eq!(notes(&events), [Note::NoFfmpeg], "{format:?}");
+        assert_eq!(files_in(&s.resolved.dir), ["Me at the zoo.webm"], "{format:?}");
+    }
+}
+
+#[tokio::test]
+async fn m4a_from_the_site_is_kept_as_it_is_and_another_format_converted() {
+    let w = with_ffmpeg("EXT=m4a", "");
+    let (_, events) = run_choosing(&w.s, &zoo(), &choosing(Format::M4a, CoverMode::Separate), &Cancel::new()).await;
+    assert!(!events.contains(&Event::Converting(0)) && notes(&events).is_empty(), "{events:?}");
+    assert!(!w.log.exists(), "ffmpeg was not run");
+    assert_eq!(std::fs::read(w.s.resolved.dir.join("Me at the zoo.m4a")).unwrap(), b"audio");
+    let w = with_ffmpeg("EXT=webm", "");
+    let (_, events) = run_choosing(&w.s, &zoo(), &choosing(Format::M4a, CoverMode::Separate), &Cancel::new()).await;
+    assert!(events.contains(&Event::Converting(0)), "{events:?}");
+    assert_eq!(files_in(&w.s.resolved.dir), ["Me at the zoo.jpg", "Me at the zoo.m4a"]);
+    assert!(std::fs::read_to_string(&w.log).unwrap().contains("-c:a aac"));
+    // The original format: nothing converted, whatever came.
+    let w = with_ffmpeg("EXT=webm", "");
+    run_choosing(&w.s, &zoo(), &choosing(Format::Original, CoverMode::Separate), &Cancel::new()).await;
+    assert!(!w.log.exists(), "ffmpeg was not run");
+}
+
+#[tokio::test]
+async fn a_conversion_never_overwrites_a_file_of_its_name() {
+    let w = with_ffmpeg("EXT=webm", "");
+    std::fs::write(w.s.resolved.dir.join("Me at the zoo.mp3"), b"mine").unwrap();
+    let (_, events) = run_choosing(&w.s, &zoo(), &choosing(Format::Mp3, CoverMode::Separate), &Cancel::new()).await;
+    assert_eq!(notes(&events), [Note::ConvertedNameTaken]);
+    assert_eq!(std::fs::read(w.s.resolved.dir.join("Me at the zoo.mp3")).unwrap(), b"mine");
+    assert_eq!(std::fs::read(w.s.resolved.dir.join("Me at the zoo.webm")).unwrap(), b"audio", "the original kept");
+    assert!(!w.log.exists(), "ffmpeg was not even run");
+}
+
+#[tokio::test]
+async fn a_name_taken_while_ffmpeg_ran_is_not_overwritten_either() {
+    // ffmpeg writes its temporary, and meanwhile someone writes the name.
+    let mut s = setup(&fixture_path("video.json"), "EXT=webm", Some(JPEG.to_vec()));
+    let target = s.resolved.dir.join("Me at the zoo.mp3");
+    let bin = tempfile::tempdir().unwrap();
+    let ffmpeg = fake_ffmpeg(bin.path(), &bin.path().join("log"), &format!("printf mine > '{}'", target.display()));
+    s.ctx.limits.ffmpeg = Arc::new(move || Some(ffmpeg.clone()));
+    let (_, events) = run_choosing(&s, &zoo(), &choosing(Format::Mp3, CoverMode::Separate), &Cancel::new()).await;
+    assert_eq!(notes(&events), [Note::ConvertedNameTaken]);
+    assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+    assert_eq!(std::fs::read(s.resolved.dir.join("Me at the zoo.webm")).unwrap(), b"audio", "the original kept");
+    assert!(!files_in(&s.resolved.dir).iter().any(|f| f.contains("converting")), "the temporary is gone");
+}
+
+#[tokio::test]
+async fn a_failed_conversion_keeps_the_original_and_says_why() {
+    let w = with_ffmpeg("EXT=webm", "echo 'Unknown encoder libmp3lame' >&2; printf half > \"$out\"; exit 1");
+    let (end, events) = run_choosing(&w.s, &zoo(), &choosing(Format::Mp3, CoverMode::Separate), &Cancel::new()).await;
+    assert_eq!(end, PresetEnd::Finished);
+    assert_eq!(ended(&events), [(0, VideoState::Done)]);
+    assert_eq!(notes(&events), [Note::ConversionFailed("Unknown encoder libmp3lame".into())]);
+    assert_eq!(files_in(&w.s.resolved.dir), ["Me at the zoo.jpg", "Me at the zoo.webm"], "no temporary left");
+}
+
+#[tokio::test]
+async fn a_cancel_kills_ffmpeg_s_whole_group_and_keeps_the_original() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile = tmp.path().join("grandchild");
+    let w = with_ffmpeg("EXT=webm", &format!("sleep 30 &\necho $! > '{}'\nwait", pidfile.display()));
+    let cancel = Cancel::new();
+    let started = Instant::now();
+    let (entry, choices) = (zoo(), choosing(Format::Mp3, CoverMode::Separate));
+    let ((end, events), ()) = tokio::join!(run_choosing(&w.s, &entry, &choices, &cancel), async {
+        wait_for_file(&pidfile).await;
+        cancel.cancel();
+    });
+    assert_eq!(end, PresetEnd::Cancelled);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_gone(wait_for_file(&pidfile).await.as_str()).await;
+    assert!(events.contains(&Event::Ended(0, VideoState::Cancelled)), "{events:?}");
+    assert_eq!(files_in(&w.s.resolved.dir), ["Me at the zoo.webm"]);
+}
+
+#[tokio::test]
+async fn a_conversion_that_runs_out_of_time_is_killed_and_said() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile = tmp.path().join("grandchild");
+    let mut w = with_ffmpeg("EXT=webm", &format!("sleep 30 &\necho $! > '{}'\nwait", pidfile.display()));
+    w.s.ctx.limits.convert = Duration::from_millis(500);
+    let (end, events) = run_choosing(&w.s, &zoo(), &choosing(Format::Mp3, CoverMode::Separate), &Cancel::new()).await;
+    assert_eq!(end, PresetEnd::Finished);
+    assert_eq!(notes(&events), [Note::ConversionFailed(reason::TIMED_OUT.into())]);
+    assert_gone(wait_for_file(&pidfile).await.as_str()).await;
+}
+
+// ---- the real ffmpeg and lofty ------------------------------------------------
+
+/// The system's ffmpeg, when the machine has one with the encoders used here
+/// (CI installs it; elsewhere these tests say so and pass).
+fn real_ffmpeg() -> Option<PathBuf> {
+    let path: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH")?).collect();
+    let bin = crate::tool::runtime::which("ffmpeg", &path)?;
+    let ok = std::process::Command::new(&bin).args(["-hide_banner", "-encoders"]).output().ok()?;
+    let list = String::from_utf8_lossy(&ok.stdout).into_owned();
+    (list.contains("libopus") && list.contains("libmp3lame")).then_some(bin)
+}
+
+/// A real 16x16 jpeg, made by the real ffmpeg.
+fn real_jpeg(ffmpeg: &Path, dir: &Path) -> Vec<u8> {
+    let out = dir.join("cover.jpg");
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=16x16", "-frames:v", "1"])
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::fs::read(out).unwrap()
+}
+
+/// One second of a tone, made by the real ffmpeg with `codec` into `muxer`.
+fn tone(ffmpeg: &Path, out: &Path, codec: &str, muxer: &str) {
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", codec, "-f", muxer])
+        .arg(out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+fn front_cover(path: &Path) -> Option<(lofty::file::FileType, Vec<u8>)> {
+    use lofty::file::TaggedFileExt;
+    let file = lofty::read_from_path(path).unwrap();
+    let picture = file.tags().iter().flat_map(|t| t.pictures()).next()?.data().to_vec();
+    Some((file.file_type(), picture))
+}
+
+#[tokio::test]
+async fn a_real_webm_becomes_a_real_mp3_or_m4a_with_its_cover_inside() {
+    let Some(ffmpeg) = real_ffmpeg() else {
+        eprintln!("ffmpeg missing: skipping test");
+        return;
+    };
+    let src = tempfile::tempdir().unwrap();
+    let webm = src.path().join("tone.webm");
+    tone(&ffmpeg, &webm, "libopus", "webm");
+    let jpeg = real_jpeg(&ffmpeg, src.path());
+    for (format, ext, kind) in [(Format::Mp3, "mp3", lofty::file::FileType::Mpeg), (Format::M4a, "m4a", lofty::file::FileType::Mp4)] {
+        let mut s = setup(&fixture_path("video.json"), &format!("EXT=webm; SRC='{}'", webm.display()), Some(jpeg.clone()));
+        let bin = ffmpeg.clone();
+        s.ctx.limits.ffmpeg = Arc::new(move || Some(bin.clone()));
+        let (end, events) = run_choosing(&s, &zoo(), &choosing(format, CoverMode::Embedded), &Cancel::new()).await;
+        assert_eq!(end, PresetEnd::Finished);
+        assert!(notes(&events).is_empty(), "{format:?}: {events:?}");
+        let name = format!("Me at the zoo.{ext}");
+        assert_eq!(files_in(&s.resolved.dir), std::slice::from_ref(&name), "{format:?}: only the converted file, its cover inside");
+        assert_eq!(front_cover(&s.resolved.dir.join(&name)), Some((kind, jpeg.clone())), "{format:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_real_opus_takes_its_cover_inside_as_it_is() {
+    let Some(ffmpeg) = real_ffmpeg() else {
+        eprintln!("ffmpeg missing: skipping test");
+        return;
+    };
+    let src = tempfile::tempdir().unwrap();
+    let opus = src.path().join("tone.opus");
+    tone(&ffmpeg, &opus, "libopus", "ogg");
+    let jpeg = real_jpeg(&ffmpeg, src.path());
+    let s = setup(&fixture_path("video.json"), &format!("EXT=opus; SRC='{}'", opus.display()), Some(jpeg.clone()));
+    let (_, events) = run_choosing(&s, &zoo(), &choosing(Format::Original, CoverMode::Embedded), &Cancel::new()).await;
+    assert!(notes(&events).is_empty(), "{events:?}");
+    assert_eq!(files_in(&s.resolved.dir), ["Me at the zoo.opus"]);
+    assert_eq!(front_cover(&s.resolved.dir.join("Me at the zoo.opus")), Some((lofty::file::FileType::Opus, jpeg)));
+}
+
+#[test]
+fn only_the_containers_lofty_writes_into_are_tried() {
+    let dir = tempfile::tempdir().unwrap();
+    for ext in ["webm", "mka", "flac", "wav"] {
+        let p = dir.path().join(format!("x.{ext}"));
+        std::fs::write(&p, b"audio").unwrap();
+        let e = embed_cover(&p, JPEG).unwrap_err();
+        assert!(e.contains(&format!(".{ext}")), "{e}");
+        assert_eq!(std::fs::read(&p).unwrap(), b"audio");
+    }
 }
 
 #[tokio::test]
@@ -702,7 +1127,7 @@ async fn a_cancel_between_two_videos_starts_no_further_one() {
     let cancel = Cancel::new();
     let mut events = Vec::new();
     let entry = playlist_entry();
-    let end = download_preset(&s.ctx, &entry, &s.resolved, &share_holds, &cancel, &mut |e| {
+    let end = download_preset(&s.ctx, &entry, &Choices::default(), &s.resolved, &share_holds, &cancel, &mut |e| {
         if matches!(e, Event::Ended(0, VideoState::Done)) {
             cancel.cancel();
         }
@@ -721,7 +1146,7 @@ fn a_dollar_in_a_title_never_reaches_a_template() {
     for (title, expected) in [("$HOME", "_HOME"), ("${PATH}/x", "_{PATH}_x"), ("cost $5", "cost _5"), ("$$", "__")] {
         assert_eq!(sanitize(title, "id"), expected, "{title:?}");
     }
-    let args = download_args(Path::new("/d"), &sanitize("$HOME ${PATH}", "id"), "https://www.youtube.com/watch?v=jNQXAC9IVRw");
+    let args = download_args(Path::new("/d"), &sanitize("$HOME ${PATH}", "id"), "https://www.youtube.com/watch?v=jNQXAC9IVRw", Format::Original);
     assert!(!args[7].contains('$'), "{}", args[7]);
 }
 
@@ -898,7 +1323,7 @@ fn album_entry() -> Entry {
 
 #[test]
 fn only_yt_dlp_s_own_downloader_may_run_and_ffmpeg_is_never_found() {
-    let args = download_args(Path::new("/d"), "n", "https://soundcloud.com/forss/flickermood");
+    let args = download_args(Path::new("/d"), "n", "https://soundcloud.com/forss/flickermood", Format::Original);
     let after = |flag: &str| args.iter().position(|a| a == flag).map(|i| args[i + 1].as_str());
     assert_eq!(after("--downloader"), Some("native"));
     assert!(args.iter().any(|a| a == "--hls-prefer-native"));

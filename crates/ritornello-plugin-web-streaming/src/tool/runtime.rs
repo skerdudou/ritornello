@@ -1,6 +1,7 @@
 //! What the machine offers yt-dlp: python3 (the plugin's one system
 //! prerequisite) and, for the wrapper's second attempt only, a JavaScript
-//! runtime.
+//! runtime. And what it offers the plugin itself: ffmpeg, optional, which
+//! converts a finished download (mp3, m4a) and is never handed to yt-dlp.
 //!
 //! The runtime order, and why (measured on the device, armv7l):
 //! 1. the plugin's own deno, only on x86_64 and aarch64: deno publishes
@@ -79,6 +80,15 @@ pub struct Capabilities {
     pub js_runtime_unmaintained: bool,
     /// The exact command that would fix what is missing, when one exists.
     pub apt_hint: Option<String>,
+    /// ffmpeg's version, `None` when there is none. Optional: without it a
+    /// download keeps the site's format (no mp3, no m4a conversion).
+    pub ffmpeg: Option<String>,
+    /// The command that installs ffmpeg, when it is missing.
+    pub ffmpeg_hint: Option<String>,
+    /// The ffmpeg that answered: the one the plugin converts with. Never
+    /// handed to yt-dlp (`download.rs`).
+    #[serde(skip)]
+    pub ffmpeg_path: Option<PathBuf>,
     /// `<name>:<absolute path>`, as `--js-runtimes` takes it.
     #[serde(skip)]
     pub runtime_arg: Option<String>,
@@ -170,6 +180,14 @@ pub async fn python3(search: &[PathBuf]) -> Option<(PathBuf, String)> {
     Some((bin, version))
 }
 
+/// ffmpeg and its version (`ffmpeg version 7.1.1-1+b1 Copyright ...`), when
+/// it answers.
+pub async fn ffmpeg(search: &[PathBuf]) -> Option<(PathBuf, String)> {
+    let bin = which("ffmpeg", search)?;
+    let version = first_word_after(&output_of(&bin, "-version", PROBE_DEADLINE).await?, "ffmpeg version ")?;
+    Some((bin, version))
+}
+
 /// The deno asset for this machine; `None` where deno publishes no build.
 pub fn deno_asset(arch: &str) -> Option<&'static str> {
     match arch {
@@ -248,6 +266,8 @@ async fn usable_quickjs(search: &[PathBuf]) -> Option<PathBuf> {
 pub async fn detect(env: &Env) -> Capabilities {
     let (python3_path, python3) = python3(&env.search).await.unzip();
     let apt_hint = python3.is_none().then(|| "sudo apt install python3".to_string());
+    let (ffmpeg_path, ffmpeg) = ffmpeg(&env.search).await.unzip();
+    let ffmpeg_hint = ffmpeg.is_none().then(|| "sudo apt install ffmpeg".to_string());
     let mut own_node = false;
     let found = if let Some(p) = usable_deno(env).await {
         Some((JsRuntime::Deno, p))
@@ -265,6 +285,9 @@ pub async fn detect(env: &Env) -> Capabilities {
         js_runtime_slow: matches!(found, Some((JsRuntime::Quickjs, _))),
         js_runtime_unmaintained: false,
         apt_hint,
+        ffmpeg,
+        ffmpeg_hint,
+        ffmpeg_path,
         runtime_arg: found.map(|(r, p)| format!("{}:{}", r.name(), p.display())),
         python3_path,
         own_node,
@@ -534,6 +557,31 @@ mod tests {
         assert_eq!(caps.apt_hint.as_deref(), Some("sudo apt install python3"));
         assert_eq!(caps.js_runtime, None);
         assert_eq!(caps.runtime_arg, None);
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_is_found_with_its_version_or_said_missing_with_its_command() {
+        let empty = tempfile::tempdir().unwrap();
+        let caps = detect(&env(vec![empty.path().into()], empty.path(), "arm")).await;
+        assert_eq!((caps.ffmpeg, caps.ffmpeg_path), (None, None));
+        assert_eq!(caps.ffmpeg_hint.as_deref(), Some("sudo apt install ffmpeg"));
+        // Debian 13's first line, then Ubuntu 24.04's.
+        for (line, version) in [
+            ("ffmpeg version 7.1.1-1+b1 Copyright (c) 2000-2025 the FFmpeg developers", "7.1.1-1+b1"),
+            ("ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers", "6.1.1-3ubuntu5"),
+        ] {
+            let sys = tempfile::tempdir().unwrap();
+            write_script(sys.path(), "ffmpeg", &format!("[ \"$1\" = -version ] && echo '{line}'"));
+            let caps = detect(&env(vec![sys.path().into()], empty.path(), "arm")).await;
+            assert_eq!(caps.ffmpeg.as_deref(), Some(version));
+            assert_eq!(caps.ffmpeg_path, Some(sys.path().join("ffmpeg")));
+            assert_eq!(caps.ffmpeg_hint, None);
+        }
+        // Something named ffmpeg that does not answer like one is not it.
+        let sys = tempfile::tempdir().unwrap();
+        write_script(sys.path(), "ffmpeg", "echo hello");
+        let caps = detect(&env(vec![sys.path().into()], empty.path(), "arm")).await;
+        assert_eq!((caps.ffmpeg, caps.ffmpeg_path), (None, None));
     }
 
     #[tokio::test]

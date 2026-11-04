@@ -2751,9 +2751,29 @@ mpv would be routed for each load.
 Presets are ticked in the list, and the one "Download…" button under it
 (greyed out while no share is offered, nothing is ticked
 or changes are unsaved) writes the
-audio **without re-encoding** (`-f bestaudio`, one stream: whatever audio stream the site offers, opus or
+audio of one stream (whatever audio stream the site offers, opus in webm or
 m4a on YouTube) into
-a folder of a share:
+a folder of a share, in the format chosen in the dialog:
+
+- **Format.** *As the site gives it* (`-f bestaudio`, no re-encoding);
+  **m4a** (`-f bestaudio[ext=m4a]/bestaudio`: the site's own m4a when it has
+  one, else the best stream converted to AAC); **mp3** (`-f bestaudio`, then
+  converted with LAME at `-q:a 2`). A conversion is **the plugin's own**,
+  once the download is complete, on the local file only: the system's ffmpeg
+  run as `ffmpeg -nostdin -protocol_whitelist file -i file:<in> -vn -map 0:a:0
+  <codec> -n file:<hidden temporary>`, in its own process group, under a
+  deadline of an hour, cancelled like a download; the temporary is renamed onto
+  `<name>.<ext>` only if that name is still free, and the original is then
+  removed. ffmpeg is **optional** (`sudo apt install ffmpeg`, shown in the
+  capabilities panel): without it, mp3 is not offered (and refused by the
+  plugin if asked), and an m4a asked of a site without one keeps the site's
+  format, which the job's row says. The choice is remembered with the folder.
+- **What a row says.** Besides its state (`converting` while ffmpeg runs), a
+  video says when it went otherwise than asked: a file of that name was
+  already there (left as it was, nothing converted), ffmpeg is missing, the
+  converted name is taken, the conversion failed (ffmpeg's last line; the
+  original is kept), the cover went beside the file, or a picture of that
+  name was already there.
 
 - **Where.** Only an SMB root of the `files` plugin that is declared
   *writable* **and** is mounted `rw` right now (read from `/proc/mounts`) is
@@ -2777,24 +2797,39 @@ a folder of a share:
   would be written somewhere other than the folder that was checked.
 - **Names are the plugin's.** yt-dlp is handed a finished path, not a
   template to fill from remote data: a title is turned into a name that
-  cannot leave its folder (at most 120 bytes) and `%` is doubled. A
+  cannot leave its folder (at most 120 bytes, no `/`, `\`, `$`, nor what a
+  Windows share refuses) and `%` is doubled. A
   playlist goes into a sub-folder of its name, tracks numbered
-  (`01 - Title.ext`; three digits above 99).
+  (`01 - Title.ext`; three digits above 99). The dialog shows, for each
+  preset, the name it will get (a video's file, without its extension; a
+  playlist's folder), computed by the plugin from the saved preset (its
+  title, else its id; no network), and the operator may change it: what is
+  typed goes through the same cleaning, and one that cleans to nothing
+  leaves the default. The extension is the format's, never typed. **Nothing
+  is overwritten**: yt-dlp leaves a file already there alone (and the row
+  says so), a conversion and a cover never write over an existing name.
 - **Only yt-dlp's native downloader runs** (`--downloader native`,
   `--hls-prefer-native`), so every byte goes through the guard of the
   wrapper, which sees the sockets of its own process and of nothing it would
   start; and `--ffmpeg-location` points below `/dev/null`, so even the native
   HLS downloader, which would hand an AES-128 stream to ffmpeg when it finds
-  one, cannot. **No ffmpeg anywhere**, on any target (the owner's decision):
-  no conversion, no embedded metadata, no thumbnail asked of yt-dlp. A stream
-  that cannot be had that way fails rather than downloading outside the
-  guard.
+  one, cannot. **yt-dlp never finds ffmpeg**, whatever the format chosen and
+  even when the system has one (the owner's decision): no conversion, no
+  embedded metadata, no thumbnail asked of yt-dlp. A stream that cannot be
+  had that way fails rather than downloading outside the guard. ffmpeg only
+  ever runs as the plugin's own conversion of a finished local file (above).
 - **The cover.** The plugin picks a `jpg` from the thumbnails the probe
-  listed, fetches it itself through the guard (timeouts, a size cap, no
-  redirect to anywhere local) and writes it as
-  `cover.jpg` (a playlist's folder; for a single video, next to it and only
-  if the folder has none). No jpg offered, or a failed fetch, is never a
-  failure of the download.
+  listed and fetches it itself through the guard (timeouts, a size cap, no
+  redirect to anywhere local). A playlist's is written as `cover.jpg` in its
+  folder. A single video's is **the track's own**, never the folder's (a
+  `cover.jpg` beside one video became the cover of every other track of the
+  folder): as chosen in the dialog, either **inside the file**, written with
+  `lofty` (m4a `covr`, mp3 ID3v2 APIC, opus and ogg METADATA_BLOCK_PICTURE;
+  a webm, YouTube's usual original, takes none, and the picture then goes
+  beside it, which the row says), or **beside it** as `<name>.jpg`, which
+  `files` reads as that track's cover (see [the cover
+  chain](#the-cover-chain)), never over an existing picture. No jpg
+  offered, or a failed fetch, is never a failure of the download.
 - **Jobs.** One at a time, one video at a time so one failure never stops a
   playlist; progress read from `--newline --progress-template`; cancellable;
   the last twenty are kept in `jobs.json`. The share is resolved when the job
@@ -2816,7 +2851,8 @@ Served by the core like the other plugins' pages. It holds: the preset list
 (add, preview of the probed lines, reorder, save); the **capabilities** panel
 and the yt-dlp panel (version, channel, "Check for an update", "Install
 anyway", the last failure); the download dialog (share, folder, create a
-folder); and the list of jobs. **No admin operation waits for yt-dlp, the
+folder, which the dialog enters once the plugin has made it; format; where
+a single video's cover goes; the names); and the list of jobs. **No admin operation waits for yt-dlp, the
 network, a share or a job**: the admin protocol gives `GetData` 5 seconds and
 `SetData` 30, so every slow thing is started, a progress record is kept, and
 the page polls it.
@@ -3347,7 +3383,9 @@ Six contributors can resolve a cover, and the order among them is not a
 list of priorities written anywhere — it falls out of the layers and
 intentions described above.
 
-1. **`files`** — a `folder.jpg` (or one of its aliases) sitting in the
+1. **`files`** — the track's own picture (`<track>.jpg`, `.jpeg` or
+   `.png` beside it: what the web-streaming plugin writes beside a single
+   video), else a `folder.jpg` (or one of its aliases) sitting in the
    file's own directory, announced as a `CoverRef::Path` **on the
    Source's own channel** (see above): `files` stays a plain Source, and
    sends this as a notification once its directory listing has resolved,
@@ -3433,12 +3471,16 @@ guessable from the general model:
   the preference list before a guess is ever needed. Without the
   exclusion, a lone `back.jpg` or `Scan_verso.png` would be shown as the
   album's face; with it, `files` says nothing and the generic resolver
-  gets its turn instead.
+  gets its turn instead. The same rule sets aside a lone image named after
+  a track of the directory (`Song.jpg` beside `Song.m4a`): it is that
+  track's own picture, and guessing it to be the folder's would show it on
+  every other track there.
 
 What this produces in practice, for a file on the NAS:
 
 | What there is | What's displayed | Who |
 |---|---|---|
+| the track's own `<track>.jpg` | that picture | `files` |
 | a `folder.jpg` | the `folder.jpg` | `files` |
 | no `folder.jpg`, an embedded cover | the embedded one | the core, which completes |
 | neither, but usable tags | Cover Art Archive | `musicbrainz`, which completes |

@@ -1877,7 +1877,25 @@ there. In particular:
   been looked at either, on the page or on a device;
 - about 6.5 s before the sound of each video, playlist entries included, is
   a measured limit (mpv resolves each entry when it reaches it), not a
-  verified-good behaviour of the whole chain.
+  verified-good behaviour of the whole chain;
+- the **player cache** the wrapper switches on (yt-dlp's preprocessed
+  YouTube player, 29.7 s down to 15 s per video with a JavaScript challenge)
+  was measured by hand on the device, not through the service: that the
+  plugin's `--cache-dir` is then written by the service user, and the time
+  saved under mpv and in a download, are to be checked. The import it adds
+  to every run (YouTube's extractor package) has not been timed on the Pi
+  for a run of another site;
+- **downloads in mp3 or m4a** have been converted by a real ffmpeg (6.1.1) on
+  a workstation only: how long ffmpeg takes on a Pi 2 for a track and for a
+  long mix (the deadline is an hour), and whether Debian's ffmpeg on the
+  device has `libmp3lame`, are not measured. An m4a straight from YouTube
+  (DASH, which yt-dlp would have repaired with the ffmpeg it is denied) is
+  kept as it comes; that it plays and takes an embedded cover has not been
+  checked;
+- **covers written into the file** were read back with `lofty` on
+  workstation files (mp3, m4a, opus); that the core shows them for a
+  downloaded track, and that `files` shows a track's own `<name>.jpg` on the
+  device, have not been seen.
 
 Not something left unverified, but worth recording here for whoever meets
 its traces in the history: `plugin_action_refusal`, the scaffold that made

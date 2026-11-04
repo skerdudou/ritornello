@@ -19,7 +19,7 @@ use ritornello_files_mount::roots::Roots;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 
-use crate::download::{Action, Cancel, Ctx, Event, PresetEnd, VideoState, download_preset};
+use crate::download::{Action, Cancel, Choices, CoverMode, Ctx, Event, Format, Note, PresetEnd, VideoState, download_preset};
 use crate::entries::{Entries, write_atomically};
 use crate::reason;
 use crate::targets::{Resolved, Target, TargetError, resolve_parts};
@@ -56,6 +56,27 @@ pub struct Row {
     pub state: VideoState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub percent: Option<f32>,
+    /// What went otherwise than asked (format kept, cover beside the file...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
+}
+
+/// What the operator chose for a whole job, kept with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobOptions {
+    #[serde(default)]
+    pub format: Format,
+    #[serde(default)]
+    pub cover: CoverMode,
+    /// The name typed per preset: a video's file, a playlist's folder.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub names: std::collections::BTreeMap<u8, String>,
+}
+
+impl JobOptions {
+    fn for_preset(&self, preset: u8) -> Choices {
+        Choices { format: self.format, cover: self.cover, name: self.names.get(&preset).cloned() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +87,9 @@ pub struct Job {
     #[serde(flatten)]
     pub state: JobState,
     pub rows: Vec<Row>,
+    /// A job written before there were choices has the defaults.
+    #[serde(default)]
+    pub options: JobOptions,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -166,7 +190,7 @@ impl Jobs {
                 job.state = JobState::Failed(reason::INTERRUPTED.into());
             }
             for row in &mut job.rows {
-                if matches!(row.state, VideoState::Running) {
+                if matches!(row.state, VideoState::Running | VideoState::Converting) {
                     row.state = VideoState::Failed(reason::INTERRUPTED.into());
                 }
             }
@@ -198,12 +222,16 @@ impl Jobs {
     }
 
     pub fn enqueue(&self, presets: Vec<u8>, target: Target) -> JobId {
+        self.enqueue_with(presets, target, JobOptions::default())
+    }
+
+    pub fn enqueue_with(&self, presets: Vec<u8>, target: Target, options: JobOptions) -> JobId {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let cancel = Cancel::new();
         self.inner.cancels.lock().unwrap_or_else(|p| p.into_inner()).insert(id, cancel.clone());
         {
             let mut view = self.inner.view.lock().unwrap_or_else(|p| p.into_inner());
-            view.jobs.push(Job { id, presets, target, state: JobState::Queued, rows: Vec::new() });
+            view.jobs.push(Job { id, presets, target, state: JobState::Queued, rows: Vec::new(), options });
         }
         // Off the caller's thread: it is an admin route's, and none may block.
         let inner = self.inner.clone();
@@ -261,9 +289,9 @@ async fn run_job(
     if queued.cancel.is_cancelled() {
         return JobState::Cancelled;
     }
-    let Some((presets, target)) = inner.with_job(queued.id, |j| {
+    let Some((presets, target, options)) = inner.with_job(queued.id, |j| {
         j.state = JobState::Running;
-        (j.presets.clone(), j.target.clone())
+        (j.presets.clone(), j.target.clone(), j.options.clone())
     }) else {
         return JobState::Failed(reason::JOB_LOST.into());
     };
@@ -282,14 +310,14 @@ async fn run_job(
     for preset in presets {
         let entry = entries.read().await.by_preset(preset).cloned();
         let Some(entry) = entry else {
-            let row = Row { preset, id: String::new(), title: String::new(), state: VideoState::Failed(reason::NO_SUCH_PRESET.into()), percent: None };
+            let row = Row { preset, id: String::new(), title: String::new(), state: VideoState::Failed(reason::NO_SUCH_PRESET.into()), percent: None, notes: Vec::new() };
             inner.with_job(queued.id, |j| j.rows.push(row));
             inner.persist();
             continue;
         };
         let mut base = 0usize;
         let mut sink = |event: Event| {
-            let persist = matches!(event, Event::Planned(_) | Event::Ended(..));
+            let persist = matches!(event, Event::Planned(_) | Event::Converting(_) | Event::Ended(..));
             inner.with_job(queued.id, |job| match event {
                 Event::Planned(planned) => {
                     base = job.rows.len();
@@ -302,6 +330,7 @@ async fn run_job(
                             Action::Download { .. } => VideoState::Pending,
                         },
                         percent: None,
+                        notes: Vec::new(),
                     }));
                 }
                 Event::Started(i) => {
@@ -315,6 +344,17 @@ async fn run_job(
                         r.percent = Some(percent);
                     }
                 }
+                Event::Converting(i) => {
+                    if let Some(r) = job.rows.get_mut(base + i) {
+                        r.state = VideoState::Converting;
+                        r.percent = None;
+                    }
+                }
+                Event::Noted(i, note) => {
+                    if let Some(r) = job.rows.get_mut(base + i) {
+                        r.notes.push(note);
+                    }
+                }
                 Event::Ended(i, state) => {
                     if let Some(r) = job.rows.get_mut(base + i) {
                         r.percent = matches!(state, VideoState::Done).then_some(100.0);
@@ -326,7 +366,7 @@ async fn run_job(
                 inner.persist();
             }
         };
-        match download_preset(ctx, &entry, &resolved, &share, &queued.cancel, &mut sink).await {
+        match download_preset(ctx, &entry, &options.for_preset(preset), &resolved, &share, &queued.cancel, &mut sink).await {
             PresetEnd::Finished => {}
             PresetEnd::Cancelled => return JobState::Cancelled,
             // Every row of this preset already says why; the presets after
@@ -345,7 +385,7 @@ async fn run_job(
                         marked = true;
                     }
                     if !marked {
-                        j.rows.push(Row { preset, id: String::new(), title: entry.title.clone(), state: VideoState::Failed(message), percent: None });
+                        j.rows.push(Row { preset, id: String::new(), title: entry.title.clone(), state: VideoState::Failed(message), percent: None, notes: Vec::new() });
                     }
                 });
                 inner.persist();

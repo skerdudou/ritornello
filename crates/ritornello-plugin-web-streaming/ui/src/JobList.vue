@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Button } from '@ritornello/ui'
-import { faultText, rowTitle, stateText, targetText, type Job, type T } from './data'
+import { faultText, noteText, rowTitle, stateText, targetText, type Job, type T } from './data'
 
 defineProps<{ t: T; jobs: Job[] }>()
 defineEmits<{ cancel: [id: number] }>()
@@ -37,6 +37,9 @@ function newestFirst(jobs: Job[]): Job[] {
           </span>
           <span v-if="r.detail" :class="r.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'">
             {{ faultText(t, r.detail) }}
+          </span>
+          <span v-for="(n, k) in r.notes ?? []" :key="k" class="w-full pl-2 text-muted-foreground" data-job-row-note>
+            {{ noteText(t, n) }}
           </span>
         </li>
       </ul>

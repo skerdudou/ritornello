@@ -2619,6 +2619,7 @@ dependencies = [
  "async-trait",
  "flate2",
  "libc",
+ "lofty",
  "pgp",
  "rand 0.8.8",
  "reqwest",

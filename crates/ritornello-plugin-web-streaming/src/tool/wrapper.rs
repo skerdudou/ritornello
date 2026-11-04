@@ -27,6 +27,11 @@
 //!
 //! It exits with the code of the last call made.
 //!
+//! Right after `import yt_dlp`, it switches on yt-dlp's cache of YouTube's
+//! preprocessed player ([`PLAYER_CACHE`]): half the time of a video with a
+//! JavaScript challenge, measured on the device; guarded, so a yt-dlp that
+//! renamed it simply runs without.
+//!
 //! A failed `-J` run served for **mpv** (the plugin's own runs carry
 //! [`crate::ytdlp::OWN_RUN_ENV`]) is recorded in
 //! [`crate::playfail::FILE`]: when, the host, a code, and yt-dlp's last line
@@ -112,6 +117,29 @@ fn utf8(path: &Path) -> Result<&str, String> {
 fn py(s: &str) -> String {
     serde_json::to_string(s).expect("a string serialises")
 }
+
+/// Inserted right after `import yt_dlp`: yt-dlp keeps YouTube's player code
+/// preprocessed for its JavaScript challenge in its cache only when this
+/// class attribute is true, and 2026.10.26 leaves it false for every runtime.
+/// Measured on the device (armv7l, node 22), a video with a JavaScript
+/// challenge: 29.7 s with an empty cache, then 15.1 s and 14.9 s with it
+/// forced (4.2 MB per player version, in the conf's `--cache-dir`).
+///
+/// **Guarded, so that it can only ever do nothing.** A yt-dlp that renames
+/// the module, the class or the attribute runs as if this were not here: the
+/// attribute is set only when it already exists, and any exception of the
+/// import or the lookup is swallowed. The import pulls in YouTube's
+/// extractor package, which a YouTube run loads anyway.
+pub const PLAYER_CACHE: &str = r#"
+# yt-dlp caches YouTube's preprocessed player only when told to; nothing
+# breaks when a newer yt-dlp moved or renamed what is set here.
+try:
+    import yt_dlp.extractor.youtube.jsc._builtin.ejs as _ejs
+    if hasattr(_ejs.EJSBaseJCP, "_ENABLE_PREPROCESSED_PLAYER_CACHE"):
+        _ejs.EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE = True
+except Exception:
+    pass
+"#;
 
 /// The network guard of the wrapper, inserted before `import yt_dlp`: the
 /// predicate, the replaced socket methods, and the judging of a `-J`
@@ -544,7 +572,7 @@ OWN_RUN = {own_run}
 # standard library's.
 sys.path.insert(0, PACKAGE)
 import yt_dlp
-
+{PLAYER_CACHE}
 
 class HoldNull(io.RawIOBase):
     """Passes stdout through as it comes, except what could still be the
@@ -985,6 +1013,79 @@ def main(argv=None):
         assert!(text.contains(r#"PACKAGE = "/data/it's \"x\"\\y/yt-dlp""#), "{text}");
         assert!(text.contains(r#"RUNTIME = "node:/a b/node""#), "{text}");
         assert_eq!(conf(Path::new("/d/it's")).unwrap().lines().nth(1), Some(r#"--cache-dir '/d/it'"'"'s/cache'"#));
+    }
+
+    // ---- the player cache ----------------------------------------------------
+
+    /// A fake `yt_dlp` whose `main` writes to `FAKE_SEEN` what the challenge
+    /// provider's attribute holds when it runs: `absent` without the module
+    /// or the attribute, else its value.
+    const CACHE_MAIN: &str = r#"import os, sys
+
+
+def main(argv=None):
+    m = sys.modules.get("yt_dlp.extractor.youtube.jsc._builtin.ejs")
+    cls = getattr(m, "EJSBaseJCP", None)
+    seen = "absent"
+    if hasattr(cls, "_ENABLE_PREPROCESSED_PLAYER_CACHE"):
+        seen = str(cls._ENABLE_PREPROCESSED_PLAYER_CACHE)
+    with open(os.environ["FAKE_SEEN"], "w") as f:
+        f.write(seen)
+    raise SystemExit(0)
+"#;
+
+    /// A rig whose package holds `ejs` (the module of the challenge
+    /// provider) as given, `None` for no such module at all.
+    fn cache_rig(ejs: Option<&str>) -> Rig {
+        let r = rig_with(None, false, CACHE_MAIN);
+        if let Some(ejs) = ejs {
+            let mut dir = r.dir.path().join(PACKAGE_DIR).join("yt_dlp");
+            for part in ["extractor", "youtube", "jsc", "_builtin"] {
+                dir = dir.join(part);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("__init__.py"), "").unwrap();
+            }
+            std::fs::write(dir.join("ejs.py"), ejs).unwrap();
+        }
+        r
+    }
+
+    fn seen_by_main(r: &Rig) -> (i32, String) {
+        let seen = r.dir.path().join("seen");
+        let (code, _, _) = run_with(r, "0", &["--version"], &[("FAKE_SEEN", seen.to_str().unwrap())]);
+        (code, std::fs::read_to_string(&seen).unwrap_or_else(|_| "main never ran".into()))
+    }
+
+    #[test]
+    fn the_wrapper_forces_the_player_cache_right_after_importing_yt_dlp() {
+        let text = wrapper(Path::new("/d"), &real_python3(), None).unwrap();
+        let import = text.find("\nimport yt_dlp\n").expect("the import");
+        let forced = text.find("_ENABLE_PREPROCESSED_PLAYER_CACHE = True").expect("the forcing");
+        assert!(import < forced, "after the import");
+        assert!(text.contains(PLAYER_CACHE));
+        // Guarded: inside a try that swallows everything, and only set when
+        // the attribute already exists.
+        assert!(PLAYER_CACHE.contains("try:\n") && PLAYER_CACHE.contains("except Exception:\n    pass"));
+        assert!(PLAYER_CACHE.contains("if hasattr(_ejs.EJSBaseJCP, \"_ENABLE_PREPROCESSED_PLAYER_CACHE\"):"));
+    }
+
+    #[test]
+    fn the_player_cache_is_switched_on_in_the_yt_dlp_that_has_it() {
+        // The shape of yt-dlp 2026.10.26's `ejs.py`, reduced to what matters.
+        let r = cache_rig(Some("class EJSBaseJCP:\n    _ENABLE_PREPROCESSED_PLAYER_CACHE = False\n"));
+        assert_eq!(seen_by_main(&r), (0, "True".into()));
+    }
+
+    #[test]
+    fn a_yt_dlp_without_the_player_cache_still_runs() {
+        // No such module: a yt-dlp that moved it.
+        assert_eq!(seen_by_main(&cache_rig(None)), (0, "absent".into()));
+        // The module, the class renamed.
+        assert_eq!(seen_by_main(&cache_rig(Some("class Other:\n    pass\n"))), (0, "absent".into()));
+        // The class, the attribute gone: not created.
+        assert_eq!(seen_by_main(&cache_rig(Some("class EJSBaseJCP:\n    pass\n"))), (0, "absent".into()));
+        // A module that fails as it is imported.
+        assert_eq!(seen_by_main(&cache_rig(Some("raise RuntimeError('broken')\n"))), (0, "absent".into()));
     }
 
     // ---- the network guard ---------------------------------------------------

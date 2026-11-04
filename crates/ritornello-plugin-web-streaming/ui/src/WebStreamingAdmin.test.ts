@@ -178,6 +178,7 @@ describe('WebStreamingAdmin', () => {
       entries: [video(1), video(2), video(3)],
       targets: ['nas', 'other'],
       last_target: { root: 'nas', path: 'rock' },
+      default_names: { 1: 'Video 1', 2: 'Video 2', 3: 'Video 3' },
     })
     await w.findAll('[data-entry-select]')[0]!.setValue(true)
     await w.findAll('[data-entry-select]')[2]!.setValue(true)
@@ -191,7 +192,10 @@ describe('WebStreamingAdmin', () => {
     await clickDialog('[data-download-here]')
 
     expect(s.putsOf('download')).toEqual([
-      { op: 'download', presets: [1, 3], target: { root: 'nas', path: 'rock' } },
+      {
+        op: 'download', presets: [1, 3], target: { root: 'nas', path: 'rock' },
+        format: 'original', cover: 'separate', names: { 1: 'Video 1', 3: 'Video 3' },
+      },
     ])
   })
 
@@ -223,10 +227,117 @@ describe('WebStreamingAdmin', () => {
     expect(s.putsOf('create_dir')).toEqual([
       { op: 'create_dir', target: { root: 'nas', path: 'rock' }, name: 'live' },
     ])
-    expect(inDialog('[data-dir="live"]')).not.toBeNull()
+    // Confirmed (its parent lists it): the dialog goes into it.
+    expect(s.putsOf('list_dirs')[2]).toEqual({ op: 'list_dirs', target: { root: 'nas', path: 'rock/live' } })
+    expect(inDialog('[data-where]')!.textContent).toContain('nas/rock/live')
 
     await clickDialog('[data-up]')
-    expect(s.putsOf('list_dirs')[2]).toEqual({ op: 'list_dirs', target: { root: 'nas', path: '' } })
+    expect(s.putsOf('list_dirs')[3]).toEqual({ op: 'list_dirs', target: { root: 'nas', path: 'rock' } })
+  })
+
+  it('enters a new folder only once the plugin confirms it, and not when it refuses', async () => {
+    vi.useFakeTimers()
+    const { w, s } = await mountAdmin({ entries: [video(1)], targets: ['nas'] })
+    const parent = { root: 'nas', path: '' }
+    s.onPut = (p) => {
+      if (p.op === 'list_dirs') s.data.explore = { busy: false, error: null, listing: { target: p.target as typeof parent, names: ['rock'] } }
+      // Being made: the plugin still lists the parent as it was.
+      if (p.op === 'create_dir') s.data.explore = { busy: true, error: null, listing: { target: parent, names: ['rock'] } }
+    }
+    await w.find('[data-entry-select]').setValue(true)
+    await w.find('[data-download]').trigger('click')
+    await vi.advanceTimersByTimeAsync(10)
+    await typeDialog('[data-new-folder]', 'live')
+    await clickDialog('[data-create-folder]')
+    expect(s.putsOf('list_dirs'), 'not before it exists').toHaveLength(1)
+    expect(inDialog('[data-where]')!.textContent).not.toContain('live')
+
+    // Made: the next read lists it in its parent.
+    s.data.explore = { busy: false, error: null, listing: { target: parent, names: ['live', 'rock'] } }
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(s.putsOf('list_dirs')[1]).toEqual({ op: 'list_dirs', target: { root: 'nas', path: 'live' } })
+
+    // Refused (it already exists, say): the dialog stays where it is.
+    await clickDialog('[data-up]')
+    await vi.advanceTimersByTimeAsync(10)
+    s.onPut = (p) => {
+      if (p.op === 'list_dirs') s.data.explore = { busy: false, error: null, listing: { target: p.target as typeof parent, names: ['live', 'rock'] } }
+      if (p.op === 'create_dir') s.data.explore = { busy: false, error: { code: 'io', detail: 'File exists (os error 17)' }, listing: null }
+    }
+    const before = s.putsOf('list_dirs').length
+    await typeDialog('[data-new-folder]', 'rock')
+    await clickDialog('[data-create-folder]')
+    await vi.advanceTimersByTimeAsync(3100)
+    expect(s.putsOf('list_dirs')).toHaveLength(before)
+    expect(inDialog('[data-explore-error]')!.textContent).toContain('File exists')
+
+    // Answered with a listing that does not hold it: not entered either.
+    s.onPut = (p) => {
+      if (p.op === 'create_dir') s.data.explore = { busy: false, error: null, listing: { target: parent, names: ['live', 'rock'] } }
+    }
+    await typeDialog('[data-new-folder]', 'jazz')
+    await clickDialog('[data-create-folder]')
+    await vi.advanceTimersByTimeAsync(3100)
+    expect(s.putsOf('list_dirs')).toHaveLength(before)
+  })
+
+  it('offers the formats, the last one chosen, and mp3 only with ffmpeg', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1)], targets: ['nas'], last_format: 'm4a', last_cover: 'embedded' })
+    await w.find('[data-entry-select]').setValue(true)
+    await w.find('[data-download]').trigger('click')
+    await flushPromises()
+    // The last format is the one chosen: its help says so.
+    expect(inDialog('[data-format-help]')!.textContent).toContain(CATALOG.format_m4a_help)
+    expect((inDialog('[data-format="mp3"]') as HTMLButtonElement).disabled).toBe(false)
+    expect(inDialog('[data-mp3-unavailable]')).toBeNull()
+    await clickDialog('[data-format="mp3"]')
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]).toMatchObject({ format: 'mp3', cover: 'embedded' })
+  })
+
+  it('does not offer mp3 without ffmpeg, says the command, and falls back from a remembered mp3', async () => {
+    const caps = { ...state().capabilities, ffmpeg: null, ffmpeg_hint: 'sudo apt install ffmpeg' }
+    const { w, s } = await mountAdmin({ entries: [video(1)], targets: ['nas'], last_format: 'mp3', capabilities: caps })
+    await w.find('[data-entry-select]').setValue(true)
+    await w.find('[data-download]').trigger('click')
+    await flushPromises()
+    expect((inDialog('[data-format="mp3"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(inDialog('[data-mp3-unavailable]')!.textContent).toContain('sudo apt install ffmpeg')
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]).toMatchObject({ format: 'original' })
+  })
+
+  it('asks where a video\'s cover goes only when a video is selected', async () => {
+    const { w } = await mountAdmin({ entries: [list(1), video(2)], targets: ['nas'] })
+    await w.findAll('[data-entry-select]')[0]!.setValue(true)
+    await w.find('[data-download]').trigger('click')
+    await flushPromises()
+    expect(inDialog('[data-cover-choice]'), 'a playlist keeps its cover.jpg').toBeNull()
+    cleanup()
+    const again = await mountAdmin({ entries: [list(1), video(2)], targets: ['nas'] })
+    await again.w.findAll('[data-entry-select]')[1]!.setValue(true)
+    await again.w.find('[data-download]').trigger('click')
+    await flushPromises()
+    expect(inDialog('[data-cover="embedded"]')).not.toBeNull()
+    expect(inDialog('[data-cover="separate"]')).not.toBeNull()
+  })
+
+  it('prefills each name with the plugin\'s and sends what was typed', async () => {
+    // The plugin's names, not the titles: the page computes none itself.
+    const { w, s } = await mountAdmin({
+      entries: [video(1, 'Me at the zoo?'), list(2)],
+      targets: ['nas'],
+      default_names: { 1: 'Me at the zoo_', 2: 'List 2' },
+    })
+    await w.findAll('[data-entry-select]')[0]!.setValue(true)
+    await w.findAll('[data-entry-select]')[1]!.setValue(true)
+    await w.find('[data-download]').trigger('click')
+    await flushPromises()
+    expect((inDialog('[data-name="1"]') as HTMLInputElement).value).toBe('Me at the zoo_')
+    expect((inDialog('[data-name="2"]') as HTMLInputElement).placeholder).toBe(CATALOG.name_playlist_hint)
+    await typeDialog('[data-name="1"]', 'Zoo, first video')
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]).toMatchObject({ names: { 1: 'Zoo, first video', 2: 'List 2' } })
   })
 
   it('says why a share cannot be listed, in the catalog\'s words', async () => {
@@ -241,6 +352,30 @@ describe('WebStreamingAdmin', () => {
   })
 
   // ---- the downloads --------------------------------------------------------
+
+  it('says what a row did otherwise than asked, and that it is converting', async () => {
+    const job: Job = {
+      id: 8,
+      presets: [1],
+      target: { root: 'nas', path: '' },
+      state: 'running',
+      rows: [
+        { preset: 1, id: 'a', title: 'Kept', state: 'done', notes: [{ code: 'no_ffmpeg' }, { code: 'cover_beside' }] },
+        { preset: 1, id: 'b', title: 'Failed conversion', state: 'done', notes: [{ code: 'conversion_failed', detail: 'Unknown encoder' }] },
+        { preset: 1, id: 'c', title: 'Turning', state: 'converting' },
+        { preset: 1, id: 'd', title: 'There', state: 'done', notes: [{ code: 'already_present' }, { code: 'converted_name_taken' }, { code: 'cover_name_taken' }] },
+      ],
+    }
+    const { w } = await mountAdmin({ jobs: [job] })
+    const rows = w.findAll('[data-job-row]').map((r) => r.text())
+    expect(rows[0]).toContain(CATALOG.note_no_ffmpeg)
+    expect(rows[0]).toContain(CATALOG.note_cover_beside)
+    expect(rows[1]).toContain('the conversion failed, kept in the site\'s format: Unknown encoder')
+    expect(rows[2]).toContain(CATALOG.state_converting)
+    expect(rows[3]).toContain(CATALOG.note_already_present)
+    expect(rows[3]).toContain(CATALOG.note_converted_name_taken)
+    expect(rows[3]).toContain(CATALOG.note_cover_name_taken)
+  })
 
   it('shows each video of a job with its state and a reason, and cancels', async () => {
     const job: Job = {
@@ -555,13 +690,23 @@ describe('WebStreamingAdmin', () => {
       capabilities: {
         python3: null, js_runtime: null, js_runtime_slow: false,
         apt_hint: 'sudo apt install python3', checking: false, js_hopeless: false, js_runtime_unmaintained: false,
+        ffmpeg: null, ffmpeg_hint: 'sudo apt install ffmpeg',
       },
     })
     expect(w.find('[data-python]').text()).toContain('sudo apt install python3')
     // No apt hint for the JavaScript runtime.
     expect(w.find('[data-js]').text()).not.toContain('apt')
+    // ffmpeg is optional, and says what its absence costs and how to fix it.
+    expect(w.find('[data-ffmpeg]').text()).toBe(
+      "ffmpeg is missing: downloads stay in the site's format. Install it with: sudo apt install ffmpeg",
+    )
     await w.find('[data-recheck]').trigger('click')
     expect(s.putsOf('reprobe')).toHaveLength(1)
+  })
+
+  it('names the ffmpeg found', async () => {
+    const { w } = await mountAdmin()
+    expect(w.find('[data-ffmpeg]').text()).toBe('ffmpeg 7.1.1-1+b1: downloads can be converted to mp3 or m4a')
   })
 
   // The whole sentence, with toBe: the two parts were once printed glued

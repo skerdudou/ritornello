@@ -98,6 +98,11 @@ async fn world_with(tool_body: &str, targets_max_age: Duration) -> World {
 }
 
 async fn world_on(tool_body: &str, targets_max_age: Duration, arch: &str) -> World {
+    world_searching(tool_body, targets_max_age, arch, vec![]).await
+}
+
+/// The same, the machine's programs looked for in `search`.
+async fn world_searching(tool_body: &str, targets_max_age: Duration, arch: &str, search: Vec<PathBuf>) -> World {
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("web-streaming");
     std::fs::create_dir_all(&data).unwrap();
@@ -123,7 +128,7 @@ async fn world_on(tool_body: &str, targets_max_age: Duration, arch: &str) -> Wor
     let deps = Deps {
         fetch: Arc::new(SlowFetch),
         now: Arc::new(|| 1_000_000),
-        search: vec![],
+        search,
         arch: arch.into(),
         gate: jobs.tool_gate(),
         key: verify::ytdlp_key().unwrap(),
@@ -560,7 +565,7 @@ fn a_reason_the_plugin_wrote_is_a_code_and_an_outside_voice_stays_raw() {
     use ritornello_plugin_web_streaming::download::VideoState;
     use ritornello_plugin_web_streaming::jobs::{Job, JobState, Row};
     let target = Target { root: "nas".into(), path: String::new() };
-    let row = |state| Row { preset: 1, id: "x".into(), title: "t".into(), state, percent: None };
+    let row = |state| Row { preset: 1, id: "x".into(), title: "t".into(), state, percent: None, notes: Vec::new() };
     let job = Job {
         id: 1,
         presets: vec![1],
@@ -572,6 +577,7 @@ fn a_reason_the_plugin_wrote_is_a_code_and_an_outside_voice_stays_raw() {
             row(VideoState::Skipped(reason::UNAVAILABLE.into())),
             row(VideoState::Done),
         ],
+        options: Default::default(),
     };
     let v = jobs_for_page(&[job]);
     assert_eq!(v[0]["detail"], json!({ "code": "not_mounted" }));
@@ -638,7 +644,74 @@ async fn the_capabilities_panel_says_what_is_missing() {
         assert_eq!(caps["js_runtime"], Value::Null);
         assert_eq!(caps["js_hopeless"], hopeless, "{arch}");
         assert_eq!(caps["js_runtime_unmaintained"], false, "{arch}");
+        assert_eq!(caps["ffmpeg"], Value::Null);
+        assert_eq!(caps["ffmpeg_hint"], "sudo apt install ffmpeg");
     }
+}
+
+// ---- format, cover and names -------------------------------------------------
+
+#[tokio::test]
+async fn mp3_is_refused_without_ffmpeg_whatever_the_page_sent() {
+    let mut w = world("exit 1").await;
+    w.op(json!({ "op": "reprobe" })).await.unwrap();
+    w.until("probed", |d| d["capabilities"]["ffmpeg_hint"] != Value::Null).await;
+    w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
+    let target = json!({ "root": "nas", "path": "" });
+    assert_eq!(key_of(w.op(json!({ "op": "download", "presets": [1], "target": target, "format": "mp3" })).await), "ffmpeg_missing");
+    assert!(w.admin.get_data().await["jobs"].as_array().unwrap().is_empty(), "nothing was queued");
+    // m4a goes through: the site's own m4a needs no ffmpeg.
+    w.op(json!({ "op": "download", "presets": [1], "target": target, "format": "m4a" })).await.unwrap();
+}
+
+#[tokio::test]
+async fn mp3_is_taken_once_ffmpeg_is_found() {
+    let sys = tempfile::tempdir().unwrap();
+    let ffmpeg = sys.path().join("ffmpeg");
+    std::fs::write(&ffmpeg, "#!/bin/sh\necho 'ffmpeg version 7.1.1-1+b1 Copyright (c) 2000-2025 the FFmpeg developers'\n").unwrap();
+    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut w = world_searching("exit 1", Duration::from_secs(30), "arm", vec![sys.path().into()]).await;
+    w.op(json!({ "op": "reprobe" })).await.unwrap();
+    let d = w.until("probed", |d| d["capabilities"]["ffmpeg"] != Value::Null).await;
+    assert_eq!(d["capabilities"]["ffmpeg"], "7.1.1-1+b1");
+    assert_eq!(d["capabilities"]["ffmpeg_hint"], Value::Null);
+    w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
+    w.op(json!({ "op": "download", "presets": [1], "target": { "root": "nas", "path": "" }, "format": "mp3" })).await.unwrap();
+}
+
+#[tokio::test]
+async fn the_choices_go_with_the_job_and_the_format_and_cover_are_remembered() {
+    let mut w = world(&answering()).await;
+    let d = w.admin.get_data().await;
+    assert_eq!((d["last_format"].clone(), d["last_cover"].clone()), (json!("original"), json!("separate")), "the defaults");
+    w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video), entry(2, LIST, Kind::Playlist)];
+    w.op(json!({
+        "op": "download", "presets": [1, 2], "target": { "root": "nas", "path": "" },
+        "format": "m4a", "cover": "embedded", "names": { "1": "Mine", "2": "Theirs" },
+    }))
+    .await
+    .unwrap();
+    let d = w.until("remembered", |d| d["last_format"] == "m4a").await;
+    assert_eq!(d["last_cover"], "embedded");
+    assert_eq!(d["jobs"][0]["options"], json!({ "format": "m4a", "cover": "embedded", "names": { "1": "Mine", "2": "Theirs" } }));
+    let settings = std::fs::read_to_string(w.data.join("settings.toml")).unwrap();
+    assert!(settings.contains("last_format") && settings.contains("last_cover"), "{settings}");
+    // A request of an older page, without any of them: the defaults.
+    w.op(json!({ "op": "download", "presets": [1], "target": { "root": "nas", "path": "" } })).await.unwrap();
+    let d = w.until("second job", |d| d["jobs"].as_array().unwrap().len() == 2).await;
+    assert_eq!(d["jobs"][1]["options"], json!({ "format": "original", "cover": "separate" }));
+}
+
+#[tokio::test]
+async fn the_names_a_download_would_give_are_served_without_any_network() {
+    let w = world("exec sleep 10").await;
+    let mut odd = entry(2, LIST, Kind::Playlist);
+    odd.title = "a/b: $x".into();
+    let mut blank = entry(3, VIDEO, Kind::Video);
+    blank.title = "..".into();
+    w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video), odd, blank];
+    let d = quickly("get_data", w.admin.get_data()).await;
+    assert_eq!(d["default_names"], json!({ "1": "t1", "2": "a_b_ _x", "3": "jNQXAC9IVRw" }));
 }
 
 #[tokio::test]
