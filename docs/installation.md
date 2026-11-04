@@ -849,8 +849,9 @@ What to do with an installation that is already there has three answers:
 After the plugins and the packs comes a checklist of **system permissions**,
 every one checked by default: shut down and restart the machine, and change
 the time zone. On a device that already has an installation the boxes start
-as the registry recorded them, so a permission declined once stays declined
-until it is checked again.
+as the registry recorded them: a permission recorded as declined starts
+unchecked, any other starts checked. Without `--grants`, a run that does not
+ask keeps the recorded choices.
 
 The summary names what is installed, updated and removed, and what is
 **already up to date** and left exactly as it is. When everything is — no
@@ -1087,10 +1088,12 @@ recorded at all.
 
 polkit must be installed for either rule to matter (see the next section for
 the package names), and `systemd-timedated` must exist for the time zone:
-the second is checked at startup, the page greys the Time card when timedated
-does not answer, and it says which of the two causes it is. Both answers are
-cached for the life of the process, which is why the installer restarts the
-service after placing or removing a rule.
+the second is checked at startup, the page greys the Time card when
+`systemd-timedated` does not answer, and it says which of the two causes it
+is. Both answers are cached for the life of the process, so a change takes
+effect at the next start of the service. A run that changes a grant places the
+core again (its recorded identities no longer match), and placing the core
+stops and starts the service, which is the restart that makes it take effect.
 
 The time zone is read without any privilege, from the `/etc/localtime` link
 (`/etc/timezone` when that is a copied file). Setting it calls timedated's
@@ -1116,18 +1119,18 @@ the endpoint requires.
 | Restart **Ritornello** | the process exits, systemd starts it again (`Restart=always` in the unit) | none |
 
 `ritornello-install` installs `deploy/50-ritornello-power.rules` into
-`/etc/polkit-1/rules.d/`, unless the operator declined the `power`
-permission ([System permissions](#system-permissions)): then the rule is
-absent on purpose, logind answers "no", and the page says it was not allowed
-when Ritornello was installed. The rule grants the `ritornello` user the six logind
+`/etc/polkit-1/rules.d/`, unless the operator declined the `power` permission
+([System permissions](#system-permissions)): then the rule is absent on
+purpose, logind answers "no", and the page says it was not allowed when
+Ritornello was installed. The rule grants the `ritornello` user the six logind
 actions involved — power-off and reboot, each in its plain,
 `-multiple-sessions` and `-ignore-inhibit` form. All six, because logind
 checks the plain action only when nothing else is going on: it switches to
-`-multiple-sessions` as soon as another session exists (an open SSH
-connection is enough, which is the usual situation while testing) and to
+`-multiple-sessions` as soon as another session exists (an open SSH connection
+is enough, which is the usual situation while testing) and to
 `-ignore-inhibit` when an inhibitor is held — which also means a confirmed
-shutdown overrides shutdown inhibitors and will not wait for an
-in-progress `apt`/`dpkg` run to finish.
+shutdown overrides shutdown inhibitors and will not wait for an in-progress
+`apt`/`dpkg` run to finish.
 
 polkit itself is not installed by `ritornello-install` — it installs no
 package — and it is not present everywhere. Neither the power rule nor the

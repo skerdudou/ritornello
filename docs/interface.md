@@ -821,12 +821,13 @@ exactly at that hour still gets it once it comes back, rather than
 waiting for the next cycle.
 
 The hour is counted in the **device's** time zone, not the browser's, and a
-Raspberry Pi image often ships set to UTC. When the two zones differ (the
-offsets are compared, and UTC's aliases count as one zone), a sentence under
-the hour input says which zone the hour is in and what time it is there,
-instead of letting an owner believe "3" means 3 in the morning where they sit.
-The warning only informs: the hour is saved as typed, and the zone is changed
-from the [Time card](#time-card) of the System page.
+Raspberry Pi image often ships set to UTC. When the two zones' **names**
+differ (UTC's aliases count as one zone; two zones that happen to share an
+offset today still differ), a sentence under the hour input names the device's
+zone and the browser's, and converts the configured hour into the browser's
+time, instead of letting an owner believe "3" means 3 in the morning where
+they sit. The warning only informs: the hour is saved as typed, and the zone
+is changed from the [Time card](#time-card) of the System page.
 
 An automatic install only ever touches a component the device **already
 runs**: under no setting does it introduce a plugin or a language pack the
@@ -1865,13 +1866,14 @@ dialog opens, never with the page.
 
 ### Time card
 
-Below the metrics, above the power card, the System page shows the device's time: its local time, the zone's name
-and its offset, drawn from `device_unix_s` and `utc_offset_seconds` so that it
-is the **device's** time, which is what the automatic update and the displays
-use, whatever the browser's. A picker lists the zones the browser knows, and a
-button picks the browser's own zone, for the owner who is sitting in the room
-the device is in. Choosing one posts it to `/api/system/timezone`; a refusal
-shows its message beside the card.
+Below the metrics, above the power card, the System page shows the device's
+time: its local time, the zone's name and its offset, drawn from
+`device_unix_s` and `utc_offset_seconds` so that it is the **device's** time,
+which is what the automatic update and the displays use, whatever the
+browser's. A picker lists the zones the browser knows, and a button picks the
+browser's own zone, for the owner who is sitting in the room the device is in.
+Choosing one posts it to `/api/system/timezone`; a refusal shows its message
+beside the card.
 
 The card is greyed, with a sentence, when it cannot work: one when the
 permission was declined at install time, another when timedated does not answer
