@@ -1376,8 +1376,19 @@ function goTo(id: string) {
         <Card>
           <CardHeader><CardTitle>{{ t('plugins_title') }}</CardTitle></CardHeader>
           <CardContent>
-            <table class="w-full text-sm" data-plugins-table>
-              <thead class="text-muted-foreground">
+            <!-- Below `md` the six columns do not fit a phone (measured: the
+                 Actions column ended 36 px past a 360 px screen, and the whole
+                 page slid sideways). Rather than a second, phone-only markup
+                 that tests and handlers would have to follow, the same table
+                 changes shape there: no header, and each row becomes a
+                 wrapping line — the name, its gear and arrows, then the
+                 switch, then a forced break (the row's `::after`, full
+                 width), then kind, version, state and actions on the line
+                 below. `order` places the switch before the break; the
+                 header's six columns are untouched from `md` up, where the
+                 e2e journey counts them. -->
+            <table class="w-full text-sm max-md:block" data-plugins-table>
+              <thead class="text-muted-foreground max-md:hidden">
                 <tr>
                   <th class="text-left font-normal">{{ t('col_plugin') }}</th>
                   <th class="text-left font-normal">{{ t('col_kind') }}</th>
@@ -1387,7 +1398,7 @@ function goTo(id: string) {
                   <th class="text-left font-normal">{{ t('col_actions') }}</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody class="max-md:block">
                 <!--
                   Draggable rows: only a declared row has a `plugins.toml`
                   position to drop into, so the handle and the drag
@@ -1404,7 +1415,7 @@ function goTo(id: string) {
                   v-for="p in plugins"
                   :key="p.name"
                   data-plugin-row
-                  class="border-t border-border"
+                  class="border-t border-border max-md:flex max-md:flex-wrap max-md:items-center max-md:gap-x-3 max-md:gap-y-1 max-md:py-2 max-md:after:order-3 max-md:after:basis-full max-md:after:content-['']"
                   :class="p.declared && draggingPlugin === p.name ? 'opacity-50' : ''"
                   :draggable="p.declared"
                   @dragstart="p.declared && (draggingPlugin = p.name)"
@@ -1412,7 +1423,7 @@ function goTo(id: string) {
                   @drop.prevent="p.declared && dropPlugin(p.name)"
                   @dragend="draggingPlugin = null"
                 >
-                  <td class="py-1">
+                  <td class="py-1 max-md:order-1 max-md:min-w-0 max-md:grow max-md:py-0">
                     <!-- The handle sits beside the name, not inside
                          `[data-plugin-name]`: that attribute is the name's
                          own text everywhere else it is queried, and must
@@ -1476,7 +1487,7 @@ function goTo(id: string) {
                       >▼</Button>
                     </span>
                   </td>
-                  <td data-plugin-kind>
+                  <td data-plugin-kind class="max-md:order-4">
                     <!-- One icon per kind, its translated name as the native
                          title and as screen-reader text (the glyph itself is
                          hidden from them). A plugin that has announced no real
@@ -1496,9 +1507,13 @@ function goTo(id: string) {
                     </template>
                     <template v-else>—</template>
                   </td>
-                  <td data-plugin-version>{{ p.version ?? '—' }}</td>
-                  <td data-plugin-state>
+                  <td data-plugin-version class="max-md:order-4 max-md:text-muted-foreground">{{ p.version ?? '—' }}</td>
+                  <td data-plugin-state class="max-md:order-4 max-md:min-w-0">
+                    <!-- `whitespace-normal` on a phone: the kit's badge never
+                         wraps, and a refusal or a "limited" sentence is
+                         longer than the screen. -->
                     <Badge
+                      class="max-md:whitespace-normal max-md:text-left"
                       :variant="
                         p.incompatible !== undefined
                           ? 'destructive'
@@ -1588,7 +1603,7 @@ function goTo(id: string) {
                       }}
                     </Badge>
                   </td>
-                  <td>
+                  <td class="max-md:order-2">
                     <!-- No confirmation: the action is reversible from this
                          same row, and the notification says what happened.
                          Only a declared row has anything to enable or
@@ -1604,7 +1619,7 @@ function goTo(id: string) {
                     />
                     <span v-else>-</span>
                   </td>
-                  <td data-plugin-actions>
+                  <td data-plugin-actions class="max-md:order-4">
                     <!-- Two states carry two gestures each, and never the same
                          pair twice (Ruling 13/65): `missing_binary` (declared,
                          no binary) installs or uninstalls; `undeclared_binary`
