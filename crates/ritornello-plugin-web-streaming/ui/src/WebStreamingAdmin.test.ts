@@ -564,17 +564,22 @@ describe('WebStreamingAdmin', () => {
     expect(s.putsOf('reprobe')).toHaveLength(1)
   })
 
-  it('says QuickJS is slow, and that no runtime helps on a device that has none to give', async () => {
+  // The whole sentence, with toBe: the two parts were once printed glued
+  // together ("…: quickjsQuickJS is…"), which a `toContain` let through. And
+  // it says the runtime is only the second attempt's, which is what the
+  // wrapper does: a device showing QuickJS still plays without it first.
+  it('names the fallback runtime, says QuickJS is slow, and that none helps where none exists', async () => {
     const base = state().capabilities
     const slow = await mountAdmin({ capabilities: { ...base, js_runtime: 'quickjs', js_runtime_slow: true } })
-    expect(slow.w.find('[data-js]').text()).toContain('slow')
+    expect(slow.w.find('[data-js]').text()).toBe(
+      'JavaScript runtime, used only when a video fails without one: QuickJS It is slow: about two minutes for such a video.',
+    )
     cleanup()
     const none = await mountAdmin({ capabilities: { ...base, js_runtime: null, js_hopeless: true } })
-    expect(none.w.find('[data-js]').text()).toContain('No JavaScript runtime exists for this device today')
+    expect(none.w.find('[data-js]').text()).toBe(CATALOG.js_hopeless)
     cleanup()
     const fine = await mountAdmin()
-    expect(fine.w.find('[data-js]').text()).toContain('node')
-    expect(fine.w.find('[data-js]').text()).not.toContain('slow')
+    expect(fine.w.find('[data-js]').text()).toBe('JavaScript runtime, used only when a video fails without one: Node.js')
   })
 
   // ---- loading --------------------------------------------------------------

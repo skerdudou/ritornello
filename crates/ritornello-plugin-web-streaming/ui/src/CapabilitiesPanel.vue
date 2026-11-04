@@ -1,9 +1,25 @@
 <script setup lang="ts">
 import { Button } from '@ritornello/ui'
+import { computed } from 'vue'
 import type { Capabilities, T } from './data'
 
-defineProps<{ t: T; caps: Capabilities; frozen: boolean }>()
+const props = defineProps<{ t: T; caps: Capabilities; frozen: boolean }>()
 defineEmits<{ recheck: [] }>()
+
+/** How each runtime is usually written; the wire carries yt-dlp's names. */
+const RUNTIME_NAMES: Record<string, string> = { deno: 'Deno', node: 'Node.js', quickjs: 'QuickJS' }
+
+/**
+ * The JavaScript line, built as one string. Two `<template>` blocks side by
+ * side lost the space between them (the compiler drops whitespace that opens
+ * a block), which printed "quickjsQuickJS est…".
+ */
+const jsLine = computed(() => {
+  const { t, caps } = props
+  if (!caps.js_runtime) return caps.js_hopeless ? t('js_hopeless') : t('js_none')
+  const found = t('js_found', { name: RUNTIME_NAMES[caps.js_runtime] ?? caps.js_runtime })
+  return caps.js_runtime_slow ? `${found} ${t('js_slow')}` : found
+})
 </script>
 
 <template>
@@ -17,12 +33,7 @@ defineEmits<{ recheck: [] }>()
     </p>
 
     <!-- No command here: nothing the operator could type would help. -->
-    <p data-js>
-      <template v-if="caps.js_runtime">{{ t('js_found', { name: caps.js_runtime }) }}</template>
-      <template v-else-if="caps.js_hopeless">{{ t('js_hopeless') }}</template>
-      <template v-else>{{ t('js_none') }}</template>
-      <template v-if="caps.js_runtime && caps.js_runtime_slow"> {{ t('js_slow') }}</template>
-    </p>
+    <p data-js>{{ jsLine }}</p>
 
     <div class="flex items-center gap-2">
       <Button variant="outline" size="sm" data-recheck :disabled="frozen || caps.checking" @click="$emit('recheck')">
