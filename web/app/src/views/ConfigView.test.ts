@@ -1094,6 +1094,50 @@ describe('ConfigView — plugin table', () => {
     expect(posts).toContainEqual({ url: '/api/update/install', body: { components: ['mpd'] } })
   })
 
+  // Reported from the device: plugins installed from this page did not show
+  // up in this table until F5. The poll armed after the install only re-read
+  // `/api/update`, and this table is drawn from `/api/status` — which the
+  // worker has already changed by the time it clears `busy`, since it starts
+  // the plugin first (`start_declared_plugin` / `restart_plugin`). So the end
+  // of the job is the moment to re-read the plugins, and this test drives the
+  // whole gesture through the timers: enqueue, busy, idle.
+  it('re-reads the plugin table once the install job is over', async () => {
+    vi.useFakeTimers()
+    try {
+      const { w, spy, table } = await mountView({
+        '/api/status': {
+          plugins: [{ name: 'mpd', kind: 'unknown', connected: false, admin: false, missing_binary: true }],
+          active_source: 'radio',
+          contracts: {},
+        },
+        '/api/update': offering('mpd'),
+      })
+      await rowOf(w, 'mpd').get('[data-plugin-install]').trigger('click')
+      await flushPromises()
+
+      const tables = table as Record<string, unknown>
+      tables['/api/update'] = { ...offering('mpd'), busy: 'Installing mpd…' }
+      await vi.advanceTimersByTimeAsync(2000)
+      const statusReadsWhileBusy = spy.mock.calls.filter((c) => c[0] === '/api/status').length
+
+      // The worker has placed and started the plugin, then cleared `busy`.
+      tables['/api/status'] = {
+        plugins: [{ name: 'mpd', kind: 'input', connected: true, admin: true }],
+        active_source: 'radio',
+        contracts: {},
+      }
+      tables['/api/update'] = { ...offering(), busy: null }
+      await vi.advanceTimersByTimeAsync(2000)
+
+      expect(spy.mock.calls.filter((c) => c[0] === '/api/status').length)
+        .toBeGreaterThan(statusReadsWhileBusy)
+      expect(rowOf(w, 'mpd').find('[data-plugin-install]').exists()).toBe(false)
+      expect(rowOf(w, 'mpd').find('[data-admin-link]').exists()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // And for an undeclared binary, which offers two gestures: Declare (the
   // same download-then-refuse as Install) and "Remove the binary" (which
   // would erase the plugin binary alone and leave the root helper, its unit
