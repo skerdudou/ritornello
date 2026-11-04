@@ -656,6 +656,13 @@ describe('WebStreamingAdmin', () => {
     s.data.tool = { ...state().tool }
     await vi.advanceTimersByTimeAsync(1100)
     expect(w.find('[data-tool-version]').text()).toContain('2026.10.26')
+    // Let the mount's own grace reads run out first: the page asks for the
+    // shares (`list_targets`) right after its first read, and that request's
+    // few follow-up reads may land after the install is shown — on CI they
+    // did, and counting from here read one too many (6 for 5). Five seconds
+    // cover the longest grace (3 reads, one a second); the page still
+    // reading past that, because work seems to run, is what fails below.
+    await vi.advanceTimersByTimeAsync(5_000)
     const settled = s.gets()
     await vi.advanceTimersByTimeAsync(10_000)
     expect(s.gets(), 'installed: no more reading').toBe(settled)
