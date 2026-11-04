@@ -74,6 +74,11 @@ pub struct Settings {
     /// Unix seconds of the last check that reached a verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check: Option<u64>,
+    /// The highest version of the plugin's own node (armv7) ever installed:
+    /// the floor of its anti-rollback guard, kept even when `bin/node` is
+    /// deleted. Absent from a file written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_highest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed: Option<InstalledRecord>,
     /// Whatever else is in the file, written back untouched.
@@ -117,10 +122,24 @@ mod tests {
             sha256: "ab".into(),
             tag: Some("2026.10.26".into()),
         });
+        s.node_highest = Some("22.23.4".into());
         s.save(&path).unwrap();
         let again = Settings::load(&path);
         assert_eq!(again, s);
         assert_eq!(again.other["last_target"]["root"].as_str(), Some("nas"));
+    }
+
+    /// A file written before `node_highest` existed (the shape the plugin
+    /// wrote until then) loads whole: nothing recorded, nothing reset.
+    #[test]
+    fn a_settings_file_without_the_node_record_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let old = "channel = \"nightly\"\nlast_check = 42\n\n[installed]\nversion = \"2026.10.26\"\nchannel = \"nightly\"\nsha256 = \"ab\"\n";
+        std::fs::write(&path, old).unwrap();
+        let s = Settings::load(&path);
+        assert_eq!((s.channel, s.last_check, s.node_highest), (Channel::Nightly, Some(42), None));
+        assert_eq!(s.installed.map(|i| i.version).as_deref(), Some("2026.10.26"));
     }
 
     #[test]

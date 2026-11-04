@@ -66,6 +66,7 @@ export function state(partial: Partial<Data> = {}): Data {
       apt_hint: null,
       checking: false,
       js_hopeless: false,
+      js_runtime_unmaintained: false,
     },
     last_failure: null,
     ...partial,

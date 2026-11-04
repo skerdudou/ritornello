@@ -80,13 +80,18 @@ update_install_extract_limit = "el archivo supera los límites permitidos"
 update_install_extract_unsafe = "el archivo contiene una entrada peligrosa"
 update_install_write = "no se pudo escribir el script de arranque: {detail}"
 
-# why deno, the JavaScript runtime the plugin installs itself, could not be
-runtime_no_build = "deno no publica ninguna versión para este dispositivo ({arch})"
+# why the JavaScript runtime the plugin installs itself (deno, or node
+# on armv7) could not be installed or updated; {runtime} is its name
+runtime_no_build = "{runtime} no publica ninguna versión para este dispositivo ({arch})"
 runtime_fetch = "la descarga falló: {detail}"
+runtime_bad_signature = "las sumas publicadas no están firmadas por ninguna clave de publicación conocida de {runtime}: {detail}"
 runtime_not_listed = "la descarga no figura en las sumas publicadas"
+runtime_unexpected = "las sumas publicadas no son las esperadas: {detail}"
 runtime_mismatch = "la descarga no coincide con su suma publicada"
 runtime_extract = "no se pudo descomprimir la descarga: {detail}"
-runtime_write = "no se pudo escribir deno: {detail}"
+runtime_version = "el {runtime} descargado no indica la versión esperada: {detail}"
+runtime_write = "no se pudo escribir {runtime}: {detail}"
+runtime_rollback = "la lista firmada ofrece {runtime} {listed}, anterior al {installed} instalado: rechazado, se conserva el instalado"
 
 # admin page
 title = "Streaming web"
@@ -174,5 +179,6 @@ js_found = "Entorno de JavaScript, usado solo si un vídeo falla sin él: {name}
 js_slow = "Es lento: unos dos minutos para un vídeo así."
 js_none = "No se encontró ningún entorno de JavaScript: algunos vídeos podrían no reproducirse."
 js_hopeless = "Hoy no existe ningún entorno de JavaScript para este dispositivo, así que no hay nada que instalar que ayude."
+js_unmaintained = "Node.js 22 ya no recibe mantenimiento de sus autores: el complemento conserva su última versión tal cual."
 btn_recheck = "Comprobar de nuevo"
 checking = "Comprobando…"

@@ -1,13 +1,10 @@
 <script setup lang="ts">
 import { Button } from '@ritornello/ui'
 import { computed } from 'vue'
-import type { Capabilities, T } from './data'
+import { runtimeName, type Capabilities, type T } from './data'
 
 const props = defineProps<{ t: T; caps: Capabilities; frozen: boolean }>()
 defineEmits<{ recheck: [] }>()
-
-/** How each runtime is usually written; the wire carries yt-dlp's names. */
-const RUNTIME_NAMES: Record<string, string> = { deno: 'Deno', node: 'Node.js', quickjs: 'QuickJS' }
 
 /**
  * The JavaScript line, built as one string. Two `<template>` blocks side by
@@ -17,8 +14,10 @@ const RUNTIME_NAMES: Record<string, string> = { deno: 'Deno', node: 'Node.js', q
 const jsLine = computed(() => {
   const { t, caps } = props
   if (!caps.js_runtime) return caps.js_hopeless ? t('js_hopeless') : t('js_none')
-  const found = t('js_found', { name: RUNTIME_NAMES[caps.js_runtime] ?? caps.js_runtime })
-  return caps.js_runtime_slow ? `${found} ${t('js_slow')}` : found
+  const parts = [t('js_found', { name: runtimeName(caps.js_runtime) })]
+  if (caps.js_runtime_slow) parts.push(t('js_slow'))
+  if (caps.js_runtime_unmaintained) parts.push(t('js_unmaintained'))
+  return parts.join(' ')
 })
 </script>
 

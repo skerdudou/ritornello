@@ -2617,6 +2617,7 @@ version = "0.2.0-beta.9"
 dependencies = [
  "anyhow",
  "async-trait",
+ "flate2",
  "libc",
  "pgp",
  "rand 0.8.8",
@@ -2628,6 +2629,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "tokio",
  "toml",

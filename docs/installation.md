@@ -1860,6 +1860,14 @@ there. In particular:
   rests on a published sum only. On the device, no runtime that helps exists
   (node 20 is unsupported, node 22 is about 4 times and QuickJS about 20 times
   slower than none), so the fallback has only been exercised with stand-ins;
+- the **plugin's own node on armv7** has never been installed by the plugin
+  on the device: its chain was checked on a workstation against the real
+  signed list of v22.23.4 and the real 25 MB tarball (signature, sum, and the
+  107 563 500-byte `bin/node` taken out alone), but that binary has never been
+  run by the plugin, the time its extraction and its first `--version` take
+  on the Pi has not been measured, and its update to a newer node 22 has only
+  been exercised with stand-ins. The node 22 measured on the device (28.8 s
+  for a video that needs a JavaScript challenge) was one installed by hand;
 - the wrapper runs Python with **`-S`** (no site-packages) and relies on the
   **system CA store** (`ca-certificates`) for TLS; whether the device has it
   and that yt-dlp still plays without site-packages there is to be checked;
