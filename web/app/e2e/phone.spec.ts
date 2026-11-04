@@ -106,6 +106,61 @@ test('on a phone: dragging the volume slider sends a SetVolume that the core ech
   expect(lastVolume).toBeLessThanOrEqual(30)
 })
 
+/**
+ * No admin page may scroll sideways on a phone.
+ *
+ * Reported on a real phone: the update card's button row and the six-column
+ * plugins table pushed the configuration page past the screen's edge, so the
+ * whole page slid left and right under the finger. 360 px rather than the
+ * project's Pixel 7 (412 px): it is the narrowest width still common on
+ * Android, and a layout that holds there holds above it.
+ *
+ * The verdict is the document's own scroll width — what the finger feels —
+ * and the message names the leaf elements that stick out, so a failure says
+ * where to look instead of only that something is wrong. An element inside a
+ * container that scrolls or clips horizontally on purpose is not a culprit:
+ * it does not widen the page.
+ */
+for (const { path, ready } of [
+  { path: '/config', ready: '[data-plugins-table] [data-plugin-row]' },
+  { path: '/system', ready: '[data-system-memory]' },
+  { path: '/plugins/', ready: '[data-plugins-list] a' },
+  { path: '/plugins/radio/', ready: '[data-plugin-content]' },
+  { path: '/plugins/files/', ready: '[data-plugin-content]' },
+  { path: '/plugins/generic-input/', ready: '[data-plugin-content]' },
+]) {
+  test(`on a 360 px phone: ${path} does not scroll sideways`, async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 780 })
+    await page.goto(path)
+    await expect(page.locator(ready).first()).toBeVisible()
+    const overflow = await page.evaluate(() => {
+      const root = document.documentElement
+      const width = root.clientWidth
+      const culprits: string[] = []
+      for (const el of Array.from(document.body.querySelectorAll<HTMLElement>('*'))) {
+        if (el.children.length > 0) continue
+        const box = el.getBoundingClientRect()
+        if (box.width === 0 || box.right <= width + 0.5) continue
+        // A fixed element (the toaster's empty list) does not widen the page
+        // either, whatever its box says.
+        let clipped = false
+        for (let p: HTMLElement | null = el; p && p !== document.body; p = p.parentElement) {
+          const style = getComputedStyle(p)
+          if (style.position === 'fixed' || (p !== el && style.overflowX !== 'visible')) { clipped = true; break }
+        }
+        if (clipped) continue
+        const marker = Array.from(el.attributes).find((a) => a.name.startsWith('data-'))?.name
+        const text = (el.textContent ?? '').trim().slice(0, 40)
+        culprits.push(`${el.tagName.toLowerCase()}${marker ? `[${marker}]` : ''} "${text}" right=${Math.round(box.right)}`)
+      }
+      return { scroll: root.scrollWidth, width, culprits }
+    })
+    expect(overflow.scroll, `wider than the screen:\n${overflow.culprits.join('\n')}`).toBeLessThanOrEqual(
+      overflow.width,
+    )
+  })
+}
+
 test('on a phone: the Plugins tab leads to the list, which leads to the plugin page', async ({ page }) => {
   await page.goto('/')
   await page.locator('[data-nav-plugins]').click()

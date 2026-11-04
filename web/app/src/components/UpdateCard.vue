@@ -211,7 +211,10 @@ function onCadenceKindChange(kind: unknown) {
         {{ t('update_release_notes') }}
       </a>
 
-      <div class="flex gap-2 pt-2">
+      <!-- `flex-wrap`: the three buttons do not fit side by side on a phone,
+           and without it "Configure sources" pushed the whole page sideways
+           (e2e/phone.spec.ts measures it at 360 px). -->
+      <div class="flex flex-wrap gap-2 pt-2">
         <Button
           variant="secondary"
           data-update-check
